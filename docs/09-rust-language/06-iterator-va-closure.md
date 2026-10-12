@@ -17,25 +17,43 @@
 
 Mọi ví dụ trong chương được biên dịch và chạy bằng `rustc 1.95.0 --edition 2024` trên macOS aarch64; output dán lại là quan sát thật của một lần chạy. Các con số kích thước là của nền tảng này (con trỏ 8 byte).
 
+Xuyên suốt chương, ta bám theo `orders`, một service Rust nhận request đặt hàng, đăng ký các callback lúc khởi động, giữ một `Vec` đơn hàng trong bộ nhớ và đọc log theo dòng. Đây là ví dụ giả định của người soạn, không phải code trong repo; các đoạn code đã chạy thật bên dưới là những mẫu nhỏ đại diện cho các việc đó.
+
 ## 1. Closure bắt biến thế nào (Q1)
 
-> **Trả lời ngắn.** Closure là một giá trị có kiểu ẩn danh, gần như một struct chứa những thứ nó dùng từ môi trường xung quanh[^cl-intro]. Compiler chọn cách bắt *nhẹ nhất* mà thân closure còn chạy được: chỉ đọc thì mượn chung, ghi thì mượn `&mut`, cần sở hữu thì move[^cl-prec]; từ khóa `move` ép bắt theo giá trị[^ce-move]. Từ edition 2021, closure bắt riêng từng field mà nó dùng chứ không bắt cả biến[^ed-disjoint-2021].
+> **Trả lời ngắn.** Closure là một giá trị có kiểu ẩn danh, gần như một struct chứa những thứ nó lấy từ môi trường xung quanh[^cl-intro]. Với mỗi thứ cần lấy, compiler chọn cách *nhẹ nhất* mà thân closure còn chạy được: chỉ đọc thì mượn chung, ghi thì mượn `&mut`, cần sở hữu thì move[^cl-prec]. Từ khóa `move` ép closure bắt theo giá trị[^ce-move]. Từ edition 2021, closure chỉ bắt đúng field nó dùng chứ không bắt cả biến[^ed-disjoint-2021].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn nhờ đồng nghiệp xử lý một việc và đưa kèm một phong bì. Nếu việc chỉ cần *xem* tài liệu, bạn ghi địa chỉ chỗ để tài liệu (mượn). Nếu cần *sửa tại chỗ*, bạn ghi địa chỉ kèm quyền sửa (mượn `&mut`). Nếu cần *giữ luôn*, bạn đưa bản gốc (move). Phong bì chính là struct ẩn danh của closure.
+*Với service `orders`.* Lúc khởi động, `orders` đăng ký vài callback, và callback nào cũng cần một ít ngữ cảnh: handler kiểm tra đơn dùng hạn mức trong `Config`, thread nền ghi log dùng cả `Config` lẫn một bộ đếm, bộ lọc đơn lớn trong `filter` dùng một ngưỡng tiền. Câu hỏi của mục này: mỗi callback lấy ngữ cảnh đó bằng cách nào (mượn để đọc, mượn để sửa, hay lấy luôn), và compiler quyết định thay bạn ra sao?
 
-*Bước 1 — closure là struct.* Hàm thường (`fn`) không nhìn thấy biến cục bộ của nơi gọi (nhận xét của người soạn), nhưng nhiều API cần "một đoạn code kèm ít dữ liệu ngữ cảnh": callback xử lý request, comparator của `sort_by`, predicate của `filter`. Closure gói cả hai. Mỗi biểu thức closure có một kiểu duy nhất, ẩn danh[^ce-unique], nên hai closure giống hệt về chữ vẫn là hai kiểu khác nhau (hệ quả ở mục 3).
+### 1.1 Closure là một struct
 
-*Bước 2 — bốn chế độ bắt.* Reference liệt kê: mượn chung (ImmBorrow), mượn chung đặc biệt "duy nhất" (UniqueImmBorrow — không viết ra được trong code, xem phần Đi sâu), mượn `&mut` (MutBorrow) và move giá trị vào closure (ByValue)[^cl-modes]. Với mỗi biến, compiler lấy chế độ đầu tiên trong danh sách còn tương thích với cách thân closure dùng nó, và lựa chọn này không phụ thuộc code xung quanh như lifetime của biến[^cl-prec]. Không có `move`, closure ưu tiên mượn chung và chỉ nâng lên khi cần[^ce-infer].
+Hàm thường (`fn`) không nhìn thấy biến cục bộ của nơi gọi (nhận xét của người soạn), trong khi callback của `orders` thì cần: nó là "một đoạn code kèm ít dữ liệu ngữ cảnh". Closure gói cả hai vào một giá trị. Mỗi biểu thức closure có một kiểu riêng, ẩn danh[^ce-unique], nên hai closure giống hệt về chữ vẫn là hai kiểu khác nhau; hệ quả của chuyện này nằm ở mục 3.
 
-*Bước 3 — giá trị `Copy` là trường hợp hay gây bối rối.* Giá trị `Copy` bị "move" vào thân closure vẫn được bắt bằng mượn chung, tức là bằng một tham chiếu chứ không phải bản copy[^cl-copy]. Ví dụ `|| a` với `a: u8` có kích thước 8 byte, không phải 1 (bảng ở mục 3).
+### 1.2 Bốn chế độ bắt
 
-*Bước 4 — `move`.* Với `move`, mọi thứ bị bắt bằng move (hoặc copy nếu là `Copy`)[^ce-move], thường để bảo đảm closure có lifetime `'static`[^ce-static]; Reference cũng nêu mục đích tiêu biểu là để closure sống lâu hơn giá trị gốc, như khi trả về closure hay đưa sang thread mới[^cl-move-usage]. Nếu đường dẫn đi qua một tham chiếu thì chính tham chiếu được move vào, vì không được move field ra khỏi một tham chiếu[^cl-moveref]. Dùng lại biến sau khi move: `let c = move || s.len(); println!("{}", s);` cho `error[E0382]: borrow of moved value: `s`` (đã chạy).
+Giả sử thân một callback của `orders` chạm vào `config` theo ba kiểu khác nhau: chỉ đọc `config.limit`, thêm gì đó vào `config`, hoặc đem hẳn `config` đi chỗ khác. Compiler phân loại bằng bốn chế độ bắt: mượn chung (ImmBorrow), mượn chung đặc biệt "duy nhất" (UniqueImmBorrow, không viết ra được trong code, xem phần Đi sâu), mượn `&mut` (MutBorrow) và move giá trị vào closure (ByValue)[^cl-modes].
 
-*Bước 5 — closure giữ borrow đến lần dùng cuối.* `let mut c = || v.push(4); println!("{:?}", v); c();` cho `error[E0502]: cannot borrow `v` as immutable because it is also borrowed as mutable` (đã chạy); đây là quy tắc ở chương 01[^b-borrow].
+Với mỗi thứ được dùng trong thân, compiler đi qua danh sách trên từ nhẹ đến nặng và lấy chế độ đầu tiên còn tương thích với cách thân closure dùng nó[^cl-prec]. Nghĩa là bạn không chọn: thân closure làm gì thì chế độ bắt đi theo đó. Khi không có `move`, closure ưu tiên mượn chung và chỉ nâng lên khi buộc phải[^ce-infer].
 
-*Bước 6 — bắt tách rời field (disjoint capture).* Ở Rust 2018 trở về trước, closure bắt cả biến dù chỉ dùng một field[^ed-disjoint]; từ Rust 2021 chính xác hơn: thường chỉ bắt các field nó dùng, và trong một số trường hợp có thể bắt nhiều hơn[^ed-disjoint-2021]. Reference mô tả bằng *capture path*: một biến cộng thêm các phép chiếu (field, chỉ số tuple, dereference), và closure mượn hoặc move đường dẫn đó (có thể bị cắt bớt theo quy tắc ở phần Đi sâu)[^cl-path].
+### 1.3 Giá trị `Copy` là chỗ hay gây bối rối
+
+Giá trị `Copy` bị "move" vào thân closure vẫn được bắt bằng mượn chung, tức bằng một tham chiếu chứ không phải một bản copy[^cl-copy]. Ví dụ `|| a` với `a: u8` có kích thước 8 byte, không phải 1 (bảng đo ở mục 3).
+
+### 1.4 `move`: lấy hẳn giá trị
+
+Thử với thread nền ghi log của `orders`. Thread này có thể còn sống khi hàm đã tạo ra nó trả về, nên mượn `config` của hàm đó không đủ; closure phải *sở hữu* `config`. Đó là việc của `move`: nó ép closure bắt mọi thứ bằng move, hoặc bằng copy nếu giá trị là `Copy`[^ce-move]. Mục đích thường gặp là bảo đảm closure có lifetime `'static`[^ce-static]. Nó cũng dùng để closure sống lâu hơn giá trị gốc, như khi trả closure về hay đưa nó sang thread mới[^cl-move-usage].
+
+Nếu đường dẫn mà closure dùng đi qua một tham chiếu thì chính tham chiếu được move vào, vì Rust không cho move một field ra khỏi tham chiếu[^cl-moveref]. Còn dùng lại biến sau khi đã move vào closure thì compiler chặn: `let c = move || s.len(); println!("{}", s);` cho `error[E0382]: borrow of moved value: `s`` (đã chạy).
+
+### 1.5 Closure giữ borrow đến lần dùng cuối
+
+Closure mượn `&mut` thì giữ khoản mượn đó cho đến lần gọi cuối cùng của nó, nên code khác đụng vào biến trong khoảng ấy sẽ bị chặn. Ví dụ `let mut c = || v.push(4); println!("{:?}", v); c();` cho `error[E0502]: cannot borrow `v` as immutable because it is also borrowed as mutable` (đã chạy). Đây chính là quy tắc ở chương 01[^b-borrow].
+
+### 1.6 Bắt tách rời từng field (disjoint capture)
+
+Giả sử `orders` có một struct trạng thái gồm hai field, `a` và `b`; một callback chỉ ghi vào `a`, còn code bên ngoài vẫn đọc `b` để log. Ở Rust 2018 trở về trước, closure bắt cả biến dù chỉ dùng một field[^ed-disjoint], nên hai việc đó va nhau. Từ Rust 2021 chính xác hơn: closure thường chỉ bắt các field nó dùng, và trong một số trường hợp có thể bắt nhiều hơn[^ed-disjoint-2021]. Reference mô tả bằng *capture path*, tức một biến cộng thêm các phép chiếu (field, chỉ số tuple, dereference); closure mượn hoặc move đúng đường dẫn đó (có thể bị cắt bớt theo quy tắc ở phần Đi sâu)[^cl-path].
 
 **Thí nghiệm** (đã chạy): closure sửa `p.a` trong khi code ngoài đọc `p.b`.
 
@@ -53,23 +71,25 @@ Biên dịch được với edition 2021/2024 (in `x1 y`); với `--edition 2018
 
 - **Thứ tự mạnh–yếu.** Khi một đường dẫn và tổ tiên của nó cùng bị bắt, tổ tiên lấy chế độ lớn nhất theo thứ tự `ImmBorrow < UniqueImmBorrow < MutBorrow < ByValue`[^cl-shared-prefix].
 - **UniqueImmBorrow** là loại borrow đặc biệt, không dùng được ở chỗ nào khác trong ngôn ngữ và không viết ra được; nó xuất hiện khi sửa referent của một `&mut` (ví dụ `let x = &mut b; ... *x = true;` trong closure)[^cl-unique].
-- **Capture path bị cắt** ở dereference ngoài cùng-phải của tham chiếu chung[^cl-trunc], ở dereference con trỏ thô[^cl-raw], ở truy cập field của union[^cl-union] và ở field của struct `repr(packed)`[^cl-packed]. Bạn không cần thuộc; chỉ cần biết là có để hiểu vì sao đôi khi closure bắt nhiều hơn dự đoán.
-- **Mảng và slice không bị bắt từng phần**: toàn bộ mảng/slice luôn bị bắt dù dùng chỉ số hay sub-slice[^cl-array]. Vì thế closure đọc `arr[0]` bắt `&arr` chứ không phải `&arr[0]` (xem `c5` ở mục 3).
-- **Drop order**: khi closure bắt một field theo giá trị, field đó gắn với lifetime của closure nên các field rời của cùng một struct có thể bị drop ở thời điểm khác nhau[^cl-drop].
-- **Rủi ro khi lên edition 2021.** Edition Guide cảnh báo thay đổi này có thể làm thứ tự drop đổi hoặc ảnh hưởng việc closure có implement `Send`/`Clone` hay không; `cargo fix` chèn `let _ = &a;` để ép bắt cả biến khi phát hiện khả năng đó[^ed-disjoint-risk].
+- **Capture path bị cắt** ở bốn chỗ. Chỗ thứ nhất là dereference ngoài cùng bên phải của tham chiếu chung[^cl-trunc]. Chỗ thứ hai là dereference con trỏ thô[^cl-raw]. Chỗ thứ ba là truy cập field của union[^cl-union]. Chỗ thứ tư là field của struct `repr(packed)`[^cl-packed]. Bạn không cần thuộc; chỉ cần biết là có, để hiểu vì sao đôi khi closure bắt nhiều hơn dự đoán.
+- **Mảng và slice không bị bắt từng phần**: toàn bộ mảng hay slice luôn bị bắt, dù code dùng chỉ số hay sub-slice[^cl-array]. Vì thế closure đọc `arr[0]` bắt `&arr` chứ không phải `&arr[0]` (xem `c5` ở mục 3).
+- **Drop order.** Khi closure bắt một field theo giá trị, field đó gắn với lifetime của closure, nên các field rời của cùng một struct có thể bị drop ở những thời điểm khác nhau[^cl-drop].
+- **Rủi ro khi lên edition 2021.** Edition Guide cảnh báo thay đổi này có thể làm thứ tự drop đổi, hoặc ảnh hưởng việc closure có implement `Send`/`Clone` hay không; `cargo fix` chèn `let _ = &a;` để ép bắt cả biến khi phát hiện khả năng đó[^ed-disjoint-risk].
 - Reference minh họa kiểu closure bằng closure sửa hai field của `rect`: struct sinh ra (chỉ để minh họa) có hai field `&'a mut`, mỗi cái trỏ vào một *field con*, rồi `FnOnce` được implement cho nó với thân closure làm thân `call_once`[^cl-intro].
 
 </details>
 
-**Quay lại Q1:** closure bắt mỗi thứ theo mức nhẹ nhất thân nó cho phép (đọc → `&`, ghi → `&mut`, sở hữu → move), `move` ép move/copy tất cả, và từ 2021 chỉ bắt đúng field được dùng.
+**Quay lại Q1:** closure bắt mỗi thứ theo mức nhẹ nhất thân nó cho phép (đọc → `&`, ghi → `&mut`, sở hữu → move), `move` ép move/copy tất cả, và từ 2021 chỉ bắt đúng field được dùng. Với `orders`: callback chỉ đọc `Config` thì mượn, thread nền sống lâu hơn hàm tạo ra nó thì phải `move`.
 
 ## 2. `Fn`, `FnMut`, `FnOnce` (Q2)
 
-> **Trả lời ngắn.** Ba trait này xếp lồng nhau: closure gọi được nhiều lần mà không sửa gì (`Fn`) cũng gọi được như `FnMut` và `FnOnce`[^std-fnonce]. Closure thuộc trait nào do *thân closure làm gì* với giá trị bắt được quyết định, không do việc có viết `move` hay không[^cl-move-note]. Closure move giá trị bắt được ra khỏi thân thì chỉ gọi được một lần (`FnOnce`)[^b-fntraits].
+> **Trả lời ngắn.** Ba trait này xếp lồng nhau: closure gọi được nhiều lần mà không sửa gì (`Fn`) thì cũng dùng được ở chỗ cần `FnMut` hay `FnOnce`[^std-fnonce]. Closure thuộc trait nào là do *thân closure làm gì* với giá trị bắt được, không do có viết `move` hay không[^cl-move-note]. Closure move giá trị bắt được ra khỏi thân thì chỉ gọi được một lần (`FnOnce`)[^b-fntraits].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một cái máy bán nước. `Fn` là máy chỉ *đọc* bảng giá, bấm bao nhiêu lần cũng được và nhiều người bấm cùng lúc cũng được. `FnMut` là máy *đếm xu* trong thùng: bấm nhiều lần được nhưng mỗi lần đổi trạng thái nên phải có một người bấm tại một thời điểm. `FnOnce` là phiếu quà tặng *đổi một lần rồi hủy*.
+*Với service `orders`.* `orders` truyền closure vào ba kiểu chỗ khác nhau. Middleware kiểm tra request được nhiều handler thread gọi cùng lúc. Bộ đếm số đơn trong một `map` được gọi liên tục và đổi state mỗi lần. Hook dọn dẹp lúc shutdown thì chỉ chạy đúng một lần, và có thể tiêu luôn thứ nó nắm. Ba cách dùng đó tương ứng ba trait. Mục này trả lời: trait nào là của closure nào, ai quyết định, và khi viết API nhận callback thì nên đòi trait nào.
+
+### 2.1 Ba trait lồng nhau
 
 ```mermaid
 flowchart LR
@@ -77,9 +97,11 @@ flowchart LR
     FnMut -->|supertrait| FnOnce["FnOnce: call_once(self)"]
 ```
 
-*Quan hệ trait.* Trong std: `pub trait Fn<Args>: FnMut<Args>` (và tương tự `FnMut` có supertrait `FnOnce`)[^std-fn-def]. Do đó bất kỳ `Fn` hoặc `FnMut` nào cũng dùng được ở chỗ cần `FnOnce`[^std-fnonce]. Nói theo tập hợp: closure thỏa `Fn` ⊂ thỏa `FnMut` ⊂ thỏa `FnOnce`; *bound* càng lỏng (`FnOnce`) thì càng nhiều closure thỏa.
+Trong std, `Fn` có supertrait là `FnMut`: `pub trait Fn<Args>: FnMut<Args>`[^std-fn-def]; `FnMut` lại có supertrait `FnOnce`. Vì vậy bất kỳ `Fn` hoặc `FnMut` nào cũng dùng được ở chỗ cần `FnOnce`[^std-fnonce]. Nhìn theo tập hợp, closure thỏa `Fn` ⊂ thỏa `FnMut` ⊂ thỏa `FnOnce`; bound càng lỏng (`FnOnce`) thì càng nhiều closure thỏa.
 
-*Compiler chọn trait nào.* Mọi closure đều implement `FnOnce`[^cl-fnonce]; closure không move giá trị bắt được ra khỏi thân thì implement thêm `FnMut`; closure không sửa cũng không move thì implement thêm `Fn`[^cl-calltraits]. Book diễn đạt: closure tự động implement một, hai hoặc cả ba trait một cách cộng dồn tùy thân closure xử lý giá trị bắt được ra sao[^b-fntraits].
+### 2.2 Compiler gán trait nào
+
+Mọi closure đều implement `FnOnce`[^cl-fnonce]. Closure không move giá trị bắt được ra khỏi thân thì implement thêm `FnMut`, và nếu nó cũng không sửa thứ gì thì implement thêm cả `Fn`[^cl-calltraits]. Nói gọn lại, closure tự động implement một, hai hoặc cả ba trait một cách cộng dồn, tùy thân nó xử lý giá trị bắt được ra sao[^b-fntraits].
 
 | Thân closure | Capture mode | Trait implement |
 |---|---|---|
@@ -87,9 +109,15 @@ flowchart LR
 | ghi / gọi method `&mut` | MutBorrow | `FnMut` + `FnOnce` |
 | move giá trị ra khỏi thân (`drop(s)`, trả `s`) | ByValue | chỉ `FnOnce` |
 
-*`move` không quyết định trait.* Reference nói rõ closure `move` vẫn có thể là `Fn` hay `FnMut`, vì trait do việc closure *làm gì* với giá trị bắt được quyết định chứ không do cách bắt[^cl-move-note]. Chạy thật: `call_fn(move || s.len())` với `fn call_fn<F: Fn() -> usize>(f: F) -> usize { f() + f() }` và `s = "abc"` in `6`.
+Với `orders`: middleware chỉ đọc cấu hình thì là `Fn`; closure trong `map` cộng dồn một bộ đếm thì là `FnMut`; hook shutdown `drop` luôn connection pool mà nó nắm thì chỉ là `FnOnce`.
 
-*Chọn bound khi viết API.* Std khuyên: `FnOnce` khi chỉ cần gọi một lần[^std-fnonce-use]; `Fn` khi cần gọi lặp lại mà không đổi state, ví dụ gọi đồng thời[^std-fn-use]. Nguyên tắc (nhận xét của người soạn): chọn bound *lỏng nhất* mà thân hàm còn chạy được. `Iterator::map` gọi closure nhiều lần và cho phép đổi state nên nhận `FnMut`[^std-map].
+### 2.3 `move` không quyết định trait
+
+Dễ nhầm rằng closure `move` là `FnOnce`. Thực ra closure `move` vẫn có thể là `Fn` hay `FnMut`, vì trait do việc closure *làm gì* với giá trị bắt được quyết định, không do cách nó bắt[^cl-move-note]. Chạy thật: `call_fn(move || s.len())` với `fn call_fn<F: Fn() -> usize>(f: F) -> usize { f() + f() }` và `s = "abc"` in `6`. Closure này sở hữu `s` nhưng chỉ đọc nó, nên gọi bao nhiêu lần cũng được.
+
+### 2.4 Chọn bound khi viết API
+
+Khi hàm của bạn nhận callback, std khuyên dùng `FnOnce` nếu chỉ cần gọi một lần[^std-fnonce-use]. Còn `Fn` dành cho trường hợp cần gọi lặp lại mà không đổi state, chẳng hạn gọi đồng thời[^std-fn-use]. Nguyên tắc chung (nhận xét của người soạn) là chọn bound *lỏng nhất* mà thân hàm còn chạy được, vì bound lỏng thì nhiều closure thỏa hơn. `Iterator::map` gọi closure nhiều lần và cho phép closure đổi state, nên nó nhận `FnMut`[^std-map].
 
 <details><summary>Đi sâu: các lỗi khi bound không khớp, Send/Sync/Clone/Copy của closure</summary>
 
@@ -113,13 +141,13 @@ fn main(){ let s=String::new(); let c = move || drop(s); call_mut(c); }
 error[E0525]: expected a closure that implements the `FnMut` trait, but this closure only implements `FnOnce`
 ```
 
-Gọi trực tiếp closure `FnOnce` hai lần: `let c = || drop(s); c(); c();` → `error[E0382]: use of moved value: `c`` với ghi chú "`c` moved due to this call" — vì `call_once` nhận `self` by value.
+Gọi trực tiếp closure `FnOnce` hai lần: `let c = || drop(s); c(); c();` → `error[E0382]: use of moved value: `c`` với ghi chú "`c` moved due to this call". Lý do là `call_once` nhận `self` by value.
 
 Closure có `Send`/`Sync`/`Clone`/`Copy` hay không tùy các giá trị nó bắt; ví dụ nó là `Send` nếu mọi giá trị bắt theo `&` là `Sync` và mọi giá trị bắt theo `&mut`, copy hoặc move là `Send`[^cl-traits]. Chi tiết thuộc chương đồng thời (P4).
 
 </details>
 
-**Quay lại Q2:** `Fn ⊂ FnMut ⊂ FnOnce` về tập closure thỏa; trait của closure do thân nó làm gì với biến bắt được quyết định, không do `move`.
+**Quay lại Q2:** `Fn ⊂ FnMut ⊂ FnOnce` về tập closure thỏa; trait của closure do thân nó làm gì với biến bắt được quyết định, không do `move`. Với `orders`: middleware gọi đồng thời cần `Fn`, bộ đếm trong `map` là `FnMut`, hook shutdown tiêu thứ nó nắm là `FnOnce`.
 
 ## 3. Closure trong bộ nhớ, `impl Fn` hay `Box<dyn Fn>`, `fn` pointer (Q3)
 
@@ -127,15 +155,25 @@ Closure có `Send`/`Sync`/`Clone`/`Copy` hay không tùy các giá trị nó b�
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `impl Fn` là bạn giao thẳng một cái phong bì có kích thước đúng bằng nội dung; `Box<dyn Fn>` là bạn đưa một *phiếu nhận hàng* cùng địa chỉ kho — người nhận đi lấy hàng, chấp nhận thêm một bước, nhưng mọi phiếu trông giống nhau nên xếp chung một ngăn được.
+*Với service `orders`.* `orders` có một bảng route: mỗi route là một closure, và mỗi closure bắt những thứ khác nhau (route này giữ `Config`, route kia giữ một connection pool). Hai câu hỏi thực tế nảy ra. Một: closure nặng bao nhiêu, đưa nó vào hàm generic có tốn heap không? Hai: bảng route phải chứa cả chục closure khác kiểu trong cùng một `Vec` thì viết kiểu phần tử thế nào?
 
-*Kích thước.* Nếu closure là struct chứa thứ nó bắt thì kích thước bằng tổng các thứ đó (cộng padding nếu cần — suy luận của người soạn từ các số đo, không phải bảo đảm của ngôn ngữ). Bảng đo ở phần Đi sâu cho 0 byte khi không bắt gì và 100 byte khi move một mảng 100 byte: không có "header" ẩn nào. Reference chỉ nói kiểu closure "gần như tương đương" một struct[^cl-intro], nên (suy luận của người soạn) đừng dựa vào bố cục cụ thể của nó. Hệ quả (nhận xét của người soạn): closure truyền cho hàm generic không cần cấp phát heap, nó chỉ là một struct trên stack.
+### 3.1 Kích thước
 
-*`impl Fn` hay `Box<dyn Fn>` khi trả về.* Closure biểu diễn bằng trait nên không trả "trực tiếp"; thường dùng `impl Trait`, ví dụ `fn returns_closure() -> impl Fn(i32) -> i32`[^b-retclosure-impl]. Nhưng mỗi lần trả `impl Trait`, Rust tạo một opaque type riêng, nên hai hàm cùng trả `impl Fn(i32) -> i32` cho hai kiểu khác nhau; muốn đặt chúng chung một `Vec` thì cần trait object[^b-traitobj]. Thí nghiệm: hai nhánh `if` trả hai closure khác nhau cùng `impl Fn` cho `error[E0308]: `if` and `else` have incompatible types` (đã chạy); `Box<dyn Fn(i32) -> i32>` thì được.
+Closure là struct chứa thứ nó bắt, nên kích thước bằng tổng các thứ đó, cộng padding nếu cần (suy luận của người soạn từ các số đo, không phải bảo đảm của ngôn ngữ). Bảng đo ở phần Đi sâu cho 0 byte khi không bắt gì và 100 byte khi move một mảng 100 byte: không có "header" ẩn nào. Reference chỉ nói kiểu closure "gần như tương đương" một struct[^cl-intro], nên (suy luận của người soạn) đừng dựa vào bố cục cụ thể của nó. Hệ quả (nhận xét của người soạn): closure truyền cho hàm generic không cần cấp phát heap, nó chỉ là một struct trên stack.
 
-Nhận xét của người soạn: trong backend, bảng route/middleware/hook đăng ký lúc chạy là chỗ điển hình cần `Box<dyn Fn>`; hàm tiện ích generic nhận callback thì dùng `impl Fn` hoặc tham số generic để tránh chi phí.
+### 3.2 Trả closure: `impl Fn` hay `Box<dyn Fn>`
 
-*Function pointer `fn`.* Khác closure, `fn` là một kiểu chứ không phải trait; function pointer implement cả ba trait nên luôn truyền được vào chỗ cần closure[^b-fnptr]; chỉ nên nhận `fn` khi giao tiếp với code ngoài không có closure (như C)[^b-fnptr-c]. Function pointer tạo được bằng coercion từ function item và từ closure *không bắt gì* (và không async)[^fnptr-coerce]. Tên hàm có *function item type* riêng, kích thước 0 byte[^fnitem-zst]; truyền tên hàm cho generic `F: Fn` là zero-cost, còn ép về `fn` thì thành con trỏ thật (suy luận của người soạn từ kích thước đo ở dưới). Book cũng cho thấy dùng tên hàm hoặc enum constructor thay closure, như `.map(ToString::to_string)`, và nói chúng biên dịch ra cùng code với bản closure[^b-fnptr-map].
+Closure biểu diễn bằng trait nên không trả "trực tiếp" được; thường dùng `impl Trait`, ví dụ `fn returns_closure() -> impl Fn(i32) -> i32`[^b-retclosure-impl]. Nhưng mỗi lần trả `impl Trait`, Rust tạo một opaque type riêng, nên hai hàm cùng trả `impl Fn(i32) -> i32` vẫn trả hai kiểu khác nhau. Muốn đặt chúng chung một `Vec` thì cần trait object[^b-traitobj].
+
+Thí nghiệm: hai nhánh `if` trả hai closure khác nhau cùng `impl Fn` cho `error[E0308]: `if` and `else` have incompatible types` (đã chạy); `Box<dyn Fn(i32) -> i32>` thì được.
+
+Với `orders`, quy tắc chọn như sau (nhận xét của người soạn). Bảng route, middleware, hook đăng ký lúc chạy là chỗ điển hình cần `Box<dyn Fn>`, vì các closure trong đó khác kiểu mà phải nằm chung một `Vec`. Còn hàm tiện ích generic nhận callback (ví dụ hàm retry nhận closure) thì dùng `impl Fn` hoặc tham số generic để tránh chi phí.
+
+### 3.3 Function pointer `fn`
+
+Khác closure, `fn` là một kiểu chứ không phải trait. Function pointer implement cả ba trait `Fn`, `FnMut`, `FnOnce`, nên luôn truyền được vào chỗ cần closure[^b-fnptr]. Dù vậy chỉ nên nhận `fn` khi giao tiếp với code ngoài không có khái niệm closure, như C[^b-fnptr-c].
+
+Tạo function pointer bằng coercion từ function item hoặc từ closure *không bắt gì* (và không async)[^fnptr-coerce]. Mỗi tên hàm có *function item type* riêng, kích thước 0 byte[^fnitem-zst]. Nên truyền tên hàm cho generic `F: Fn` là zero-cost, còn ép về `fn` thì thành con trỏ thật (suy luận của người soạn từ kích thước đo ở dưới). Book cũng cho thấy dùng tên hàm hoặc enum constructor thay cho closure, như `.map(ToString::to_string)`, và nói chúng biên dịch ra cùng code với bản closure[^b-fnptr-map].
 
 <details><summary>Đi sâu: số đo size_of_val và các thí nghiệm</summary>
 
@@ -208,17 +246,19 @@ error[E0308]: mismatched types
 
 </details>
 
-**Quay lại Q3:** closure là struct chứa đúng thứ nó bắt (0–100 byte trong các ví dụ đo); trả `impl Fn` khi chỉ có một closure, `Box<dyn Fn>` khi cần nhiều closure cùng kiểu, `fn` chỉ khi không bắt gì hoặc giao tiếp C.
+**Quay lại Q3:** closure là struct chứa đúng thứ nó bắt (0–100 byte trong các ví dụ đo); trả `impl Fn` khi chỉ có một closure, `Box<dyn Fn>` khi cần nhiều closure cùng kiểu, `fn` chỉ khi không bắt gì hoặc giao tiếp C. Với `orders`: bảng route là `Vec<Box<dyn Fn>>`, hàm retry nhận callback thì dùng generic.
 
 ## 4. Iterator: `for`, ba dạng duyệt, lười và `collect` (Q4)
 
-> **Trả lời ngắn.** Iterator là mọi thứ có hàm `next` trả `Some(phần tử)` đến khi hết thì trả `None`[^it-trait]. `for x in e` chỉ là cú pháp rút gọn: gọi `into_iter` rồi gọi `next` lặp lại đến khi `None`[^lp-intro]. `iter()` / `iter_mut()` / `into_iter()` cho phần tử kiểu `&T` / `&mut T` / `T`[^it-three]. Các adapter như `map` chỉ *dựng* iterator mới và lười, còn consumer như `sum`, `collect` mới thật sự chạy[^it-lazy]; `collect` chọn kiểu đích theo kiểu bạn yêu cầu[^std-collect].
+> **Trả lời ngắn.** Iterator là mọi thứ có hàm `next` trả `Some(phần tử)` cho đến khi hết thì trả `None`[^it-trait]. `for x in e` chỉ là cú pháp rút gọn: gọi `into_iter` rồi gọi `next` lặp lại đến khi gặp `None`[^lp-intro]. `iter()` / `iter_mut()` / `into_iter()` cho phần tử kiểu `&T` / `&mut T` / `T`[^it-three]. Các adapter như `map` chỉ *dựng* iterator mới và lười, còn consumer như `sum`, `collect` mới thật sự chạy[^it-lazy]; `collect` chọn kiểu đích theo kiểu bạn yêu cầu[^std-collect].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): dây chuyền đóng gói. `next` là việc "băng chuyền đẩy ra một món"; adapter là các trạm gắn thêm trên băng chuyền (soi, lọc, gắn nhãn) nhưng băng chuyền chưa quay cho đến khi có người *đứng cuối dây* (consumer) kéo món ra. Món đi qua trạm nào là trạm đó chạy, không có kho trung gian.
+*Với service `orders`.* `orders` giữ một `Vec` đơn hàng trong bộ nhớ và phải làm đủ thứ với nó: cộng tổng tiền các đơn lớn, lấy danh sách mã đơn, parse một batch dòng log thành đơn mới. Cả ba việc đều là "đi qua từng phần tử rồi làm gì đó", nhưng với những cách đi khác nhau (mượn, mượn để sửa, lấy hẳn) và những kết quả khác nhau (một số, một `Vec`, một `Result`). Iterator là cái khung chung cho tất cả. Mục này lần lượt giải thích `next`, ba dạng duyệt, cách `for` hoạt động, vì sao chuỗi `map`/`filter` không chạy nếu không có ai kéo, và `collect` dựng kết quả ra sao.
 
-*Giao thức `next`.* Lõi của trait chỉ có một method bắt buộc:
+### 4.1 Giao thức `next`
+
+Lõi của trait chỉ có một method bắt buộc:
 
 ```rust
 trait Iterator {
@@ -227,11 +267,17 @@ trait Iterator {
 }
 ```
 
-`next` trả `Some(item)` khi còn phần tử và `None` khi hết[^it-trait]; trait chỉ đòi cài `next`[^b-next], mọi method khác có sẵn cài đặt mặc định xây trên `next`. Vì `next` nhận `&mut self`, duyệt là *thay đổi trạng thái* iterator nên biến iterator phải `mut`. Sau khi `next` trả `None`, gọi lại có thể trả `Some` trở lại tùy iterator[^it-next-none].
+`next` trả `Some(item)` khi còn phần tử và `None` khi hết[^it-trait]. Trait chỉ đòi cài `next`[^b-next]; mọi method khác (`map`, `filter`, `sum`…) đã có cài đặt mặc định xây trên nó. Vì `next` nhận `&mut self`, duyệt là *thay đổi trạng thái* của iterator, nên biến iterator phải khai báo `mut`. Còn sau khi `next` đã trả `None`, gọi lại có thể trả `Some` trở lại, tùy iterator[^it-next-none].
 
-*Ba dạng duyệt.* `iter()` duyệt `&T`, `iter_mut()` duyệt `&mut T`, `into_iter()` duyệt `T` (sở hữu)[^it-three]. Nếu collection `C` có `iter()` thì thường cũng có `impl IntoIterator for &C` gọi `iter()`, và `&mut C` ↔ `iter_mut()`; nhờ vậy viết được `for x in &v` và `for x in &mut v`[^it-byref]. `for x in v` (không `&`) tiêu thụ `v` vì `into_iter` nhận `self` by value[^it-consume].
+### 4.2 Ba dạng duyệt
 
-*`for` được dịch thành gì.* Reference: `for` là cấu trúc lặp trên phần tử do một implementation của `IntoIterator` cung cấp[^lp-intro]; tương đương một `loop` chứa `match` (code desugar ở phần Đi sâu). `match` ngoài cùng tồn tại để các temporary trong biểu thức bên phải `in` không bị drop trước khi vòng lặp kết thúc[^lp-desugar]; nghĩa là `for x in make_guard().iter()` giữ `make_guard()` sống suốt vòng lặp (suy luận của người soạn từ quy tắc trên).
+Với `Vec<Order>` của `orders`, bạn có ba cách đi qua nó. `iter()` cho `&T`, đủ để đọc. `iter_mut()` cho `&mut T`, để sửa tại chỗ. `into_iter()` cho `T`, tức lấy sở hữu từng phần tử[^it-three].
+
+Cú pháp `for` thì gọn hơn nhờ một quy ước: nếu collection `C` có `iter()` thì thường cũng có `impl IntoIterator for &C` chỉ gọi `iter()`, và `&mut C` tương ứng với `iter_mut()`. Nhờ vậy bạn viết được `for x in &v` và `for x in &mut v`[^it-byref]. Còn `for x in v` (không có `&`) tiêu thụ `v`, vì `into_iter` nhận `self` by value[^it-consume].
+
+### 4.3 `for` được dịch thành gì
+
+`for` là cấu trúc lặp trên các phần tử do một implementation của `IntoIterator` cung cấp[^lp-intro]. Nó tương đương một `loop` chứa `match` (code desugar ở phần Đi sâu). Lớp `match` ngoài cùng có đó để các temporary trong biểu thức bên phải `in` không bị drop trước khi vòng lặp kết thúc[^lp-desugar]. Từ đó suy ra (suy luận của người soạn) `for x in make_guard().iter()` giữ `make_guard()` sống suốt vòng lặp.
 
 ```mermaid
 flowchart TD
@@ -244,16 +290,22 @@ flowchart TD
 
 Vì mọi `Iterator` cũng là `IntoIterator` (trả về chính nó), cả iterator lẫn collection đều đứng được bên phải `in`[^it-forloop].
 
-*Adapter lười, consumer ăn hết.* Chỉ tạo iterator thì chưa làm gì; không có gì xảy ra cho đến khi gọi `next`[^it-lazy]. Book gọi method trên `Iterator` mà *không* tiêu thụ iterator, trả về iterator khác, là *iterator adapter*[^b-adapter-def]; method gọi `next` và dùng cạn iterator là *consuming adapter* (consumer), ví dụ `sum`[^b-adapter]. Compiler cảnh báo nếu bạn dựng adapter mà bỏ phí kết quả[^it-lazy-warn].
+### 4.4 Adapter lười, consumer chạy thật
+
+Giả sử `orders` viết `orders.iter().filter(|o| o.total > 1_000).map(|o| o.id)`. Đoạn đó chưa duyệt gì cả: tạo iterator chưa làm việc, không có gì xảy ra cho đến khi ai đó gọi `next`[^it-lazy]. Method nào của `Iterator` không tiêu thụ iterator mà trả về một iterator khác thì gọi là *iterator adapter*[^b-adapter-def]. Method nào gọi `next` và dùng cạn iterator thì là *consuming adapter*, hay consumer, như `sum`[^b-adapter]. Nếu bạn dựng adapter mà bỏ phí kết quả, compiler sẽ cảnh báo[^it-lazy-warn].
 
 | Loại | Ví dụ | Trả về | Chạy closure ngay? |
 |---|---|---|---|
 | Adapter | `map`, `filter`, `take`, `enumerate`, `zip`, `chain`, `skip`, `inspect` | iterator mới | không |
 | Consumer | `collect`, `sum`, `count`, `fold`, `for_each`, `find`, `last` | giá trị cuối | có |
 
-Bound của adapter chính là các `Fn*` ở mục 2: `map` nhận `F: FnMut(Self::Item) -> B`[^std-map] nên closure được giữ state thay đổi; `find` nhận `&Item` và vì nhiều iterator vốn duyệt tham chiếu nên đối số thành tham chiếu đôi[^std-find-ref] — lý do bạn thấy `|&&x|` khi lọc `iter()` của `Vec<i32>`. Lười cũng cho phép *ngắt sớm*: `find` dừng xử lý ngay khi closure trả `true`[^std-find].
+Bound của adapter chính là các `Fn*` ở mục 2. `map` nhận `F: FnMut(Self::Item) -> B`[^std-map], nên closure được giữ state thay đổi. `find` thì nhận `&Item`, mà nhiều iterator vốn đã duyệt tham chiếu, nên đối số thành tham chiếu đôi[^std-find-ref]; đó là lý do bạn thấy `|&&x|` khi lọc `iter()` của `Vec<i32>`. Lười cũng cho phép *ngắt sớm*: `find` dừng xử lý ngay khi closure trả `true`[^std-find].
 
-*`collect` và `FromIterator`.* Iterator không biết container đích; kiểu đích do kiểu bạn yêu cầu `collect` trả về quyết định[^std-collect], nên cần chú thích kiểu hoặc turbofish `collect::<Vec<_>>()` để giúp suy luận kiểu[^std-turbofish]. Trait `FromIterator<A>` có hàm `from_iter` dựng kiểu đó từ một iterator[^std-fromiter]. `collect` còn dựng được kiểu không phải collection thông thường: iterator các `Result<T, E>` gom được thành `Result<Collection<T>, E>`[^std-collect-result]; `Result` gặp `Err` đầu tiên thì dừng lấy phần tử và trả `Err` đó[^std-result-fi], `Option` tương tự với `None`[^std-option-fi]. Mẫu này (nhận xét của người soạn) là cách gọn để "parse cả batch, fail ở dòng lỗi đầu tiên" — liên hệ [Chương 05 — Error handling](05-error-handling.md).
+### 4.5 `collect` và `FromIterator`
+
+Iterator không biết container đích. Kiểu đích do kiểu bạn yêu cầu `collect` trả về quyết định[^std-collect]. Vì vậy đôi khi cần chú thích kiểu hoặc dùng turbofish `collect::<Vec<_>>()` để giúp suy luận[^std-turbofish]. Bên dưới, `collect` dựa vào trait `FromIterator<A>`, có hàm `from_iter` dựng kiểu đích từ một iterator[^std-fromiter].
+
+`collect` còn dựng được những kiểu không phải collection thông thường. Iterator các `Result<T, E>` gom được thành `Result<Collection<T>, E>`[^std-collect-result]. `Result` gặp `Err` đầu tiên thì dừng lấy phần tử và trả đúng `Err` đó[^std-result-fi]; `Option` làm tương tự với `None`[^std-option-fi]. Với `orders`, đây là cách gọn để "parse cả batch dòng log, dừng ở dòng lỗi đầu tiên" (nhận xét của người soạn); liên hệ [Chương 05 — Error handling](05-error-handling.md).
 
 <details><summary>Đi sâu: code desugar, thí nghiệm lười/ngắt sớm, collect, iterator tự viết, DoubleEnded/ExactSize</summary>
 
@@ -296,7 +348,7 @@ for s in w.clone() { let _: String = s; }           // String (into_iter, tiêu 
 println!("{:?}", w);                                // ["a!", "b!"]
 ```
 
-**Lười** — closure trong `map` chưa chạy khi mới tạo (đã chạy):
+**Lười**: closure trong `map` chưa chạy khi mới tạo (đã chạy):
 
 ```rust
 let v = vec![10, 20, 30];
@@ -314,7 +366,7 @@ map 30
 [20, 40, 60]
 ```
 
-**Ngắt sớm** — `find` dừng khi gặp phần tử khớp, các phần tử sau không bị chạm (đã chạy):
+**Ngắt sớm**: `find` dừng khi gặp phần tử khớp, các phần tử sau không bị chạm (đã chạy):
 
 ```rust
 let f = v.iter().inspect(|x| println!("saw {x}")).find(|&&x| x == 20);
@@ -328,7 +380,7 @@ Some(20)
 
 Iterator vô hạn dùng được nếu có adapter chặn: `(0..).step_by(2).take(3)` → `[0, 2, 4]` (đã chạy). Docs cảnh báo method trên iterator vô hạn có thể không bao giờ kết thúc, như `min`[^it-infinity].
 
-**`fold` và `by_ref`.** `fold(init, f)` gọi closure `FnMut(B, Item) -> B` cho mỗi phần tử và trả accumulator cuối[^std-fold]; `(1..=4).fold(String::new(), |acc, x| format!("{acc}{x}"))` ra `1234` (đã chạy). `by_ref` mượn iterator để dùng method lấy-ownership (như `take`) mà vẫn dùng lại iterator gốc sau đó[^std-by-ref]. Ví dụ:
+**`fold` và `by_ref`.** `fold(init, f)` gọi closure `FnMut(B, Item) -> B` cho mỗi phần tử và trả accumulator cuối[^std-fold]; `(1..=4).fold(String::new(), |acc, x| format!("{acc}{x}"))` ra `1234` (đã chạy). `by_ref` mượn iterator để dùng method lấy ownership (như `take`) mà vẫn dùng lại iterator gốc sau đó[^std-by-ref]. Ví dụ:
 
 ```rust
 let mut it = 1..10;
@@ -378,37 +430,43 @@ println!("{}", Countdown(5).zip(Countdown(5).skip(1)).map(|(a,b)| a*b).filter(|x
 
 Kiểm tay: `Countdown(5)` = 5,4,3,2,1; `skip(1)` = 4,3,2,1; tích từng cặp 20,12,6,2; chia hết cho 3 là 12 và 6 → 18. Chỉ định nghĩa `next` mà toàn bộ adapter dùng được[^b-next]. `size_of_val(&Countdown(1)) = 4` (đã chạy).
 
-`size_hint(&self) -> (usize, Option<usize>)` mặc định `(0, None)`, đúng cho mọi iterator[^it-sizehint]; docs dùng nó để tối ưu như dự trữ chỗ nhưng không được tin nó để bỏ bounds check trong unsafe[^it-sizehint-use]. Quan sát (đã chạy): `(0..10).filter(|x| x%2==0).size_hint()` là `(0, Some(10))`, còn `v.iter().map(|x| x+1).size_hint()` là `(3, Some(3))`.
+`size_hint(&self) -> (usize, Option<usize>)` mặc định là `(0, None)`, đúng cho mọi iterator[^it-sizehint]. Docs dùng nó để tối ưu như dự trữ chỗ, nhưng không được tin nó để bỏ bounds check trong unsafe[^it-sizehint-use]. Quan sát (đã chạy): `(0..10).filter(|x| x%2==0).size_hint()` là `(0, Some(10))`, còn `v.iter().map(|x| x+1).size_hint()` là `(3, Some(3))`.
 
-**`DoubleEndedIterator` / `ExactSizeIterator`.** `DoubleEndedIterator` thêm `next_back`; hai đầu cùng làm việc trên một dãy và không giao nhau, duyệt xong khi chúng gặp nhau ở giữa[^std-dei]. Nó là nền của `rev()`, vốn chỉ dùng được với iterator hai đầu[^std-rev]; ví dụ `v.iter().rev().collect::<Vec<_>>()` ra `[30, 20, 10]` (đã chạy). Với `let mut r = 1u8..=5;`: `r.next_back()` → `Some(5)`, `r.next()` → `Some(1)`, `r.len()` → `3`. `ExactSizeIterator` cung cấp `len()`[^std-esi-len]; khi implement thì `size_hint` phải trả đúng kích thước[^std-esi]. Không phổ quát: `let mut r = 1..=5; r.len()` (kiểu `RangeInclusive<i32>`) cho
+**`DoubleEndedIterator` / `ExactSizeIterator`.** `DoubleEndedIterator` thêm `next_back`; hai đầu cùng làm việc trên một dãy và không giao nhau, duyệt xong khi chúng gặp nhau ở giữa[^std-dei]. Nó là nền của `rev()`, vốn chỉ dùng được với iterator hai đầu[^std-rev]; ví dụ `v.iter().rev().collect::<Vec<_>>()` ra `[30, 20, 10]` (đã chạy). Với `let mut r = 1u8..=5;`: `r.next_back()` → `Some(5)`, `r.next()` → `Some(1)`, `r.len()` → `3`. `ExactSizeIterator` cung cấp `len()`[^std-esi-len]. Khi implement nó, `size_hint` phải trả đúng kích thước[^std-esi]. Không phải iterator nào cũng có: `let mut r = 1..=5; r.len()` (kiểu `RangeInclusive<i32>`) cho
 
 ```text
 error[E0277]: the trait bound `std::ops::RangeInclusive<i32>: ExactSizeIterator` is not satisfied
 ```
 
-còn `1u8..=5` thì được — thông báo lỗi liệt kê `RangeInclusive<u8>`, `<i8>`, `<u16>`, `<i16>` là các kiểu có impl (quan sát từ lần chạy này). Docs giải thích `Chain` không phải `ExactSizeIterator` ngay cả khi hai vế đều exact: dãy dài ra có thể vượt `usize::MAX`[^std-esi-chain].
+còn `1u8..=5` thì được; thông báo lỗi liệt kê `RangeInclusive<u8>`, `<i8>`, `<u16>`, `<i16>` là các kiểu có impl (quan sát từ lần chạy này). Docs giải thích `Chain` không phải `ExactSizeIterator` ngay cả khi hai vế đều exact: dãy dài ra có thể vượt `usize::MAX`[^std-esi-chain].
 
-**Trait object cho iterator.** Hàm trả iterator mặc định dùng `impl Iterator<Item = u32>`; khi các nhánh trả kiểu khác nhau thì `Box<dyn Iterator<Item = u32>>` (đã chạy với nhánh `Box::new(0..3)` / `Box::new([7,8].into_iter())`) — cùng lý do "mỗi closure/adapter một kiểu" ở mục 1 và 3.
+**Trait object cho iterator.** Hàm trả iterator mặc định dùng `impl Iterator<Item = u32>`; khi các nhánh trả kiểu khác nhau thì dùng `Box<dyn Iterator<Item = u32>>` (đã chạy với nhánh `Box::new(0..3)` / `Box::new([7,8].into_iter())`). Lý do cùng với closure ở mục 1 và 3: mỗi closure, mỗi adapter là một kiểu riêng.
 
 </details>
 
-**Quay lại Q4:** `for` = `into_iter` + `next` đến `None`; `iter`/`iter_mut`/`into_iter` cho `&T`/`&mut T`/`T`; adapter chỉ dựng, consumer mới chạy; `collect` quyết định kiểu đích theo kiểu bạn yêu cầu.
+**Quay lại Q4:** `for` = `into_iter` + `next` đến `None`; `iter`/`iter_mut`/`into_iter` cho `&T`/`&mut T`/`T`; adapter chỉ dựng, consumer mới chạy; `collect` quyết định kiểu đích theo kiểu bạn yêu cầu. Với `orders`: `filter` và `map` trên `Vec` đơn hàng chưa chạy gì cho đến khi `sum` hoặc `collect` kéo.
 
 ## 5. Zero-cost abstraction: Book nói gì, asm cho thấy gì (Q5)
 
-> **Trả lời ngắn.** Book chạy một benchmark so vòng `for` với iterator và kết luận hai bản có hiệu năng tương tự[^b-bench]. Book nói iterator được biên dịch xuống code *gần như* giống code mức thấp viết tay[^b-zerocost], và "trong nhiều trường hợp" ra cùng assembly[^b-sameasm]. Đó là phát biểu có giới hạn ("gần như", "nhiều trường hợp"), không phải "luôn luôn".
+> **Trả lời ngắn.** Book chạy một benchmark so vòng `for` với iterator và kết luận hai bản có hiệu năng tương tự[^b-bench]. Book cũng nói iterator được biên dịch xuống code *gần như* giống code mức thấp viết tay[^b-zerocost]. Trong "nhiều trường hợp" nó còn ra cùng assembly[^b-sameasm]. Đó là phát biểu có giới hạn ("gần như", "nhiều trường hợp"), không phải "luôn luôn".
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thuê dịch viên giỏi — bạn viết văn trôi chảy bằng ngôn ngữ cao, bản dịch ra cũng gọn như người viết tay thẳng bằng ngôn ngữ đích; nhưng "giỏi" không có nghĩa "mọi văn bản".
+*Với service `orders`.* Nếu `orders` tính tổng tiền các đơn lớn bằng chuỗi `iter().filter(..).map(..).sum()` thay vì một vòng `for` viết tay, chuỗi đó có chậm hơn không? Nó có thêm lời gọi hàm cho mỗi closure và mỗi adapter hay không? Đây là câu hỏi mà "zero-cost abstraction" trả lời; mục này xem Book hứa chính xác tới đâu, và ta tự soi được bao nhiêu.
 
-Book ch13.4 tìm một từ trong *Sherlock Holmes* bằng vòng `for` và bằng iterator, ra 19.620.300 ns/iter và 19.234.900 ns/iter[^b-bench-num], kết luận hai bản có hiệu năng tương tự[^b-bench]. Book nói rõ benchmark chỉ để có cảm nhận chung chứ không nhằm chứng minh hai bản tương đương[^b-bench-note]. Kết luận của Book: iterator, dù là abstraction cấp cao, được biên dịch xuống gần như cùng code như khi bạn tự viết mức thấp, và là một zero-cost abstraction[^b-zerocost]. Book còn nêu các tối ưu như loop unrolling và bỏ bounds check áp dụng cho code iterator[^b-sameasm]. Chương này chỉ khẳng định đúng mức đó.
+### 5.1 Book đo gì và kết luận gì
 
-Điều này **không** chứng minh mọi chuỗi iterator đều miễn phí: ở build debug (không `-O`) các lớp adapter là các lời gọi hàm thật (suy luận của người soạn; chương này không đo), và chuỗi adapter dài kèm `Box<dyn Iterator>` có chi phí gọi gián tiếp (suy luận của người soạn).
+Book ch13.4 tìm một từ trong *Sherlock Holmes* bằng vòng `for` và bằng iterator. Kết quả đo được là 19.620.300 ns/iter và 19.234.900 ns/iter[^b-bench-num]. Từ đó Book kết luận hai bản có hiệu năng tương tự[^b-bench]. Book cũng nói rõ benchmark chỉ để có cảm nhận chung chứ không nhằm chứng minh hai bản tương đương[^b-bench-note].
+
+Kết luận chung của Book: iterator, dù là abstraction cấp cao, được biên dịch xuống gần như cùng code với khi bạn tự viết mức thấp, và là một zero-cost abstraction[^b-zerocost]. Book còn nêu các tối ưu như loop unrolling và bỏ bounds check áp dụng cho code iterator[^b-sameasm]. Chương này chỉ khẳng định đúng mức đó.
+
+### 5.2 Những gì chưa được chứng minh
+
+Điều trên **không** chứng minh mọi chuỗi iterator đều miễn phí. Ở build debug (không `-O`), các lớp adapter là những lời gọi hàm thật (suy luận của người soạn; chương này không đo). Chuỗi adapter dài kèm `Box<dyn Iterator>` thì có chi phí gọi gián tiếp (suy luận của người soạn). Với `orders`, nghĩa là chuyện "iterator có miễn phí không" nên kiểm bằng build release và, nếu quan trọng, bằng chính benchmark của bạn.
 
 <details><summary>Đi sâu: tự soi asm một trường hợp</summary>
 
-Quan sát của người soạn (một trường hợp, một compiler, một kiến trúc — không phải bảo đảm): hai hàm cộng gấp đôi các phần tử `u32`:
+Quan sát của người soạn (một trường hợp, một compiler, một kiến trúc; không phải bảo đảm): hai hàm cộng gấp đôi các phần tử `u32`:
 
 ```rust
 pub fn sum_loop(v: &[u32]) -> u32 { let mut s = 0u32; for i in 0..v.len() { s = s.wrapping_add(v[i] * 2); } s }
@@ -419,7 +477,7 @@ Biên dịch `rustc 1.95.0 --edition 2024 -O --crate-type=lib --emit=asm -C over
 
 </details>
 
-**Quay lại Q5:** Book hứa code biên dịch ra gần như giống code viết tay và, trong nhiều trường hợp, cùng assembly — một trường hợp asm aarch64 đã khớp, nhưng đó không phải bảo đảm cho mọi chuỗi iterator.
+**Quay lại Q5:** Book hứa code biên dịch ra gần như giống code viết tay và, trong nhiều trường hợp, cùng assembly. Một trường hợp asm aarch64 đã khớp, nhưng đó không phải bảo đảm cho mọi chuỗi iterator của `orders`.
 
 ## 6. Sửa collection khi đang duyệt (Q6)
 
@@ -427,11 +485,15 @@ Biên dịch `rustc 1.95.0 --edition 2024 -O --crate-type=lib --emit=asm -C over
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đang đọc danh sách khách hàng đưa cho bạn từng người một, mà có người chen vào thêm tên giữa chừng — danh sách đang cầm bị đổi dưới tay. Rust không cho phép, và chặn ngay ở khâu biên dịch thay vì để runtime phát hiện (Java ném `ConcurrentModificationException` lúc chạy — nhận xét của người soạn, chương này không dẫn nguồn Java cho hành vi đó).
+*Với service `orders`.* Một việc rất tự nhiên với `Vec` đơn hàng: duyệt qua từng đơn, và nếu đơn hết hạn thì thêm một đơn hoàn tiền vào chính `Vec` đó, hoặc xóa đơn khỏi `Vec`. Viết thẳng như vậy thì compiler từ chối, và chặn ngay khi biên dịch thay vì để lúc chạy mới phát hiện (Java ném `ConcurrentModificationException` lúc chạy; đây là nhận xét của người soạn, chương này không dẫn nguồn Java cho hành vi đó). Mục này giải thích vì sao bị chặn và sửa thế nào.
 
-*Cơ chế.* `for x in &v` tạo iterator giữ `&Vec`; vì `for` gọi `next` ở mỗi vòng, borrow đó sống suốt vòng lặp (mục 4). `v.push` cần `&mut v`, mà đang còn `&v` nên bị chặn[^b-borrow]. Tương tự (đã chạy), `let x = it.next(); drop(v); println!("{:?}", x)` với `it = v.iter()` cho `E0505: cannot move out of `v` because it is borrowed`.
+### 6.1 Cơ chế
 
-*Cách sửa* (nhận xét của người soạn): thu thập chỉ số/giá trị cần đổi vào `Vec` riêng rồi áp dụng sau vòng lặp; duyệt `iter_mut()` nếu chỉ sửa phần tử tại chỗ; hoặc `retain`/`drain` nếu cần xóa — API của collection được viết để thỏa quy tắc borrow.
+`for x in &v` tạo một iterator giữ `&Vec`. Vì `for` gọi `next` ở mỗi vòng, borrow đó sống suốt vòng lặp (mục 4). Trong thân vòng lặp, `v.push` cần `&mut v`, mà `&v` vẫn còn nên bị chặn[^b-borrow]. Tương tự (đã chạy), `let x = it.next(); drop(v); println!("{:?}", x)` với `it = v.iter()` cho `E0505: cannot move out of `v` because it is borrowed`.
+
+### 6.2 Cách sửa
+
+Đây là các hướng sửa (nhận xét của người soạn). Nếu cần thêm đơn: thu thập chỉ số hoặc giá trị cần đổi vào một `Vec` riêng rồi áp dụng sau vòng lặp. Nếu chỉ sửa phần tử tại chỗ: duyệt bằng `iter_mut()`. Nếu cần xóa: dùng `retain` hoặc `drain`. API của collection được viết ra để thỏa quy tắc borrow, nên các hướng này đều biên dịch được.
 
 <details><summary>Đi sâu: thông báo lỗi đầy đủ</summary>
 
@@ -458,7 +520,7 @@ error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immuta
 
 ## 7. Liên hệ backend: pipeline log và so với Java Stream
 
-Ví dụ xử lý log theo dòng — parse, bỏ dòng hỏng, đếm lỗi theo method (đã chạy):
+Tất cả những gì ở trên gặp nhau trong một việc rất thường của `orders`: đọc log theo dòng, parse, bỏ dòng hỏng, rồi đếm lỗi theo method. Đoạn code dưới đã chạy thật; mỗi dòng log có dạng `METHOD status`.
 
 ```rust
 let log = "GET 200\nPOST 500\nGET 404\nGET 200\nbad line\nPOST 201";
@@ -474,11 +536,11 @@ e.sort();
 // [("GET", 1), ("POST", 1)]
 ```
 
-Dòng `bad line` bị bỏ vì `?` trong closure trả `Option` thoát sớm cho dòng đó. Dữ liệu không bị sao chép: `&str` trỏ vào chuỗi gốc (lifetime ràng buộc `parsed` với `log`, chương 01).
+Dòng `bad line` bị bỏ vì `?` trong closure trả `Option` thoát sớm cho dòng đó. Dữ liệu không bị sao chép: `&str` trỏ vào chuỗi gốc, và lifetime ràng buộc `parsed` với `log` (chương 01). Đọc đoạn code theo từng mục của chương: `filter_map` nhận một closure `FnMut` (mục 2); `lines()` và `filter_map` là adapter nên chưa chạy gì cho đến `collect` (mục 4); `collect` chọn `Vec<(&str, u16)>` theo kiểu đã chú thích (mục 4); vòng `for (m, c) in &parsed` mượn `parsed` chứ không tiêu thụ nó (mục 4).
 
-So với Java Stream (nhận xét của người soạn, có đối chiếu docs Java): Javadoc nói các thao tác trung gian luôn lười và việc duyệt nguồn chỉ bắt đầu khi thao tác kết thúc chạy[^jv-lazy] — khớp với adapter/consumer của Rust. Khác biệt: `collect(self)` của Rust move iterator nên dùng lại là lỗi biên dịch (E0382), còn Java Stream sau thao tác kết thúc được coi là đã tiêu thụ và không dùng lại được[^jv-consumed].
+Nếu bạn quen Java Stream thì hai mô hình khá gần nhau (nhận xét của người soạn, có đối chiếu docs Java). Javadoc nói các thao tác trung gian luôn lười, và việc duyệt nguồn chỉ bắt đầu khi thao tác kết thúc chạy[^jv-lazy]. Điều đó khớp với adapter và consumer của Rust. Khác biệt nằm ở chuyện dùng lại: `collect(self)` của Rust move iterator nên dùng lại là lỗi biên dịch (E0382), còn Java Stream sau thao tác kết thúc được coi là đã tiêu thụ và không dùng lại được[^jv-consumed].
 
-`Iterator::next` là lời gọi đồng bộ trả giá trị ngay (nhận xét của người soạn), nên không dùng để duyệt nguồn bất đồng bộ (socket, file async); với nguồn đó dùng `Stream` của hệ async (chương I/O async, P7).
+Cuối cùng, một giới hạn: `Iterator::next` là lời gọi đồng bộ, trả giá trị ngay (nhận xét của người soạn). Vì vậy nó không dùng để duyệt nguồn bất đồng bộ như socket hay file async; với nguồn đó dùng `Stream` của hệ async (chương I/O async, P7).
 
 ## Tóm tắt
 
@@ -495,87 +557,87 @@ So với Java Stream (nhận xét của người soạn, có đối chiếu docs
 
 ## Câu hỏi tự kiểm tra
 
-1. Closure `|| a` với `a: u8` có kích thước bao nhiêu và vì sao không phải 1?
+1. Trong `orders`, closure `|| a` với `a: u8` có kích thước bao nhiêu và vì sao không phải 1?
 <details><summary>Đáp án</summary>
 
-8 byte (đo thật trên aarch64): `u8` là `Copy` nên được bắt bằng ImmBorrow, tức là một tham chiếu.[^cl-copy]
+8 byte (đo thật trên aarch64): `u8` là `Copy` nên được bắt bằng ImmBorrow, tức là một tham chiếu[^cl-copy].
 
 </details>
 
 2. Closure `move || s.len()` (với `s: String`) implement trait nào trong `Fn`/`FnMut`/`FnOnce`?
 <details><summary>Đáp án</summary>
 
-Cả ba: trait do thân closure quyết định (chỉ đọc), không do `move`.[^cl-move-note]
+Cả ba: trait do thân closure quyết định (chỉ đọc), không do `move`[^cl-move-note].
 
 </details>
 
 3. Vì sao `call_mut(move || drop(s))` lỗi E0525?
 <details><summary>Đáp án</summary>
 
-Thân move `s` ra khỏi closure nên chỉ implement `FnOnce`; `call_mut` đòi `FnMut`.[^b-fntraits][^cl-calltraits]
+Thân closure move `s` ra khỏi closure nên nó chỉ implement `FnOnce`[^b-fntraits]. Còn `call_mut` đòi `FnMut`, mà trait đó chỉ có ở closure không move giá trị bắt được ra khỏi thân[^cl-calltraits].
 
 </details>
 
 4. Đoạn code sửa `p.a` trong closure rồi đọc `p.b` biên dịch ở edition 2021 nhưng lỗi ở 2018. Vì sao?
 <details><summary>Đáp án</summary>
 
-2018 bắt cả biến `p`; 2021 chỉ bắt `p.a` (disjoint capture).[^ed-disjoint]
+Bản 2018 bắt cả biến `p`[^ed-disjoint]. Bản 2021 chỉ bắt `p.a` (disjoint capture)[^ed-disjoint-2021].
 
 </details>
 
 5. Khi nào bắt buộc dùng `Box<dyn Fn>` thay vì `impl Fn`?
 <details><summary>Đáp án</summary>
 
-Khi cần nhiều closure khác nhau cùng một kiểu (nhánh `if` trả closure khác nhau, `Vec` các handler): mỗi `impl Fn` là một opaque type riêng.[^b-retclosure]
+Khi cần nhiều closure khác nhau cùng một kiểu, như các nhánh `if` trả closure khác nhau hoặc một `Vec` handler của `orders`. Lý do là mỗi `impl Fn` là một opaque type riêng[^b-retclosure].
 
 </details>
 
 6. Closure nào ép được thành `fn`?
 <details><summary>Đáp án</summary>
 
-Chỉ closure không bắt gì từ môi trường (và không async).[^fnptr-coerce]
+Chỉ closure không bắt gì từ môi trường (và không async)[^fnptr-coerce].
 
 </details>
 
 7. Viết lại `for x in v { body }` thành `loop`/`match`.
 <details><summary>Đáp án</summary>
 
-`match IntoIterator::into_iter(v) { mut iter => loop { match Iterator::next(&mut iter) { Some(x) => { body } None => break } } }`.[^lp-desugar]
+`match IntoIterator::into_iter(v) { mut iter => loop { match Iterator::next(&mut iter) { Some(x) => { body } None => break } } }`[^lp-desugar].
 
 </details>
 
 8. `v.iter().map(|x| println!("{x}"));` in gì? Vì sao?
 <details><summary>Đáp án</summary>
 
-Không in gì: adapter lười, chưa có consumer; compiler cảnh báo.[^it-lazy-warn]
+Không in gì: adapter lười, chưa có consumer, và compiler cảnh báo kết quả không dùng[^it-lazy-warn].
 
 </details>
 
 9. `collect::<Result<Vec<_>, _>>()` trên chuỗi có một phần tử lỗi trả gì?
 <details><summary>Đáp án</summary>
 
-`Err` chứa lỗi đầu tiên (ví dụ chạy: `Err(ParseIntError { kind: InvalidDigit })`).[^std-result-fi]
+`Err` chứa lỗi đầu tiên[^std-result-fi]. Ví dụ chạy thật: `Err(ParseIntError { kind: InvalidDigit })`.
 
 </details>
 
 10. Vì sao `for x in &v { v.push(1) }` không biên dịch?
 <details><summary>Đáp án</summary>
 
-`&v` giữ borrow chung suốt vòng lặp; `push` cần `&mut` — E0502.[^b-borrow]
+`&v` giữ borrow chung suốt vòng lặp, còn `push` cần `&mut`, nên compiler báo E0502[^b-borrow].
 
 </details>
 
 11. Book hứa gì về hiệu năng iterator so với vòng `for`?
 <details><summary>Đáp án</summary>
 
-Biên dịch ra gần như cùng code, và trong nhiều trường hợp cùng assembly; benchmark của Book cho thấy hiệu năng tương đương, không phải bảo đảm cho mọi chuỗi.[^b-zerocost][^b-sameasm]
+Iterator biên dịch ra gần như cùng code với vòng lặp viết tay[^b-zerocost]. Trong nhiều trường hợp còn ra cùng assembly[^b-sameasm]. Benchmark của Book cho thấy hiệu năng tương đương, nhưng đó không phải bảo đảm cho mọi chuỗi iterator.
 
 </details>
 
 12. `RangeInclusive<i32>` có `len()` không?
 <details><summary>Đáp án</summary>
 
-Không: nó không implement `ExactSizeIterator` (E0277 chạy thật); `RangeInclusive<u8>` thì có. Docs chỉ nêu `ExactSizeIterator` cung cấp `len()` khi implement trait này.[^std-esi-len]
+Không: nó không implement `ExactSizeIterator` (E0277 chạy thật), còn `RangeInclusive<u8>` thì có. Docs chỉ nêu rằng `ExactSizeIterator` cung cấp `len()` khi một kiểu implement trait này[^std-esi-len].
 
 </details>
 

@@ -13,28 +13,35 @@
 
 ## Kiến thức cần trước
 
-Chương này đứng độc lập về cú pháp; nên đã quen với trait và generic (xem [02-trait](02-trait.md), [03-generics-nang-cao](03-generics-nang-cao.md) — cùng phase P9). Phần "macro expand ở đâu trong pipeline compiler" chỉ nêu mức đủ dùng; chi tiết xem chương pipeline rustc ở P10·01 (`docs/10-rust-internals/01-…`, viết sau).
+Chương này đứng độc lập về cú pháp, nhưng bạn nên quen với trait và generic: xem [02-trait](02-trait.md) và [03-generics-nang-cao](03-generics-nang-cao.md), cùng phase P9. Phần "macro expand ở đâu trong pipeline compiler" chỉ nêu mức đủ dùng; chi tiết ở chương pipeline rustc, P10·01 (`docs/10-rust-internals/01-…`, viết sau).
+
+Ví dụ xuyên suốt là `orders`, một service Rust nhận đơn hàng qua HTTP rồi lưu vào Postgres. Đây là ví dụ giả định của người soạn, không phải code trong repo. Mỗi mục mở đầu bằng việc `orders` cần gì ở macro, còn các đoạn code chạy thật thì giữ dạng ngắn nhất để minh họa cơ chế.
 
 Mọi ví dụ trong chương được chạy thật với `rustc`/`cargo` 1.95.0 trên macOS (aarch64). Phần xem code đã expand dùng `cargo expand` 1.0.118, vốn cần nightly (nightly đã có trên máy).
 
 ## 1. Vì sao Rust cần macro (Q1)
 
-> **Trả lời ngắn.** Hàm phải khai báo trước số lượng và kiểu tham số, và chạy lúc runtime. Macro được mở rộng thành code trước khi compiler hiểu nghĩa code, nên nhận được số tham số tùy ý và sinh được cả `impl`[^book-variadic][^book-expand-before]. Macro cũng giúp viết một lần thay cho nhiều đoạn code lặp[^book-meta].
+> **Trả lời ngắn.** Hàm Rust phải khai báo trước số lượng và kiểu tham số[^book-fn-sig]. Macro thì nhận được số tham số thay đổi[^book-variadic]. Macro cũng được expand trước khi compiler hiểu nghĩa của code, nên nó implement được trait cho một kiểu[^book-expand-before]. Hàm không làm được việc này, vì hàm chạy lúc runtime còn trait phải implement lúc compile[^book-fn-runtime]. Cuối cùng, macro là cách viết code sinh ra code khác (metaprogramming), nhờ vậy bạn viết một lần thay cho nhiều đoạn code lặp[^book-meta].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hàm giống biểu mẫu có sẵn các ô cố định; macro giống người soạn văn bản mẫu — viết ra đoạn code đúng chỗ rồi compiler mới đọc đoạn code đó.
+*Với service `orders`.* Mở code của `orders` ra là gặp macro ngay: `println!("served order {}", id)` trong handler, `#[derive(Debug)]` trên mỗi struct, `#[tokio::main]` trên `main`. Ta sẽ tự hỏi: vì sao những thứ này là macro mà không phải hàm, và khi nào đáng tự viết macro cho `orders`? Mục này trả lời câu thứ nhất bằng ba điều hàm không làm được.
 
-*Số tham số.* Chữ ký hàm phải khai báo số lượng và kiểu tham số[^book-fn-sig]; macro thì nhận số tham số thay đổi, ví dụ `println!("hello")` một đối số hoặc `println!("hello {}", name)` hai đối số[^book-variadic]. Vì vậy `println!` là macro (suy luận của người soạn từ ví dụ của Book).
+### 1.1 Số tham số thay đổi
 
-*Sinh item.* Macro được expand trước khi compiler diễn giải nghĩa của code nên có thể implement trait cho một kiểu[^book-expand-before]. Hàm không làm được vì hàm được gọi lúc runtime còn trait phải được implement lúc compile[^book-fn-runtime]. Nghĩa là macro sinh được *item* (struct, impl, fn), không chỉ giá trị (suy luận của người soạn).
+Handler của `orders` lúc thì in `println!("started")` với một đối số, lúc thì `println!("served order {} in {} ms", id, ms)` với ba đối số. Hàm không viết được như vậy, vì chữ ký hàm phải khai báo số lượng và kiểu tham số[^book-fn-sig]. Macro thì khác: `println!("hello")` nhận một đối số, `println!("hello {}", name)` nhận hai[^book-variadic]. Đó là lý do `println!` là macro (suy luận của người soạn từ ví dụ của Book).
 
-*Bớt code lặp.* Book định nghĩa macro là cách viết code sinh ra code khác, gọi là metaprogramming[^book-meta]. Ví dụ minh họa (người soạn): 12 kiểu số nguyên cần cùng một `impl` — viết một macro rồi gọi 12 lần thay vì copy-paste.
+### 1.2 Sinh item, không chỉ giá trị
 
+`orders` có ba kiểu id là `OrderId`, `CustomerId` và `ProductId`, và cả ba cần cùng một `impl`. Hàm không giúp được ở đây: hàm chạy lúc runtime, còn trait phải được implement lúc compile[^book-fn-runtime]. Macro làm được vì nó expand trước khi compiler diễn giải nghĩa của code[^book-expand-before]. Nói cách khác, macro sinh được *item* (struct, impl, fn) chứ không chỉ sinh giá trị (suy luận của người soạn).
+
+### 1.3 Viết một lần, dùng nhiều lần
+
+Với ba kiểu id kia, thay vì copy-paste `impl` ba lần, bạn viết một macro rồi gọi nó ba lần (ví dụ minh họa của người soạn, chưa chạy). Đó chính là ý của metaprogramming: code sinh ra code khác[^book-meta].
 
 <details><summary>Đi sâu: hai họ macro và bảng so sánh</summary>
 
-Book chia macro thành hai họ: declarative macro (`macro_rules!`) và ba loại procedural macro — custom `#[derive]`, attribute-like, function-like.[^book-three-kinds]
+Book chia macro thành hai họ: declarative macro (`macro_rules!`) và ba loại procedural macro, gồm custom `#[derive]`, attribute-like và function-like[^book-three-kinds].
 
 | | `macro_rules!` (declarative) | Procedural |
 |---|---|---|
@@ -45,17 +52,17 @@ Book chia macro thành hai họ: declarative macro (`macro_rules!`) và ba loạ
 
 </details>
 
-**Quay lại Q1:** hàm cố định chữ ký và chạy lúc runtime; macro sinh code lúc compile nên linh hoạt hơn về số tham số và về thứ sinh ra.
+**Quay lại Q1:** hàm cố định chữ ký và chạy lúc runtime; macro sinh code lúc compile nên linh hoạt hơn về số tham số và về thứ sinh ra. Với `orders`, đó là lý do `println!` nhận số đối số tùy ý và một macro có thể phát ra `impl` cho cả ba kiểu id.
 
 ## 2. `macro_rules!`: matcher, fragment, repetition (Q2)
 
-> **Trả lời ngắn.** Một macro `macro_rules!` là danh sách luật; mỗi luật gồm khuôn để khớp (matcher) và khuôn để sinh code (transcriber), compiler thử lần lượt và dùng luật đầu tiên khớp[^ref-transcribe]. Trong khuôn khớp, `$tên:loại` bắt một mảnh cú pháp thuộc đúng *loại* đó (biểu thức, định danh, kiểu…) và gán vào tên[^ref-metavar]. Lặp `$( ... ),*` bắt nhiều mảnh cùng dạng[^ref-repetition-sep].
+> **Trả lời ngắn.** Một macro `macro_rules!` là danh sách luật. Mỗi luật có một matcher, khuôn để khớp đầu vào, và một transcriber, khuôn để sinh code; compiler thử lần lượt từ trên xuống rồi dùng luật khớp đầu tiên[^ref-transcribe]. Trong matcher, `$tên:loại` bắt một mảnh cú pháp thuộc đúng *loại* đó (biểu thức, định danh, kiểu…) và gán vào tên[^ref-metavar]. Muốn bắt nhiều mảnh cùng dạng thì dùng lặp `$( ... ),*`[^ref-repetition-sep].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như mẫu thư mail-merge — chỗ trống `$tên` được điền bằng phần người gọi truyền vào, và mẫu có thể có nhiều phiên bản cho các dạng yêu cầu khác nhau.
+*Với service `orders`.* Giả sử `orders` gọi ba service phía sau (kho, thanh toán, vận chuyển) và muốn biết lần gọi nào chậm nhất. Số lần gọi thay đổi, nên một hàm hai tham số không đủ; đây là việc `macro_rules!` làm được gọn. Mục này đi từ một macro nhỏ như vậy tới ba mảnh ghép: luật, loại mảnh cú pháp và lặp. (Để ví dụ ngắn, ta tìm số lớn nhất trong vài số nguyên chứ không dùng latency thật.)
 
-*Ví dụ đầu tiên: `max` nhiều đối số.*
+### 2.1 Luật và đệ quy: `maxm!`
 
 ```rust
 macro_rules! maxm {
@@ -69,11 +76,11 @@ macro_rules! maxm {
 fn main() { println!("{}", maxm!(3, 9, 4)); }
 ```
 
-Chạy thật: in `9`. Macro có hai luật; compiler thử từng luật từ trên xuống, luật đầu khớp thì dùng[^ref-transcribe]. Luật 2 gọi lại chính macro (đệ quy) với phần đuôi. Reference ghi rằng macro vẫn có thể được dùng đệ quy, vì tên được tra từ nơi gọi.[^ref-textual-scope]
+Chạy thật: in `9`. Macro có hai luật. Luật 1 xử lý đúng một biểu thức. Luật 2 lấy biểu thức đầu, rồi gọi lại chính macro với phần còn lại, cho tới khi chỉ còn một biểu thức thì luật 1 dừng đệ quy. Macro đệ quy được vì tên macro được tra từ nơi gọi[^ref-textual-scope].
 
-*Matcher và fragment specifier (loại mảnh cú pháp).*
+### 2.2 Loại mảnh cú pháp (fragment specifier)
 
-Trong matcher, `$name:fragment` khớp một mảnh cú pháp thuộc loại `fragment` và gán vào metavariable `$name`.[^ref-metavar] Danh sách của Reference gồm `block`, `expr`, `ident`, `item`, `lifetime`, `literal`, `meta`, `pat`, `path`, `stmt`, `tt`, `ty`, `vis`…[^ref-fragspec-list] Vài loại hay dùng:
+Trong matcher, `$name:fragment` khớp một mảnh cú pháp thuộc loại `fragment` và gán nó vào metavariable `$name`[^ref-metavar]. Reference còn liệt kê `block`, `item`, `lifetime`, `literal`, `meta`, `pat`, `path`, `stmt`, `vis`… ngoài bốn loại hay gặp nhất dưới đây[^ref-fragspec-list].
 
 | Specifier | Khớp | Theo Reference |
 |---|---|---|
@@ -82,9 +89,11 @@ Trong matcher, `$name:fragment` khớp một mảnh cú pháp thuộc loại `fr
 | `ty` | một kiểu | một Type[^ref-ty] |
 | `tt` | một token tree | một token đơn, hoặc các token nằm trong cặp ngoặc khớp nhau `()`, `[]`, `{}`[^ref-tt] |
 
-`tt` khớp một token đơn hoặc cả cụm trong cặp ngoặc[^ref-tt]; nhờ vậy hay dùng để chuyển tiếp token nguyên xi cho macro khác (nhận xét của người soạn).
+Vì `tt` khớp được cả một cụm token trong ngoặc mà không cần hiểu nghĩa, nó hay được dùng để chuyển tiếp nguyên xi token cho macro khác (nhận xét của người soạn).
 
-Ví dụ dùng `ident` và `ty` để sinh hàm:
+### 2.3 Sinh tên hàm từ đối số
+
+Cặp `ident` và `ty` cho phép macro *tạo* hàm:
 
 ```rust
 macro_rules! make_fn {
@@ -94,15 +103,21 @@ make_fn!(answer, u32, 42);
 fn main() { println!("{}", answer()); }   // in 42
 ```
 
-(Chạy thật: in `42`.) Đây là điều hàm không làm được: tên hàm `answer` được *tạo ra* từ đối số.
+(Chạy thật: in `42`.) Đây là điều hàm không làm được: tên hàm `answer` sinh ra từ đối số. Trong `orders`, cùng kiểu macro này có thể sinh hàng loạt hàm kiểu `default_port()` hay `default_timeout()` từ một danh sách (ví dụ minh họa của người soạn, chưa chạy).
 
-*Repetition (lặp).*
+### 2.4 Lặp
 
-Lặp được viết bằng `$( ... )` theo sau là toán tử lặp, có thể kèm dấu phân cách: `$( $i:ident ),*` biểu diễn một số lượng bất kỳ định danh ngăn cách bằng dấu phẩy.[^ref-repetition-sep] Các toán tử: `*` (không hoặc nhiều), `+` (một hoặc nhiều[^ref-plus]), `?` (một mảnh tùy chọn, xuất hiện không hoặc một lần[^ref-opt]).
+Để bắt nhiều mảnh cùng dạng, bạn viết `$( ... )` rồi thêm toán tử lặp, có thể kèm dấu phân cách. Chẳng hạn `$( $i:ident ),*` biểu diễn một số lượng bất kỳ định danh ngăn cách bằng dấu phẩy[^ref-repetition-sep]. Có ba toán tử:
+
+- `*`: không hoặc nhiều lần.
+- `+`: một hoặc nhiều lần[^ref-plus].
+- `?`: một mảnh tùy chọn, xuất hiện không hoặc một lần[^ref-opt].
+
+`maxm!` ở trên đã dùng `$($rest:expr),+` để bắt phần đuôi gồm một hoặc nhiều biểu thức.
 
 <details><summary>Đi sâu: ràng buộc số lần lặp, ví dụ <code>hashmap!</code>, khác biệt edition 2024</summary>
 
-Reference còn đặt ràng buộc: một metavariable phải xuất hiện trong transcriber với đúng số lượng, loại và độ lồng của lặp như trong matcher.[^ref-rep-rules] Ví dụ cụ thể, `hashmap!`:
+Reference đặt một ràng buộc: metavariable phải xuất hiện trong transcriber với đúng số lượng, loại và độ lồng của lặp như trong matcher[^ref-rep-rules]. Ví dụ cụ thể là `hashmap!`, thứ `orders` có thể dùng để dựng bảng header hay bảng route (ví dụ minh họa của người soạn):
 
 ```rust
 macro_rules! hashmap {
@@ -118,25 +133,25 @@ fn main() {
 }
 ```
 
-Chạy thật: in `2`. Dấu `,` cuối được chấp nhận nhờ `$(,)?`. Chú ý đường dẫn đầy đủ `::std::collections::HashMap` trong transcriber: macro sẽ được gọi ở nơi người dùng có thể đã `use` một thứ khác tên `HashMap`, nên dùng đường dẫn tuyệt đối là thói quen an toàn (nhận xét của người soạn). Với macro export ra crate khác, chuyện này giải quyết bằng `$crate` (mục 3).
+Chạy thật: in `2`. Dấu `,` cuối được chấp nhận nhờ `$(,)?`. Cũng để ý đường dẫn đầy đủ `::std::collections::HashMap` trong transcriber. Macro sẽ chạy ở nơi người dùng có thể đã `use` một thứ khác tên `HashMap`, nên đường dẫn tuyệt đối là thói quen an toàn (nhận xét của người soạn). Với macro export ra crate khác thì việc này giải bằng `$crate` (mục 3).
 
-Một lưu ý về phiên bản: Reference nêu rằng trước edition 2024, `expr` không khớp `_` và const block ở cấp cao nhất.[^ref-expr2024] Nếu macro của bạn dùng `expr` và hành xử khác giữa các edition, đây là chỗ cần kiểm tra.
+Một lưu ý về phiên bản: trước edition 2024, `expr` không khớp `_` và const block ở cấp cao nhất[^ref-expr2024]. Nếu macro của bạn dùng `expr` mà hành xử khác nhau giữa các edition thì đây là chỗ cần kiểm tra.
 
 </details>
 
-**Quay lại Q2:** luật = matcher + transcriber, thử từ trên xuống; fragment specifier định loại mảnh bắt được; `$(...)sep op` bắt nhiều mảnh.
+**Quay lại Q2:** luật gồm matcher và transcriber, thử từ trên xuống; fragment specifier định loại mảnh bắt được; `$(...)sep op` bắt nhiều mảnh. Với `orders`, `maxm!(a, b, c)` đệ quy qua số đối số tùy ý, còn `make_fn!` sinh cả tên hàm.
 
 ## 3. Hygiene, `$crate`, `#[macro_export]` và textual scope (Q3)
 
-> **Trả lời ngắn.** Hygiene của `macro_rules!` giữ biến cục bộ và nhãn (label) trong macro tách khỏi của người gọi; các tên khác như hàm, kiểu, trait vẫn được tra tại nơi gọi[^ref-hygiene]. Vì thế macro của thư viện dùng `$crate` để trỏ về crate hiện tại[^ref-dollar-crate], còn `#[macro_export]` đổi visibility ngầm định từ `pub(crate)` sang `pub`[^ref-macro-export]. Macro `macro_rules!` chỉ dùng được sau chỗ định nghĩa vì scope mặc định tính theo thứ tự trong file[^ref-textual-scope].
+> **Trả lời ngắn.** Hygiene của `macro_rules!` giữ biến cục bộ và nhãn (label) bên trong macro tách khỏi của người gọi; các tên còn lại như hàm, kiểu, trait vẫn tra tại nơi gọi[^ref-hygiene]. Vì vậy macro của thư viện dùng `$crate` để trỏ về crate hiện tại[^ref-dollar-crate]. Việc macro gọi được ở đâu thì do hai thứ quyết định. Thứ nhất, `#[macro_export]` đổi visibility ngầm định của macro từ `pub(crate)` sang `pub`[^ref-macro-export]. Thứ hai, `macro_rules!` chỉ dùng được từ sau chỗ định nghĩa trở đi[^ref-textual-scope].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai người dùng chung một bảng trắng, mỗi người một màu bút — hai chữ `x` khác màu không bao giờ bị nhầm là một.
+*Với service `orders`.* Giả sử `orders` có một macro bọc biểu thức của handler và tự khai báo một biến tạm bên trong. Nếu biến tạm đó trùng tên với biến trong handler thì sao? Và nếu macro nằm ở crate `orders_core` còn handler ở crate khác, các tên trong thân macro tra vào đâu? Mục này trả lời hai câu đó, rồi nói tới chuyện thứ tự: gọi macro trước chỗ định nghĩa thì lỗi.
 
-*Hygiene: biến trong macro không đụng biến ngoài.*
+### 3.1 Hygiene: biến trong macro không đụng biến ngoài
 
-Reference nói macro-by-example có hygiene kiểu "mixed-site": nhãn vòng lặp, nhãn block và biến cục bộ được tra tại nơi định nghĩa macro, còn mọi ký hiệu khác được tra tại nơi gọi.[^ref-hygiene] Tức là biến cục bộ `x` mà macro khai báo *không* trùng với `x` người gọi.
+Reference gọi đây là hygiene kiểu "mixed-site": nhãn vòng lặp, nhãn block và biến cục bộ được tra tại nơi định nghĩa macro, còn mọi ký hiệu khác tra tại nơi gọi[^ref-hygiene]. Nghĩa là biến cục bộ `x` mà macro khai báo *không* trùng với `x` của người gọi.
 
 ```rust
 macro_rules! hyg {
@@ -148,29 +163,29 @@ fn main() {
 }
 ```
 
-Chạy thật: in `102`. Biểu thức `x * 2` của người gọi dùng `x = 1` của người gọi (cho 2), còn `x` trong `$e + x` là `x = 100` do macro khai báo: 2 + 100 = 102. Nếu macro không hygienic, `let x = 100` sẽ che `x` của người gọi và kết quả là 300 (suy luận số học của người soạn, chưa chạy thử).
+Chạy thật: in `102`. Biểu thức `x * 2` của người gọi dùng `x = 1` của người gọi, cho 2. Còn `x` trong `$e + x` là `x = 100` do macro khai báo, nên kết quả là 2 + 100 = 102. Nếu macro không hygienic thì `let x = 100` sẽ che `x` của người gọi và kết quả là 300 (suy luận số học của người soạn, chưa chạy thử).
 
-Chiều ngược lại: biến `let` bên trong macro cũng không "rò" ra ngoài.
+Chiều ngược lại cũng đúng: biến `let` bên trong macro không rò ra ngoài.
 
 ```rust
 macro_rules! bad { () => { let x = 100; } }
 fn main() { bad!(); println!("{}", x); }
 ```
 
-Chạy thật, compile lỗi `E0425: cannot find value 'x' in this scope`, kèm gợi ý "an identifier with the same name is defined here, but is not accessible due to macro hygiene". Muốn macro tạo biến mà người gọi thấy được, tên phải do người gọi truyền vào dưới dạng `ident`:
+Chạy thật, compile lỗi `E0425: cannot find value 'x' in this scope`, kèm gợi ý "an identifier with the same name is defined here, but is not accessible due to macro hygiene". Muốn macro tạo biến cho người gọi thấy, tên phải do người gọi truyền vào dưới dạng `ident`:
 
 ```rust
 macro_rules! show_ident { ($i:ident) => { let $i = 5; }; }
 fn main() { show_ident!(z); println!("{}", z); }   // in 5
 ```
 
-(Chạy thật: in `5`.) Hygiene của `macro_rules!` chỉ áp dụng cho biến cục bộ và label; mọi ký hiệu khác được tra tại nơi gọi[^ref-hygiene]: tên hàm, kiểu, trait… cũng vậy. Vì vậy mới cần `$crate`.
+(Chạy thật: in `5`.) Hygiene của `macro_rules!` chỉ che biến cục bộ và label. Mọi ký hiệu khác, kể cả tên hàm, kiểu và trait, vẫn tra tại nơi gọi[^ref-hygiene]. Đó là lý do cần `$crate`.
 
-*`$crate` và `#[macro_export]`.*
+### 3.2 `$crate` và `#[macro_export]`
 
-Từ khóa metavariable `$crate` dùng để trỏ tới crate hiện tại[^ref-dollar-crate]. Trong macro của thư viện, viết `$crate::path::item` để trỏ tới item của crate chứa định nghĩa macro (cách dùng điển hình — nhận xét của người soạn; Reference chỉ nêu `$crate` trỏ tới crate hiện tại).
+Từ khóa metavariable `$crate` trỏ tới crate hiện tại[^ref-dollar-crate]. Trong macro của thư viện, bạn viết `$crate::path::item` để trỏ tới item của crate chứa định nghĩa macro, nên dù người dùng gọi macro từ crate nào thì tên vẫn tra đúng chỗ (cách dùng điển hình, nhận xét của người soạn; Reference chỉ nêu `$crate` trỏ tới crate hiện tại).
 
-Về visibility: macro có visibility ngầm định là `pub(crate)`, và `#[macro_export]` đổi nó thành `pub`.[^ref-macro-export] Ví dụ trong một crate:
+Về visibility, macro mặc định là `pub(crate)`, và `#[macro_export]` đổi nó thành `pub`[^ref-macro-export]. Ví dụ trong một crate:
 
 ```rust
 mod inner {
@@ -181,11 +196,11 @@ mod inner {
 fn main() { println!("{}", helper_pub!()); }   // in 7
 ```
 
-Chạy thật: in `7`. Dù `helper_pub` định nghĩa trong `mod inner`, `#[macro_export]` làm nó có mặt ở gốc crate để phân giải theo đường dẫn[^ref-macro-export-root], nên dependency gọi là `tên_crate::helper_pub!()` (suy luận của người soạn từ câu đó); `$crate::inner::f()` vẫn trỏ đúng vị trí thật của `f`.
+Chạy thật: in `7`. Dù `helper_pub` nằm trong `mod inner`, `#[macro_export]` đưa nó ra gốc crate để các crate khác gọi theo đường dẫn[^ref-macro-export-root]. Vì thế dependency gọi là `tên_crate::helper_pub!()` (suy luận của người soạn từ câu đó), còn `$crate::inner::f()` vẫn trỏ đúng vị trí thật của `f`.
 
-*Thứ tự định nghĩa: textual scope.*
+### 3.3 Thứ tự định nghĩa: textual scope
 
-Reference: macro-by-example có hai dạng scope, textual và path-based; textual scope dựa trên thứ tự các thứ xuất hiện trong file nguồn và là scope mặc định.[^ref-scope-two] Với `macro_rules!`, macro vào scope sau chỗ định nghĩa, cho đến khi scope bao quanh (thường là module) đóng lại.[^ref-textual-scope] Khi gọi bằng tên trơn, compiler tra textual scope trước rồi mới tới path-based scope.[^ref-lookup-order]
+Macro-by-example có hai dạng scope là textual và path-based. Textual scope dựa trên thứ tự các thứ xuất hiện trong file nguồn, và là scope mặc định[^ref-scope-two]. Với `macro_rules!`, macro vào scope từ sau chỗ định nghĩa, cho tới khi scope bao quanh (thường là module) đóng lại[^ref-textual-scope]. Khi bạn gọi bằng tên trơn, compiler tra textual scope trước, không có mới tra path-based[^ref-lookup-order].
 
 Hệ quả thực tế: gọi macro *trước* chỗ định nghĩa thì lỗi.
 
@@ -198,36 +213,23 @@ Chạy thật, compile lỗi: `cannot find macro 'early' in this scope`, với g
 
 <details><summary>Đi sâu: <code>#[macro_use]</code> và re-export</summary>
 
-Để macro tồn tại qua ranh giới module: `#[macro_use]` trên module mở rộng scope của các macro định nghĩa bên trong ra ngoài module; trên `extern crate` thì nhập macro của crate khác vào `macro_use` prelude.[^ref-macro-use] Cách khác là `#[macro_export]` rồi `use crate::tên_macro;` hoặc gọi theo đường dẫn (thường gọn hơn — nhận xét của người soạn); Reference cũng nói macro có thể được re-export để có path-based scope từ module khác ngoài gốc crate.[^ref-reexport]
+Muốn macro vượt ranh giới module thì có `#[macro_use]`. Đặt trên module, nó mở rộng scope của các macro định nghĩa bên trong ra ngoài module; đặt trên `extern crate`, nó nhập macro của crate khác vào `macro_use` prelude[^ref-macro-use]. Cách khác là `#[macro_export]` rồi `use crate::tên_macro;` hoặc gọi theo đường dẫn, thường gọn hơn (nhận xét của người soạn). Reference cũng nói macro có thể được re-export để có path-based scope từ module khác ngoài gốc crate[^ref-reexport].
 
 </details>
 
-**Quay lại Q3:** hygiene chỉ che biến cục bộ và nhãn; tên còn lại tra tại nơi gọi nên cần `$crate`; macro dùng được từ sau chỗ định nghĩa, hoặc qua đường dẫn nếu `#[macro_export]`.
+**Quay lại Q3:** hygiene chỉ che biến cục bộ và nhãn; tên còn lại tra tại nơi gọi nên macro thư viện cần `$crate`; macro dùng được từ sau chỗ định nghĩa, hoặc qua đường dẫn nếu có `#[macro_export]`. Với `orders`, biến tạm trong macro không đè biến của handler, và macro đặt ở `orders_core` vẫn tìm đúng hàm của crate đó.
 
 ## 4. Procedural macro: ba loại và crate riêng (Q4)
 
-> **Trả lời ngắn.** Procedural macro là một hàm Rust chạy lúc compile[^ref-proc-run], làm việc trên dãy token (`TokenStream`) thay vì AST[^ref-tokenstream]. Có ba loại — derive, attribute, function-like[^book-three-kinds] — và hàm phải nằm ở gốc crate kiểu `proc-macro`, không dùng được ngay trong crate định nghĩa nó[^ref-proc-root].
+> **Trả lời ngắn.** Procedural macro là một hàm Rust chạy ngay lúc compile[^ref-proc-run]. Nó làm việc trên dãy token (`TokenStream`) chứ không trên AST[^ref-tokenstream]. Có ba loại là derive, attribute và function-like[^book-three-kinds]. Hàm phải nằm ở gốc một crate kiểu `proc-macro` và không dùng được ngay trong crate định nghĩa nó[^ref-proc-root].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `macro_rules!` giống bộ lọc theo mẫu; procedural macro giống một script chạy trong compiler, đọc code của bạn rồi in ra code mới.
+*Với service `orders`.* `macro_rules!` chỉ khớp mẫu trên token. Khi `orders` cần nhiều hơn, chẳng hạn đọc danh sách field của một struct rồi sinh code theo từng field, bạn phải viết procedural macro: một hàm Rust thật sự chạy trong compiler, nhận token của struct và trả token của code mới. Cái giá là cấu trúc dự án đổi đi. Mục này nói ba loại macro đó là gì và vì sao chúng đòi một crate riêng.
 
-Khác với việc khớp pattern, procedural macro nhận và trả `TokenStream`[^ref-tokenstream]; ba loại là custom derive, attribute-like, function-like và Book nói chúng hoạt động theo cách tương tự nhau[^book-three-kinds].
+### 4.1 Hàm trên TokenStream, ba loại
 
-*Phải nằm trong crate riêng.*
-
-Book nói định nghĩa của procedural macro phải nằm trong crate riêng với một crate type đặc biệt.[^book-own-crate] Reference nói cụ thể hơn: procedural macro phải được định nghĩa ở gốc crate có crate type `proc-macro`; chúng không dùng được trong chính crate định nghĩa, chỉ dùng được khi được import vào crate khác.[^ref-proc-root] Với Cargo, đặt trong `Cargo.toml`:
-
-```toml
-[lib]
-proc-macro = true
-```
-
-[^ref-proc-cargo]
-
-Vì thế một dự án có derive macro riêng thường là workspace hai crate: `foo` và `foo_derive` (nhận xét của người soạn, theo cấu trúc của ví dụ bên dưới và của Book).
-
-*Ba loại.*
+Khác với việc khớp mẫu, procedural macro nhận và trả `TokenStream`[^ref-tokenstream]. Ba loại custom derive, attribute-like và function-like hoạt động theo cách tương tự nhau[^book-three-kinds]. Khác biệt nằm ở chỗ chúng được gọi thế nào và nhận gì:
 
 | Loại | Cách dùng | Hàm nhận / trả |
 |---|---|---|
@@ -235,35 +237,48 @@ Vì thế một dự án có derive macro riêng thường là workspace hai cra
 | Derive | `#[derive(MyTrait)]` | Nhận token của struct/enum/union, có thể phát ra item mới đặt sau nó[^ref-derive] |
 | Attribute | `#[my_attr(...)]` trên item | Tham số 1 là token trong ngoặc của attribute; tham số 2 là phần còn lại của item, kể cả các attribute khác trên item[^ref-attr-second] |
 
-Khác biệt quan trọng: derive không *thay thế* item gốc, chỉ thêm item mới sau nó[^ref-derive]; Reference nói syntax trả về thay thế hoặc thêm tùy loại macro[^ref-proc-result], nên attribute macro nhận cả item và trả về thứ thay cho nó (suy luận của người soạn từ hai tham số và câu đó).
+Để ý hai dòng cuối. Derive không *thay thế* item gốc mà chỉ thêm item mới sau nó[^ref-derive]. Reference nói syntax trả về sẽ thay thế hoặc thêm, tùy loại macro[^ref-proc-result]. Nên attribute macro, nhận cả item, trả về thứ thay cho item đó (suy luận của người soạn từ hai tham số và câu trên).
+
+### 4.2 Vì sao phải ở crate riêng
+
+Book chỉ nói định nghĩa của procedural macro phải nằm trong crate riêng, với một crate type đặc biệt[^book-own-crate]. Reference nói cụ thể hơn: procedural macro phải định nghĩa ở gốc crate có crate type `proc-macro`; chúng không dùng được trong chính crate định nghĩa, chỉ dùng được khi import vào crate khác[^ref-proc-root]. Với Cargo, bạn khai báo trong `Cargo.toml`:
+
+```toml
+[lib]
+proc-macro = true
+```
+
+Reference nói đây là cách Cargo định nghĩa crate procedural macro[^ref-proc-cargo].
+
+Hệ quả cho `orders`: một dự án có derive macro riêng thường thành workspace hai crate, kiểu `orders` và `orders_derive` (nhận xét của người soạn, theo cấu trúc của ví dụ ở mục 5 và của Book).
 
 <details><summary>Đi sâu: <code>TokenStream</code>, <code>Span</code> và hygiene của procedural macro</summary>
 
-Procedural macro làm việc trên `TokenStream` chứ không phải AST: Reference giải thích đó là giao diện ổn định hơn nhiều theo thời gian cho cả compiler lẫn procedural macro.[^ref-tokenstream] Mỗi token có `Span` — vị trí trong mã nguồn, dùng chủ yếu cho báo lỗi.[^ref-span]
+Procedural macro làm việc trên `TokenStream` chứ không phải AST. Reference giải thích đây là giao diện ổn định hơn nhiều theo thời gian, cho cả compiler lẫn procedural macro[^ref-tokenstream]. Mỗi token mang một `Span`, tức vị trí trong mã nguồn, dùng chủ yếu cho báo lỗi[^ref-span].
 
-Hygiene của procedural macro *khác* `macro_rules!`: chúng không hygienic, tức hành xử như thể token đầu ra được viết thẳng vào chỗ gọi[^ref-proc-hygiene]. Nên macro sinh `let tmp = ...` có thể đụng biến của người dùng; docs của `quote` nhắc `quote_spanned!` là quan trọng để viết procedural macro hygienic[^quote-spanned] (hướng dẫn chi tiết thuộc docs của chúng).
+Hygiene của procedural macro *khác* `macro_rules!`: nó không hygienic, tức hành xử như thể token đầu ra được viết thẳng vào chỗ gọi[^ref-proc-hygiene]. Vì vậy một macro sinh `let tmp = ...` có thể đụng biến của người dùng. Docs của `quote` nhắc `quote_spanned!` là quan trọng để viết procedural macro hygienic[^quote-spanned]; hướng dẫn chi tiết nằm ở docs của chúng.
 
 </details>
 
-**Quay lại Q4:** procedural macro là hàm Rust chạy trong compiler trên `TokenStream`, có ba loại, và bắt buộc ở crate `proc-macro` riêng.
+**Quay lại Q4:** procedural macro là hàm Rust chạy trong compiler trên `TokenStream`, có ba loại, và bắt buộc ở crate `proc-macro` riêng. Với `orders`, đó là lý do một derive macro đòi thêm một crate vào workspace.
 
 ## 5. `syn`, `quote` và một derive macro chạy thật (Q5)
 
-> **Trả lời ngắn.** `syn` đọc dãy token đầu vào thành cây cú pháp có cấu trúc; với derive, đầu vào được biểu diễn bằng kiểu `DeriveInput`[^syn-deriveinput]. `quote!` cho viết code mẫu rồi chèn biến vào bằng `#var` để sinh dãy token đầu ra[^quote-interp]. Ví dụ `FieldNames` bên dưới ghép hai thứ đó thành một derive macro nhỏ.
+> **Trả lời ngắn.** `syn` đọc dãy token đầu vào thành cây cú pháp có cấu trúc; với derive, đầu vào là kiểu `DeriveInput`[^syn-deriveinput]. `quote!` cho bạn viết code mẫu rồi chèn biến vào bằng `#var` để sinh dãy token đầu ra[^quote-interp]. Ví dụ `FieldNames` bên dưới ghép hai thứ đó thành một derive macro nhỏ.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `syn` giống bộ parse JSON ra struct để bạn đọc field; `quote!` giống template engine điền biến vào mẫu rồi in ra chuỗi code.
+*Với service `orders`.* Giả sử `orders` muốn có sẵn danh sách tên field của struct `User` để dựng câu `SELECT id, email FROM users` mà khỏi gõ tay hai lần (ví dụ minh họa của người soạn). Viết tay thì dễ lệch khi thêm field. Một derive macro đọc struct và sinh danh sách đó thì không lệch. Mục này dựng đúng macro ấy, từng bước.
 
-*`syn`, `quote`, `proc-macro2`.*
+### 5.1 Ba crate đi cùng nhau
 
-Ba crate hay đi cùng nhau (phiên bản dùng trong ví dụ dưới, theo `Cargo.lock` thật: `syn 2.0.119`, `quote 1.0.47`, `proc-macro2 1.0.107`):
+Ba crate này hay xuất hiện cùng nhau. Phiên bản dùng trong ví dụ dưới, theo `Cargo.lock` thật: `syn 2.0.119`, `quote 1.0.47`, `proc-macro2 1.0.107`.
 
-- **`syn`** parse `TokenStream` thành cây cú pháp: docs nói Syn cung cấp một cây cú pháp đầy đủ, biểu diễn được mọi mã Rust hợp lệ.[^syn-tree] Với derive, kiểu đáng chú ý là `syn::DeriveInput`, đại diện cho một trong ba loại item hợp lệ làm đầu vào của derive macro.[^syn-deriveinput] Nó cũng được feature-gate rất chặt, để macro không phải trả chi phí compile cho phần còn lại.[^syn-features]
-- **`quote`** sinh token: ý tưởng của quasi-quoting là viết code rồi xem nó như dữ liệu.[^quote-idea] Trong `quote!`, cú pháp `#var` chèn biến (lúc chạy macro) vào dãy token được trích.[^quote-interp]
-- **`proc-macro2`** bọc API `proc_macro` của compiler, vì kiểu của `proc_macro` chỉ tồn tại trong procedural macro còn kiểu `proc_macro2` có thể tồn tại ở mọi nơi[^pm2]. Docs của nó nói lý do này giúp helper library test được độc lập[^pm2-test].
+- **`syn`** parse `TokenStream` thành cây cú pháp. Docs nói Syn cung cấp một cây cú pháp đầy đủ, biểu diễn được mọi mã Rust hợp lệ[^syn-tree]. Với derive, kiểu cần chú ý là `syn::DeriveInput`, đại diện cho một trong ba loại item hợp lệ làm đầu vào của derive macro[^syn-deriveinput]. Các tính năng của `syn` bị feature-gate rất chặt, để macro không phải trả thời gian compile cho phần mình không dùng[^syn-features].
+- **`quote`** sinh token. Ý tưởng của quasi-quoting là viết code rồi coi nó như dữ liệu[^quote-idea]. Trong `quote!`, cú pháp `#var` chèn một biến (tính lúc chạy macro) vào dãy token được trích[^quote-interp].
+- **`proc-macro2`** bọc API `proc_macro` của compiler. Lý do là kiểu của `proc_macro` chỉ tồn tại trong procedural macro, còn kiểu `proc_macro2` có thể tồn tại ở mọi nơi[^pm2]. Docs của nó nói nhờ vậy helper library test được độc lập[^pm2-test].
 
-*Một derive macro chạy thật: `FieldNames`.*
+### 5.2 `FieldNames`: macro chạy thật
 
 Mục tiêu: `#[derive(FieldNames)]` thêm hằng `FIELD_NAMES: &[&str]` liệt kê tên field của struct.
 
@@ -323,18 +338,18 @@ struct User { id: u64, email: String }
 fn main() { println!("{:?}", User::FIELD_NAMES); }
 ```
 
-Chạy `cargo run` thật: in `["id", "email"]` (kèm cảnh báo `dead_code` vì hai field không được đọc — không liên quan macro).
+Chạy `cargo run` thật: in `["id", "email"]` (kèm cảnh báo `dead_code` vì hai field không được đọc, không liên quan macro).
 
-Các bước trong hàm:
+Hàm làm bốn việc theo thứ tự:
 
-1. `parse_macro_input!` parse `TokenStream` đầu vào thành `DeriveInput`; nếu token không parse được, nó kích hoạt lỗi biên dịch[^syn-parse-input].
-2. Lấy `ident` (tên kiểu) và `generics.split_for_impl()` để `impl` đúng cho kiểu generic.
-3. Duyệt `Data::Struct` → `Fields::Named` lấy tên field; các trường hợp khác trả `compile_error!` gắn `Span` của tên kiểu.
-4. `quote!` dựng `impl`; `#(#names),*` lặp qua `Vec<String>` rồi phân cách bằng dấu phẩy — cùng ý tưởng với `$(...),*` của `macro_rules!`, nhưng cú pháp là `#`.
+1. `parse_macro_input!` parse `TokenStream` đầu vào thành `DeriveInput`. Nếu token không parse được, nó kích hoạt lỗi biên dịch[^syn-parse-input].
+2. Lấy `ident` (tên kiểu) và `generics.split_for_impl()` để `impl` đúng cả với kiểu generic.
+3. Duyệt `Data::Struct` rồi `Fields::Named` để lấy tên field. Các trường hợp khác trả về `compile_error!` gắn `Span` của tên kiểu.
+4. `quote!` dựng `impl`. `#(#names),*` lặp qua `Vec<String>` và phân cách bằng dấu phẩy, cùng ý tưởng với `$(...),*` của `macro_rules!` nhưng dùng `#`.
 
 <details><summary>Đi sâu: lỗi do chính macro báo ra và <code>Span</code></summary>
 
-Cái lỗi do chính macro báo ra, khi áp dụng vào `enum E { A }` (chạy thật):
+Đây là lỗi do chính macro báo ra, khi áp dụng vào `enum E { A }` (chạy thật):
 
 ```text
 error: FieldNames chi ho tro struct
@@ -344,23 +359,27 @@ error: FieldNames chi ho tro struct
   |      ^
 ```
 
-Dấu `^` nằm đúng tên `E` vì ta truyền `ast.ident` làm span. Syn docs nói API dựa trên token cho khả năng kiểm soát tốt nơi thông báo lỗi của compiler hiện ra trong code người dùng.[^syn-errors] Nếu quên span, lỗi sẽ trỏ vào dòng `#[derive(...)]`, khó đoán hơn (suy luận của người soạn, chưa chạy thử riêng).
+Dấu `^` nằm đúng tên `E` vì ta truyền `ast.ident` làm span. Syn docs nói API dựa trên token cho khả năng kiểm soát tốt nơi thông báo lỗi của compiler hiện ra trong code người dùng[^syn-errors]. Nếu quên span, lỗi sẽ trỏ vào dòng `#[derive(...)]`, khó đoán hơn (suy luận của người soạn, chưa chạy thử riêng).
 
 </details>
 
-**Quay lại Q5:** `syn` parse thành `DeriveInput`, `quote!` sinh `impl`; gắn `Span` đúng thì lỗi trỏ đúng chỗ.
+**Quay lại Q5:** `syn` parse thành `DeriveInput`, `quote!` sinh `impl`; gắn `Span` đúng thì lỗi trỏ đúng chỗ. Với `orders`, `#[derive(FieldNames)]` trên `User` cho sẵn danh sách `["id", "email"]` và danh sách đó đổi theo struct.
 
 ## 6. Expand ở đâu và xem code đã expand (Q6)
 
-> **Trả lời ngắn.** Parser đặt macro sang một bên; sau đó compiler lặp việc expand cho đến khi cây cú pháp (AST) không còn macro[^rdg-parse][^rdg-ast]. Để xem kết quả, chạy `cargo expand` (cần nightly)[^cargo-expand].
+> **Trả lời ngắn.** Parser đặt nội dung macro sang một bên, rồi compiler lặp việc expand cho tới khi cây cú pháp (AST) không còn macro[^rdg-parse]. Lúc đó crate có một AST hoàn chỉnh, không còn macro chưa expand (hoặc đã có lỗi compile)[^rdg-ast]. Để xem kết quả, chạy `cargo expand` (cần nightly)[^cargo-expand].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như template engine render HTML trước khi gửi cho trình duyệt — compiler chỉ xử lý tiếp bản đã render; `cargo expand` là nút "xem bản đã render".
+*Với service `orders`.* Khi `orders` build lỗi trong một đoạn có `derive` hay macro tự viết, thứ compiler báo lỗi là code *sau khi expand*, không phải dòng bạn gõ. Muốn debug thì bạn cần biết hai điều: macro được expand ở bước nào của compiler, và làm sao nhìn được code đã expand.
 
-*Xem code đã expand.*
+### 6.1 Expand xảy ra ở giai đoạn nào
 
-`cargo expand` in kết quả macro expansion (và `#[derive]`) của crate hiện tại; nó cần nightly vì dựa vào các cờ compiler chưa ổn định.[^cargo-expand] Cài bằng `cargo install cargo-expand`. Chạy trên `app` ở trên (chạy thật, 1.0.118 với nightly):
+Mục này theo rustc-dev-guide, một tài liệu sống nên không ghim phiên bản và có thể đổi. Trong giai đoạn parsing, parser thông thường của Rust đặt nội dung macro và các lời gọi macro sang một bên; sau đó macro được expand dựa trên những phần mã đó[^rdg-parse]. Compiler lặp việc expand cho tới khi có AST hoàn chỉnh cho crate, không còn macro chưa expand (hoặc đã có lỗi compile)[^rdg-ast]. Thuật toán này cần phân giải import và tên macro[^rdg-resolve].
+
+### 6.2 Xem code đã expand
+
+`cargo expand` in kết quả macro expansion (kể cả `#[derive]`) của crate hiện tại. Nó cần nightly vì dựa vào các cờ compiler chưa ổn định[^cargo-expand]. Cài bằng `cargo install cargo-expand`. Chạy trên `app` ở mục 5 (chạy thật, 1.0.118 với nightly):
 
 ```rust
 struct User { id: u64, email: String }
@@ -374,15 +393,13 @@ fn main() {
 }
 ```
 
-Thấy cả hai: `#[derive(FieldNames)]` đã biến mất và thay bằng `impl` của ta, và `println!` đã expand thành `::std::io::_print(format_args!(...))`. README của cargo-expand cho biết lệnh này bọc một lệnh dài hơn dùng `-Zunpretty=expanded` của rustc.[^cargo-expand-wrap][^cargo-expand-unpretty] Vì `-Z` là cờ không ổn định, định dạng đầu ra có thể thay đổi theo bản nightly — đừng coi là hợp đồng (nhận xét của người soạn).
+Kết quả cho thấy hai điều. `#[derive(FieldNames)]` đã biến mất và thay bằng `impl` của ta. `println!` đã expand thành `::std::io::_print(format_args!(...))`.
 
-*Expand xảy ra ở giai đoạn nào.*
-
-Theo rustc-dev-guide (*không ghim phiên bản; đây là tài liệu sống, có thể đổi*): trong giai đoạn parsing, parser thông thường của Rust đặt nội dung macro và các lời gọi sang một bên; sau đó macro được expand dựa trên các phần mã đó.[^rdg-parse] Rồi compiler lặp việc expand cho đến khi có AST hoàn chỉnh cho crate, không còn macro chưa expand (hoặc có lỗi compile).[^rdg-ast] Thuật toán cần phân giải import và tên macro.[^rdg-resolve]
+Về cách lệnh này làm việc, README của cargo-expand cho biết nó bọc một lệnh dài hơn[^cargo-expand-wrap]. Lệnh đó dùng `-Zunpretty=expanded` của rustc[^cargo-expand-unpretty]. Vì `-Z` là cờ không ổn định nên định dạng đầu ra có thể đổi theo bản nightly; đừng coi nó là hợp đồng (nhận xét của người soạn).
 
 <details><summary>Đi sâu: sơ đồ vị trí của expand, vì sao macro không biết kiểu, macro lồng nhau</summary>
 
-Tóm tắt vị trí trong dòng chảy (nhận xét của người soạn dựa vào các câu trên, mức độ khái quát):
+Sơ đồ dưới tóm tắt vị trí của expand trong dòng chảy (nhận xét của người soạn, dựa vào các câu ở trên, mức khái quát):
 
 ```mermaid
 flowchart LR
@@ -392,33 +409,33 @@ flowchart LR
     D --> E[Name resolution đầy đủ,<br/>type check, ...]
 ```
 
-Vì sao "macro không biết kiểu"? Vì lúc expand chưa có type check: macro chỉ thấy token. Do đó `$x:ty` chỉ cho bạn *chữ* `u32`, không cho bạn biết `u32` có implement trait nào (suy luận của người soạn từ thứ tự trên). Pipeline đầy đủ ở P10·01.
+Vì sao macro không biết kiểu? Vì lúc expand chưa có type check, macro chỉ thấy token. Do đó `$x:ty` chỉ cho bạn *chữ* `u32`, không cho bạn biết `u32` implement trait nào (suy luận của người soạn từ thứ tự trên). Pipeline đầy đủ ở P10·01.
 
-Cũng vì expand lặp, một macro có thể sinh lời gọi macro khác; Reference minh họa: macro ngoài `example` được expand trước, rồi macro trong `println` mới được expand.[^ref-nested] Thứ tự này có hệ quả khi bạn truyền `$e:expr` chứa macro vào trong macro khác.
+Vì expand lặp, một macro có thể sinh lời gọi macro khác. Reference minh họa: macro ngoài `example` được expand trước, rồi macro trong `println` mới được expand[^ref-nested]. Thứ tự này có hệ quả khi bạn truyền `$e:expr` chứa macro vào trong macro khác.
 
 </details>
 
-**Quay lại Q6:** expand diễn ra sau parse và lặp đến hết macro; `cargo expand` cho thấy kết quả nhưng định dạng không phải hợp đồng.
+**Quay lại Q6:** expand diễn ra sau parse và lặp đến hết macro; `cargo expand` cho thấy kết quả nhưng định dạng không phải hợp đồng. Với `orders`, nó cho bạn thấy `derive` và `println!` thực sự biến thành code gì.
 
 ## 7. Macro quen thuộc nhìn từ bên trong (Q7)
 
-> **Trả lời ngắn.** Trang std của `vec!` hiển thị nó với chữ ký dạng `macro_rules!`[^std-vec-rules]; `println!` mở thành lời gọi dùng `format_args!` (kết quả `cargo expand` ở mục 6), và `format_args!` tạo giá trị kiểu `fmt::Arguments`[^std-format-args]; `#[derive(Debug)]` là derive macro sinh một `impl`[^std-debug-derive]. `#[tokio::main]` giúp dựng runtime để chạy hàm async[^tokio-main].
+> **Trả lời ngắn.** Trang std của `vec!` hiển thị nó với chữ ký dạng `macro_rules!`[^std-vec-rules]. `println!` mở thành một lời gọi dùng `format_args!` (kết quả `cargo expand` ở mục 6), và `format_args!` tạo giá trị kiểu `fmt::Arguments`[^std-format-args]. `#[derive(Debug)]` là derive macro sinh một `impl`[^std-debug-derive]. Còn `#[tokio::main]` dựng runtime để chạy hàm async[^tokio-main].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như alias rút gọn trong shell — gõ ngắn, bên dưới là chuỗi lệnh dài.
+*Với service `orders`.* Bốn macro này đều đã có trong code của `orders`: `vec!` để dựng danh sách dòng đơn hàng, `println!` để log, `#[derive(Debug)]` trên các struct, `#[tokio::main]` trên `main`. Chúng không phải phép màu của compiler: phần lớn là macro bình thường, và `cargo expand` cho thấy chúng sinh ra gì.
 
-*`vec!`.*
+### 7.1 `vec!`
 
-Tài liệu std: `vec!` tạo một `Vec` chứa các đối số[^std-vec]. Trang đó hiện chữ ký `macro_rules! vec` với các luật như `() => ...` và `($elem:expr; $n:expr) => ...`[^std-vec-rules]. Trên nightly 2026-05-01 trên máy, `cargo expand` cho `vec![1, 2, 3]` ra chuỗi hàm nội bộ của `alloc` (`Box::new_uninit`, `write_box_via_move`, `box_assume_init_into_vec_unsafe`) — đó là chi tiết cài đặt của std, thay đổi theo phiên bản, đừng dựa vào.
+Tài liệu std mô tả `vec!` là tạo một `Vec` chứa các đối số[^std-vec]. Trang đó hiện chữ ký `macro_rules! vec` với các luật như `() => ...` và `($elem:expr; $n:expr) => ...`[^std-vec-rules]. Trên nightly 2026-05-01 trên máy, `cargo expand` cho `vec![1, 2, 3]` ra một chuỗi hàm nội bộ của `alloc` (`Box::new_uninit`, `write_box_via_move`, `box_assume_init_into_vec_unsafe`). Đó là chi tiết cài đặt của std, đổi theo phiên bản, đừng dựa vào.
 
-*`println!` và `format_args!`.*
+### 7.2 `println!` và `format_args!`
 
-`println!` ghi ra stdout và khóa stdout mỗi lần gọi[^std-println]. `format_args!` được khai báo trong `core` với thân `/* compiler built-in */`, tức compiler tự cài đặt[^core-format-args]; docs std nói nó chuẩn bị tham số để đầu ra đọc được như chuỗi[^std-format-args-prep] và tạo giá trị kiểu `fmt::Arguments`[^std-format-args]. Kết quả expand ở mục 6 cho thấy `println!` mở thành lời gọi `_print` kèm `format_args!`.
+`println!` ghi ra stdout và khóa stdout mỗi lần gọi[^std-println]. Bên trong, nó dựa vào `format_args!`. Macro này khai báo trong `core` với thân `/* compiler built-in */`, nghĩa là compiler tự cài đặt[^core-format-args]. Docs std nói nó chuẩn bị tham số để đầu ra đọc được như chuỗi[^std-format-args-prep]. Kết quả là một giá trị kiểu `fmt::Arguments`[^std-format-args]. Kết quả expand ở mục 6 cho thấy `println!` mở thành lời gọi `_print` kèm `format_args!`.
 
-*`#[derive(Debug)]`.*
+### 7.3 `#[derive(Debug)]`
 
-Std mô tả đây là derive macro sinh một `impl` của trait `Debug`.[^std-debug-derive] Expand thật (nightly 2026-05-01) cho `struct P { x: i32 }`:
+Std mô tả đây là derive macro sinh một `impl` của trait `Debug`[^std-debug-derive]. Expand thật (nightly 2026-05-01) cho `struct P { x: i32 }`:
 
 ```rust
 #[automatically_derived]
@@ -430,11 +447,11 @@ impl ::core::fmt::Debug for P {
 }
 ```
 
-Đây là đúng điều derive làm: thêm một `impl` sau struct, struct gốc nguyên vẹn (khớp mô tả của derive ở mục 4). Tên hàm `debug_struct_field1_finish` là chi tiết nội bộ.
+Đúng điều derive làm ở mục 4: thêm một `impl` sau struct, struct gốc nguyên vẹn. Tên hàm `debug_struct_field1_finish` là chi tiết nội bộ.
 
 <details><summary>Đi sâu: <code>#[tokio::main]</code> tương đương code nào</summary>
 
-Docs tokio 1.52.1: macro đánh dấu một hàm async để chạy bởi runtime được chọn, và giúp dựng runtime mà người dùng không phải dùng `Runtime` hay `Builder` trực tiếp.[^tokio-main] Docs có mục "Equivalent code not using #[tokio::main]" cho thấy:
+Docs tokio 1.52.1: macro đánh dấu một hàm async để runtime được chọn chạy, và giúp dựng runtime mà người dùng không phải dùng `Runtime` hay `Builder` trực tiếp[^tokio-main]. Docs có mục "Equivalent code not using #[tokio::main]", cho thấy đoạn sau[^tokio-equiv]:
 
 ```rust
 fn main() {
@@ -448,135 +465,153 @@ fn main() {
 }
 ```
 
-[^tokio-equiv]
-
-Tức là: `async fn main` không tồn tại ở cấp ngôn ngữ; macro bọc thân hàm vào `block_on` trên một runtime. Docs còn lưu ý: dùng macro này trên hàm không phải `main` làm hàm cư xử như hàm đồng bộ, vì mỗi lần được gọi nó khởi động một runtime mới.[^tokio-nonmain] (Chạy thử `#[tokio::main]` bằng `cargo expand` không làm ở đây — chương không khẳng định đầu ra cụ thể ngoài những gì docs nói.)
+Tức là `async fn main` không tồn tại ở cấp ngôn ngữ; macro bọc thân hàm vào `block_on` trên một runtime. Docs còn lưu ý rằng dùng macro này trên hàm không phải `main` làm hàm cư xử như hàm đồng bộ, vì mỗi lần gọi nó khởi động một runtime mới[^tokio-nonmain]. (Chương này không chạy `cargo expand` cho `#[tokio::main]` và không khẳng định đầu ra cụ thể ngoài những gì docs nói.)
 
 </details>
 
-**Quay lại Q7:** các macro quen thuộc chỉ là code được sinh sẵn: `vec!` bằng `macro_rules!`, `println!` qua `format_args!`, derive thêm `impl`, `#[tokio::main]` dựng runtime.
+**Quay lại Q7:** các macro quen thuộc chỉ là code sinh sẵn: `vec!` bằng `macro_rules!`, `println!` qua `format_args!`, derive thêm `impl`, `#[tokio::main]` dựng runtime. Với `orders`, không có gì trong bốn thứ đó vượt ra ngoài những cơ chế ở mục 2 đến mục 4.
 
 ## 8. serde, sqlx và cái giá của macro (Q8)
 
-> **Trả lời ngắn.** serde derive sinh code lúc compile thay cho reflection lúc chạy[^serde-design]; sqlx `query!` kiểm câu SQL với schema của database ngay lúc build[^sqlx-url]. Cái giá (nhận xét của người soạn): thời gian build, lỗi khó đọc hơn, và code compiler biên dịch khác code bạn thấy.
+> **Trả lời ngắn.** serde derive sinh code lúc compile thay cho reflection lúc chạy[^serde-design]. sqlx `query!` kiểm câu SQL với schema của database ngay lúc build[^sqlx-url]. Cái giá (nhận xét của người soạn) là thời gian build, lỗi khó đọc hơn, và code compiler biên dịch khác với code bạn thấy.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như codegen từ OpenAPI/protobuf thay cho reflection runtime, và `query!` như một bước CI chạy mỗi lần build để đối chiếu SQL với schema.
+*Với service `orders`.* `orders` làm hai việc với dữ liệu: parse JSON của request thành struct, và ghi struct đó vào Postgres. Cả hai đều là chỗ macro đang làm việc nặng. serde derive lo việc đầu, sqlx `query!` lo việc sau. Mục này nói mỗi cái làm gì, rồi tính tiền: bạn trả cái gì để có chúng.
 
-**serde derive.** Docs serde: thay vì runtime reflection, serde dựa trên hệ trait của Rust; dùng derive là cách tự sinh implementation lúc compile, nên tránh được chi phí của reflection hay thông tin kiểu lúc chạy[^serde-design]. Hai derive `Serialize`, `Deserialize` chỉ có khi bật feature `derive` của serde.[^serde-feature] Nhận xét của người soạn: với một backend engineer quen Jackson/GORM tag dùng reflection, đây là khác biệt cốt lõi — cái "reflection" đó diễn ra lúc compile, nên chi phí là *thời gian build*, không phải latency request.
+### 8.1 serde derive
 
-**sqlx `query!`.** Docs mô tả đây là truy vấn SQL được kiểm tra tĩnh, với cú pháp kiểu `println!()`.[^sqlx-static] Lúc build, biến môi trường `DATABASE_URL` phải trỏ tới một database server có schema để kiểm câu truy vấn.[^sqlx-url] Có thể thay bằng thư mục `.sqlx` ở gốc workspace ("Offline Mode").[^sqlx-offline] Bản ghim: sqlx 0.8.6. (Nhận xét của người soạn: CI build của bạn vì vậy phụ thuộc vào một DB sống hoặc file `.sqlx` được commit và giữ đồng bộ — đáng cân nhắc trong pipeline Docker/Kubernetes.)
+Thay vì runtime reflection, serde dựa vào hệ trait của Rust. Derive là cách tự sinh implementation lúc compile, nên tránh được chi phí của reflection hay thông tin kiểu lúc chạy[^serde-design]. Hai derive `Serialize` và `Deserialize` chỉ có khi bật feature `derive` của serde[^serde-feature].
 
-*Chi phí và cạm bẫy.*
+Với backend engineer quen Jackson hay GORM tag dùng reflection, đây là khác biệt cốt lõi (nhận xét của người soạn): phần "reflection" diễn ra lúc compile, nên chi phí là *thời gian build*, không phải latency của request.
 
-- **Thông báo lỗi.** Lỗi trong `macro_rules!` thường trỏ vào chỗ gọi hoặc luật không khớp, không phải ý định của bạn. Ví dụ phía trên (`early!`) cho thấy compiler vẫn có gợi ý trong trường hợp đơn giản. Với procedural macro chất lượng lỗi phụ hoàn toàn vào tác giả macro: có dùng `Span` đúng như ví dụ `FieldNames` hay không. (Nhận xét của người soạn — chỉ dựa trên hai thí nghiệm nhỏ của chương này, không phải khảo sát.)
-- **Khó đọc/khó debug.** Code người đọc thấy khác code compiler biên dịch. Công cụ: `cargo expand` (mục 6). Giữ macro nhỏ; nếu hàm hoặc generic làm được thì dùng chúng (nhận xét của người soạn).
-- **Hygiene không đối xứng.** `macro_rules!` hygienic cho biến cục bộ, procedural macro thì không (mục 3, 4).
+### 8.2 sqlx `query!`
+
+Docs mô tả đây là truy vấn SQL được kiểm tra tĩnh, với cú pháp kiểu `println!()`[^sqlx-static]. Lúc build, biến môi trường `DATABASE_URL` phải trỏ tới một database server có schema để kiểm câu truy vấn[^sqlx-url]. Bạn có thể thay bằng thư mục `.sqlx` ở gốc workspace, gọi là "Offline Mode"[^sqlx-offline]. Bản ghim: sqlx 0.8.6.
+
+Với `orders`, CI build vì vậy phụ thuộc vào một DB sống hoặc vào file `.sqlx` được commit và giữ đồng bộ. Điều này đáng cân nhắc trong pipeline Docker/Kubernetes (nhận xét của người soạn).
+
+### 8.3 Chi phí và cạm bẫy
+
+- **Thông báo lỗi.** Lỗi trong `macro_rules!` thường trỏ vào chỗ gọi hoặc luật không khớp, không phải ý định của bạn. Ví dụ `early!` ở mục 3 cho thấy compiler vẫn có gợi ý trong trường hợp đơn giản. Với procedural macro, chất lượng lỗi phụ hoàn toàn vào tác giả macro: có gắn `Span` đúng như ví dụ `FieldNames` hay không. (Nhận xét của người soạn, chỉ dựa trên hai thí nghiệm nhỏ của chương này, không phải khảo sát.)
+- **Khó đọc, khó debug.** Code người đọc thấy khác code compiler biên dịch. Công cụ để nhìn là `cargo expand` (mục 6). Hãy giữ macro nhỏ, và nếu hàm hoặc generic làm được thì dùng chúng (nhận xét của người soạn).
+- **Hygiene không đối xứng.** `macro_rules!` hygienic cho biến cục bộ, procedural macro thì không (mục 3 và 4).
 
 <details><summary>Đi sâu: một lần đo thời gian compile của macro nhỏ</summary>
 
-Compile time: procedural macro là code Rust phải được build và chạy trong compiler. Docs `syn` thừa nhận việc này bằng cách cho tắt bớt tính năng để macro không phải trả thời gian compile cho phần còn lại.[^syn-features] Quan sát duy nhất của tôi: build lạnh crate `mymac_derive` (syn + quote + proc-macro2, profile dev) mất khoảng 1–1,5 giây trên máy này — đó là một lần đo nhỏ của macro nhỏ, không đại diện; đo trên dự án thật của bạn bằng `cargo build --timings` (nhận xét của người soạn).
+Procedural macro là code Rust phải được build rồi chạy trong compiler. Docs `syn` thừa nhận điều này bằng cách cho tắt bớt tính năng để macro không phải trả thời gian compile cho phần còn lại[^syn-features]. Quan sát duy nhất ở đây: build lạnh crate `mymac_derive` (syn + quote + proc-macro2, profile dev) mất khoảng 1–1,5 giây trên máy này. Đó là một lần đo của một macro nhỏ, không đại diện; hãy đo trên dự án thật của bạn bằng `cargo build --timings` (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q8:** serde thay reflection bằng code sinh lúc compile, sqlx kiểm SQL lúc build; cái giá là thời gian build, lỗi khó đọc và code đã expand khác code nguồn.
+**Quay lại Q8:** serde thay reflection bằng code sinh lúc compile, sqlx kiểm SQL lúc build; cái giá là thời gian build, lỗi khó đọc và code đã expand khác code nguồn. Với `orders`, bạn đổi latency lúc chạy lấy thời gian build và một DB (hoặc `.sqlx`) trong CI.
 
 ## Tóm tắt
 
-- Macro tồn tại vì hàm phải khai báo cố định số tham số, không implement được trait, còn macro giúp bớt code lặp.[^book-variadic][^book-expand-before][^book-meta]
-- `macro_rules!` = các luật `matcher => transcriber`, thử từ trên xuống; fragment specifier (`expr`, `ident`, `ty`, `tt`…) định loại mảnh cú pháp; lặp bằng `$(...)sep op`.
+- Macro tồn tại vì hàm phải khai báo cố định số tham số và không implement được trait, còn macro nhận số tham số tùy ý, sinh được item và giúp bớt code lặp.
+- `macro_rules!` là các luật `matcher => transcriber`, thử từ trên xuống. Fragment specifier (`expr`, `ident`, `ty`, `tt`…) định loại mảnh cú pháp; lặp bằng `$(...)sep op`.
 - Hygiene của `macro_rules!` áp dụng cho biến cục bộ và label: `hyg!(x * 2)` cho 102, và biến `let` trong macro không rò ra ngoài.
-- `$crate` trỏ tới crate định nghĩa; `#[macro_export]` đổi visibility sang `pub`; macro textual scope nên phải định nghĩa trước khi dùng.
-- Procedural macro có ba loại (derive, attribute, function-like), phải ở crate `proc-macro` riêng, làm việc trên `TokenStream`, và không hygienic.
-- Derive macro nhỏ cần `syn` (parse `DeriveInput`) + `quote` (sinh token); lỗi nên gắn `Span` để trỏ đúng chỗ.
-- Macro expand sau parse, lặp cho đến khi hết macro (rustc-dev-guide, không ghim); xem kết quả bằng `cargo expand` (cần nightly).
-- `#[tokio::main]` chỉ dựng runtime và `block_on`; serde derive thay reflection runtime bằng code sinh lúc compile; sqlx `query!` kiểm SQL với DB hoặc `.sqlx` lúc build.
+- `$crate` trỏ tới crate định nghĩa. `#[macro_export]` đổi visibility sang `pub`. Macro có textual scope nên phải định nghĩa trước khi dùng.
+- Procedural macro có ba loại (derive, attribute, function-like), phải ở crate `proc-macro` riêng, làm việc trên `TokenStream` và không hygienic.
+- Derive macro nhỏ cần `syn` (parse `DeriveInput`) và `quote` (sinh token); lỗi nên gắn `Span` để trỏ đúng chỗ.
+- Macro expand sau parse và lặp cho tới khi hết macro (rustc-dev-guide, không ghim). Xem kết quả bằng `cargo expand` (cần nightly).
+- `#[tokio::main]` chỉ dựng runtime và `block_on`. serde derive thay reflection runtime bằng code sinh lúc compile. sqlx `query!` kiểm SQL với DB hoặc `.sqlx` lúc build.
 - Cái giá: thời gian compile, lỗi khó đọc, code đã expand khác code bạn thấy.
 
 ## Câu hỏi tự kiểm tra
 
-1. Nêu ba lý do chính Rust cần macro bên cạnh hàm.
+1. Nêu ba lý do chính Rust cần macro bên cạnh hàm. Với `orders`, mỗi lý do ứng với chuyện gì?
+
 <details><summary>Đáp án</summary>
 
-Số tham số thay đổi (<code>println!</code>), sinh item/impl trước khi compiler diễn giải nghĩa, và giảm code lặp — xem [^book-variadic][^book-expand-before][^book-meta].
+Thứ nhất, số tham số thay đổi, như `println!` trong handler[^book-variadic]. Thứ hai, sinh item hay `impl` trước khi compiler diễn giải nghĩa, như `impl` cho ba kiểu id[^book-expand-before]. Thứ ba, giảm code lặp[^book-meta]. Hai ví dụ trong `orders` là ví dụ của người soạn.
 
 </details>
 
 2. `$x:ident` và `$x:expr` khác nhau thế nào? Cho ví dụ dùng `ident` để *tạo tên hàm*.
+
 <details><summary>Đáp án</summary>
 
-<code>ident</code> khớp một định danh, <code>expr</code> một biểu thức [^ref-ident][^ref-expr]. Ví dụ <code>make_fn!(answer, u32, 42)</code> ở mục 2 sinh <code>fn answer() -&gt; u32 { 42 }</code> và in 42.
+`ident` khớp một định danh[^ref-ident]. `expr` khớp một biểu thức[^ref-expr]. Ví dụ `make_fn!(answer, u32, 42)` ở mục 2 sinh `fn answer() -> u32 { 42 }` và in 42.
 
 </details>
 
-3. Macro <code>hyg!(x * 2)</code> với <code>let x = 1;</code> ngoài macro in gì và vì sao?
+3. Macro `hyg!(x * 2)` với `let x = 1;` ngoài macro in gì và vì sao?
+
 <details><summary>Đáp án</summary>
 
-102. Biến local trong macro được tra tại nơi định nghĩa macro nên <code>let x = 100</code> không che <code>x</code> của người gọi [^ref-hygiene].
+In 102. Biến local trong macro được tra tại nơi định nghĩa macro, nên `let x = 100` không che `x` của người gọi[^ref-hygiene].
 
 </details>
 
-4. Vì sao đoạn <code>fn main(){ early!(); } macro_rules! early {...}</code> lỗi?
+4. Vì sao đoạn `fn main(){ early!(); } macro_rules! early {...}` lỗi?
+
 <details><summary>Đáp án</summary>
 
-Textual scope: macro chỉ vào scope sau chỗ định nghĩa [^ref-textual-scope]; chạy thật báo "cannot find macro 'early' in this scope".
+Vì textual scope: macro chỉ vào scope từ sau chỗ định nghĩa[^ref-textual-scope]. Chạy thật báo "cannot find macro 'early' in this scope".
 
 </details>
 
-5. Dùng <code>$crate</code> để làm gì?
+5. Dùng `$crate` để làm gì?
+
 <details><summary>Đáp án</summary>
 
-Trỏ tới crate hiện tại [^ref-dollar-crate]; vì tên khác ngoài biến cục bộ và label được tra tại nơi gọi [^ref-hygiene], dùng <code>$crate</code> trong macro của thư viện để trỏ về crate định nghĩa là cách dùng điển hình (suy luận của người soạn).
+`$crate` trỏ tới crate hiện tại[^ref-dollar-crate]. Các tên khác ngoài biến cục bộ và label được tra tại nơi gọi[^ref-hygiene]. Vì vậy macro của thư viện dùng `$crate` để trỏ về crate định nghĩa, đó là cách dùng điển hình (suy luận của người soạn).
 
 </details>
 
-6. Ba loại procedural macro là gì và loại nào nhận hai <code>TokenStream</code>?
+6. Ba loại procedural macro là gì và loại nào nhận hai `TokenStream`?
+
 <details><summary>Đáp án</summary>
 
-Function-like, derive, attribute [^book-three-kinds]; attribute macro nhận hai (tham số attribute và phần còn lại của item) [^ref-attr-second].
+Là function-like, derive và attribute[^book-three-kinds]. Attribute macro nhận hai: tham số của attribute và phần còn lại của item[^ref-attr-second].
 
 </details>
 
 7. Vì sao không dùng được procedural macro trong chính crate định nghĩa nó?
+
 <details><summary>Đáp án</summary>
 
-Reference: phải ở crate type <code>proc-macro</code> và chỉ dùng được khi import từ crate khác [^ref-proc-root]; Book cũng nói phải ở crate riêng [^book-own-crate].
+Reference quy định macro phải ở crate type `proc-macro` và chỉ dùng được khi import từ crate khác[^ref-proc-root]. Book cũng nói phải ở crate riêng[^book-own-crate].
 
 </details>
 
-8. Hai việc của <code>syn</code> và <code>quote</code> trong derive macro?
+8. Hai việc của `syn` và `quote` trong derive macro?
+
 <details><summary>Đáp án</summary>
 
-<code>syn</code> parse thành <code>DeriveInput</code> [^syn-deriveinput]; <code>quote</code> sinh token với nội suy <code>#var</code> [^quote-interp].
+`syn` parse đầu vào thành `DeriveInput`[^syn-deriveinput]. `quote` sinh token với nội suy `#var`[^quote-interp].
 
 </details>
 
 9. Làm sao xem code sau khi expand, và có điều kiện gì?
+
 <details><summary>Đáp án</summary>
 
-<code>cargo expand</code>, cần nightly [^cargo-expand]; đầu ra là chi tiết không ổn định.
+Dùng `cargo expand`, cần nightly[^cargo-expand]. Đầu ra là chi tiết không ổn định.
 
 </details>
 
 10. Macro expand ở giai đoạn nào so với parse?
+
 <details><summary>Đáp án</summary>
 
-Sau parse (parser đặt macro sang bên), lặp đến khi AST hết macro [^rdg-parse][^rdg-ast]. Nguồn không ghim phiên bản.
+Sau parse: parser đặt macro sang bên[^rdg-parse]. Rồi compiler lặp đến khi AST hết macro[^rdg-ast]. Nguồn này không ghim phiên bản.
 
 </details>
 
-11. <code>#[tokio::main]</code> tương đương code nào?
+11. `#[tokio::main]` tương đương code nào?
+
 <details><summary>Đáp án</summary>
 
-Dựng <code>Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {...})</code> [^tokio-equiv].
+Dựng `Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {...})`[^tokio-equiv].
 
 </details>
 
-12. sqlx <code>query!</code> kiểm SQL bằng gì lúc build?
+12. sqlx `query!` kiểm SQL bằng gì lúc build?
+
 <details><summary>Đáp án</summary>
 
-Database trỏ bởi <code>DATABASE_URL</code> hoặc thư mục <code>.sqlx</code> [^sqlx-url][^sqlx-offline].
+Bằng database mà `DATABASE_URL` trỏ tới[^sqlx-url]. Hoặc bằng thư mục `.sqlx`[^sqlx-offline].
 
 </details>
 

@@ -1,6 +1,6 @@
 # P12 · Chương 13 — Kiến trúc hệ dữ liệu: operational vs analytical, warehouse/lake, cloud vs tự vận hành
 
-> Chương này nói về *cách ghép các hệ thống dữ liệu thành một kiến trúc*, không đi vào bên trong một engine (xem [Chương 03](03-storage-engine.md)). Nguồn: paper gốc (Lakehouse, Delta Lake, Snowflake, COST), spec ghim phiên bản (Apache Iceberg `apache-iceberg-1.5.0`, Delta `v3.2.0`, Parquet `apache-parquet-format-2.10.0`), docs.rs ghim phiên bản (`parquet 53.3.0`, `object_store 0.11.2`), và tài liệu vendor (AWS, Google Cloud, Microsoft, DuckDB, PostgreSQL, SQLite). Tài liệu vendor **không ghim được phiên bản**: nội dung là bản truy cập ngày 2026-10-12 và có thể đổi. Không có thí nghiệm nào được chạy; ví dụ code ở phần Rust chỉ để minh họa và **chưa được biên dịch** trong chương này.
+> Chương này nói về *cách ghép các hệ thống dữ liệu thành một kiến trúc*, không đi vào bên trong một engine (xem [Chương 03](03-storage-engine.md)). Nguồn gồm paper gốc (Lakehouse, Delta Lake, Snowflake, COST), spec ghim phiên bản (Apache Iceberg `apache-iceberg-1.5.0`, Delta `v3.2.0`, Parquet `apache-parquet-format-2.10.0`), docs.rs ghim phiên bản (`parquet 53.3.0`, `object_store 0.11.2`) và tài liệu vendor (AWS, Google Cloud, Microsoft, DuckDB, PostgreSQL, SQLite). Tài liệu vendor **không ghim được phiên bản**: nội dung là bản truy cập ngày 2026-10-12 và có thể đổi. Không có thí nghiệm nào được chạy; ví dụ code ở phần Rust chỉ để minh họa và **chưa được biên dịch** trong chương này.
 
 ## Bạn sẽ hiểu được gì
 
@@ -24,47 +24,49 @@ Chuyện *trách nhiệm với dữ liệu* (xóa dữ liệu theo luật, GDPR,
 
 ## 1. Vận hành vs phân tích (Q1)
 
-> **Trả lời ngắn.** Hệ vận hành (OLTP) ghi lại từng giao dịch kinh doanh khi nó xảy ra và phục vụ ngay cho ứng dụng[^oltp-def]; hệ phân tích (OLAP) được tối ưu cho nhiều đọc, ít ghi, và cho các truy vấn quét một phần lớn dữ liệu[^olap-heavyread][^duck-olap]. Hai bài toán kéo thiết kế về hai hướng ngược nhau nên thường được đặt ở hai hệ thống riêng; điều này không phải quy luật tự nhiên mà là thực hành phổ biến, có lý do cụ thể (xem bên dưới).
+> **Trả lời ngắn.** Hệ vận hành (OLTP) ghi lại từng giao dịch kinh doanh ngay khi nó xảy ra và phục vụ ứng dụng trực tiếp[^oltp-def]. Hệ phân tích (OLAP) thì nghiêng về đọc nhiều, ghi ít[^olap-heavyread]. Tải của nó hay là những truy vấn quét một phần lớn dữ liệu[^duck-olap]. Hai bài toán kéo thiết kế về hai hướng ngược nhau, nên thực hành phổ biến là đặt chúng ở hai hệ thống riêng. Đó là thực hành chứ không phải quy luật tự nhiên, và nó có lý do cụ thể (xem bên dưới).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): quầy thu ngân siêu thị và phòng kế toán. Quầy thu ngân phải xử lý từng khách trong vài giây, sai một dòng là khách thấy ngay. Phòng kế toán cuối tháng lật *toàn bộ* hóa đơn để tính doanh thu theo vùng. Nếu kế toán đứng ngay quầy mà lật sổ thì hàng người chờ dài ra; nếu thu ngân tự tổng hợp báo cáo thì không ai tính tiền.
+*Với service `shop`.* Hãy hình dung `shop`, một service Rust nhận đơn hàng và lưu vào bảng `orders` trong PostgreSQL. Mỗi request chỉ chạm vài dòng, tra theo khóa, và phải trả lời trong vài mili giây. Rồi team kinh doanh xin báo cáo "doanh thu theo vùng, theo tuần": nghĩa là quét hàng chục triệu dòng `orders` để cộng một cột. Ta sẽ bám theo `shop` suốt chương, vì cả chương là một câu hỏi: dữ liệu của `shop` nên nằm ở đâu, dưới hình dạng nào, để vừa phục vụ khách vừa trả lời được báo cáo (nhận xét của người soạn: `shop` là ví dụ giả định, không phải code trong repo).
 
-*OLTP (online transaction processing).* Tài liệu kiến trúc của Microsoft định nghĩa đây là việc quản lý dữ liệu giao dịch bằng máy tính: hệ thống ghi nhận tương tác kinh doanh khi chúng xảy ra trong vận hành hằng ngày và hỗ trợ truy vấn dữ liệu đó[^oltp-def]. Giao dịch cần tính nguyên tử: hoặc thành công trọn vẹn, hoặc thất bại, không để dở dang[^oltp-atomic]. Đây chính là ACID ở [Chương 07](07-transaction.md). Tải điển hình (nhận xét của người soạn): rất nhiều thao tác nhỏ chạm vài dòng, tra cứu bằng khóa, độ trễ tính bằng mili giây.
+Phía khách hàng của `shop` là OLTP (online transaction processing): hệ thống ghi nhận các tương tác kinh doanh ngay khi chúng xảy ra trong vận hành hằng ngày, và cho truy vấn lại dữ liệu đó[^oltp-def]. Một đơn hàng phải lưu trọn vẹn hoặc không lưu gì, nên giao dịch cần tính nguyên tử, tức là chữ A trong ACID ở [Chương 07](07-transaction.md)[^oltp-atomic]. Tải điển hình (nhận xét của người soạn): rất nhiều thao tác nhỏ chạm vài dòng, tra cứu bằng khóa, độ trễ tính bằng mili giây.
 
-*OLAP (online analytical processing).* Cùng tài liệu mô tả OLAP là loại cơ sở dữ liệu tối ưu cho tác vụ đọc nhiều, ghi ít[^olap-heavyread]. DuckDB định nghĩa theo *tải*: truy vấn phức tạp, chạy tương đối lâu, xử lý một phần đáng kể tập dữ liệu, ví dụ tổng hợp trên cả bảng hoặc join nhiều bảng lớn[^duck-olap]. Tải điển hình (nhận xét của người soạn): ít truy vấn nhưng mỗi truy vấn đọc hàng triệu dòng và chỉ cần vài cột — chính là kiểu tải mà lưu theo cột trả công nhất. Cơ chế bên trong engine (layout hàng/cột, nén) nằm ở [Chương 03](03-storage-engine.md), mục 8; chương này chỉ nhìn ở tầng kiến trúc hệ thống.
+Báo cáo doanh thu thì thuộc về OLAP (online analytical processing). Microsoft mô tả OLAP là loại database tối ưu cho tác vụ đọc nhiều, ghi ít[^olap-heavyread]. DuckDB định nghĩa theo *tải*: truy vấn phức tạp, chạy tương đối lâu, xử lý một phần đáng kể tập dữ liệu, ví dụ tổng hợp trên cả bảng hoặc join nhiều bảng lớn[^duck-olap]. Với `shop`, đó là vài truy vấn nhưng mỗi truy vấn đọc hàng triệu dòng mà chỉ cần vài cột như `region` và `amount` (nhận xét của người soạn). Đây chính là kiểu tải mà lưu theo cột trả công nhất. Cơ chế bên trong engine (layout hàng/cột, nén) nằm ở [Chương 03](03-storage-engine.md), mục 8; chương này chỉ nhìn ở tầng kiến trúc hệ thống.
 
-*Vì sao tách.* Microsoft nêu rằng cơ sở dữ liệu OLTP chứa thông tin quý nhưng "không được thiết kế để phân tích", nên truy xuất dữ liệu phục vụ phân tích chậm và khó[^olap-notdesigned], và OLAP cho phép truy vấn phức tạp mà không làm gián đoạn hệ giao dịch[^olap-nodisrupt]. Tài liệu BigQuery nói cùng hướng về cơ sở dữ liệu kiểu cũ: phải chia sẻ tài nguyên giữa thao tác đọc/ghi và thao tác phân tích[^bq-share]. Chi tiết cơ chế (nhận xét của người soạn): một truy vấn quét lớn tranh CPU, băng thông đĩa và bộ nhớ đệm với các giao dịch nhạy độ trễ trên cùng máy; đây là suy luận từ kiến trúc chứ không phải điều các nguồn trên đo đạc.
+Vậy sao không chạy báo cáo thẳng trên Postgres đang phục vụ `shop`? Microsoft nêu rằng database OLTP chứa thông tin quý nhưng "không được thiết kế để phân tích", nên lấy dữ liệu ra để phân tích vừa chậm vừa khó[^olap-notdesigned]. Tách ra thì truy vấn phức tạp chạy được mà không làm gián đoạn hệ giao dịch[^olap-nodisrupt]. Tài liệu BigQuery nói cùng hướng về database kiểu cũ: phải chia sẻ tài nguyên giữa thao tác đọc/ghi và thao tác phân tích[^bq-share]. Còn cơ chế cụ thể (nhận xét của người soạn): một truy vấn quét lớn tranh CPU, băng thông đĩa và bộ nhớ đệm với các giao dịch nhạy độ trễ trên cùng máy, nên request của khách có thể chậm theo. Đây là suy luận từ kiến trúc, các nguồn trên không đo điều đó.
 
-| Trục | OLTP | Phân tích (OLAP) | Nguồn |
-|---|---|---|---|
-| Mục tiêu | Ghi nhận và phục vụ giao dịch ngay | Truy vấn phức tạp trên khối lượng lớn | [^oltp-def][^duck-olap] |
-| Nghiêng về | Ghi nặng, đọc vừa phải | Đọc nhiều, ghi ít | [^oltp-workload][^olap-heavyread] |
-| Thay đổi dữ liệu | Giao dịch phải nguyên tử | Thay đổi dự kiến cũng ở quy mô lớn: thêm nhiều dòng hoặc đổi phần lớn bảng cùng lúc | [^oltp-atomic][^duck-olap-change] |
+| Trục | OLTP (đơn hàng của `shop`) | Phân tích (báo cáo doanh thu) |
+|---|---|---|
+| Mục tiêu | Ghi nhận và phục vụ giao dịch ngay[^oltp-def] | Truy vấn phức tạp trên khối lượng lớn[^duck-olap] |
+| Nghiêng về | Ghi nặng, đọc vừa phải[^oltp-workload] | Đọc nhiều, ghi ít[^olap-heavyread] |
+| Thay đổi dữ liệu | Giao dịch phải nguyên tử[^oltp-atomic] | Thay đổi dự kiến cũng ở quy mô lớn: thêm nhiều dòng hoặc đổi phần lớn bảng cùng lúc[^duck-olap-change] |
 
-(Bảng tóm tắt của người soạn; mỗi ô dựa vào nguồn ở cột cuối.)
+(Bảng tóm tắt của người soạn; mỗi ô dựa vào nguồn ghi ở chú thích.)
 
 <details><summary>Đi sâu: hai nghĩa của chữ "OLAP", và con số quy mô trong docs Azure</summary>
 
-- Chữ "OLAP" được dùng theo hai nghĩa. Trang của Microsoft mô tả mô hình ngữ nghĩa kiểu cube/star/snowflake cần *tính lại cube* khi cập nhật hoặc nối thêm dữ liệu[^olap-cube]; DuckDB dùng chữ này để chỉ *kiểu tải* (quét, tổng hợp), không nói đến cube[^duck-olap]. Khi đọc tài liệu, hỏi: đang nói về mô hình dữ liệu (cube) hay về kiểu truy vấn?
-- Cùng trang đó gán quy mô OLTP là "nhỏ (MB) đến lớn (vài TB)", OLAP là "lớn, hàng trăm GB đến nhiều PB"[^azure-oltp-scale][^azure-olap-scale]. Đây là con số minh họa cho phân loại, *không phải giới hạn kỹ thuật* của từng loại engine (mục 8 cho thấy giới hạn máy đơn lớn hơn nhiều).
-- Chương này không đi vào hệ lai (một engine phục vụ cả hai tải) vì tập nguồn của P12 chưa có tài liệu ghim phiên bản cho chủ đề đó.
+- Chữ "OLAP" được dùng theo hai nghĩa. Trang của Microsoft mô tả mô hình ngữ nghĩa kiểu cube/star/snowflake, nơi cập nhật hoặc nối thêm dữ liệu thường phải *tính lại cube*[^olap-cube]. DuckDB thì dùng chữ này để chỉ *kiểu tải* (quét, tổng hợp), không nói đến cube[^duck-olap]. Khi đọc tài liệu, hãy hỏi: họ đang nói về mô hình dữ liệu (cube) hay về kiểu truy vấn?
+- Cũng trang đó gán quy mô OLTP là "nhỏ (MB) đến lớn (vài TB)"[^azure-oltp-scale]. Quy mô OLAP là "lớn, hàng trăm GB đến nhiều PB"[^azure-olap-scale]. Đây là con số minh họa cho phân loại, *không phải giới hạn kỹ thuật* của từng loại engine (mục 8 cho thấy giới hạn máy đơn lớn hơn nhiều).
+- Chương này không đi vào hệ lai (một engine phục vụ cả hai tải), vì tập nguồn của P12 chưa có tài liệu ghim phiên bản cho chủ đề đó.
 
 </details>
 
-**Quay lại Q1:** OLTP phục vụ từng giao dịch nhỏ cần đúng và nhanh; phân tích quét khối lớn cần thông lượng; hai tải đòi layout dữ liệu và tài nguyên khác nhau nên thực hành phổ biến là tách ra hai hệ thống.
+**Quay lại Q1:** với `shop`, OLTP phục vụ từng đơn hàng nhỏ, cần đúng và nhanh; báo cáo doanh thu quét khối lớn, cần thông lượng. Hai tải đòi layout dữ liệu và tài nguyên khác nhau, nên thực hành phổ biến là tách ra hai hệ thống.
 
 ## 2. ETL, ELT, system of record và derived data (Q2)
 
-> **Trả lời ngắn.** Để phân tích, dữ liệu phải được sao từ hệ vận hành sang nơi khác. ETL biến đổi dữ liệu *trước khi* nạp vào kho đích; ELT nạp nguyên liệu vào kho đích rồi biến đổi *ngay trong đó*[^elt-def]. Dù đi đường nào, bản trong kho là *derived data* (dữ liệu dẫn xuất) có thể dựng lại từ nguồn, còn nơi giữ bản gốc có thẩm quyền là *system of record*[^es-sor][^mv-disposable].
+> **Trả lời ngắn.** Muốn phân tích mà không làm nặng hệ vận hành, ta phải sao dữ liệu sang nơi khác. ETL biến đổi dữ liệu *trước khi* nạp vào kho đích, còn ELT nạp nguyên liệu vào kho đích rồi biến đổi *ngay trong đó*[^elt-def]. Dù đi đường nào, bản trong kho cũng là *derived data* (dữ liệu dẫn xuất), dựng lại được từ nguồn[^mv-disposable]. Nơi giữ bản gốc có thẩm quyền là *system of record*[^es-sor].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): sổ cái của cửa hàng là bản gốc; bảng doanh thu tuần dán lên tường là bản tính ra từ sổ cái. Nếu bảng tường sai, bạn *sửa sổ cái hoặc cách tính*, rồi tính lại bảng — không ai sửa tay bảng tường và coi đó là sự thật.
+*Với service `shop`.* Bảng `orders` trong Postgres là bản gốc. Bảng `revenue_by_region_week` trong kho phân tích là bản tính ra từ nó. Nếu một con số trên báo cáo sai, bạn sửa `orders` hoặc sửa cách tính rồi tính lại; không ai sửa tay bảng báo cáo và coi đó là sự thật (nhận xét của người soạn). Mục này trả lời hai câu hỏi: `shop` đưa dữ liệu sang kho bằng cách nào, và bản nào được coi là thật.
 
-*ETL.* Extract–transform–load là quy trình tích hợp dữ liệu gom từ nhiều nguồn vào một kho thống nhất; ở bước biến đổi dữ liệu bị sửa theo quy tắc kinh doanh bằng một engine chuyên dụng[^etl-def]. Việc biến đổi thường gồm lọc, sắp xếp, tổng hợp, join, làm sạch, khử trùng lặp và kiểm tra hợp lệ[^etl-def].
+### 2.1 Đưa dữ liệu sang kho: ETL và ELT
 
-*ELT.* Theo Microsoft, ELT khác ETL "chỉ ở nơi diễn ra phép biến đổi": nó xảy ra trong kho đích[^elt-def]. Lợi thế: bỏ được engine biến đổi riêng[^elt-simplify], và scale kho đích cũng scale luôn hiệu năng pipeline[^elt-scale]; điều kiện: kho đích đủ mạnh để biến đổi hiệu quả[^elt-condition]. Cùng trang lưu ý ELT không nhất thiết là truy vấn "ảo": có workload vẫn vật chất hóa bảng đã biến đổi[^elt-materialize].
+ETL (extract–transform–load) là quy trình gom dữ liệu từ nhiều nguồn vào một kho thống nhất. Ở bước biến đổi, dữ liệu bị sửa theo quy tắc kinh doanh bằng một engine chuyên dụng, thường gồm lọc, sắp xếp, tổng hợp, join, làm sạch, khử trùng lặp và kiểm tra hợp lệ[^etl-def]. Với `shop`, ETL nghĩa là: lấy đơn từ Postgres, bỏ đơn nháp, join với bảng khách hàng, cộng theo vùng, rồi mới nạp kết quả vào kho.
+
+ELT chỉ khác ETL ở nơi diễn ra phép biến đổi: nó xảy ra trong kho đích[^elt-def]. Với `shop`, ta nạp nguyên bảng `orders` vào kho rồi chạy SQL cộng theo vùng ngay tại đó. Cái lợi là bỏ được engine biến đổi riêng[^elt-simplify]. Ngoài ra, scale kho đích cũng kéo theo hiệu năng của pipeline[^elt-scale]. Đổi lại, kho đích phải đủ mạnh để biến đổi hiệu quả[^elt-condition]. Cùng trang cũng lưu ý ELT không nhất thiết là truy vấn "ảo": có workload vẫn vật chất hóa bảng đã biến đổi[^elt-materialize].
 
 ```mermaid
 flowchart LR
@@ -86,35 +88,41 @@ flowchart LR
 
 (Sơ đồ của người soạn, minh họa định nghĩa ETL/ELT ở trên.)
 
-*Pipeline là hệ thống cần vận hành.* Cách cổ điển để xử lý dữ liệu là viết chương trình đọc, biến đổi, xuất dữ liệu mới, thường chạy theo lịch của một bộ lập lịch định kỳ như cron; mẫu này gọi là data pipeline[^sre-pipeline]. Kinh nghiệm SRE của Google: mô hình pipeline định kỳ *mong manh* — lúc cài đặt thì tinh chỉnh kỹ nên chạy ổn, nhưng tăng trưởng hữu cơ làm lộ ra job vượt hạn, cạn tài nguyên, chunk bị treo[^sre-fragile]. Tài liệu Microsoft khuyên thiết kế song song hóa theo ranh giới phân vùng (ngày, tenant, shard key) để tránh tranh chấp ghi và cho phép *retry idempotent*[^etl-idem]. Idempotent (cách hiểu của người soạn): chạy lại cùng đầu vào cho cùng kết quả, không nhân đôi dòng — định nghĩa và các cơ chế ở [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md), mục 4.
+Chọn đường nào thì pipeline cũng là một hệ thống bạn phải vận hành. Cách cổ điển là viết chương trình đọc, biến đổi, xuất dữ liệu mới, thường chạy theo lịch của một bộ lập lịch định kỳ như cron; mẫu này gọi là data pipeline[^sre-pipeline]. Kinh nghiệm SRE của Google là mô hình pipeline chạy định kỳ rất *mong manh*: lúc cài đặt thì người ta tinh chỉnh kỹ nên chạy ổn, nhưng tăng trưởng hữu cơ làm lộ ra job vượt hạn, cạn tài nguyên, chunk bị treo[^sre-fragile]. Vì vậy Microsoft khuyên thiết kế song song hóa theo ranh giới phân vùng (ngày, tenant, shard key) để tránh tranh chấp ghi và cho phép *retry idempotent*[^etl-idem]. Idempotent (cách hiểu của người soạn): chạy lại cùng đầu vào thì cho cùng kết quả, không nhân đôi dòng. Định nghĩa và các cơ chế nằm ở [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md), mục 4.
 
-*System of record và derived data.* Tài liệu event sourcing của Microsoft gọi event store là "system of record", tức nguồn dữ liệu có thẩm quyền về trạng thái hiện tại[^es-sor]. Ngược lại, một materialized view (view đã được tính sẵn và lưu) và dữ liệu trong nó là "hoàn toàn bỏ đi được vì có thể dựng lại hoàn toàn từ kho nguồn"[^mv-disposable]. Kleppmann cũng nêu hệ quả thực tế của việc dùng log sự kiện làm gốc: index tìm kiếm hay view mới có thể dựng bằng cách đọc log từ đầu đến cuối[^olep-rebuild], và nếu bug ghi sự kiện sai thì các view dẫn xuất tính lại được[^olep-recover].
+### 2.2 Bản nào là thật
 
-Hệ quả kiến trúc (nhận xét của người soạn): (1) mỗi tập dữ liệu nên có *một* system of record được chỉ định rõ; mọi bản khác (warehouse, search index, cache) là derived; (2) sửa lỗi dữ liệu ở nguồn rồi để derived data được tính lại, thay vì vá từng bản; (3) xóa dữ liệu theo yêu cầu pháp lý phải lan tới *mọi* bản dẫn xuất — nội dung ở [Chương 14](14-trach-nhiem-voi-du-lieu.md). Nguồn thực tế của điểm (3): paper Delta Lake nêu rằng các tập dữ liệu về người dùng thường cần cập nhật toàn bảng để thực hiện chính sách riêng tư như GDPR[^delta-gdpr].
+Tài liệu event sourcing của Microsoft gọi event store là "system of record", tức nguồn dữ liệu có thẩm quyền về trạng thái hiện tại[^es-sor]. Ngược lại, materialized view (view đã được tính sẵn và lưu) cùng dữ liệu trong nó là "hoàn toàn bỏ đi được vì có thể dựng lại hoàn toàn từ kho nguồn"[^mv-disposable]. Kleppmann nêu hệ quả thực tế của việc lấy log sự kiện làm gốc: index tìm kiếm hay view mới có thể dựng bằng cách đọc log từ đầu đến cuối[^olep-rebuild]. Và nếu bug ghi sai sự kiện, các view dẫn xuất tính lại được[^olep-recover].
+
+Từ đó rút ra ba hệ quả kiến trúc cho `shop` (nhận xét của người soạn):
+
+1. Mỗi tập dữ liệu nên có *một* system of record được chỉ định rõ. Ở đây là `orders` trong Postgres; mọi bản khác (warehouse, search index, cache) là derived.
+2. Sửa lỗi dữ liệu ở nguồn rồi để derived data được tính lại, thay vì vá từng bản.
+3. Xóa dữ liệu theo yêu cầu pháp lý phải lan tới *mọi* bản dẫn xuất; nội dung ở [Chương 14](14-trach-nhiem-voi-du-lieu.md).
+
+Điểm thứ ba có nguồn thực tế: paper Delta Lake nêu rằng các tập dữ liệu về người dùng thường cần cập nhật toàn bảng để thực hiện chính sách riêng tư như GDPR[^delta-gdpr].
 
 <details><summary>Đi sâu: độ sâu pipeline, và dòng "ELT rồi ETL" trong kiến trúc hai tầng</summary>
 
 - SRE định nghĩa *pipeline depth* là số chương trình nối tiếp nhau trong pipeline: pipeline nông có một chương trình, pipeline sâu có hàng chục đến hàng trăm[^sre-depth]. Mỗi bậc là thêm một chỗ có thể trễ hoặc hỏng (suy luận của người soạn).
-- Paper Lakehouse mô tả hệ hai tầng: dữ liệu bị ETL vào lake, rồi lại ELT sang warehouse, "tạo ra phức tạp, độ trễ và kiểu lỗi mới"[^lh-etl-twice]. Đây là động lực để tìm kiến trúc ít bước sao chép hơn (mục 3).
+- Paper Lakehouse mô tả hệ hai tầng: dữ liệu bị ETL vào lake rồi lại ELT sang warehouse, "tạo ra phức tạp, độ trễ và kiểu lỗi mới"[^lh-etl-twice]. Đây là động lực để tìm kiến trúc ít bước sao chép hơn (mục 3).
 - Chương 10 và 11 nói cách *tính* derived data bằng batch và stream; chương 12 nói cách giữ chúng nhất quán với nguồn.
 
 </details>
 
-**Quay lại Q2:** ETL biến đổi trước khi nạp, ELT nạp rồi biến đổi trong kho đích; bản trong kho là dữ liệu dẫn xuất dựng lại được, còn gốc có thẩm quyền nằm ở system of record — nên sửa ở gốc rồi tính lại.
+**Quay lại Q2:** `shop` sao `orders` sang kho bằng ETL (biến đổi trước khi nạp) hoặc ELT (nạp rồi biến đổi trong kho đích). Bản trong kho là dữ liệu dẫn xuất dựng lại được, còn gốc có thẩm quyền nằm ở system of record, nên sửa ở gốc rồi tính lại.
 
 ## 3. Warehouse, lake, lakehouse (Q3)
 
-> **Trả lời ngắn.** Data warehouse là kho tập trung, gom dữ liệu từ các hệ vận hành để phục vụ báo cáo và hỗ trợ ra quyết định[^lh-gen1]. Data lake là kho lưu trữ rẻ có API file, chứa dữ liệu thô ở định dạng mở như Parquet[^lh-gen2]. Lakehouse là mô hình do các tác giả paper CIDR 2021 đề xuất: đặt lớp quản lý kiểu warehouse (transaction, hiệu năng) *lên trên* dữ liệu mở của lake[^lh-def][^lh-nonatomic]. Đây là *luận điểm* của một nhóm thuộc một vendor, không phải sự thật đã được thống nhất (xem phần Đi sâu).
+> **Trả lời ngắn.** Data warehouse là kho tập trung, gom dữ liệu từ các hệ vận hành để phục vụ báo cáo và hỗ trợ ra quyết định[^lh-gen1]. Data lake là kho lưu trữ giá rẻ có API file, chứa dữ liệu thô ở định dạng mở như Parquet[^lh-gen2]. Lakehouse là mô hình do các tác giả paper CIDR 2021 đề xuất: đặt lớp quản lý kiểu warehouse (transaction, hiệu năng) *lên trên* dữ liệu mở của lake[^lh-def]. Cần nhớ đây là *luận điểm* của một nhóm làm ở một vendor, không phải sự thật đã được thống nhất (xem phần Đi sâu).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): warehouse là thư viện đã phân loại — sách vào kệ theo đúng danh mục, tìm nhanh nhưng nhập sách mới phải xử lý trước; lake là nhà kho đổ mọi thùng hàng vào — lưu gì cũng được nhưng tìm lại phải tự biết cách; lakehouse là nhà kho có thêm sổ đăng ký chuẩn: hàng vẫn để nguyên thùng nhưng ai cũng tra sổ để biết hàng nào hợp lệ.
+*Với service `shop`.* Dữ liệu của `shop` không dừng ở `orders`. Còn log tìm kiếm, clickstream, ảnh sản phẩm, đánh giá của khách. Câu hỏi của mục này: cất tất cả ở đâu để vừa lên được báo cáo doanh thu, vừa cho team ML dùng? Paper *Lakehouse* kể lịch sử câu trả lời theo ba thế hệ (Hình 1 của paper).
 
-Paper *Lakehouse* kể lịch sử theo ba thế hệ (Hình 1 của paper):
-
-1. **Thế hệ một — warehouse.** Lịch sử data warehousing bắt đầu bằng việc gom dữ liệu từ cơ sở dữ liệu vận hành vào kho tập trung để hỗ trợ quyết định và BI (business intelligence); dữ liệu ghi theo *schema-on-write*, nghĩa là ép về mô hình đã thiết kế *khi ghi*[^lh-gen1]. Hai vấn đề: compute và storage gắn thành một thiết bị on-premises khiến doanh nghiệp phải mua theo đỉnh tải và đỉnh dữ liệu[^lh-coupled]; và dữ liệu phi cấu trúc (video, âm thanh, văn bản) không lưu truy vấn được[^lh-unstructured].
-2. **Thế hệ hai — data lake.** Đổ dữ liệu thô vào lake: hệ lưu trữ giá thấp có API file, dùng định dạng mở như Parquet và ORC[^lh-gen2]. Lake là *schema-on-read* (áp cấu trúc khi *đọc*): linh hoạt lưu mọi thứ rẻ, nhưng đẩy bài toán chất lượng và quản trị dữ liệu về phía sau[^lh-schema-read]. Từ 2015, lake trên đám mây như S3, ADLS, GCS thay HDFS, với độ bền cao và chi phí rất thấp[^lh-cloud-lake].
-3. **Hệ hai tầng hiện hành.** Một phần dữ liệu trong lake lại được ETL sang warehouse cho các ứng dụng quan trọng nhất[^lh-twotier-etl]; các tác giả viết rằng theo kinh nghiệm của họ kiến trúc lake + warehouse hai tầng này đang thống trị công nghiệp[^lh-twotier] (đây là lời của tác giả, không phải khảo sát).
+1. **Thế hệ một: warehouse.** Data warehousing bắt đầu từ việc gom dữ liệu của các database vận hành vào kho tập trung để hỗ trợ quyết định và BI (business intelligence). Dữ liệu ghi theo *schema-on-write*, nghĩa là bị ép về mô hình đã thiết kế ngay *lúc ghi*[^lh-gen1]. Với `shop`, `orders` phải được làm sạch và khớp schema của kho trước khi vào (minh họa của người soạn). Kiểu này có hai vấn đề. Một là compute và storage gắn thành một thiết bị on-premises, nên doanh nghiệp phải mua theo đỉnh tải và đỉnh dữ liệu[^lh-coupled]. Hai là dữ liệu phi cấu trúc (video, âm thanh, văn bản) không lưu truy vấn được[^lh-unstructured].
+2. **Thế hệ hai: data lake.** Thay vì ép schema, ta đổ dữ liệu thô vào lake: hệ lưu trữ giá thấp có API file, dùng định dạng mở như Parquet và ORC[^lh-gen2]. Lake là *schema-on-read* (áp cấu trúc khi *đọc*): lưu gì cũng được và rẻ, nhưng đẩy bài toán chất lượng và quản trị dữ liệu về phía sau[^lh-schema-read]. Từ 2015, lake trên đám mây như S3, ADLS, GCS bắt đầu thay HDFS[^lh-cloud-lake].
+3. **Hệ hai tầng hiện hành.** Một phần dữ liệu trong lake lại được ETL sang warehouse cho các ứng dụng quan trọng nhất[^lh-twotier-etl]. Các tác giả viết rằng, theo kinh nghiệm của họ, kiến trúc lake + warehouse hai tầng này đang thống trị công nghiệp[^lh-twotier]. Đó là lời của tác giả, không phải khảo sát.
 
 ```mermaid
 flowchart TB
@@ -135,31 +143,33 @@ flowchart TB
 
 (Sơ đồ rút gọn theo Hình 1 của paper; vẽ lại bằng chữ của người soạn.)
 
-Bốn vấn đề paper gán cho kiến trúc hai tầng: độ tin cậy (giữ lake và warehouse nhất quán khó và tốn kém), dữ liệu cũ (warehouse trễ so với lake), hỗ trợ phân tích nâng cao hạn chế (ML cần đọc dữ liệu lớn bằng mã không phải SQL), và tổng chi phí sở hữu (trả hai lần chi phí lưu trữ, bị khóa vào định dạng độc quyền)[^lh-four][^lh-tco]. Định nghĩa lakehouse của paper: mô hình đặc trưng bởi (i) định dạng mở truy cập trực tiếp như Parquet và ORC, (ii) hỗ trợ hạng nhất cho ML và data science, (iii) hiệu năng hiện đại[^lh-def].
+Paper gán bốn vấn đề cho kiến trúc hai tầng: độ tin cậy (giữ lake và warehouse nhất quán khó và tốn kém), dữ liệu cũ (warehouse trễ so với lake), hỗ trợ phân tích nâng cao hạn chế (ML cần đọc dữ liệu lớn bằng mã không phải SQL) và tổng chi phí sở hữu[^lh-four]. Riêng chi phí, paper nói cụ thể là trả hai lần chi phí lưu trữ cho dữ liệu sao sang warehouse, và bị khóa vào định dạng độc quyền của warehouse thương mại[^lh-tco]. Vì thế lakehouse được định nghĩa là mô hình đặc trưng bởi (i) định dạng mở truy cập trực tiếp như Parquet và ORC, (ii) hỗ trợ hạng nhất cho ML và data science, (iii) hiệu năng hiện đại[^lh-def].
 
-Điều kiện kỹ thuật để lakehouse khả thi, theo paper, là lớp metadata đặt trên lưu trữ lake: S3 hay HDFS chỉ có giao diện object/file mức thấp, trong đó ngay cả cập nhật một bảng trải trên nhiều file cũng không nguyên tử[^lh-nonatomic]. Mục 5 và 6 mổ xẻ chính điều này.
+Điều kiện kỹ thuật để làm được vậy, theo paper, là một lớp metadata đặt trên lưu trữ của lake. Lý do: S3 hay HDFS chỉ có giao diện object/file mức thấp, trong đó ngay cả việc cập nhật một bảng trải trên nhiều file cũng không nguyên tử[^lh-nonatomic]. Với `shop`, nghĩa là nạp một batch đơn hàng gồm nhiều file thì reader có thể thấy batch dở dang. Mục 5 và 6 mổ xẻ chính điều này.
 
 <details><summary>Đi sâu: đọc paper Lakehouse với con mắt phản biện</summary>
 
-- Các tác giả làm việc ở Databricks và Berkeley/Stanford[^lh-authors]. Paper là bài *lập luận* ("lập luận rằng kiến trúc warehouse hiện nay sẽ suy yếu")[^lh-abstract], đi kèm kết quả TPC-DS của một hệ dùng Parquet có hiệu năng cạnh tranh với warehouse đám mây phổ biến[^lh-tpcds]. Nhận xét của người soạn: đọc như một đề xuất thiết kế có động cơ thương mại, đối chiếu với nhu cầu thực tế của mình, không như kết luận trung lập. Chương này dùng paper chủ yếu để *mô tả thế hệ và vấn đề*, và dùng spec Iceberg/Delta (mục 6) để mô tả cơ chế.
-- Paper cũng nêu phương án "bỏ lake, chỉ dùng warehouse có tách compute/storage" (tự gọi là giải pháp *straw-man*) nhưng cho rằng khả năng ứng dụng hạn chế vì không quản lý dễ dữ liệu video/audio/văn bản và không cho ML đọc trực tiếp nhanh[^lh-strawman].
-- Với ứng dụng *một dịch vụ backend nhỏ*, câu hỏi thực tế thường không phải "chọn lakehouse hay warehouse" mà "có cần kho phân tích riêng chưa" — đối chiếu mục 8.
+- Các tác giả làm việc ở Databricks và Berkeley/Stanford[^lh-authors]. Paper là bài *lập luận*: nó "lập luận rằng kiến trúc warehouse hiện nay sẽ suy yếu"[^lh-abstract]. Kèm theo là kết quả TPC-DS của một hệ dùng Parquet có hiệu năng cạnh tranh với warehouse đám mây phổ biến[^lh-tpcds]. Nhận xét của người soạn: nên đọc nó như một đề xuất thiết kế có động cơ thương mại, đối chiếu với nhu cầu thực tế của mình, chứ không như kết luận trung lập. Chương này dùng paper chủ yếu để *mô tả thế hệ và vấn đề*, còn cơ chế thì lấy từ spec Iceberg/Delta (mục 6).
+- Paper cũng nêu phương án "bỏ lake, chỉ dùng warehouse có tách compute/storage" và tự gọi là giải pháp *straw-man*. Họ cho rằng khả năng ứng dụng của nó hạn chế vì không quản lý dễ dữ liệu video/audio/văn bản và không cho ML đọc trực tiếp nhanh[^lh-strawman].
+- Với một service backend nhỏ như `shop`, câu hỏi thực tế thường không phải "chọn lakehouse hay warehouse" mà là "đã cần kho phân tích riêng chưa"; đối chiếu mục 8 (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q3:** warehouse tối ưu cho BI nhưng đắt và đóng; lake rẻ và mở nhưng thiếu quản trị; lakehouse cố giữ định dạng mở của lake và thêm transaction/hiệu năng của warehouse — một luận điểm có cơ chế kỹ thuật cụ thể (mục 5–6) nhưng đến từ một vendor.
+**Quay lại Q3:** warehouse tối ưu cho BI nhưng đắt và đóng; lake rẻ và mở nhưng thiếu quản trị; lakehouse cố giữ định dạng mở của lake và thêm transaction/hiệu năng của warehouse. Đó là một luận điểm có cơ chế kỹ thuật cụ thể (mục 5–6) nhưng đến từ một vendor.
 
 ## 4. Parquet và định dạng file cột (Q4)
 
-> **Trả lời ngắn.** Parquet là định dạng file lưu theo cột, hỗ trợ dữ liệu lồng nhau[^pq-def]. Một file chia thành các row group, mỗi row group có đúng một column chunk cho mỗi cột, mỗi chunk chia thành page[^pq-hier]; metadata nằm cuối file nên reader đọc metadata trước rồi chỉ lấy đúng các column chunk cần[^pq-footer][^pq-read]. Nhờ vậy truy vấn chỉ đọc cột nó cần, và nén/mã hóa chọn riêng cho từng cột[^pq-percol]. Arrow là định dạng *trong bộ nhớ* ưu tiên hiệu quả tính toán, Parquet ưu tiên hiệu quả lưu trữ[^pq-vs-arrow].
+> **Trả lời ngắn.** Parquet là định dạng file lưu theo cột, hỗ trợ cả dữ liệu lồng nhau[^pq-def]. Một file chia thành các row group, mỗi row group có đúng một column chunk cho mỗi cột, và mỗi chunk chia thành các page[^pq-hier]. Metadata nằm cuối file, nên reader đọc metadata trước rồi chỉ lấy đúng các column chunk cần[^pq-footer]. Nhờ vậy truy vấn chỉ đọc cột nó cần, và nén/mã hóa được chọn riêng cho từng cột[^pq-percol]. Arrow là định dạng *trong bộ nhớ* ưu tiên hiệu quả tính toán, còn Parquet ưu tiên hiệu quả lưu trữ[^pq-vs-arrow].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảng tính 200 cột, 100 triệu dòng, bạn chỉ cần tính tổng cột "doanh thu". Lưu theo hàng thì phải đọc qua cả 200 ô của mỗi dòng; lưu theo cột thì đọc đúng một "băng" doanh thu liền nhau. Lý do và kỹ thuật bên trong engine (nén theo cột, ghi vào kho cột, late materialization) nằm ở [Chương 03](03-storage-engine.md); ở đây ta nhìn một *file* cột nằm trên object storage.
+*Với service `shop`.* Giả sử `shop` xuất `orders` ra file, bảng có hàng chục cột, hàng trăm triệu dòng, mà báo cáo doanh thu chỉ cần cộng cột `amount` theo cột `region`. Lưu theo hàng thì phải đọc qua mọi cột của từng dòng; lưu theo cột thì chỉ đọc đúng hai "băng" `region` và `amount` (nhận xét của người soạn). Lý do và kỹ thuật bên trong engine (nén theo cột, ghi vào kho cột, late materialization) nằm ở [Chương 03](03-storage-engine.md). Ở đây ta nhìn một *file* cột nằm trên object storage.
 
-*Cấu trúc.* Phân cấp file → row group → column chunk → page đã được mô tả ở [Chương 03](03-storage-engine.md) (mục 8); ở đây chỉ giữ điều cần cho object storage: file gồm một hay nhiều row group, mỗi row group có đúng một column chunk cho mỗi cột[^pq-hier], và column chunk của một cột trong một row group được bảo đảm liền nhau trong file[^pq-glossary] — nên đọc trọn một chunk có thể là một lượt đọc theo khoảng byte (suy luận của người soạn).
+### 4.1 Cấu trúc file
 
-*Footer.* Layout file: magic `PAR1`, lần lượt các column chunk, rồi *file metadata*, độ dài metadata, và `PAR1` một lần nữa. Metadata được ghi sau dữ liệu để cho phép ghi một lượt[^pq-footer]. Reader đọc metadata trước để tìm các column chunk quan tâm, rồi đọc các chunk đó[^pq-read]. Metadata mã hóa bằng Apache Thrift[^pq-thrift].
+Phân cấp file → row group → column chunk → page đã được mô tả ở [Chương 03](03-storage-engine.md) (mục 8). Ở đây chỉ giữ điều cần cho object storage. File gồm một hay nhiều row group, và mỗi row group có đúng một column chunk cho mỗi cột[^pq-hier]. Column chunk của một cột trong một row group được bảo đảm nằm liền nhau trong file[^pq-glossary], nên đọc trọn một chunk có thể chỉ là một lượt đọc theo khoảng byte (suy luận của người soạn).
+
+Layout file là: magic `PAR1`, lần lượt các column chunk, rồi file metadata, độ dài metadata, và `PAR1` một lần nữa. Metadata được ghi sau dữ liệu để cho phép ghi một lượt[^pq-footer]. Reader đọc metadata trước để tìm các column chunk quan tâm, rồi mới đọc các chunk đó[^pq-read]. Bản thân metadata mã hóa bằng Apache Thrift[^pq-thrift].
 
 ```mermaid
 flowchart LR
@@ -179,66 +189,73 @@ flowchart LR
   end
 ```
 
-(Sơ đồ của người soạn theo layout ở đoạn *Footer*; chỉ vẽ hai row group và ba cột cho gọn.)
+(Sơ đồ của người soạn theo layout ở đoạn trên; chỉ vẽ hai row group và ba cột cho gọn.)
 
-*Bỏ bớt việc đọc.* Hai cách: **chiếu cột** (projection: chỉ đọc cột cần) nhờ metadata chỉ vị trí từng column chunk; và **cắt tỉa** (pruning: bỏ phần dữ liệu không thể khớp) nhờ thống kê min/max Parquet lưu ở nhiều cấp (column chunk, column index, data page)[^pq-minmax]. README nói thống kê có thể dùng để pruning[^pq-prune] và file có thể kèm column index để reader bỏ qua page hiệu quả hơn[^pq-skip]; cách dùng điển hình là bỏ cả row group có khoảng min/max không chứa giá trị đang tìm (suy luận của người soạn). Snowflake mô tả cùng ý trên S3: vì S3 cho GET theo khoảng byte của file, truy vấn chỉ tải header và các cột nó cần[^snow-range]. Nén/mã hóa chọn riêng từng cột: xem [Chương 03](03-storage-engine.md), mục 8.
+### 4.2 Đọc ít hơn
 
-*Parquet và Arrow.* Docs crate `parquet` nói Parquet giống Arrow về tinh thần nhưng tập trung hiệu quả lưu trữ, còn Arrow ưu tiên hiệu quả tính toán[^pq-vs-arrow]. Đặc tả Arrow cho biết: định dạng cột Arrow đổi hiệu năng phân tích và tính cục bộ dữ liệu lấy chi phí thay đổi (mutation) cao hơn[^arrow-tradeoff]. Nhận xét của người soạn: vì vậy pipeline điển hình là *lưu* ở Parquet, *nạp* thành Arrow `RecordBatch` để tính trong RAM.
+Có hai cách bỏ bớt việc đọc. Cách thứ nhất là **chiếu cột** (projection): chỉ đọc cột cần, nhờ metadata chỉ rõ vị trí từng column chunk. Với báo cáo của `shop`, reader chỉ lấy hai chunk `region` và `amount` trong mỗi row group. Cách thứ hai là **cắt tỉa** (pruning): bỏ phần dữ liệu không thể khớp, nhờ thống kê min/max mà Parquet lưu ở nhiều cấp (column chunk, column index, data page)[^pq-minmax]. README nói thống kê có thể dùng để pruning[^pq-prune]. File cũng có thể kèm column index để reader bỏ qua page hiệu quả hơn[^pq-skip]. Cách dùng điển hình là bỏ cả row group có khoảng min/max không chứa giá trị đang tìm (suy luận của người soạn).
+
+Snowflake mô tả cùng ý trên S3: vì S3 cho GET theo khoảng byte của file, truy vấn chỉ tải header và các cột nó cần[^snow-range]. Còn việc nén/mã hóa chọn riêng từng cột thì xem [Chương 03](03-storage-engine.md), mục 8.
+
+### 4.3 Parquet và Arrow
+
+Docs crate `parquet` nói Parquet giống Arrow về tinh thần nhưng tập trung vào hiệu quả lưu trữ, còn Arrow ưu tiên hiệu quả tính toán[^pq-vs-arrow]. Đặc tả Arrow cho biết định dạng cột của nó đổi hiệu năng phân tích và tính cục bộ dữ liệu lấy chi phí thay đổi (mutation) cao hơn[^arrow-tradeoff]. Vì vậy pipeline điển hình *lưu* ở Parquet rồi *nạp* thành Arrow `RecordBatch` để tính trong RAM (nhận xét của người soạn).
 
 <details><summary>Đi sâu: kiểu dữ liệu tối thiểu, nested, kích thước row group, tách metadata khỏi dữ liệu</summary>
 
-- Parquet cố ý giữ tập kiểu vật lý tối thiểu: ví dụ không có số nguyên 16 bit vì đã được 32 bit cùng mã hóa hiệu quả bao phủ[^pq-types]; kiểu logic (như chuỗi UTF8 trên byte array) chỉ là chú thích diễn giải[^pq-logical].
-- Dữ liệu lồng nhau dùng thuật toán record shredding/assembly mô tả trong paper Dremel, được README cho là tốt hơn việc "làm phẳng" không gian tên[^pq-dremel].
-- README khuyến nghị row group lớn (512MB–1GB) vì row group lớn cho column chunk lớn, tức I/O tuần tự lớn hơn[^pq-rg-benefit][^pq-rg-recommend]. Lưu ý đây là khuyến nghị gắn với HDFS (cùng đoạn nói row group nên nằm trọn một HDFS block)[^pq-rg-hdfs]; trên object storage đo lại theo workload mình (nhận xét của người soạn).
-- Thiết kế *tách metadata khỏi dữ liệu*: cho phép chia cột ra nhiều file, hoặc một file metadata tham chiếu nhiều file Parquet[^pq-sep]. Ý tưởng này là tiền đề để table format (mục 6) quản lý "bảng gồm nhiều file".
-- Quy tắc so sánh min/max có chi tiết riêng cho NaN và ±0 (spec ghi cụ thể và coi định nghĩa Thrift là có thẩm quyền)[^pq-nan]; engine tự viết cần tuân theo để pruning không loại nhầm.
+- Parquet cố ý giữ tập kiểu vật lý tối thiểu. Ví dụ không có số nguyên 16 bit, vì số nguyên 32 bit cùng một mã hóa hiệu quả đã bao phủ nó[^pq-types]. Kiểu logic (như chuỗi UTF8 trên byte array) chỉ là chú thích diễn giải[^pq-logical].
+- Dữ liệu lồng nhau dùng thuật toán record shredding/assembly mô tả trong paper Dremel, mà README cho là tốt hơn việc "làm phẳng" không gian tên[^pq-dremel].
+- README khuyến nghị row group lớn, 512MB–1GB[^pq-rg-recommend]. Lý do: row group lớn cho column chunk lớn, tức I/O tuần tự lớn hơn[^pq-rg-benefit]. Khuyến nghị này gắn với HDFS, vì cùng đoạn nói row group nên nằm trọn một HDFS block[^pq-rg-hdfs]. Trên object storage thì đo lại theo workload của mình (nhận xét của người soạn).
+- Thiết kế *tách metadata khỏi dữ liệu* cho phép chia cột ra nhiều file, hoặc để một file metadata tham chiếu nhiều file Parquet[^pq-sep]. Ý tưởng này là tiền đề để table format (mục 6) quản lý "bảng gồm nhiều file".
+- Quy tắc so sánh min/max có chi tiết riêng cho NaN và ±0; spec ghi cụ thể và coi định nghĩa Thrift là có thẩm quyền[^pq-nan]. Engine tự viết cần tuân theo để pruning không loại nhầm.
 
 </details>
 
-**Quay lại Q4:** Parquet = file cột có footer metadata và thống kê, cho phép chỉ đọc cột và row group cần từ object storage; Arrow là dạng trong RAM để tính, Parquet là dạng để lưu.
+**Quay lại Q4:** Parquet là file cột có footer metadata và thống kê, nên `shop` chỉ cần đọc các cột và row group cần từ object storage. Arrow là dạng trong RAM để tính, Parquet là dạng để lưu.
 
 ## 5. Object storage: bảo đảm gì, không bảo đảm gì (Q5)
 
-> **Trả lời ngắn.** Amazon S3 cung cấp read-after-write *mạnh* cho PUT và DELETE đối tượng[^s3-strong], cập nhật một khóa là nguyên tử[^s3-atomic-key], nhưng *không có* cập nhật nguyên tử xuyên nhiều khóa[^s3-nocross] và không có khóa đối tượng cho nhiều người ghi đồng thời[^s3-nolock]. Đối tượng thường chỉ thay được cả khối[^delta-whole], đọc theo khoảng byte được[^snow-range]. Chính những hạn chế này quyết định thiết kế của table format ở mục 6.
+> **Trả lời ngắn.** Amazon S3 cho read-after-write *mạnh* với PUT và DELETE đối tượng[^s3-strong]. Cập nhật một khóa là nguyên tử[^s3-atomic-key]. Nhưng nó *không có* cập nhật nguyên tử xuyên nhiều khóa[^s3-nocross]. Nó cũng không có khóa đối tượng cho nhiều người ghi đồng thời[^s3-nolock]. Đối tượng thường chỉ thay được cả khối[^delta-whole]. Đọc theo khoảng byte thì được[^snow-range]. Chính những hạn chế này quyết định thiết kế của table format ở mục 6.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tủ gửi đồ có số. Bạn cất một túi vào ô 42 — lấy ra lúc nào cũng thấy đúng túi bạn vừa cất. Nhưng nếu muốn "đổi đồng thời ô 42 và ô 43 sao cho không ai thấy trạng thái nửa vời" thì tủ không có thao tác đó; còn nếu hai người cùng cất vào ô 42 thì tủ không hỏi ý ai.
+*Với service `shop`.* Giả sử `shop` ghi các file Parquet lên S3. Có ba tình huống `shop` sẽ gặp. Ghi xong một file rồi đọc lại ngay, có thấy đúng bản vừa ghi không? Ghi một lúc nhiều file, reader có thể thấy trạng thái nửa vời không? Hai instance `shop` cùng ghi một khóa thì chuyện gì xảy ra? Phần dưới trả lời lần lượt, theo đúng những gì docs AWS hứa.
 
-*Mô hình dữ liệu.* S3 lưu dữ liệu dưới dạng *object* trong *bucket*; object là một file cùng metadata mô tả nó[^s3-model]. Khóa (key) nhìn như đường dẫn nhưng không phải cây thư mục (nhận xét của người soạn; xem thêm `object_store` ở phần Rust).
+*Mô hình dữ liệu.* S3 lưu dữ liệu dưới dạng *object* trong *bucket*; object là một file cùng metadata mô tả nó[^s3-model]. Khóa (key) trông như đường dẫn nhưng không phải cây thư mục (nhận xét của người soạn; xem thêm `object_store` ở phần Rust).
 
-*Nhất quán.* Tài liệu AWS: read-after-write mạnh cho PUT/DELETE trong mọi Region, áp dụng cả cho object mới lẫn PUT ghi đè và DELETE[^s3-strong]. Sau khi xóa object rồi liệt kê khóa ngay, object không xuất hiện trong danh sách[^s3-list]. Cập nhật một khóa là nguyên tử: một thread PUT đè trong khi thread khác GET cùng khóa thì sẽ thấy dữ liệu cũ hoặc mới, không thấy nửa vời[^s3-atomic-key].
+*Những gì S3 bảo đảm.* Với tình huống đầu tiên, AWS ghi rõ read-after-write mạnh cho PUT/DELETE trong mọi Region, áp dụng cả cho object mới lẫn PUT ghi đè và DELETE[^s3-strong]. Xóa object rồi liệt kê khóa ngay thì object không còn trong danh sách[^s3-list]. Cập nhật một khóa cũng là nguyên tử: nếu một thread PUT đè trong khi thread khác GET cùng khóa, thread GET thấy dữ liệu cũ hoặc mới, không bao giờ thấy nửa vời[^s3-atomic-key].
 
-*Không có gì.* Cập nhật tính theo khóa; không có cách làm nguyên tử xuyên khóa, nên muốn cập nhật khóa này phụ thuộc khóa kia thì phải tự thiết kế trong ứng dụng[^s3-nocross]. S3 không hỗ trợ khóa đối tượng cho nhiều writer đồng thời: hai PUT cùng lúc vào cùng một khóa thì request có timestamp muộn hơn thắng, và nếu đó là vấn đề thì phải tự xây cơ chế khóa[^s3-nolock]. Cấu hình bucket có mô hình nhất quán *cuối cùng* (eventual) chứ không mạnh[^s3-bucket].
+*Những gì S3 không làm.* Cập nhật chỉ tính theo khóa, không có cách làm nguyên tử xuyên khóa. Nếu khóa này phụ thuộc khóa kia thì bạn phải tự thiết kế trong ứng dụng[^s3-nocross]. Với `shop`, ghi một batch mười file và muốn reader thấy cả mười hoặc không file nào là đúng loại việc này (nhận xét của người soạn). Tình huống thứ ba cũng không được bảo vệ: S3 không hỗ trợ khóa đối tượng cho nhiều writer đồng thời. Hai PUT cùng lúc vào cùng một khóa thì request có timestamp muộn hơn thắng, và nếu đó là vấn đề thì phải tự xây cơ chế khóa[^s3-nolock]. Ngoài ra, cấu hình bucket có mô hình nhất quán *cuối cùng* (eventual) chứ không mạnh[^s3-bucket].
 
-*Ghi có điều kiện.* AWS có *conditional writes*: thêm header `If-None-Match` hoặc `If-Match` vào request ghi[^s3-cw]; `If-None-Match` ngăn ghi đè khi đã có object cùng khóa[^s3-cw]; nếu nhiều ghi có điều kiện cùng khóa thì ghi hoàn tất đầu tiên thành công, các ghi sau nhận `412 Precondition Failed`[^s3-first]. Docs còn nói có thể nhận `409 Conflict` khi có request đồng thời (ví dụ một delete hoàn tất trước khi ghi có điều kiện xong)[^s3-409], nên client cần xử lý cả hai mã (suy luận của người soạn). `If-None-Match` là "tạo nếu chưa có" và `If-Match` so ETag là compare-and-swap trên *một* khóa — nguyên liệu để dựng commit trên object storage (mục 6; nối nguồn là suy luận của người soạn). Chương [09](09-consistency-va-consensus.md) nói compare-and-swap nằm ở đâu trong bức tranh đồng thuận.
+*Ghi có điều kiện.* Có một công cụ để hai writer không đè nhau: *conditional writes*. Bạn thêm header `If-None-Match` hoặc `If-Match` vào request ghi; `If-None-Match` ngăn ghi đè khi đã có object cùng khóa[^s3-cw]. Nếu nhiều ghi có điều kiện cùng khóa thì ghi hoàn tất đầu tiên thành công, các ghi sau nhận `412 Precondition Failed`[^s3-first]. Docs còn nói có thể nhận `409 Conflict` khi có request đồng thời, ví dụ một delete hoàn tất trước khi ghi có điều kiện xong[^s3-409]; vì vậy client cần xử lý cả hai mã (suy luận của người soạn). Hiểu theo cách dùng: `If-None-Match` là "tạo nếu chưa có", còn `If-Match` so ETag là compare-and-swap trên *một* khóa. Đó là nguyên liệu để dựng commit trên object storage (mục 6; việc nối nguồn này là suy luận của người soạn). Chương [09](09-consistency-va-consensus.md) nói compare-and-swap nằm ở đâu trong bức tranh đồng thuận.
 
-*Hình dạng đối tượng.* Paper Delta Lake: cập nhật object thường cần ghi lại cả object; các cập nhật này có thể làm nguyên tử để reader thấy hoặc bản mới hoặc bản cũ[^delta-whole][^delta-atomic-obj]. Snowflake mô tả trên S3 điều tương tự: không thể append vào cuối file[^snow-noappend]. Delta paper cũng nêu thao tác metadata như *liệt kê object* tốn kém[^delta-list]; thư viện `object_store` của Rust ghi trong source rằng một lượt liệt kê có thể bị giới hạn 1.000 object theo hạn chế của kho lưu trữ nền[^os-list].
+*Hình dạng đối tượng.* Paper Delta Lake nói cập nhật object thường cần ghi lại cả object[^delta-whole]. Các cập nhật này có thể làm nguyên tử, để reader thấy hoặc bản mới hoặc bản cũ[^delta-atomic-obj]. Snowflake mô tả trên S3 điều tương tự: không thể append vào cuối file[^snow-noappend]. Với `shop`, nghĩa là muốn thêm dòng vào một file Parquet đã có thì phải ghi lại cả file hoặc ghi file mới (suy luận của người soạn). Paper Delta cũng nêu thao tác metadata như liệt kê object tốn kém[^delta-list].
 
-<details><summary>Đi sâu: "S3 từng nhất quán cuối cùng" và khác biệt giữa các nhà cung cấp</summary>
+<details><summary>Đi sâu: "S3 từng nhất quán cuối cùng", khác biệt giữa các nhà cung cấp, và giới hạn của một lượt liệt kê</summary>
 
-- Paper Delta Lake viết rằng các object store cài đặt dạng key-value khiến khó đạt ACID và hiệu năng cao: thao tác metadata như liệt kê đắt, bảo đảm nhất quán hạn chế[^delta-abs]. Câu này là của tác giả *tại thời điểm viết paper*; bảo đảm hiện hành của S3 là chuỗi đã trích từ docs AWS ở trên. Không suy ra điều đó cho kho khác: đọc tài liệu đúng nhà cung cấp và đúng loại bucket (nhận xét của người soạn).
-- Một số nhà cung cấp phủ giao diện hệ file lên blob storage (ví dụ ADLS Gen2 của Azure), với ngữ nghĩa gần HDFS[^delta-adls]. Đừng gộp chúng với S3 khi nói "object storage bảo đảm gì".
-- Chương Iceberg spec nói rõ bộ yêu cầu tối thiểu với file system: ghi tại chỗ (file không bị di chuyển/sửa sau khi ghi), đọc có seek, và xóa; các yêu cầu này tương thích với object store như S3[^ice-fsops].
+- Paper Delta Lake viết rằng các object store cài đặt dạng key-value khiến khó đạt ACID và hiệu năng cao: thao tác metadata như liệt kê đắt, bảo đảm nhất quán hạn chế[^delta-abs]. Câu này là của tác giả *tại thời điểm viết paper*; bảo đảm hiện hành của S3 là chuỗi đã trích từ docs AWS ở trên. Đừng suy ra điều đó cho kho khác: hãy đọc tài liệu đúng nhà cung cấp và đúng loại bucket (nhận xét của người soạn).
+- Một số nhà cung cấp phủ giao diện hệ file lên blob storage, ví dụ ADLS Gen2 của Azure, với ngữ nghĩa gần HDFS[^delta-adls]. Đừng gộp chúng với S3 khi nói "object storage bảo đảm gì".
+- Iceberg spec nêu rõ bộ yêu cầu tối thiểu với file system: ghi tại chỗ (file không bị di chuyển hay sửa sau khi ghi), đọc có seek, và xóa. Các yêu cầu này tương thích với object store như S3[^ice-fsops].
+- Thư viện `object_store` của Rust ghi trong source rằng một lượt liệt kê có thể bị giới hạn 1.000 object theo hạn chế của kho lưu trữ nền[^os-list].
 
 </details>
 
-**Quay lại Q5:** S3 cho read-after-write mạnh và PUT nguyên tử theo từng khóa, có ghi có điều kiện, nhưng không có nguyên tử xuyên khóa và không khóa đối tượng cho nhiều writer — mọi thứ "giống database" phải xây lên trên.
+**Quay lại Q5:** S3 cho read-after-write mạnh và PUT nguyên tử theo từng khóa, lại có ghi có điều kiện; nhưng không có nguyên tử xuyên khóa và không khóa đối tượng cho nhiều writer. Nên mọi thứ "giống database" mà `shop` cần đều phải xây lên trên.
 
 ## 6. Table format mở: Iceberg và Delta (Q6)
 
-> **Trả lời ngắn.** Table format là một đặc tả quy định cách *một bảng* được ghi thành tập file bất biến cộng với metadata, sao cho engine nào đọc spec cũng đọc được. Iceberg theo dõi từng data file riêng lẻ thay vì thư mục[^ice-files-not-dirs]; mỗi thay đổi tạo file metadata mới và thay file cũ bằng một "hoán đổi nguyên tử"[^ice-atomic-swap]. Delta ghi mỗi phiên bản bảng thành một entry trong log giao dịch, và không bao giờ ghi đè entry có sẵn[^delta-never-overwrite]. Cả hai dùng optimistic concurrency: ghi trước, đụng độ thì thử lại[^ice-occ][^delta-twophase].
+> **Trả lời ngắn.** Table format là một đặc tả quy định cách *một bảng* được ghi thành tập file bất biến cộng với metadata, sao cho engine nào đọc spec cũng đọc được. Iceberg theo dõi từng data file riêng lẻ thay vì thư mục[^ice-files-not-dirs]. Mỗi thay đổi tạo file metadata mới và thay file cũ bằng một "hoán đổi nguyên tử"[^ice-atomic-swap]. Delta ghi mỗi phiên bản bảng thành một entry trong log giao dịch, và không bao giờ ghi đè entry có sẵn[^delta-never-overwrite]. Cả hai dùng optimistic concurrency: ghi trước, đụng độ thì thử lại. Iceberg nêu rõ điều đó trong spec[^ice-occ]. Delta thì commit theo hai pha[^delta-twophase].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì sửa trực tiếp cuốn sổ chung, mỗi lần thay đổi bạn viết *một trang mới* ghi "từ nay danh sách file hợp lệ là X, Y, Z" rồi đóng dấu thứ tự trang. Ai muốn biết bảng đang như thế nào thì đọc trang mới nhất. Hai người cùng viết trang số 8 thì chỉ một người đóng dấu được, người kia đọc lại trang 8 rồi viết trang 9.
+*Với service `shop`.* Mỗi đêm `shop` muốn nạp một batch gồm nhiều file Parquet vào bảng `orders_history` trên S3. Báo cáo chạy lúc đang nạp phải thấy trọn batch cũ hoặc trọn batch mới. Hai job nạp chạy chồng nhau không được phá nhau. Mục 5 cho thấy S3 không tự đảm bảo cả hai điều này. Table format giải quyết bằng một ý đơn giản: không sửa gì tại chỗ. Mỗi lần thay đổi, ghi thêm một bản metadata mới liệt kê các file hợp lệ; ai muốn biết bảng đang thế nào thì đọc bản mới nhất; và nếu hai writer cùng muốn tạo bản kế tiếp thì chỉ một bên thắng, bên kia đọc lại rồi thử lại (nhận xét của người soạn, tóm tắt cơ chế mô tả bên dưới).
 
 ### Iceberg
 
-Spec mô tả mình là đặc tả table format nhằm quản lý một tập file lớn, thay đổi chậm, trong hệ file phân tán hoặc kho key-value như một bảng[^ice-def]. Cấu trúc:
+Spec của Iceberg tự mô tả là đặc tả table format, nhằm quản lý một tập file lớn, thay đổi chậm, trong hệ file phân tán hoặc kho key-value như một bảng[^ice-def]. Cấu trúc gồm ba lớp:
 
-- Trạng thái bảng nằm trong *metadata file*: schema, cấu hình partition, thuộc tính, và các *snapshot*; mỗi snapshot là trạng thái bảng tại một thời điểm và dùng để truy cập toàn bộ tập data file[^ice-overview].
-- Data file trong snapshot được theo dõi bởi một hay nhiều *manifest file*, mỗi file chứa một dòng cho mỗi data file cùng dữ liệu partition và số đo (metrics) của file đó[^ice-manifest]. Các manifest của một snapshot được liệt kê trong một *manifest list*[^ice-manifest-list].
+- Trạng thái bảng nằm trong *metadata file*: schema, cấu hình partition, thuộc tính, và các *snapshot*. Mỗi snapshot là trạng thái bảng tại một thời điểm, dùng để truy cập toàn bộ tập data file[^ice-overview].
+- Data file trong snapshot do một hay nhiều *manifest file* theo dõi. Mỗi manifest chứa một dòng cho mỗi data file cùng dữ liệu partition và số đo (metrics) của file đó[^ice-manifest]. Các manifest của một snapshot được liệt kê trong một *manifest list*[^ice-manifest-list].
 - Manifest được dùng lại giữa các snapshot để khỏi viết lại metadata thay đổi chậm[^ice-manifest-reuse].
 
 ```mermaid
@@ -256,55 +273,64 @@ flowchart LR
   MF2 --> D3["data-003.parquet"]
 ```
 
-(Sơ đồ của người soạn, dựng theo mô tả ở trên; manifest A được dùng chung bởi hai snapshot như spec cho phép.)
+(Sơ đồ của người soạn, dựng theo mô tả ở trên; manifest A được hai snapshot dùng chung như spec cho phép.)
 
-*Commit.* Mọi thay đổi trạng thái bảng tạo file metadata mới và thay file cũ bằng hoán đổi nguyên tử[^ice-atomic-swap]. Hoán đổi nguyên tử một file metadata này lấy file metadata khác là nền tảng cho serializable isolation: reader dùng snapshot hiện hành lúc nạp metadata và không bị ảnh hưởng cho tới khi refresh[^ice-occ-basis]. Writer tạo file metadata một cách lạc quan (optimistic), giả định phiên bản hiện hành sẽ không đổi trước lúc commit; commit bằng cách hoán đổi con trỏ file metadata từ phiên bản gốc sang phiên bản mới[^ice-occ]. Nếu snapshot nền của cập nhật không còn là hiện hành thì writer phải thử lại trên phiên bản hiện hành mới[^ice-retry].
+*Commit.* Mọi thay đổi trạng thái bảng tạo file metadata mới và thay file cũ bằng hoán đổi nguyên tử[^ice-atomic-swap]. Chính hoán đổi này là nền tảng cho serializable isolation: reader dùng snapshot hiện hành lúc nạp metadata và không bị ảnh hưởng cho tới khi refresh[^ice-occ-basis]. Còn writer tạo file metadata một cách lạc quan (optimistic), giả định phiên bản hiện hành sẽ không đổi trước lúc commit, rồi commit bằng cách hoán đổi con trỏ file metadata từ phiên bản gốc sang phiên bản mới[^ice-occ]. Nếu snapshot nền của cập nhật không còn là hiện hành thì writer phải thử lại trên phiên bản hiện hành mới[^ice-retry]. Với `shop`: job nạp đêm đọc metadata hiện hành, ghi các file Parquet mới, rồi commit; nếu giữa chừng có job khác đã commit thì nó đọc lại phiên bản mới và thử lại, còn báo cáo chạy song song vẫn thấy trọn snapshot cũ (minh họa của người soạn).
 
-Điểm đáng nhớ: *thao tác nguyên tử dùng để commit không được spec chuẩn hóa*, mà phụ thuộc cách bảng được theo dõi[^ice-notstd]. Spec đưa ví dụ: bảng dạng file system dùng rename nguyên tử ở hệ file hỗ trợ (HDFS, đa số hệ file cục bộ)[^ice-fs-tables], hay bảng dạng metastore lưu con trỏ trong metastore/cơ sở dữ liệu và cập nhật bằng check-and-put[^ice-metastore]. Spec cũng nói bảng không cần rename, trừ bảng dùng rename nguyên tử để commit[^ice-norename]. Về S3: paper Delta Lake (2020) liệt kê cách cài bước ghi log nguyên tử trên từng kho và ghi rằng *lúc đó* Amazon S3 không có "put if absent" hay rename nguyên tử[^delta-s3-2020]; docs AWS hiện hành (mục 5) đã có ghi có điều kiện. Suy luận của người soạn: hai thời điểm khác nhau, nên trên S3 ngày nay cách commit có thể là catalog/metastore hoặc ghi có điều kiện; đừng giả định có rename nguyên tử.
+Điều đáng nhớ là spec không chuẩn hóa thao tác nguyên tử dùng để commit; thao tác đó phụ thuộc cách bảng được theo dõi[^ice-notstd]. Spec đưa ví dụ: bảng dạng file system dùng rename nguyên tử ở hệ file hỗ trợ (HDFS, đa số hệ file cục bộ)[^ice-fs-tables]. Bảng dạng metastore thì lưu con trỏ trong metastore hoặc database và cập nhật bằng check-and-put[^ice-metastore]. Spec cũng nói bảng không cần rename, trừ bảng dùng rename nguyên tử để commit[^ice-norename].
+
+Còn trên S3? Paper Delta Lake (2020) liệt kê cách cài bước ghi log nguyên tử trên từng kho, và ghi rằng *lúc đó* Amazon S3 không có "put if absent" hay rename nguyên tử[^delta-s3-2020]. Docs AWS hiện hành (mục 5) đã có ghi có điều kiện. Đây là hai thời điểm khác nhau, nên (suy luận của người soạn) trên S3 ngày nay commit có thể dùng catalog/metastore hoặc ghi có điều kiện; đừng giả định có rename nguyên tử.
 
 ### Delta
 
-Đặc tả giao thức Delta mô tả mục tiêu: mang tính chất ACID cho tập dữ liệu lớn lưu dạng file trong hệ file phân tán hoặc object store[^delta-def]. Giao dịch cài bằng multi-version concurrency control (MVCC): giữ nhiều bản dữ liệu thay vì thay ngay file chứa bản ghi bị sửa/xóa[^delta-mvcc]. Writer sửa bảng theo hai pha: trước hết ghi lạc quan các data file mới (hoặc bản sao cập nhật của file cũ); sau đó commit bằng cách thêm một entry mới vào log, tạo ra phiên bản nguyên tử mới của bảng[^delta-twophase].
+Đặc tả giao thức Delta đặt mục tiêu mang tính chất ACID cho tập dữ liệu lớn lưu dạng file trong hệ file phân tán hoặc object store[^delta-def]. Delta cài giao dịch bằng multi-version concurrency control (MVCC): giữ nhiều bản dữ liệu thay vì thay ngay file chứa bản ghi bị sửa hay xóa[^delta-mvcc]. Writer sửa bảng theo hai pha. Trước hết nó ghi lạc quan các data file mới (hoặc bản sao cập nhật của file cũ). Sau đó nó commit bằng cách thêm một entry mới vào log, tạo ra phiên bản nguyên tử mới của bảng[^delta-twophase].
 
-- Delta file là đơn vị nguyên tử của bảng, đặt tên bằng số phiên bản kế tiếp, đệm số 0 đủ 20 chữ số, trong thư mục `_delta_log`[^delta-log-entry].
-- Writer *không bao giờ* được ghi đè log entry có sẵn; spec dùng "should" cho phần còn lại: *khi có thể* nên dùng primitive nguyên tử của hệ file nền để các writer đồng thời không ghi đè nhau[^delta-never-overwrite]. Spec v3.2.0 không gọi tên "put-if-absent"; paper Delta Lake thì nêu bước tạo log record kế tiếp phải nguyên tử — chỉ một client được tạo object mang tên đó[^delta-atomic-create] — và kể cách cài: Google Cloud Storage/Azure Blob dùng put-if-absent nguyên tử[^delta-impls]. Nối với `If-None-Match` ở mục 5 là suy luận của người soạn: phép "tạo nếu chưa có" nguyên tử trên S3 chính là thứ header này cung cấp.
-- File dữ liệu không còn trong phiên bản mới nhất có thể bị xóa chậm bằng lệnh vacuum sau thời gian lưu giữ do người dùng đặt (mặc định 7 ngày)[^delta-vacuum].
-- Checkpoint của log được lưu dạng Parquet: các action là các cột riêng, kiểu struct[^delta-checkpoint-pq]. Paper Delta: log "được nén thành định dạng Parquet" để có ACID, time travel và thao tác metadata nhanh hơn nhiều[^delta-paper-log].
+Mỗi entry là một *Delta file*, đơn vị nguyên tử của bảng. Tên file là số phiên bản kế tiếp, đệm số 0 đủ 20 chữ số, nằm trong thư mục `_delta_log`[^delta-log-entry]. Vì tên file chính là số phiên bản, hai job nạp của `shop` cùng muốn commit phiên bản 8 sẽ cùng nhắm vào một khóa; chỉ cần lớp lưu trữ cho đúng một bên tạo thành công là xong (suy luận của người soạn).
+
+Quy tắc đứng sau việc đó: writer *không bao giờ* được ghi đè log entry có sẵn. Với phần còn lại spec chỉ dùng "should": khi có thể, nên dùng primitive nguyên tử của hệ file nền để các writer đồng thời không ghi đè nhau[^delta-never-overwrite]. Spec v3.2.0 không gọi tên "put-if-absent". Paper Delta Lake thì nêu rằng bước tạo log record kế tiếp phải nguyên tử, chỉ một client được tạo object mang tên đó[^delta-atomic-create]. Paper cũng kể cách cài: Google Cloud Storage và Azure Blob Store dùng put-if-absent nguyên tử[^delta-impls]. Nối với `If-None-Match` ở mục 5 là suy luận của người soạn: phép "tạo nếu chưa có" nguyên tử trên S3 chính là thứ header này cung cấp.
 
 ### So sánh nhanh
 
 | Khía cạnh | Iceberg 1.5.0 (spec) | Delta v3.2.0 (protocol) |
 |---|---|---|
-| Đơn vị theo dõi | Data file qua manifest, snapshot[^ice-files-not-dirs][^ice-manifest] | Action `add`/`remove` trong log[^delta-action] |
+| Đơn vị theo dõi | Data file qua manifest, snapshot[^ice-manifest] | Action `add`/`remove` trong log[^delta-action] |
 | Điểm commit | Hoán đổi nguyên tử file metadata, cơ chế *không chuẩn hóa*[^ice-notstd] | Entry log mới, không ghi đè entry cũ[^delta-never-overwrite] |
 | Mô hình cạnh tranh | Optimistic, retry[^ice-retry] | Optimistic, hai pha[^delta-twophase] |
-| Mục tiêu về isolation | Serializable isolation[^ice-goal-ser] | Ghi serializable, đọc snapshot isolation[^delta-ser][^delta-goals] |
+| Mục tiêu về isolation | Serializable isolation[^ice-goal-ser] | Ghi serializable[^delta-ser] |
 | Metadata nằm đâu | Metadata/manifest file, con trỏ qua catalog tùy cách theo dõi[^ice-notstd] | "Tự mô tả": metadata nằm cạnh dữ liệu, không cần metastore riêng để đọc[^delta-selfdesc] |
 
-(Bảng so sánh của người soạn từ hai spec. Isolation ở đây là *mục tiêu* spec nêu, không phải bảo đảm của mọi engine: Iceberg spec nói điều kiện để một ghi commit thành công quyết định mức isolation, và writer có thể chọn điều kiện kiểm tra khác nhau[^ice-validate].)
+(Bảng so sánh của người soạn từ hai spec.) Delta nêu thêm mục tiêu cho phía đọc: reader đọc được một snapshot nhất quán của bảng, kể cả khi có ghi đồng thời[^delta-goals]. Isolation ở đây là *mục tiêu* spec nêu, không phải bảo đảm của mọi engine: Iceberg spec nói writer có thể chọn điều kiện kiểm tra khác nhau, nên mức isolation phụ thuộc điều kiện để một ghi commit thành công[^ice-validate].
 
-<details><summary>Đi sâu: version của spec, delete file, sequence number, giới hạn checkpoint</summary>
+<details><summary>Đi sâu: version của spec, delete file, sequence number, checkpoint, vacuum</summary>
 
-- Iceberg spec ở tag 1.5.0 nói phiên bản 1 và 2 đã hoàn tất và được cộng đồng chấp nhận, còn phiên bản 3 đang phát triển tích cực, chưa chính thức được chấp nhận[^ice-versions]. Khi bạn đọc spec trên web không ghim, hãy kiểm tra số phiên bản đang xem.
-- Phiên bản 1 quản lý bảng phân tích bằng định dạng file bất biến: Parquet, Avro, ORC[^ice-v1]. Phiên bản 2 thêm cập nhật/xóa theo dòng: thay đổi chính là *delete file* mã hóa những dòng đã bị xóa trong data file có sẵn, để xóa hoặc thay từng dòng mà không viết lại file[^ice-v2].
-- Mỗi commit thành công được gán một *sequence number* để so tuổi tương đối giữa data file và delete file; nếu commit phải thử lại thì sequence number được gán lại[^ice-seq].
-- Delta ghi rõ một log entry không được chứa nhiều hơn một action "reconcile" với nhau (ví dụ nhiều `Metadata` action, hoặc `add`/`remove` cùng `(path, DV)`)[^delta-one-action]; đây là ràng buộc về nội dung một entry, còn "ai thắng khi hai writer đụng nhau" do quy tắc không ghi đè entry quyết định (nhận xét của người soạn). Checkpoint nhiều phần *không thể ghi nguyên tử*; reader phải bỏ qua checkpoint nhiều phần thiếu part[^delta-multipart].
-- Delta dành sẵn chỗ cho định danh giao dịch ứng dụng (cặp `appId`/`version`) ghi nguyên tử cùng thay đổi bảng để tránh nhân đôi dữ liệu khi stream retry[^delta-txid] — liên quan trực tiếp đến idempotence ở [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md) và [Chương 11](11-stream-processing.md).
-- Bảng đọc/ghi qua "reader/writer protocol version" và "table features" quyết định engine nào được đọc hay ghi bảng[^delta-protocol]; trước khi chia sẻ bảng giữa nhiều engine, kiểm tra tính tương thích (nhận xét của người soạn).
+- Iceberg spec ở tag 1.5.0 nói phiên bản 1 và 2 đã hoàn tất và được cộng đồng chấp nhận, còn phiên bản 3 đang phát triển tích cực, chưa chính thức được chấp nhận[^ice-versions]. Khi đọc spec trên web không ghim, hãy kiểm tra số phiên bản đang xem.
+- Phiên bản 1 quản lý bảng phân tích bằng định dạng file bất biến: Parquet, Avro, ORC[^ice-v1]. Phiên bản 2 thêm cập nhật/xóa theo dòng; thay đổi chính là *delete file* mã hóa những dòng đã bị xóa trong data file có sẵn, để xóa hoặc thay từng dòng mà không viết lại file[^ice-v2].
+- Mỗi commit thành công được gán một *sequence number* để so tuổi tương đối giữa data file và delete file. Nếu commit phải thử lại thì sequence number được gán lại[^ice-seq].
+- Delta ghi rõ một log entry không được chứa nhiều hơn một action "reconcile" với nhau, ví dụ nhiều `Metadata` action, hoặc `add`/`remove` cùng `(path, DV)`[^delta-one-action]. Đây là ràng buộc về nội dung một entry; còn "ai thắng khi hai writer đụng nhau" do quy tắc không ghi đè entry quyết định (nhận xét của người soạn).
+- Checkpoint của log Delta lưu dạng Parquet: các action là các cột riêng, kiểu struct[^delta-checkpoint-pq]. Paper Delta nói log "được nén thành định dạng Parquet" để có ACID, time travel và thao tác metadata nhanh hơn nhiều[^delta-paper-log]. Checkpoint nhiều phần *không thể ghi nguyên tử*, nên reader phải bỏ qua checkpoint nhiều phần thiếu part[^delta-multipart].
+- File dữ liệu không còn trong phiên bản mới nhất có thể bị xóa chậm bằng lệnh vacuum, sau thời gian lưu giữ do người dùng đặt (mặc định 7 ngày)[^delta-vacuum].
+- Delta dành sẵn chỗ cho định danh giao dịch ứng dụng (cặp `appId`/`version`), ghi nguyên tử cùng thay đổi bảng để tránh nhân đôi dữ liệu khi stream retry[^delta-txid]. Điều này liên quan trực tiếp đến idempotence ở [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md) và [Chương 11](11-stream-processing.md).
+- Bảng đọc/ghi qua "reader/writer protocol version" và "table features"; chúng quyết định engine nào được đọc hay ghi bảng[^delta-protocol]. Trước khi chia sẻ bảng giữa nhiều engine, hãy kiểm tra tính tương thích (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q6:** table format = tập file bất biến + metadata có phiên bản + *một* thao tác nguyên tử (hoán đổi con trỏ hoặc tạo entry log chưa tồn tại) để commit; cạnh tranh được giải bằng optimistic concurrency, nên transaction trên object storage khả thi dù chính object storage không có transaction.
+**Quay lại Q6:** table format là tập file bất biến, cộng metadata có phiên bản, cộng *một* thao tác nguyên tử để commit (hoán đổi con trỏ, hoặc tạo entry log chưa tồn tại). Cạnh tranh giữa các writer được giải bằng optimistic concurrency, nên `shop` có transaction trên object storage dù bản thân object storage không có transaction.
 
 ## 7. Tách compute/storage, serverless, cloud vs tự vận hành (Q7)
 
-> **Trả lời ngắn.** *Tách compute khỏi storage* nghĩa là phần tính toán và phần lưu dữ liệu là hai dịch vụ co giãn độc lập; Snowflake và BigQuery đều thiết kế như vậy[^snow-sep][^bq-sep]. Được (suy ra từ các nhược điểm của shared-nothing thuần mà paper Snowflake nêu): phần cứng không phải thỏa hiệp cho một loại tải[^snow-hetero], đổi số node không kéo theo xáo trộn dữ liệu trên chính các node đang xử lý truy vấn[^snow-member]; Snowflake còn được cung cấp dạng trả theo mức dùng[^snow-payg]. Mất: dữ liệu ở xa compute nên phải có cache[^snow-cache]. *Serverless* đẩy việc cấp phát tài nguyên cho nhà cung cấp[^bq-serverless]; *cloud được quản lý* (như RDS) nhận việc sao lưu, vá, phát hiện lỗi[^rds-manage]; *tự vận hành* giữ toàn quyền nhưng nhận toàn bộ trách nhiệm.
+> **Trả lời ngắn.** *Tách compute khỏi storage* nghĩa là phần tính toán và phần lưu dữ liệu là hai dịch vụ co giãn độc lập. Snowflake ghép hai phần đó lỏng lẻo và cho co giãn độc lập[^snow-sep]. BigQuery cũng tách như vậy, để mỗi tầng cấp phát tài nguyên động mà không ảnh hưởng hiệu năng hay tính sẵn sàng của tầng kia[^bq-sep]. Cái được (suy ra từ các nhược điểm của shared-nothing thuần mà paper Snowflake nêu): phần cứng không phải thỏa hiệp cho một loại tải[^snow-hetero]. Đổi số node cũng không kéo theo xáo trộn dữ liệu trên chính các node đang xử lý truy vấn[^snow-member]. Snowflake còn cung cấp dạng trả theo mức dùng[^snow-payg]. Cái mất: dữ liệu nằm xa compute nên phải có cache[^snow-cache]. *Serverless* đẩy việc cấp phát tài nguyên cho nhà cung cấp[^bq-serverless]. *Cloud được quản lý* như RDS nhận việc sao lưu, vá, phát hiện lỗi[^rds-manage]. *Tự vận hành* giữ toàn quyền nhưng nhận toàn bộ trách nhiệm.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhà bếp có kho lạnh. Kiểu cũ, mỗi bếp có tủ lạnh riêng gắn liền — muốn thêm bếp phải mua thêm tủ lạnh và chuyển đồ sang. Kiểu tách: một kho lạnh chung rất lớn, bếp thuê theo giờ; cần thêm bếp thì thêm, nhưng mỗi lần lấy nguyên liệu phải đi xa nên mỗi bếp giữ một tủ nhỏ cho đồ hay dùng.
+*Với service `shop`.* Giờ `shop` có dữ liệu trên object storage và cần một engine để truy vấn nó. Có hai câu hỏi tách bạch. Engine đó nên dính liền với chỗ lưu dữ liệu hay tách riêng? Và ai chạy, vá, sao lưu, co giãn nó: đội của bạn hay nhà cung cấp? Mục này đi qua từng câu hỏi.
 
-*Vì sao tách.* Snowflake mô tả kiến trúc shared-nothing thuần: mỗi node có đĩa cục bộ, bảng được chia ngang giữa các node và mỗi node chỉ chịu trách nhiệm dòng trên đĩa mình[^snow-sn]. Nhược điểm: nó gắn chặt compute với storage, dẫn tới vấn đề ở một số tình huống[^snow-couple]. Cụ thể paper nêu: (1) tải không đồng nhất — cấu hình tốt cho nạp hàng loạt (băng thông I/O cao, ít tính) lại kém cho truy vấn phức tạp (ít I/O, tính nhiều) và ngược lại, nên phần cứng phải thỏa hiệp với mức sử dụng trung bình thấp[^snow-hetero]; (2) thay đổi thành viên node — khi đổi tập node (do lỗi hay do resize) phải xáo trộn lượng lớn dữ liệu, và vì chính các node đó vừa xáo trộn vừa xử lý truy vấn nên hiệu năng bị ảnh hưởng[^snow-member]. Trên đám mây, thay đổi thành viên "không phải ngoại lệ mà là chuẩn mực"[^snow-norm]. Từ đó Snowflake tách hai phần: hai dịch vụ ghép lỏng, co giãn độc lập[^snow-sep].
+### 7.1 Vì sao tách compute khỏi storage
+
+Hãy bắt đầu từ thiết kế cũ, shared-nothing thuần: mỗi node có đĩa cục bộ, bảng được chia ngang giữa các node và mỗi node chỉ chịu trách nhiệm các dòng trên đĩa mình[^snow-sn]. Cái dở là nó gắn chặt compute với storage, nên một số tình huống sinh vấn đề[^snow-couple]. Paper Snowflake nêu hai vấn đề cụ thể.
+
+Vấn đề thứ nhất là tải không đồng nhất. Cấu hình tốt cho nạp hàng loạt (băng thông I/O cao, ít tính) lại kém cho truy vấn phức tạp (ít I/O, tính nhiều) và ngược lại, nên phần cứng đành thỏa hiệp với mức sử dụng trung bình thấp[^snow-hetero]. Với `shop`, job nạp đơn hằng đêm và truy vấn báo cáo cần hai kiểu máy khác nhau, nhưng một cụm dính liền thì chỉ chọn được một kiểu (minh họa của người soạn).
+
+Vấn đề thứ hai là thay đổi thành viên node. Khi đổi tập node (do lỗi hay do resize) phải xáo trộn lượng lớn dữ liệu. Chính các node đó vừa xáo trộn vừa xử lý truy vấn, nên hiệu năng bị ảnh hưởng đáng kể[^snow-member]. Trên đám mây, thay đổi thành viên "không phải ngoại lệ mà là chuẩn mực"[^snow-norm]. Từ đó Snowflake tách hai phần thành hai dịch vụ ghép lỏng, co giãn độc lập[^snow-sep].
 
 BigQuery nêu cùng nguyên tắc: tách tầng compute và storage cho phép mỗi tầng cấp phát tài nguyên động mà không ảnh hưởng hiệu năng hay tính sẵn sàng của tầng kia[^bq-sep]. Paper Lakehouse chỉ ra điểm kinh tế của hệ cũ: thiết bị on-premises gắn compute với storage buộc doanh nghiệp trả tiền cho đỉnh tải và đỉnh dữ liệu[^lh-coupled].
 
@@ -325,54 +351,64 @@ flowchart LR
 
 (Sơ đồ của người soạn; "cache đĩa cục bộ" theo mô tả của paper Snowflake ở đoạn *Cái giá* bên dưới.)
 
-*Cái giá.* Để giảm lưu lượng giữa compute và storage, mỗi node compute của Snowflake cache một phần dữ liệu bảng trên đĩa cục bộ; lợi thêm là đĩa cục bộ không phải nhân bản toàn bộ dữ liệu gốc (lớn và phần lớn nguội)[^snow-cache]. Nhận xét của người soạn: độ trễ một lần truy vấn lạnh phụ thuộc vào mạng tới object storage; đây là suy luận từ kiến trúc, nguồn trên không đo độ trễ này.
+*Cái giá.* Để giảm lưu lượng giữa compute và storage, mỗi node compute của Snowflake cache một phần dữ liệu bảng trên đĩa cục bộ[^snow-cache]. Với `shop`, truy vấn đầu tiên vào một phân vùng chưa có trong cache sẽ chậm hơn các lần sau, vì phải kéo dữ liệu qua mạng từ object storage (nhận xét của người soạn: đây là suy luận từ kiến trúc, nguồn trên không đo độ trễ này).
 
-*Cloud so với tự vận hành.* Hai chiều tách bạch:
+### 7.2 Cloud so với tự vận hành
 
-- *Ai làm việc vận hành.* Amazon RDS là dịch vụ cơ sở dữ liệu được quản lý; nó đảm nhiệm sao lưu, vá phần mềm, phát hiện lỗi tự động và khôi phục[^rds-manage]. Snowflake đặt mục tiêu người dùng "không cần mua máy, thuê DBA hay cài phần mềm"[^snow-saas]. Nhưng trách nhiệm không biến mất mà *chia*: mô hình trách nhiệm chia sẻ của AWS gọi là "bảo mật *của* đám mây" (AWS chịu trách nhiệm bảo vệ hạ tầng chạy dịch vụ)[^aws-sr-of] và "bảo mật *trong* đám mây" (khách hàng; mức việc phải làm tùy dịch vụ chọn)[^aws-sr-in].
-- *Ai co giãn.* *Serverless*: BigQuery tự mô tả là kiến trúc serverless "quản lý hạ tầng bằng không"[^bq-serverless]; docs của họ nói việc tách compute/storage là thiết yếu để cung cấp warehouse serverless được quản lý hoàn toàn, nơi đội kỹ sư BigQuery lo cập nhật và bảo trì[^bq-managed].
+Hai chiều tách bạch:
 
-*Khóa nhà cung cấp.* Paper Lakehouse lập luận rằng warehouse thương mại khóa dữ liệu vào định dạng độc quyền, làm tăng chi phí di chuyển dữ liệu hoặc workload sang hệ khác[^lh-tco]. Định dạng mở (Parquet, mục 4) cùng table format mở (mục 6) là cách các tác giả đề xuất để giảm khóa này (đây là lập luận của paper, và chỉ giảm khóa *dữ liệu*, không loại bỏ khóa dịch vụ — ví dụ catalog, quyền truy cập, API riêng; nhận xét của người soạn).
+- *Ai làm việc vận hành.* Amazon RDS là dịch vụ database được quản lý: nó lo sao lưu, vá phần mềm, tự phát hiện lỗi và khôi phục[^rds-manage]. Snowflake đặt mục tiêu người dùng "không cần mua máy, thuê DBA hay cài phần mềm"[^snow-saas]. Nhưng trách nhiệm không biến mất mà *chia*. Mô hình trách nhiệm chia sẻ của AWS có "bảo mật *của* đám mây", nơi AWS chịu trách nhiệm bảo vệ hạ tầng chạy dịch vụ[^aws-sr-of]. Phần "bảo mật *trong* đám mây" thuộc khách hàng, và mức việc phải làm tùy dịch vụ chọn[^aws-sr-in].
+- *Ai co giãn.* BigQuery tự mô tả là kiến trúc serverless với "quản lý hạ tầng bằng không"[^bq-serverless]. Docs của họ nói việc tách compute/storage là thiết yếu để cung cấp warehouse serverless được quản lý hoàn toàn, nơi đội kỹ sư BigQuery lo cập nhật và bảo trì[^bq-managed].
+
+*Khóa nhà cung cấp.* Paper Lakehouse lập luận rằng warehouse thương mại khóa dữ liệu vào định dạng độc quyền, làm tăng chi phí di chuyển dữ liệu hoặc workload sang hệ khác[^lh-tco]. Định dạng mở (Parquet, mục 4) cùng table format mở (mục 6) là cách các tác giả đề xuất để giảm khóa này. Đây là lập luận của paper, và nó chỉ giảm khóa *dữ liệu*, không loại bỏ khóa dịch vụ như catalog, quyền truy cập, API riêng (nhận xét của người soạn).
 
 | Câu hỏi | Nghiêng về dịch vụ được quản lý | Nghiêng về tự vận hành |
 |---|---|---|
 | Có đội vận hành database không? | Không/ít: để nhà cung cấp lo sao lưu, vá, failover[^rds-manage] | Có, và đã có quy trình riêng |
-| Tải có đỉnh nhọn, thất thường? | Có: mua theo mức dùng thay vì đỉnh[^lh-coupled][^snow-payg] | Tải ổn định, dự đoán được |
+| Tải có đỉnh nhọn, thất thường? | Có: mua theo mức dùng thay vì theo đỉnh[^snow-payg] | Tải ổn định, dự đoán được |
 | Cần kiểm soát hạ tầng/tuân thủ chi tiết? | Chia trách nhiệm theo mô hình nhà cung cấp[^aws-sr-in] | Toàn quyền, và toàn gánh |
 | Lo khóa nhà cung cấp? | Ưu tiên định dạng mở, đọc được ngoài dịch vụ[^lh-tco] | — |
 
-(Bảng là khung quyết định của người soạn; mỗi ô có chú thích chỉ dẫn chứng cho *dữ kiện nền*, còn việc chọn nghiêng về đâu là nhận xét của người soạn. Chương không đưa số tiền vì giá dịch vụ thay đổi và không nằm trong tập nguồn ghim phiên bản.)
+(Bảng là khung quyết định của người soạn: chú thích chỉ dẫn chứng cho *dữ kiện nền*, còn việc chọn nghiêng về đâu là nhận xét của người soạn. Chương không đưa số tiền vì giá dịch vụ thay đổi và không nằm trong tập nguồn ghim phiên bản.)
 
 <details><summary>Đi sâu: các vấn đề nêu trong paper Snowflake, và hạn chế của trích dẫn</summary>
 
-- Paper Snowflake: cấu hình tách compute/storage, compute dựng trên engine shared-nothing riêng; storage qua Amazon S3 nhưng "về nguyên tắc loại blob store nào cũng được"[^snow-sep2].
-- Về tính chất S3 ảnh hưởng thiết kế: object chỉ ghi đè được cả khối, không append, kích thước phải khai trước trong PUT; S3 hỗ trợ GET theo khoảng byte[^snow-s3-props]. Những tính chất đó "ảnh hưởng mạnh" tới định dạng file bảng và cơ chế điều khiển đồng thời của Snowflake[^snow-s3-props]. Đây là cùng bộ ràng buộc ở mục 5, nhìn từ phía một engine chứ không phải table format mở.
-- Paper là của vendor (Snowflake Computing) và mô tả hệ của họ[^snow-authors]; dùng để hiểu *lý do thiết kế*, không như so sánh khách quan giữa các sản phẩm.
-- Trong cloud, lỗi node xảy ra thường hơn và hiệu năng có thể khác rất nhiều ngay cả giữa node cùng loại, theo paper[^snow-norm-src]; nối với [Chương 08](08-su-co-he-phan-tan.md): thiết kế coi lỗi là mặc định chứ không phải ngoại lệ (nhận xét của người soạn).
+- Snowflake dùng cấu hình tách compute/storage: compute dựng trên engine shared-nothing riêng, còn storage đi qua Amazon S3, nhưng paper nói "về nguyên tắc loại blob store nào cũng được"[^snow-sep2].
+- Về tính chất S3 ảnh hưởng thiết kế: object chỉ ghi đè được cả khối, không append, kích thước phải khai trước trong PUT, và S3 hỗ trợ GET theo khoảng byte. Paper nói những tính chất đó "ảnh hưởng mạnh" tới định dạng file bảng và cơ chế điều khiển đồng thời của Snowflake[^snow-s3-props]. Đây là cùng bộ ràng buộc ở mục 5, nhìn từ phía một engine chứ không phải table format mở.
+- Paper là của vendor (Snowflake Computing) và mô tả hệ của họ[^snow-authors]. Dùng nó để hiểu *lý do thiết kế*, không như so sánh khách quan giữa các sản phẩm.
+- Trong cloud, theo paper, lỗi node xảy ra thường hơn và hiệu năng có thể khác rất nhiều ngay cả giữa node cùng loại[^snow-norm-src]. Nối với [Chương 08](08-su-co-he-phan-tan.md): thiết kế coi lỗi là mặc định chứ không phải ngoại lệ (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q7:** tách compute/storage đổi "co giãn độc lập, trả theo mức dùng"[^snow-payg] lấy "dữ liệu ở xa compute nên cần cache"; dịch vụ được quản lý/serverless đổi công vận hành lấy phụ thuộc nhà cung cấp, nhưng trách nhiệm không mất đi mà được chia theo mô hình của từng nhà cung cấp.
+**Quay lại Q7:** tách compute/storage đổi "co giãn độc lập, trả theo mức dùng"[^snow-payg] lấy việc dữ liệu ở xa compute nên cần cache. Dịch vụ được quản lý hay serverless đổi công vận hành lấy sự phụ thuộc vào nhà cung cấp, nhưng trách nhiệm không mất đi mà được chia theo mô hình của từng nhà cung cấp.
 
 ## 8. Một máy đủ khi nào, phân tán khi nào (Q8)
 
-> **Trả lời ngắn.** Hệ phân tán thêm lỗi riêng (mạng hỏng, node chết hay chậm) mà chương trình một máy không phải xử lý[^kdist-down][^kdist-fault], nên chỉ đáng dùng khi bài toán thật sự đòi hỏi (nhận xét của người soạn): dữ liệu quá lớn, cần chịu lỗi, hoặc cần gần người dùng — ba lý do này lấy từ danh sách của Kleppmann[^kdist-why]. Paper COST cho thấy nhiều hệ "scalable" được công bố cần cấu hình lớn mới thắng được một thread viết cẩn thận[^cost-def][^cost-unbounded]. Quyết định đúng là đo khối lượng thật rồi so với giới hạn máy đơn, không mặc định "big data".
+> **Trả lời ngắn.** Hệ phân tán thêm những lỗi riêng mà chương trình một máy không phải xử lý: mạng hỏng, node chết hay chậm[^kdist-fault]. Vì vậy nó chỉ đáng dùng khi bài toán thật sự đòi hỏi (nhận xét của người soạn). Kleppmann liệt kê các lý do chính đáng, trong đó có dữ liệu quá lớn không vừa một máy, cần chịu lỗi, hoặc cần gần người dùng[^kdist-why]. Paper COST cho thấy nhiều hệ "scalable" đã công bố không có cấu hình nào thắng nổi một thread viết cẩn thận, trên các bài toán đồ thị được xét[^cost-unbounded]. Quyết định đúng là đo khối lượng thật rồi so với giới hạn máy đơn, không mặc định "big data" (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chuyển nhà. Nếu đồ vừa một chiếc xe tải thì thuê một xe, một tài xế, một lộ trình. Thuê mười xe nhỏ kèm điều phối viên chỉ đáng khi đồ không vừa hoặc bạn *bắt buộc* phải xong trước giờ nhất định; còn nếu không, bạn trả thêm tiền, thêm rủi ro lạc xe, thêm họp điều phối.
+*Với service `shop`.* Giả sử dữ liệu của `shop` đã lên vài trăm GB và ai đó đề xuất dựng cụm phân tán cho báo cáo. Trước khi duyệt, ta cần hai thứ: biết phân tán đem lại gì và đòi gì, rồi so khối lượng thật của `shop` với những gì một máy làm được.
 
-*Lý do để phân tán.* Bài giảng của Kleppmann liệt kê các lý do: vốn đã phân tán (ví dụ tin nhắn giữa hai điện thoại); độ tin cậy tốt hơn (một node hỏng, cả hệ vẫn chạy); hiệu năng tốt hơn (lấy dữ liệu từ node gần); và giải bài toán lớn hơn (ví dụ lượng dữ liệu khổng lồ không vừa một máy)[^kdist-why].
+### 8.1 Được gì, mất gì khi phân tán
 
-*Cái giá.* Cũng bài giảng đó: truyền thông có thể hỏng mà ta không biết, tiến trình có thể chết mà ta không biết, và tất cả xảy ra không tất định[^kdist-down]. Trên một máy, nếu một bộ phận hỏng thì thường cả máy dừng; còn hệ phân tán muốn chịu được một phần hỏng — "partial failure" — và đó là điều làm lập trình phân tán khác biệt và thường khó hơn[^kdist-fault]. Chi tiết ở [Chương 08](08-su-co-he-phan-tan.md).
+Bài giảng của Kleppmann liệt kê các lý do để phân tán: vốn đã phân tán (ví dụ tin nhắn giữa hai điện thoại); độ tin cậy tốt hơn (một node hỏng, cả hệ vẫn chạy); hiệu năng tốt hơn (lấy dữ liệu từ node gần); và giải bài toán lớn hơn (ví dụ lượng dữ liệu khổng lồ không vừa một máy)[^kdist-why].
 
-*Bằng chứng về chi phí.* McSherry và Isard đề xuất thước đo COST (Configuration that Outperforms a Single Thread): cấu hình phần cứng cần có trước khi một nền tảng vượt được một cài đặt đơn luồng có năng lực, cho một bài toán nhất định[^cost-def]. Họ so các paper hệ thống về xử lý đồ thị với cài đặt đơn luồng đơn giản trên cùng tập dữ liệu, dùng một laptop cao cấp đời 2014[^cost-method], và thấy rằng nhiều hệ đã công bố có COST *không giới hạn* — không cấu hình nào thắng được cài đặt đơn luồng tốt nhất — với mọi bài toán chúng được áp dụng[^cost-unbounded]. Phạm vi cần đọc đúng: đây là kết quả về *xử lý đồ thị* của các hệ đời trước 2015, tác giả tự nhận phép so sánh "không hoàn hảo và không phải lúc nào cũng công bằng"[^cost-caveat]; không suy ra "phân tán luôn chậm hơn một máy" (nhận xét của người soạn).
+Cái giá cũng nằm trong bài giảng đó. Truyền thông có thể hỏng mà ta không biết, tiến trình có thể chết mà ta không biết, và tất cả xảy ra không tất định[^kdist-down]. Trên một máy, nếu một bộ phận hỏng thì thường cả máy dừng. Hệ phân tán thì muốn chịu được một phần hỏng ("partial failure"), và đó là điều làm lập trình phân tán khác biệt và thường khó hơn[^kdist-fault]. Chi tiết ở [Chương 08](08-su-co-he-phan-tan.md).
 
-*Giới hạn thực của máy đơn.* Một số mốc từ docs chính thức:
+### 8.2 Bằng chứng về chi phí
 
-- PostgreSQL 17: "relation size" tối đa 32 TB với `BLCKSZ` mặc định 8192 byte; docs cũng nhắc giới hạn thực tế như hiệu năng hay dung lượng đĩa có thể chạm trước giới hạn cứng[^pg-limits][^pg-practical].
-- SQLite: dùng được cho backend website thông thường, nhưng nếu website ghi nặng hoặc bận tới mức cần nhiều server thì docs khuyên cân nhắc cơ sở dữ liệu client/server cấp doanh nghiệp[^sqlite-site].
-- DuckDB: engine phân tích chạy *trong* tiến trình chủ, không có server riêng cần cài hay bảo trì[^duck-embedded], nhắm tới tải OLAP[^duck-olap]. Một thiết kế cho thấy phân tích mức vài chục GB có thể không cần cụm (nhận xét của người soạn, chưa đo trong chương này).
+McSherry và Isard đề xuất thước đo COST (Configuration that Outperforms a Single Thread): cấu hình phần cứng cần có trước khi một nền tảng vượt được một cài đặt đơn luồng có năng lực, cho một bài toán nhất định[^cost-def]. Họ so các paper hệ thống về xử lý đồ thị với cài đặt đơn luồng đơn giản trên cùng tập dữ liệu, dùng một laptop cao cấp đời 2014[^cost-method]. Kết quả: nhiều hệ đã công bố có COST *không giới hạn*, tức không cấu hình nào thắng được cài đặt đơn luồng tốt nhất, với mọi bài toán chúng được áp dụng[^cost-unbounded].
+
+Cần đọc đúng phạm vi. Đây là kết quả về *xử lý đồ thị* của các hệ đời trước 2015, và tác giả tự nhận phép so sánh "không hoàn hảo và không phải lúc nào cũng công bằng"[^cost-caveat]. Đừng suy ra "phân tán luôn chậm hơn một máy" (nhận xét của người soạn).
+
+### 8.3 Giới hạn thực của máy đơn
+
+Một số mốc từ docs chính thức:
+
+- PostgreSQL 17: "relation size" tối đa 32 TB với `BLCKSZ` mặc định 8192 byte[^pg-limits]. Docs cũng nhắc giới hạn thực tế như hiệu năng hay dung lượng đĩa có thể chạm trước giới hạn cứng[^pg-practical].
+- SQLite: dùng được cho backend website thông thường, nhưng nếu website ghi nặng hoặc bận tới mức cần nhiều server thì docs khuyên cân nhắc database client/server cấp doanh nghiệp[^sqlite-site].
+- DuckDB: engine phân tích chạy *trong* tiến trình chủ, không có server riêng cần cài hay bảo trì[^duck-embedded]. Nó nhắm tới tải OLAP[^duck-olap]. Một thiết kế như vậy cho thấy phân tích mức vài chục GB có thể không cần cụm (nhận xét của người soạn, chưa đo trong chương này).
 
 ```mermaid
 flowchart TD
@@ -387,30 +423,33 @@ flowchart TD
 
 (Cây quyết định của người soạn để định hướng suy nghĩ, không phải quy tắc có nguồn; mỗi nhánh là một chương/mục đã nói.)
 
-Điểm đáng nhớ (nhận xét của người soạn): *replica để chịu lỗi* (nhân bản cùng một dữ liệu) và *partition để vượt dung lượng/thông lượng một máy* (chia dữ liệu) là hai bài toán khác nhau; nhiều hệ chỉ cần cái đầu. Nhầm lẫn giữa hai cái dễ dẫn tới dựng cụm lớn khi chỉ cần replica.
+Điều đáng nhớ (nhận xét của người soạn): *replica để chịu lỗi* (nhân bản cùng một dữ liệu) và *partition để vượt dung lượng/thông lượng một máy* (chia dữ liệu) là hai bài toán khác nhau, và nhiều hệ chỉ cần cái đầu. Nhầm lẫn giữa hai cái dễ dẫn tới dựng cụm lớn cho `shop` khi chỉ cần thêm replica.
 
 <details><summary>Đi sâu: đọc paper COST đúng cách, và chi phí ẩn của pipeline phân tán</summary>
 
-- COST không kết luận rằng phân tán là sai: tác giả viết hệ scalable thường hợp với tài nguyên cụm nhưng cần cân nhắc phần cứng khác để đạt hiệu năng đỉnh[^cost-alt], và cần phân biệt "scalability" với "dùng tài nguyên hiệu quả"[^cost-distinguish]. Lý do tác giả nêu: môi trường cụm thường đề cao dung lượng và thông lượng hơn độ trễ, với lõi, lưu trữ, bộ nhớ chậm hơn[^cost-env]; laptop dung lượng thấp hơn nhưng lõi, lưu trữ, bộ nhớ nhanh hơn[^cost-laptop].
-- Kết luận của paper: câu hỏi "hệ thống có thể được làm cho scale tốt không?" đã được trả lời tầm thường (ở phần mở đầu) và không phải câu hỏi đúng[^cost-q]; cần minh bạch hơn về các phương án đã có để nhận ra tiến bộ[^cost-concl].
-- Chi phí vận hành của pipeline nhiều bậc: SRE cho biết pipeline sâu thì mỗi bậc là một chỗ chunk có thể bị treo; nếu phản ứng "mặc định" là giết job rồi chạy lại mà pipeline không có checkpoint thì công việc của mọi chunk bị làm lại (xem đoạn "hanging chunk")[^sre-fragile].
-- Bước đầu hợp lý (nhận xét của người soạn): viết bản đơn giản nhất chạy trên một máy với định dạng mở (Parquet, mục 4); chỉ chuyển sang cụm khi *đo được* nút thắt. Vì dữ liệu đã ở định dạng mở, việc chuyển không phải viết lại dữ liệu — chỉ đổi engine đọc nó.
+- COST không kết luận rằng phân tán là sai. Tác giả viết hệ scalable thường hợp với tài nguyên cụm, nhưng cần cân nhắc phần cứng khác để đạt hiệu năng đỉnh[^cost-alt]. Họ cũng nhấn mạnh cần phân biệt "scalability" với "dùng tài nguyên hiệu quả"[^cost-distinguish].
+- Lý do tác giả nêu: môi trường cụm thường đề cao dung lượng và thông lượng hơn độ trễ, với lõi, lưu trữ, bộ nhớ chậm hơn[^cost-env]. Laptop dung lượng thấp hơn nhưng lõi, lưu trữ, bộ nhớ nhanh hơn[^cost-laptop].
+- Kết luận của paper: câu hỏi "hệ thống có thể được làm cho scale tốt không?" đã được trả lời tầm thường (ở phần mở đầu) và không phải câu hỏi đúng[^cost-q]. Cần minh bạch hơn về các phương án đã có để nhận ra tiến bộ[^cost-concl].
+- Chi phí vận hành của pipeline nhiều bậc: SRE cho biết pipeline sâu thì mỗi bậc là một chỗ chunk có thể bị treo. Nếu phản ứng "mặc định" là giết job rồi chạy lại mà pipeline không có checkpoint thì công việc của mọi chunk bị làm lại (xem đoạn "hanging chunk")[^sre-fragile].
+- Bước đầu hợp lý (nhận xét của người soạn): viết bản đơn giản nhất chạy trên một máy với định dạng mở (Parquet, mục 4), và chỉ chuyển sang cụm khi *đo được* nút thắt. Vì dữ liệu đã ở định dạng mở, việc chuyển không phải viết lại dữ liệu mà chỉ đổi engine đọc nó.
 
 </details>
 
-**Quay lại Q8:** phân tán đổi dung lượng và chịu lỗi lấy phức tạp và chi phí điều phối; vì vậy phải so khối lượng thật với giới hạn máy đơn trước, và nhớ rằng replica (chịu lỗi) khác partition (vượt dung lượng).
+**Quay lại Q8:** phân tán đổi dung lượng và chịu lỗi lấy phức tạp và chi phí điều phối. Vì vậy với `shop`, phải so khối lượng thật với giới hạn máy đơn trước, và nhớ rằng replica (chịu lỗi) khác partition (vượt dung lượng).
 
 ## Liên hệ với Rust
 
-Rust có hệ crate chính thức của dự án Apache Arrow cho đúng các tầng ở trên. Ví dụ dưới chỉ minh họa; **chưa biên dịch hay chạy** trong chương này; phiên bản ghim: `parquet 53.3.0`, `object_store 0.11.2`. Để dùng `ParquetObjectReader`, crate `parquet` cần bật feature `async` và `object_store`[^pq-feat] (cùng `tokio` và `futures` cho phần chạy bất đồng bộ).
+Quay lại `shop`: nếu `shop` viết bằng Rust thì các tầng ở trên đều có crate tương ứng, do chính dự án Apache Arrow duy trì. Ví dụ dưới chỉ để minh họa và **chưa biên dịch hay chạy** trong chương này; phiên bản ghim là `parquet 53.3.0`, `object_store 0.11.2`. Để dùng `ParquetObjectReader`, crate `parquet` cần bật feature `async` và `object_store`[^pq-feat], cùng `tokio` và `futures` cho phần chạy bất đồng bộ.
 
 | Crate | Vai trò | Nguồn |
 |---|---|---|
 | `arrow` | Cài đặt Rust thuần, an toàn, đầy đủ của Apache Arrow, định dạng dữ liệu trong bộ nhớ | [^arrow-crate] |
-| `parquet` | Cài đặt Rust native chính thức của Parquet, thuộc dự án Arrow; có API đọc/ghi Arrow `RecordBatch` | [^pq-crate][^pq-arrow-api] |
+| `parquet` | Cài đặt Rust native chính thức của Parquet, thuộc dự án Arrow | [^pq-crate] |
 | `object_store` | API thống nhất cho object storage (S3, GCS, Azure, local) qua trait `ObjectStore` | [^os-crate] |
 
-**`object_store` mô hình hóa object store chứ không phải hệ file.** Docs nói giao diện được thiết kế để phản chiếu API object store chứ không phải hệ file, nên API *không có trạng thái* thay vì giao diện dựa con trỏ như `Read`/`Seek`[^os-nofs]. Lợi ích docs nêu: mọi thao tác nguyên tử và reader không thấy ghi dở hoặc thất bại, phương thức ánh xạ trực tiếp sang API object store, và cho phép điều kiện tiên quyết cho thao tác[^os-nofs-benefits]. Trait là `Send + Sync + 'static`, và các phương thức async trả `Pin<Box<dyn Future ...>>` (dùng `async_trait`), nên giữ được `Arc<dyn ObjectStore>` làm trait object: cùng binary chạy trên nhiều cloud và môi trường test qua cấu hình runtime[^os-crate][^os-trait-sig]. (Chi tiết async: [Phase 7, Tokio](../07-io-async/08-tokio.md).)
+Crate `parquet` có module `arrow` để đọc và ghi dữ liệu Parquet từ/sang Arrow `RecordBatch`[^pq-arrow-api].
+
+**`object_store` mô hình hóa object store chứ không phải hệ file.** Docs nói giao diện được thiết kế để phản chiếu API object store chứ không phải hệ file, nên API *không có trạng thái* thay vì giao diện dựa con trỏ như `Read`/`Seek`[^os-nofs]. Docs nêu các lợi ích: mọi thao tác nguyên tử và reader không thấy ghi dở hay thất bại, phương thức ánh xạ trực tiếp sang API object store, và cho phép đặt điều kiện tiên quyết cho thao tác[^os-nofs-benefits]. Trait là `Send + Sync + 'static`, và các phương thức async trả `Pin<Box<dyn Future ...>>` (dùng `async_trait`)[^os-trait-sig]. Nhờ vậy giữ được `Arc<dyn ObjectStore>` làm trait object: cùng một binary chạy trên nhiều cloud, còn môi trường test chỉ khác ở cấu hình runtime[^os-crate]. (Chi tiết async: [Phase 7, Tokio](../07-io-async/08-tokio.md).)
 
 **Đọc Parquet từ object store, chỉ lấy vài cột** (khớp mục 4):
 
@@ -441,7 +480,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-Điểm bám vào docs: `ParquetObjectReader` đọc Parquet trong object storage qua `ObjectStore`[^pq-objreader], được tạo từ `Arc<dyn ObjectStore>` và `ObjectMeta` (lấy bằng `head` hoặc `list`)[^pq-objmeta]; `ParquetRecordBatchStreamBuilder` là builder dựng `ParquetRecordBatchStream` để đọc bất đồng bộ[^pq-streambuilder] và là alias của `ArrowReaderBuilder<AsyncReader<T>>`[^pq-alias]; `ProjectionMask` xác định tập cột trong schema có thể lồng nhau[^pq-projmask]. Vì là alias của `ArrowReaderBuilder`, builder async có `with_projection`, được ghi là "chỉ đọc dữ liệu từ các cột được chỉ định"[^pq-with-proj], và `with_row_groups`, chỉ đọc từ các row group được chọn, còn gọi là *row group filtering*[^pq-with-rg]. Hai lời gọi này là bản Rust của chiếu cột và cắt tỉa ở mục 4.
+Điểm bám vào docs: `ParquetObjectReader` đọc Parquet trong object storage qua `ObjectStore`[^pq-objreader]. Nó được tạo từ `Arc<dyn ObjectStore>` và `ObjectMeta`, lấy bằng `head` hoặc `list`[^pq-objmeta]. `ParquetRecordBatchStreamBuilder` dựng `ParquetRecordBatchStream` để đọc bất đồng bộ[^pq-streambuilder]. Kiểu này là alias của `ArrowReaderBuilder<AsyncReader<T>>`[^pq-alias]. `ProjectionMask` xác định tập cột trong schema có thể lồng nhau[^pq-projmask]. Vì là alias của `ArrowReaderBuilder`, builder async có `with_projection`, được ghi là "chỉ đọc dữ liệu từ các cột được chỉ định"[^pq-with-proj]. Nó cũng có `with_row_groups`, chỉ đọc từ các row group được chọn, còn gọi là *row group filtering*[^pq-with-rg]. Hai lời gọi này là bản Rust của chiếu cột và cắt tỉa ở mục 4.
 
 **Commit kiểu Delta: tạo log entry chỉ khi chưa tồn tại** (khớp mục 5–6):
 
@@ -466,105 +505,112 @@ async fn try_commit(
 }
 ```
 
-`PutMode::Create` được docs mô tả là ghi nguyên tử và trả `Error::AlreadyExists` nếu đã có object[^pq-putmode]. Với `PutMode::Update(UpdateVersion)` ghi chỉ thành công nếu phiên bản hiện tại của object khớp, nếu không trả `Error::Precondition`[^pq-putmode]; docs nói chế độ này dùng để dựng giao dịch optimistic concurrency, và tạo điều kiện dựng catalog metadata kiểu Iceberg hay Delta ngay trên object storage, không cần DBMS riêng[^os-condput]. Hỗ trợ phụ thuộc kho nền. Trong `0.11.2`, `S3ConditionalPut` có hai chế độ: `ETagMatch` (docs mô tả là dùng header `If-Match`/`If-None-Match`, nêu ví dụ Cloudflare R2 và MinIO, không nêu AWS S3) và `Dynamo` (một bảng DynamoDB để điều phối)[^os-s3cond]. Đối chiếu mã nguồn tag `object_store_0.11.2`: builder S3 cấu hình chế độ này bằng `with_conditional_put`[^os-s3-with]; nếu không đặt, `PutMode::Create`/`Update` trả `Error::NotImplemented`[^os-s3-default]; với `ETagMatch`, `Create` gửi `If-None-Match: *`[^os-s3-inm], và nhánh `Update` có chú thích "Real S3 will occasionally report 409 Conflict", tức mã đã tính tới S3 thật[^os-s3-409]. Hệ quả cho `try_commit` ở trên (đọc từ mã nguồn, chưa chạy với S3 thật): trên S3 với `object_store 0.11.2` phải gọi `AmazonS3Builder::with_conditional_put(S3ConditionalPut::ETagMatch)` (hoặc cấu hình `Dynamo`); nếu quên, hàm nhận `Err(NotImplemented)` thay vì `Ok(true)`/`Ok(false)`. Nối với docs AWS ở mục 5 (`If-None-Match`/`If-Match` ngay trên S3[^s3-cw]) là suy luận của người soạn.
+Hàm này là cuộc đua commit của hai job nạp `shop` ở mục 6, viết thành code. `PutMode::Create` ghi nguyên tử và trả `Error::AlreadyExists` nếu đã có object[^pq-putmode]. Với `PutMode::Update(UpdateVersion)`, ghi chỉ thành công nếu phiên bản hiện tại của object khớp, nếu không thì trả `Error::Precondition`[^pq-putmode]. Docs nói chế độ này dùng để dựng giao dịch optimistic concurrency, và tạo điều kiện dựng catalog metadata kiểu Iceberg hay Delta ngay trên object storage, không cần DBMS riêng[^os-condput].
 
-Hai điểm sư phạm (nhận xét của người soạn): (1) Rust ép bạn xử lý `Result` ở mỗi nhánh — trong code trên, *"thua cuộc đua"* là một giá trị trả về (`Ok(false)`) chứ không phải ngoại lệ, đúng với bản chất optimistic concurrency nơi thất bại commit là kết quả bình thường; (2) vòng lặp retry (đọc phiên bản mới, tính lại, thử lại) là *trách nhiệm của thư viện hoặc bạn*, không phải của object storage — đúng như mục 6 mô tả.
+Hỗ trợ ghi có điều kiện phụ thuộc kho nền. Trong `0.11.2`, `S3ConditionalPut` có hai chế độ: `ETagMatch` và `Dynamo` (một bảng DynamoDB để điều phối). Docs mô tả `ETagMatch` là dùng header `If-Match`/`If-None-Match`, nêu ví dụ Cloudflare R2 và MinIO mà không nêu AWS S3[^os-s3cond]. Đối chiếu mã nguồn tag `object_store_0.11.2`: builder S3 cấu hình chế độ này bằng `with_conditional_put`[^os-s3-with]. Nếu không đặt, `PutMode::Create`/`Update` trả `Error::NotImplemented`[^os-s3-default]. Với `ETagMatch`, `Create` gửi `If-None-Match: *`[^os-s3-inm]. Nhánh `Update` có chú thích "Real S3 will occasionally report 409 Conflict", tức mã đã tính tới S3 thật[^os-s3-409].
+
+Hệ quả cho `try_commit` ở trên (đọc từ mã nguồn, chưa chạy với S3 thật): trên S3 với `object_store 0.11.2` phải gọi `AmazonS3Builder::with_conditional_put(S3ConditionalPut::ETagMatch)` (hoặc cấu hình `Dynamo`). Nếu quên, hàm nhận `Err(NotImplemented)` thay vì `Ok(true)`/`Ok(false)`. Việc nối với docs AWS ở mục 5, tức `If-None-Match`/`If-Match` ngay trên S3[^s3-cw], là suy luận của người soạn.
+
+Hai điểm sư phạm (nhận xét của người soạn). Thứ nhất, Rust ép bạn xử lý `Result` ở mỗi nhánh. Trong code trên, *"thua cuộc đua"* là một giá trị trả về (`Ok(false)`) chứ không phải ngoại lệ, đúng với bản chất optimistic concurrency, nơi commit thất bại là kết quả bình thường. Thứ hai, vòng lặp retry (đọc phiên bản mới, tính lại, thử lại) là *trách nhiệm của thư viện hoặc của bạn*, không phải của object storage; đúng như mục 6 mô tả.
 
 ## Tóm tắt
 
-- OLTP phục vụ từng giao dịch nhỏ cần đúng và nhanh; phân tích quét phần lớn dữ liệu cần thông lượng; vì vậy thường tách thành hai hệ thống[^oltp-def][^olap-heavyread][^duck-olap].
-- ETL biến đổi trước khi nạp, ELT nạp rồi biến đổi trong kho đích[^elt-def]; bản trong kho là dữ liệu dẫn xuất dựng lại được, còn gốc có thẩm quyền là system of record[^es-sor][^mv-disposable].
-- Pipeline định kỳ là hệ thống cần vận hành và có thể mong manh[^sre-fragile]; thiết kế cho retry idempotent[^etl-idem].
-- Ba thế hệ: warehouse (schema-on-write, đắt, đóng), lake (rẻ, mở, schema-on-read), lakehouse (đề xuất lớp metadata/transaction trên lake)[^lh-gen1][^lh-gen2][^lh-def]; lakehouse là luận điểm của một vendor, đọc phản biện.
-- Parquet là file cột có footer metadata, thống kê min/max và nén theo cột; Arrow là dạng trong RAM để tính[^pq-def][^pq-hier][^pq-vs-arrow].
-- S3: read-after-write mạnh và nguyên tử theo từng khóa, không nguyên tử xuyên khóa, không khóa đối tượng cho nhiều writer, có ghi có điều kiện[^s3-strong][^s3-nocross][^s3-nolock][^s3-cw].
-- Iceberg/Delta biến file bất biến thành bảng có transaction bằng metadata có phiên bản + một thao tác nguyên tử để commit + optimistic concurrency[^ice-atomic-swap][^delta-never-overwrite].
-- Tách compute/storage đổi co giãn độc lập lấy dữ liệu ở xa (cần cache)[^snow-sep][^snow-cache]; dịch vụ quản lý và serverless chuyển việc vận hành, trách nhiệm được chia chứ không mất[^aws-sr-in].
-- Phân tán thêm lỗi từng phần và chi phí điều phối[^kdist-fault]; COST cho thấy cần so với một máy trước[^cost-def]; replica khác partition.
-- Trong Rust: `parquet` + `arrow` + `object_store`; `object_store` mô hình hóa object store (không phải hệ file) và có ghi có điều kiện[^os-nofs][^os-condput].
+- OLTP phục vụ từng giao dịch nhỏ cần đúng và nhanh[^oltp-def]. Phân tích quét phần lớn dữ liệu và cần thông lượng[^duck-olap]. Vì vậy thường tách thành hai hệ thống, như `shop` tách Postgres khỏi kho báo cáo[^olap-nodisrupt].
+- ETL biến đổi trước khi nạp, ELT nạp rồi biến đổi trong kho đích[^elt-def]. Bản trong kho là dữ liệu dẫn xuất dựng lại được[^mv-disposable]. Gốc có thẩm quyền là system of record[^es-sor].
+- Pipeline định kỳ là hệ thống cần vận hành và có thể mong manh[^sre-fragile]. Hãy thiết kế cho retry idempotent[^etl-idem].
+- Ba thế hệ: warehouse (schema-on-write, đắt, đóng)[^lh-gen1]. Lake (rẻ, mở, schema-on-read)[^lh-gen2]. Lakehouse (đề xuất lớp metadata/transaction trên lake)[^lh-def]. Lakehouse là luận điểm của một vendor, nên đọc có phản biện.
+- Parquet là file cột có footer metadata, thống kê min/max và nén theo cột[^pq-hier]. Arrow là dạng trong RAM để tính[^pq-vs-arrow].
+- S3 cho read-after-write mạnh và nguyên tử theo từng khóa[^s3-strong]. Nó không nguyên tử xuyên khóa[^s3-nocross]. Nó cũng không khóa đối tượng cho nhiều writer[^s3-nolock]. Đổi lại, S3 có ghi có điều kiện[^s3-cw].
+- Iceberg và Delta biến file bất biến thành bảng có transaction bằng metadata có phiên bản, cộng một thao tác nguyên tử để commit, cộng optimistic concurrency[^ice-atomic-swap]. Delta thì không ghi đè log entry có sẵn[^delta-never-overwrite].
+- Tách compute/storage đổi co giãn độc lập lấy việc dữ liệu ở xa, nên cần cache[^snow-cache]. Dịch vụ quản lý và serverless chuyển việc vận hành sang nhà cung cấp, nhưng trách nhiệm được chia chứ không mất[^aws-sr-in].
+- Phân tán thêm lỗi từng phần và chi phí điều phối[^kdist-fault]. COST cho thấy cần so với một máy trước[^cost-def]. Replica khác partition.
+- Trong Rust: `parquet` + `arrow` + `object_store`. `object_store` mô hình hóa object store chứ không phải hệ file[^os-nofs]. Nó cũng có ghi có điều kiện[^os-condput].
 
 ## Câu hỏi tự kiểm tra
 
 1. Nêu hai khác biệt giữa tải OLTP và tải phân tích, và một lý do thực tế để tách chúng ra hai hệ thống.
 <details><summary>Đáp án</summary>
 
-OLTP ghi nhận giao dịch khi chúng xảy ra, giao dịch phải nguyên tử[^oltp-def][^oltp-atomic]; phân tích tối ưu cho đọc nhiều ghi ít[^olap-heavyread] và truy vấn quét phần lớn dữ liệu[^duck-olap]. Lý do: OLTP không được thiết kế để phân tích, và OLAP cho phép truy vấn phức tạp mà không làm gián đoạn hệ giao dịch[^olap-notdesigned][^olap-nodisrupt]; tài liệu BigQuery nêu việc chia sẻ tài nguyên giữa đọc/ghi và phân tích ở CSDL kiểu cũ[^bq-share]; chi tiết CPU/đĩa/cache là suy luận của người soạn.
+OLTP ghi nhận giao dịch khi chúng xảy ra[^oltp-def]. Giao dịch phải nguyên tử[^oltp-atomic]. Phân tích tối ưu cho đọc nhiều ghi ít[^olap-heavyread]. Truy vấn của nó quét phần lớn dữ liệu[^duck-olap]. Lý do tách: OLTP không được thiết kế để phân tích[^olap-notdesigned]. OLAP thì cho phép truy vấn phức tạp mà không làm gián đoạn hệ giao dịch[^olap-nodisrupt]. Tài liệu BigQuery nêu việc chia sẻ tài nguyên giữa đọc/ghi và phân tích ở database kiểu cũ[^bq-share]. Chi tiết CPU/đĩa/cache là suy luận của người soạn.
 
 </details>
 
 2. ELT khác ETL ở điểm nào, và điều kiện nào làm ELT hợp lý?
 <details><summary>Đáp án</summary>
 
-Chỉ khác nơi biến đổi: ELT biến đổi trong kho đích[^elt-def]. Hợp lý khi kho đích đủ mạnh để biến đổi hiệu quả[^elt-condition].
+Chỉ khác nơi biến đổi: ELT biến đổi trong kho đích[^elt-def]. Nó hợp lý khi kho đích đủ mạnh để biến đổi hiệu quả[^elt-condition].
 
 </details>
 
 3. "System of record" và "derived data" khác nhau thế nào? Vì sao sửa dữ liệu nên làm ở gốc?
 <details><summary>Đáp án</summary>
 
-System of record là nguồn có thẩm quyền về trạng thái dữ liệu[^es-sor]; derived data như materialized view có thể dựng lại hoàn toàn từ nguồn[^mv-disposable]. Sửa ở gốc rồi tính lại: các view dẫn xuất tính lại được từ nguồn[^olep-recover]; vá tay bản dẫn xuất sẽ mất khi tính lại (suy luận của người soạn).
+System of record là nguồn có thẩm quyền về trạng thái dữ liệu[^es-sor]. Derived data như materialized view có thể dựng lại hoàn toàn từ nguồn[^mv-disposable]. Sửa ở gốc rồi tính lại, vì các view dẫn xuất tính lại được từ nguồn[^olep-recover]. Vá tay bản dẫn xuất thì sẽ mất khi tính lại (suy luận của người soạn).
 
 </details>
 
 4. Ba thế hệ kiến trúc dữ liệu theo paper Lakehouse là gì, và vấn đề của kiến trúc hai tầng?
 <details><summary>Đáp án</summary>
 
-Warehouse schema-on-write gắn compute-storage[^lh-gen1][^lh-coupled]; lake schema-on-read định dạng mở[^lh-gen2][^lh-schema-read]; hai tầng lake + warehouse[^lh-twotier]. Vấn đề: độ tin cậy, dữ liệu cũ, hỗ trợ phân tích nâng cao, tổng chi phí sở hữu[^lh-four][^lh-tco].
+Warehouse schema-on-write, gắn compute với storage[^lh-gen1]. Lake schema-on-read, định dạng mở[^lh-gen2]. Hai tầng lake + warehouse[^lh-twotier]. Vấn đề: độ tin cậy, dữ liệu cũ, hỗ trợ phân tích nâng cao, tổng chi phí sở hữu[^lh-four].
 
 </details>
 
 5. Vì sao truy vấn Parquet trên object storage chỉ cần đọc một phần file?
 <details><summary>Đáp án</summary>
 
-Footer metadata ở cuối file cho reader tìm các column chunk cần[^pq-footer][^pq-read]; S3 hỗ trợ GET theo khoảng byte[^snow-range]; thống kê min/max cho phép bỏ row group[^pq-minmax].
+Footer metadata ở cuối file cho reader tìm các column chunk cần[^pq-read]. S3 hỗ trợ GET theo khoảng byte[^snow-range]. Thống kê min/max cho phép bỏ row group[^pq-minmax].
 
 </details>
 
 6. Hãy nêu ba điều S3 bảo đảm và hai điều không.
 <details><summary>Đáp án</summary>
 
-Bảo đảm: read-after-write mạnh cho PUT/DELETE[^s3-strong], cập nhật một khóa nguyên tử[^s3-atomic-key], liệt kê không còn thấy object đã xóa[^s3-list]. Không: nguyên tử xuyên khóa[^s3-nocross], khóa đối tượng cho nhiều writer (timestamp muộn hơn thắng)[^s3-nolock].
+Bảo đảm: read-after-write mạnh cho PUT/DELETE[^s3-strong]. Cập nhật một khóa nguyên tử[^s3-atomic-key]. Liệt kê không còn thấy object đã xóa[^s3-list]. Không bảo đảm: nguyên tử xuyên khóa[^s3-nocross]. Không có khóa đối tượng cho nhiều writer (timestamp muộn hơn thắng)[^s3-nolock].
 
 </details>
 
 7. Iceberg commit một thay đổi bảng bằng cách nào, và vì sao spec không nói rõ cơ chế nguyên tử?
 <details><summary>Đáp án</summary>
 
-Tạo metadata file mới rồi hoán đổi con trỏ nguyên tử từ bản gốc sang bản mới; nếu bản gốc đã đổi thì thử lại[^ice-occ][^ice-retry]. Thao tác nguyên tử cụ thể phụ thuộc cách theo dõi bảng nên không được chuẩn hóa; ví dụ rename nguyên tử hoặc check-and-put trong metastore[^ice-notstd][^ice-fs-tables][^ice-metastore].
+Tạo metadata file mới rồi hoán đổi con trỏ nguyên tử từ bản gốc sang bản mới[^ice-occ]. Nếu bản gốc đã đổi thì thử lại[^ice-retry]. Thao tác nguyên tử cụ thể phụ thuộc cách theo dõi bảng nên không được chuẩn hóa[^ice-notstd]. Ví dụ là rename nguyên tử[^ice-fs-tables]. Hoặc check-and-put trong metastore[^ice-metastore].
 
 </details>
 
 8. Quy tắc nào của Delta làm hai writer không thể cùng commit một phiên bản? Primitive nào ở lớp lưu trữ cần có?
 <details><summary>Đáp án</summary>
 
-Writer không được ghi đè log entry có sẵn và nên dùng primitive nguyên tử của hệ file nền[^delta-never-overwrite]; entry đặt tên theo số phiên bản kế tiếp[^delta-log-entry]; paper Delta nêu bước tạo entry này phải nguyên tử, chỉ một client được tạo object tên đó[^delta-atomic-create]. Primitive cần là "tạo nếu chưa có" nguyên tử, ví dụ `If-None-Match` trên S3[^s3-cw] (nối nguồn là suy luận của người soạn).
+Writer không được ghi đè log entry có sẵn, và nên dùng primitive nguyên tử của hệ file nền[^delta-never-overwrite]. Entry đặt tên theo số phiên bản kế tiếp[^delta-log-entry]. Paper Delta nêu bước tạo entry này phải nguyên tử, chỉ một client được tạo object tên đó[^delta-atomic-create]. Primitive cần là "tạo nếu chưa có" nguyên tử, ví dụ `If-None-Match` trên S3[^s3-cw] (nối nguồn là suy luận của người soạn).
 
 </details>
 
 9. Vì sao Snowflake chọn tách compute khỏi storage? Cái giá phải trả là gì?
 <details><summary>Đáp án</summary>
 
-Shared-nothing thuần gắn chặt compute với storage[^snow-couple]: tải không đồng nhất khiến phần cứng thỏa hiệp[^snow-hetero], thay đổi thành viên phải xáo trộn dữ liệu[^snow-member] mà trên cloud là chuyện thường[^snow-norm]. Cái giá: node compute phải cache dữ liệu để giảm lưu lượng tới storage[^snow-cache].
+Shared-nothing thuần gắn chặt compute với storage[^snow-couple]. Tải không đồng nhất khiến phần cứng phải thỏa hiệp[^snow-hetero]. Thay đổi thành viên thì phải xáo trộn dữ liệu[^snow-member]. Trên cloud đó là chuyện thường[^snow-norm]. Cái giá: node compute phải cache dữ liệu để giảm lưu lượng tới storage[^snow-cache].
 
 </details>
 
 10. COST là gì, và đừng suy ra điều gì từ paper COST?
 <details><summary>Đáp án</summary>
 
-Cấu hình cần để nền tảng vượt một cài đặt đơn luồng có năng lực[^cost-def]; nhiều hệ có COST không giới hạn trên bài toán đồ thị được xét[^cost-unbounded]. Không suy ra phân tán luôn chậm; tác giả tự nhận phép so sánh không hoàn hảo[^cost-caveat].
+COST là cấu hình cần để nền tảng vượt một cài đặt đơn luồng có năng lực[^cost-def]. Nhiều hệ có COST không giới hạn trên bài toán đồ thị được xét[^cost-unbounded]. Đừng suy ra phân tán luôn chậm; tác giả tự nhận phép so sánh không hoàn hảo[^cost-caveat].
 
 </details>
 
 11. Mô tả chức năng của `ParquetObjectReader`, `ProjectionMask` và `PutMode::Create` trong chương này.
 <details><summary>Đáp án</summary>
 
-`ParquetObjectReader` đọc Parquet trong object storage qua `ObjectStore`[^pq-objreader]; `ProjectionMask` chọn cột[^pq-projmask]; `PutMode::Create` ghi nguyên tử và trả `AlreadyExists` nếu đã có object[^pq-putmode].
+`ParquetObjectReader` đọc Parquet trong object storage qua `ObjectStore`[^pq-objreader]. `ProjectionMask` chọn cột[^pq-projmask]. `PutMode::Create` ghi nguyên tử và trả `AlreadyExists` nếu đã có object[^pq-putmode].
 
 </details>
 
 ## Đọc thêm
 
-- DDIA (Kleppmann, O'Reilly, ấn bản 1): **không có chương tương ứng 1-1** với chương này — đây là phần mở rộng của người soạn (kiến trúc hệ dữ liệu, table format, object storage). Liên quan: chương 3 "Storage and Retrieval" (các mục "Data Warehousing", "Stars and Snowflakes: Schemas for Analytics", "Column-Oriented Storage")[^toc-ddia3]; chương 10 "Batch Processing" (các mục "The Output of Batch Workflows", "Comparing Hadoop to Distributed Databases")[^toc-ddia10]; chương 12 "The Future of Data Systems" (mục "Data Integration")[^toc-ddia12]. Sách không có bản đọc tự do nên chương này chỉ dùng tên chương/mục từ mục lục, không trích nội dung.
+- DDIA (Kleppmann, O'Reilly, ấn bản 1) **không có chương tương ứng 1-1** với chương này; đây là phần mở rộng của người soạn (kiến trúc hệ dữ liệu, table format, object storage). Sách không có bản đọc tự do nên chương này chỉ dùng tên chương/mục từ mục lục, không trích nội dung. Các phần liên quan:
+  - Chương 3 "Storage and Retrieval", mục "Stars and Snowflakes: Schemas for Analytics" (cùng các mục "Data Warehousing" và "Column-Oriented Storage")[^toc-ddia3].
+  - Chương 10 "Batch Processing", các mục "The Output of Batch Workflows" và "Comparing Hadoop to Distributed Databases"[^toc-ddia10].
+  - Chương 12 "The Future of Data Systems", mục "Data Integration"[^toc-ddia12].
 - [Lakehouse (CIDR 2021)](https://www.cidrdb.org/cidr2021/papers/cidr2021_paper17.pdf), mục 1–3: đọc để thấy lập luận ba thế hệ và danh sách vấn đề của kiến trúc hai tầng; nhớ đây là bài lập luận của vendor.
 - [Delta Lake: High-Performance ACID Table Storage over Cloud Object Stores](https://www.databricks.com/wp-content/uploads/2020/08/p975-armbrust.pdf): đọc để hiểu vì sao object store cần lớp log giao dịch và các lựa chọn thiết kế.
 - [Iceberg Table Spec (tag 1.5.0)](https://raw.githubusercontent.com/apache/iceberg/apache-iceberg-1.5.0/format/spec.md): đọc mục Overview, Optimistic Concurrency và Table Metadata để thấy chi tiết snapshot/manifest.

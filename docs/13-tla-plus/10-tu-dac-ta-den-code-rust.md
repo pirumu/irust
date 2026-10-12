@@ -1,17 +1,17 @@
 # P13 · Chương 10 — Từ đặc tả đến code Rust
 
-> Nguồn chính: Lamport, *Specifying Systems* (SS, bản PDF miễn phí); Newcombe et al., "Use of Formal Methods at Amazon Web Services" (AWS); Cirstea–Kuppe–Loillier–Merz, "Validating Traces of Distributed Programs Against TLA+ Specifications" (arXiv 2404.16075v2); Howard et al., "Smart Casual Verification of the Confidential Consortium Framework" (CCF, arXiv 2406.17455v2); Davis–Hirschhorn–Schvimer, "eXtreme Modelling in Practice" (MongoDB, arXiv 2006.00915v1); Bornholt et al., "Using Lightweight Formal Methods to Validate a Key-Value Storage Node in Amazon S3" (ShardStore, SOSP 2021); docs.rs `stateright` 0.31.0, `loom` 0.7.2, `shuttle` 0.9.6, `proptest` 1.12.0, `proptest-state-machine` 0.9.0; mã nguồn `tlaplus/tlaplus` tại commit `94d0c5070852b37b801bb8998c436383ab7ee37b` và `tlaplus/Examples` tại commit `6a7b26a31c1a6aeec789b455e9bbfa3b3ad2728f`. Sách Stateright (`stateright.rs`) và sách Proptest (`proptest-rs.github.io`) là **trang sống**, không có số phiên bản; trích tại thời điểm soạn (2026-10-12). Spec TLA+ và code Rust trong chương do **người soạn** tự viết để minh họa; **chương này không chạy TLC, không chạy `cargo`, không biên dịch code**, nên không có kết quả kiểm tra nào được khẳng định trừ chỗ nguồn nói rõ — chỗ nào là suy luận bằng tay thì ghi "(suy luận của người soạn)".
+> Nguồn chính: Lamport, *Specifying Systems* (SS, bản PDF miễn phí); Newcombe et al., "Use of Formal Methods at Amazon Web Services" (AWS); Cirstea–Kuppe–Loillier–Merz, "Validating Traces of Distributed Programs Against TLA+ Specifications" (arXiv 2404.16075v2); Howard et al., "Smart Casual Verification of the Confidential Consortium Framework" (CCF, arXiv 2406.17455v2); Davis–Hirschhorn–Schvimer, "eXtreme Modelling in Practice" (MongoDB, arXiv 2006.00915v1); Bornholt et al., "Using Lightweight Formal Methods to Validate a Key-Value Storage Node in Amazon S3" (ShardStore, SOSP 2021); docs.rs `stateright` 0.31.0, `loom` 0.7.2, `shuttle` 0.9.6, `proptest` 1.12.0, `proptest-state-machine` 0.9.0; mã nguồn `tlaplus/tlaplus` tại commit `94d0c5070852b37b801bb8998c436383ab7ee37b` và `tlaplus/Examples` tại commit `6a7b26a31c1a6aeec789b455e9bbfa3b3ad2728f`. Sách Stateright (`stateright.rs`) và sách Proptest (`proptest-rs.github.io`) là **trang sống**, không có số phiên bản; trích tại thời điểm soạn (2026-10-12). Spec TLA+ và code Rust trong chương do **người soạn** tự viết để minh họa. Chương này không chạy TLC, không chạy `cargo`, không biên dịch code, nên chỉ khẳng định kết quả ở chỗ nguồn nói rõ; chỗ nào là suy luận bằng tay thì ghi "(suy luận của người soạn)".
 
 ## Bạn sẽ hiểu được gì
 
-- **Q1.** Spec đã model-check xong mà code vẫn có thể sai — khoảng cách spec–code gồm những loại nào? → mục 1
-- **Q2.** Model-based testing có hai hướng (sinh test từ model; kiểm vết thực thi với model): khác nhau ra sao, và vì sao MongoDB thành công với một hướng rồi bỏ hướng kia? → mục 2
-- **Q3.** Trace validation bằng TLC làm cụ thể những gì (log → trace spec → verdict), cần instrument code thế nào, và "vết được chấp nhận" bảo đảm gì? → mục 3
+- **Q1.** Spec đã model-check xong mà code vẫn có thể sai: giữa spec và code có những khe hở nào? → mục 1
+- **Q2.** Model-based testing có hai hướng, sinh test từ model và kiểm vết thực thi với model. Hai hướng khác nhau ra sao, và vì sao MongoDB thành công với một hướng rồi bỏ hướng kia? → mục 2
+- **Q3.** Trace validation bằng TLC làm cụ thể những gì (log → trace spec → verdict), cần instrument code thế nào, và "vết được chấp nhận" bảo đảm đến đâu? → mục 3
 - **Q4.** Stateright là gì: `Model`, checker BFS/DFS, actor, linearizability tester dùng ra sao, và khác TLC ở đâu? → mục 4
 - **Q5.** loom và shuttle kiểm interleaving trong *code thật* thế nào, và khác nhau (cũng như khác TLC) ở độ sound và quy mô? → mục 5
-- **Q6.** Property-based testing kiểu state machine (proptest) kiểm code so với một reference model ra sao? → mục 6
-- **Q7.** Mỗi công cụ trả lời câu hỏi nào — mức thiết kế (TLA+) so với mức code — và giới hạn của từng cái? → mục 7
-- **Q8.** Một quy trình đề xuất cho team backend dùng các công cụ trên cùng nhau (nhận xét của người soạn) → mục 8
+- **Q6.** Property-based testing kiểu state machine (proptest) so code với một reference model ra sao? → mục 6
+- **Q7.** Mỗi công cụ trả lời câu hỏi nào, ở mức thiết kế (TLA+) hay mức code, và giới hạn của từng cái là gì? → mục 7
+- **Q8.** Một team backend nên dùng các công cụ trên cùng nhau theo quy trình nào (đề xuất của người soạn)? → mục 8
 
 ## Kiến thức cần trước
 
@@ -24,27 +24,27 @@
 
 ## Ví dụ chạy xuyên chương: bộ cấp token
 
-Để các công cụ dễ so sánh, cả chương xoay quanh **một** bài toán nhỏ do người soạn chọn: một service cấp *fencing token* tăng dần cho client (đúng loại token ở [P12 · 08, mục 8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md)). Tính chất cần giữ: **không hai client nào nhận cùng một token** (`Unique`). Ở mức thiết kế, "cấp token" là một bước duy nhất: đọc bộ đếm, giao cho client, tăng bộ đếm. Mọi chỗ lệch giữa "một bước" đó và code thật chính là khoảng cách spec–code mà chương này nói tới.
+Cả chương bám theo một bài toán nhỏ, do người soạn chọn (đây là ví dụ giả định, không phải code trong repo): `fencer`, một service Rust cấp *fencing token* tăng dần cho client đang giữ lease (đúng loại token ở [P12 · 08, mục 8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md)). Storage phía sau dùng token để từ chối ghi từ client cũ, nên tính chất sống còn là **không hai client nào nhận cùng một token** (`Unique`). Trên giấy, "cấp token" là một bước duy nhất: đọc bộ đếm, giao cho client, tăng bộ đếm. Code thật thì có thread, atomic, retry. Chỗ lệch giữa "một bước" trên giấy và code đó chính là khoảng cách spec–code mà chương này xử lý. Mỗi mục bên dưới mở đầu bằng câu hỏi tương ứng cho `fencer`, rồi thử từng công cụ lên nó.
 
 ## 1. Khoảng cách spec–code (Q1)
 
-> **Trả lời ngắn.** Model-check một spec chỉ cho biết điều gì đó về *mô hình* của hệ, không phải về code — tài liệu của AWS ghi rõ phương pháp hình thức làm việc với mô hình chứ không phải chính hệ thống[^aws-model]. Khoảng cách có nhiều dạng: spec cố ý bỏ bớt chi tiết (mỗi chi tiết bỏ là một nguồn lỗi tiềm tàng[^ss-abstraction]); "một bước" của spec không trùng "một bước nguyên tử" của code[^ss-grain]; code đi tắt hoặc spec chặt hơn code[^tv-shortcut][^ewd-self]; và hai bên trôi lệch nhau theo thời gian[^tv-sync].
+> **Trả lời ngắn.** Model-check xong một spec chỉ cho bạn biết điều gì đó về *mô hình* của hệ, không phải về code: phương pháp hình thức làm việc với mô hình chứ không phải chính hệ thống[^aws-model]. Khe hở giữa hai bên có nhiều dạng. Spec cố ý bỏ bớt chi tiết, mà mỗi chi tiết bỏ đi là một nguồn lỗi tiềm tàng[^ss-abstraction]. "Một bước" của spec không trùng "một bước nguyên tử" của code[^ss-grain]. Ngoài ra còn code đi tắt, spec chặt hơn code, và hai bên trôi lệch nhau theo thời gian (liệt kê ở dưới).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): design doc của một tính năng đã qua review kỹ, sequence diagram không có lỗ hổng. Nhưng developer cài đặt bằng một thread pool, một cache và một retry-loop mà sơ đồ không vẽ. Doc đúng không bảo đảm service đúng; và service chạy ổn trong test không bảo đảm doc đúng. Đó là hai loại lỗi khác nhau, cần hai loại công cụ.
+*Với `fencer`.* Giả sử team bạn đã viết spec TLA+ cho `fencer` và TLC báo `Unique` đúng ở mọi trạng thái. Bạn yên tâm được đến đâu? Chưa nhiều. Người cài đặt `fencer` dùng một thread pool, một bộ đếm atomic và một retry-loop mà spec không vẽ ra. Spec đúng không bảo đảm service đúng, và service chạy ổn trong test cũng không bảo đảm spec đúng. Hai loại lỗi này khác nhau, nên cần hai loại công cụ (nhận xét của người soạn).
 
-*Hai loại lỗi, hai loại công cụ.* AWS mô tả: có những lỗi tinh vi là lỗi *thiết kế* — code cài đặt trung thực thiết kế, nhưng thiết kế không xử lý đúng một tình huống hiếm[^aws-design]; và test code không đủ để tìm lỗi thiết kế vì số trạng thái có thể đạt của code là thiên văn[^aws-testing]. Ngược lại, code cuối cùng thì rõ nghĩa nhưng chứa quá nhiều chi tiết[^aws-exec], nên spec tồn tại để giữ lại phần cốt lõi. Hệ quả hiển nhiên (suy luận của người soạn): spec đúng chỉ bịt được lỗi thiết kế; lỗi cài đặt vẫn cần công cụ chạm vào code.
+Hai loại lỗi ấy khác nhau về bản chất. Có những lỗi tinh vi nằm ở *thiết kế*: code làm đúng như thiết kế, nhưng thiết kế không xử lý được một tình huống hiếm[^aws-design]. Test code không đủ để tìm loại lỗi này, vì số trạng thái code có thể đi tới là thiên văn[^aws-testing]. Ngược lại, code là thứ rõ nghĩa cuối cùng nhưng ngập trong chi tiết[^aws-exec], nên cần spec để giữ lại phần cốt lõi. Từ đó suy ra (suy luận của người soạn): spec đúng chỉ bịt được lỗi thiết kế, còn lỗi cài đặt vẫn cần công cụ chạm vào code.
 
-*Các dạng khoảng cách* (mỗi dạng có nguồn thực tế):
+Khe hở giữa spec và code có bảy dạng thường gặp, mỗi dạng đều có ví dụ từ thực tế:
 
-1. **Bỏ chi tiết có chủ đích.** Lamport: spec là một sự trừu tượng hóa, mô tả vài khía cạnh và lờ đi phần còn lại; mỗi khía cạnh bỏ đi là một nguồn lỗi tiềm tàng[^ss-abstraction]. Ví dụ ShardStore cố ý bỏ lỗi I/O và cạn tài nguyên khỏi reference model[^ss21-omit], đổi lại là không suy luận được về phần lớn tính sẵn sàng/hiệu năng[^ss21-avail].
-2. **Khác *grain of atomicity*** — chọn thay đổi nào của hệ được coi là một step của behavior[^ss-grain]. Gộp nhiều thao tác vào một step làm spec đơn giản hơn, nhưng spec "mịn" hơn thì mô tả hệ thật chính xác hơn[^ss-grain-fine]. Mục 1.1 bên dưới là ví dụ cụ thể.
-3. **Code đi tắt.** Cirstea et al.: cài đặt có thể đếm *số lượng* RM đã gửi Prepared thay vì lưu *danh tính*; chạy đúng khi không mất tin nhắn, nhưng nếu RM gửi lại do timeout thì TM đếm hai lần và commit sớm[^tv-shortcut].
-4. **Spec quá chặt.** Ở ví dụ EWD998 của `tlaplus/Examples`, spec không cho node gửi tin nhắn cho chính nó, trong khi cài đặt cho phép; sự khác biệt này an toàn nhưng vẫn là một "divergence" do trace validation phát hiện[^ewd-self].
-5. **Sai chép tay (transcription).** Kỹ sư công nghiệp thường nghi ngờ giá trị của model trừ khi chứng minh được model khớp cài đặt, vì rủi ro lỗi chép: lỗi logic khi cài đặt spec[^mdb-transcription].
-6. **Trôi lệch theo thời gian.** Khó bảo đảm trong một tổ chức lớn rằng đổi code luôn đi kèm đổi spec[^mdb-drift]; CCF xử lý rủi ro này bằng cách tích hợp việc đối chiếu vào CI của dự án[^ccf-ci].
-7. **Phần Rust không nằm trong spec.** Type system của Rust loại data race trong phần safe, nhưng không bảo đảm gì về race condition cấp cao như vi phạm tính nguyên tử[^ss21-datarace] — đúng loại khoảng cách mà mục 5 (loom/shuttle) nhắm vào.
+1. **Bỏ chi tiết có chủ đích.** Spec là một sự trừu tượng hóa: nó mô tả vài khía cạnh của hệ và lờ đi phần còn lại, và mỗi khía cạnh bỏ đi là một nguồn lỗi tiềm tàng[^ss-abstraction]. ShardStore của AWS bỏ hẳn lỗi I/O và cạn tài nguyên khỏi reference model[^ss21-omit]. Đổi lại, model không nói được gì về phần lớn tính sẵn sàng và hiệu năng[^ss21-avail].
+2. **Khác *grain of atomicity*.** Đó là việc chọn thay đổi nào của hệ được tính là một step của behavior[^ss-grain]. Gộp nhiều thao tác vào một step thì spec gọn hơn, nhưng spec mịn hơn mô tả hệ thật chính xác hơn[^ss-grain-fine]. Mục 1.1 bên dưới cho ví dụ trên `fencer`.
+3. **Code đi tắt.** Trong ví dụ của Cirstea et al., cài đặt đếm *số* RM đã gửi Prepared thay vì lưu *danh tính* từng RM. Khi không mất tin nhắn thì chạy đúng; nhưng nếu RM gửi lại do timeout thì TM đếm hai lần và commit sớm[^tv-shortcut].
+4. **Spec quá chặt.** Ở ví dụ EWD998 của `tlaplus/Examples`, spec không cho node gửi tin nhắn cho chính nó, trong khi cài đặt cho phép. Khác biệt này vô hại, nhưng trace validation vẫn báo nó là một "divergence"[^ewd-self].
+5. **Sai chép tay (transcription).** Kỹ sư trong công nghiệp thường nghi ngờ giá trị của model nếu không ai chứng minh được model khớp cài đặt, vì còn rủi ro lỗi chép, tức lỗi logic phát sinh khi cài đặt spec[^mdb-transcription].
+6. **Trôi lệch theo thời gian.** Trong một tổ chức lớn, khó bảo đảm mỗi lần đổi code đều kèm đổi spec[^mdb-drift]. CCF đối phó bằng cách đưa việc đối chiếu vào CI của dự án[^ccf-ci]. Trace validation cũng giúp hai bên giữ đồng bộ, vì dễ chạy lại mỗi khi spec hoặc code đổi[^tv-sync].
+7. **Phần Rust không nằm trong spec.** Type system của Rust loại được data race trong phần safe, nhưng không bảo đảm gì về race condition cấp cao như vi phạm tính nguyên tử[^ss21-datarace]. Đây đúng là khe hở mà mục 5 (loom, shuttle) nhắm vào.
 
 ```mermaid
 flowchart TB
@@ -58,13 +58,13 @@ flowchart TB
   C -->|"mục 6: so với reference model bằng PBT"| C
 ```
 
-*Sơ đồ: các cây cầu bắc qua khoảng cách, đánh số theo mục của chương. Mũi tên là chiều "kiểm tra", không phải chiều "chứng minh".*
+*Sơ đồ của người soạn: các cây cầu bắc qua khe hở, đánh số theo mục của chương. Mũi tên chỉ chiều "kiểm tra", không phải chiều "chứng minh".*
 
-Cirstea et al. nói thẳng vì sao không đi bằng con đường *chứng minh*: TLA+ có khái niệm refinement, nhưng chứng minh cả chuỗi refinement từ thiết kế cấp cao xuống cài đặt thật sẽ là việc cực nhọc[^tv-daunting]; CCF cũng nhận xét rằng chỉ viết spec cấp cao thì không đem lại bảo đảm nào về chính code sản xuất[^ccf-bridge]. Vì thế các nhóm ở đây chọn cách *nhẹ*: không chứng minh, mà kiểm tra có hệ thống từng mặt.
+Vì sao các nhóm này không đi bằng con đường *chứng minh*? TLA+ có khái niệm refinement, nhưng chứng minh cả chuỗi refinement từ thiết kế cấp cao xuống cài đặt thật là việc cực nhọc[^tv-daunting]. Nhóm CCF cũng nhận xét rằng chỉ viết spec cấp cao thì không bảo đảm gì về chính code production[^ccf-bridge]. Vì vậy họ chọn cách *nhẹ* hơn: không chứng minh, mà kiểm tra có hệ thống từng mặt.
 
 ### 1.1 Ví dụ: một bước hay hai bước? (bộ cấp token)
 
-Spec thiết kế (người soạn viết; chương này không chạy TLC). `Issue(c)` là **một** step: gán `next` cho `c` rồi tăng `next`. Nếu ký hiệu TLA+ còn lạ: `/\` là "và"; `\E c \in S : P` là "tồn tại `c` thuộc `S` sao cho `P`"; `x'` là giá trị của `x` ở state kế tiếp; `[f EXCEPT ![k] = v]` là hàm giống `f` trừ giá trị tại `k`; `[][Next]_vars` là "mỗi step hoặc là `Next`, hoặc không đổi `vars`". Định nghĩa có dẫn chứng nằm ở [Chương 02](02-toan-nen-tang.md) (logic, hàm, `EXCEPT`) và [Chương 03](03-trang-thai-hanh-vi-action.md) (state, action, `Spec`).
+Ta thử với `fencer`. Spec thiết kế dưới đây do người soạn viết (chương này không chạy TLC). `Issue(c)` là **một** step: gán `next` cho `c` rồi tăng `next`. Nếu ký hiệu TLA+ còn lạ: `/\` là "và"; `\E c \in S : P` là "tồn tại `c` thuộc `S` sao cho `P`"; `x'` là giá trị của `x` ở state kế tiếp; `[f EXCEPT ![k] = v]` là hàm giống `f` trừ giá trị tại `k`; `[][Next]_vars` là "mỗi step hoặc là `Next`, hoặc không đổi `vars`". Định nghĩa có dẫn chứng nằm ở [Chương 02](02-toan-nen-tang.md) (logic, hàm, `EXCEPT`) và [Chương 03](03-trang-thai-hanh-vi-action.md) (state, action, `Spec`).
 
 ```tla
 ------------------------- MODULE TokenIssuer -------------------------
@@ -95,9 +95,9 @@ Unique == \A c1, c2 \in Clients :
 =====================================================================
 ```
 
-Lưu ý khi chạy TLC (suy luận của người soạn từ định nghĩa spec): khi mọi client đã nhận token, không còn `Issue(c)` nào enabled; TLC mặc định kiểm deadlock nên sẽ coi trạng thái đó là lỗi, và cờ `-deadlock` tắt việc kiểm tra này[^tlc-deadlock]. Điều tương tự đúng cho spec `TokenIssuerSplit` ở phần "Đi sâu" bên dưới.
+Khi chạy TLC có một chỗ cần để ý (suy luận của người soạn từ định nghĩa spec): lúc mọi client đã nhận token thì không còn `Issue(c)` nào enabled. TLC mặc định kiểm deadlock nên sẽ coi trạng thái đó là lỗi, và cờ `-deadlock` tắt việc kiểm tra này[^tlc-deadlock]. Spec `TokenIssuerSplit` ở phần Đi sâu bên dưới cũng vậy.
 
-Với spec này, `Unique` đúng gần như hiển nhiên (suy luận của người soạn): mỗi step cấp đúng giá trị `next` rồi tăng nó lên, và `Issue(c)` chỉ chạy khi `got[c] = 0`. Code Rust tương ứng, nếu cài bằng một lệnh `fetch_add`, là **một** thao tác atomic — khớp đúng với "một step":
+Với spec này, `Unique` đúng gần như hiển nhiên (suy luận của người soạn): mỗi step cấp đúng giá trị `next` rồi tăng nó lên, và `Issue(c)` chỉ chạy khi `got[c] = 0`. Còn trong Rust, nếu `fencer` cài bằng một lệnh `fetch_add` thì đó là **một** thao tác atomic, khớp đúng với "một step":
 
 ```rust
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -119,7 +119,7 @@ impl TokenIssuer {
 }
 ```
 
-Họ `fetch_*` trả giá trị *trước* khi sửa, và việc "đọc rồi sửa" là một thao tác atomic duy nhất[^ral-fetch]; `AtomicUsize::fetch_add` cộng vào giá trị hiện tại và trả về giá trị trước đó[^std-fetchadd]. Docs Nomicon nói tăng một bộ đếm bằng `fetch_add` `Relaxed` là an toàn nếu bộ đếm không dùng để đồng bộ các truy cập khác[^nomicon-counter] (xem [P4 · 06](../04-concurrency/06-memory-model.md)). Còn phiên bản "tự nhiên" mà nhiều người viết thì khác hẳn:
+Các hàm họ `fetch_*` đọc rồi sửa giá trị trong một thao tác atomic duy nhất, và trả về giá trị *trước* khi sửa[^ral-fetch]. `AtomicUsize::fetch_add` cũng vậy: cộng vào giá trị hiện tại và trả về giá trị trước đó[^std-fetchadd]. Dùng `Relaxed` ở đây là đủ, vì tăng một bộ đếm bằng `fetch_add` `Relaxed` an toàn khi bộ đếm không dùng để đồng bộ các truy cập khác[^nomicon-counter] (xem [P4 · 06](../04-concurrency/06-memory-model.md)). Nhưng nhiều người sẽ viết phiên bản "tự nhiên" hơn, và nó khác hẳn:
 
 ```rust
     /// KHÔNG khớp `Issue(c)`: hai thao tác atomic riêng rẽ, giữa chúng thread khác chen vào được.
@@ -130,11 +130,11 @@ Họ `fetch_*` trả giá trị *trước* khi sửa, và việc "đọc rồi s
     }
 ```
 
-Mỗi bước riêng lẻ đều atomic, nhưng cả cụm không phải một bước: đây là race condition kinh điển chứ không phải data race theo định nghĩa của `std`, đã phân tích ở [P4 · 07, mục 1](../04-concurrency/07-lock-free.md)[^std-datarace]. Điểm của ví dụ: **spec đúng không nói gì về việc code có thật sự là "một bước" hay không**; câu hỏi đó chỉ trả lời được khi công cụ chạm vào code (mục 5). Biến thể mịn của spec, có thể dùng để thấy lỗi ngay ở mức thiết kế, nằm ở phần "Đi sâu" bên dưới.
+Từng lệnh `load` và `store` đều atomic, nhưng cả cụm thì không phải một bước. Đây là race condition kinh điển chứ không phải data race theo định nghĩa của `std`[^std-datarace] (đã phân tích ở [P4 · 07, mục 1](../04-concurrency/07-lock-free.md)). Ý của ví dụ: **spec đúng không nói gì về việc code có thật sự là "một bước" hay không**. Câu hỏi đó chỉ trả lời được khi công cụ chạm vào code (mục 5). Còn biến thể mịn của spec, để thấy lỗi ngay ở mức thiết kế, nằm ở phần Đi sâu dưới đây.
 
 <details><summary>Đi sâu: biến thể "hai bước" của spec và bốn bước dẫn tới vi phạm (suy luận của người soạn)</summary>
 
-Tách `Issue` thành hai step `Read` rồi `Write` — đúng grain của `issue_buggy` — bằng cách thêm biến `pc` (vị trí của từng client) và `tmp` (giá trị đã đọc). `UNCHANGED <<next, got>>` nghĩa là các biến trong ngoặc giữ nguyên giá trị ở state kế tiếp (xem [Chương 03](03-trang-thai-hanh-vi-action.md)):
+Ta tách `Issue` thành hai step `Read` rồi `Write`, đúng grain của `issue_buggy`, bằng cách thêm biến `pc` (vị trí của từng client) và `tmp` (giá trị đã đọc). `UNCHANGED <<next, got>>` nghĩa là các biến trong ngoặc giữ nguyên giá trị ở state kế tiếp (xem [Chương 03](03-trang-thai-hanh-vi-action.md)):
 
 ```tla
 ------------------------ MODULE TokenIssuerSplit ------------------------
@@ -170,19 +170,19 @@ Unique == \A c1, c2 \in Clients :
 =========================================================================
 ```
 
-Lập luận bằng tay với hai client `a`, `b` (không chạy TLC): ban đầu `next = 1`. `Read(a)` đặt `tmp[a] = 1`; `Read(b)` đặt `tmp[b] = 1`; `Write(a)` đặt `got[a] = 1` và `next = 2`; `Write(b)` đặt `got[b] = 1`. Bốn step, hai client cùng giữ token 1 — `Unique` bị vi phạm. Bất kỳ model checker nào duyệt hết các behavior sẽ gặp trạng thái này; bài học là *mức mịn của spec quyết định spec có "thấy" được lỗi hay không*: Lamport đã nói spec thô đơn giản hơn nhưng có thể bỏ sót điều xảy ra ở grain mịn[^ss-grain-fine]. Ở mức code, việc `issue` là một hay hai step thì loom (mục 5) kiểm trực tiếp.
+Lập luận bằng tay với hai client `a`, `b` (không chạy TLC): ban đầu `next = 1`. `Read(a)` đặt `tmp[a] = 1`; `Read(b)` đặt `tmp[b] = 1`; `Write(a)` đặt `got[a] = 1` và `next = 2`; `Write(b)` đặt `got[b] = 1`. Sau bốn step, hai client cùng giữ token 1 và `Unique` bị vi phạm. Model checker nào duyệt hết các behavior cũng sẽ gặp trạng thái này. Bài học là *độ mịn của spec quyết định spec có "thấy" được lỗi hay không*: spec thô thì đơn giản hơn nhưng có thể bỏ sót điều xảy ra ở grain mịn[^ss-grain-fine]. Còn ở mức code, việc `issue` là một hay hai step thì loom (mục 5) kiểm trực tiếp.
 
 </details>
 
-**Quay lại Q1:** spec đúng chỉ đảm bảo *thiết kế* đúng; giữa spec và code có các khe hở — chi tiết bị bỏ, grain of atomicity, đi tắt, spec quá chặt, chép sai, trôi lệch — và mỗi khe cần một cây cầu kiểm tra riêng.
+**Quay lại Q1:** spec đúng chỉ bảo đảm *thiết kế* đúng; giữa spec và code còn các khe hở (chi tiết bị bỏ, grain of atomicity, đi tắt, spec quá chặt, chép sai, trôi lệch), và mỗi khe cần một cây cầu kiểm tra riêng. Với `fencer`: một lệnh `fetch_add` khớp một step của spec, còn `load` rồi `store` thì không.
 
 ## 2. Model-based testing: sinh test từ model, và kiểm vết với model (Q2)
 
-> **Trả lời ngắn.** *Model-based testing* dùng spec để kiểm code theo hai hướng. Hướng thứ nhất, **model-based test-case generation (MBTCG)**: dùng spec hình thức để sinh test case khẳng định hành vi mong đợi của cài đặt[^mdb-mbtcg-def] (ở Realm Sync, test lấy từ không gian trạng thái mà TLC khám phá — xem bên dưới). Hướng thứ hai, **model-based trace-checking (MBTC)**: chạy code (bằng test sẵn có), ghi lại vết, rồi kiểm xem vết có hợp lệ với spec không. MongoDB thử cả hai: MBTCG rất thành công cho Realm Sync, còn MBTC bị đánh giá là không thực tế cho MongoDB Server và bị bỏ sau 10 tuần[^mdb-abs-1][^mdb-abandon].
+> **Trả lời ngắn.** *Model-based testing* dùng spec để kiểm code, theo hai hướng. Hướng thứ nhất là **MBTCG** (model-based test-case generation): từ spec hình thức sinh ra test case khẳng định hành vi mà cài đặt phải có[^mdb-mbtcg-def]. Hướng thứ hai là **MBTC** (model-based trace-checking): chạy code bằng test sẵn có, ghi lại vết, rồi kiểm vết đó có hợp lệ với spec không. Ở MongoDB, MBTCG rất thành công với Realm Sync, còn MBTC bị đánh giá là không thực tế cho MongoDB Server[^mdb-abs-1], và nhóm bỏ nó sau 10 tuần (chi tiết bên dưới).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có contract test cho một API. Hướng 1 giống việc *tự động sinh* bộ contract test từ OpenAPI: spec đi trước, test đi ra. Hướng 2 giống việc *đọc access log production* và hỏi "chuỗi request/response này có hợp lệ theo contract không?": code đi trước, log đi vào, spec là giám khảo.
+*Với `fencer`.* Giả sử bạn đã có spec `TokenIssuer` và muốn biết code của `fencer` có làm đúng như spec không. Có hai cách. Cách thứ nhất: để spec *sinh* test, tức duyệt các trạng thái của model rồi biến mỗi đường đi thành một test chạy trên `fencer`. Cách thứ hai: cứ chạy `fencer` bằng test sẵn có, ghi lại log các lần cấp token, rồi hỏi spec xem chuỗi log đó có phải một đường đi hợp lệ không. Ở cách thứ nhất spec đi trước và test đi ra; ở cách thứ hai code đi trước, log đi vào, và spec làm giám khảo (nhận xét của người soạn).
 
 ```mermaid
 flowchart LR
@@ -194,11 +194,11 @@ flowchart LR
   end
 ```
 
-*Hướng 1: MBTCG.* Nhóm Realm Sync của MongoDB viết một spec TLA+ mới cho thuật toán operational transformation (OT), rồi dùng không gian trạng thái mà TLC khám phá để sinh test case C++ và Golang[^mdb-mbtcg-use]. Cách làm cụ thể: TLC ghi toàn bộ đồ thị trạng thái ra file GraphViz DOT với mỗi cạnh dán nhãn bằng action[^mdb-dot]; một chương trình Golang parse file DOT đó thành test case, mỗi test gồm mảng khởi đầu, thao tác của từng client, thao tác sau khi biến đổi, và trạng thái cuối[^mdb-gen]. (TLC có tùy chọn `-dump dot` ghi các state ra file dạng dot[^tlc-dump].) Với mảng 3 phần tử và 3 client, mỗi client một thao tác, chương trình Golang sinh ra 4.913 test C++[^mdb-4913]; 36 test viết tay chỉ phủ 18/86 nhánh (21%) của luật merge cho các thao tác mảng[^mdb-cov]. Lợi ích dài hạn: test sinh và chạy lại tự động sau mỗi thay đổi model, giữ hai cài đặt (C++ và Golang) tương đương[^mdb-nice].
+*Hướng 1: MBTCG.* Nhóm Realm Sync của MongoDB viết một spec TLA+ mới cho thuật toán operational transformation (OT), rồi lấy không gian trạng thái mà TLC khám phá được để sinh test case C++ và Golang[^mdb-mbtcg-use]. TLC ghi cả đồ thị trạng thái ra file GraphViz DOT, mỗi cạnh dán nhãn bằng action[^mdb-dot]; đó là tùy chọn `-dump dot` của TLC[^tlc-dump]. Một chương trình Golang parse file DOT thành test case, mỗi test gồm mảng khởi đầu, thao tác của từng client, thao tác sau khi biến đổi, và trạng thái cuối[^mdb-gen]. Với mảng 3 phần tử và 3 client, mỗi client một thao tác, chương trình sinh ra 4.913 test C++[^mdb-4913]. Trong khi đó 36 test viết tay chỉ phủ 18/86 nhánh (21%) của luật merge cho các thao tác mảng[^mdb-cov]. Về lâu dài còn một lợi nữa: test sinh ra được chạy lại tự động sau mỗi lần sửa model, nên hai cài đặt C++ và Golang luôn tương đương nhau[^mdb-nice].
 
-*Hướng 2: MBTC.* Với MongoDB Server, nhóm không dùng MBTCG vì protocol *bất định*: một leader mới có thể được bầu bất cứ lúc nào, follower tụt hay bắt kịp không đoán trước được[^mdb-nondet]. Muốn ép code đi đúng một chuỗi bước sinh từ model thì phải đổi hành vi hệ quá nhiều[^mdb-force]. Thay vào đó họ chạy 423 test tích hợp viết tay sẵn có, instrument để ghi vết, hậu xử lý thành chuỗi state rồi bắt TLC kiểm chuỗi đó có hợp lệ theo `RaftMongo.tla` không. Kết quả: 120/423 test hỏng vì không tương thích với việc ghi vết[^mdb-120]; rốt cuộc nhóm chỉ kiểm vết cho 5 test viết tay + 1 test ngẫu nhiên, chỉ một test viết tay cho vết hợp lệ; bốn test còn lại cho vết vi phạm spec do hai sai lệch của cài đặt[^mdb-analysis]; họ bỏ dự án sau 10 tuần[^mdb-abandon].
+*Hướng 2: MBTC.* Với MongoDB Server, nhóm không dùng MBTCG vì protocol *bất định*: leader mới có thể được bầu bất cứ lúc nào, và follower tụt hay bắt kịp thế nào thì không đoán trước được[^mdb-nondet]. Muốn ép code đi đúng chuỗi bước do model sinh ra thì phải đổi hành vi của hệ quá nhiều[^mdb-force]. Vì vậy họ làm ngược lại: chạy 423 test tích hợp viết tay sẵn có, instrument để ghi vết, hậu xử lý vết thành chuỗi state rồi bắt TLC kiểm chuỗi đó có hợp lệ theo `RaftMongo.tla` không. Kết quả không tốt. 120/423 test hỏng vì không tương thích với việc ghi vết[^mdb-120]. Rốt cuộc nhóm chỉ kiểm vết cho 5 test viết tay và 1 test ngẫu nhiên; chỉ một test viết tay cho vết hợp lệ, bốn test còn lại cho vết vi phạm spec do hai sai lệch của cài đặt[^mdb-analysis]. Họ bỏ dự án sau 10 tuần[^mdb-abandon].
 
-*Vì sao hai hướng cho kết quả ngược nhau?* Bài báo nêu nguyên nhân thất bại của MBTC: mã nguồn khổng lồ, điều khiển concurrency nội bộ phức tạp, và các spec đã bị đơn giản hóa quá mức trước khi ai biết chúng sẽ dùng cho MBTC[^mdb-impeded]. Ngược lại MBTCG thành công khi thuật toán là *hàm xác định trên đầu vào nhỏ* (luật merge giữa hai thao tác) và cả đầu vào lẫn đầu ra đều dễ phát và so sánh (suy luận của người soạn từ phần mô tả Realm Sync ở trên). Hai mặt khác của bức tranh: viết spec cho Realm Sync mất khoảng 40 giờ trong hai tuần, bằng cách chép từ code C++ rồi sửa cú pháp, và TLC bắt được lỗi chép nhiều lần trong quá trình đó[^mdb-40h][^mdb-transcribe-err]; trong khi spec cho Server lại quá trừu tượng.
+Vì sao hai hướng cho kết quả ngược nhau? Bài báo nêu nguyên nhân thất bại của MBTC: mã nguồn khổng lồ, điều khiển concurrency nội bộ phức tạp, và các spec đã bị đơn giản hóa quá mức trước khi ai biết chúng sẽ dùng cho MBTC[^mdb-impeded]. MBTCG thành công trong điều kiện ngược lại: thuật toán là *hàm xác định trên đầu vào nhỏ* (luật merge giữa hai thao tác), và cả đầu vào lẫn đầu ra đều dễ phát và dễ so sánh (suy luận của người soạn từ phần mô tả Realm Sync ở trên). Chi phí cũng khác nhau. Spec của Realm Sync mất khoảng 40 giờ trong hai tuần, bằng cách chép từ code C++ rồi sửa cú pháp[^mdb-40h]. TLC cũng bắt được lỗi chép nhiều lần trong quá trình đó[^mdb-transcribe-err]. Spec của Server thì quá trừu tượng để dùng cho việc này.
 
 | | MBTCG (sinh test từ model) | MBTC (kiểm vết với spec) |
 |---|---|---|
@@ -208,26 +208,26 @@ flowchart LR
 | Cái giá chính | viết bộ chuyển đổi model → test | instrument code, đồng bộ thứ tự log, spec phải đủ mịn |
 | Nguồn | MongoDB §5 | MongoDB §4; Cirstea et al.; CCF (mục 3) |
 
-*(Bảng do người soạn tổng hợp từ các chú thích ở trên.)*
+*(Bảng do người soạn tổng hợp từ các chú thích ở trên.)* Với `fencer`, MBTCG hợp vì bước cấp token xác định và đầu vào nhỏ. MBTC hợp khi bạn đã có sẵn test tích hợp và chỉ muốn xem log của chúng có khớp spec không (nhận xét của người soạn).
 
 <details><summary>Đi sâu: các bài học kỹ thuật của MongoDB về MBTC (cũng áp dụng cho Rust)</summary>
 
-- **Thứ tự sự kiện.** MBTC với hệ phân tán cần một thứ tự (từng phần) của các sự kiện; MongoDB đạt thứ tự chặt bằng cách chạy mọi process trên một máy và ngủ trước khi ghi sự kiện[^mdb-order]. Một giải pháp tổng quát hơn là vector clock (bài báo nhắc nhưng không cần dùng).
-- **Tầm nhìn của sự kiện (visibility).** Mỗi sự kiện phải được ghi *sau khi* nó xảy ra nhưng *trước khi* thay đổi hiển thị với node khác; muốn vậy code ghi log phải giữ nhiều lock[^mdb-visibility]. Bài học này quyết định cách đặt `trace_line` trong code Rust ở mục 3.
-- **Khoảng cách trừu tượng.** Spec `RaftMongo.tla` rất cấp cao và không mô hình hóa tin nhắn giữa các node[^mdb-abstract]; mức trừu tượng đó phù hợp để kiểm thiết kế gossip commit point, nhưng khó ánh xạ từng sự kiện của code.
-- **Hạ tầng.** Phần công cụ MBTC gồm 570 dòng C++ để ghi sự kiện, 252 dòng TLA+ cập nhật spec và 484 dòng Python hậu xử lý[^mdb-loc], do hai kỹ sư làm trong 10 tuần[^mdb-effort].
+- **Thứ tự sự kiện.** MBTC với hệ phân tán cần sắp thứ tự (từng phần) các sự kiện. MongoDB có được thứ tự chặt bằng cách chạy mọi process trên một máy và ngủ trước khi ghi mỗi sự kiện[^mdb-order].
+- **Tầm nhìn của sự kiện (visibility).** Mỗi sự kiện phải được ghi *sau khi* nó xảy ra nhưng *trước khi* thay đổi hiển thị với node khác, nên code ghi log phải giữ nhiều lock[^mdb-visibility]. Bài học này quyết định cách đặt `trace_line` trong code Rust ở mục 3.
+- **Khoảng cách trừu tượng.** Spec `RaftMongo.tla` rất cấp cao và không mô hình hóa tin nhắn giữa các node[^mdb-abstract]. Mức đó hợp để kiểm thiết kế gossip commit point, nhưng khó ánh xạ từng sự kiện của code (nhận xét của người soạn).
+- **Hạ tầng.** Phần công cụ MBTC gồm 570 dòng C++ để ghi sự kiện, 252 dòng TLA+ cập nhật spec và 484 dòng Python hậu xử lý[^mdb-loc]. Hai kỹ sư làm phần này trong 10 tuần[^mdb-effort].
 
 </details>
 
-**Quay lại Q2:** MBTCG lấy test từ model, MBTC lấy vết từ code; MongoDB thành công với MBTCG ở bài toán xác định, nhỏ, và bỏ MBTC ở bài toán bất định, mã nguồn lớn, spec quá trừu tượng.
+**Quay lại Q2:** MBTCG lấy test từ model, MBTC lấy vết từ code. MongoDB thành công với MBTCG ở bài toán xác định và nhỏ, và bỏ MBTC ở bài toán bất định, mã nguồn lớn, spec quá trừu tượng; với `fencer`, cả hai hướng đều dùng được vì bước cấp token đơn giản và xác định.
 
 ## 3. Trace validation bằng TLC (Q3)
 
-> **Trả lời ngắn.** Trace validation lấy một *vết* thực thi của chương trình — chuỗi sự kiện, kèm cập nhật các biến của spec — rồi hỏi TLC: có behavior nào của spec khớp vết này không? Bài toán được quy về một bài model checking có ràng buộc[^tv-constrained]. Nếu TLC tìm được behavior khớp, vết được chấp nhận; đó là một bằng chứng kiểm thử, không phải chứng minh đúng đắn[^tv-nofg], và nếu vết thiếu thông tin thì có thể được chấp nhận oan[^tv-incomplete].
+> **Trả lời ngắn.** Trace validation lấy một *vết* thực thi của chương trình (chuỗi sự kiện kèm cập nhật các biến của spec) rồi hỏi TLC: có behavior nào của spec khớp vết này không? Bài toán được quy về một bài model checking có ràng buộc[^tv-constrained]. Nếu TLC tìm được behavior khớp thì vết được chấp nhận; đó là bằng chứng kiểm thử chứ không phải chứng minh đúng đắn[^tv-nofg]. Và nếu vết thiếu thông tin thì nó có thể được chấp nhận oan[^tv-incomplete].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có audit log của một workflow engine và muốn biết chuỗi chuyển trạng thái đã ghi có phải một đường đi hợp lệ trong state machine thiết kế không. Bạn không kiểm *mọi* đường đi của engine, chỉ những đường mà lần chạy này thực sự đi qua. Trace validation làm đúng việc đó, nhưng giám khảo là spec TLA+ và người chấm là TLC.
+*Với `fencer`.* Bạn bật ghi log trong một lần chạy test tích hợp của `fencer`: mỗi lần cấp token ghi một dòng `(client, token)`. Câu hỏi là chuỗi dòng này có phải một đường đi hợp lệ của spec `TokenIssuer` không. Bạn không kiểm *mọi* đường đi của `fencer`, chỉ đường mà lần chạy này thực sự đi qua. Trace validation làm đúng việc đó, với spec TLA+ làm giám khảo và TLC chấm (nhận xét của người soạn).
 
 ```mermaid
 flowchart LR
@@ -241,13 +241,13 @@ flowchart LR
 
 *Sơ đồ: khung của Cirstea et al.; số bước do người soạn đặt.*
 
-**Bài toán, nói bằng lời.** Gọi S là tập các behavior hữu hạn thỏa `Spec`, T là tập các behavior hữu hạn mà vết biểu diễn (biến nào vết không ghi thì nhận giá trị tùy ý). Vết *tương thích* với spec nếu S và T giao nhau khác rỗng[^tv-problem]. Lưu ý: họ **không** đòi T nằm trọn trong S (kiểu refinement), vì điều đó quá mạnh khi có biến không ghi trong vết mà spec chọn bất định[^tv-notrefine]. Atomic step của cài đặt cũng không cần khớp đúng từng step của spec: nó có thể ứng với *không hoặc nhiều* step của spec[^tv-atomicity].
+**Bài toán, nói bằng lời.** Gọi S là tập các behavior hữu hạn thỏa `Spec`, và T là tập các behavior hữu hạn mà vết biểu diễn (biến nào vết không ghi thì nhận giá trị tùy ý). Vết *tương thích* với spec nếu S và T có giao khác rỗng[^tv-problem]. Lưu ý họ **không** đòi T nằm trọn trong S như kiểu refinement, vì điều đó quá mạnh khi có biến không ghi trong vết mà spec chọn bất định[^tv-notrefine]. Một atomic step của cài đặt cũng không cần khớp đúng một step của spec: nó có thể ứng với *không hoặc nhiều* step của spec[^tv-atomicity].
 
-**Instrument ở đâu?** Khó nhất khi instrument là xác định các *điểm tuyến tính hóa* — chỗ chương trình hoàn tất một bước tương ứng với một transition nguyên tử của state machine cấp cao[^tv-lin]. Nguyên tắc dẫn đường của bài báo: ghi sự kiện khi trạng thái chia sẻ đã được cập nhật, như lúc gửi/nhận tin nhắn, thao tác trên lock hay trên lưu trữ bền[^tv-guide]. Vết chỉ cần chứa *cập nhật* của biến spec chứ không phải giá trị đầy đủ, và có thể chỉ ghi một số biến; đổi lại TLC phải tìm kiếm nhiều hơn để điền chỗ thiếu[^tv-partial]. Với hệ phân tán cần đồng hồ logic để sắp thứ tự: thư viện của họ hỗ trợ đồng hồ logic vô hướng, vector clock có thể thêm[^tv-clock].
+**Instrument ở đâu?** Phần khó nhất là xác định các *điểm tuyến tính hóa*, tức chỗ chương trình hoàn tất một bước ứng với một transition nguyên tử của state machine cấp cao[^tv-lin]. Nguyên tắc dẫn đường là ghi sự kiện ngay khi trạng thái chia sẻ vừa được cập nhật, như lúc gửi hay nhận tin nhắn, thao tác trên lock hoặc trên lưu trữ bền[^tv-guide]. Vết chỉ cần chứa *cập nhật* của biến spec chứ không phải giá trị đầy đủ, và có thể chỉ ghi một số biến; đổi lại TLC phải tìm kiếm nhiều hơn để điền chỗ thiếu[^tv-partial]. Hệ phân tán còn cần đồng hồ logic để sắp thứ tự: thư viện của họ hỗ trợ đồng hồ logic vô hướng, và có thể thêm vector clock[^tv-clock].
 
 ### 3.1 Cụ thể cho bộ cấp token
 
-**Phía Rust: ghi vết.** Mục tiêu: mỗi lần `issue` xong, ghi một dòng NDJSON (mỗi dòng là một object JSON). Cách ghi *ngây thơ* tưởng đúng nhưng sai:
+**Phía Rust: ghi vết.** Mỗi lần `issue` xong, `fencer` ghi một dòng NDJSON (mỗi dòng là một object JSON). Cách ghi *ngây thơ* trông đúng nhưng sai:
 
 ```rust
 // SAI về thứ tự: fetch_add xong rồi mới ghi log; hai thread có thể ghi ngược thứ tự bước.
@@ -258,7 +258,7 @@ pub fn issue_logged_naive(&self, client: &str) -> usize {
 }
 ```
 
-Lập luận bằng tay (suy luận của người soạn): thread A `fetch_add` được 1, thread B `fetch_add` được 2, B ghi log trước A. Vết có dòng `(b, 2)` trước `(a, 1)`. Spec `Issue` ở mục 1.1 chỉ cho cấp `next` hiện tại, mà lúc dòng đầu được xử lý `next = 1`, nên TLC từ chối dòng `(b, 2)` — một cảnh báo giả: code đúng mà vết sai thứ tự. Đây chính là bài học về tầm nhìn của MongoDB: sự kiện phải được ghi trước khi thay đổi hiển thị với bên khác, nên code ghi log phải giữ lock[^mdb-visibility]. Ví dụ EWD998 gặp một vấn đề cùng họ: ghi log ở thread nhận làm hỏng quan hệ happen-before giữa các dòng log, nên họ ghi log vào lúc thông điệp được lấy khỏi `inbox` chứ không phải lúc thread nhận chấp nhận nó[^ewd-log]. Với `fetch_add` thuần không có chỗ nào để "ghi log trong cùng bước"; cách thông thường là, **trong bản build có ghi vết**, thay bộ đếm bằng một `Mutex` và ghi log trước khi nhả lock:
+Vì sao sai? (suy luận của người soạn) Thread A `fetch_add` được 1, thread B `fetch_add` được 2, nhưng B ghi log trước A. Vết có dòng `(b, 2)` trước `(a, 1)`. Spec `Issue` ở mục 1.1 chỉ cấp `next` hiện tại, mà lúc xử lý dòng đầu thì `next = 1`, nên TLC từ chối dòng `(b, 2)`. Đó là một cảnh báo giả: code đúng mà vết sai thứ tự. MongoDB gặp đúng bài học này: sự kiện phải được ghi trước khi thay đổi hiển thị với bên khác, nên code ghi log phải giữ lock[^mdb-visibility]. Ví dụ EWD998 gặp một vấn đề cùng họ: ghi log ở thread nhận làm hỏng quan hệ happen-before giữa các dòng log, nên người viết ghi log vào lúc thông điệp được lấy khỏi `inbox` chứ không phải lúc thread nhận chấp nhận nó[^ewd-log]. Với `fetch_add` thuần thì không có chỗ nào để "ghi log trong cùng bước". Cách thông thường là, **trong bản build có ghi vết**, đặt bộ đếm sau một `Mutex` và ghi log trước khi nhả lock:
 
 ```rust
 use std::io::Write;
@@ -282,9 +282,9 @@ impl TracedIssuer {
 }
 ```
 
-Hệ quả cần nói thẳng (nhận xét của người soạn): bản build ghi vết **không còn là chính code production** — nó kiểm đường logic, không kiểm việc `fetch_add` có thật sự là một bước. Việc đó là của loom (mục 5).
+Cái giá cần nói thẳng (nhận xét của người soạn): bản build ghi vết **không còn là chính code production**. Nó kiểm đường logic, không kiểm việc `fetch_add` có thật sự là một bước; việc đó là của loom (mục 5).
 
-**Phía TLA+: trace spec.** Mô-đun dưới đây (người soạn viết; không chạy TLC) có dạng của `TraceSpec` trong Cirstea et al.: một biến `l` đếm dòng vết[^tv-l], `Trace` nạp file NDJSON[^tv-trace-op] bằng module `Json` của TLC (đối số là đường dẫn tuyệt đối), và mỗi action của spec được "ghép" với một dòng vết. Module `Json` có `ndJsonDeserialize` — nạp các giá trị JSON ngăn cách bằng dòng mới[^json-nd]. Cách khai báo `EXTENDS … Json, IOUtils` và đọc đường dẫn vết từ `IOEnv.TRACE_PATH` lấy theo `TraceSpec` của bài báo[^tv-ioenv]; người soạn không tìm thấy `IOUtils.tla` trong thư mục `StandardModules` ở commit đã ghim nên chưa xác nhận nó có sẵn trong `tla2tools.jar` — nếu SANY báo thiếu module, cần thêm gói chứa nó vào classpath.
+**Phía TLA+: trace spec.** Mô-đun dưới đây (người soạn viết, không chạy TLC) có dạng của `TraceSpec` trong bài của Cirstea et al. Nó dùng một biến `l` đếm dòng vết[^tv-l]. Toán tử `Trace` nạp file NDJSON thành một chuỗi record[^tv-trace-op]. Việc nạp dùng `ndJsonDeserialize` của module `Json` trong TLC (đối số là đường dẫn tuyệt đối), hàm này đọc các giá trị JSON ngăn cách bằng dòng mới[^json-nd]. Mỗi action của spec được "ghép" với một dòng vết. Cách khai báo `EXTENDS … Json, IOUtils` và đọc đường dẫn vết từ `IOEnv.TRACE_PATH` lấy theo `TraceSpec` của bài báo[^tv-ioenv]. Một lưu ý: người soạn không tìm thấy `IOUtils.tla` trong thư mục `StandardModules` ở commit đã ghim, nên chưa xác nhận nó có sẵn trong `tla2tools.jar`; nếu SANY báo thiếu module thì cần thêm gói chứa nó vào classpath.
 
 ```tla
 ---------------------------- MODULE IssuerTrace ----------------------------
@@ -315,7 +315,7 @@ TraceAccepted == TLCGet("stats").diameter - 1 = Len(Trace)
 =============================================================================
 ```
 
-Dưới đây là file cấu hình (ví dụ) và lệnh chạy. Cờ `-deadlock` tắt kiểm tra deadlock, như mô tả trong chính `TLC.java`[^tlc-deadlock].
+Tiếp theo là file cấu hình (ví dụ) và lệnh chạy. Cờ `-deadlock` tắt kiểm tra deadlock, như mô tả trong chính `TLC.java`[^tlc-deadlock].
 
 ```
 SPECIFICATION TraceSpec
@@ -329,46 +329,46 @@ TRACE_PATH=/tmp/issuer.ndjson java -cp tla2tools.jar tlc2.TLC -deadlock -config 
 
 Ba chi tiết cần lưu ý (phần lớn từ bài báo):
 
-- **Thứ tự conjunct.** TLC đánh giá công thức từ trái sang phải. Bài báo viết `IsEvent` (cập nhật biến theo vết) *trước* action của spec[^tv-lr]; trong `IsIssue` ở trên người soạn đặt `Issue(...)` trước rồi mới so `got'` với vết, vì `got'` phải được gán trước khi so sánh (suy luận của người soạn về cách TLC xử lý biến có dấu phẩy trên).
-- **Không kiểm deadlock.** Ở trạng thái mà vết không đi tiếp được vẫn có thể còn behavior khớp ở nhánh khác của không gian trạng thái, nên không nên bắt TLC kiểm deadlock của spec bị ràng buộc[^tv-nodeadlock].
-- **Hậu điều kiện thay vì invariant.** Có thể bắt TLC in ra một behavior khớp bằng cách kiểm invariant `l < Len(Trace)` — vi phạm nó cho ra một behavior của spec khớp vết nếu tồn tại[^tv-inv] — nhưng khi vết *không* khớp thì không có thông tin nào được in ra; vì thế họ dùng hậu điều kiện `TraceAccepted` dựa trên nhận xét rằng độ dài đường dài nhất trong không gian bị ràng buộc bằng đường kính của đồ thị[^tv-diameter][^tv-post].
+- **Thứ tự conjunct.** TLC đánh giá công thức từ trái sang phải. Bài báo viết `IsEvent` (cập nhật biến theo vết) *trước* action của spec[^tv-lr]. Trong `IsIssue` ở trên, người soạn đặt `Issue(...)` trước rồi mới so `got'` với vết, vì `got'` phải được gán trước khi đem ra so (suy luận của người soạn về cách TLC xử lý biến có dấu phẩy trên).
+- **Không kiểm deadlock.** Khi vết không đi tiếp được ở một nhánh, vẫn có thể còn behavior khớp ở nhánh khác của không gian trạng thái. Vì vậy không nên bắt TLC kiểm deadlock trên spec đã bị ràng buộc[^tv-nodeadlock].
+- **Hậu điều kiện thay vì invariant.** Có thể bắt TLC in ra một behavior khớp bằng cách kiểm invariant `l < Len(Trace)`: vi phạm nó cho ra một behavior của spec khớp vết, nếu có[^tv-inv]. Nhưng khi vết *không* khớp thì không có thông tin nào được in ra. Vì vậy nhóm tác giả dùng hậu điều kiện `TraceAccepted`, dựa trên nhận xét rằng độ dài đường dài nhất trong không gian bị ràng buộc bằng đường kính của đồ thị[^tv-diameter].
 
-**Đọc kết quả.** Nếu `TraceAccepted` đúng: tồn tại behavior của spec khớp toàn bộ vết. Nếu sai: spec không có behavior nào có tiền tố độ dài tương ứng khớp log[^tv-post]; TLC không in *counterexample* vì không có một behavior duy nhất giải thích thất bại[^tv-post], đúng như CCF ghi nhận: khác với model checking thường, vết không hợp lệ không có phản ví dụ[^ccf-nocex]. Với ví dụ của ta (suy luận của người soạn): vết do `issue_buggy` sinh ra khi hai thread đọc trùng, `(a,1)` rồi `(b,1)`: dòng thứ hai đòi `got'[b] = 1` nhưng spec cấp `next = 2`, nên chuỗi không khớp được quá dòng 2 và vết bị từ chối.
+**Đọc kết quả.** Nếu `TraceAccepted` đúng, tồn tại behavior của spec khớp toàn bộ vết. Nếu sai, spec không có behavior nào có tiền tố độ dài tương ứng khớp log[^tv-post]. Cũng vì thế TLC không in *counterexample* (không có một behavior duy nhất giải thích thất bại), và CCF ghi nhận đúng điều này: khác với model checking thường, vết không hợp lệ không có phản ví dụ[^ccf-nocex]. Với `fencer` (suy luận của người soạn): vết do `issue_buggy` sinh ra khi hai thread đọc trùng là `(a,1)` rồi `(b,1)`. Dòng thứ hai đòi `got'[b] = 1` nhưng spec cấp `next = 2`, nên chuỗi không khớp được quá dòng 2 và vết bị từ chối.
 
 ### 3.2 Khi vết bị từ chối: sửa code hay sửa spec?
 
-Cirstea et al. áp dụng cho 2PC, một kho key-value, EWD998, hai cài đặt Raft và CCF[^tv-cases]; trong mọi trường hợp, trace validation nhanh chóng tìm ra các lần chạy không khớp spec cấp cao[^tv-found]. Họ phân loại các nguyên nhân thường gặp:
+Cirstea et al. áp dụng phương pháp cho 2PC, một kho key-value, EWD998, hai cài đặt Raft và CCF[^tv-cases]. Ở mọi trường hợp, trace validation nhanh chóng tìm ra các lần chạy không khớp spec cấp cao[^tv-found]. Họ phân loại nguyên nhân thường gặp thành ba nhóm:
 
-1. **Cài đặt đi tắt** — ví dụ đếm RM thay vì nhớ danh tính (mục 1)[^tv-shortcut].
-2. **Spec quá chặt** — ví dụ EWD998 cấm gửi cho chính mình[^ewd-self].
-3. **Lệch grain of atomicity.** Ngôn ngữ phổ biến không có giao dịch nguyên tử bao nhiều cập nhật, nên chọn lúc nào ghi một action cần cân nhắc[^tv-atomicity2]. Các cách xử lý nêu trong bài báo: gửi lại tin nhắn là *stuttering step* (bước không đổi biến spec), mà spec TLA+ vốn không nhạy với stuttering[^tv-stutter]; hoặc cài đặt gộp nhiều step của spec thành một thì có thể ghi hai transition liên tiếp[^tv-two], hoặc thêm một disjunct dùng toán tử *action composition* vào next-state của spec dành cho validation[^tv-compose]. CCF làm đúng điều này: nhiều cài đặt Raft, kể cả CCF, gói cập nhật term vào `AppendEntries` để giảm số vòng mạng[^ccf-piggy], nên họ ghép `UpdateTerm` với `HandleAppendEntriesReq` thành một action[^ccf-grain], và dùng stuttering hữu hạn khi một action cấp cao ứng với nhiều sự kiện cài đặt[^ccf-stutter]. EWD998 cũng ghi nhận: spec cấp cao coi chuyền token là *một* step nguyên tử, nhưng thực tế token đi qua mạng nên người làm phải thêm stuttering step tường minh[^ewd-token].
+1. **Cài đặt đi tắt**, như ví dụ đếm RM thay vì nhớ danh tính ở mục 1[^tv-shortcut].
+2. **Spec quá chặt**, như EWD998 cấm gửi cho chính mình[^ewd-self].
+3. **Lệch grain of atomicity.** Các ngôn ngữ phổ biến không có giao dịch nguyên tử bao nhiều cập nhật tùy ý, nên chọn lúc nào ghi một action cần cân nhắc[^tv-atomicity2]. Bài báo nêu ba cách xử lý. Cách một: coi việc gửi lại tin nhắn là *stuttering step* (bước không đổi biến spec), vì spec TLA+ vốn không nhạy với stuttering[^tv-stutter]. Cách hai: nếu cài đặt gộp nhiều step của spec thành một, ghi hai transition liên tiếp[^tv-two]. Cách ba: thêm vào next-state của spec dành cho validation một disjunct dùng toán tử *action composition*[^tv-compose]. CCF áp dụng các kỹ thuật này như sau. Nhiều cài đặt Raft, kể cả CCF, gói cập nhật term vào `AppendEntries` để giảm số vòng mạng[^ccf-piggy]. Vì vậy họ ghép `UpdateTerm` với `HandleAppendEntriesReq` thành một action[^ccf-grain]. Họ cũng dùng stuttering hữu hạn khi một action cấp cao ứng với nhiều sự kiện cài đặt[^ccf-stutter]. EWD998 gặp tình huống tương tự: spec cấp cao coi chuyền token là *một* step nguyên tử, nhưng thực tế token đi qua mạng, nên người làm phải thêm stuttering step tường minh[^ewd-token].
 
-Khi phát hiện divergence, tùy trường hợp mà sửa spec hoặc sửa code, rồi chạy lại cả model checking trên spec đã sửa lẫn test trên code đã sửa[^ccf-fix]. CCF còn ghi nhận một thói quen hữu ích: ghi chú tham chiếu chéo giữa code và spec khi tên biến/hàm khác nhau[^ccf-xref].
+Khi phát hiện divergence, tùy trường hợp mà sửa spec hoặc sửa code, rồi chạy lại cả model checking trên spec đã sửa lẫn test trên code đã sửa[^ccf-fix]. CCF còn có một thói quen đáng bắt chước: ghi chú tham chiếu chéo giữa code và spec khi tên biến hay tên hàm khác nhau[^ccf-xref].
 
-**Kết quả thực tế.** Ở CCF, trace validation phát hiện một lỗi safety nghiêm trọng ("commit advance on AE-NACK"), khiến nhóm đầu tư thêm vào phương pháp này[^ccf-bug]; việc dựng trace spec đạt tới mức kiểm được phần lớn vết tốn khoảng hai tháng-kỹ sư rải trong bốn tháng[^ccf-effort], trong khi chính trace spec chỉ dài khoảng 400 dòng[^ccf-400]. Sau khi spec consensus được xác nhận khớp cài đặt, nhóm chuyển sang phát triển *theo spec*: spec là nguồn sự thật[^ccf-spec-driven]. Về hiệu năng, họ thêm tìm kiếm DFS vào TLC: kiểm một vết với spec consistency giảm từ khoảng một giờ (BFS) xuống dưới một giây (DFS)[^ccf-dfs]. Ở ví dụ EWD998 trong `tlaplus/Examples`, tác giả cài đặt thuật toán dựa trên spec trong khoảng hai giờ mà chưa chạy hay debug code[^ewd-impl], rồi trace validation lần lượt bắt các sai lệch (spec cấm tự gửi[^ewd-self], thông điệp kết thúc `trm` không có trong spec, và một vòng token bị khởi động lại sai)[^ewd-trm][^ewd-round].
+**Kết quả thực tế.** Ở CCF, trace validation phát hiện một lỗi safety nghiêm trọng ("commit advance on AE-NACK"), và chính việc đó khiến nhóm đầu tư thêm vào phương pháp này[^ccf-bug]. Dựng trace spec đến mức kiểm được phần lớn vết tốn khoảng hai tháng-kỹ sư, rải trong bốn tháng[^ccf-effort]. Bản thân trace spec chỉ dài khoảng 400 dòng[^ccf-400]. Sau khi spec consensus được xác nhận khớp cài đặt, nhóm chuyển sang phát triển *theo spec*, tức spec là nguồn sự thật[^ccf-spec-driven]. Về hiệu năng, họ thêm tìm kiếm DFS vào TLC, và thời gian kiểm một vết với spec consistency giảm từ khoảng một giờ (BFS) xuống dưới một giây (DFS)[^ccf-dfs]. Ví dụ EWD998 trong `tlaplus/Examples` thì khác: tác giả cài đặt thuật toán dựa trên spec trong khoảng hai giờ mà chưa chạy hay debug code[^ewd-impl]. Sau đó trace validation lần lượt bắt các sai lệch. Spec cấm tự gửi[^ewd-self]. Thông điệp kết thúc `trm` không có trong spec[^ewd-trm]. Và một vòng token bị khởi động lại sai[^ewd-round].
 
 <details><summary>Đi sâu: kiểu ràng buộc của <code>tlaplus/Examples</code> (ACTION_CONSTRAINT + VIEW + POSTCONDITION), BFS/DFS và <code>-loadTrace</code></summary>
 
-- **Hai trường phái viết trace spec.** Bài báo dùng một biến đếm dòng `l` (như trên). Spec EWD998ChanTrace trong `tlaplus/Examples` thì không thêm biến: dùng `TLCGet("level")` làm chỉ số dòng vết (lợi thế: TLC vẫn hiển thị tên action cấp cao thay vì chỉ `Next`[^ewd-level]), nối vào TLC bằng `ACTION_CONSTRAINT TraceNextConstraint`, `VIEW TraceView`, `POSTCONDITION TraceAccepted`, `ALIAS TraceAlias` trong file `.cfg`[^ewd-cfg]. Tác giả giải thích lý do thêm `TraceView`: một state cấp cao có thể xuất hiện nhiều lần trong vết, và nếu không đưa mức (level) hiện tại vào view của TLC thì TLC sẽ dừng khi gặp lại state đã thấy[^ewd-view].
-- **Bản chất của việc chấp nhận.** Tác giả viết: một vết được chấp nhận nếu và chỉ nếu TLC khớp được từng dòng vết với state tương ứng trong (tiền tố của) một behavior của spec cấp cao[^ewd-constraint]. Spec này cũng ghi rằng nó được thiết kế cho TLC chạy chế độ model checking mặc định, tức BFS[^ewd-bfs], trong khi CCF thêm DFS vào TLC[^ccf-dfs2] để chạy nhanh hơn — hai lựa chọn khác nhau theo kích thước và độ không đầy đủ của vết (suy luận của người soạn).
-- **Vết không đầy đủ.** Dùng bất định để "định nghĩa tiên đề" cho giá trị thiếu dễ vượt khả năng của TLC; tác giả EWD998 chọn viết ràng buộc state/action khớp từng dòng vết với behavior của spec gốc thay cho cách đó[^ewd-nondet]. Cirstea et al. nêu rõ sự đánh đổi giữa độ chính xác của thông tin ghi trong vết (và của verdict) với khối lượng tìm kiếm TLC phải làm[^tv-tradeoff]; với kho key-value, chỉ ghi sự kiện cùng đối số đã đủ vì chúng xác định giá trị các biến[^tv-kv].
-- **Chỉ kiểm hữu hạn.** Vì chỉ phân tích vết hữu hạn nên bài báo bỏ qua tính chất liveness[^tv-liveness]. Với liveness xem [Chương 05](05-liveness-va-fairness.md).
-- **Tùy chọn TLC liên quan** (đọc từ mã nguồn `TLC.java` tại commit đã ghim): `-dump [dot] file` ghi các state ra file[^tlc-dump]; `-dumpTrace format file` ghi các counterexample theo định dạng cho trước[^tlc-dumptrace]; `-loadTrace format file` nạp một vết từ file để dùng làm ràng buộc[^tlc-loadtrace]. Chương này không đi sâu vào `-loadTrace` vì chưa đọc ngữ nghĩa chi tiết của nó.
-- **Coverage.** Một mục TODO ở cuối `EWD998ChanTrace.tla` ghi nhu cầu kiểm một *tập* vết hoặc gộp thống kê coverage từ nhiều lần chạy TLC để biết đã thấy đủ vết chưa[^ewd-todo]; nghĩa là "vết được chấp nhận" chưa nói gì về việc đã *thấy đủ* hành vi của spec.
+- **Hai trường phái viết trace spec.** Bài báo dùng một biến đếm dòng `l` (như trên). Spec EWD998ChanTrace trong `tlaplus/Examples` thì không thêm biến mà dùng `TLCGet("level")` làm chỉ số dòng vết; lợi thế là TLC vẫn hiển thị tên action cấp cao thay vì chỉ `Next`[^ewd-level]. Nó nối vào TLC bằng `ACTION_CONSTRAINT TraceNextConstraint`, `VIEW TraceView`, `POSTCONDITION TraceAccepted` và `ALIAS TraceAlias` trong file `.cfg`[^ewd-cfg]. Tác giả giải thích lý do thêm `TraceView`: một state cấp cao có thể xuất hiện nhiều lần trong vết, và nếu không đưa mức (level) hiện tại vào view của TLC thì TLC sẽ dừng khi gặp lại state đã thấy[^ewd-view].
+- **Bản chất của việc chấp nhận.** Một vết được chấp nhận nếu và chỉ nếu TLC khớp được từng dòng vết với state tương ứng trong (tiền tố của) một behavior của spec cấp cao[^ewd-constraint]. Spec này cũng ghi rằng nó được thiết kế cho TLC chạy chế độ model checking mặc định, tức BFS[^ewd-bfs]. CCF thì thêm DFS vào TLC để chạy nhanh hơn[^ccf-dfs2]. Hai lựa chọn khác nhau theo kích thước và độ không đầy đủ của vết (suy luận của người soạn).
+- **Vết không đầy đủ.** Dùng bất định để "định nghĩa tiên đề" cho giá trị thiếu dễ vượt khả năng của TLC, nên tác giả EWD998 chọn viết ràng buộc state/action khớp từng dòng vết với behavior của spec gốc[^ewd-nondet]. Cirstea et al. nêu rõ sự đánh đổi giữa độ chính xác của thông tin ghi trong vết (và của verdict) với khối lượng tìm kiếm TLC phải làm[^tv-tradeoff]. Riêng kho key-value thì chỉ cần ghi sự kiện cùng đối số, vì chúng đã xác định giá trị các biến[^tv-kv].
+- **Chỉ kiểm hữu hạn.** Vì chỉ phân tích vết hữu hạn nên bài báo bỏ qua tính chất liveness[^tv-liveness]. Về liveness xem [Chương 05](05-liveness-va-fairness.md).
+- **Tùy chọn TLC liên quan** (đọc từ mã nguồn `TLC.java` tại commit đã ghim). `-dump [dot] file` ghi các state ra file[^tlc-dump]. `-dumpTrace format file` ghi các counterexample theo định dạng cho trước[^tlc-dumptrace]. `-loadTrace format file` nạp một vết từ file để dùng làm ràng buộc[^tlc-loadtrace]. Chương này không đi sâu vào `-loadTrace` vì chưa đọc ngữ nghĩa chi tiết của nó.
+- **Coverage.** Một mục TODO ở cuối `EWD998ChanTrace.tla` ghi nhu cầu kiểm một *tập* vết, hoặc gộp thống kê coverage từ nhiều lần chạy TLC, để biết đã thấy đủ vết chưa[^ewd-todo]. Nghĩa là "vết được chấp nhận" chưa nói gì về việc đã *thấy đủ* hành vi của spec.
 
 </details>
 
-**Quay lại Q3:** instrument code tại điểm tuyến tính hóa (ghi log trong cùng critical section), viết trace spec ràng buộc `Spec` theo từng dòng vết, để TLC tìm behavior khớp; "chấp nhận" nghĩa là *vết này* nằm trong spec, không phải code đúng.
+**Quay lại Q3:** instrument code tại điểm tuyến tính hóa (với `fencer`: ghi log ngay trong critical section cấp token), viết trace spec ràng buộc `Spec` theo từng dòng vết, để TLC tìm behavior khớp. "Chấp nhận" nghĩa là *vết này* nằm trong spec, không phải code đúng.
 
 ## 4. Stateright: model checker viết bằng Rust (Q4)
 
-> **Trả lời ngắn.** Stateright là thư viện Rust để model check hệ thống, thiên về hệ phân tán[^sr-crate]. Bạn mô tả hệ bằng trait `Model` (state, action, bước chuyển) và gắn các *property* (always/eventually/sometimes)[^sr-always]; checker duyệt BFS hoặc DFS để tìm phản ví dụ[^sr-bfs][^sr-dfs]. Khác TLC ở chỗ model viết bằng chính Rust, và Stateright còn chạy được các actor đó trên mạng thật[^sr-spawn-real].
+> **Trả lời ngắn.** Stateright là thư viện Rust để model check hệ thống, thiên về hệ phân tán[^sr-crate]. Bạn mô tả hệ bằng trait `Model` (state, action, bước chuyển) và gắn các *property* (always, eventually, sometimes)[^sr-always]; checker duyệt BFS hoặc DFS để tìm phản ví dụ[^sr-bfs]. Khác TLC ở chỗ model viết bằng chính Rust, và Stateright còn chạy được các actor đó trên mạng thật[^sr-spawn-real].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): TLC giống một công cụ *vẽ và mô phỏng* sơ đồ ở môi trường riêng; Stateright giống một *test harness* nằm trong chính workspace Cargo của bạn, dùng kiểu và thư viện của bạn. Cái lợi: model và code có thể dùng chung kiểu dữ liệu, thậm chí dùng chung logic. Cái hại: model dài hơn spec TLA+, và bạn phải tự gánh phần "kiểu" mà TLA+ cho miễn phí.
+*Với `fencer`.* Ở mục 3 ta kiểm một vết của `fencer` với spec TLA+. Stateright đi hướng khác: viết luôn model của `fencer` bằng Rust, ngay trong workspace Cargo của bạn, dùng kiểu và thư viện của bạn. Cái lợi là model và code có thể dùng chung kiểu dữ liệu, thậm chí dùng chung logic. Cái hại là model dài hơn spec TLA+, và phần "kiểu" mà TLA+ cho miễn phí thì giờ bạn phải tự gánh (nhận xét của người soạn).
 
-**(a) Ánh xạ TLA+ ↔ `Model`.** Trait `Model` là abstraction chính của Stateright, mô hình hóa sự tiến triển của một hệ bất định[^sr-model]. Ba phương thức bắt buộc ứng với `Init`/`Next` của TLA+:
+**(a) Ánh xạ TLA+ ↔ `Model`.** Trait `Model` là abstraction chính của Stateright, mô hình hóa sự tiến triển của một hệ bất định[^sr-model]. Ba phương thức bắt buộc của nó ứng với `Init` và `Next` của TLA+:
 
 | TLA+ | Stateright `Model` |
 |---|---|
@@ -381,19 +381,19 @@ Hình dung (nhận xét của người soạn): TLC giống một công cụ *v�
 | tính chất đạt được ("có thể xảy ra") | `Property::sometimes(...)` |
 | `PROPERTY <>P` (liveness) | `Property::eventually(...)`, có hạn chế (xem bên dưới) |
 
-Sách Stateright (trang sống) nói rõ cách tách: trong TLA+ mỗi action tự mang cả điều kiện lẫn hiệu ứng; trong Stateright thì thành ngữ (và hiệu quả hơn) là tách điều kiện (`actions`) khỏi biến đổi trạng thái (`next_state`)[^sr-split]. Lưu ý docs còn yêu cầu thứ tự `init_states` và `actions` phải *xác định* để dựng `Path` theo chỉ số action[^sr-init].
+Điểm khác nhau chính nằm ở cách chia việc. Trong TLA+, mỗi action tự mang cả điều kiện lẫn hiệu ứng; trong Stateright, thành ngữ (và cũng hiệu quả hơn) là tách điều kiện (`actions`) khỏi biến đổi trạng thái (`next_state`)[^sr-split]. Docs còn yêu cầu thứ tự của `init_states` và `actions` phải *xác định*, để dựng `Path` theo chỉ số action[^sr-init].
 
-**(b) Property.** Docs gọi property *always* là safety/invariant — kiểm xem một kết cục tồi có thể xảy ra không[^sr-always]; property *sometimes* dùng để chắc rằng một kết cục mong muốn *đạt được*, ví dụ hệ xử lý được một yêu cầu ghi[^sr-sometimes]. Checker tìm phản ví dụ cho mỗi `always` và ví dụ cho mỗi `sometimes`; các ví dụ/phản ví dụ là chuỗi bước hệ thống gọi là `Path`, còn gọi là trace hay behavior[^sr-paths]. Property `sometimes` đóng vai "sanity check" cho các kết cục mong đợi[^sr-book-sometimes]; trong TLC phải mô phỏng bằng invariant giả cố ý vi phạm, vốn phiền hơn vì phải comment ra và chạy định kỳ[^sr-book-fake]. **Cảnh báo:** docs chỉ rõ trong bản cài đặt này, `eventually` chỉ đúng trên các đường *không chu trình*; một đường kết thúc ở chu trình không được coi là kết thúc tại chu trình đó, nên có thể bỏ sót (false negative)[^sr-eventually]. Tức là phần liveness và fairness của TLC ([Chương 05](05-liveness-va-fairness.md)) *không* có tương đương đầy đủ ở Stateright 0.31.0.
+**(b) Property.** Property *always* là safety hay invariant: kiểm xem một kết cục tồi có thể xảy ra không[^sr-always]. Property *sometimes* dùng để chắc rằng một kết cục mong muốn *đạt được*, ví dụ hệ xử lý được một yêu cầu ghi[^sr-sometimes]. Checker tìm phản ví dụ cho mỗi `always` và ví dụ cho mỗi `sometimes`; các ví dụ và phản ví dụ này là chuỗi bước của hệ, gọi là `Path` (còn gọi là trace hay behavior)[^sr-paths]. `sometimes` đóng vai "sanity check" cho các kết cục mong đợi[^sr-book-sometimes]. Trong TLC muốn có cái tương tự thì phải mô phỏng bằng invariant giả cố ý vi phạm, vốn phiền hơn vì phải comment ra và chạy định kỳ[^sr-book-fake]. **Cảnh báo:** docs chỉ rõ ở bản cài đặt này `eventually` chỉ đúng trên các đường *không chu trình*; một đường kết thúc ở chu trình không được coi là kết thúc tại chu trình đó, nên có thể bỏ sót (false negative)[^sr-eventually]. Nghĩa là phần liveness và fairness của TLC ([Chương 05](05-liveness-va-fairness.md)) *không* có tương đương đầy đủ ở Stateright 0.31.0.
 
-**(c) Checker.** `Model::checker()` trả về `CheckerBuilder`[^sr-checker]; từ đó:
+**(c) Checker.** `Model::checker()` trả về `CheckerBuilder`[^sr-checker]; từ đó bạn chọn cách duyệt:
 
-- `spawn_bfs()` duyệt theo chiều rộng, tốn bộ nhớ hơn `spawn_dfs`, nhưng tìm được `Path` *ngắn nhất* tới mỗi phát hiện nếu chạy một luồng (mặc định)[^sr-bfs].
+- `spawn_bfs()` duyệt theo chiều rộng. Nó tốn bộ nhớ hơn `spawn_dfs`, nhưng nếu chạy một luồng (mặc định) thì tìm được `Path` *ngắn nhất* tới mỗi phát hiện[^sr-bfs].
 - `spawn_dfs()` dùng ít bộ nhớ hơn đáng kể, đổi lại không bảo đảm đường ngắn nhất[^sr-dfs].
-- `spawn_simulation(seed, chooser)` đi lặp từ state khởi đầu tới state cuối để phủ nhanh các state sâu của model quá lớn để duyệt hết[^sr-sim] — gần với chế độ simulation của TLC (TLC có `-simulate`)[^tlc-simulate].
-- Các nút chỉnh: số luồng (`threads`)[^sr-threads], độ sâu tối đa (`target_max_depth`)[^sr-depth], giảm đối xứng (`symmetry`)[^sr-sym], và `serve` — một web UI để khám phá model tương tác[^sr-serve].
-- Sau `join()`, `assert_properties()` kiểm rằng có ví dụ cho mọi property `sometimes` và không có phản ví dụ cho `always`/`eventually`[^sr-assert]; trong test, vi phạm làm test thất bại (suy luận của người soạn từ tên hàm họ `assert_*`).
+- `spawn_simulation(seed, chooser)` đi lặp từ state khởi đầu tới state cuối, để phủ nhanh các state sâu của model quá lớn để duyệt hết[^sr-sim]. Nó gần với chế độ simulation của TLC (`-simulate`)[^tlc-simulate].
+- Các nút chỉnh: số luồng (`threads`)[^sr-threads]. Độ sâu tối đa (`target_max_depth`)[^sr-depth]. Giảm đối xứng (`symmetry`)[^sr-sym]. Và `serve`, một web UI để khám phá model tương tác[^sr-serve].
+- Sau `join()`, `assert_properties()` kiểm rằng có ví dụ cho mọi property `sometimes` và không có phản ví dụ cho `always`/`eventually`[^sr-assert]. Trong test, vi phạm làm test thất bại (suy luận của người soạn từ tên hàm họ `assert_*`).
 
-Đoạn code dưới đây (người soạn viết, **chưa biên dịch**, khớp chữ ký ở docs.rs 0.31.0) mô hình hóa đúng phiên bản *hai bước* `issue_buggy` — tương ứng `TokenIssuerSplit` ở mục 1:
+Đoạn code dưới đây (người soạn viết, **chưa biên dịch**, khớp chữ ký ở docs.rs 0.31.0) mô hình hóa đúng phiên bản *hai bước* `issue_buggy` của `fencer`, tương ứng `TokenIssuerSplit` ở mục 1:
 
 ```rust
 use std::collections::HashSet;
@@ -467,11 +467,11 @@ fn split_issuer_loses_uniqueness() {
 }
 ```
 
-Dự đoán bằng tay (suy luận của người soạn, chưa chạy): phản ví dụ ngắn nhất gồm bốn bước chuyển — cả hai client `Read` trước khi bất kỳ client nào `Write` — và vì BFS một luồng tìm được đường ngắn nhất[^sr-bfs], đường tìm ra dài bốn bước chuyển. Thứ tự cụ thể của các bước phụ thuộc vào thứ tự duyệt, nên đoạn code dùng `assert_any_discovery` thay vì `assert_discovery` với một chuỗi cứng.
+Dự đoán bằng tay (suy luận của người soạn, chưa chạy): phản ví dụ ngắn nhất gồm bốn bước chuyển, trong đó cả hai client `Read` trước khi client nào `Write`. BFS một luồng tìm được đường ngắn nhất[^sr-bfs], nên đường tìm ra dài bốn bước chuyển. Thứ tự cụ thể của các bước phụ thuộc vào thứ tự duyệt, vì thế đoạn code dùng `assert_any_discovery` thay vì `assert_discovery` với một chuỗi cứng.
 
-**(d) Actor: model và cài đặt cùng một mã.** Trên `Model` thô bạn tự viết toàn bộ mạng. Với hệ phân tán, Stateright cung cấp `Actor`: một actor khởi tạo state (có thể kèm output), rồi chờ sự kiện đến và phản hồi bằng cách cập nhật state và có thể phát thêm output[^sr-actor]. `ActorModel` biểu diễn hệ các actor liên lạc qua mạng[^sr-actormodel]; mạng có thể không thứ tự và có nhân bản[^sr-net-unordered], hoặc có thứ tự theo từng cặp actor[^sr-network]; có thể mất tin nhắn hoặc không, và docs lưu ý rằng nếu invariant không nhìn vào trạng thái mạng thì "mất tin" không khác "trễ vô hạn", nên thường không cần mô hình hóa mất tin để model checker chạy nhanh hơn[^sr-lossy]. Tham số `H` của `ActorModel` là *history*, một biến phụ (auxiliary variable) theo nghĩa TLA+[^sr-history]. Và đây là điểm khác biệt lớn: hàm `actor::spawn` chạy actor thật, gửi tin nhắn qua UDP[^sr-spawn]; sách Stateright coi đó là lợi ích — model và cài đặt cuối được khuyến khích dùng chung code, loại bỏ một kiểu lỗi (model và hệ thật lệch nhau)[^sr-book-share].
+**(d) Actor: model và cài đặt dùng chung một mã.** Trên `Model` thô, bạn phải tự viết toàn bộ phần mạng. Với hệ phân tán, Stateright có sẵn `Actor`: một actor khởi tạo state (có thể kèm output), rồi chờ sự kiện đến và phản hồi bằng cách cập nhật state, có thể phát thêm output[^sr-actor]. `ActorModel` biểu diễn một hệ các actor liên lạc qua mạng[^sr-actormodel]. Mạng có thể không thứ tự và có nhân bản[^sr-net-unordered]. Nó cũng có thể có thứ tự theo từng cặp actor[^sr-network]. Mạng cũng có thể mất tin nhắn hoặc không. Docs lưu ý rằng nếu invariant không nhìn vào trạng thái mạng thì "mất tin" không khác "trễ vô hạn", nên thường không cần mô hình hóa mất tin, và model checker chạy nhanh hơn[^sr-lossy]. Tham số `H` của `ActorModel` là *history*, một biến phụ (auxiliary variable) theo nghĩa TLA+[^sr-history]. Điểm khác biệt lớn nhất: hàm `actor::spawn` chạy actor thật, gửi tin nhắn qua UDP[^sr-spawn]. Sách Stateright coi đó là lợi ích: model và cài đặt cuối được khuyến khích dùng chung code, nên loại được một kiểu lỗi, là model và hệ thật lệch nhau[^sr-book-share].
 
-Phiên bản actor của bộ cấp token (người soạn viết, **chưa biên dịch**): server giữ `next`; mỗi lần nhận `Request` nó trả `Grant(next)` rồi tăng `next` — việc xử lý *một tin nhắn* là một bước, nên khớp `Issue(c)` ở mức thiết kế:
+Phiên bản actor của `fencer` (người soạn viết, **chưa biên dịch**): server giữ `next`; mỗi lần nhận `Request` nó trả `Grant(next)` rồi tăng `next`. Xử lý *một tin nhắn* là một bước, nên khớp `Issue(c)` ở mức thiết kế:
 
 ```rust
 use std::borrow::Cow;
@@ -543,11 +543,11 @@ fn actor_issuer_is_unique() {
 }
 ```
 
-(Hình dạng `on_start`/`on_msg`, `Cow<Self::State>`, `Out::send`, `ActorModel::new(...).actor(...).property(...)` và `state.actor_states` đều theo ví dụ trong docs của module `actor`[^sr-actor-ex].) Kết quả của lần chạy này chương không khẳng định (không chạy); điều đáng chú ý là cùng hàm `on_msg` đó, với `stateright::actor::spawn`, có thể chạy thật.
+Hình dạng của `on_start`/`on_msg`, `Cow<Self::State>`, `Out::send`, `ActorModel::new(...).actor(...).property(...)` và `state.actor_states` đều theo ví dụ trong docs của module `actor`[^sr-actor-ex]. Chương này không khẳng định kết quả chạy vì không chạy. Điều đáng chú ý là chính hàm `on_msg` này, nếu đưa vào `stateright::actor::spawn`, có thể chạy thật.
 
-**(e) Linearizability tester.** Khi hệ có hàm *đồng thời* (không phải mô hình tin nhắn), Stateright có module `semantics`. `SequentialSpec` định nghĩa tính đúng đắn qua một "reference implementation" — ví dụ "hệ này phải cư xử như một hàng đợi"[^sr-seq]. Sau đó một `ConsistencyTester` (như `LinearizabilityTester`) kiểm một lịch sử các thao tác có thể đồng thời so với reference đó[^sr-lintester-use]. Linearizability yêu cầu các thao tác được áp dụng nguyên tử và các thao tác tuần tự (không đồng thời) được áp dụng đúng thứ tự[^sr-lin]. Mỗi thao tác gắn với một "thread id" (một `actor::Id` làm được, miễn actor không phát thao tác thứ hai trước khi thao tác đầu xong)[^sr-threadid]; ghi `on_invoke` lúc gọi, `on_return` lúc trả, rồi `is_consistent()`; hai hàm đầu trả `Ok` nếu lịch sử *hợp lệ*, kể cả khi nó không nhất quán[^sr-oninvoke].
+**(e) Linearizability tester.** Khi hệ có các hàm gọi *đồng thời* (không phải mô hình tin nhắn), Stateright có module `semantics`. `SequentialSpec` định nghĩa tính đúng đắn qua một "reference implementation", ví dụ "hệ này phải cư xử như một hàng đợi"[^sr-seq]. Một `ConsistencyTester` như `LinearizabilityTester` sẽ kiểm lịch sử các thao tác có thể đồng thời so với reference đó[^sr-lintester-use]. Linearizability yêu cầu các thao tác được áp dụng nguyên tử, và các thao tác tuần tự (không đồng thời) được áp dụng đúng thứ tự[^sr-lin]. Mỗi thao tác gắn với một "thread id"; một `actor::Id` làm được, miễn actor không phát thao tác thứ hai trước khi thao tác đầu xong[^sr-threadid]. Cách dùng: ghi `on_invoke` lúc gọi, `on_return` lúc trả, rồi gọi `is_consistent()`; hai hàm đầu trả `Ok` nếu lịch sử *hợp lệ*, kể cả khi nó không nhất quán[^sr-oninvoke].
 
-Reference object cho bộ cấp token — "cấp token liên tiếp 1, 2, 3…" — và một harness kiểm trên thread thật (người soạn viết, **chưa biên dịch**):
+Với `fencer`, reference object là "cấp token liên tiếp 1, 2, 3…", và harness kiểm trên thread thật như sau (người soạn viết, **chưa biên dịch**):
 
 ```rust
 use std::sync::{Arc, Mutex};
@@ -596,9 +596,9 @@ fn check_linearizable(issuer: Arc<TokenIssuer>, threads: usize) {
 }
 ```
 
-Hai nhận xét của người soạn: (1) việc dùng `LinearizabilityTester` *bên ngoài* `ActorModel` — với thread thật hay trong harness loom/shuttle — là suy luận từ chữ ký API (`LinearizabilityTester::new(init_ref_obj)` không đòi một `Model`). Mục tiêu tương tự có ở ShardStore: về nguyên tắc họ muốn kiểm các thực thi đồng thời là linearizable so với reference model tuần tự[^ss21-lin], nhưng loom không đủ mở rộng cho test đầu-cuối nên họ chuyển sang Shuttle[^ss21-loom-scale]; bài báo không nhắc `LinearizabilityTester`. (2) Ghi `on_invoke` *trước* khi gọi và `on_return` *sau* khi gọi chỉ làm các khoảng thời gian "to ra", tức là có thể bỏ sót một số vi phạm nhưng không tạo cảnh báo giả (suy luận của người soạn). Trong harness loom/shuttle, hãy dùng `Mutex` của chính công cụ đó (mục 5), vì `std::sync::Mutex` là "vô hình" với loom[^loom-intrusive].
+Hai nhận xét của người soạn. (1) Dùng `LinearizabilityTester` *bên ngoài* `ActorModel`, với thread thật hay trong harness loom/shuttle, là suy luận từ chữ ký API: `LinearizabilityTester::new(init_ref_obj)` không đòi một `Model`. Mục tiêu tương tự có ở ShardStore: về nguyên tắc họ muốn kiểm các thực thi đồng thời là linearizable so với reference model tuần tự[^ss21-lin]. Nhưng loom không đủ mở rộng cho test đầu-cuối nên họ chuyển sang Shuttle[^ss21-loom-scale]; bài báo không nhắc `LinearizabilityTester`. (2) Ghi `on_invoke` *trước* khi gọi và `on_return` *sau* khi gọi chỉ làm các khoảng thời gian "to ra". Cách này có thể bỏ sót một số vi phạm nhưng không tạo cảnh báo giả (suy luận của người soạn). Trong harness loom/shuttle, hãy dùng `Mutex` của chính công cụ đó (mục 5), vì `std::sync::Mutex` là "vô hình" với loom[^loom-intrusive].
 
-**(f) So với TLC.** Sách Stateright liệt kê ưu thế của TLC/TLA+: ngắn gọn hơn Rust[^sr-book-brev]; hỗ trợ các tính chất temporal tùy ý kể cả fairness; hỗ trợ refinement mapping giữa các model[^sr-book-tlc]. Ưu thế của Stateright: model và cài đặt chung code (xem trên); tái sử dụng thư viện của hệ sinh thái Rust[^sr-book-eco], trong khi mẫu tái sử dụng TLA+ là copy-paste-sửa[^sr-book-reuse]; và tốc độ. Số đo do chính tác giả Stateright công bố trên spec Two-Phase Commit, laptop của ông:
+**(f) So với TLC.** Sách Stateright liệt kê vài ưu thế của TLC/TLA+: ngắn gọn hơn Rust[^sr-book-brev]; hỗ trợ tính chất temporal tùy ý (kể cả fairness) và refinement mapping giữa các model[^sr-book-tlc]. Ưu thế của Stateright: model và cài đặt dùng chung code (như trên); tái sử dụng thư viện của hệ sinh thái Rust[^sr-book-eco]; và tốc độ. Về tái sử dụng, mẫu của TLA+ là copy-paste-sửa[^sr-book-reuse]. Số đo dưới đây do chính tác giả Stateright công bố trên spec Two-Phase Commit, chạy trên laptop của ông:
 
 | #RM | Số state | TLC | Stateright | Tăng tốc |
 |---|---|---|---|---|
@@ -607,35 +607,35 @@ Hai nhận xét của người soạn: (1) việc dùng `LinearizabilityTester` 
 | 9 | 10.340.352 | 90 s | 8,902 s | 10,1× |
 | 10 | 61.515.776 | 674 s | 54,709 s | 12,3× |
 
-(Bảng số liệu của sách Stateright[^sr-book-perf]; **một nguồn, một spec, một máy** — không suy ra cho spec khác hay máy khác.) Ghi chú về độ nhất quán giữa các nguồn: sách (trang sống) liệt kê "symmetry reduction" là ưu thế của TLC[^sr-book-sym], nhưng docs 0.31.0 có `CheckerBuilder::symmetry` ở trên; khi hai nguồn khác nhau, chương này lấy docs bản ghim làm chuẩn cho API.
+(Bảng số liệu của sách Stateright[^sr-book-perf]; **một nguồn, một spec, một máy**, không suy ra cho spec khác hay máy khác.) Còn một chỗ hai nguồn lệch nhau: sách (trang sống) liệt kê "symmetry reduction" là ưu thế của TLC[^sr-book-sym], nhưng docs 0.31.0 có `CheckerBuilder::symmetry` ở trên. Khi hai nguồn khác nhau, chương này lấy docs bản ghim làm chuẩn cho API.
 
 <details><summary>Đi sâu: <code>Model</code> thô vs <code>ActorModel</code>, history, và những gì Stateright *không* cho bạn</summary>
 
-- **`ActorModel` là một `Model` có sẵn.** Docs liệt kê `impl Model for ActorModel<A, C, H>` với `State = ActorModelState<A, H>` và `Action = ActorModelAction<…>`[^sr-actormodel-impl]; vì vậy mọi cấu hình `checker()` ở trên dùng được cho actor.
+- **`ActorModel` là một `Model` có sẵn.** Docs liệt kê `impl Model for ActorModel<A, C, H>` với `State = ActorModelState<A, H>` và `Action = ActorModelAction<…>`[^sr-actormodel-impl]. Vì vậy mọi cấu hình `checker()` ở trên dùng được cho actor.
 - **Trường của `ActorModel`.** Có `init_network`, `lossy_network`, `max_crashes` (số actor đồng thời có thể đã crash), `record_msg_in`/`record_msg_out` (cập nhật history khi nhận/gửi) và `within_boundary` (giới hạn không gian cần duyệt)[^sr-actormodel-fields].
-- **Chuẩn bị cho code thật.** `spawn` nhận hàm serialize/deserialize cho `Msg` và `Storage`[^sr-spawn]. Ở stack backend thực tế (gRPC, tokio, queue…) bạn khó giữ nguyên runtime UDP của Stateright; vì vậy mục "Liên hệ với Rust" đề xuất tách *lõi bước chuyển trạng thái* thành hàm thuần mà cả `Model::next_state` lẫn shell async cùng gọi (nhận xét của người soạn).
-- **Không phải refinement.** Stateright kiểm `property` trên model của bạn; nó không chứng minh code production (nếu khác code trong `Actor`) "cài đặt đúng" model. Cùng một khoảng cách của mục 1 vẫn còn nếu bạn viết model và code riêng rẽ (nhận xét của người soạn).
+- **Chuẩn bị cho code thật.** `spawn` nhận hàm serialize/deserialize cho `Msg` và `Storage`[^sr-spawn]. Ở stack backend thực tế (gRPC, tokio, queue…) bạn khó giữ nguyên runtime UDP của Stateright. Vì vậy mục "Liên hệ với Rust" đề xuất tách *lõi bước chuyển trạng thái* thành hàm thuần mà cả `Model::next_state` lẫn shell async cùng gọi (nhận xét của người soạn).
+- **Không phải refinement.** Stateright kiểm `property` trên model của bạn; nó không chứng minh code production (nếu khác code trong `Actor`) "cài đặt đúng" model. Khe hở ở mục 1 vẫn còn nếu bạn viết model và code riêng rẽ (nhận xét của người soạn).
 - **Phiên bản.** Mọi chữ ký trong mục này theo `stateright` 0.31.0 trên docs.rs; crate này có thể đổi API ở bản sau.
 
 </details>
 
-**Quay lại Q4:** Stateright cho bạn viết model (state, action, property) bằng Rust và duyệt BFS/DFS, có actor chạy được cả trong model lẫn trên mạng thật, và tester kiểm linearizability so với một reference tuần tự; nó mạnh ở chỗ chung code với hệ thật, yếu hơn TLC ở temporal/fairness.
+**Quay lại Q4:** Stateright cho bạn viết model (state, action, property) bằng Rust và duyệt BFS/DFS; actor chạy được cả trong model lẫn trên mạng thật, và tester kiểm linearizability so với một reference tuần tự. Nó mạnh ở chỗ dùng chung code với hệ thật, và yếu hơn TLC ở temporal và fairness.
 
 ## 5. loom và shuttle: kiểm interleaving trên code thật (Q5)
 
-> **Trả lời ngắn.** Rust chặn data race trong phần safe nhưng không chặn các lỗi race cấp cao như vi phạm tính nguyên tử[^ss21-datarace]. **loom** chạy test của bạn rất nhiều lần, mỗi lần một lịch chạy khác, theo các cách thực thi mà luật bộ nhớ của ngôn ngữ cho phép (mô hình C11), và có kỹ thuật cắt bớt để khỏi bùng nổ[^loom-what] — nên khi chạy vét cạn, một test qua được nghĩa là đúng với *mọi* lịch trong mô hình đó (chặn preempt hay `Relaxed` làm yếu bảo đảm này — xem 5.1). **shuttle** chọn lịch ngẫu nhiên: không sound (qua test không chứng minh code đúng) nhưng chạy được test lớn hơn loom nhiều[^sh-unsound].
+> **Trả lời ngắn.** Rust chặn data race trong phần safe nhưng không chặn các lỗi race cấp cao như vi phạm tính nguyên tử[^ss21-datarace]. **loom** chạy test của bạn rất nhiều lần, mỗi lần với một lịch chạy khác, theo mọi cách thực thi mà luật bộ nhớ của ngôn ngữ cho phép (mô hình C11), và có kỹ thuật cắt bớt để khỏi bùng nổ[^loom-what]. Nhờ vậy, khi chạy vét cạn, một test qua được nghĩa là đúng với *mọi* lịch trong mô hình đó (chặn preempt hay `Relaxed` làm yếu bảo đảm này, xem 5.1). **shuttle** chọn lịch ngẫu nhiên: không sound, tức qua test không chứng minh code đúng, nhưng chạy được test lớn hơn loom nhiều[^sh-unsound].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn nghi `issue_buggy` có race. Cách quen thuộc là chạy test trong vòng lặp một triệu lần và hy vọng gặp. loom giống một thanh tra *liệt kê hết* các cách hai request chen nhau; shuttle giống chaos monkey có seed — gặp lỗi thì phát lại được đúng lịch đó.
+*Với `fencer`.* Bạn nghi `issue_buggy` có race. Cách quen thuộc là chạy test trong vòng lặp một triệu lần rồi hy vọng gặp. loom thì *liệt kê hết* các cách hai request chen nhau, còn shuttle giống một chaos monkey có seed: gặp lỗi thì phát lại được đúng lịch đó (nhận xét của người soạn).
 
-**Vì sao "chạy lặp và hy vọng" không đủ.** Lịch sử của việc test code concurrent là chạy test trong vòng lặp hoặc đặt máy chủ test dưới tải để sinh ra các thực thi hiếm[^loom-bg]; docs loom đánh giá cách đó không đáng tin, và nếu một lần lặp hỏng thì rất khó tìm nguyên nhân[^loom-bg2]. Khi dùng thứ tự bộ nhớ yếu hơn `SeqCst`, lỗi có thể chỉ xuất hiện trên phần cứng có đặc tính nhất định, nên lặp bao nhiêu lần cũng không chứng minh được gì trên phần cứng khác[^loom-bg3] — xem [P4 · 06, mục 8](../04-concurrency/06-memory-model.md).
+**Vì sao "chạy lặp và hy vọng" không đủ.** Cách quen thuộc để test code concurrent là chạy test trong vòng lặp, hoặc đặt máy chủ test dưới tải để sinh ra các thực thi hiếm[^loom-bg]. Docs loom đánh giá cách đó không đáng tin, và khi một lần lặp hỏng thì rất khó tìm nguyên nhân[^loom-bg2]. Thêm nữa, với thứ tự bộ nhớ yếu hơn `SeqCst`, lỗi có thể chỉ xuất hiện trên phần cứng có đặc tính nhất định, nên lặp bao nhiêu lần cũng không chứng minh được gì trên phần cứng khác[^loom-bg3] (xem [P4 · 06, mục 8](../04-concurrency/06-memory-model.md)).
 
 ### 5.1 loom: duyệt hết các lịch, theo memory model
 
-**Cơ chế.** loom mô phỏng bộ lập lịch của hệ điều hành *và* memory model của Rust, để mọi hành vi hợp lệ đều được khám phá[^loom-sim]. Cụ thể: bạn bọc test trong `loom::model(|| …)`; loom chạy closure đó nhiều lần, mỗi lần dùng một lịch chạy luồng khác[^loom-closure]. Kỹ thuật bên dưới là CDSChecker (kiểm cấu trúc dữ liệu đồng thời viết bằng atomic C/C++)[^loom-cds]; Rust dùng cùng luật atomic như C++20 (không có `consume`)[^std-cpp20], nên mô hình C11 là phần chung — chi tiết ordering ở [P4 · 06](../04-concurrency/06-memory-model.md). ShardStore mô tả loom là *sound model checker* trong mô hình release/acquire và dùng bounded partial-order reduction để giảm bùng nổ trạng thái[^ss21-loom-impl].
+**Cơ chế.** loom mô phỏng bộ lập lịch của hệ điều hành *và* memory model của Rust, để mọi hành vi hợp lệ đều được khám phá[^loom-sim]. Bạn bọc test trong `loom::model(|| …)`, và loom chạy closure đó nhiều lần, mỗi lần với một lịch chạy luồng khác[^loom-closure]. Kỹ thuật bên dưới là CDSChecker, công cụ kiểm cấu trúc dữ liệu đồng thời viết bằng atomic C/C++[^loom-cds]. Rust dùng cùng luật atomic như C++20 (không có `consume`)[^std-cpp20], nên mô hình C11 là phần chung; chi tiết ordering xem [P4 · 06](../04-concurrency/06-memory-model.md). ShardStore mô tả loom là một *sound model checker* trong mô hình release/acquire, dùng bounded partial-order reduction để giảm bùng nổ trạng thái[^ss21-loom-impl].
 
-**Điều kiện để test hợp lệ.** Test phải hoàn toàn *xác định*: mọi nguồn bất định phải đi qua kiểu của loom, vì thế loom mới phơi ra các giá trị khả dĩ khác nhau ở mỗi lần chạy[^loom-nondet]. Sinh số ngẫu nhiên hay system call không mô hình hóa được trực tiếp, phải mock[^loom-others]. Để dùng được kiểu của loom ở test nhưng `std` ở production, docs khuyên một cờ `cfg(loom)`[^loom-cfg]; mẫu thường dùng là một module `sync` đổi kiểu theo cờ:
+**Điều kiện để test hợp lệ.** Test phải hoàn toàn *xác định*: mọi nguồn bất định phải đi qua kiểu của loom, thì loom mới phơi ra được các giá trị khả dĩ khác nhau ở mỗi lần chạy[^loom-nondet]. Số ngẫu nhiên hay system call không mô hình hóa trực tiếp được, phải mock[^loom-others]. Để dùng kiểu của loom khi test nhưng dùng `std` ở production, docs khuyên một cờ `cfg(loom)`[^loom-cfg]. Mẫu thường dùng là một module `sync` đổi kiểu theo cờ:
 
 ```rust
 // src/sync.rs — duy nhất chỗ chọn loom hay std
@@ -689,20 +689,20 @@ fn issue_returns_unique_tokens() {
 }
 ```
 
-Chạy theo hướng dẫn của docs: `RUSTFLAGS="--cfg loom" cargo test --test loom_issuer --release`; docs khuyên dùng `--release` vì loom phải chạy closure rất nhiều lần[^loom-release].
+Chạy theo hướng dẫn của docs: `RUSTFLAGS="--cfg loom" cargo test --test loom_issuer --release`. Docs khuyên dùng `--release` vì loom phải chạy closure rất nhiều lần[^loom-release].
 
-Dự đoán (suy luận của người soạn, **chưa chạy**): với `issue`, mỗi lịch cho hai token khác nhau vì `fetch_add` là một thao tác duy nhất, nên test qua. Nếu thay `issue` bằng `issue_buggy`, tồn tại lịch trong đó cả hai thread `load` được 1 trước khi bất kỳ ai `store`; loom khám phá mọi lịch nên sẽ gặp lịch này và `assert_ne!` sẽ hỏng — đúng cái bốn bước mà spec `TokenIssuerSplit` ở mục 1 mô tả. Điểm quan trọng: **loom trả lời câu hỏi "code có thật sự thực hiện *một bước* như spec giả định không"**.
+Dự đoán (suy luận của người soạn, **chưa chạy**): với `issue`, mọi lịch đều cho hai token khác nhau vì `fetch_add` là một thao tác duy nhất, nên test qua. Nếu thay bằng `issue_buggy`, tồn tại lịch trong đó cả hai thread `load` được 1 trước khi ai `store`. loom khám phá mọi lịch nên sẽ gặp lịch này và `assert_ne!` sẽ hỏng, đúng cái bốn bước mà spec `TokenIssuerSplit` ở mục 1 mô tả. Điểm quan trọng: **loom trả lời câu hỏi "code có thật sự thực hiện *một bước* như spec giả định không"**.
 
-**Giới hạn đã được docs ghi rõ (loom 0.7.2):**
+**Giới hạn docs ghi rõ (loom 0.7.2):**
 
-- *Xâm nhập (intrusive).* loom chỉ chặn các thao tác dùng kiểu thay thế của nó; code không dùng kiểu loom thì "vô hình" và không bị hoán vị[^loom-intrusive]. Thư viện bên thứ ba dùng lock/channel riêng cũng phải hỗ trợ loom mới được phủ đủ[^loom-lib].
-- *`Relaxed`.* docs nói loom không thể mô hình hóa hết các interleaving mà `Relaxed` cho phép vì nó cho phép đổi thứ tự thao tác *trong cùng một thread* mà loom không mô phỏng được[^loom-relaxed][^loom-reorder]. Hệ quả: có lớp bug loom không bắt được[^loom-reorder].
-- *Bùng nổ.* mặc định loom kiểm *vét cạn*[^loom-exh]; số lịch tăng rất nhanh theo số thread (docs: tăng đáng kể với mỗi thread mới, đến mức việc kiểm không còn khả thi), nên loom giới hạn số thread được mô hình (`MAX_THREADS`)[^loom-maxthreads]. Muốn rẻ hơn, đặt *chặn số lần preempt* (`LOOM_MAX_PREEMPTIONS` hoặc `Builder::preemption_bound`): docs nói đặt 2 hoặc 3 đủ bắt phần lớn bug mà giảm mạnh số lịch[^loom-preempt]. Khi đó kiểm tra không còn vét cạn.
-- *Công bằng.* bộ lập lịch của loom cố ý không công bằng[^loom-fair]; vòng chờ kiểu spin lock phải gọi `loom::thread::yield_now` để báo cho loom biết cần chuyển sang thread khác[^loom-yield].
+- *Xâm nhập (intrusive).* loom chỉ chặn các thao tác dùng kiểu thay thế của nó. Code không dùng kiểu loom thì "vô hình" và không bị hoán vị[^loom-intrusive]. Thư viện bên thứ ba dùng lock hoặc channel riêng cũng phải hỗ trợ loom thì mới được phủ đủ[^loom-lib].
+- *`Relaxed`.* Docs nói loom không mô hình hóa hết các interleaving mà `Relaxed` cho phép, vì `Relaxed` cho phép đổi thứ tự thao tác *trong cùng một thread* mà loom không mô phỏng được[^loom-relaxed]. Hệ quả là có lớp bug loom không bắt được[^loom-reorder].
+- *Bùng nổ.* Mặc định loom kiểm *vét cạn*[^loom-exh]. Số lịch tăng rất nhanh theo số thread (docs: tăng đáng kể với mỗi thread mới, đến mức việc kiểm không còn khả thi), nên loom giới hạn số thread được mô hình (`MAX_THREADS`)[^loom-maxthreads]. Muốn rẻ hơn thì đặt *chặn số lần preempt* (`LOOM_MAX_PREEMPTIONS` hoặc `Builder::preemption_bound`); docs nói đặt 2 hoặc 3 đủ bắt phần lớn bug mà giảm mạnh số lịch[^loom-preempt]. Khi đó kiểm tra không còn vét cạn.
+- *Công bằng.* Bộ lập lịch của loom cố ý không công bằng[^loom-fair]. Vòng chờ kiểu spin lock vì vậy phải gọi `loom::thread::yield_now` để báo cho loom chuyển sang thread khác[^loom-yield].
 
 ### 5.2 shuttle: lịch ngẫu nhiên, mở rộng được hơn
 
-**Cơ chế.** shuttle lấy cảm hứng từ loom nhưng tập trung vào kiểm thử *ngẫu nhiên*, đổi tính sound lấy khả năng mở rộng[^sh-what]. Docs viết thẳng: shuttle *không sound* — test qua không chứng minh code đúng — nhưng chạy được test lớn hơn loom nhiều[^sh-unsound]; họ dựa vào quan sát rằng kiểm thử ngẫu nhiên tìm được phần lớn bug concurrency vì các bug này thường không "đối kháng"[^sh-nonadv]. Vì shuttle điều khiển lịch chạy của từng thread nên tái hiện được test hỏng một cách xác định[^sh-control].
+**Cơ chế.** shuttle lấy cảm hứng từ loom nhưng tập trung vào kiểm thử *ngẫu nhiên*, đổi tính sound lấy khả năng mở rộng[^sh-what]. Docs nói thẳng là shuttle *không sound*: test qua không chứng minh code đúng, nhưng chạy được test lớn hơn loom nhiều[^sh-unsound]. Cơ sở là quan sát rằng kiểm thử ngẫu nhiên tìm được phần lớn bug concurrency, vì các bug này thường không "đối kháng"[^sh-nonadv]. Và vì shuttle điều khiển lịch chạy của từng thread, nó tái hiện được test hỏng một cách xác định[^sh-control].
 
 ```rust
 // Cargo.toml: shuttle = { version = "0.9", optional = true }, feature "shuttle"
@@ -730,24 +730,24 @@ fn issuer_stress_shuttle() {
 }
 ```
 
-Để dùng shuttle phải thay mọi kiểu đồng bộ của `std` bằng kiểu của shuttle; docs khuyên làm qua cờ cfg/feature và một module `sync` duy nhất[^sh-replace], giống mẫu của loom. Chữ ký trong docs 0.9.6: `check_random(f, iterations)`[^sh-sig-random], `check_pct(f, iterations, depth)`[^sh-sig-pct], `check_dfs(f, max_iterations: Option<usize>)`[^sh-sig-dfs]. Ba bộ lập lịch chính:
+Để dùng shuttle, mọi kiểu đồng bộ của `std` phải được thay bằng kiểu tương đương của shuttle[^sh-replace]. Ta làm qua cờ cfg hoặc feature và một module `sync` duy nhất, giống mẫu của loom (nhận xét của người soạn). Shuttle có ba bộ lập lịch chính:
 
-- **Random** (`check_random`): chạy một số lần với lịch ngẫu nhiên.
-- **PCT** (`check_pct`): giới hạn số lần preempt mà test khám phá; docs nhận xét thực nghiệm cho thấy phần lớn bug cần rất ít preempt nên PCT tăng xác suất bắt được[^sh-pct].
-- **DFS** (`check_dfs`): vét cạn; docs không khuyên dùng vì chỉ khả thi với chương trình rất đơn giản, nhưng hữu ích cho thử kỹ các primitive nhỏ[^sh-dfs].
+- **Random** (`check_random(f, iterations)`[^sh-sig-random]): chạy một số lần với lịch ngẫu nhiên.
+- **PCT** (`check_pct(f, iterations, depth)`[^sh-sig-pct]): giới hạn số lần preempt mà test khám phá. Docs nhận xét thực nghiệm cho thấy phần lớn bug cần rất ít preempt, nên PCT tăng xác suất bắt được chúng[^sh-pct].
+- **DFS** (`check_dfs(f, max_iterations: Option<usize>)`[^sh-sig-dfs]): vét cạn. Docs không khuyên dùng vì chỉ khả thi với chương trình rất đơn giản, nhưng nó hữu ích để thử kỹ các primitive nhỏ[^sh-dfs].
 
-Khi một test hỏng, shuttle in ra chuỗi mã hóa lịch chạy và hướng dẫn truyền nó vào `shuttle::replay`[^sh-replay]; hàm đó tái hiện đúng lịch, miễn là closure không có bất định nào ngoài bất định do lập lịch[^sh-replay2]:
+Khi một test hỏng, shuttle in ra chuỗi mã hóa lịch chạy và hướng dẫn truyền nó vào `shuttle::replay`[^sh-replay]. Hàm đó tái hiện đúng lịch, miễn là closure không có bất định nào ngoài bất định do lập lịch[^sh-replay2]:
 
 ```rust
 // Dán chuỗi lịch shuttle in ra khi test hỏng vào đây để chạy lại đúng một lần.
 shuttle::replay(|| { /* cùng thân test */ }, "<chuỗi lịch shuttle in ra>");
 ```
 
-**Giới hạn quan trọng nhất so với loom: memory model.** Docs của `shuttle::sync::atomic`: shuttle không mô hình trung thực các hành vi của ordering yếu (mọi thứ ngoài `SeqCst`); nó coi *mọi* thao tác atomic như `SeqCst`, nên bug cần hành vi relaxed mới xảy ra thì shuttle không thể tìm thấy[^sh-weak]; docs chỉ sang loom cho việc suy luận về Acquire/Release và hỗ trợ một phần `Relaxed`[^sh-loom-weak]. Về async: shuttle có module `future` — executor async "gần tương đương `futures::executor`"[^sh-async] — nên test được code async trong cùng lịch ngẫu nhiên; shuttle cũng hỗ trợ code dùng dữ liệu ngẫu nhiên (random) miễn qua `shuttle::rand`[^sh-rand]. Cuối cùng, `check_random_with_seed` cho phép một thư viện như proptest lo việc sinh seed[^sh-seed].
+**Giới hạn quan trọng nhất so với loom: memory model.** Theo docs của `shuttle::sync::atomic`, shuttle không mô hình trung thực các hành vi của ordering yếu (mọi thứ ngoài `SeqCst`): nó coi *mọi* thao tác atomic như `SeqCst`, nên bug cần hành vi relaxed mới xảy ra thì shuttle không thể tìm thấy[^sh-weak]. Docs chỉ sang loom cho việc suy luận về Acquire/Release và hỗ trợ một phần `Relaxed`[^sh-loom-weak]. Về async: shuttle có module `future`, một executor async "gần tương đương `futures::executor`"[^sh-async], nên test được code async trong cùng lịch ngẫu nhiên. Shuttle cũng hỗ trợ code dùng dữ liệu ngẫu nhiên, miễn qua `shuttle::rand`[^sh-rand]. Cuối cùng, `check_random_with_seed` cho phép một thư viện như proptest lo việc sinh seed[^sh-seed].
 
 ### 5.3 Dùng cả hai, và so với TLC
 
-ShardStore dùng *cả hai* và nói rõ vì sao: loom (sound) không đủ mở rộng để kiểm linearizability cho test đầu-cuối của cả hệ[^ss21-loom-scale]; họ dùng loom cho các đoạn code nhỏ, cực kỳ quan trọng như primitive concurrency tự viết, và shuttle để kiểm ngẫu nhiên các test harness lớn hơn[^ss21-loom-shuttle]. Một harness loom cho index LSM chạy ba thread: chunk reclamation, compaction, và ghi-rồi-đọc kiểm read-after-write[^ss21-harness-loom]; lỗi #14 của họ là race trong LSM tree bị harness loom bắt *trước cả khi qua code review*[^ss21-bug14]. Về quy trình, họ tự viết harness cho các tính chất chủ chốt và kiểm bằng stateless model checking, một kỹ thuật khám phá các interleaving của chương trình[^ss21-harness]; stateless model checker cũng tìm được deadlock bằng cách tìm các lịch kết thúc với mọi thread bị chặn[^ss21-deadlock] (khái niệm deadlock: [P4 · 05](../04-concurrency/05-concurrency-bug-va-deadlock.md)).
+Với `fencer`, cách chia hợp lý là loom cho `issue` và `issue_buggy` (hai thread, vài lệnh), shuttle cho test ném hàng chục thread vào cả lớp storage phía sau (nhận xét của người soạn). ShardStore chia đúng như vậy và nói rõ vì sao. loom (sound) không đủ mở rộng để kiểm linearizability cho test đầu-cuối của cả hệ[^ss21-loom-scale]. Họ dùng loom cho các đoạn code nhỏ mà cực kỳ quan trọng, như primitive concurrency tự viết, và dùng shuttle để kiểm ngẫu nhiên các test harness lớn hơn[^ss21-loom-shuttle]. Một harness loom cho index LSM chạy ba thread: chunk reclamation, compaction, và ghi-rồi-đọc để kiểm read-after-write[^ss21-harness-loom]. Lỗi #14 của họ, một race trong LSM tree, bị harness loom bắt *trước cả khi qua code review*[^ss21-bug14]. Về quy trình, họ tự viết harness cho các tính chất chủ chốt rồi kiểm bằng stateless model checking, một kỹ thuật khám phá các interleaving của chương trình[^ss21-harness]. Stateless model checker cũng tìm được deadlock, bằng cách tìm các lịch kết thúc với mọi thread bị chặn[^ss21-deadlock] (khái niệm deadlock: [P4 · 05](../04-concurrency/05-concurrency-bug-va-deadlock.md)).
 
 | | TLC (spec) | loom | shuttle |
 |---|---|---|---|
@@ -761,24 +761,24 @@ ShardStore dùng *cả hai* và nói rõ vì sao: loom (sound) không đủ mở
 
 <details><summary>Đi sâu: <code>loom::model::Builder</code>, <code>UnsafeCell</code>, và loom trong Tokio</summary>
 
-- **Builder.** `loom::model` chạy test với `Builder` mặc định chịu ảnh hưởng của biến môi trường[^loom-model]. Các trường của `Builder` (docs 0.7.2): `max_threads`, `max_branches` (số lần chuyển thread tối đa mỗi hoán vị), `max_permutations`, `max_duration`, `preemption_bound`, `checkpoint_file`, `checkpoint_interval`, `location`, `log`[^loom-builder]. Với một lỗi xảy ra ở hoán vị thứ 10 triệu, ghi checkpoint (`LOOM_CHECKPOINT_FILE`, `LOOM_CHECKPOINT_INTERVAL`, tránh ghi file ở mỗi lần lặp[^loom-debug]) để cô lập đường dẫn gây lỗi, rồi bật `LOOM_LOG` để in một dấu mốc ở mỗi lần chuyển thread[^loom-log].
+- **Builder.** `loom::model` chạy test với `Builder` mặc định, chịu ảnh hưởng của biến môi trường[^loom-model]. Các trường của `Builder` (docs 0.7.2): `max_threads`, `max_branches` (số lần chuyển thread tối đa mỗi hoán vị), `max_permutations`, `max_duration`, `preemption_bound`, `checkpoint_file`, `checkpoint_interval`, `location`, `log`[^loom-builder]. Với một lỗi xảy ra ở hoán vị thứ 10 triệu, hãy ghi checkpoint (`LOOM_CHECKPOINT_FILE`, `LOOM_CHECKPOINT_INTERVAL`) để cô lập đường dẫn gây lỗi; docs dặn tránh ghi file ở mỗi lần lặp[^loom-debug]. Sau đó bật `LOOM_LOG` để in một dấu mốc ở mỗi lần chuyển thread[^loom-log].
 - **`UnsafeCell`.** API của `loom::cell::UnsafeCell` khác `std` ở chỗ dùng `with`/`with_mut` thay vì `get()`; thư viện phải tự cài lớp bọc tương ứng cho `std` dưới `cfg(not(loom))`[^loom-uc].
-- **Tokio là ví dụ thật.** Tokio có module `loom` tự "trừu tượng hóa giữa `loom` và `std::sync` tùy chạy test hay không"[^tokio-loom], và có test dùng `loom::model(|| { … })` để kiểm số lần poll tối đa của `block_on` trên runtime current-thread[^tokio-loom-test] (Tokio 1.53.2, cùng phiên bản dùng ở [P7 · 08](../07-io-async/08-tokio.md)). Nghĩa là đây là mẫu "facade `cfg(loom)`" ở quy mô một dự án lớn, không chỉ ví dụ sách vở.
+- **Tokio là ví dụ thật.** Tokio có module `loom` tự "trừu tượng hóa giữa `loom` và `std::sync` tùy chạy test hay không"[^tokio-loom]. Tokio cũng có test dùng `loom::model(|| { … })` để kiểm số lần poll tối đa của `block_on` trên runtime current-thread[^tokio-loom-test] (Tokio 1.53.2, cùng phiên bản dùng ở [P7 · 08](../07-io-async/08-tokio.md)). Nghĩa là mẫu "facade `cfg(loom)`" đã chạy ở quy mô một dự án lớn, không chỉ là ví dụ sách vở.
 - **Con số trong docs shuttle.** Test mẫu (100 lần chạy) "phát hiện lỗi với xác suất rất cao (trên 99,9999%)"[^sh-prob] chỉ là lập luận cho ví dụ đó, không phải bảo đảm cho test của bạn (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q5:** loom kiểm vét cạn (có thể chặn preempt) các lịch của một đoạn code nhỏ theo memory model C11; shuttle kiểm ngẫu nhiên các test lớn hơn nhưng không sound và coi atomic là `SeqCst`; ShardStore dùng loom cho primitive nhỏ, shuttle cho stress test lớn.
+**Quay lại Q5:** loom kiểm vét cạn (có thể chặn preempt) các lịch của một đoạn code nhỏ theo memory model C11; shuttle kiểm ngẫu nhiên các test lớn hơn nhưng không sound và coi atomic là `SeqCst`. ShardStore dùng loom cho primitive nhỏ và shuttle cho stress test lớn, còn `fencer` dùng loom để xác nhận `fetch_add` đúng là một bước.
 
 ## 6. Property-based testing kiểu state machine với proptest (Q6)
 
-> **Trả lời ngắn.** Bạn viết một *reference model* đơn giản (tương đương spec viết bằng code) và một bản mô tả cách áp mỗi thao tác lên code thật; `proptest` sinh chuỗi thao tác ngẫu nhiên, so kết quả code với model sau từng bước, và khi thấy sai lệch thì thu nhỏ chuỗi thao tác về dạng ngắn nhất vẫn tái hiện lỗi[^pt-sm-what][^pt-sm-shrink]. ShardStore của AWS dùng đúng ý tưởng này với reference model viết bằng Rust[^ss21-refmodel].
+> **Trả lời ngắn.** Bạn viết một *reference model* đơn giản (tương đương spec nhưng bằng code) và một bản mô tả cách áp mỗi thao tác lên code thật. `proptest` sinh chuỗi thao tác ngẫu nhiên, so kết quả code với model sau từng bước, và khi thấy sai lệch thì thu nhỏ chuỗi thao tác về dạng ngắn nhất vẫn tái hiện lỗi[^pt-sm-what]. ShardStore của AWS dùng đúng ý tưởng này, với reference model viết bằng Rust[^ss21-refmodel].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn thay lớp lưu trữ phía sau API bằng một bản "tối ưu" có cache và compaction. Để chắc nó vẫn cư xử như bản `HashMap` đơn giản, bạn cho cả hai nhận cùng một chuỗi `PUT`/`GET` ngẫu nhiên và so kết quả sau từng bước. Property-based testing kiểu state machine chính là việc tự động hóa đó, cộng thêm khả năng thu nhỏ chuỗi lệnh gây lỗi.
+*Với `fencer`.* Phía sau `fencer` là lớp storage chỉ nhận ghi nếu token không nhỏ hơn token đã thấy cho khóa đó. Giả sử bạn thay lớp này bằng một bản "tối ưu" có cache và compaction. Để chắc nó vẫn cư xử như bản `HashMap` đơn giản, bạn cho cả hai nhận cùng một chuỗi `PUT`/`GET` ngẫu nhiên rồi so kết quả sau từng bước. Property-based testing kiểu state machine tự động hóa đúng việc đó, và thêm khả năng thu nhỏ chuỗi lệnh gây lỗi (nhận xét của người soạn).
 
-**Cấu trúc.** Proptest chia thành hai nửa. Một là *reference state machine* — định nghĩa trừu tượng, quyết định chuỗi thao tác được sinh ra. Hai là *định nghĩa test* cho SUT (system under test), lặp lại đúng các thao tác đó trên code thật để phát hiện sai lệch hoặc điều kiện làm tính chất bị phá (ở đây gồm post-condition và invariant)[^pt-sm-two]. Ánh xạ với TLA+:
+**Cấu trúc.** Proptest chia thành hai nửa. Nửa thứ nhất là *reference state machine*: một định nghĩa trừu tượng, quyết định chuỗi thao tác được sinh ra. Nửa thứ hai là *định nghĩa test* cho SUT (system under test): nó lặp lại đúng các thao tác đó trên code thật để phát hiện sai lệch, hoặc điều kiện làm tính chất bị phá (ở đây gồm post-condition và invariant)[^pt-sm-two]. Ánh xạ với TLA+:
 
 | TLA+ | `proptest-state-machine` |
 |---|---|
@@ -788,9 +788,9 @@ Hình dung (nhận xét của người soạn): bạn thay lớp lưu trữ phí
 | hiệu ứng của action | `ReferenceStateMachine::apply` (trên model) và `StateMachineTest::apply` (trên SUT) |
 | `INVARIANT` | `check_invariants(&sut, &ref_state)` — kiểm sau mỗi transition[^pt-sm-inv] |
 
-Trong `StateMachineTest::apply`, sách hướng dẫn đặt các post-condition của từng transition: sau khi áp transition lên SUT, dùng `assert!` hoặc so với `ref_state` — là trạng thái model *đã* áp transition đó[^pt-sm-apply]. Thu nhỏ: khi thấy phản ví dụ, proptest rút gọn xuống một chuỗi transition tối thiểu vẫn tái hiện lỗi[^pt-sm-shrink]; cụ thể là xóa transition từ cuối danh sách đến hết mức, rồi thu nhỏ từng transition từ đầu, rồi thu nhỏ trạng thái ban đầu[^pt-sm-shrinkorder]. `preconditions` quan trọng ở đây: sau khi thu nhỏ, một transition từng hợp lệ có thể không còn hợp lệ, nên chỉ ràng buộc những transition mà tính hợp lệ phụ thuộc state hiện tại[^pt-sm-pre].
+Sách hướng dẫn đặt post-condition của từng transition trong `StateMachineTest::apply`: sau khi áp transition lên SUT, dùng `assert!` hoặc so với `ref_state`, là trạng thái model *đã* áp transition đó[^pt-sm-apply]. Khi thấy phản ví dụ, proptest thu nhỏ về một chuỗi transition tối thiểu vẫn tái hiện lỗi[^pt-sm-shrink]. Cụ thể, nó xóa transition từ cuối danh sách đến hết mức, rồi thu nhỏ từng transition từ đầu, rồi thu nhỏ trạng thái ban đầu[^pt-sm-shrinkorder]. `preconditions` quan trọng ở bước này: sau khi thu nhỏ, một transition từng hợp lệ có thể không còn hợp lệ, nên chỉ nên ràng buộc những transition mà tính hợp lệ phụ thuộc state hiện tại[^pt-sm-pre].
 
-Ví dụ: phía *storage* của mô hình fencing — chỉ nhận ghi nếu token không nhỏ hơn token đã thấy cho khóa đó. Reference model và harness (người soạn viết, **chưa biên dịch**; `FencedStore` là một kiểu giả định):
+Ví dụ dưới đây là phía *storage* của mô hình fencing, chỉ nhận ghi nếu token không nhỏ hơn token đã thấy cho khóa đó. Reference model và harness do người soạn viết, **chưa biên dịch**; `FencedStore` là một kiểu giả định:
 
 ```rust
 use std::collections::HashMap;
@@ -877,29 +877,29 @@ prop_state_machine! {
 }
 ```
 
-Dạng chung của các hàm (`init_state`, `transitions`, `apply`, `preconditions`, `init_test`, `check_invariants`) và macro `prop_state_machine!` với `sequential 1..20 => …` lấy từ sách Proptest (trang sống)[^pt-sm-macro]; sách ghi chú một số kiểu trong phần mô tả đã được đơn giản hóa cho dễ đọc[^pt-sm-simpl], nên chữ ký chính xác phải đối chiếu với docs.rs `proptest-state-machine` 0.9.0[^pt-sm-crate]. Cảnh báo trung thực: bản `proptest-state-machine` này mới hỗ trợ chiến lược **tuần tự**; chiến lược đồng thời được sách ghi là sẽ thêm sau[^pt-sm-seq]. Nghĩa là nó kiểm *logic* của state machine, không phải interleaving — việc đó của loom/shuttle (mục 5).
+Dạng chung của các hàm (`init_state`, `transitions`, `apply`, `preconditions`, `init_test`, `check_invariants`) và macro `prop_state_machine!` với `sequential 1..20 => …` lấy từ sách Proptest (trang sống)[^pt-sm-macro]. Sách ghi chú rằng một số kiểu trong phần mô tả đã được đơn giản hóa cho dễ đọc[^pt-sm-simpl]. Vì vậy chữ ký chính xác phải đối chiếu với docs.rs `proptest-state-machine` 0.9.0[^pt-sm-crate]. Cảnh báo trung thực: bản `proptest-state-machine` này mới hỗ trợ chiến lược **tuần tự**, còn chiến lược đồng thời được sách ghi là sẽ thêm sau[^pt-sm-seq]. Nghĩa là nó kiểm *logic* của state machine, không kiểm interleaving; việc đó của loom và shuttle (mục 5).
 
 <details><summary>Đi sâu: bias đối số, độ phủ, shrink, file regressions và giới hạn</summary>
 
-- **Bias đối số (từ ShardStore).** Test ngây thơ chọn key ngẫu nhiên cho `Get`/`Put` sẽ hiếm khi trùng nhau, nên hầu như không bao giờ kiểm đường `Get` thành công. ShardStore thiên vị đối số của `Get` về các key đã `Put`[^ss21-bias]; ví dụ ở trên dùng miền key/token nhỏ cho cùng mục đích là để các lần ghi va chạm nhau (nhận xét của người soạn). Nhưng họ cũng cảnh báo: bias có nguy cơ khắc các giả định của mình vào test, trong khi mục tiêu của phương pháp hình thức là bác bỏ chính các giả định ấy, nên họ ưu tiên dùng ngẫu nhiên mặc định và chỉ thêm bias khi có bằng chứng định lượng[^ss21-default].
-- **Bảng chữ cái thao tác gồm cả thao tác nền.** ShardStore đưa vào alphabet cả các thao tác nền như reclaim và reboot; chúng là no-op trên reference model nhưng việc đưa vào kiểm chứng chúng không làm hỏng index[^ss21-bg]. Họ khung hóa việc kiểm như một PBT nhận vào dãy thao tác từ một alphabet tự định nghĩa[^ss21-alphabet], áp từng thao tác lên cả cài đặt và reference rồi so kết quả và kiểm invariant liên hệ giữa hai bên[^ss21-pbt-steps], và dùng một ổ đĩa user-space trong bộ nhớ để bảo đảm xác định và tốc độ trong khi mọi thành phần phía trên đĩa dùng code thật[^ss21-inmemdisk].
-- **PBT có thể bỏ sót.** ShardStore thừa nhận PBT chọn chuỗi thao tác ngẫu nhiên nên có thể bỏ sót bug[^ss21-miss]; họ chạy hàng chục triệu chuỗi ngẫu nhiên trước mỗi lần deploy[^ss21-scale], nhưng các test này chỉ kiểm được những trạng thái mà harness chạm tới[^ss21-reach] — nên họ theo dõi code coverage để thấy các điểm mù[^ss21-cov]. Sách Proptest cũng ghi: property testing cực kỳ khó có khả năng tìm ra các trường hợp biên một-giá-trị trong không gian lớn[^pt-limit], nên unit test chọn lọc vẫn cần thiết[^pt-limit2].
+- **Bias đối số (từ ShardStore).** Test ngây thơ chọn key ngẫu nhiên cho `Get`/`Put` sẽ hiếm khi trùng nhau, nên gần như không bao giờ kiểm được đường `Get` thành công. ShardStore thiên vị đối số của `Get` về các key đã `Put`[^ss21-bias]. Ví dụ ở trên dùng miền key và token nhỏ cho cùng mục đích: để các lần ghi va chạm nhau (nhận xét của người soạn). Nhưng họ cũng cảnh báo: bias có nguy cơ khắc các giả định của mình vào test, trong khi mục tiêu của phương pháp hình thức là bác bỏ chính các giả định ấy, nên họ ưu tiên ngẫu nhiên mặc định và chỉ thêm bias khi có bằng chứng định lượng[^ss21-default].
+- **Bảng chữ cái thao tác gồm cả thao tác nền.** ShardStore đưa vào alphabet cả các thao tác nền như reclaim và reboot; chúng là no-op trên reference model, nhưng việc đưa vào kiểm chứng chúng không làm hỏng index[^ss21-bg]. Họ khung hóa việc kiểm như một PBT nhận vào dãy thao tác từ một alphabet tự định nghĩa[^ss21-alphabet]. Mỗi thao tác được áp lên cả cài đặt lẫn reference, rồi so kết quả và kiểm invariant liên hệ giữa hai bên[^ss21-pbt-steps]. Một ổ đĩa user-space trong bộ nhớ giữ cho test xác định và nhanh, trong khi mọi thành phần phía trên đĩa dùng code thật[^ss21-inmemdisk].
+- **PBT có thể bỏ sót.** ShardStore thừa nhận PBT chọn chuỗi thao tác ngẫu nhiên nên có thể bỏ sót bug[^ss21-miss]. Họ chạy hàng chục triệu chuỗi ngẫu nhiên trước mỗi lần deploy[^ss21-scale]. Tuy nhiên các test này chỉ kiểm được những trạng thái mà harness chạm tới[^ss21-reach]. Vì thế họ theo dõi code coverage để thấy các điểm mù[^ss21-cov]. Sách Proptest cũng ghi: property testing cực kỳ khó có khả năng tìm ra các trường hợp biên một-giá-trị trong không gian lớn[^pt-limit]. Vì vậy unit test chọn lọc vẫn cần thiết[^pt-limit2].
 - **Shrink.** Việc tìm đầu vào "đơn giản nhất" gây lỗi gọi là shrinking[^pt-shrink]. Với state machine, kết quả thu nhỏ là một *chuỗi lệnh ngắn*, đọc được như một kịch bản tái hiện (nhận xét của người soạn).
-- **File regressions.** Mặc định proptest lưu ca lỗi vào thư mục `proptest-regressions` và phát lại ở các lần chạy sau[^pt-persist]; sách khuyên check các file này vào source control để CI và đồng nghiệp cũng phát lại[^pt-persist2]. Proptest lưu *seed* thay vì giá trị[^pt-seed].
+- **File regressions.** Mặc định proptest lưu ca lỗi vào thư mục `proptest-regressions` và phát lại ở các lần chạy sau[^pt-persist]. Sách khuyên check các file này vào source control để CI và đồng nghiệp cũng phát lại[^pt-persist2]. Proptest lưu *seed* thay vì giá trị[^pt-seed].
 - **CI.** State machine test nặng hơn test thường; sách gợi ý chỉnh số `cases` của `proptest_config` hoặc biến môi trường `PROPTEST_CASES` cho CI[^pt-sm-ci].
-- **Chia sẻ reference model.** ShardStore chọn viết reference model *cùng ngôn ngữ* với cài đặt vì dễ cho kỹ sư giữ cập nhật hơn[^ss21-samelang], và dùng lại chúng làm mock trong unit test, giúp model luôn mới[^ss21-mock]. Họ cũng cố ý bỏ lỗi I/O, cạn tài nguyên khỏi model[^ss21-omit] — đánh đổi ở mục 1.
+- **Chia sẻ reference model.** ShardStore chọn viết reference model *cùng ngôn ngữ* với cài đặt vì dễ cho kỹ sư giữ cập nhật hơn[^ss21-samelang]. Họ dùng lại chúng làm mock trong unit test, nên model luôn mới[^ss21-mock]. Họ cũng cố ý bỏ lỗi I/O và cạn tài nguyên khỏi model[^ss21-omit], một đánh đổi đã nói ở mục 1.
 
 </details>
 
-**Quay lại Q6:** viết reference state machine ngắn gọn (`init_state`, `transitions`, `apply`), cho proptest sinh chuỗi thao tác và so code thật với model sau từng bước; nó kiểm logic tuần tự, tự thu nhỏ phản ví dụ, nhưng không thay được kiểm interleaving và chỉ phủ được trạng thái mà harness chạm tới.
+**Quay lại Q6:** viết reference state machine ngắn gọn (`init_state`, `transitions`, `apply`), cho proptest sinh chuỗi thao tác và so code thật với model sau từng bước. Nó kiểm logic tuần tự và tự thu nhỏ phản ví dụ, nhưng không thay được kiểm interleaving và chỉ phủ được trạng thái mà harness chạm tới; với `fencer`, nó bảo vệ lớp storage khỏi hồi quy khi bạn tối ưu.
 
 ## 7. Mỗi công cụ trả lời câu hỏi nào? Mức thiết kế và mức code (Q7)
 
-> **Trả lời ngắn.** TLA+/TLC trả lời "*thiết kế* này có giữ tính chất không khi mọi thứ xen kẽ?" — nhưng trên mô hình. Các công cụ ở mức code trả lời những câu hẹp hơn nhưng *về code thật*: loom/shuttle ("có lịch chạy nào làm code hỏng không?"), proptest ("code có cư xử như reference model không?"), trace validation ("lần chạy này có nằm trong spec không?"). Không công cụ nào thay được công cụ khác (nhận xét của người soạn, từ các nguồn ở mục 1–6).
+> **Trả lời ngắn.** TLA+/TLC trả lời câu hỏi "*thiết kế* này có giữ tính chất không, khi mọi thứ xen kẽ?", nhưng trên mô hình. Các công cụ ở mức code trả lời những câu hẹp hơn mà *về code thật*. loom và shuttle hỏi "có lịch chạy nào làm code hỏng không?", proptest hỏi "code có cư xử như reference model không?", trace validation hỏi "lần chạy này có nằm trong spec không?". Không công cụ nào thay được công cụ khác (nhận xét của người soạn, từ các nguồn ở mục 1–6).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): xây cầu. Bản vẽ kết cấu (TLA+) kiểm cầu *đứng được* khi mọi tải trọng xen kẽ; kiểm tra mối hàn tại công trường (loom/shuttle) kiểm từng mối nối thực sự; thử tải xe thật (proptest, trace validation) kiểm cầu thật cư xử đúng như bản vẽ trong những tình huống đã thử.
+*Với `fencer`.* Đến đây bạn đã có cả một hộp công cụ, và `fencer` cần biết dùng cái nào cho câu hỏi nào. Thiết kế cấp token có giữ `Unique` không? Hỏi TLC. Lệnh `fetch_add` ngoài kia có thật là một bước không? Hỏi loom. Lớp storage phía sau có cư xử như `HashMap` mẫu không? Hỏi proptest. Log của lần chạy hôm qua có nằm trong spec không? Hỏi trace validation. Sơ đồ và bảng dưới đây tổng kết cách phân việc đó (nhận xét của người soạn).
 
 ```mermaid
 flowchart TB
@@ -937,26 +937,26 @@ flowchart TB
 
 *(Bảng do người soạn tổng hợp.)*
 
-**Hai điều rút ra.** (1) *Mức thiết kế và mức code không lấn sân nhau.* AWS: test code không thay được việc kiểm lỗi thiết kế[^aws-testing]; ngược lại spec đúng không nói gì về cài đặt (mục 1). (2) *Phần lớn cây cầu là kiểm chứng, không phải chứng minh.* Cirstea et al. nói rõ phương pháp của họ không cho bảo đảm đúng đắn hình thức, kể cả khi spec đã kiểm kỹ[^tv-nofg]; ShardStore nói họ không nhắm tới verification hình thức đầy đủ mà nhấn mạnh tự động hóa, dễ dùng và khả năng liên tục bảo đảm tính đúng khi cả phần mềm và đặc tả cùng tiến hóa[^ss21-notverify]. Chứng minh (như refinement) là một hướng khác, nặng hơn, được bàn ở [Chương 07](07-refinement.md).
+**Hai điều rút ra.** Một: *mức thiết kế và mức code không lấn sân nhau.* Test code không thay được việc kiểm lỗi thiết kế[^aws-testing], và ngược lại, spec đúng không nói gì về cài đặt (mục 1). Hai: *phần lớn các cây cầu là kiểm chứng, không phải chứng minh.* Cirstea et al. nói rõ phương pháp của họ không cho bảo đảm đúng đắn hình thức, kể cả khi spec đã kiểm kỹ[^tv-nofg]. ShardStore cũng không nhắm tới verification hình thức đầy đủ, mà nhấn mạnh tự động hóa, dễ dùng và khả năng liên tục bảo đảm tính đúng khi cả phần mềm và đặc tả cùng tiến hóa[^ss21-notverify]. Chứng minh (như refinement) là một hướng khác, nặng hơn, được bàn ở [Chương 07](07-refinement.md).
 
 <details><summary>Đi sâu: "smart casual verification" và "lightweight formal methods" — hai tên cho cùng một triết lý</summary>
 
-- CCF gọi cách làm của mình là *smart casual verification*: kết hợp độ chặt chẽ của đặc tả hình thức và model checking với tính thực dụng của kiểm thử tự động, trong trường hợp của họ là buộc đặc tả TLA+ với cài đặt C++[^ccf-hybrid]. Họ tích hợp vào CI để người đóng góp liên tục kiểm tra khi hệ tiến hóa[^ccf-ci], và tìm được sáu lỗi tinh vi trong thiết kế và cài đặt trước khi ảnh hưởng sản xuất[^ccf-6bugs].
-- ShardStore gọi là *lightweight formal methods*: phân rã tính đúng thành các tính chất độc lập, mỗi tính chất kiểm bằng công cụ phù hợp nhất, và dùng reference model chạy được làm đặc tả để so với cài đặt[^ss21-abs]; công việc ngăn được 16 vấn đề lên production, gồm cả lỗi crash consistency và concurrency tinh vi[^ss21-16]. Phần định nghĩa tính chất và harness chiếm 12% code của ShardStore[^ss21-12pct].
-- CCF cũng nhận xét việc kiểm model exhaustive quá chậm trong CI trừ khi dùng ràng buộc state rất chặt, nên họ thêm một spec *simulation* làm phương án nhẹ thay cho khám phá vét cạn[^ccf-sim] — cùng tinh thần với `spawn_simulation` của Stateright và `-simulate` của TLC (mục 4).
-- Chương này không bàn các công cụ chứng minh trên code Rust (ví dụ Prusti, ShardStore từng thử nghiệm cho phần chứng minh reference model[^ss21-prusti]).
+- CCF gọi cách làm của mình là *smart casual verification*: kết hợp độ chặt chẽ của đặc tả hình thức và model checking với tính thực dụng của kiểm thử tự động, ở đây là buộc đặc tả TLA+ với cài đặt C++[^ccf-hybrid]. Họ tích hợp vào CI để người đóng góp liên tục kiểm tra khi hệ tiến hóa[^ccf-ci]. Cách làm này tìm được sáu lỗi tinh vi trong thiết kế và cài đặt trước khi chúng ảnh hưởng sản xuất[^ccf-6bugs].
+- ShardStore gọi là *lightweight formal methods*: phân rã tính đúng thành các tính chất độc lập, mỗi tính chất kiểm bằng công cụ phù hợp nhất, và dùng reference model chạy được làm đặc tả để so với cài đặt[^ss21-abs]. Công việc này ngăn được 16 vấn đề lên production, gồm cả lỗi crash consistency và concurrency tinh vi[^ss21-16]. Phần định nghĩa tính chất và harness chiếm 12% code của ShardStore[^ss21-12pct].
+- CCF cũng nhận xét việc kiểm model exhaustive quá chậm trong CI trừ khi dùng ràng buộc state rất chặt, nên họ thêm một spec *simulation* làm phương án nhẹ thay cho khám phá vét cạn[^ccf-sim]. Cùng tinh thần đó có `spawn_simulation` của Stateright và `-simulate` của TLC (mục 4).
+- Chương này không bàn các công cụ chứng minh trên code Rust (ví dụ Prusti, mà ShardStore từng thử nghiệm cho phần chứng minh reference model[^ss21-prusti]).
 
 </details>
 
-**Quay lại Q7:** TLA+ kiểm thiết kế trên mô hình; loom/shuttle kiểm interleaving của code; proptest kiểm logic tuần tự so reference model; trace validation và MBTCG là cầu nối spec ↔ code; tất cả là kiểm chứng, không phải chứng minh.
+**Quay lại Q7:** TLA+ kiểm thiết kế trên mô hình; loom và shuttle kiểm interleaving của code; proptest kiểm logic tuần tự so với reference model; trace validation và MBTCG là cầu nối spec ↔ code. Tất cả là kiểm chứng, không phải chứng minh.
 
 ## 8. Quy trình đề xuất cho team backend (Q8)
 
-> **Trả lời ngắn.** Đây là *đề xuất của người soạn* dựa trên các nguồn ở mục 1–7, không phải quy trình đã được kiểm chứng ở team của bạn. Ý chính: viết spec nhỏ cho đúng phần khó (protocol phân tán, đồng thời tinh vi); chia code thành lõi trạng thái thuần và vỏ I/O; kiểm lõi bằng proptest + reference model; kiểm đoạn concurrent nhỏ bằng loom, stress lớn bằng shuttle; thêm trace validation cho đúng các protocol quan trọng khi đã quen. Bắt đầu rẻ rồi mới đắt.
+> **Trả lời ngắn.** Đây là *đề xuất của người soạn*, dựa trên các nguồn ở mục 1–7 chứ không phải quy trình đã được kiểm chứng ở team của bạn. Ý chính: viết spec nhỏ cho đúng phần khó (protocol phân tán, đồng thời tinh vi); chia code thành lõi trạng thái thuần và vỏ I/O; kiểm lõi bằng proptest với reference model; kiểm đoạn concurrent nhỏ bằng loom, stress lớn bằng shuttle; và thêm trace validation cho các protocol quan trọng khi đã quen. Bắt đầu rẻ rồi mới đắt.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như quy trình review/test của một API công khai — bạn không tự động hóa mọi thứ từ ngày đầu; bạn chọn chỗ rủi ro cao nhất, đặt contract test ở đó, rồi mở rộng khi thấy giá trị.
+*Với `fencer`.* Giả sử team bạn sở hữu `fencer` cùng vài service khác. Bạn không nên áp cả sáu công cụ lên mọi thứ ngay từ ngày đầu. Hãy chọn chỗ rủi ro cao nhất (cấp token sai thì storage nhận ghi từ client cũ và dữ liệu hỏng), đặt công cụ rẻ ở đó trước, rồi mở rộng khi thấy giá trị (nhận xét của người soạn).
 
 ```mermaid
 flowchart TD
@@ -975,14 +975,14 @@ flowchart TD
 
 **Các bước và căn cứ.**
 
-1. **Chọn chỗ đáng.** AWS dùng spec để bắt lỗi thiết kế mà test không thấy[^aws-testing]; CCF buộc spec TLA+ với cài đặt C++[^ccf-hybrid], áp dụng trace validation cho spec consensus rồi cho spec consistency[^ccf-happy][^ccf-later]. Ngược lại MongoDB thấy MBTC không thực tế cho cả MongoDB Server do kích thước code, concurrency nội bộ và spec quá đơn giản hóa[^mdb-impeded]. Rút ra (nhận xét của người soạn): đừng bắt đầu bằng thứ lớn nhất.
-2. **Spec trước, nhỏ, mục đích rõ.** Nếu định dùng trace validation, *viết spec sao cho dùng được cho nó từ đầu*: MongoDB chỉ ra rằng spec bị đơn giản hóa trước khi biết sẽ dùng cho MBTC là một nguyên nhân thất bại[^mdb-impeded]; Cirstea et al. cho biết phương pháp dễ áp dụng nhất khi spec có trước, người cài đặt hiểu spec và dùng làm bản thiết kế khi viết code[^tv-spec-first].
-3. **Tách lõi trạng thái thuần khỏi vỏ I/O** (xem "Liên hệ với Rust"). Mỗi action của spec ứng với một hàm/biến thể của lõi; ghi chú tham chiếu chéo giữa tên trong code và tên trong spec, như CCF[^ccf-xref].
-4. **Reference model + proptest ở mỗi PR.** ShardStore chọn viết reference model cùng ngôn ngữ để dễ cập nhật và dùng lại làm mock[^ss21-samelang][^ss21-mock]; phần định nghĩa tính chất và harness chỉ chiếm 12% code[^ss21-12pct].
-5. **loom/shuttle ở nightly hoặc job riêng.** loom nên chạy `--release`[^loom-release] và có thể chặn preempt để giữ thời gian chạy trong tầm kiểm soát[^loom-preempt]. Dùng loom cho primitive nhỏ, shuttle cho test lớn[^ss21-loom-shuttle]. (Việc đặt vào CI nightly hay PR là chọn lựa của người soạn, theo chi phí.)
-6. **Trace validation sau cùng, tăng dần.** CCF bắt đầu bằng việc ánh xạ từng dòng vết của một *happy-path test* với spec consensus[^ccf-happy] và thêm càng nhiều assertion càng tốt để sớm bắt lệch[^ccf-assert]. Chi phí thực: chỉnh test driver và ghi log chi tiết khoảng một ngày; dựng trace spec validate được phần lớn vết khoảng hai tháng-kỹ sư rải trong bốn tháng[^ccf-effort2]; nhưng sau đó chuyển sang kiểm spec consistency "tốn ít công hơn đáng kể"[^ccf-later]. Với MongoDB: 10 tuần cho hai kỹ sư rồi bỏ[^mdb-effort].
-7. **Khi có divergence:** không mặc định sửa code. Cirstea et al. chia nguyên nhân ra *đi tắt trong cài đặt*, *spec quá chặt*, *lệch grain of atomicity*[^tv-reasons]; CCF sửa bên nào sai rồi chạy lại cả model checking lẫn test[^ccf-fix].
-8. **Giữ đồng bộ.** Đưa việc kiểm vào CI để người đóng góp liên tục kiểm tra[^ccf-ci]; sau khi spec được xác nhận khớp cài đặt, CCF chuyển sang phát triển theo spec[^ccf-spec-driven] — đổi spec trước, code sau.
+1. **Chọn chỗ đáng.** AWS dùng spec để bắt lỗi thiết kế mà test không thấy[^aws-testing]. CCF buộc spec TLA+ với cài đặt C++[^ccf-hybrid]. Sau đó họ áp dụng trace validation cho spec consensus, rồi cho spec consistency[^ccf-later]. Ngược lại, MongoDB thấy MBTC không thực tế cho MongoDB Server, do kích thước code, concurrency nội bộ và spec quá đơn giản hóa[^mdb-impeded]. Rút ra (nhận xét của người soạn): đừng bắt đầu bằng thứ lớn nhất.
+2. **Spec trước, nhỏ, mục đích rõ.** Nếu định dùng trace validation thì *viết spec sao cho dùng được cho nó từ đầu*: MongoDB chỉ ra rằng spec bị đơn giản hóa trước khi biết sẽ dùng cho MBTC là một nguyên nhân thất bại[^mdb-impeded]. Cirstea et al. cho biết phương pháp dễ áp dụng nhất khi spec có trước, người cài đặt hiểu spec và dùng nó làm bản thiết kế khi viết code[^tv-spec-first].
+3. **Tách lõi trạng thái thuần khỏi vỏ I/O** (xem "Liên hệ với Rust"). Mỗi action của spec ứng với một hàm hoặc biến thể của lõi; ghi chú tham chiếu chéo giữa tên trong code và tên trong spec, như CCF làm[^ccf-xref].
+4. **Reference model + proptest ở mỗi PR.** ShardStore chọn viết reference model cùng ngôn ngữ với cài đặt, vì dễ cập nhật hơn[^ss21-samelang]. Họ cũng dùng lại chúng làm mock[^ss21-mock]. Phần định nghĩa tính chất và harness chỉ chiếm 12% code[^ss21-12pct].
+5. **loom/shuttle ở nightly hoặc job riêng.** loom nên chạy `--release`[^loom-release]. Có thể chặn preempt để giữ thời gian chạy trong tầm kiểm soát[^loom-preempt]. Dùng loom cho primitive nhỏ, shuttle cho test lớn[^ss21-loom-shuttle]. (Việc đặt vào CI nightly hay PR là chọn lựa của người soạn, theo chi phí.)
+6. **Trace validation sau cùng, tăng dần.** CCF bắt đầu bằng việc ánh xạ từng dòng vết của một *happy-path test* với spec consensus[^ccf-happy]. Họ thêm càng nhiều assertion càng tốt để sớm bắt lệch[^ccf-assert]. Chi phí thực: chỉnh test driver và ghi log chi tiết mất khoảng một ngày, nhưng dựng trace spec validate được phần lớn vết mất khoảng hai tháng-kỹ sư rải trong bốn tháng[^ccf-effort2]. Với MongoDB, con số là 10 tuần cho hai kỹ sư rồi bỏ[^mdb-effort].
+7. **Khi có divergence**, không mặc định sửa code. Cirstea et al. chia nguyên nhân thành *đi tắt trong cài đặt*, *spec quá chặt* và *lệch grain of atomicity*[^tv-reasons]. CCF sửa bên nào sai rồi chạy lại cả model checking lẫn test[^ccf-fix].
+8. **Giữ đồng bộ.** Đưa việc kiểm vào CI để người đóng góp liên tục kiểm tra[^ccf-ci]. Khi spec đã được xác nhận khớp cài đặt, CCF chuyển sang phát triển theo spec[^ccf-spec-driven], tức đổi spec trước, code sau.
 
 **Checklist ngắn cho một PR đụng tới protocol (nhận xét của người soạn).**
 
@@ -993,7 +993,7 @@ flowchart TD
 - Nếu có trace validation: điểm ghi log mới có nằm trong cùng critical section với bước nó mô tả không?
 - Báo cáo CI nói gì về *phạm vi*: bao nhiêu thread, bao nhiêu lịch/mẫu, có chặn preempt không? "Xanh" chỉ có nghĩa trong phạm vi đó.
 
-**Nói thẳng về kỳ vọng.** Không bước nào ở trên chứng minh code đúng. Bạn có: một thiết kế đã được kiểm vét cạn trong phạm vi model; nhiều lớp kiểm tra bắt các lệch cụ thể giữa code và thiết kế. Đó là kiểm chứng nhiều tầng, đúng triết lý của hai nguồn công nghiệp chính ở đây[^ccf-hybrid][^ss21-notverify].
+**Nói thẳng về kỳ vọng.** Không bước nào ở trên chứng minh code đúng. Bạn có một thiết kế đã được kiểm vét cạn trong phạm vi model, cộng với nhiều lớp kiểm tra bắt các lệch cụ thể giữa code và thiết kế. Đó là kiểm chứng nhiều tầng, đúng triết lý của nguồn công nghiệp chính ở đây[^ccf-hybrid].
 
 <details><summary>Đi sâu: chi phí đã công bố và những chỗ chưa có số liệu</summary>
 
@@ -1006,17 +1006,17 @@ flowchart TD
 | `tlaplus/Examples` (EWD998) | cài đặt theo spec | khoảng hai giờ (chưa chạy/debug code)[^ewd-impl] |
 | ShardStore | harness + định nghĩa tính chất | 12% code base[^ss21-12pct] |
 
-Chưa có nguồn nào ở đây cho: chi phí cho một team backend Rust điển hình; tỉ lệ lỗi do mỗi công cụ bắt được trong hệ của bạn; thời gian chạy loom/shuttle trên code của bạn. Các con số trên là từ hệ rất khác (database, nền tảng consensus, lưu trữ) — dùng để *định cỡ kỳ vọng*, không phải dự toán (nhận xét của người soạn).
+Chưa có nguồn nào ở đây cho: chi phí với một team backend Rust điển hình; tỉ lệ lỗi mà mỗi công cụ bắt được trong hệ của bạn; thời gian chạy loom và shuttle trên code của bạn. Các con số trên đến từ những hệ rất khác (database, nền tảng consensus, lưu trữ), nên chỉ dùng để *định cỡ kỳ vọng*, không phải để dự toán (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q8:** chọn phần rủi ro cao, spec nhỏ, tách lõi, kiểm bằng nhiều lớp từ rẻ (proptest) đến đắt (trace validation), luôn nói rõ phạm vi của từng lớp.
+**Quay lại Q8:** chọn phần rủi ro cao, spec nhỏ, tách lõi, kiểm bằng nhiều lớp từ rẻ (proptest) đến đắt (trace validation), và luôn nói rõ phạm vi của từng lớp. Với `fencer`, đó là spec `TokenIssuer`, lõi `IssuerCore`, proptest cho storage, loom cho `fetch_add`.
 
 ## Liên hệ với Rust
 
-*Thiết kế để kiểm tra được.* Các công cụ ở trên đều dễ dùng hơn khi code có hình dạng nhất định (nhận xét của người soạn, trừ chỗ có chú thích):
+*Thiết kế để kiểm tra được.* Các công cụ ở trên đều dễ dùng hơn khi code có hình dạng nhất định. Với `fencer`, đó là sáu việc sau (nhận xét của người soạn, trừ chỗ có chú thích):
 
-1. **Lõi trạng thái thuần.** Đặt logic của protocol vào một kiểu thuần với bước chuyển tường minh, để cả `Model::next_state` (Stateright), `StateMachineTest::apply` (proptest) và shell async của service gọi cùng một hàm. Sách Stateright nhấn mạnh lợi ích này: model và cài đặt cuối dùng chung code loại bỏ một kiểu lỗi lệch giữa model và hệ thật[^sr-book-share].
+1. **Lõi trạng thái thuần.** Đặt logic của protocol vào một kiểu thuần với bước chuyển tường minh, để `Model::next_state` (Stateright), `StateMachineTest::apply` (proptest) và shell async của service gọi cùng một hàm. Đây chính là lợi ích mà sách Stateright nhấn mạnh: model và cài đặt cuối dùng chung code thì loại được một kiểu lỗi, là model lệch khỏi hệ thật[^sr-book-share].
 
 ```rust
 // Lõi thuần: không I/O, không clock, không thread. Mỗi biến thể Input ↔ một action của spec.
@@ -1039,24 +1039,24 @@ impl IssuerCore {
 // proptest: StateMachineTest::apply gọi IssuerCore::issue, so với RefStore.
 ```
 
-   Lưu ý: bản `Mutex<IssuerCore>` khác bản `AtomicUsize::fetch_add` về chi phí, không khác về ngữ nghĩa "một bước"; chọn bản nào là quyết định hiệu năng, và loom kiểm cả hai nếu dùng kiểu loom (suy luận của người soạn).
-2. **Một module `sync` duy nhất** chọn kiểu của `std`/loom/shuttle theo `cfg`/feature, theo hướng dẫn của cả hai docs[^loom-cfg][^sh-replace]. Tokio dùng mẫu facade `cfg(loom)` tương tự ở quy mô lớn (facade của Tokio đổi giữa `std` và loom, không đổi sang shuttle)[^tokio-loom]. Kiểm soát thứ gì *không* đi qua facade, vì loom và shuttle không thấy nó[^loom-intrusive].
-3. **Async.** Facade loom của Tokio chỉ bật khi biên dịch chính Tokio ở chế độ test cùng cờ `loom`[^tokio-loom-cond], tức là nó phục vụ test bên trong Tokio chứ không biến Tokio runtime mà ứng dụng của bạn dùng thành runtime của loom (suy luận của người soạn từ điều kiện cfg đó). Với code async của bạn, shuttle có executor async riêng ở `shuttle::future`[^sh-async]; để dùng, bạn phải đặt `spawn`/`block_on` sau một facade có thể đổi (suy luận của người soạn từ chữ ký module `future`). Xem [P7 · 08](../07-io-async/08-tokio.md) cho runtime thật.
-4. **Cái type system *đã* và *chưa* làm.** `Send`/`Sync` và borrow checker loại data race ở phần safe; chúng không bắt vi phạm tính nguyên tử như `issue_buggy`[^ss21-datarace] ([P4 · 08, mục 10](../04-concurrency/08-rust-concurrency.md) liệt kê Rust chặn gì và không chặn gì). Một phần `unsafe` nhỏ vẫn có thể có: ShardStore chạy test suite dưới Miri để bắt một số lớp hành vi không xác định, và phải mở rộng Miri để hỗ trợ thread và lock[^ss21-miri].
-5. **Tính xác định của test.** loom đòi test hoàn toàn xác định[^loom-nondet]; shuttle phát lại lịch chính xác chỉ khi không có bất định nào khác ngoài lịch[^sh-replay2]; proptest phát lại bằng seed trong file regressions[^pt-seed]. Hệ quả: đưa clock, RNG, I/O vào qua tham số/trait để thay được bằng bản giả trong test.
-6. **Lệnh chạy.** Cờ loom: `RUSTFLAGS="--cfg loom" cargo test --test <tên> --release`[^loom-release]; shuttle: `cargo test --features shuttle` theo mẫu của docs[^sh-feature]; proptest: bình thường với `cargo test`, kèm `PROPTEST_CASES` cho CI[^pt-sm-ci].
+   Lưu ý: bản `Mutex<IssuerCore>` khác bản `AtomicUsize::fetch_add` về chi phí, không khác về ngữ nghĩa "một bước". Chọn bản nào là quyết định hiệu năng, và loom kiểm được cả hai nếu dùng kiểu loom (suy luận của người soạn).
+2. **Một module `sync` duy nhất** chọn kiểu của `std`, loom hay shuttle theo `cfg` hoặc feature. Docs loom hướng dẫn làm vậy qua cờ `cfg(loom)`[^loom-cfg]. Docs shuttle yêu cầu thay mọi kiểu đồng bộ của `std` bằng kiểu của shuttle[^sh-replace], và ta làm theo cùng mẫu đó (nhận xét của người soạn). Tokio dùng mẫu facade `cfg(loom)` tương tự ở quy mô lớn; facade của Tokio đổi giữa `std` và loom, không đổi sang shuttle[^tokio-loom]. Hãy kiểm soát thứ gì *không* đi qua facade, vì loom và shuttle không thấy nó[^loom-intrusive].
+3. **Async.** Facade loom của Tokio chỉ bật khi biên dịch chính Tokio ở chế độ test cùng cờ `loom`[^tokio-loom-cond]. Tức là nó phục vụ test bên trong Tokio chứ không biến Tokio runtime mà ứng dụng của bạn dùng thành runtime của loom (suy luận của người soạn từ điều kiện cfg đó). Với code async của bạn, shuttle có executor async riêng ở `shuttle::future`[^sh-async]; để dùng, bạn phải đặt `spawn`/`block_on` sau một facade có thể đổi (suy luận của người soạn từ chữ ký module `future`). Runtime thật xem ở [P7 · 08](../07-io-async/08-tokio.md).
+4. **Cái type system *đã* và *chưa* làm.** `Send`/`Sync` và borrow checker loại data race ở phần safe, nhưng không bắt vi phạm tính nguyên tử như `issue_buggy`[^ss21-datarace] ([P4 · 08, mục 10](../04-concurrency/08-rust-concurrency.md) liệt kê Rust chặn gì và không chặn gì). Một phần `unsafe` nhỏ vẫn có thể có. ShardStore chạy test suite dưới Miri để bắt một số lớp hành vi không xác định, và phải mở rộng Miri để hỗ trợ thread và lock[^ss21-miri].
+5. **Tính xác định của test.** loom đòi test hoàn toàn xác định[^loom-nondet]. shuttle chỉ phát lại lịch chính xác khi không có bất định nào khác ngoài lịch[^sh-replay2]. proptest phát lại bằng seed trong file regressions[^pt-seed]. Hệ quả: đưa clock, RNG, I/O vào qua tham số hoặc trait, để thay được bằng bản giả trong test.
+6. **Lệnh chạy.** Cờ loom: `RUSTFLAGS="--cfg loom" cargo test --test <tên> --release`[^loom-release]. Shuttle: `cargo test --features shuttle`, theo mẫu của docs[^sh-feature]. Proptest: chạy bình thường với `cargo test`, kèm `PROPTEST_CASES` cho CI[^pt-sm-ci].
 
 ## Tóm tắt
 
-- Spec đúng chỉ bảo đảm *thiết kế*; khoảng cách spec–code gồm chi tiết bị bỏ, lệch grain of atomicity, cài đặt đi tắt, spec quá chặt, lỗi chép và trôi lệch theo thời gian.
-- Không đi bằng chứng minh refinement toàn bộ (việc cực nhọc[^tv-daunting]), các nhóm công nghiệp dùng kiểm chứng nhiều lớp: model-based testing, trace validation, reference model + PBT, model checker cho code concurrent.
-- MBTCG sinh test từ đồ thị trạng thái của model (thành công với Realm Sync, bài toán xác định, nhỏ); MBTC kiểm vết thật với spec (MongoDB Server: bỏ sau 10 tuần).
-- Trace validation quy về model checking có ràng buộc: instrument tại điểm tuyến tính hóa (ghi log trong cùng critical section), viết trace spec, TLC kiểm có behavior khớp không; "được chấp nhận" không phải chứng minh; vết thiếu có thể được chấp nhận oan; vết sai không có phản ví dụ.
+- Spec đúng chỉ bảo đảm *thiết kế*. Giữa spec và code còn các khe hở: chi tiết bị bỏ, lệch grain of atomicity, cài đặt đi tắt, spec quá chặt, lỗi chép và trôi lệch theo thời gian.
+- Chứng minh refinement toàn bộ là việc cực nhọc[^tv-daunting], nên các nhóm công nghiệp dùng kiểm chứng nhiều lớp: model-based testing, trace validation, reference model + PBT, model checker cho code concurrent.
+- MBTCG sinh test từ đồ thị trạng thái của model (thành công với Realm Sync: bài toán xác định, nhỏ). MBTC kiểm vết thật với spec (MongoDB Server: bỏ sau 10 tuần).
+- Trace validation quy về model checking có ràng buộc: instrument tại điểm tuyến tính hóa (ghi log trong cùng critical section), viết trace spec, để TLC kiểm có behavior khớp không. "Được chấp nhận" không phải chứng minh; vết thiếu có thể được chấp nhận oan; vết sai không có phản ví dụ.
 - Stateright: `Model` (`init_states`/`actions`/`next_state`/`properties`), checker BFS/DFS/simulation, `Actor` chạy được cả trong model lẫn qua UDP, `LinearizabilityTester` so với `SequentialSpec`; `eventually` chỉ đúng trên đường không chu trình.
-- loom vét cạn lịch theo memory model C11 trên code dùng kiểu loom; giới hạn: intrusive, `Relaxed` chỉ một phần, bùng nổ theo số thread, cần `yield_now` cho spin.
-- shuttle kiểm lịch ngẫu nhiên/PCT/DFS, phát lại bằng chuỗi lịch; không sound; coi mọi atomic là `SeqCst`; có executor async.
-- proptest state machine: reference state machine + test cho SUT, thu nhỏ chuỗi lệnh; hiện chỉ tuần tự; chỉ phủ trạng thái mà harness chạm tới.
-- Quy trình đề xuất (người soạn): spec nhỏ cho chỗ rủi ro cao → lõi thuần → proptest mỗi PR → loom/shuttle nightly → trace validation sau cùng; luôn ghi phạm vi của từng lớp kiểm.
+- loom vét cạn lịch theo memory model C11 trên code dùng kiểu loom. Giới hạn: intrusive, `Relaxed` chỉ một phần, bùng nổ theo số thread, cần `yield_now` cho spin.
+- shuttle kiểm lịch ngẫu nhiên, PCT hoặc DFS, phát lại bằng chuỗi lịch. Nó không sound, coi mọi atomic là `SeqCst`, và có executor async.
+- proptest state machine: reference state machine + test cho SUT, thu nhỏ chuỗi lệnh. Hiện chỉ tuần tự, và chỉ phủ trạng thái mà harness chạm tới.
+- Quy trình đề xuất (người soạn): spec nhỏ cho chỗ rủi ro cao, rồi lõi thuần, proptest mỗi PR, loom/shuttle nightly, trace validation sau cùng; luôn ghi phạm vi của từng lớp kiểm.
 
 ## Câu hỏi tự kiểm tra
 
@@ -1076,17 +1076,17 @@ impl IssuerCore {
 <details><summary>Đáp án</summary>
 
 1. (i) Bỏ chi tiết: ShardStore bỏ lỗi I/O khỏi model[^ss21-omit]. (ii) Lệch grain of atomicity: spec coi cấp token là một step, code là `load` rồi `store`[^ss-grain]. (iii) Đi tắt: đếm số RM thay vì danh tính[^tv-shortcut]. (iv) Spec quá chặt: EWD998 cấm tự gửi[^ewd-self]. (v) Lỗi chép tay[^mdb-transcription]. (vi) Trôi lệch theo thời gian[^mdb-drift].
-2. `issue_buggy` là hai thao tác atomic riêng rẽ; giữa chúng thread khác chen vào được; spec `TokenIssuer` coi cả cụm là một step nên không thể hiện lỗi. Cần tách `Issue` thành `Read`/`Write` (spec `TokenIssuerSplit`) để TLC thấy bốn bước dẫn tới trùng token (suy luận của người soạn); spec mịn hơn mô tả hệ thật chính xác hơn[^ss-grain-fine]. Ở mức code, loom kiểm trực tiếp (mục 5).
-3. MBTCG: sinh test từ spec/model[^mdb-mbtcg-def]. MBTC: ghi vết từ code rồi kiểm với spec. Realm Sync (xác định, nhỏ — suy luận của người soạn) thành công với MBTCG[^mdb-abs-1]; MongoDB Server (bất định[^mdb-nondet], code lớn, concurrency phức tạp, spec quá trừu tượng[^mdb-impeded]) bỏ MBTC sau 10 tuần[^mdb-abandon].
-4. Gọi S là tập behavior hữu hạn của `Spec`, T là tập behavior hữu hạn khớp vết (biến không ghi nhận giá trị tùy ý); vết tương thích nếu S và T giao nhau khác rỗng[^tv-problem]. Không đòi T ⊆ S vì quá mạnh khi có biến không ghi mà spec chọn bất định[^tv-notrefine].
-5. Hai thread `fetch_add` được 1 và 2 nhưng thread nhận 2 có thể ghi log trước, tạo vết đảo thứ tự mà spec không cho (suy luận của người soạn). MongoDB: phải ghi sự kiện trước khi thay đổi hiển thị với bên khác, nên giữ lock khi ghi[^mdb-visibility]; EWD998 cũng gặp việc ghi ở thread nhận làm hỏng happen-before[^ewd-log]. Khắc phục: trong build có vết, ghi log trong cùng critical section với bước.
-6. Bảo đảm: tồn tại behavior của spec khớp thông tin đã ghi trong vết đó. Không bảo đảm: code đúng cho các lần chạy khác, liveness (chỉ phân tích vết hữu hạn[^tv-liveness]), hay bất cứ điều gì nếu vết thiếu thông tin[^tv-incomplete]. Cirstea et al. nói rõ phương pháp không cho bảo đảm đúng đắn hình thức[^tv-nofg]; ngoài ra coverage của các vết chưa được đo gộp[^ewd-todo].
-7. `type State` ↔ biến; `init_states` ↔ `Init`; `actions` + `next_state` ↔ `Next` (điều kiện enabled và hiệu ứng)[^sr-split]; `properties` ↔ `INVARIANT`[^sr-always] và (hạn chế) liveness. `eventually` chỉ đúng trên đường không chu trình; đường kết thúc ở chu trình có thể bị bỏ sót[^sr-eventually].
-8. BFS duyệt theo độ sâu nên (một luồng) tìm `Path` ngắn nhất tới mỗi phát hiện nhưng tốn bộ nhớ; DFS dùng ít bộ nhớ hơn đáng kể nhưng không bảo đảm ngắn nhất[^sr-bfs][^sr-dfs]. Chọn DFS khi không gian trạng thái lớn và bộ nhớ là nút thắt (nhận xét của người soạn).
-9. loom sound trong mô hình của nó (vét cạn, release/acquire), nhưng nhỏ; shuttle không sound, mở rộng hơn, coi mọi atomic là `SeqCst`[^sh-weak][^sh-unsound]. ShardStore: loom cho primitive nhỏ, shuttle cho stress đầu-cuối[^ss21-loom-shuttle].
-10. Chọn ba trong: intrusive (code không dùng kiểu loom vô hình[^loom-intrusive]); `Relaxed` chỉ một phần[^loom-reorder]; bùng nổ theo số thread, giới hạn `MAX_THREADS`[^loom-maxthreads]; cần cờ `cfg(loom)` và `--release`[^loom-cfg][^loom-release]. Spin lock cần `loom::thread::yield_now` trong vòng chờ[^loom-yield].
-11. `preconditions` giữ cho chuỗi sinh ra và thu nhỏ chỉ chứa transition hợp lệ với state hiện tại[^pt-sm-pre]; `check_invariants` kiểm sau mỗi transition[^pt-sm-inv]. Miền nhỏ để lần ghi/đọc va chạm nhau, nếu không các đường như `Get` thành công gần như không bao giờ được kiểm[^ss21-bias].
-12. Cập nhật spec và kiểm TLC; chạy proptest với reference model đã đổi; loom/shuttle cho thay đổi concurrent; trace validation nếu có. "Xanh" chỉ có nghĩa trong phạm vi: model đã kiểm, số mẫu/lịch đã chạy, có chặn preempt không; PBT chỉ phủ trạng thái harness chạm tới[^ss21-reach].
+2. `issue_buggy` gồm hai thao tác atomic riêng rẽ, giữa chúng thread khác chen vào được. Spec `TokenIssuer` coi cả cụm là một step nên không thể hiện lỗi này. Cần tách `Issue` thành `Read` và `Write` (spec `TokenIssuerSplit`) để TLC thấy bốn bước dẫn tới trùng token (suy luận của người soạn), vì spec mịn hơn mô tả hệ thật chính xác hơn[^ss-grain-fine]. Ở mức code, loom kiểm trực tiếp (mục 5).
+3. MBTCG sinh test từ spec hoặc model[^mdb-mbtcg-def]; MBTC ghi vết từ code rồi kiểm với spec. Realm Sync (xác định, nhỏ; suy luận của người soạn) thành công với MBTCG[^mdb-abs-1]. MongoDB Server thì bất định[^mdb-nondet]. Code lớn, concurrency phức tạp và spec quá trừu tượng[^mdb-impeded] khiến MBTC không thực tế ở đó. Nhóm bỏ nó sau 10 tuần[^mdb-abandon].
+4. Gọi S là tập behavior hữu hạn của `Spec`, T là tập behavior hữu hạn khớp vết (biến không ghi nhận giá trị tùy ý). Vết tương thích nếu S và T có giao khác rỗng[^tv-problem]. Không đòi T ⊆ S vì điều đó quá mạnh khi có biến không ghi mà spec chọn bất định[^tv-notrefine].
+5. Hai thread `fetch_add` được 1 và 2, nhưng thread nhận 2 có thể ghi log trước, tạo vết đảo thứ tự mà spec không cho (suy luận của người soạn). MongoDB: phải ghi sự kiện trước khi thay đổi hiển thị với bên khác, nên giữ lock khi ghi[^mdb-visibility]. EWD998 cũng gặp việc ghi ở thread nhận làm hỏng happen-before[^ewd-log]. Cách khắc phục: trong build có vết, ghi log trong cùng critical section với bước.
+6. Bảo đảm: tồn tại behavior của spec khớp thông tin đã ghi trong vết đó. Không bảo đảm: code đúng cho các lần chạy khác, và liveness, vì chỉ phân tích vết hữu hạn[^tv-liveness]. Cũng không bảo đảm gì nếu vết thiếu thông tin[^tv-incomplete]. Cirstea et al. nói rõ phương pháp không cho bảo đảm đúng đắn hình thức[^tv-nofg]. Ngoài ra coverage của các vết chưa được đo gộp[^ewd-todo].
+7. `type State` ↔ biến; `init_states` ↔ `Init`; `actions` + `next_state` ↔ `Next` (điều kiện enabled và hiệu ứng)[^sr-split]. `properties` ↔ `INVARIANT`[^sr-always]. Liveness thì có hạn chế: `eventually` chỉ đúng trên đường không chu trình, đường kết thúc ở chu trình có thể bị bỏ sót[^sr-eventually].
+8. BFS duyệt theo độ sâu nên (một luồng) tìm `Path` ngắn nhất tới mỗi phát hiện nhưng tốn bộ nhớ[^sr-bfs]. DFS dùng ít bộ nhớ hơn đáng kể nhưng không bảo đảm ngắn nhất[^sr-dfs]. Chọn DFS khi không gian trạng thái lớn và bộ nhớ là nút thắt (nhận xét của người soạn).
+9. loom sound trong mô hình của nó (vét cạn, release/acquire) nhưng chỉ cho code nhỏ. shuttle không sound[^sh-unsound] nhưng mở rộng hơn. Nó coi mọi atomic là `SeqCst`[^sh-weak]. ShardStore dùng loom cho primitive nhỏ và shuttle cho stress đầu-cuối[^ss21-loom-shuttle].
+10. Chọn ba trong: intrusive (code không dùng kiểu loom thì vô hình[^loom-intrusive]); `Relaxed` chỉ một phần[^loom-reorder]; bùng nổ theo số thread, giới hạn `MAX_THREADS`[^loom-maxthreads]; cần cờ `cfg(loom)` và `--release`[^loom-cfg]. Spin lock cần `loom::thread::yield_now` trong vòng chờ[^loom-yield].
+11. `preconditions` giữ cho chuỗi sinh ra và thu nhỏ chỉ chứa transition hợp lệ với state hiện tại[^pt-sm-pre]. `check_invariants` kiểm sau mỗi transition[^pt-sm-inv]. Miền đối số nhỏ để các lần ghi/đọc va chạm nhau; nếu không, các đường như `Get` thành công gần như không bao giờ được kiểm[^ss21-bias].
+12. Cập nhật spec và kiểm bằng TLC; chạy proptest với reference model đã đổi; chạy loom/shuttle cho thay đổi concurrent; chạy trace validation nếu có. "Xanh" chỉ có nghĩa trong phạm vi: model đã kiểm, số mẫu/lịch đã chạy, có chặn preempt hay không. PBT chỉ phủ trạng thái mà harness chạm tới[^ss21-reach].
 
 </details>
 

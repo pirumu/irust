@@ -14,31 +14,35 @@
 ## Kiến thức cần trước
 
 - [Chương 01 — Các mô hình I/O](01-mo-hinh-io.md) (non-blocking, `EAGAIN`, readiness) và [Chương 02 — select/poll/epoll](02-select-poll-epoll.md) (interest list, ready list, level/edge-triggered).
-- [Chương 04 — Kiến trúc event loop](04-kien-truc-event-loop.md): vòng lặp reactor "thuần OS", chương này lắp nó với `Future`.
-- [Chương 05 — Future, poll và Waker](05-future-poll-waker.md): hợp đồng của `poll`, `Context`, `Waker`, `Wake`. Chương này dùng lại chúng mà không giải thích lại từ đầu. `Pin` ở [Chương 06](06-async-await-pin.md).
+- [Chương 04 — Kiến trúc event loop](04-kien-truc-event-loop.md): vòng lặp reactor "thuần OS". Chương này lắp vòng lặp đó với `Future`.
+- [Chương 05 — Future, poll và Waker](05-future-poll-waker.md): hợp đồng của `poll`, `Context`, `Waker`, `Wake`. Chương này dùng lại chúng, không giải thích lại từ đầu. `Pin` ở [Chương 06](06-async-await-pin.md).
+
+Ví dụ chạy xuyên chương là `echo-svc`, một TCP service viết bằng Rust, chạy trên đúng một thread, mỗi kết nối là một task. Mục 1 giới thiệu nó; mục 7 là code thật của nó.
 
 ## 1. Hai vai trò: executor và reactor (Q1)
 
-> **Trả lời ngắn.** Executor là phần giữ các task sẵn sàng chạy và gọi `Future::poll` lên từng task[^tokio-basic]. Reactor là phần nói chuyện với hệ điều hành: nó chờ I/O sẵn sàng rồi chuyển sự kiện tới những task đang đợi I/O đó[^tokio-services]. Rust không đi kèm runtime[^book-noruntime], nên hai phần này nằm trong crate ngoài như Tokio.
+> **Trả lời ngắn.** Một runtime async làm hai việc khác nhau. Executor giữ các task sẵn sàng chạy và gọi `Future::poll` lên từng task[^tokio-basic]. Reactor nói chuyện với hệ điều hành: nó chờ I/O sẵn sàng rồi báo cho những task đang đợi I/O đó[^tokio-services]. Rust không đi kèm runtime[^book-noruntime], nên hai phần này nằm trong crate ngoài như Tokio.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ở một nhà hàng đông khách, người phục vụ (executor) chỉ đi tới bàn nào đang có việc. Bàn nào còn chờ món thì người phục vụ để lại một mẩu ghi chú ở quầy rồi sang bàn khác. Nhân viên quầy (reactor) lắng nghe bếp; món nào xong thì gọi đúng bàn đó để người phục vụ quay lại.
+*Với service của bạn.* Giả sử `echo-svc` nhận các kết nối TCP và gửi lại y nguyên những byte client gửi tới. Nó chạy trên đúng một thread, mỗi kết nối là một task (nhận xét của người soạn: ví dụ giả định, cùng thiết kế với demo ở mục 7). Phần lớn thời gian một kết nối chỉ ngồi chờ client gửi, nên thread không thể ngủ chờ riêng một socket nào, vì lúc đó các kết nối còn lại đứng hình. Cần có hai việc tách bạch: chọn task nào chạy tiếp, và biết socket nào vừa có dữ liệu. Hai việc đó là hai vai executor và reactor.
 
-Chương 05 cho thấy future trả `Pending` phải lưu một clone của `Waker` để có ai đó gọi sau[^std-future-clone]. Việc *chạy* future và việc *biết khi nào fd sẵn sàng* thuộc crate ngoài (Rust Book gọi executor là phần của runtime chịu trách nhiệm chạy code async[^book-executor]), nên thành hai vai trò:
+Chương 05 đã cho thấy một future trả `Pending` phải giữ một clone của `Waker` để lát nữa có ai gọi nó dậy[^std-future-clone]. Nhưng ai chạy future, và ai biết khi nào fd sẵn sàng, thì ngôn ngữ không quy định. Rust Book xếp việc chạy code async vào executor, một phần của runtime[^book-executor]. Từ đó ta có hai vai:
 
-- **Executor** (scheduler) giữ các task và *ready queue* (cách gọi của giáo trình này), lấy task ra rồi gọi `Future::poll`. Tokio mô tả mức cơ bản nhất: runtime có một tập task cần lên lịch, lặp lại việc lấy một task ra và gọi `poll`[^tokio-basic]; khi tập rỗng thì thread ngủ tới khi có task mới[^tokio-sleep].
-- **Reactor** (driver) giữ bảng "nguồn sự kiện → waker đang chờ" (mô hình của người soạn, khớp demo mục 7), đăng ký fd với OS, chờ (`epoll_wait`/`kevent`), nhận sự kiện rồi gọi `wake`. Tokio gọi nó là "một I/O event loop … điều khiển các I/O resource và chuyển I/O event tới những task phụ thuộc vào chúng"[^tokio-services], dựa trên event queue của OS (epoll, kqueue, IOCP…)[^tokio-crate]; khi nhận event của một I/O resource, driver trong source đánh dấu readiness rồi gọi `io.wake(ready)`[^tokio-driver-wake].
+- **Executor** (hay scheduler) giữ các task và *ready queue*, hàng đợi những task đang sẵn sàng chạy (cách gọi của giáo trình này). Nó lấy một task ra rồi gọi `Future::poll`; Tokio mô tả ở mức cơ bản nhất cũng thế: runtime có một tập task cần lên lịch và cứ lặp lại việc lấy một task ra để `poll`[^tokio-basic]. Khi tập rỗng thì thread ngủ cho tới khi có task mới[^tokio-sleep].
+- **Reactor** (hay driver) giữ bảng "nguồn sự kiện → waker đang chờ" (mô hình của người soạn, khớp demo mục 7). Nó đăng ký fd với OS, chờ bằng `epoll_wait`/`kevent`, và khi có sự kiện thì gọi `wake`. Tokio gọi nó là một I/O event loop, điều khiển các I/O resource và chuyển I/O event tới những task phụ thuộc vào chúng[^tokio-services]. Loop này chạy trên event queue của OS (epoll, kqueue, IOCP…)[^tokio-crate]. Trong source, khi nhận event của một I/O resource, driver đánh dấu readiness rồi gọi `io.wake(ready)`[^tokio-driver-wake].
 
-Tokio gói driver, scheduler và timer vào một kiểu `Runtime`[^tokio-bundle], và nối chúng bằng một phép kiểm tra định kỳ: runtime kiểm tra I/O resource và timer nào đã sẵn sàng rồi đánh thức task liên quan[^tokio-io-check].
+Với `echo-svc`, một vòng như sau (nhận xét của người soạn). Executor `poll` task của kết nối 7; task `read` mà chưa có byte nào nên trả `Pending`. Executor chuyển sang task khác, và khi hết task sẵn sàng thì thread ngủ ở reactor. Client gửi byte, reactor biết nhờ OS và gọi `wake`, task 7 quay lại ready queue, executor `poll` nó lần nữa.
+
+Tokio gói driver, scheduler và timer vào một kiểu `Runtime`[^tokio-bundle]. Sợi dây nối chúng là một phép kiểm tra định kỳ: runtime xem I/O resource và timer nào đã sẵn sàng rồi đánh thức task liên quan[^tokio-io-check].
 
 <details><summary>Đi sâu: hai vai trên cùng một thread</summary>
 
-Hai vai không nhất thiết là hai thread: ở executor mục 7 và scheduler `current_thread`, chúng luân phiên trên một thread (current-thread runtime kiểm tra IO/timer khi hết task sẵn sàng hoặc sau 61 task liên tiếp; hành vi "tại thời điểm viết")[^tokio-ct-check].
+Hai vai không nhất thiết là hai thread. Ở executor mục 7 và ở scheduler `current_thread` của Tokio, chúng luân phiên trên một thread: current-thread runtime kiểm tra IO/timer khi hết task sẵn sàng hoặc sau 61 task liên tiếp (hành vi "tại thời điểm viết")[^tokio-ct-check].
 
 </details>
 
-**Quay lại Q1:** executor lấy task ra và gọi `poll`[^tokio-basic]; reactor chờ OS rồi gọi `wake`[^tokio-driver-wake] — hai việc khác nhau, có thể luân phiên trên cùng một thread.
+**Quay lại Q1:** executor lấy task ra và gọi `poll`, reactor chờ OS rồi gọi `wake`; hai việc khác nhau, nhưng có thể luân phiên trên cùng một thread như ở `echo-svc`.
 
 ## 2. Task, future và waker (Q2)
 
@@ -46,11 +50,15 @@ Hai vai không nhất thiết là hai thread: ở executor mục 7 và scheduler
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): future là một tờ việc đang làm dở; task là tờ việc đó được kẹp thêm một số thứ tự và một cái chuông. Chuông reo thì người ta chỉ ghi số thứ tự lên bảng "việc cần làm tiếp"; việc thật sự do người phục vụ làm khi tới lượt.
+*Với `echo-svc`.* Mỗi kết nối của `echo-svc` là một `async fn handle` chứa vòng lặp `read().await` rồi `write_all().await`. Khi `poll`, future đó chạy tới `.await` đầu tiên chưa xong rồi trả `Pending`. Câu hỏi của mục này: executor phải nhớ gì để lần sau quay lại đúng kết nối ấy, và reactor phải báo cho ai khi socket có dữ liệu?
 
-Từ góc nhìn executor (nhận xét của người soạn), một task gồm: (1) một future *top-level* (gốc cây future; mọi `.await` bên trong là phần của cùng task, xem [chương 06](06-async-await-pin.md)); (2) một *danh tính* để xếp hàng (demo mục 7: số nguyên `id`); (3) một *waker* nối danh tính đó với ready queue.
+Bản thân future chỉ là thứ để `poll`. Để xếp hàng được, executor bọc nó thành task, và từ góc nhìn executor (nhận xét của người soạn) task gồm ba phần:
 
-`Wake` hỗ trợ thiết kế phổ biến này: dữ liệu để đánh thức task nằm trong một `Arc`[^std-wake]. `Waker` là "tay cầm để đánh thức task bằng cách báo executor rằng nó sẵn sàng chạy"[^std-waker-def]. Hệ quả (nhận xét của người soạn): khi bị gọi, waker chỉ *đẩy `id` vào ready queue* (và đánh thức executor nếu nó đang ngủ), không chạy future.
+1. Một future *top-level*, tức gốc cây future. Mọi `.await` bên trong là một phần của cùng task (xem [chương 06](06-async-await-pin.md)).
+2. Một *danh tính* để xếp hàng; demo mục 7 dùng số nguyên `id`.
+3. Một *waker* nối danh tính đó với ready queue.
+
+Phần thứ ba là chỗ trait `Wake` hỗ trợ: nó hợp với thiết kế phổ biến trong đó dữ liệu để đánh thức task nằm trong một `Arc`[^std-wake]. `Waker` là tay cầm để đánh thức task, bằng cách báo executor rằng task sẵn sàng chạy[^std-waker-def]. Hệ quả (nhận xét của người soạn): khi bị gọi, waker chỉ *đẩy `id` vào ready queue*, và đánh thức executor nếu nó đang ngủ; waker không chạy future. Với `echo-svc`, "wake kết nối 7" chỉ là ghi số 7 vào hàng đợi; việc đọc socket xảy ra khi executor tới lượt `poll` task 7.
 
 ```mermaid
 flowchart LR
@@ -72,22 +80,22 @@ Sơ đồ trên là cấu trúc của demo mục 7 (nhận xét của người s
 
 <details><summary>Đi sâu: những bảo đảm của <code>Waker::wake</code></summary>
 
-- `Waker` gọi được từ mọi thread kể cả thread không do executor quản lý[^std-waker-send].
-- Nếu executor còn chạy và task chưa kết thúc, mỗi `wake()` được bảo đảm theo sau bởi *ít nhất một* `poll()`[^std-waker-wake], nhưng nhiều lần wake có thể gộp thành một lần poll[^std-waker-coalesce].
+- `Waker` gọi được từ mọi thread, kể cả thread không do executor quản lý[^std-waker-send].
+- Nếu executor còn chạy và task chưa kết thúc, mỗi lần `wake()` kéo theo *ít nhất một* lần `poll()`[^std-waker-wake]. Nhưng nhiều lần wake có thể gộp thành một lần poll[^std-waker-coalesce].
 
 </details>
 
-**Quay lại Q2:** future là thứ được `poll`; task là future gốc kèm danh tính và waker (cấu tạo theo nhận xét của người soạn); waker chỉ báo cho executor rằng task sẵn sàng chạy lại[^std-waker-def].
+**Quay lại Q2:** future là thứ để `poll`; task là future gốc kèm danh tính và waker (cấu tạo theo nhận xét của người soạn); waker chỉ báo cho executor rằng task sẵn sàng chạy lại.
 
 ## 3. Vòng đời của một lần `read` async (Q3)
 
-> **Trả lời ngắn.** Task thử `read` trước. Nếu socket chưa có dữ liệu, `read` trên fd non-blocking trả `EAGAIN`[^man-read-eagain], mà `std` ánh xạ thành `ErrorKind::WouldBlock`[^std-errno-map]. Khi đó task lưu waker của mình vào reactor rồi trả `Pending`; sau khi `epoll_wait` báo fd sẵn sàng, reactor gọi waker, executor `poll` lại task và `read` thử lần nữa.
+> **Trả lời ngắn.** Task thử `read` trước. Nếu socket chưa có dữ liệu, `read` trên fd non-blocking trả `EAGAIN`[^man-read-eagain]. `std` ánh xạ lỗi đó thành `ErrorKind::WouldBlock`[^std-errno-map]. Khi ấy task lưu waker của mình vào reactor rồi trả `Pending`. Sau khi `epoll_wait` báo fd sẵn sàng, reactor gọi waker, executor `poll` lại task và `read` thử lần nữa.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn ra quầy hỏi "đơn của tôi xong chưa?". Chưa xong thì bạn để lại số điện thoại rồi đi làm việc khác. Khi quầy gọi, bạn quay lại hỏi lần nữa chứ không tin rằng được gọi nghĩa là đơn chắc chắn đã xong.
+*Với `echo-svc`.* Client của kết nối 7 vừa nối vào nhưng chưa gửi gì. Handler `poll`, gọi `read`, và socket chưa có byte nào. Handler không được chặn thread, vì thread này đang phục vụ cả các kết nối khác. Nó để lại waker rồi nhường chỗ. Mục này đi từng bước từ lúc đó tới khi byte đầu tiên tới nơi.
 
-Hai mệnh đề từ các chương trước làm nền: `WouldBlock` nghĩa là thao tác chưa làm xong và cần thử lại[^std-set-nb]; còn epoll chỉ theo dõi xem I/O có thể thực hiện trên fd hay chưa[^man-epoll-intro], chứ không tự thực hiện I/O (nhận xét của người soạn).
+Hai điều từ các chương trước làm nền. `WouldBlock` nghĩa là thao tác chưa làm xong và cần thử lại[^std-set-nb]. Còn epoll chỉ theo dõi xem I/O có thể thực hiện trên fd hay chưa[^man-epoll-intro]; nó không tự thực hiện I/O (nhận xét của người soạn).
 
 ```mermaid
 sequenceDiagram
@@ -113,96 +121,96 @@ sequenceDiagram
   T-->>E: Poll::Ready / hoặc Pending ở await kế
 ```
 
-Sơ đồ mô tả demo mục 7 (nhận xét của người soạn): `park`, `turn` là tên trong demo. "Ready list" là danh sách fd sẵn sàng của epoll instance, do kernel điền khi có I/O trên các fd đó[^man-epoll-ready] ([chương 02 mục 4](02-select-poll-epoll.md)). Source mio gọi hàm `epoll_wait` (mục 6), còn `strace` trên aarch64 thấy `epoll_pwait`.
+Sơ đồ mô tả demo mục 7 (nhận xét của người soạn): `park`, `turn` là tên trong demo. "Ready list" là danh sách fd sẵn sàng của epoll instance, do kernel điền khi có I/O trên các fd đó[^man-epoll-ready] (xem [chương 02 mục 4](02-select-poll-epoll.md)). Source mio gọi hàm `epoll_wait` (mục 6), còn `strace` trên aarch64 thấy `epoll_pwait`.
 
-**Thử syscall trước, park sau.** Với edge-triggered, epoll(7) khuyên chỉ chờ sự kiện *sau khi* `read`/`write` trả `EAGAIN`[^man-epoll-et-rule]. Lý do (suy luận của người soạn từ epoll(7) và code demo): edge-triggered chỉ phát sự kiện khi fd *có thay đổi*[^man-epoll-et-changes], và ví dụ pipe của epoll(7) cho thấy hậu quả khi dữ liệu còn trong buffer mà bên đọc chờ tiếp: có thể treo[^man-epoll-hang]. Với task, nếu một edge tới lúc bảng chưa có waker thì reactor bỏ qua nó, và task park mà không `read` thử sẽ chờ một edge không tới lại; lần `poll` đầu của task cũng chưa có sự kiện nào để chờ. `read` tới `EAGAIN` rồi mới park thì dữ liệu đến trước đã bị đọc hết, còn dữ liệu đến sau tạo edge mới. Thread ngủ ở *reactor* (`epoll_wait`), không ở task.
+**Thử syscall trước, park sau.** Với edge-triggered, epoll(7) khuyên chỉ nên chờ sự kiện *sau khi* `read`/`write` trả `EAGAIN`[^man-epoll-et-rule]. Lý do (suy luận của người soạn từ epoll(7) và code demo) có hai tầng. Tầng thứ nhất: edge-triggered chỉ phát sự kiện khi fd *có thay đổi*[^man-epoll-et-changes]. Ví dụ pipe trong epoll(7) cho thấy hậu quả: dữ liệu còn trong buffer mà bên đọc đã chờ tiếp thì có thể treo[^man-epoll-hang]. Với task cũng vậy: nếu một edge tới lúc bảng chưa có waker thì reactor bỏ qua nó, và task park luôn mà không `read` thử sẽ chờ một edge không bao giờ tới lại. Tầng thứ hai: lần `poll` đầu của task chưa có sự kiện nào để chờ. Còn nếu `read` tới `EAGAIN` rồi mới park thì dữ liệu tới trước đã bị đọc hết, và dữ liệu tới sau tạo ra edge mới. Nói cách khác, thread ngủ ở *reactor* (`epoll_wait`), không ngủ trong task.
 
-**`WouldBlock` và `Pending`.** `WouldBlock` là kết quả của syscall ("fd chưa sẵn sàng"); `Pending` là kết quả của `Future::poll` ("task chưa xong, waker đã được lưu"). Leaf future là chỗ chuyển đổi: `WouldBlock` → lưu waker → `Pending`. Các `async fn` bên trên chỉ thấy `Pending` lan lên qua `.await`[^ref-await] mà không biết mio hay epoll tồn tại.
+**`WouldBlock` và `Pending`.** `WouldBlock` là kết quả của syscall, nghĩa là fd chưa sẵn sàng. `Pending` là kết quả của `Future::poll`, nghĩa là task chưa xong và waker đã được lưu. Leaf future là chỗ chuyển từ cái này sang cái kia: `WouldBlock` → lưu waker → `Pending`. Các `async fn` nằm trên nó chỉ thấy `Pending` lan lên qua `.await`[^ref-await], và không biết mio hay epoll tồn tại.
 
 <details><summary>Đi sâu: sự kiện không bảo đảm có dữ liệu, waker mới nhất, hai nửa của chữ "register"</summary>
 
-- **Khi được đánh thức, `poll` thử `read` thật**, không tin "có sự kiện nghĩa là có dữ liệu" (mục 6). Tokio cũng có thể lên lịch task chưa được wake ("spurious wakeup")[^tokio-spurious].
+- **Khi được đánh thức, `poll` thử `read` thật**, không tin rằng "có sự kiện nghĩa là có dữ liệu" (mục 6). Tokio cũng có thể lên lịch task chưa được wake ("spurious wakeup")[^tokio-spurious].
 - **Chỉ waker của lần `poll` gần nhất cần được đánh thức**[^std-future-latest], nên mỗi lần `Pending`, ghi đè waker cũ trong bảng là đúng.
-- **Hai nửa của chữ "register".** Đăng ký với **OS** (`epoll_ctl(ADD)` / `Registry::register`) làm một lần, lúc tạo socket. Đăng ký với **reactor** (lưu `Waker` theo `Token`; cách làm của demo mục 7, nhận xét của người soạn) làm mỗi lần `Pending` và hết hiệu lực khi sự kiện kế tiếp tới. Với edge-triggered, nửa thứ nhất không cần lặp (mio dùng `EPOLLET`, mục 6; trong strace không có `epoll_ctl(MOD)` giữa các lần chờ), còn `EPOLLONESHOT` bắt bạn `MOD` lại sau mỗi sự kiện[^man-epollctl-oneshot-off].
+- **Hai nửa của chữ "register".** Đăng ký với **OS** (`epoll_ctl(ADD)` / `Registry::register`) làm một lần, lúc tạo socket. Đăng ký với **reactor** (lưu `Waker` theo `Token`; cách làm của demo mục 7, nhận xét của người soạn) làm mỗi lần `Pending` và hết hiệu lực khi sự kiện kế tiếp tới. Với edge-triggered, nửa thứ nhất không cần lặp (mio dùng `EPOLLET`, mục 6; trong strace không có `epoll_ctl(MOD)` giữa các lần chờ). `EPOLLONESHOT` thì khác: nó bắt bạn `MOD` lại sau mỗi sự kiện[^man-epollctl-oneshot-off].
 
 </details>
 
-**Quay lại Q3:** `poll` → `read` → `WouldBlock` → lưu waker, `Pending`[^std-future-clone] → `epoll_wait` → `wake` → `poll` lại và `read` lại.
+**Quay lại Q3:** `poll` → `read` → `WouldBlock` → lưu waker, `Pending` → `epoll_wait` → `wake` → `poll` lại và `read` lại.
 
 ## 4. `mio` từng kiểu một (Q4)
 
-> **Trả lời ngắn.** `mio` là thư viện I/O mức thấp, tập trung vào API non-blocking và thông báo sự kiện[^mio-intro]. Bạn tạo một `Poll` để đọc sự kiện từ OS và đưa vào `Events`[^mio-usage]; `Registry` đăng ký nguồn, `Token` nhận ra nguồn nào có sự kiện, `Interest` chọn loại thao tác cần theo dõi.
+> **Trả lời ngắn.** `mio` là thư viện I/O mức thấp, tập trung vào API non-blocking và thông báo sự kiện[^mio-intro]. Dùng nó bắt đầu bằng việc tạo một `Poll`, thứ đọc sự kiện từ OS rồi đưa vào `Events`[^mio-usage]. Ba kiểu còn lại đi kèm: `Registry` để đăng ký nguồn, `Token` để nhận ra nguồn nào có sự kiện, `Interest` để chọn loại thao tác cần theo dõi.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Poll` là tổng đài viên ngồi chờ, `Registry` là sổ đăng ký đường dây, `Token` là số máy lẻ, `Interest` là loại cuộc gọi muốn được báo.
+*Với `echo-svc`.* `echo-svc` cần nói với OS "báo tôi khi socket của kết nối 7 có dữ liệu", và khi OS báo thì phải biết đó là kết nối nào. Trên Linux việc này là epoll, nhưng gọi thẳng `epoll_ctl`/`epoll_wait` thì bạn tự lo luôn chỗ khác biệt giữa các nền tảng. `mio` bọc phần đó lại. Dưới đây là từng kiểu của nó, đặt vào đúng chỗ của `echo-svc`.
 
-- **`Poll`** cho phép chương trình theo dõi nhiều `event::Source` và chờ tới khi một hay nhiều cái "ready" cho một loại thao tác nào đó[^mio-poll]. Nó dựa trên selector của hệ điều hành[^mio-impl].
-- **`Registry`** là nơi `register`: từ đó `Poll` sẽ theo dõi source, và "khi nhận thấy thay đổi trạng thái, nó sẽ trả về một readiness event cho handle ở lần gọi `poll` kế tiếp"[^mio-registry]. Bạn lấy nó từ `poll.registry()`[^mio-poll-registry].
-- **`Events`** là bộ chứa readiness event; `poll` xóa nó rồi đẩy sự kiện mới vào, tối đa `events.capacity()` cái, phần còn lại trả ở lần `poll` sau[^mio-poll-cap]. Một source có thể nhận nhiều event trong một lần `poll` (ví dụ một event readable và một event writable)[^mio-poll-multi], nên hãy xử lý theo cờ của từng event.
-- `Poll::poll(&mut self, events, timeout: Option<Duration>)` chặn tới khi có ít nhất một event hoặc hết `timeout`; `None` là chờ vô hạn[^mio-poll-block].
-- **`Token`** là wrapper quanh `usize`, dùng làm đối số cho `Registry::register`/`reregister`[^mio-token]; khi `poll` trả event, token đi kèm để bạn ánh xạ event về source[^mio-reg-token]. Trên Linux, source mio ghi token vào trường `u64` của `epoll_event` khi `epoll_ctl`[^mio-src-register]. Với executor, `Token` là chỗ để nhét "khóa tìm waiter" (nhận xét của người soạn): demo mục 7 dùng số tự tăng.
+- **`Poll`** cho chương trình theo dõi nhiều `event::Source` và chờ tới khi một hay nhiều cái "ready" cho một loại thao tác nào đó[^mio-poll]. Bên dưới, nó dựa trên selector của hệ điều hành[^mio-impl].
+- **`Registry`** là nơi gọi `register`. Đăng ký xong, `Poll` theo dõi source đó, và khi nhận thấy thay đổi trạng thái thì nó trả một readiness event cho handle ở lần `poll` kế tiếp[^mio-registry]. Bạn lấy `Registry` từ `poll.registry()`[^mio-poll-registry].
+- **`Events`** là bộ chứa readiness event. Mỗi lần gọi, `poll` xóa nó rồi đẩy sự kiện mới vào, tối đa `events.capacity()` cái; phần dư nằm lại cho lần `poll` sau[^mio-poll-cap]. Một source có thể nhận nhiều event trong một lần `poll`, chẳng hạn một event readable và một event writable[^mio-poll-multi], nên hãy xử lý theo cờ của từng event.
+- **`Poll::poll(&mut self, events, timeout: Option<Duration>)`** chặn tới khi có ít nhất một event hoặc hết `timeout`; `None` là chờ vô hạn[^mio-poll-block].
+- **`Token`** là wrapper quanh `usize`, dùng làm đối số cho `Registry::register`/`reregister`[^mio-token]. Bạn tự chọn token lúc đăng ký, và khi `poll` trả event thì token đi kèm[^mio-reg-token]. Trên Linux, source mio ghi token vào trường `u64` của `epoll_event` khi gọi `epoll_ctl`[^mio-src-register]. Với executor, `Token` là chỗ để nhét khóa tìm waiter (nhận xét của người soạn); ở `echo-svc`, mỗi kết nối nhận một số tự tăng làm token, như demo mục 7.
 - **`Interest`** chọn loại thao tác theo dõi. `Poll` chỉ trả readiness event cho các thao tác trong `interest`; đăng ký `READABLE` mà socket chỉ trở nên writable thì không có event nào[^mio-interest].
 
 <details><summary>Đi sâu: <code>try_clone</code>, làm tròn timeout, <code>EINTR</code>, đăng ký lại, bảng nền tảng</summary>
 
-- Tokio dùng chính mio: mã nguồn driver của Tokio 1.53.2 mô tả nó là I/O driver chạy trên Mio[^tokio-driver-mio]. Tokio nhét một con trỏ vào `Token` (`token.0` được đổi lại thành con trỏ rồi ép thành `&ScheduledIo`)[^tokio-driver-ptr][^tokio-driver-wake].
-- `Registry::try_clone` tạo một `Registry` sở hữu độc lập, các source đăng ký qua nó vẫn đăng ký vào `Poll` ban đầu[^mio-tryclone]. Trong `strace` ở mục 7 bạn sẽ thấy `fcntl(3, F_DUPFD_CLOEXEC, 3) = 5` rồi `epoll_ctl(5, …)`: bản clone là một fd mới trỏ vào cùng epoll instance (suy luận của người soạn: `F_DUPFD_CLOEXEC` là nhân đôi fd[^man-fcntl-dupfd]).
-- `timeout` của `Poll::poll` làm tròn lên theo độ phân giải đồng hồ (thường 1 ms), `Duration::ZERO` thì không[^mio-poll-round]; đây là chỗ timer của runtime móc vào (mục 8). `poll` không tự thử lại khi `EINTR` (bản mio cũ có)[^mio-poll-eintr], nên `mio_echo` có nhánh `Interrupted => continue` và driver Tokio cũng bỏ qua lỗi này[^tokio-driver-loop-eintr].
-- `reregister` đổi `Interest`/`Token`, và đối số mới "ghi đè hoàn toàn" giá trị trước[^mio-rereg].
-- Hợp đồng đăng ký: source từng đăng ký với `Poll` này phải `deregister` trước khi `register` lại; gọi `register` liên tiếp là hành vi *không xác định*[^mio-reg-twice]. Demo gọi `deregister` trong `Drop` của wrapper socket để gỡ tường minh (nhận xét của người soạn); đóng fd cũng chưa chắc gỡ nó khỏi interest list nếu còn fd chung open file description[^man-epoll-close].
-- **Tính portable.** Bảng "Implementation notes" của `Poll` ghi: Linux, Android, illumos dùng epoll; macOS, iOS, FreeBSD, NetBSD, OpenBSD, DragonFly BSD dùng kqueue; Solaris dùng event ports; Windows dùng IOCP[^mio-impl-table]. Socket luôn đi qua selector của hệ thống, và có extension riêng như `SourceFd` (docs lấy ví dụ `signalfd` của Linux)[^mio-sourcefd]. IOCP là mô hình *completion* chứ không phải readiness[^mio-iocp]; mio che sự khác biệt sau API readiness (cơ chế bên trong ngoài phạm vi chương này). Hợp đồng chặt của mio (luôn drain, chịu event giả, mục 6) vì thế là mẫu số chung của các backend (suy luận của người soạn). kqueue và io_uring ở mức OS: xem [chương 03](03-kqueue-io-uring.md).
+- **Tokio dùng chính mio.** Mã nguồn driver của Tokio 1.53.2 mô tả nó là I/O driver chạy trên Mio[^tokio-driver-mio]. Tokio nhét một con trỏ vào `Token`: `token.0` được đổi lại thành con trỏ rồi ép thành `&ScheduledIo`[^tokio-driver-ptr].
+- **`try_clone`.** `Registry::try_clone` tạo một `Registry` sở hữu độc lập, và các source đăng ký qua nó vẫn đăng ký vào `Poll` ban đầu[^mio-tryclone]. Trong `strace` ở mục 7 bạn sẽ thấy `fcntl(3, F_DUPFD_CLOEXEC, 3) = 5` rồi `epoll_ctl(5, …)`: bản clone là một fd mới trỏ vào cùng epoll instance (suy luận của người soạn: `F_DUPFD_CLOEXEC` là nhân đôi fd[^man-fcntl-dupfd]).
+- **Timeout và `EINTR`.** `timeout` của `Poll::poll` được làm tròn lên theo độ phân giải đồng hồ (thường 1 ms), còn `Duration::ZERO` thì không[^mio-poll-round]. Đây là chỗ timer của runtime móc vào (mục 8). `poll` không tự thử lại khi gặp `EINTR`, dù bản mio cũ có[^mio-poll-eintr]. Vì vậy `mio_echo` có nhánh `Interrupted => continue`. Driver Tokio cũng bỏ qua lỗi này[^tokio-driver-loop-eintr].
+- **`reregister`** đổi `Interest`/`Token`, và đối số mới "ghi đè hoàn toàn" giá trị trước[^mio-rereg].
+- **Hợp đồng đăng ký.** Source từng đăng ký với `Poll` này phải `deregister` trước khi `register` lại; gọi `register` liên tiếp là hành vi *không xác định*[^mio-reg-twice]. Demo gọi `deregister` trong `Drop` của wrapper socket để gỡ tường minh (nhận xét của người soạn). Đóng fd cũng chưa chắc gỡ nó khỏi interest list, nếu còn fd khác chung open file description[^man-epoll-close].
+- **Tính portable.** Bảng "Implementation notes" của `Poll` ghi: Linux, Android, illumos dùng epoll; macOS, iOS, FreeBSD, NetBSD, OpenBSD, DragonFly BSD dùng kqueue; Solaris dùng event ports; Windows dùng IOCP[^mio-impl-table]. Socket luôn đi qua selector của hệ thống, và có extension riêng như `SourceFd` (docs lấy ví dụ `signalfd` của Linux)[^mio-sourcefd]. IOCP là mô hình *completion* chứ không phải readiness[^mio-iocp]. Mio che sự khác biệt đó sau API readiness (cơ chế bên trong ngoài phạm vi chương này). Hợp đồng chặt của mio (luôn drain, chịu event giả, mục 6) vì thế là mẫu số chung của các backend (suy luận của người soạn). kqueue và io_uring ở mức OS: xem [chương 03](03-kqueue-io-uring.md).
 
 </details>
 
-**Quay lại Q4:** `Poll` đọc sự kiện từ OS vào `Events`[^mio-usage]; `Registry` đăng ký, `Token` định danh nguồn, `Interest` chọn thao tác.
+**Quay lại Q4:** `Poll` đọc sự kiện từ OS vào `Events`; `Registry` đăng ký, `Token` định danh nguồn, `Interest` chọn thao tác.
 
 ## 5. `mio::Waker` khác `std::task::Waker` (Q5)
 
-> **Trả lời ngắn.** Hai kiểu cùng tên nhưng đánh thức hai thứ khác nhau: `std::task::Waker` đánh thức một task[^std-waker-def], còn `mio::Waker` đánh thức một lời gọi `Poll::poll` đang chặn, kể cả từ thread khác[^mio-waker]. Executor trên mio cần cả hai: khi thread khác đánh thức task trong lúc executor đang ngủ trong `epoll_wait`, chỉ `mio::Waker` mới làm `poll` trả về (suy luận của người soạn từ mã nguồn Tokio[^tokio-wakeup]).
+> **Trả lời ngắn.** Hai kiểu cùng tên nhưng đánh thức hai thứ khác nhau. `std::task::Waker` đánh thức một task[^std-waker-def]; `mio::Waker` đánh thức một lời gọi `Poll::poll` đang chặn, kể cả từ thread khác[^mio-waker]. Executor trên mio cần cả hai: khi thread khác đánh thức task lúc executor đang ngủ trong `epoll_wait`, chỉ `mio::Waker` mới làm `poll` trả về (suy luận của người soạn từ mã nguồn Tokio[^tokio-wakeup]).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `std` waker là mẩu ghi chú "bàn số 5 cần phục vụ tiếp" dán lên bảng. Nhưng nếu người phục vụ đang ngủ trong phòng nghỉ thì không ai nhìn bảng; cần thêm một cái chuông reo trong phòng nghỉ đó, và đấy là `mio::Waker`.
+*Với `echo-svc`.* Giả sử `echo-svc` có thêm một thread phụ giữ giờ, như hàm `sleep` ở demo mục 7. Hết giờ, thread này gọi `wake` cho task của kết nối 7. Lúc đó executor có thể đang ngủ trong `epoll_wait` để chờ socket. Thread phụ đẩy id 7 vào ready queue thì chưa đủ, vì executor đang nằm trong kernel và không nhìn queue. Phải có thứ gì đó làm `epoll_wait` trả về, và thứ đó là `mio::Waker`.
 
-Hai kiểu cùng làm việc "đánh thức", nhưng đánh thức *thứ khác nhau*:
+Cả hai kiểu đều làm việc "đánh thức", nhưng đánh thức những thứ khác nhau:
 
 | | `std::task::Waker` | `mio::Waker` |
 |---|---|---|
 | Đánh thức cái gì | một *task* (báo executor cần `poll` lại nó)[^std-waker-def] | một lời gọi `Poll::poll` đang chặn: `wake` làm `Poll` trả về một event readable mang `Token` đã đăng ký[^mio-waker-event] |
-| Bản chất | handle bao một `RawWaker`, hành vi đánh thức do executor định nghĩa[^std-waker-raw] | nguồn sự kiện đăng ký vào chính `Poll` (Linux: `eventfd`; kqueue: `EVFILT_USER`[^mio-waker-impl]): "Waker cho phép đánh thức `Poll` xuyên thread"[^mio-waker] |
+| Bản chất | handle bao một `RawWaker`, hành vi đánh thức do executor định nghĩa[^std-waker-raw] | nguồn sự kiện đăng ký vào chính `Poll`; docs mô tả nó là cách đánh thức `Poll` xuyên thread[^mio-waker] |
 
-**Vì sao cần cả hai.** Giả sử executor đang ngủ trong `epoll_wait`. Một thread khác (timer, thread pool, `spawn_blocking`) gọi `std::task::Waker::wake()` của task. Waker kiểu `Wake` + `Arc` chỉ đẩy `id` vào queue, nhưng executor đang ngủ trong kernel và không thấy queue (suy luận của người soạn từ thiết kế demo). Trên Linux, cách làm `epoll_wait` trả về là ghi vào một fd đang được epoll theo dõi: đó là `eventfd` của `mio::Waker`[^mio-waker-impl]. Driver của Tokio làm đúng như thế: nó tạo `mio::Waker` với `TOKEN_WAKEUP`[^tokio-waker-new] và khi nhận event mang token này thì ghi chú "không làm gì cả, sự kiện này chỉ dùng để mở khóa I/O driver"[^tokio-wakeup] (suy luận của người soạn từ mã nguồn). Demo mục 7 làm cùng cách.
+**Vì sao cần cả hai.** Giả sử executor đang ngủ trong `epoll_wait` và một thread khác (timer, thread pool, `spawn_blocking`) gọi `std::task::Waker::wake()` của task. Waker kiểu `Wake` + `Arc` chỉ đẩy `id` vào queue, mà executor đang ngủ trong kernel nên không thấy queue (suy luận của người soạn từ thiết kế demo). Muốn `epoll_wait` trả về thì phải ghi vào một fd mà epoll đang theo dõi; trên Linux đó là `eventfd` của `mio::Waker`[^mio-waker-impl]. Driver của Tokio làm đúng như thế: nó tạo `mio::Waker` với `TOKEN_WAKEUP`[^tokio-waker-new]. Khi nhận event mang token này, nó chỉ ghi chú rằng không có gì để làm, sự kiện chỉ để mở khóa I/O driver[^tokio-wakeup] (suy luận của người soạn từ mã nguồn). Demo mục 7 làm cùng cách.
 
 <details><summary>Đi sâu: thời gian sống, <code>eventfd</code> và <code>EVFILT_USER</code></summary>
 
-- Chi tiết của `mio::Waker` (docs): sự kiện chỉ được bảo đảm tới khi giá trị `Waker` còn sống; mỗi `Poll` chỉ nên có *một* `Waker` hoạt động (nhiều thread dùng chung qua `Arc`), còn hành vi khi đăng ký nhiều cái là không xác định[^mio-waker-notes].
-- Trên Linux nó dùng `eventfd`, còn nền tảng có kqueue thì dùng `EVFILT_USER`[^mio-waker-impl]; source 1.2.4 mô tả `eventfd` là một bộ đếm 64 bit[^mio-eventfd-src].
-- Source 1.2.4: `Waker::new` tạo `eventfd` rồi đăng ký vào selector với `Interest::READABLE` và `Token` đã cho[^mio-eventfd-reg]; `eventfd` được tạo với cờ `EFD_CLOEXEC | EFD_NONBLOCK`[^mio-eventfd-flags]; mỗi `wake()` ghi 8 byte `1u64.to_ne_bytes()` vào nó[^mio-eventfd-wake]. Strace ở mục 7 (một lần quan sát) thấy `eventfd2 = 4` được `epoll_ctl(ADD)` với `EPOLLIN|EPOLLRDHUP|EPOLLET`, khớp với việc selector luôn thêm `EPOLLET` (mục 6).
+- Chi tiết của `mio::Waker` (docs): sự kiện chỉ được bảo đảm tới khi giá trị `Waker` còn sống. Mỗi `Poll` chỉ nên có *một* `Waker` hoạt động (nhiều thread dùng chung qua `Arc`), còn hành vi khi đăng ký nhiều cái là không xác định[^mio-waker-notes].
+- Trên Linux nó dùng `eventfd`, còn nền tảng có kqueue thì dùng `EVFILT_USER`[^mio-waker-impl]. Source 1.2.4 mô tả `eventfd` là một bộ đếm 64 bit[^mio-eventfd-src].
+- Source 1.2.4: `Waker::new` tạo `eventfd` rồi đăng ký vào selector với `Interest::READABLE` và `Token` đã cho[^mio-eventfd-reg]. `eventfd` được tạo với cờ `EFD_CLOEXEC | EFD_NONBLOCK`[^mio-eventfd-flags]. Mỗi `wake()` ghi 8 byte `1u64.to_ne_bytes()` vào nó[^mio-eventfd-wake]. Strace ở mục 7 (một lần quan sát) thấy `eventfd2 = 4` được `epoll_ctl(ADD)` với `EPOLLIN|EPOLLRDHUP|EPOLLET`, khớp với việc selector luôn thêm `EPOLLET` (mục 6).
 
 </details>
 
-**Quay lại Q5:** `std` waker đánh thức task[^std-waker-def], `mio::Waker` đánh thức `Poll` đang ngủ[^mio-waker]; thread khác đánh thức task lúc executor ngủ thì cần cả hai.
+**Quay lại Q5:** `std` waker đánh thức task, `mio::Waker` đánh thức `Poll` đang ngủ; thread khác đánh thức task lúc executor ngủ thì cần cả hai.
 
 ## 6. Spurious event, draining readiness và edge-triggered (Q6)
 
-> **Trả lời ngắn.** `Poll::poll` của mio có thể báo sự kiện dù nguồn chưa sẵn sàng, nên đừng giả định thao tác sẽ thành công[^mio-spurious]. Đã nhận event thì phải lặp thao tác tới khi `WouldBlock`, nếu không thì không có bảo đảm sẽ còn event nào[^mio-drain]. Trên Linux, source mio đăng ký nguồn ở chế độ edge-triggered; đó là chi tiết cài đặt, không phải bảo đảm của docs[^mio-src-et].
+> **Trả lời ngắn.** `Poll::poll` của mio có thể báo sự kiện dù nguồn chưa sẵn sàng, nên đừng giả định thao tác sẽ thành công[^mio-spurious]. Đã nhận event thì phải lặp thao tác tới khi `WouldBlock`; nếu không thì không có bảo đảm sẽ còn event nào[^mio-drain]. Trên Linux, source mio đăng ký nguồn ở chế độ edge-triggered; đó là chi tiết cài đặt, không phải bảo đảm của docs[^mio-src-et].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chuông cửa chỉ kêu khi có người *vừa bấm*. Nghe một tiếng chuông, lấy một kiện hàng rồi quay vào trong thì những kiện còn lại không làm chuông kêu lại; ngược lại, thi thoảng chuông kêu mà ngoài cửa chẳng có gì.
+*Với `echo-svc`.* Giả sử client của kết nối 7 gửi 10 KB một lượt, trong khi `buf` của handler chỉ có 1024 byte (ví dụ giả định). Một lần `read` chỉ lấy được 1024 byte. Nếu handler dừng ở đó và đi chờ event kế tiếp, 9 KB còn lại nằm im trong buffer của kernel, và có thể không event nào tới nữa. Mục này nói mio buộc code viết thế nào để khỏi dính chuyện đó, và vì sao.
 
-Mio chọn một hợp đồng chung đủ chặt để cùng code chạy đúng trên mọi nền tảng được hỗ trợ: `Poll` cung cấp interface portable "miễn là người gọi chú ý các điều sau"[^mio-portable].
+Mio chọn một hợp đồng chung đủ chặt để cùng một đoạn code chạy đúng trên mọi nền tảng nó hỗ trợ: `Poll` cung cấp interface portable "miễn là người gọi chú ý các điều sau"[^mio-portable]. Hai điều đó là event giả và drain.
 
-**Spurious events.** `Poll::poll` có thể trả readiness event ngay cả khi source thực ra chưa sẵn sàng, và có thể xảy ra nhiều hơn trên vài nền tảng; do đó đừng bao giờ giả định thao tác đi kèm sẽ thành công[^mio-spurious]. Nếu thao tác trả `WouldBlock` thì không phải lỗi, mà là chờ event kế tiếp[^mio-spurious-wb]. Hệ quả cho future: `poll` của future *phải* chịu được "đánh thức nhưng chưa có gì".
+**Spurious events.** `Poll::poll` có thể trả readiness event dù source thực ra chưa sẵn sàng, nên đừng bao giờ cho rằng nhận được event thì thao tác đi kèm sẽ thành công[^mio-spurious]. Nếu thao tác trả `WouldBlock` thì đó không phải lỗi; chỉ cần chờ event kế tiếp[^mio-spurious-wb]. Với future, hệ quả là `poll` *phải* chịu được kiểu đánh thức "báo có việc mà chưa có gì".
 
-**Draining readiness.** "Một khi đã nhận readiness event, thao tác tương ứng phải được thực hiện lặp lại cho tới khi trả `WouldBlock`. Nếu không làm vậy, không có bảo đảm event khác sẽ được gửi, ngay cả khi có thêm dữ liệu tới source"[^mio-drain]. Đây là cùng loại bẫy với "đọc một lần rồi treo" của epoll edge-triggered (suy luận của người soạn): epoll(7) giải thích edge-triggered chỉ phát sự kiện khi fd *có thay đổi*[^man-epoll-et-changes], nên ở ví dụ pipe, lần `epoll_wait` kế "có lẽ sẽ treo dù dữ liệu vẫn nằm trong buffer"[^man-epoll-hang]. Đáng chú ý: trang `Poll` của mio 1.2.4 *không dùng* chữ "edge-triggered" (người soạn đã tìm chữ "edge" trong trang); nó chỉ nêu hợp đồng drain. Việc Linux backend dùng `EPOLLET` thấy trong source (phần Đi sâu bên dưới).
+**Draining readiness.** Mio đòi rằng khi đã nhận readiness event thì phải thực hiện thao tác tương ứng lặp lại cho tới khi nó trả `WouldBlock`. Nếu không, không có bảo đảm sẽ còn event khác, kể cả khi source nhận thêm dữ liệu[^mio-drain]. Đây là cùng loại bẫy với "đọc một lần rồi treo" của epoll edge-triggered (suy luận của người soạn). epoll(7) giải thích rằng edge-triggered chỉ phát sự kiện khi fd *có thay đổi*[^man-epoll-et-changes]. Vì vậy ở ví dụ pipe của nó, lần `epoll_wait` kế "có lẽ sẽ treo dù dữ liệu vẫn nằm trong buffer"[^man-epoll-hang]. Lưu ý là trang `Poll` của mio 1.2.4 *không dùng* chữ "edge-triggered" (người soạn đã tìm chữ "edge" trong trang); nó chỉ nêu hợp đồng drain. Việc backend Linux dùng `EPOLLET` thì thấy trong source (phần Đi sâu bên dưới).
 
-`accept` của `mio::net::TcpListener` cũng tuân theo: nó có thể trả `WouldBlock`, và khi đó phải chờ event rồi mới gọi lại[^mio-accept]. Vòng `loop { accept }` tới `WouldBlock` trong `mio_echo` là drain accept queue.
+`accept` của `mio::net::TcpListener` cũng theo hợp đồng này: nó có thể trả `WouldBlock`, và khi đó phải chờ event rồi mới gọi lại[^mio-accept]. Vòng `loop { accept }` tới `WouldBlock` trong `mio_echo` chính là drain accept queue.
 
 <details><summary>Đi sâu: <code>EPOLLET</code> trong source mio và quan sát <code>strace</code></summary>
 
-**Từ source** (chi tiết cài đặt, không phải bảo đảm của docs): hàm `interests_to_epoll` của backend epoll mio 1.2.4 bắt đầu bằng `let mut kind = EPOLLET;`, rồi cộng `EPOLLIN | EPOLLRDHUP` nếu readable, `EPOLLOUT` nếu writable[^mio-src-et]; `register` dựng `epoll_event` bằng hàm này[^mio-src-register]. Nghĩa là mọi source đăng ký qua `Registry::register` trên Linux (bản 1.2.4) đều là edge-triggered (suy luận của người soạn từ source; `strace` bên dưới khớp).
+**Từ source** (chi tiết cài đặt, không phải bảo đảm của docs): hàm `interests_to_epoll` của backend epoll mio 1.2.4 bắt đầu bằng `let mut kind = EPOLLET;`, rồi cộng `EPOLLIN | EPOLLRDHUP` nếu readable, `EPOLLOUT` nếu writable[^mio-src-et]. `register` dựng `epoll_event` bằng hàm này[^mio-src-register]. Nghĩa là mọi source đăng ký qua `Registry::register` trên Linux (bản 1.2.4) đều là edge-triggered (suy luận của người soạn từ source; `strace` bên dưới khớp).
 
 **Quan sát** (một máy: container Linux aarch64 của repo, `./labs/linux.sh`; chạy `mio_echo` của `labs/crates/lab-io-async` dưới `strace -e trace=epoll_create1,epoll_ctl,epoll_pwait,accept4,recvfrom,sendto`, 1 kết nối, 2 message 8 byte từ `echo_load`):
 
@@ -229,17 +237,21 @@ epoll_ctl(3, EPOLL_CTL_DEL, 5, NULL)    = 0
 
 </details>
 
-**Quay lại Q6:** chịu được event giả, drain tới `WouldBlock` sau mỗi event[^mio-drain]; trên Linux điều đó cần thiết vì mio đăng ký edge-triggered (`EPOLLET`)[^mio-src-et], như `strace` cho thấy.
+**Quay lại Q6:** chịu được event giả, drain tới `WouldBlock` sau mỗi event; trên Linux điều đó cần thiết vì mio đăng ký edge-triggered (`EPOLLET`), như `strace` cho thấy.
 
 ## 7. Một executor single-thread tối giản trên mio (Q7)
 
-> **Trả lời ngắn.** Theo bản demo bên dưới (thiết kế tối thiểu, nhận xét của người soạn), chỉ cần một bảng task, một ready queue, một bảng "token → waker" và một `mio::Waker`. Vòng lặp chính luân phiên hai việc: poll các task trong queue, và khi queue rỗng thì chờ reactor ở `mio::Poll::poll`. Bản demo (code ở phần Đi sâu) đã chạy: hai client echo thành công (quan sát).
+> **Trả lời ngắn.** Bản demo bên dưới (thiết kế tối thiểu, nhận xét của người soạn) chỉ cần một bảng task, một ready queue, một bảng "token → waker" và một `mio::Waker`. Vòng lặp chính luân phiên hai việc: poll các task trong queue, và khi queue rỗng thì chờ reactor ở `mio::Poll::poll`. Code nằm ở phần Đi sâu; nó đã chạy và hai client echo thành công (quan sát).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đây là nhà hàng ở mục 1 thu nhỏ thành một chương trình.
+*Với `echo-svc`.* Demo này chính là `echo-svc` thu nhỏ. `main` accept 2 kết nối, và với mỗi kết nối nó `spawn` một task `handle` (echo tới EOF rồi `sleep` 30 ms). Hai thread client blocking đóng vai client. Các mảnh của demo ghép lại như sau:
 
-`Executor` giữ bảng task `HashMap<id, Pin<Box<dyn Future>>>` và ready queue; `Arc<Mutex<VecDeque>>` vì `Waker` phải `Send + Sync`[^std-waker-send] dù executor chạy một thread. `TaskWaker` (`impl Wake`) đẩy `id` vào queue rồi gọi `mio::Waker::wake()`. `Reactor` giữ `Registry` và hai bảng `Token → Waker` (đợi đọc, đợi ghi). `Io::read`/`write_all` dựng bằng `std::future::poll_fn` theo mẫu "thử syscall; `WouldBlock` thì park waker, trả `Pending`". `sleep` dùng thread phụ gọi `waker.wake()` để dùng thật `mio::Waker`. `main` accept 2 kết nối, `spawn` một `handle` (echo tới EOF rồi `sleep` 30 ms) cho mỗi kết nối; 2 thread client blocking.
+- `Executor` giữ bảng task `HashMap<id, Pin<Box<dyn Future>>>` và ready queue. Queue là `Arc<Mutex<VecDeque>>` vì `Waker` phải `Send + Sync`[^std-waker-send], dù executor chỉ chạy một thread.
+- `TaskWaker` (`impl Wake`) đẩy `id` vào queue rồi gọi `mio::Waker::wake()`.
+- `Reactor` giữ `Registry` và hai bảng `Token → Waker`, một cho task đợi đọc, một cho task đợi ghi.
+- `Io::read`/`write_all` dựng bằng `std::future::poll_fn` theo mẫu "thử syscall; `WouldBlock` thì park waker, trả `Pending`".
+- `sleep` dùng một thread phụ gọi `waker.wake()`, để dùng thật `mio::Waker`.
 
 **Đã chạy** (rustc 1.95.0, `mio =1.2.4` với `features = ["os-poll", "net"]`, edition 2024; trong container Linux aarch64 của repo; build một crate tạm bên ngoài workspace):
 
@@ -253,12 +265,12 @@ executor: polls=8 reactor_turns=5 would_block=3
 
 Các điểm cần nhìn trong code (đối chiếu với mã ở phần Đi sâu):
 
-1. **Vòng `run`** có ba nhánh: có id trong queue → poll task; queue rỗng nhưng còn task → `poll.poll(&mut events, None)` (reactor chạy, thread ngủ ở đây); bảng task rỗng → thoát.
-2. **Task bị `remove` khỏi bảng khi poll, `insert` lại nếu `Pending`**, để task có thể `spawn` task mới ngay trong lúc được poll mà không đụng `RefCell` đang mượn. Nếu một id nằm trong queue hai lần, lần thứ hai gặp task đã xong thì `remove` trả `None` và bị bỏ qua; nếu task vẫn `Pending` thì lần poll thừa là vô hại vì future phải chịu được đánh thức giả (Tokio cũng có thể lên lịch task chưa được wake[^tokio-spurious]).
-3. **`park` ghi đè** waker cũ — đúng yêu cầu "chỉ waker của lần poll gần nhất"[^std-future-latest]. Khi sự kiện tới, reactor `remove` waker rồi `wake()`; task phải đăng ký lại nếu vẫn `Pending`.
-4. **Edge-triggered được tôn trọng** nhờ "syscall trước, park sau": vòng `loop { read().await; write_all().await }` chạy lại `read` ngay, tức drain từng bước đến `WouldBlock` rồi mới `Pending`.
-5. **Đánh thức xuyên thread dùng cả hai waker:** thread của `sleep` gọi `std` waker → `TaskWaker::wake` đẩy id vào queue và gọi `mio::Waker::wake()` để `epoll_wait` trả về. Đã chạy thử bản bỏ đúng dòng `self.mio_waker.wake().unwrap()`: 3/3 lần, hai client in `echo ok` rồi chương trình treo tới khi `timeout 5` giết (exit 124), không handler nào in "xong".
-6. **Không có bảo vệ chống task chặn.** Task nên tránh system call có thể chặn thread, vì các task khác trên cùng thread không chạy được[^tokio-noblock-task]; chuyển task chỉ xảy ra ở `.await`[^tokio-await-only]. Executor demo không có cơ chế chống điều này (đọc từ code): một `std::thread::sleep` trong `handle` sẽ chặn cả vòng lặp (suy luận của người soạn).
+1. **Vòng `run`** có ba nhánh. Có id trong queue thì poll task. Queue rỗng nhưng còn task thì gọi `poll.poll(&mut events, None)`: reactor chạy và thread ngủ ở đây. Bảng task rỗng thì thoát.
+2. **Task bị `remove` khỏi bảng khi poll, rồi `insert` lại nếu `Pending`.** Nhờ vậy task có thể `spawn` task mới ngay trong lúc được poll mà không đụng `RefCell` đang mượn. Nếu một id nằm trong queue hai lần, lần thứ hai gặp task đã xong thì `remove` trả `None` và bị bỏ qua. Nếu task vẫn `Pending` thì lần poll thừa là vô hại, vì future phải chịu được đánh thức giả (Tokio cũng có thể lên lịch task chưa được wake[^tokio-spurious]).
+3. **`park` ghi đè waker cũ**, đúng yêu cầu "chỉ waker của lần poll gần nhất"[^std-future-latest]. Khi sự kiện tới, reactor `remove` waker rồi `wake()`; task phải đăng ký lại nếu vẫn `Pending`.
+4. **Edge-triggered được tôn trọng nhờ "syscall trước, park sau".** Vòng `loop { read().await; write_all().await }` chạy lại `read` ngay, tức drain từng bước đến `WouldBlock` rồi mới `Pending`.
+5. **Đánh thức xuyên thread dùng cả hai waker.** Thread của `sleep` gọi `std` waker, `TaskWaker::wake` đẩy id vào queue rồi gọi `mio::Waker::wake()` để `epoll_wait` trả về. Đã chạy thử bản bỏ đúng dòng `self.mio_waker.wake().unwrap()`: 3/3 lần, hai client in `echo ok` rồi chương trình treo tới khi `timeout 5` giết (exit 124), không handler nào in "xong".
+6. **Không có bảo vệ chống task chặn.** Task nên tránh system call có thể chặn thread, vì các task khác trên cùng thread sẽ không chạy được[^tokio-noblock-task]. Việc chuyển task chỉ xảy ra ở `.await`[^tokio-await-only]. Executor demo không có cơ chế chống điều này (đọc từ code): một `std::thread::sleep` trong `handle` sẽ chặn cả vòng lặp (suy luận của người soạn).
 
 <details><summary>Đi sâu: mã nguồn đầy đủ, dao động giữa các lần chạy, <code>strace</code></summary>
 
@@ -496,7 +508,7 @@ fn main() -> io::Result<()> {
 }
 ```
 
-Ba lần chạy đầu cho `polls=8`, `would_block=3`, nhưng 30 lần chạy liên tiếp cho: `polls=8`/`would_block=3` ở 24 lần, `polls=9`/`would_block=4` ở 4 lần, `polls=7`/`would_block=2` ở 2 lần, còn `reactor_turns` từ 4 đến 8. Các số này phụ thuộc lịch thread client, không phải hằng (suy luận của người soạn: lần đọc nào gặp dữ liệu đã tới sẵn thì không có `WouldBlock`).
+Ba lần chạy đầu cho `polls=8`, `would_block=3`. Nhưng 30 lần chạy liên tiếp cho kết quả: `polls=8`/`would_block=3` ở 24 lần, `polls=9`/`would_block=4` ở 4 lần, `polls=7`/`would_block=2` ở 2 lần, còn `reactor_turns` từ 4 đến 8. Các số này phụ thuộc lịch thread client, không phải hằng số (suy luận của người soạn: lần đọc nào gặp dữ liệu đã tới sẵn thì không có `WouldBlock`).
 
 **Quan sát `strace` chương trình này** (cùng container; một lần chạy, thứ tự xen kẽ với thread client đổi theo lịch): `epoll_create1 = 3` → `eventfd2 = 4` → `epoll_ctl(3, ADD, 4, EPOLLIN|EPOLLRDHUP|EPOLLET, data=0)` (`mio::Waker`) → `fcntl(3, F_DUPFD_CLOEXEC, 3) = 5` (`try_clone`) → `epoll_ctl(5, ADD, <fd>, …EPOLLET, data=1/2/3)` cho listener và hai kết nối; `epoll_ctl(5, DEL, …)` khi `Io` bị drop. Vòng chờ dùng fd 3, đăng ký đi qua fd 5, cùng một epoll instance.
 
@@ -506,29 +518,29 @@ Ba lần chạy đầu cho `polls=8`, `would_block=3`, nhưng 30 lần chạy li
 
 ## 8. Timer trong runtime: mức khái niệm (Q8)
 
-> **Trả lời ngắn.** Timer không nhất thiết cần fd riêng (nhận xét của người soạn; cách thứ hai là `timerfd`, xem [chương 04 mục 7](04-kien-truc-event-loop.md)): runtime chỉ cần biết còn bao lâu tới deadline gần nhất và đưa khoảng đó làm `timeout` cho lời gọi chờ OS. Trong Tokio, timeout của timer chính là `max_wait` mà `Driver::turn` truyền vào `mio::Poll::poll`[^tokio-driver-poll]; chuỗi gọi ở phần Đi sâu.
+> **Trả lời ngắn.** Timer không nhất thiết cần fd riêng (nhận xét của người soạn; cách thứ hai là `timerfd`, xem [chương 04 mục 7](04-kien-truc-event-loop.md)). Runtime chỉ cần biết còn bao lâu tới deadline gần nhất và đưa khoảng đó làm `timeout` cho lời gọi chờ OS. Trong Tokio, timeout của timer chính là `max_wait` mà `Driver::turn` truyền vào `mio::Poll::poll`[^tokio-driver-poll]; chuỗi gọi nằm ở phần Đi sâu.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): người phục vụ trước khi vào phòng nghỉ đặt đồng hồ báo thức theo việc cần làm sớm nhất.
+*Với `echo-svc`.* Giả sử `echo-svc` muốn đóng kết nối nào im lặng quá 30 giây. Thread sắp ngủ ở `epoll_wait` thì không được ngủ vô hạn: nếu mọi socket đều im, không ai gọi nó dậy đúng hạn. Vậy thread cần biết mình được phép ngủ tối đa bao lâu.
 
-Ý này đã có ở [chương 04 mục 7](04-kien-truc-event-loop.md) cho event loop thuần. Trong runtime async (mô tả khái niệm của người soạn): `sleep(d)` đăng ký deadline với timer của runtime, lưu waker, trả `Pending`; trước khi ngủ, runtime tính khoảng còn lại tới deadline gần nhất[^tokio-time-park] làm `timeout` cho `Poll::poll` (mục 4); sau khi tỉnh, runtime xử lý các timer đến hạn[^tokio-time-process] bằng cách `wake` task tương ứng, chúng vào ready queue.
+Ý này đã có ở [chương 04 mục 7](04-kien-truc-event-loop.md) cho event loop thuần. Trong runtime async, nó diễn ra như sau (mô tả khái niệm của người soạn). `sleep(d)` đăng ký một deadline với timer của runtime, lưu waker rồi trả `Pending`. Trước khi ngủ, runtime tính khoảng còn lại tới deadline gần nhất[^tokio-time-park], và dùng nó làm `timeout` cho `Poll::poll` (mục 4). Sau khi tỉnh, runtime xử lý các timer đến hạn[^tokio-time-process]: nó `wake` task tương ứng, và các task đó vào ready queue.
 
-Demo mục 7 không có timer trong reactor (thread phụ làm `sleep`). Một timer tối thiểu (nhận xét của người soạn) là `BTreeMap<Instant, Waker>` và `timeout = deadline_gần_nhất - now` đưa vào `poll.poll`, đúng ý bài tập 3 ở [capstone mục 4.6](../labs/capstone.md) (chưa chạy trong chương này); Tokio dùng một timer wheel thay vì `BTreeMap`[^tokio-time-park].
+Demo mục 7 không có timer trong reactor, vì thread phụ làm `sleep`. Một timer tối thiểu (nhận xét của người soạn) là `BTreeMap<Instant, Waker>`, với `timeout = deadline_gần_nhất - now` đưa vào `poll.poll`; đó đúng là ý bài tập 3 ở [capstone mục 4.6](../labs/capstone.md) (chưa chạy trong chương này). Tokio dùng một timer wheel thay vì `BTreeMap`[^tokio-time-park].
 
 <details><summary>Đi sâu: chuỗi gọi từ timer tới <code>mio::Poll::poll</code> trong Tokio 1.53.2</summary>
 
-Chuỗi gọi từ timer tới `mio::Poll::poll` đã lần theo source 1.53.2 (đọc, không chạy): `park_internal` của time driver lấy thời điểm hết hạn gần nhất từ timer wheel[^tokio-time-park], đổi thành `duration` rồi gọi `park_timeout(duration)` của `park: IoStack` (qua `park_thread_timeout` khi không bật `test-util`)[^tokio-time-parkcall]; `IoStack::Enabled` chỉ chuyển tiếp xuống I/O driver[^tokio-iostack], I/O driver gọi `self.turn(handle, Some(duration))`[^tokio-driver-parktimeout], và `Driver::turn(.., max_wait)`[^tokio-driver-turn] gọi `self.poll.poll(events, max_wait)`[^tokio-driver-poll]. Vậy timeout của timer chính là `max_wait` của `mio::Poll::poll`. Tỉnh dậy, `park_internal` xử lý timer đến hạn[^tokio-time-process]; comment nói làm tròn lên 1 ms[^tokio-time-round], khớp `sleep` ghi độ phân giải mili-giây[^tokio-sleep-gran].
+Chuỗi gọi dưới đây đã lần theo source 1.53.2 (đọc, không chạy). `park_internal` của time driver lấy thời điểm hết hạn gần nhất từ timer wheel[^tokio-time-park]. Nó đổi thời điểm đó thành `duration` rồi gọi `park_timeout(duration)` của `park: IoStack`, qua `park_thread_timeout` khi không bật `test-util`[^tokio-time-parkcall]. `IoStack::Enabled` chỉ chuyển tiếp xuống I/O driver[^tokio-iostack]. I/O driver gọi `self.turn(handle, Some(duration))`[^tokio-driver-parktimeout]. Hàm `Driver::turn(.., max_wait)` nhận khoảng thời gian đó qua tham số `max_wait`[^tokio-driver-turn]. Bên trong, nó gọi `self.poll.poll(events, max_wait)`[^tokio-driver-poll]. Vậy timeout của timer chính là `max_wait` của `mio::Poll::poll`. Tỉnh dậy, `park_internal` xử lý timer đến hạn[^tokio-time-process]. Comment trong source nói làm tròn lên 1 ms[^tokio-time-round]. Docs của `sleep` cũng ghi độ phân giải mili-giây[^tokio-sleep-gran].
 
 </details>
 
-**Quay lại Q8:** timer là deadline gần nhất đổi thành `timeout` của `mio::Poll::poll`[^tokio-driver-poll].
+**Quay lại Q8:** timer là deadline gần nhất đổi thành `timeout` của `mio::Poll::poll`.
 
 ## Liên hệ với Rust
 
-- `Future::poll(Pin<&mut Self>, &mut Context<'_>)` là toàn bộ giao diện giữa task và executor[^std-future-sig]; `Context` chỉ chứa `&Waker`[^std-context]. `Wake` + `Waker::from(Arc<W>)` là đường an toàn để dựng waker thay cho `RawWaker`[^std-wake-safe]; `std::future::poll_fn` bọc một hàm trả `Poll` thành future[^std-poll-fn], đủ để viết leaf future mà không định nghĩa struct. Demo dùng cả hai.
+- `Future::poll(Pin<&mut Self>, &mut Context<'_>)` là toàn bộ giao diện giữa task và executor[^std-future-sig]. `Context` chỉ chứa `&Waker`[^std-context]. `Wake` + `Waker::from(Arc<W>)` là đường an toàn để dựng waker thay cho `RawWaker`[^std-wake-safe]. Còn `std::future::poll_fn` bọc một hàm trả `Poll` thành future[^std-poll-fn], đủ để viết leaf future mà không phải định nghĩa struct. Demo dùng cả hai.
 - `mio` không phải executor: docs giới thiệu nó là thư viện I/O non-blocking và thông báo sự kiện[^mio-intro], và các kiểu ở mục 4 không nhận hay trả `Future` (suy luận của người soạn từ chữ ký trong docs). Vì thế nó dùng được cho cả code sync lẫn async (suy luận của người soạn).
-- `tokio::spawn` đòi `F: Future + Send + 'static`[^tokio-spawn-sig] vì task có thể chạy trên thread khác nơi spawn[^tokio-spawn-thread] (suy luận nối hai nguồn của người soạn). Future của demo chứa `Rc<Reactor>` nên không `Send`[^std-rc-nosend], và điều đó chấp nhận được vì executor demo chạy đúng một thread. Với nhiều thread: nhiều thread chờ cùng một epoll fd ET thì chỉ một thread được đánh thức[^man-epoll-herd-et], còn scheduler multi-thread của Tokio chạy future trên thread pool theo work-stealing[^tokio-multi]; chi tiết ở [chương 08](08-tokio.md).
+- `tokio::spawn` đòi `F: Future + Send + 'static`[^tokio-spawn-sig]. Lý do là task có thể chạy trên thread khác nơi gọi `spawn`[^tokio-spawn-thread] (suy luận nối hai nguồn của người soạn). Future của demo chứa `Rc<Reactor>` nên không `Send`[^std-rc-nosend]; điều đó chấp nhận được vì executor demo chạy đúng một thread. Khi chuyển sang nhiều thread, có hai điều cần biết. Một: nhiều thread chờ cùng một epoll fd ET thì chỉ một thread được đánh thức[^man-epoll-herd-et]. Hai: scheduler multi-thread của Tokio chạy future trên thread pool theo work-stealing[^tokio-multi]. Chi tiết ở [chương 08](08-tokio.md).
 
 ## Tóm tắt
 
@@ -552,28 +564,28 @@ Một future top-level, một danh tính để xếp hàng, và một waker nố
 2. Vì sao `Io::read` gọi `read` trước rồi mới park?
 <details><summary>Đáp án</summary>
 
-(a) epoll(7) khuyến nghị với ET chỉ chờ sự kiện sau khi `read`/`write` trả `EAGAIN`[^man-epoll-et-rule]; park mà không thử `read` thì dữ liệu đã nằm sẵn trong buffer không tạo edge mới và task có thể treo, cùng cơ chế với ví dụ pipe của epoll(7)[^man-epoll-hang] (suy luận của người soạn; mục 3, 6). (b) Lần `poll` đầu của task chưa có sự kiện nào để chờ, nên phải thử syscall trước (suy luận của người soạn từ code demo).
+(a) epoll(7) khuyến nghị với ET chỉ chờ sự kiện sau khi `read`/`write` trả `EAGAIN`[^man-epoll-et-rule]. Park mà không thử `read` thì dữ liệu đã nằm sẵn trong buffer không tạo edge mới và task có thể treo, cùng cơ chế với ví dụ pipe của epoll(7)[^man-epoll-hang] (suy luận của người soạn; mục 3, 6). (b) Lần `poll` đầu của task chưa có sự kiện nào để chờ, nên phải thử syscall trước (suy luận của người soạn từ code demo).
 
 </details>
 
 3. "Draining readiness" của mio yêu cầu gì, và áp vào `accept` thế nào?
 <details><summary>Đáp án</summary>
 
-Sau khi nhận readiness event phải lặp thao tác tới khi `WouldBlock`, nếu không không có bảo đảm event kế tiếp[^mio-drain]. Với `accept`, lặp `accept` tới `WouldBlock`[^mio-accept].
+Sau khi nhận readiness event phải lặp thao tác tới khi `WouldBlock`, nếu không thì không có bảo đảm event kế tiếp[^mio-drain]. Với `accept`, lặp `accept` tới `WouldBlock`[^mio-accept].
 
 </details>
 
 4. Một spurious event ảnh hưởng thế nào lên `poll` của future?
 <details><summary>Đáp án</summary>
 
-Future không được giả định thao tác thành công; nếu `WouldBlock` thì park lại và trả `Pending`[^mio-spurious][^mio-spurious-wb]. Tokio cũng có thể lên lịch task chưa được wake[^tokio-spurious].
+Future không được giả định thao tác thành công[^mio-spurious]. Nếu gặp `WouldBlock` thì park lại và trả `Pending`[^mio-spurious-wb]. Tokio cũng có thể lên lịch task chưa được wake[^tokio-spurious].
 
 </details>
 
 5. `mio::Waker` và `std::task::Waker` khác nhau thế nào, và khi nào cần cả hai?
 <details><summary>Đáp án</summary>
 
-`std` waker đánh thức task; `mio::Waker` đánh thức `Poll::poll` đang chặn (eventfd trên Linux)[^mio-waker][^mio-waker-impl]. Khi một thread khác wake task trong lúc executor ngủ ở `epoll_wait`, cần `mio::Waker` để làm `poll` trả về (mục 5).
+`std` waker đánh thức task; `mio::Waker` đánh thức `Poll::poll` đang chặn, bằng eventfd trên Linux[^mio-waker-impl]. Khi một thread khác wake task trong lúc executor ngủ ở `epoll_wait`, cần `mio::Waker` để làm `poll` trả về (mục 5).
 
 </details>
 
@@ -587,14 +599,14 @@ Edge-triggered: source 1.2.4 bắt đầu bằng `EPOLLET`[^mio-src-et]; strace 
 7. Timeout của `sleep` đi từ time driver xuống `epoll_wait` của Tokio theo đường nào?
 <details><summary>Đáp án</summary>
 
-Time driver lấy deadline gần nhất của timer wheel[^tokio-time-park], đổi thành khoảng thời gian rồi `park_timeout`[^tokio-time-parkcall]; I/O driver gọi `turn(handle, Some(duration))`[^tokio-driver-parktimeout], và `turn` gọi `mio::Poll::poll(events, max_wait)`[^tokio-driver-poll], nơi timeout được làm tròn lên theo độ phân giải đồng hồ[^mio-poll-round] (mục 8).
+Time driver lấy deadline gần nhất của timer wheel[^tokio-time-park]. Nó đổi thành khoảng thời gian rồi `park_timeout`[^tokio-time-parkcall]. I/O driver nhận lời gọi đó và gọi `turn(handle, Some(duration))`[^tokio-driver-parktimeout]. `turn` lại gọi `mio::Poll::poll(events, max_wait)`[^tokio-driver-poll]. Ở đó timeout được làm tròn lên theo độ phân giải đồng hồ[^mio-poll-round] (mục 8).
 
 </details>
 
 8. Bỏ `mio_waker.wake()` khỏi `TaskWaker::wake` ở demo thì chuyện gì xảy ra, và vì sao?
 <details><summary>Đáp án</summary>
 
-Chương trình treo (quan sát: 3/3 lần chạy, `timeout 5` giết, exit 124). Thread của `sleep` chỉ đẩy `id` vào queue, còn executor đang chặn trong `poll.poll(.., None)`; `None` nghĩa là chờ tới khi có readiness event[^mio-poll-block], và không ai ghi vào eventfd của `mio::Waker` nên không có event nào (mục 5, 7). Ở demo, `sleep` chỉ bắt đầu sau khi cả hai kết nối đã EOF, nên không còn nguồn I/O nào khác tình cờ đánh thức vòng chờ (suy luận của người soạn từ code `handle`).
+Chương trình treo (quan sát: 3/3 lần chạy, `timeout 5` giết, exit 124). Thread của `sleep` chỉ đẩy `id` vào queue, còn executor đang chặn trong `poll.poll(.., None)`. `None` nghĩa là chờ tới khi có readiness event[^mio-poll-block], mà không ai ghi vào eventfd của `mio::Waker` nên không có event nào (mục 5, 7). Ở demo, `sleep` chỉ bắt đầu sau khi cả hai kết nối đã EOF, nên không còn nguồn I/O nào khác tình cờ đánh thức vòng chờ (suy luận của người soạn từ code `handle`).
 
 </details>
 

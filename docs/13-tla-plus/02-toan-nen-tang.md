@@ -16,19 +16,21 @@
 ## Kiến thức cần trước
 
 - [Chương 01 — Vì sao cần đặc tả hình thức](01-vi-sao-dac-ta-hinh-thuc.md): đặc tả là gì, vì sao một kỹ sư backend có thể cần nó. Chương này chỉ dạy phần *toán*; cách mô tả trạng thái thay đổi (biến, `Init`, `Next`, ký hiệu `'`) để dành cho [Chương 03](03-trang-thai-hanh-vi-action.md).
-- Không cần biết trước logic hay lý thuyết tập hợp. Chương này giả định bạn đọc được code Rust (so sánh ở mục 10) nhưng không giả định bạn nhớ toán phổ thông.
+- Không cần biết trước logic hay lý thuyết tập hợp, và cũng không cần nhớ toán phổ thông. Bạn chỉ cần đọc được code Rust; mục 10 đặt từng khái niệm của chương cạnh thứ tương ứng trong Rust.
 
-Một lý do để đầu tư vào phần toán này: đội Amazon Web Services mô tả TLA+ là dựa trên toán rời rạc đơn giản — lý thuyết tập hợp cơ bản và vị từ[^aws-math] — và Lamport nói chính ý tưởng nền của TLA+ là cách tốt nhất để mô tả sự vật chính xác là dùng toán đơn giản[^tla-home].
+Vì sao đáng bỏ công học phần toán này? Vì nó không nặng như tên gọi. Đội Amazon Web Services mô tả TLA+ là dựa trên toán rời rạc đơn giản, gồm lý thuyết tập hợp cơ bản và vị từ[^aws-math]. Lamport cũng nói ý tưởng nền của TLA+ là cách tốt nhất để mô tả sự vật chính xác là dùng toán đơn giản[^tla-home].
 
 ## 1. Logic: `/\`, `\/`, `~`, `=>`, `<=>`, `\A`, `\E` và danh sách bullet (Q1)
 
-> **Trả lời ngắn.** TLA+ dùng đúng năm toán tử của logic mệnh đề (và, hoặc, phủ định, kéo theo, tương đương)[^bk-prop-ops], thêm hai lượng từ "với mọi" `\A` và "tồn tại" `\E` chạy trên một tập[^bk-forall][^bk-exists]. Điểm dễ nhầm nhất là `=>`: `F => G` chỉ sai khi `F` đúng mà `G` sai[^bk-imp-table]. Danh sách `/\`/`\/` xếp thẳng hàng chỉ là cách viết nhiều toán hạng không cần ngoặc; ranh giới của từng mục được quyết định bằng *cột* của ký tự `/\` hay `\/`[^bk-align-1].
+> **Trả lời ngắn.** TLA+ dùng đúng năm toán tử của logic mệnh đề: và, hoặc, phủ định, kéo theo, tương đương[^bk-prop-ops]. Trên một tập, ta có thêm lượng từ "với mọi" `\A`, nói một điều đúng với mọi phần tử[^bk-forall]. Lượng từ "tồn tại" `\E` thì nói điều đó đúng với ít nhất một phần tử[^bk-exists]. Toán tử dễ nhầm nhất là `=>`: `F => G` chỉ sai khi `F` đúng mà `G` sai[^bk-imp-table]. Muốn nối nhiều điều kiện mà khỏi dùng ngoặc, ta xếp chúng thành danh sách `/\` hoặc `\/` thẳng cột; mỗi mục kết thúc ở đâu là do *cột* của ký tự `/\` hay `\/` quyết định[^bk-align-1].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một cổng kiểm tra yêu cầu ở backend thường là "thỏa A *và* B *và* (C *hoặc* D)"; một invariant của hệ thống thường là "*nếu* giao dịch đã commit *thì* bản ghi log đã được flush". Cái đầu là `/\` với `\/`, cái sau là `=>`. TLA+ cho bạn viết cả hai thành công thức chính xác để máy kiểm tra.
+*Với service `lease-svc`.* Hãy hình dung `lease-svc`, một service cấp *lease* (quyền giữ một resource key, ví dụ một shard, trong một khoảng thời gian) cho các node worker, để mỗi key chỉ có một worker xử lý tại một thời điểm. Cluster có vài node, mỗi node đang up hoặc down và có một node là leader. Client gửi lên hai loại request: đọc xem ai đang giữ lease, hoặc xin lease. Ta sẽ bám theo `lease-svc` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Ngay từ đầu nó đã đặt ra hai câu hỏi cần logic chính xác. Một: node này có được phục vụ request này không? Điều kiện sẽ có dạng "node đang up, *và* request là đọc *hoặc* node là leader". Hai: hệ thống phải luôn đúng điều gì? Chẳng hạn "*nếu* key đã có chủ *thì* epoch của lease phải lớn hơn 0". Câu đầu dùng `/\` và `\/`, câu sau dùng `=>`. Mục này dạy cách viết cả hai thành công thức mà máy kiểm tra được.
 
-*Năm toán tử.* Theo sách, `∧`, `∨`, `¬`, `⇒`, `≡` là năm toán tử Boolean[^bk-prop-ops]. Dạng gõ bằng ASCII: `/\` (hoặc `\land`), `\/` (hoặc `\lor`), `~` (hoặc `\lnot`, `\neg`)[^sum-ascii-and], `=>`, và `<=>` (hoặc `\equiv`)[^sum-ascii-or]. Sách giải thích quy ước gõ: từ khóa in bằng chữ HOA nhỏ (small caps) trong bản in được gõ bằng chữ HOA thông thường[^bk-ascii-kw], nên các giá trị Boolean gõ là `TRUE`, `FALSE`[^learn-bool] và tập `{TRUE, FALSE}` là `BOOLEAN` (nhận xét của người soạn: tên `boolean` trong sách in thành `BOOLEAN` theo đúng quy tắc từ khóa đó).
+### 1.1 Năm toán tử và hai lượng từ
+
+Ba toán tử đầu tương ứng `&&`, `||`, `!` của Rust, chỉ khác cách gõ: "và" viết `/\`, "hoặc" viết `\/`, phủ định viết `~`. Hai toán tử còn lại không có bản sao trực tiếp trong Rust: kéo theo viết `=>`, tương đương viết `<=>`. Trong file `.tla` ta gõ ASCII. `/\` còn viết được là `\land`, và `~` còn viết là `\lnot` hoặc `\neg`[^sum-ascii-and]. `\/` còn viết là `\lor`, và `<=>` còn viết là `\equiv`[^sum-ascii-or]. Hai giá trị Boolean viết là `TRUE` và `FALSE`. Vì sao viết hoa? Trong sách của Lamport, các từ khóa in bằng chữ hoa nhỏ (small caps), và khi gõ vào file thì chúng thành chữ HOA thông thường[^bk-ascii-kw]. Quy tắc đó cho ra `TRUE`, `FALSE`[^learn-bool] và tên `BOOLEAN` cho tập `{TRUE, FALSE}` (nhận xét của người soạn: tên `boolean` trong sách in thành `BOOLEAN` theo đúng quy tắc từ khóa đó).
 
 | Toán học | Gõ ASCII | Đọc |
 |---|---|---|
@@ -40,9 +42,11 @@ Hình dung (nhận xét của người soạn): một cổng kiểm tra yêu c�
 | `∀ x ∈ S : P` | `\A x \in S : P` | với mọi `x` thuộc `S`, `P` |
 | `∃ x ∈ S : P` | `\E x \in S : P` | tồn tại `x` thuộc `S` sao cho `P` |
 
-(Cách gõ `\A`, `\E`, `\in` thấy ngay trong định nghĩa `IsFiniteSet` của module chuẩn `FiniteSets`[^repo-isfinite].)
+Cách gõ `\A`, `\E`, `\in` xuất hiện ngay trong định nghĩa `IsFiniteSet` của module chuẩn `FiniteSets`[^repo-isfinite].
 
-*Phép kéo theo.* `F => G` bằng `~F \/ G`: sách chứng minh bằng bảng chân trị rằng `(F ⇒ G) ≡ (¬F ∨ G)` là hằng đúng[^bk-imp-or]. Bảng chân trị của `=>`:
+### 1.2 Phép kéo theo: không phải `if`
+
+`=>` là toán tử đáng dừng lâu nhất, vì nó trông giống `if` nhưng không phải. `F => G` bằng `~F \/ G`; sách chứng minh điều này bằng bảng chân trị, cho thấy `(F ⇒ G) ≡ (¬F ∨ G)` là hằng đúng[^bk-imp-or]. Bảng chân trị của `=>` như sau.
 
 | `F` | `G` | `F => G` |
 |---|---|---|
@@ -51,17 +55,21 @@ Hình dung (nhận xét của người soạn): một cổng kiểm tra yêu c�
 | `FALSE` | `TRUE` | `TRUE` |
 | `FALSE` | `FALSE` | `TRUE` |
 
-Hai dòng cuối (vế trái sai thì cả câu đúng) hay gây bối rối. Lamport giải thích bằng ví dụ số: ta kỳ vọng nếu `n` lớn hơn 3 thì `n` lớn hơn 1, nên `n > 3` phải kéo theo `n > 1`; thay `n` bằng 4, 2, 0 sẽ ra các dòng của bảng[^bk-imp-why]. Tức là `=>` không phải "if-then" của lập trình (không có nhánh else, không chạy gì cả): nó là một *phát biểu* về quan hệ giữa hai mệnh đề. Đó là lý do hầu hết invariant có dạng `điều_kiện => hệ_quả` (nhận xét của người soạn).
+Hai dòng cuối, vế trái sai thì cả câu đúng, hay làm người mới bối rối. Lamport giải thích bằng một ví dụ số: ta kỳ vọng nếu `n` lớn hơn 3 thì `n` lớn hơn 1, tức `n > 3` phải kéo theo `n > 1`; thay `n` bằng 4, 2, 0 sẽ ra lần lượt các dòng 1, 3, 4 của bảng[^bk-imp-why].
 
-*Tương đương.* `<=>` là phép bằng cho giá trị Boolean; có thể thay `≡` bằng `=`, nhưng không thể làm ngược lại[^bk-equiv].
+Quay lại `lease-svc`. Invariant "key đã có chủ thì epoch lớn hơn 0" có dạng `đã_có_chủ => epoch > 0`. Với key chưa có chủ, vế trái sai nên cả invariant đúng, bất kể epoch là bao nhiêu; đó chính là hai dòng cuối của bảng, và đó cũng là điều ta muốn: invariant không đòi gì ở key chưa ai giữ. Vì thế `=>` không phải `if-then` của lập trình: nó không có nhánh `else` và không chạy gì cả. Nó là một *phát biểu* về quan hệ giữa hai mệnh đề, và đó là lý do hầu hết invariant có dạng `điều_kiện => hệ_quả` (nhận xét của người soạn).
 
-*Thứ tự ưu tiên.* `¬` ràng chặt hơn `∧` và `∨`, hai cái này ràng chặt hơn `⇒` và `≡`; vậy `¬F ∧ G ⇒ H` nghĩa là `((¬F) ∧ G) ⇒ H`[^bk-prec]. Lời khuyên của sách: nếu có chút nghi ngờ về việc có cần ngoặc hay không thì cứ viết ngoặc[^bk-parens]. (Nhận xét của người soạn: đặc biệt đừng trộn `/\` và `\/` trong một biểu thức mà không ngoặc hay xếp bullet.)
+`<=>` là phép bằng cho giá trị Boolean. Ta thay được `≡` bằng `=`, nhưng không làm ngược lại được[^bk-equiv].
 
-*Lượng từ.* `\A x \in S : P` khẳng định `P` đúng với mọi phần tử `x` của `S`[^bk-forall]; `\E x \in S : P` khẳng định `P` đúng với ít nhất một phần tử[^bk-exists]. Hai lượng từ đối ngẫu: `P` đúng với một `x` nào đó khi và chỉ khi không phải "`P` sai với mọi `x`"[^bk-dual]. Trên tập rỗng, `\E` luôn sai[^bk-empty], nên theo đối ngẫu `\A` luôn đúng ("đúng rỗng"). Có thể tư duy `\A` như phép AND và `\E` như phép OR trên từng phần tử[^bk-conj-disj] (nhận xét của người soạn: gần nhất với `all`/`any` của iterator Rust, mục 10).
+### 1.3 Thứ tự ưu tiên và lượng từ
 
-Có thể gom nhiều biến một lần, và sách viết rõ nghĩa: `\A x \in S, y \in T : F` nghĩa là `\A x \in S : (\A y \in T : F)`[^bk-quant-nest]. Sách khuyên dùng lượng từ *có chặn* (bounded: `\A x \in S`) thay vì không chặn (`\A x : ...`) bất cứ khi nào có thể, vì dễ đọc hơn cho người lẫn công cụ[^bk-bounded].
+Về độ ưu tiên, `¬` ràng chặt hơn `∧` và `∨`, hai toán tử này ràng chặt hơn `⇒` và `≡`. Vì vậy `¬F ∧ G ⇒ H` nghĩa là `((¬F) ∧ G) ⇒ H`[^bk-prec]. Dù hiểu đúng, bạn vẫn nên thêm ngoặc, và sách cũng khuyên thế: nếu có chút nghi ngờ về việc cần ngoặc hay không, cứ viết[^bk-parens]. Riêng chuyện trộn `/\` với `\/` trong một biểu thức thì đừng bao giờ để trần, hãy ngoặc hoặc xếp bullet (nhận xét của người soạn).
 
-Đọc trước các khối mã trong chương: `Tên == biểu_thức` định nghĩa một tên (mục 6), `EXTENDS Naturals` nạp module số học (mục 7), và `\*` mở một comment đến hết dòng (mục 6, phần Đi sâu).
+`\A x \in S : P` khẳng định `P` đúng với mọi phần tử `x` của `S`[^bk-forall]. `\E x \in S : P` khẳng định `P` đúng với ít nhất một phần tử[^bk-exists]. Trong `lease-svc`, `\E n \in Node : n.role = "leader"` nghĩa là cluster có ít nhất một leader, còn `\A n \in Node : n.up` nghĩa là mọi node đều đang up. Hai lượng từ này đối ngẫu: `P` đúng với một `x` nào đó khi và chỉ khi không phải "`P` sai với mọi `x`"[^bk-dual]. Hệ quả đáng nhớ nằm ở tập rỗng. Trên `{}`, `\E` luôn sai vì không có phần tử nào để thỏa[^bk-empty], nên theo đối ngẫu `\A` luôn đúng, kiểu "đúng rỗng". Với `lease-svc`, nếu chưa có node nào up thì `\A n \in UpNodes : ...` đúng một cách tầm thường (nhận xét của người soạn). Để nhớ, bạn cứ coi `\A` là AND và `\E` là OR chạy qua từng phần tử[^bk-conj-disj] (nhận xét của người soạn: gần nhất với `all` và `any` của iterator Rust, xem mục 10).
+
+Có thể gom nhiều biến vào một lượng từ: `\A x \in S, y \in T : F` nghĩa là `\A x \in S : (\A y \in T : F)`[^bk-quant-nest]. Khi viết đặc tả, sách khuyên dùng lượng từ *có chặn* (bounded, tức `\A x \in S`) thay cho lượng từ không chặn (`\A x : ...`) bất cứ khi nào có thể[^bk-bounded]. Dạng có chặn dễ đọc hơn, cho cả người lẫn công cụ.
+
+Vài ký hiệu trong các khối mã dưới đây sẽ học ở chương này: `Tên == biểu_thức` định nghĩa một tên (mục 6), `EXTENDS Naturals` nạp module số học (mục 7), và `\*` mở một comment đến hết dòng (mục 6, phần Đi sâu).
 
 ```tla
 EXTENDS Naturals
@@ -82,9 +90,11 @@ CanServe(req, node) ==
 \* nghĩa là: node.up /\ (req.kind = "read" \/ node.role = "leader") /\ ~node.draining
 ```
 
-*Danh sách bullet.* Sách mô tả: mỗi `∧` bắt đầu một conjunct, và conjunct phải nằm hoàn toàn bên phải dấu `∧` đó[^bk-bullet]; các `∧`/`∨` phải thẳng cột tuyệt đối, kể cả trong file ASCII[^bk-bullet-align]. Nhờ vậy thụt lề mang ý nghĩa nên không cần ngoặc, rất tiện khi `/\` và `\/` lồng nhau[^bk-bullet-nest]. Đây là chỗ duy nhất mà thụt lề có ý nghĩa cú pháp: ở mọi nơi khác, sách nói thụt lề bị bỏ qua[^bk-indent-ignored].
+### 1.4 Danh sách bullet
 
-Ví dụ thụt lề đổi nghĩa (cột của `/\` quyết định conjunct nào chứa `D`):
+`CanServe` ở trên chính là câu hỏi đầu tiên của `lease-svc`: node phải đang up, request phải là đọc hoặc node phải là leader, và node không được đang draining. Viết bằng bullet, mỗi `/\` mở một conjunct (một vế của phép "và"), và conjunct đó phải nằm hoàn toàn bên phải dấu `/\` của nó[^bk-bullet]. Các `/\` và `\/` phải thẳng cột tuyệt đối, kể cả khi gõ ASCII[^bk-bullet-align]. Nhờ vậy thụt lề mang nghĩa, ta khỏi cần ngoặc, và cách viết này đặc biệt tiện khi `/\` với `\/` lồng nhau[^bk-bullet-nest]. Đây là chỗ duy nhất thụt lề có nghĩa cú pháp; ở mọi nơi khác nó bị bỏ qua[^bk-indent-ignored].
+
+Ví dụ sau cho thấy cột của `/\` quyết định conjunct nào chứa `D`:
 
 ```tla
 Inner ==
@@ -99,29 +109,31 @@ Outer ==
     /\ D              \* D ở cột ngoài cùng:      A /\ (B \/ C) /\ D
 ```
 
-Ở `Outer`, dòng `/\ D` thẳng cột với `/\ A` nên kết thúc cả danh sách lồng bên trong và bắt đầu một conjunct mới của danh sách ngoài (theo luật kết thúc conjunct ở phần Đi sâu). Learn TLA+ có ví dụ tương tự, và nhấn mạnh đây là nơi duy nhất trong ngôn ngữ mà khoảng trắng có nghĩa[^learn-bullet].
+Ở `Outer`, dòng `/\ D` thẳng cột với `/\ A`, nên nó kết thúc luôn danh sách lồng bên trong và mở một conjunct mới của danh sách ngoài (luật kết thúc conjunct nằm ở phần Đi sâu). Learn TLA+ có ví dụ tương tự và nhấn mạnh đây là nơi duy nhất trong ngôn ngữ mà khoảng trắng có nghĩa[^learn-bullet].
 
 <details><summary>Đi sâu: luật căn lề chính xác, lượng từ "ăn" tới cùng, và <code>=</code> với <code>&lt;=&gt;</code></summary>
 
-- **Luật kết thúc một conjunct** (sách, mục 15.2.2). Gọi `c` là cột của `/` trong `/\` mở danh sách. Một conjunct kết thúc khi gặp: (1) một `/\` khác có ký tự `/` ở đúng cột `c` và là ký tự khác khoảng trắng đầu tiên của dòng[^bk-align-1]; (2) bất kỳ ký tự khác khoảng trắng nào ở cột `c` hoặc bên trái cột `c`[^bk-align-2]; (3) một ngoặc đóng mà ngoặc mở nằm trước danh sách; (4) chỗ bắt đầu của "đơn vị module" kế tiếp (định nghĩa, khai báo). Với luật (1) thì `/\` mở conjunct tiếp theo của *cùng* danh sách; với ba luật còn lại thì cả danh sách kết thúc. Luật cho danh sách `\/` tương tự.
-- **Hậu quả của thụt sai.** Sách nêu ví dụ: nếu dòng `= y` không thụt sang bên phải dấu `/\` (nằm ở cột của `/\` hoặc bên trái nó), thì `/\ x'` là một danh sách chỉ có một conjunct, và `/\` thứ hai bị hiểu là toán tử infix thông thường[^bk-align-bad]. Vì vậy khuyến nghị là thụt mỗi conjunct hoàn toàn sang phải dấu `/\` của nó. Ngoặc đơn cũng không cứu được: sách nói không thể dùng ngoặc để lách luật căn lề, và nêu ví dụ bất hợp pháp `/\ (x'` xuống dòng rồi `= y)` (mục 15.2.2).
-- **Lượng từ, `IF`, `CASE`, `LET`, `CHOOSE` "ăn" tới cùng.** Các cấu trúc này không có từ khóa kết thúc[^bk-undelim], nên coi như toán tử tiền tố có độ ưu tiên thấp nhất và biểu thức kéo dài đến mức có thể[^bk-extends-far]. Ngay sau quy tắc này sách đưa ví dụ[^bk-rule-ex], trong đó `\A x \in S : P(x) \/ Q` nghĩa là `\A x \in S : (P(x) \/ Q)`, không phải `(\A x \in S : P(x)) \/ Q` (mục 15.2.1). Ai quen `all(...) || q` của Rust cần chú ý điểm này (nhận xét của người soạn).
-- **`=` và `<=>`.** Với Boolean hai cái dùng được thay nhau[^bk-equiv]; sách còn nêu một lý do tinh tế vì sao nên viết `<=>` khi hai vế là Boolean (mục 16.1.3)[^bk-equiv-subtle]. Lý do là `=` không phải toán tử của logic mệnh đề hay vị từ, nên một hằng đúng của logic chưa chắc còn đúng với giá trị phi-Boolean nếu thay `≡` bằng `=`[^bk-equiv-3]. Xem thêm mục 8 chương này.
-- **Phép chứng minh bằng "đếm trên ngón tay".** Sách lưu ý máy làm bảng chân trị tốt hơn người, và nói TLC có thể dùng để kiểm các hằng đúng của logic mệnh đề[^bk-tlc-calc]; Learn TLA+ cho một mẹo: hàm `[p, q \in BOOLEAN |-> p => q]` liệt kê trọn bảng chân trị[^learn-truth] (hàm xem mục 3).
+- **Luật kết thúc một conjunct** (sách, mục 15.2.2). Gọi `c` là cột của ký tự `/` trong `/\` mở danh sách. Một conjunct kết thúc khi gặp một trong bốn thứ. (1) Một `/\` khác có ký tự `/` ở đúng cột `c` và là ký tự khác khoảng trắng đầu tiên của dòng[^bk-align-1]. (2) Bất kỳ ký tự khác khoảng trắng nào ở cột `c` hoặc bên trái cột `c`[^bk-align-2]. (3) Một ngoặc đóng mà ngoặc mở nằm trước danh sách. (4) Chỗ bắt đầu "đơn vị module" kế tiếp (một định nghĩa hay khai báo). Với luật (1), `/\` đó mở conjunct tiếp theo của *cùng* danh sách; với ba luật còn lại thì cả danh sách kết thúc. Danh sách `\/` có luật tương tự.
+- **Thụt sai thì sao.** Sách nêu ví dụ: nếu dòng `= y` không thụt sang bên phải dấu `/\` (nằm đúng cột của `/\` hoặc bên trái nó), thì `/\ x'` trở thành danh sách chỉ có một conjunct, và `/\` thứ hai bị hiểu là toán tử infix thông thường[^bk-align-bad]. Vì vậy hãy luôn thụt mỗi conjunct hoàn toàn sang phải dấu `/\` của nó. Ngoặc đơn cũng không cứu được: sách nói không dùng ngoặc để lách luật căn lề được, và nêu ví dụ bất hợp pháp `/\ (x'` xuống dòng rồi `= y)` (mục 15.2.2).
+- **Lượng từ, `IF`, `CASE`, `LET`, `CHOOSE` "ăn" tới cùng.** Các cấu trúc này không có từ khóa kết thúc[^bk-undelim]. Vì vậy chúng được coi như toán tử tiền tố có độ ưu tiên thấp nhất, và biểu thức làm bằng chúng kéo dài đến mức có thể[^bk-extends-far]. Sách đưa ví dụ ngay sau quy tắc này[^bk-rule-ex]: `\A x \in S : P(x) \/ Q` nghĩa là `\A x \in S : (P(x) \/ Q)`, không phải `(\A x \in S : P(x)) \/ Q` (mục 15.2.1). Ai quen `all(...) || q` của Rust cần chú ý điểm này (nhận xét của người soạn).
+- **`=` và `<=>`.** Với Boolean, hai toán tử dùng thay nhau được[^bk-equiv]. Dù vậy sách vẫn nêu một lý do tinh tế để viết `<=>` khi hai vế là Boolean (mục 16.1.3)[^bk-equiv-subtle]. Lý do là `=` không phải toán tử của logic mệnh đề hay vị từ, nên một hằng đúng của logic chưa chắc còn đúng với giá trị phi-Boolean nếu thay `≡` bằng `=`[^bk-equiv-3]. Mục 8 nói thêm về chuyện này.
+- **Kiểm bảng chân trị bằng máy.** Sách lưu ý máy làm bảng chân trị tốt hơn người, và TLC kiểm được các hằng đúng của logic mệnh đề[^bk-tlc-calc]. Learn TLA+ có một mẹo: hàm `[p, q \in BOOLEAN |-> p => q]` liệt kê trọn bảng chân trị[^learn-truth] (hàm xem mục 3).
 
 </details>
 
-**Quay lại Q1:** logic của TLA+ là logic mệnh đề cộng hai lượng từ trên tập; `=>` là phát biểu chứ không phải rẽ nhánh, và dấu `/\`/`\/` xếp cột thay cho ngoặc.
+**Quay lại Q1:** logic của TLA+ là logic mệnh đề cộng hai lượng từ trên tập; `=>` là phát biểu chứ không phải rẽ nhánh, và dấu `/\`/`\/` xếp cột thay cho ngoặc. Với `lease-svc`, "node nào được phục vụ" là một danh sách bullet, còn "key có chủ thì epoch lớn hơn 0" là một phép `=>`.
 
 ## 2. Tập hợp: toán tử, lọc, ánh xạ, `SUBSET`, `UNION` (Q2)
 
-> **Trả lời ngắn.** Tập hợp được xác định hoàn toàn bởi các phần tử của nó, không có thứ tự và không có trùng lặp[^bk-set-same]. TLA+ có các phép `\in`, `\cup`, `\cap`, `\subseteq`, `\` (hiệu), và hai cách dựng tập mới từ tập cũ: lọc `{x \in S : P}` và ánh xạ `{e : x \in S}`[^bk-filter][^bk-map]; ngoài ra `SUBSET S` là tập mọi tập con, `UNION S` là hợp mọi phần tử của `S`[^sum-subset][^sum-union].
+> **Trả lời ngắn.** Một tập hợp được xác định hoàn toàn bởi các phần tử của nó: không có thứ tự, không có trùng lặp[^bk-set-same]. TLA+ có các phép `\in`, `\cup`, `\cap`, `\subseteq` và `\` (hiệu). Để dựng tập mới từ tập cũ, một cách là lọc bằng `{x \in S : P}`[^bk-filter]. Cách kia là ánh xạ bằng `{e : x \in S}`[^bk-map]. Ngoài ra `SUBSET S` là tập mọi tập con của `S`[^sum-subset]. `UNION S` là hợp của mọi phần tử của `S`[^sum-union].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảng quan hệ trong SQL cũng là "tập các dòng" — không thứ tự, không dòng trùng (khi dùng `DISTINCT`). `{x \in S : P}` giống `SELECT * FROM S WHERE P`, `{e : x \in S}` giống `SELECT DISTINCT e FROM S`. Điểm khác: tập TLA+ là *giá trị* bất kỳ lồng được (tập của tập, tập của record), không phải "bảng".
+*Với service `lease-svc`.* Gần như câu hỏi vận hành nào về `lease-svc` cũng là câu hỏi về tập: những node nào đang up, những key nào đang rảnh, node `n1` đang giữ những key nào, hiện có những chủ nào. Để trả lời, ta cần ba việc: so sánh và kết hợp các tập, chọn ra phần tử thỏa một điều kiện (lọc), và biến mỗi phần tử thành thứ khác (ánh xạ). Phần này đi qua cả ba; các ví dụ về `lease-svc` dùng ký hiệu `L[k]` của mục 3 và được ghép hoàn chỉnh ở mục 9.
 
-*Tập hợp.* Sách coi khái niệm tập và quan hệ `∈` là khái niệm nguyên thủy không định nghĩa[^bk-set-undef]. Hai tập bằng nhau khi và chỉ khi có cùng phần tử, nên `{0, 1, 2}`, `{2, 1, 0}` và `{0, 0, 1, 2, 2}` là cùng một tập[^bk-set-same]. Tập rỗng viết `{}`.
+### 2.1 Tập hợp và các phép toán
+
+TLA+ lấy khái niệm tập và quan hệ `∈` làm khái niệm nguyên thủy, không định nghĩa thêm[^bk-set-undef]. Hai tập bằng nhau khi và chỉ khi có cùng phần tử, nên `{0, 1, 2}`, `{2, 1, 0}` và `{0, 0, 1, 2, 2}` là cùng một tập[^bk-set-same]. Tập rỗng viết `{}`.
 
 | Phép | Gõ ASCII | Ví dụ (giá trị theo định nghĩa) |
 |---|---|---|
@@ -135,9 +147,15 @@ Hình dung (nhận xét của người soạn): bảng quan hệ trong SQL cũng
 | hợp các phần tử | `UNION S` | `UNION {{1, 2}, {2, 3}, {3, 4}}` = `{1, 2, 3, 4}` |
 | tích Descartes | `S \X T` | tập các cặp `<<a, b>>` |
 
-Sách định nghĩa: `S ∩ T` là tập các phần tử có ở cả hai[^bk-cap], `S ∪ T` là các phần tử có ở một trong hai hoặc cả hai[^bk-cup], `S ⊆ T` đúng khi mọi phần tử của `S` đều thuộc `T`[^bk-subseteq], `S \ T` là các phần tử của `S` không thuộc `T`[^bk-diff]. Hai ví dụ cho `UNION` và `SUBSET` là của sách[^bk-union-ex][^bk-subset-ex].
+Các phép trong bảng định nghĩa như sau. Giao `S ∩ T` gồm các phần tử có ở cả hai tập[^bk-cap]. Hợp `S ∪ T` gồm các phần tử có ở một trong hai hoặc cả hai[^bk-cup]. `S ⊆ T` đúng khi mọi phần tử của `S` đều thuộc `T`[^bk-subseteq]. Hiệu `S \ T` gồm các phần tử của `S` không thuộc `T`[^bk-diff]. Ví dụ `UNION` trong bảng lấy từ sách[^bk-union-ex]. Ví dụ `SUBSET` cũng vậy[^bk-subset-ex].
 
-*Lọc và ánh xạ.* `{x \in S : P}` là tập con của `S` gồm các `x` thỏa `P`; ví dụ tập số tự nhiên lẻ viết `{n \in Nat : n % 2 = 1}`[^bk-filter]. `{e : x \in S}` là tập các giá trị có dạng `e` khi `x` chạy trên `S`; tập số lẻ cũng viết được `{2 * n + 1 : n \in Nat}`[^bk-map]. Mẹo nhớ của Learn TLA+: đọc dấu hai chấm là "mà" (*where*) — "bình phương của `x` mà `x` thuộc 1..4" (ánh xạ) và "`x` thuộc 1..4 mà `x` chẵn" (lọc)[^learn-colon]. Cả hai tổng quát hóa giống lượng từ: `{e : x \in S, y \in T}` là tập các phần tử dạng `e` khi `x` chạy trên `S` và `y` chạy trên `T`[^bk-map-multi]; trong dạng lọc, `x` có thể là một tuple, như `{<<y, z>> \in S : P}` là các cặp trong `S` thỏa `P`[^bk-set-tuples].
+### 2.2 Lọc và ánh xạ
+
+`{x \in S : P}` là tập con của `S` gồm các `x` thỏa `P`. Ví dụ tập số tự nhiên lẻ viết `{n \in Nat : n % 2 = 1}`[^bk-filter]. Với `lease-svc`, tập các key đang rảnh là `{k \in Key : L[k].owner = NoOwner}`: bắt đầu từ tập `Key` có sẵn rồi giữ lại key nào chưa có chủ.
+
+`{e : x \in S}` là tập các giá trị có dạng `e` khi `x` chạy trên `S`; tập số lẻ cũng viết được `{2 * n + 1 : n \in Nat}`[^bk-map]. Với `lease-svc`, tập các chủ hiện có là `{L[k].owner : k \in Key}`: mỗi key cho ra một chủ, các chủ trùng nhau tự gộp lại. Learn TLA+ có một mẹo để khỏi lẫn hai dạng: đọc dấu hai chấm là "mà" (*where*). "Bình phương của `x` mà `x` thuộc 1..4" là ánh xạ, còn "`x` thuộc 1..4 mà `x` chẵn" là lọc[^learn-colon].
+
+Cả hai dạng tổng quát hóa giống lượng từ. `{e : x \in S, y \in T}` là tập các phần tử dạng `e` khi `x` chạy trên `S` và `y` chạy trên `T`[^bk-map-multi]. Trong dạng lọc, `x` còn có thể là một tuple, chẳng hạn `{<<y, z>> \in S : P}` là các cặp trong `S` thỏa `P`[^bk-set-tuples].
 
 ```tla
 EXTENDS Naturals, FiniteSets
@@ -151,39 +169,49 @@ Flat    == UNION {{1, 2}, {2, 3}, {3, 4}}       \* {1, 2, 3, 4}
 Count   == Cardinality(Evens)                   \* 5 (cần FiniteSets)
 ```
 
-*Số phần tử.* `Cardinality(S)` (số phần tử của tập hữu hạn) và `IsFiniteSet(S)` nằm trong module `FiniteSets`, không phải built-in[^bk-cardinality].
+`Cardinality(S)` (số phần tử của một tập hữu hạn) và `IsFiniteSet(S)` không phải built-in mà nằm trong module `FiniteSets`[^bk-cardinality].
 
-*Tại sao không có `{x : P(x)}` trần?* Sách nêu nghịch lý Russell: nếu có "tập mọi tập `S` sao cho `S ∉ S`" thì ra mâu thuẫn; nguồn gốc là "tập" đó không phải tập, và không có cách nào viết nó trong TLA+[^bk-russell]. Hệ quả thực dụng (nhận xét của người soạn): để lấy "các `x` thỏa `P`" phải lọc từ một tập nguồn `S` có sẵn bằng `{x \in S : P}` — giống mệnh đề `FROM` của SQL.
+### 2.3 Vì sao không có `{x : P(x)}` trần
 
-*Giá cả của tập lớn.* Learn TLA+ cảnh báo: `SUBSET` của một tập 86400 phần tử có $2^{86400}$ phần tử — "đừng làm vậy"; muốn kiểm tra "`S` là tập con của `T`" hãy viết `S \subseteq T`, không phải `S \in SUBSET T`[^learn-subset-cost]. Trang Structured Data của Learn TLA+ cho biết số phần tử của `[A -> B]` là $|B|^{|A|}$ (mục 3)[^learn-fnset-size]. Hiểu cỡ tập là kỹ năng sống còn khi dùng TLC (chương 04): nhiều lỗi "TLC chạy mãi" xuất phát từ một `SUBSET` hay `[S -> T]` quá lớn (nhận xét của người soạn).
+Có thể bạn muốn viết `{x : P(x)}` cho "mọi `x` thỏa `P`". TLA+ không cho. Lý do là nghịch lý Russell: nếu có "tập mọi tập `S` sao cho `S ∉ S`" thì ra mâu thuẫn. Nguồn gốc của mâu thuẫn là "tập" đó không phải tập, và không có cách nào viết nó trong TLA+[^bk-russell]. Hệ quả thực dụng (nhận xét của người soạn): muốn lấy "các `x` thỏa `P`", bạn luôn phải lọc từ một tập nguồn `S` có sẵn bằng `{x \in S : P}`, giống mệnh đề `FROM` của SQL.
+
+### 2.4 Cái giá của tập lớn
+
+Khi dùng TLC (chương 04), kích thước tập là chuyện sống còn. Learn TLA+ cảnh báo `SUBSET` của một tập 86400 phần tử có $2^{86400}$ phần tử, đừng làm vậy. Muốn kiểm tra "`S` là tập con của `T`" thì viết `S \subseteq T`, không phải `S \in SUBSET T`[^learn-subset-cost]. Cũng trang Learn TLA+ đó cho biết số phần tử của `[A -> B]` là $|B|^{|A|}$ (hàm xem mục 3)[^learn-fnset-size]. Thử tính cho `lease-svc` (phép tính của người soạn): nếu cluster có 10 node thì `SUBSET Node` có $2^{10} = 1024$ phần tử, nhưng 30 node đã là $2^{30} = 1\,073\,741\,824$. Còn `[Key -> Node]` với 10 key và 5 node là $5^{10} = 9\,765\,625$ hàm. Nhiều lỗi "TLC chạy mãi" xuất phát từ một `SUBSET` hay `[S -> T]` quá lớn như vậy (nhận xét của người soạn).
 
 <details><summary>Đi sâu: ngữ nghĩa dựa trên <code>∈</code>, thứ tự duyệt, và phần tử phải "so sánh được" trong TLC</summary>
 
-- **Nền tảng.** TLA+ dựa trên lý thuyết tập Zermelo–Fränkel, trong đó mọi giá trị đều là tập[^bk-zf]. Sách nói có thể định nghĩa mọi toán tử khác qua `∈`: ví dụ `S ∪ T` được định nghĩa bởi `∀ x : (x ∈ (S ∪ T)) ≡ (x ∈ S) ∨ (x ∈ T)`[^bk-set-sem]. Nhận xét của người soạn: nghĩa là "bằng nhau" giữa các tập là bằng nhau theo phần tử (extensionality; ví dụ `{0, 1, 2}` và `{2, 1, 0}` là cùng một tập[^bk-set-same]), không có khái niệm danh tính (identity) như con trỏ.
-- **Không có thứ tự.** Vì tập không có thứ tự, đặc tả đúng không được phụ thuộc vào thứ tự duyệt. Sách mô tả TLC đánh giá `\E x \in S : p` bằng cách duyệt các phần tử của `S` "theo một thứ tự nào đó"[^tlc-order]; đừng viết đặc tả mà đúng/sai tùy thứ tự (nhận xét của người soạn).
-- **Phần tử phải so sánh được (khi chạy TLC).** TLC chỉ làm việc với "giá trị TLC": tập hữu hạn các giá trị *so sánh được* với nhau. Sách giải thích: chuỗi và số không so sánh được vì ngữ nghĩa TLA+ không nói `"abc"` có bằng 42 hay không, nên `{"abc", 42}` không phải giá trị TLC, trong khi `{{"abc"}, {4, 2}}` thì được vì hai tập khác số phần tử thì chắc chắn khác nhau[^tlc-comparable]. Tuple và record có thành phần là giá trị TLC thì cũng là giá trị TLC[^tlc-tuple-value]. Vì vậy trong thực hành các tập nên đồng nhất kiểu phần tử (nhận xét của người soạn).
+- **Nền tảng.** TLA+ dựa trên lý thuyết tập Zermelo–Fränkel, trong đó mọi giá trị đều là tập[^bk-zf]. Mọi toán tử tập khác đều định nghĩa được qua `∈`; chẳng hạn `S ∪ T` được định nghĩa bằng `∀ x : (x ∈ (S ∪ T)) ≡ (x ∈ S) ∨ (x ∈ T)`[^bk-set-sem]. Nhận xét của người soạn: nghĩa là hai tập "bằng nhau" khi có cùng phần tử (extensionality), và không có khái niệm danh tính (identity) như con trỏ.
+- **Không có thứ tự duyệt.** Vì tập không có thứ tự nên đặc tả đúng không được phụ thuộc vào thứ tự duyệt. Sách mô tả TLC đánh giá `\E x \in S : p` bằng cách duyệt các phần tử của `S` "theo một thứ tự nào đó"[^tlc-order]; đừng viết đặc tả mà đúng hay sai tùy thứ tự (nhận xét của người soạn).
+- **Phần tử phải so sánh được (khi chạy TLC).** TLC chỉ làm việc với "giá trị TLC": tập hữu hạn các giá trị *so sánh được* với nhau. Chuỗi và số không so sánh được, vì ngữ nghĩa TLA+ không nói `"abc"` có bằng 42 hay không. Do đó `{"abc", 42}` không phải giá trị TLC, trong khi `{{"abc"}, {4, 2}}` thì được, vì hai tập khác số phần tử thì chắc chắn khác nhau[^tlc-comparable]. Tuple và record có thành phần là giá trị TLC thì cũng là giá trị TLC[^tlc-tuple-value]. Trong thực hành, nên giữ cho các phần tử của một tập cùng loại (nhận xét của người soạn).
 - **`\X` không kết hợp.** `A \X B \X C` là tập các bộ ba, khác với `A \X (B \X C)` là tập các cặp `<<a, <<b, c>>>>`[^bk-product]. Learn TLA+ nhắc cùng điều này[^learn-product].
-- **Số trong tập.** Tập số (`Nat`, `Int`, `a..b`) thuộc về các module chuẩn, xem mục 7.
+- **Số trong tập.** Các tập số (`Nat`, `Int`, `a..b`) thuộc về module chuẩn, xem mục 7.
 
 </details>
 
-**Quay lại Q2:** tập là bộ sưu tập không thứ tự, không trùng; dựng tập mới bằng lọc, ánh xạ, `SUBSET`, `UNION`, `\X`, luôn bắt đầu từ một tập nguồn.
+**Quay lại Q2:** tập là bộ sưu tập không thứ tự, không trùng; mọi tập mới đều dựng từ một tập nguồn bằng lọc, ánh xạ, `SUBSET`, `UNION` hoặc `\X`. Với `lease-svc`, "key nào đang rảnh" là một phép lọc trên `Key`, còn "hiện có những chủ nào" là một phép ánh xạ.
 
 ## 3. Hàm: `[x \in S |-> e]`, `DOMAIN`, `[S -> T]`, `EXCEPT` (Q3)
 
-> **Trả lời ngắn.** Hàm trong TLA+ là hàm toán học: một miền xác định (`DOMAIN f`, luôn là một tập) và mỗi phần tử của miền được gán một giá trị `f[x]`[^bk-fn-def]. Viết hàm bằng `[x \in S |-> e]`, viết *tập các hàm* từ `S` vào `T` bằng `[S -> T]`[^bk-fn-set], và "cập nhật" bằng `[f EXCEPT ![c] = e]` — tạo ra một hàm *mới* giống `f` trừ tại `c`[^bk-except-def]. Sách nói hàm tương ứng với mảng của ngôn ngữ lập trình[^bk-fn-array] (nhận xét của người soạn: cũng gần với map/dictionary); trạng thái hệ thống thường là một hàm (nhận xét của người soạn).
+> **Trả lời ngắn.** Hàm trong TLA+ là hàm toán học: mỗi hàm có một miền xác định `DOMAIN f` (luôn là một tập), và mỗi phần tử của miền được gán một giá trị `f[x]`[^bk-fn-def]. Ta viết hàm bằng `[x \in S |-> e]`, và viết *tập các hàm* từ `S` vào `T` bằng `[S -> T]`[^bk-fn-set]. Muốn "cập nhật", ta viết `[f EXCEPT ![c] = e]`, biểu thức này tạo ra một hàm *mới* giống `f` trừ tại `c`[^bk-except-def]. Sách nói hàm tương ứng với mảng của ngôn ngữ lập trình[^bk-fn-array] (nhận xét của người soạn: cũng gần với map hay dictionary), và trạng thái của một hệ thống thường là một hàm (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `HashMap<NodeId, State>` *bất biến*. Bạn không bao giờ sửa map tại chỗ; mỗi bước của hệ thống sinh ra một map mới, giống `{...state, [id]: newValue}` trong JavaScript hay một reducer kiểu Redux. TLA+ chọn cách này vì đặc tả mô tả *giá trị* của trạng thái ở mỗi thời điểm, không mô tả vùng nhớ.
+*Với service `lease-svc`.* Trái tim của `lease-svc` là bảng lease: mỗi key ứng với một lease. Trong code Rust, đó sẽ là một `HashMap<Key, Lease>` mà mỗi lần cấp lease ta `insert` vào tại chỗ. Đặc tả thì khác: nó không mô tả vùng nhớ mà mô tả *giá trị* của bảng ở từng thời điểm. Bảng lease là một hàm từ `Key` sang lease, và mỗi bước của hệ thống cho ra một bảng mới thay vì sửa bảng cũ. Mục này dạy cách viết và "sửa" hàm theo kiểu đó.
 
-*Hàm và miền.* Hàm `f` có miền `DOMAIN f` và gán cho mỗi `x` thuộc miền giá trị `f[x]` — TLA+ dùng ngoặc vuông như ký hiệu mảng thay cho `f(x)` của toán học[^bk-fn-def]. Hai hàm bằng nhau khi có cùng miền và cùng giá trị tại mọi điểm[^bk-fn-eq]. Giá trị `f[x]` chỉ được xác định khi `x` thuộc miền[^bk-fn-value].
+### 3.1 Hàm và miền
 
-*Tạo hàm.* `[x \in S |-> e]` là hàm có miền `S` với `f[x] = e` tại mọi `x \in S`[^sum-fn]. Ví dụ của sách: `succ == [n \in Nat |-> n + 1]` là hàm kế tiếp trên số tự nhiên[^bk-succ].
+Hàm `f` có miền `DOMAIN f` và gán cho mỗi `x` thuộc miền một giá trị `f[x]`. TLA+ dùng ngoặc vuông như ký hiệu mảng, thay cho `f(x)` của toán học[^bk-fn-def]. Hai hàm bằng nhau khi có cùng miền và cùng giá trị tại mọi điểm[^bk-fn-eq]. Còn `f[x]` chỉ có giá trị xác định khi `x` thuộc miền[^bk-fn-value].
 
-*Tập hàm.* `[S -> T]` là tập mọi hàm có miền đúng bằng `S` và giá trị rơi vào `T`; sách nói rõ miền giá trị có thể là một tập con *bất kỳ* của `T`[^bk-fn-set], nên `[S -> T]` *không* đòi hàm phủ hết `T`. Thường dùng làm "kiểu" của biến, ví dụ `mem \in [Adr -> Val]` cho một bộ nhớ: sách mô tả trạng thái bộ nhớ là phép gán giá trị cho địa chỉ — gọi là "mảng" trong lập trình, "hàm từ `Adr` sang `Val`" trong toán học[^bk-fn-array2]. Số phần tử của `[A -> B]` là $|B|^{|A|}$[^learn-fnset-size].
+`[x \in S |-> e]` là hàm có miền `S` mà `f[x] = e` tại mọi `x \in S`[^sum-fn]. Ví dụ của sách: `succ == [n \in Nat |-> n + 1]` là hàm kế tiếp trên số tự nhiên[^bk-succ]. Với `lease-svc`, bảng lease lúc khởi động, mọi key chưa ai giữ, là `[k \in Key |-> [owner |-> NoOwner, epoch |-> 0]]` (record xem mục 4).
 
-*Cập nhật bằng `EXCEPT`.* `[f EXCEPT ![c] = e]` là hàm giống `f` ngoại trừ tại `c` có giá trị `e`; gọi theo cách nhìn mảng, đó là mảng thu được từ `f` bằng cách gán `e` vào `f[c]`[^bk-except-array]. Trong `e` được dùng `@` để chỉ giá trị cũ `f[c]`[^bk-except-at]. Nhiều điều khoản cách nhau dấu phẩy được áp dụng lần lượt, và `![c][d]` cập nhật phần tử lồng[^bk-except-nested].
+### 3.2 Tập hàm
+
+`[S -> T]` là tập mọi hàm có miền đúng bằng `S` và giá trị rơi vào `T`. Sách nói rõ miền giá trị có thể là một tập con *bất kỳ* của `T`[^bk-fn-set], nên `[S -> T]` *không* đòi hàm phủ hết `T`. Ta hay dùng nó làm "kiểu" của biến. Sách ví dụ `mem \in [Adr -> Val]` cho một bộ nhớ: trạng thái bộ nhớ là phép gán giá trị cho địa chỉ, gọi là "mảng" trong lập trình và "hàm từ `Adr` sang `Val`" trong toán học[^bk-fn-array2]. Với `lease-svc`, "bảng lease hợp lệ" nằm trong `[Key -> Lease]`. Số phần tử của `[A -> B]` là $|B|^{|A|}$[^learn-fnset-size].
+
+### 3.3 Cập nhật bằng `EXCEPT`
+
+`[f EXCEPT ![c] = e]` là hàm giống `f` ngoại trừ tại `c` có giá trị `e`; theo cách nhìn mảng, đó là mảng thu được từ `f` bằng cách gán `e` vào `f[c]`[^bk-except-array]. Trong `e` ta dùng `@` để chỉ giá trị cũ `f[c]`[^bk-except-at]. Nhiều điều khoản cách nhau dấu phẩy được áp dụng lần lượt, và `![c][d]` cập nhật phần tử lồng[^bk-except-nested]. Chẳng hạn bước "cấp lease cho node `n` trên key `k`" của `lease-svc` viết là `[L EXCEPT ![k].owner = n, ![k].epoch = @ + 1]`: chủ đổi thành `n`, epoch tăng thêm 1.
 
 ```tla
 EXTENDS Naturals
@@ -200,9 +228,9 @@ Grid2  == [Grid EXCEPT ![1][2] = 7]        \* chỉ ô (1,2) đổi thành 7
 Status == [Server -> {"online", "booting", "offline"}]   \* tập mọi cách gán trạng thái cho từng server
 ```
 
-(`Server` là một CONSTANT, xem chương 03/04. Ví dụ `Status` theo Learn TLA+[^learn-status].)
+`Server` ở đây là một CONSTANT (chương 03 và 04 sẽ dạy), và ví dụ `Status` theo Learn TLA+[^learn-status].
 
-*Cái bẫy của `EXCEPT`: nó không thêm khóa mới.* Nếu `c` không thuộc `DOMAIN f` thì `[f EXCEPT ![c] = e]` chính là `f`[^bk-except-nondomain]; sách nói TLC cảnh báo biểu thức kiểu này vì nhiều khả năng là lỗi[^tlc-nowarning]. Khác `HashMap::insert` của Rust (mục 10): muốn "thêm khóa", phải dựng hàm có miền lớn hơn:
+*`EXCEPT` không thêm khóa mới.* Nếu `c` không thuộc `DOMAIN f` thì `[f EXCEPT ![c] = e]` chính là `f`[^bk-except-nondomain]. Sách nói TLC cảnh báo biểu thức kiểu này vì nhiều khả năng đó là lỗi[^tlc-nowarning]. Với `lease-svc`, nếu `Release(L, k)` bị gọi với một `k` không có trong `Key` thì bảng trả về y nguyên và không báo lỗi gì, một bug rất dễ lọt. Khác `HashMap::insert` của Rust (mục 10): muốn "thêm khóa", ta phải dựng một hàm có miền lớn hơn.
 
 ```tla
 EXTENDS TLC
@@ -213,11 +241,15 @@ PutPure(f, k, v) ==                               \* thuần TLA+
 Put(f, k, v) == (k :> v) @@ f                     \* dùng toán tử của module TLC
 ```
 
-Trong module `TLC`, `d :> e` là hàm một điểm `[x \in {d} |-> e]` và `f @@ g` ghép hai hàm, ưu tiên giá trị ở `f` khi trùng khóa[^repo-tlc-ops]; Learn TLA+ mô tả cùng điều và nói thêm hai toán tử đó chỉ có khi `EXTENDS TLC`[^learn-tlc-ops]. Vì vậy `(k :> v) @@ f` ghi đè khóa `k` nếu đã có, còn `f @@ (k :> v)` thì giữ giá trị cũ (suy ra từ định nghĩa, nhận xét của người soạn).
+Trong module `TLC`, `d :> e` là hàm một điểm `[x \in {d} |-> e]`, còn `f @@ g` ghép hai hàm và ưu tiên giá trị ở `f` khi trùng khóa[^repo-tlc-ops]. Learn TLA+ mô tả cùng điều và nói thêm: hai toán tử đó chỉ có khi `EXTENDS TLC`[^learn-tlc-ops]. Suy ra từ định nghĩa (nhận xét của người soạn): `(k :> v) @@ f` ghi đè khóa `k` nếu đã có, còn `f @@ (k :> v)` thì giữ giá trị cũ.
 
-*Nhiều đối số.* Hàm nhiều đối số là hàm có miền là tập các tuple: `f[a, b]` viết tắt của `f[<<a, b>>]`[^bk-multi-arg]. Sách khuyên chuộng hàm một đối số, và thay `f[a, b]` bằng `f[a][b]` (hàm trả về hàm) khi có thể[^bk-multi-prefer]. Learn TLA+ minh họa với `[x, y \in S |-> x * y]` và gọi `Prod[3, 5]`[^learn-multi].
+### 3.4 Nhiều đối số
 
-*Hàm khác toán tử.* Đây là chỗ người mới hay nhầm. Với `Tail(s)` hay `fact[n \in Nat]`, hai thứ này là hai loại đối tượng khác nhau[^bk-fn-vs-op0], như bảng sau.
+Hàm nhiều đối số là hàm có miền là tập các tuple, nên `f[a, b]` viết tắt của `f[<<a, b>>]`[^bk-multi-arg]. Sách khuyên chuộng hàm một đối số, và nếu được thì thay `f[a, b]` bằng `f[a][b]` (hàm trả về hàm)[^bk-multi-prefer]. Learn TLA+ minh họa bằng `[x, y \in S |-> x * y]` rồi gọi `Prod[3, 5]`[^learn-multi].
+
+### 3.5 Hàm khác toán tử
+
+Đây là chỗ người mới hay nhầm. `f[x]` và `Op(x)` trông gần giống nhau, nhưng ví dụ `Tail(s)` và `fact[n \in Nat]` là hai loại đối tượng khác nhau[^bk-fn-vs-op0]. Bảng sau tóm tắt khác biệt.
 
 | | Hàm `f[x]` | Toán tử `Op(x)` |
 |---|---|---|
@@ -227,33 +259,39 @@ Trong module `TLC`, `d :> e` là hàm một điểm `[x \in {d} |-> e]` và `f @
 | Làm giá trị của biến? | Được | Không: nếu biến có thể nhận `V` làm giá trị thì `V` phải là hàm[^bk-fn-vs-op2] |
 | Nhận toán tử làm đối số? | Không | Được[^bk-op-arg] |
 
-Ví dụ: không thể định nghĩa `Tail` như một hàm, vì miền của nó phải gồm mọi dãy khác rỗng, và tập của mọi dãy như vậy "quá lớn để là một tập"[^bk-tail-notfn]. Về phía biến: sách nói nếu một biến có thể nhận `V` làm giá trị thì `V` phải là hàm, không thể là toán tử[^bk-fn-vs-op2]; nhận xét của người soạn: vì thế cấu trúc ánh xạ nằm trong biến (bảng trạng thái, hàng đợi, bản ghi) viết bằng hàm/record/tuple, còn "phép tính" phụ trợ thường viết bằng toán tử. Khi những khác biệt trên không quyết định thì sách cho là chuyện sở thích và tác giả thường chọn toán tử[^bk-prefer-op].
+Ví dụ rõ nhất: không thể định nghĩa `Tail` như một hàm, vì miền của nó phải gồm mọi dãy khác rỗng, và tập các dãy như vậy "quá lớn để là một tập"[^bk-tail-notfn]. Còn vì biến chỉ mang được giá trị hàm chứ không mang được toán tử, nên mọi cấu trúc ánh xạ nằm trong biến, như bảng lease của `lease-svc`, đều phải viết bằng hàm, record hoặc tuple. Phần "phép tính" phụ trợ như `Free(L)` hay `Held(L, n)` thì thường viết bằng toán tử (nhận xét của người soạn). Khi những khác biệt trên không quyết định được, sách cho đó là chuyện sở thích và tác giả thường chọn toán tử[^bk-prefer-op].
 
 <details><summary>Đi sâu: định nghĩa đệ quy, <code>RECURSIVE</code>, "<code>f' = [...]</code>" so với "<code>\A i : f'[i] = ...</code>", và <code>@</code>/<code>:&gt;</code> trong TLC</summary>
 
-- **Hàm đệ quy.** Viết `fact == [n \in Nat |-> IF n = 0 THEN 1 ELSE n * fact[n - 1]]` là *bất hợp pháp* vì `fact` ở vế phải chưa được định nghĩa[^bk-fact-illegal]. TLA+ cho phép dạng viết tắt `fact[n \in Nat] == IF n = 0 THEN 1 ELSE n * fact[n - 1]`, và sách nói rõ rằng TLA+ cho phép sự "vòng tròn bề ngoài" này riêng cho định nghĩa hàm đệ quy[^bk-recfn-ok]. Ngữ nghĩa đằng sau là `CHOOSE` (mục 5): sách coi dạng viết tắt đó chỉ là cách viết gọn của một định nghĩa dùng `CHOOSE`[^bk-recfn-abbrev], và vì vậy nó "không nhất thiết định nghĩa ra một hàm" — nếu không tồn tại hàm thỏa phương trình, kết quả là một giá trị không xác định[^bk-recfn-silly].
-- **Đệ quy tương hỗ** (hai hàm gọi nhau) không được phép[^bk-mutual]; thủ thuật của sách là dựng một hàm trả về record có các trường là hai hàm cần định nghĩa, cách này chuyển được mọi đệ quy tương hỗ thành một đệ quy đơn[^bk-mr-trick].
-- **`RECURSIVE` cho toán tử.** Sách (xuất bản 2002) nói toán tử không đệ quy được[^bk-fn-vs-op3]. Learn TLA+ cho biết TLA+ đã được cập nhật năm 2008 để có toán tử đệ quy, và chúng phải được khai báo trước (`RECURSIVE SumSeq(_)` rồi mới định nghĩa)[^learn-recursive]. Hai nguồn không mâu thuẫn: sách là mô tả gốc, Learn mô tả bản ngôn ngữ về sau.
-- **Khi viết đặc tả: giá trị mới của cả hàm, không phải từng điểm.** Với `f' = [i \in Nat |-> i + 1]` (xác định duy nhất hàm `f'`) và `\A i \in Nat : f'[i] = i + 1` (chỉ ràng buộc từng điểm, `f'` có thể là hàm miền rộng hơn, thậm chí không là hàm), sách nói hai công thức không tương đương, công thức đầu kéo theo công thức sau chứ không ngược lại; khi viết đặc tả ta hầu như luôn muốn đặt giá trị mới của *cả biến* nên viết dạng đầu[^bk-using-fn]. Ký hiệu `f'` sẽ học ở chương 03.
+- **Hàm đệ quy.** Viết `fact == [n \in Nat |-> IF n = 0 THEN 1 ELSE n * fact[n - 1]]` là *bất hợp pháp*, vì `fact` ở vế phải chưa được định nghĩa[^bk-fact-illegal]. Thay vào đó, TLA+ có dạng viết tắt `fact[n \in Nat] == IF n = 0 THEN 1 ELSE n * fact[n - 1]`, và sách nói rõ rằng TLA+ cho phép sự "vòng tròn bề ngoài" này riêng cho định nghĩa hàm đệ quy[^bk-recfn-ok]. Ngữ nghĩa đằng sau là `CHOOSE` (mục 5): sách coi dạng viết tắt đó chỉ là cách viết gọn của một định nghĩa dùng `CHOOSE`[^bk-recfn-abbrev]. Vì vậy nó "không nhất thiết định nghĩa ra một hàm"; nếu không tồn tại hàm thỏa phương trình thì kết quả là một giá trị không xác định[^bk-recfn-silly].
+- **Đệ quy tương hỗ** (hai hàm gọi nhau) không được phép[^bk-mutual]. Thủ thuật của sách là dựng một hàm trả về record có các trường là hai hàm cần định nghĩa; cách này đưa được mọi đệ quy tương hỗ về một đệ quy đơn[^bk-mr-trick].
+- **`RECURSIVE` cho toán tử.** Sách xuất bản năm 2002 nói toán tử không đệ quy được[^bk-fn-vs-op3]. Learn TLA+ cho biết TLA+ đã được cập nhật năm 2008 để có toán tử đệ quy, và phải khai báo trước (`RECURSIVE SumSeq(_)` rồi mới định nghĩa)[^learn-recursive]. Hai nguồn không mâu thuẫn: sách là mô tả gốc, Learn mô tả bản ngôn ngữ về sau.
+- **Khi viết đặc tả: đặt giá trị mới của cả hàm, không phải từng điểm.** Xét `f' = [i \in Nat |-> i + 1]`, công thức xác định duy nhất hàm `f'`, và `\A i \in Nat : f'[i] = i + 1`, công thức chỉ ràng buộc từng điểm nên `f'` có thể là hàm có miền rộng hơn, thậm chí không phải hàm. Sách nói hai công thức không tương đương: công thức đầu kéo theo công thức sau chứ không ngược lại. Khi viết đặc tả, ta hầu như luôn muốn đặt giá trị mới của *cả biến*, nên hãy viết dạng đầu[^bk-using-fn]. Ký hiệu `f'` sẽ học ở chương 03.
 - **Bảng chân trị bằng hàm.** `TruthTable == [p, q \in BOOLEAN |-> p => q]` liệt kê `=>` trên mọi cặp Boolean; Learn TLA+ cho biết kết quả hiển thị dưới dạng "mở rộng" dùng `:>` và `@@`[^learn-truth].
 
 </details>
 
-**Quay lại Q3:** hàm là ánh xạ có miền là tập; `EXCEPT` sinh hàm mới cùng miền (không thêm khóa), và vì biến chỉ mang được giá trị chứ không mang được toán tử, thứ ánh xạ nằm trong biến (như trạng thái hệ thống) được viết bằng hàm.
+**Quay lại Q3:** hàm là ánh xạ có miền là một tập; `EXCEPT` sinh hàm mới cùng miền (không thêm khóa), và vì biến chỉ mang được giá trị chứ không mang được toán tử, thứ ánh xạ nằm trong biến, như bảng lease của `lease-svc`, được viết bằng hàm.
 
 ## 4. Record, tuple, sequence: tất cả đều là hàm (Q4)
 
-> **Trả lời ngắn.** Record là hàm có miền là một tập hữu hạn các chuỗi; `r.h` chỉ là cách viết khác của `r["h"]`[^bk-record-def]. Tuple `<<a, b, c>>` là hàm có miền `{1, 2, 3}`[^bk-tuple-fn], và sequence (dãy hữu hạn) *chính là* tuple[^bk-seq-tuple]. Module `Sequences` cho các toán tử `Len`, `Head`, `Tail`, `Append`, `\o` và tập `Seq(S)`[^bk-seq-ops]; ngoài ra có `SubSeq`[^bk-subseq] và `SelectSeq`[^bk-selectseq]. Chỉ số bắt đầu từ 1.
+> **Trả lời ngắn.** Record là hàm có miền là một tập hữu hạn các chuỗi, và `r.h` chỉ là cách viết khác của `r["h"]`[^bk-record-def]. Tuple `<<a, b, c>>` là hàm có miền `{1, 2, 3}`[^bk-tuple-fn]. Sequence (dãy hữu hạn) *chính là* tuple[^bk-seq-tuple]. Module `Sequences` cho các toán tử `Len`, `Head`, `Tail`, `Append`, `\o` và tập `Seq(S)`[^bk-seq-ops]. Ngoài ra có `SubSeq` để cắt một đoạn[^bk-subseq]. Có cả `SelectSeq` để lọc theo điều kiện[^bk-selectseq]. Chỉ số bắt đầu từ 1.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có `struct Request { op, adr, val }`, một `(i32, String)` và một `Vec<Request>`. Với TLA+ cả ba chỉ là cùng một thứ — "ánh xạ từ nhãn sang giá trị" — nên mọi công cụ của hàm (`DOMAIN`, `EXCEPT`, `[S -> T]`) dùng chung được cho cả ba. Learn TLA+ nói gọn: TLA+ chỉ có hai kiểu tập hợp "thật" là tập và hàm; sequence và struct chỉ là những lớp hàm đặc biệt mà lập trình viên quen thuộc[^learn-two-collections].
+*Với service `lease-svc`.* Dữ liệu của `lease-svc` có ba dạng quen thuộc. Một lease gồm chủ và epoch, ví dụ `[owner |-> "n1", epoch |-> 3]`. Một request xin lease gồm loại, key và node xin, ví dụ `[kind |-> "acquire", key |-> "shard-7", node |-> "n2"]`. Và các request chưa xử lý xếp thành một hàng chờ theo thứ tự đến. Trong Rust, bạn sẽ viết hai `struct` và một `VecDeque<Request>`. TLA+ không có ba loại đó: cả ba đều là hàm, nên mọi công cụ của hàm ở mục 3 (`DOMAIN`, `EXCEPT`, `[S -> T]`) dùng chung được. Learn TLA+ nói gọn: TLA+ chỉ có hai kiểu collection "thật" là tập và hàm; sequence và struct chỉ là những lớp hàm đặc biệt mà lập trình viên quen thuộc[^learn-two-collections].
 
-*Record.* Sách dẫn lý do tồn tại của record: ngôn ngữ toán học cho phép dùng bộ ba có thứ tự, nhưng lập trình viên đã học được rằng dùng tuple như thế gây lỗi — dễ quên `ack` là thành phần thứ hai hay thứ ba[^bk-record-why]. Cú pháp: `[op |-> "Wr", adr |-> 7, val |-> 42]` tạo record (gõ ASCII của `↦` là `|->`[^bk-mapsto-ascii]); truy cập `r.adr`; thứ tự trường không có nghĩa[^bk-record-unordered]. *Tập* các record cùng dạng viết bằng dấu hai chấm: `[op : {"Rd", "Wr"}, adr : Adr]` là tập mọi record mà trường `op` thuộc `{"Rd", "Wr"}` và `adr` thuộc `Adr`[^bk-record-set]; tên trường lặp lại là bất hợp pháp, ví dụ `[a : S, a : T]`[^bk-record-illegal]. `EXCEPT` cho record dùng `!.trường`: `[chan EXCEPT !.val = d, !.rdy = 1 - @]`[^bk-except-record].
+### 4.1 Record
 
-*Tuple và sequence.* `<<a, b, c>>` (gõ `<<` và `>>`[^bk-angle]) thực ra là hàm có miền `{1, 2, 3}` ánh xạ 1 tới `a`, 2 tới `b`, 3 tới `c`, nên `<<a, b, c>>[2] = b`[^bk-tuple-fn]. Module `Sequences` định nghĩa dãy hữu hạn là tuple, nên dãy dài `n` là hàm có miền `1..n`[^bk-seq-tuple]. Dãy rỗng là tuple 0 phần tử `<<>>`, duy nhất một cái[^bk-empty-seq].
+Vì sao có record khi đã có tuple? Lamport trả lời: toán học cho phép dùng bộ ba có thứ tự, nhưng lập trình viên đã học được rằng dùng tuple như thế gây lỗi, vì dễ quên một thành phần là thứ hai hay thứ ba[^bk-record-why]. Với request ở trên, nếu viết `<<"acquire", "shard-7", "n2">>` thì đọc rất khó biết thành phần nào là key, thành phần nào là node (nhận xét của người soạn).
 
-Các toán tử (năm toán tử đầu theo ví dụ trong mục 4.1 của sách[^bk-seq-ops-ex]; `Len`, `q[1]`, `SubSeq`, `SelectSeq` là ví dụ của người soạn, giá trị tính tay theo định nghĩa):
+Record dùng tên trường. Ta viết `[op |-> "Wr", adr |-> 7, val |-> 42]` để tạo record (ký hiệu `↦` gõ ASCII là `|->`[^bk-mapsto-ascii]), rồi truy cập bằng `r.adr`. Thứ tự các trường không có nghĩa[^bk-record-unordered]. *Tập* các record cùng dạng viết bằng dấu hai chấm: `[op : {"Rd", "Wr"}, adr : Adr]` là tập mọi record có `op` thuộc `{"Rd", "Wr"}` và `adr` thuộc `Adr`[^bk-record-set]. Tên trường không được lặp, chẳng hạn `[a : S, a : T]` là bất hợp pháp[^bk-record-illegal]. Với `EXCEPT`, cập nhật trường của record dùng `!.tên_trường`, ví dụ `[chan EXCEPT !.val = d, !.rdy = 1 - @]`[^bk-except-record].
+
+### 4.2 Tuple và sequence
+
+`<<a, b, c>>` (gõ `<<` và `>>`[^bk-angle]) thực ra là hàm có miền `{1, 2, 3}`, ánh xạ 1 tới `a`, 2 tới `b`, 3 tới `c`. Do đó `<<a, b, c>>[2] = b`[^bk-tuple-fn]. Module `Sequences` định nghĩa dãy hữu hạn là tuple, nên một dãy dài `n` là hàm có miền `1..n`[^bk-seq-tuple]. Dãy rỗng là tuple không phần tử, viết `<<>>`, và chỉ có đúng một dãy như vậy[^bk-empty-seq].
+
+Các ví dụ sau dùng hàng chờ `q` của `lease-svc`, tạm thu gọn mỗi request thành một số. Năm toán tử đầu lấy theo ví dụ trong mục 4.1 của sách[^bk-seq-ops-ex]; `Len`, `q[1]`, `SubSeq` và `SelectSeq` là ví dụ của người soạn, giá trị tính tay theo định nghĩa.
 
 ```tla
 EXTENDS Naturals, Sequences
@@ -269,43 +307,55 @@ Ex7 == SubSeq(<<1, 2, 3, 4>>, 2, 3)                      \* <<2, 3>>
 Ex8 == SelectSeq(<<1, 2, 3, 4>>, LAMBDA n : n % 2 = 0)   \* <<2, 4>>
 ```
 
-`Seq(S)` là *tập* mọi dãy hữu hạn có phần tử thuộc `S`; ví dụ `<<3, 7>>` thuộc `Seq(Nat)`[^bk-seq-set]. Sách chép toán tử `\o` (gõ ASCII của `∘`) là phép nối[^bk-seq-concat]. `SelectSeq(s, Test)` giữ các phần tử `s[i]` mà `Test(s[i])` đúng[^bk-selectseq] (đối số thứ hai là một *toán tử*; Learn TLA+ cho biết có thể viết toán tử vô danh bằng `LAMBDA`[^learn-lambda], hoặc định nghĩa toán tử có tên rồi truyền vào).
+`Seq(S)` là *tập* mọi dãy hữu hạn có phần tử thuộc `S`; ví dụ `<<3, 7>>` thuộc `Seq(Nat)`[^bk-seq-set]. Toán tử `\o` là phép nối, gõ ASCII của `∘`[^bk-seq-concat]. `SelectSeq(s, Test)` giữ các phần tử `s[i]` mà `Test(s[i])` đúng[^bk-selectseq]. Đối số thứ hai của nó là một *toán tử*, có thể là toán tử vô danh viết bằng `LAMBDA`[^learn-lambda] hoặc một toán tử có tên mà bạn định nghĩa rồi truyền vào.
 
-Chỉ số từ 1: Learn TLA+ nhấn mạnh hai lần ("1-indexed")[^learn-1idx], vì `1..Len(s)` là tập chỉ số của `s` và nếu `s = <<>>` thì nó là `1..0 = {}` đúng như kỳ vọng[^learn-empty-range].
+Về chỉ số: Learn TLA+ nhấn mạnh hai lần rằng sequence "1-indexed"[^learn-1idx]. Chọn 1 có lý do thực dụng, vì `1..Len(s)` là tập chỉ số của `s`, và nếu `s = <<>>` thì nó là `1..0 = {}`, đúng như ta kỳ vọng[^learn-empty-range].
 
-Hàng đợi/stack/buffer của hệ thống hầu hết mô hình bằng sequence: `q' = Append(q, m)` để thêm, `Head(q)` và `q' = Tail(q)` để lấy ra (ký hiệu `q'` — giá trị của `q` ở bước kế tiếp — học ở [Chương 03](03-trang-thai-hanh-vi-action.md)). Bản thân sách dùng đúng cách này khi đặc tả hàng đợi FIFO có bộ đệm chuyển thông điệp[^bk-fifo].
+### 4.3 Hàng chờ bằng sequence
 
-Record có thể làm những việc mà struct lập trình không làm được. Sách ghi nhận cách định nghĩa record bằng hàm cho phép thao tác "không có đối tác trong ngôn ngữ lập trình"[^bk-record-power]. Ví dụ toán tử `R(r, s)` của sách thay giá trị mọi trường của `r` mà `s` cũng có[^bk-record-override], viết lại dưới tên `Override`.
+Hàng đợi, stack hay buffer của một hệ thống thường mô hình bằng sequence (nhận xét của người soạn). Với `lease-svc`, request mới vào thì `q' = Append(q, m)`; muốn xử lý request đầu thì lấy `Head(q)` và đặt `q' = Tail(q)`. Ký hiệu `q'`, giá trị của `q` ở bước kế tiếp, học ở [Chương 03](03-trang-thai-hanh-vi-action.md). Bản thân sách cũng làm đúng thế khi đặc tả một hàng đợi FIFO có bộ đệm chuyển thông điệp[^bk-fifo].
+
+### 4.4 Record làm được những việc struct không làm được
+
+Vì record là hàm, ta có thể thao tác trên nó theo cách mà struct của ngôn ngữ lập trình không có. Sách ghi nhận điều này: định nghĩa record bằng hàm cho phép những thao tác "không có đối tác trong ngôn ngữ lập trình"[^bk-record-power]. Ví dụ, toán tử `R(r, s)` của sách thay giá trị mọi trường của `r` mà `s` cũng có[^bk-record-override]; dưới đây ta viết lại nó với tên `Override`. Với `lease-svc`, `Override(lease, [owner |-> "n2"])` cho ra lease đổi chủ mà giữ nguyên epoch.
 
 ```tla
 Override(r, s) == [c \in DOMAIN r |-> IF c \in DOMAIN s THEN s[c] ELSE r[c]]
 ```
 
-*Chuỗi ký tự.* Trong định nghĩa hình thức của sách, chuỗi là tuple của ký tự[^bk-string]; nhưng trong thực hành, Learn TLA+ nói chuỗi chỉ có phép `=` và `#`, và được dùng như định danh mờ đục (giống kiểu `:symbol` của một số ngôn ngữ); nếu cần thao tác chuỗi thì lưu vào sequence[^learn-string]. Nên viết `"Wr"`, `"online"` như nhãn.
+### 4.5 Chuỗi ký tự
+
+Trong định nghĩa hình thức của sách, chuỗi là tuple của ký tự[^bk-string]. Nhưng trong thực hành, Learn TLA+ nói chuỗi chỉ có phép `=` và `#`, và ta dùng chúng như định danh mờ đục, giống kiểu `:symbol` của một số ngôn ngữ. Nếu cần thao tác trên chuỗi thì phải lưu vào sequence[^learn-string]. Vì vậy hãy viết `"Wr"`, `"online"`, `"acquire"` như những nhãn.
 
 <details><summary>Đi sâu: <code>Tail(&lt;&lt;&gt;&gt;)</code> sách khác module hiện hành, <code>Len</code> bằng <code>CHOOSE</code>, và những lỗi cú pháp quen thuộc</summary>
 
-- **Định nghĩa trong module chuẩn.** Mã nguồn module `Sequences` ở commit ghim định nghĩa `Seq(S) == UNION {[1..n -> S] : n \in Nat}`[^repo-seq-defs] và `Len(s) == CHOOSE n \in Nat : DOMAIN s = 1..n`[^repo-len]; `Append(s, e) == s \o <<e>>`[^repo-append], `Head(s) == s[1]`[^repo-head]. Nghĩa là `Len` được định nghĩa qua `CHOOSE` và `DOMAIN` (mục 5), và (suy ra từ định nghĩa, nhận xét của người soạn) áp `Len` vào thứ không phải dãy cho kết quả không xác định.
-- **`Tail` đã đổi.** Sách định nghĩa `Tail(s) = [i ∈ 1..(Len(s) − 1) ↦ s[i + 1]]`[^bk-tail-def], nên với `s = <<>>` miền `1..(-1)` là rỗng, và vì tuple 0 phần tử là hàm duy nhất có miền rỗng[^bk-0tuple] nên kết quả là dãy rỗng (suy ra từ định nghĩa trong sách, nhận xét của người soạn; chú thích trong repo bên dưới xác nhận định nghĩa gốc cho `Tail(<<>>) = <<>>`). Mã nguồn module hiện hành thì viết `Tail(s) == CASE s # << >> -> [i \in 1..(Len(s)-1) |-> s[i+1]]`, kèm chú thích rằng định nghĩa `Tail` đã đổi ngày 4/6/2013 vì bản gốc cho `Tail(<<>>) = <<>>`[^repo-tail]. `CASE` không có nhánh `OTHER` (mục 6) nên `Tail(<<>>)` giờ là giá trị không xác định (suy ra từ luật `CASE` ở mục 6, nhận xét của người soạn). Hệ quả thực hành: luôn bảo vệ bằng điều kiện `q # <<>>` trước khi `Head(q)`/`Tail(q)`.
-- **`Head(<<>>)` là biểu thức ngớ ngẩn**: `<<>>[1]` không xác định vì miền rỗng; TLC không đánh giá được `x[1]` khi `x = <<>>`[^bk-seq-silly]. Luật thứ tự đánh giá ở mục 8.
-- **Lỗi quen của Learn TLA+.** Viết `["key" |-> val]` thay vì `[key |-> val]` gây lỗi cú pháp (TLC báo `Encountered "|->"`)[^learn-record-key]; viết `[key: "val"]` thay vì `[key: {"val"}]` gây lỗi "Attempted to compute the number of elements in the string" khi chạy TLC[^learn-record-err] (vì vế phải dấu `:` phải là *tập*).
-- **`Seq(S)` vô hạn.** Theo định nghĩa trên, `Seq(S)` là hợp của vô hạn tập (mỗi độ dài một tập) nên nó là tập vô hạn khi `S` khác rỗng. Dùng nó để diễn tả kiểu như `q \in Seq(Msg)` thì tự nhiên về mặt toán học; còn cách TLC xử lý phép kiểm này và cách giới hạn độ dài dãy khi chạy (ràng buộc không gian trạng thái) là chủ đề của chương 04 (suy luận của người soạn; chưa kiểm chứng về hành vi của TLC với `Seq`).
+- **Định nghĩa trong module chuẩn.** Mã nguồn module `Sequences` ở commit ghim định nghĩa `Seq(S) == UNION {[1..n -> S] : n \in Nat}`[^repo-seq-defs] và `Len(s) == CHOOSE n \in Nat : DOMAIN s = 1..n`[^repo-len]. Còn `Append(s, e) == s \o <<e>>`[^repo-append]. Và `Head(s) == s[1]`[^repo-head]. Nghĩa là `Len` được định nghĩa qua `CHOOSE` và `DOMAIN` (mục 5); suy ra từ định nghĩa (nhận xét của người soạn), áp `Len` vào thứ không phải dãy cho kết quả không xác định.
+- **`Tail` đã đổi.** Sách định nghĩa `Tail(s) = [i ∈ 1..(Len(s) − 1) ↦ s[i + 1]]`[^bk-tail-def]. Với `s = <<>>`, miền `1..(-1)` là rỗng, và tuple không phần tử là hàm duy nhất có miền rỗng[^bk-0tuple], nên kết quả là dãy rỗng (suy ra từ định nghĩa trong sách, nhận xét của người soạn). Mã nguồn module hiện hành thì viết khác: `Tail(s) == CASE s # << >> -> [i \in 1..(Len(s)-1) |-> s[i+1]]`, kèm chú thích rằng định nghĩa `Tail` đã đổi ngày 4/6/2013 vì bản gốc cho `Tail(<<>>) = <<>>`[^repo-tail]. `CASE` không có nhánh `OTHER` (mục 6), nên `Tail(<<>>)` giờ là giá trị không xác định (suy ra từ luật `CASE` ở mục 6, nhận xét của người soạn). Hệ quả thực hành: luôn bảo vệ bằng điều kiện `q # <<>>` trước khi dùng `Head(q)` hay `Tail(q)`.
+- **`Head(<<>>)` là biểu thức ngớ ngẩn.** `<<>>[1]` không xác định vì miền rỗng, và TLC không đánh giá được `x[1]` khi `x = <<>>`[^bk-seq-silly]. Luật thứ tự đánh giá nằm ở mục 8.
+- **Lỗi quen của Learn TLA+.** Viết `["key" |-> val]` thay vì `[key |-> val]` gây lỗi cú pháp, và TLC báo `Encountered "|->"`[^learn-record-key]. Viết `[key: "val"]` thay vì `[key: {"val"}]` gây lỗi "Attempted to compute the number of elements in the string" khi chạy TLC[^learn-record-err]. Lý do: vế phải dấu `:` phải là *tập*.
+- **`Seq(S)` vô hạn.** Theo định nghĩa trên, `Seq(S)` là hợp của vô hạn tập (mỗi độ dài một tập), nên nó là tập vô hạn khi `S` khác rỗng. Dùng nó để nói `q \in Seq(Msg)` thì tự nhiên về mặt toán học. Còn TLC xử lý phép kiểm này ra sao, và làm thế nào giới hạn độ dài dãy khi chạy (ràng buộc không gian trạng thái), là chủ đề của chương 04 (suy luận của người soạn; chưa kiểm chứng về hành vi của TLC với `Seq`).
 
 </details>
 
-**Quay lại Q4:** record, tuple, sequence đều là hàm (miền lần lượt là tập chuỗi, `1..n`, `1..n`), nên chung một bộ công cụ; `Sequences` thêm các toán tử dãy và nhớ chỉ số bắt đầu từ 1.
+**Quay lại Q4:** record, tuple, sequence đều là hàm (miền lần lượt là tập chuỗi, `1..n`, `1..n`), nên chung một bộ công cụ; `Sequences` thêm các toán tử dãy và nhớ chỉ số bắt đầu từ 1. Với `lease-svc`, lease và request là record, còn hàng chờ request là sequence.
 
 ## 5. `CHOOSE`: chọn một giá trị xác định (Q5)
 
-> **Trả lời ngắn.** `CHOOSE x \in S : P` là *một* giá trị `x` thuộc `S` thỏa `P`; nếu không có giá trị nào thỏa, biểu thức vẫn có giá trị nhưng hoàn toàn tùy ý[^bk-choose-def][^bk-choose-bounded]. Nó **không** ngẫu nhiên và không phải "phi tất định": trong toán học không có hàm hay toán tử phi tất định, biểu thức bằng 42 hôm nay thì mai vẫn bằng 42[^bk-choose-nondet]. Dùng nó chủ yếu để đặt tên cho một giá trị được xác định duy nhất bởi một tính chất[^bk-choose-unique].
+> **Trả lời ngắn.** `CHOOSE x \in S : P` là *một* giá trị `x` thuộc `S` thỏa `P`[^bk-choose-def]. Nếu không có giá trị nào thỏa, biểu thức vẫn có giá trị nhưng hoàn toàn tùy ý[^bk-choose-bounded]. Nó **không** ngẫu nhiên và không phải "phi tất định": trong toán học không có hàm hay toán tử phi tất định, biểu thức bằng 42 hôm nay thì mai vẫn bằng 42[^bk-choose-nondet]. Ta dùng nó chủ yếu để đặt tên cho một giá trị được xác định duy nhất bởi một tính chất[^bk-choose-unique].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `CHOOSE` giống `iter().find(P).unwrap()`, nhưng hai khác biệt: (1) kết quả không phụ thuộc thứ tự duyệt hay thời điểm; (2) khi không có phần tử thỏa thì không panic mà cho một giá trị "không biết là gì" — còn TLC thì coi đó là lỗi (xem bên dưới). Và nó khác `\E`: `\E` là một mệnh đề đúng/sai ("có phần tử thỏa không?"), còn `CHOOSE` là một *giá trị*.
+*Với service `lease-svc`.* Bảng lease cần nói được "key này chưa có chủ". Trong Rust, bạn dùng `Option<NodeId>` và gán `None`. TLA+ không có `None`; ta phải tự có một giá trị chắc chắn không trùng với node nào, và `CHOOSE` làm đúng việc đó. Nó là công cụ hơi lạ, vì ở bề ngoài giống "chọn bừa một phần tử" nhưng thực chất không phải: mục này giải thích nó là gì và vì sao một câu như "leader là node được `CHOOSE`" không mô hình hóa được bầu cử.
 
-*Luật của `CHOOSE`.* Hai quy tắc trong sách: nếu có `x` thỏa `P(x)` thì `P(CHOOSE x : P(x))` đúng; và nếu hai vị từ tương đương với mọi `x` thì hai `CHOOSE` bằng nhau. Sách nói ta không biết gì về giá trị được chọn ngoài những gì suy ra được từ các luật này[^bk-choose-rules]. Hệ quả kỳ lạ: nếu không tồn tại `x` thỏa thì `CHOOSE x : P(x)` bằng `CHOOSE x : FALSE`; vì `a/b` được định nghĩa bằng `CHOOSE` nên suy ra `1/0` bằng `2/0`[^bk-choose-div].
+### 5.1 `CHOOSE` khác `\E` và khác `find`
 
-*Dùng để đặt tên.* Ví dụ hay nhất của sách: cần một giá trị `NoVal` khác mọi giá trị bộ nhớ mà không muốn thêm tham số:
+Nếu quen Rust, bạn có thể thấy `CHOOSE` giống `iter().find(P)`. Nó khác ở hai điểm: kết quả không phụ thuộc thứ tự duyệt hay thời điểm tính (nhận xét của người soạn), và khi không có phần tử nào thỏa thì không panic mà cho một giá trị "không biết là gì". TLC thì coi trường hợp sau là lỗi, xem phần cuối của mục này. Còn so với `\E`: `\E` là một mệnh đề đúng hoặc sai ("có phần tử thỏa không?"), `CHOOSE` là một *giá trị* (nhận xét của người soạn).
+
+Giá trị đó ràng buộc bởi hai quy tắc. Thứ nhất, nếu có `x` thỏa `P(x)` thì `P(CHOOSE x : P(x))` đúng. Thứ hai, nếu hai vị từ tương đương với mọi `x` thì hai `CHOOSE` tương ứng bằng nhau. Ngoài những gì suy ra được từ hai luật này, ta không biết gì về giá trị được chọn[^bk-choose-rules]. Hệ quả kỳ lạ là nếu không tồn tại `x` thỏa thì `CHOOSE x : P(x)` bằng `CHOOSE x : FALSE`. Vì phép chia `a/b` được định nghĩa bằng `CHOOSE`, suy ra `1/0` bằng `2/0`[^bk-choose-div].
+
+### 5.2 Dùng để đặt tên: `NoOwner`
+
+Ví dụ hay nhất của sách là cần một giá trị `NoVal` khác mọi giá trị bộ nhớ mà không muốn thêm tham số. Với `lease-svc`, đó là `NoOwner`, giá trị "chưa có chủ" khác mọi node.
 
 ```tla
 EXTENDS Naturals
@@ -317,40 +367,58 @@ NoVal   == CHOOSE v : v \notin Val                \* dạng trong sách: NoVal =
 MaxOf(S) == CHOOSE x \in S : \A y \in S : y <= x  \* S là tập số hữu hạn khác rỗng
 ```
 
-Sách giải thích: ta không biết `NoVal` bằng gì, chỉ biết nó *không phải* phần tử của `Val`[^bk-noval]. `MaxOf` là thành ngữ "phần tử lớn nhất" (do người soạn viết; hợp lệ khi `S` là tập hữu hạn khác rỗng gồm các số — nếu `S` rỗng thì kết quả không xác định).
+Về `NoVal`, sách giải thích rằng ta không biết nó bằng gì, chỉ biết nó *không phải* phần tử của `Val`[^bk-noval]. Đó là mọi thứ ta cần. `MaxOf` là thành ngữ "phần tử lớn nhất" do người soạn viết; nó hợp lệ khi `S` là tập hữu hạn khác rỗng gồm các số, còn nếu `S` rỗng thì kết quả không xác định.
 
-*Không phải phi tất định.* Sách đối chiếu hai đặc tả để thấy khác biệt: `(x = CHOOSE n : n \in Nat) /\ [][x' = CHOOSE n : n \in Nat]_x` chỉ cho phép *một* hành vi — `x` luôn bằng cùng một số tự nhiên không xác định — trong khi `(x \in Nat) /\ [][x' \in Nat]_x` cho phép vô số hành vi, `x` có thể đổi mỗi bước[^bk-choose-vs-in]. (Ký hiệu chưa học, tạm đọc: `x'` là giá trị của `x` ở bước kế tiếp; `[][A]_x` là "mọi bước đều thỏa `A` hoặc giữ nguyên `x`"; chi tiết ở [Chương 03](03-trang-thai-hanh-vi-action.md).) Bài học: phi tất định (nhiều lựa chọn của hệ thống) trong TLA+ được viết bằng `\in` hoặc `\E` trên biến ở trạng thái kế tiếp, **không** bằng `CHOOSE`.
+### 5.3 Không phải phi tất định
 
-*Với TLC.* Ngữ nghĩa TLA+ cho `CHOOSE x \in S : P` giá trị tùy ý nếu không có `x` thỏa, nhưng TLC coi đó là lỗi vì trường hợp này hầu như luôn do nhầm lẫn[^tlc-choose-err]. TLC chỉ đánh giá `CHOOSE` khi nó cần: `IF n > 5 THEN CHOOSE i \in 1..n : i > 5 ELSE 42` không báo lỗi khi `n <= 5` vì nhánh `CHOOSE` không được đánh giá[^tlc-choose-lazy]. TLC không đánh giá được `CHOOSE x : P` không chặn, tức không có `\in S`[^tlc-unbounded]; vì thế thành ngữ `NoVal == CHOOSE v : v \notin Val` ở trên không tính được trong TLC, và sách hướng dẫn ghi đè một định nghĩa như vậy (ví dụ `NotAnS`) bằng một giá trị mô hình trong phần `CONSTANT` của file cấu hình[^tlc-notans] (chi tiết ở chương 04). Learn TLA+ nói khi nhiều phần tử cùng thỏa, yêu cầu duy nhất là kết quả phải *xác định* — luôn cùng một giá trị[^learn-choose-det]; (nhận xét của người soạn: đừng viết đặc tả phụ thuộc vào việc TLC chọn phần tử nào, vì đó là chi tiết cài đặt chứ không phải bảo đảm của ngôn ngữ).
+Sách đối chiếu hai đặc tả để thấy khác biệt. Đặc tả `(x = CHOOSE n : n \in Nat) /\ [][x' = CHOOSE n : n \in Nat]_x` chỉ cho phép *một* hành vi, trong đó `x` luôn bằng cùng một số tự nhiên không xác định. Đặc tả `(x \in Nat) /\ [][x' \in Nat]_x` cho phép vô số hành vi, vì `x` có thể đổi ở mỗi bước[^bk-choose-vs-in]. (Ký hiệu chưa học, tạm đọc: `x'` là giá trị của `x` ở bước kế tiếp; `[][A]_x` là "mọi bước đều thỏa `A` hoặc giữ nguyên `x`"; chi tiết ở [Chương 03](03-trang-thai-hanh-vi-action.md).)
+
+Bài học cho `lease-svc`: nếu ta viết "leader là `CHOOSE n \in UpNodes : TRUE`" thì leader sẽ là một node cố định, không bao giờ đổi; ta mô hình hóa được "một node nào đó là leader" nhưng không mô hình hóa được "leader có thể đổi sang node khác" (suy ra từ luật của `CHOOSE`, nhận xét của người soạn). Phi tất định, tức nhiều lựa chọn khả dĩ của hệ thống, trong TLA+ viết bằng `\in` hoặc `\E` trên biến ở trạng thái kế tiếp, **không** bằng `CHOOSE`.
+
+### 5.4 `CHOOSE` khi chạy TLC
+
+Ngữ nghĩa TLA+ cho `CHOOSE x \in S : P` một giá trị tùy ý nếu không có `x` thỏa. TLC thì coi trường hợp đó là lỗi, vì nó hầu như luôn do nhầm lẫn[^tlc-choose-err]. TLC chỉ đánh giá `CHOOSE` khi nó thật sự cần: `IF n > 5 THEN CHOOSE i \in 1..n : i > 5 ELSE 42` không báo lỗi khi `n <= 5`, vì nhánh `CHOOSE` không được đánh giá[^tlc-choose-lazy].
+
+Còn `CHOOSE x : P` không chặn, tức không có `\in S`, thì TLC không đánh giá được[^tlc-unbounded]. Vì thế thành ngữ `NoOwner == CHOOSE v : v \notin Node` ở trên đặc tả đúng toán học nhưng TLC không tính nổi. Sách hướng dẫn ghi đè một định nghĩa như vậy (ví dụ `NotAnS`) bằng một giá trị mô hình trong phần `CONSTANT` của file cấu hình[^tlc-notans], chi tiết ở chương 04. Cuối cùng, khi nhiều phần tử cùng thỏa, Learn TLA+ nói yêu cầu duy nhất là kết quả phải *xác định*, tức luôn cùng một giá trị[^learn-choose-det]. Nhận xét của người soạn: đừng viết đặc tả phụ thuộc vào việc TLC chọn phần tử nào, vì đó là chi tiết cài đặt chứ không phải bảo đảm của ngôn ngữ.
 
 <details><summary>Đi sâu: nền tảng ε của Hilbert, <code>IF</code>/<code>CASE</code> là <code>CHOOSE</code> trá hình, và vì sao phép chia cho 0 không "nổ"</summary>
 
-- **Hilbert's ε.** `CHOOSE x : p` (dạng không chặn) là cấu trúc nguyên thủy của TLA+, các nhà toán học gọi là ε của Hilbert, và ý nghĩa của nó được định nghĩa bởi hai luật nói trên[^bk-hilbert]. Dạng chặn `CHOOSE x \in S : p` được định nghĩa là `CHOOSE x : (x \in S) /\ p`[^bk-choose-bounded].
+- **Hilbert's ε.** `CHOOSE x : p` (dạng không chặn) là cấu trúc nguyên thủy của TLA+; các nhà toán học gọi nó là ε của Hilbert, và ý nghĩa của nó được định nghĩa bằng hai luật nói trên[^bk-hilbert]. Dạng chặn `CHOOSE x \in S : p` được định nghĩa là `CHOOSE x : (x \in S) /\ p`[^bk-choose-bounded].
 - **`IF` và `CASE` định nghĩa qua `CHOOSE`.** Sách viết rõ rằng hai cấu trúc này được định nghĩa dùng `CHOOSE`[^bk-if-via-choose]; ví dụ `IF p THEN e1 ELSE e2` là `CHOOSE v : (p => (v = e1)) /\ (~p => (v = e2))`. Điều này giải thích vì sao `CASE` không có nhánh nào đúng cho kết quả không xác định (mục 6).
-- **Tránh `1/0 = 2/0`.** Nếu bạn thấy khó chịu, sách đề nghị một toán tử `Choice(v, P)` cho giá trị phụ thuộc `v` khi không tồn tại `x`, để không suy ra được quan hệ giữa `1/0` và `2/0`; nhưng sách cũng nói hiếm khi có lý do thực tế để lo chuyện đó[^bk-choice-op].
-- **Ví dụ "ngớ ngẩn"** `circ[n \in Nat] == CHOOSE y : y # circ[n]` không định nghĩa được hàm nào, và định nghĩa này cho `circ` một giá trị không xác định[^bk-recfn-silly].
+- **Tránh `1/0 = 2/0`.** Nếu bạn thấy khó chịu, sách đề nghị một toán tử `Choice(v, P)` cho giá trị phụ thuộc `v` khi không tồn tại `x`, để không suy ra được quan hệ giữa `1/0` và `2/0`. Nhưng sách cũng nói hiếm khi có lý do thực tế để lo chuyện đó[^bk-choice-op].
+- **Ví dụ "ngớ ngẩn".** `circ[n \in Nat] == CHOOSE y : y # circ[n]` không định nghĩa được hàm nào, và định nghĩa này cho `circ` một giá trị không xác định[^bk-recfn-silly].
 
 </details>
 
-**Quay lại Q5:** `CHOOSE` là một giá trị cố định nhưng không biết là gì; nó đặt tên cho thứ được xác định bởi tính chất, còn lựa chọn của hệ thống phải viết bằng `\in`/`\E`.
+**Quay lại Q5:** `CHOOSE` là một giá trị cố định nhưng không biết là gì; nó đặt tên cho thứ được xác định bởi tính chất, như `NoOwner` của `lease-svc`, còn lựa chọn của hệ thống phải viết bằng `\in`/`\E`.
 
 ## 6. Định nghĩa, `LET`/`IN`, `IF`, `CASE` (Q6)
 
-> **Trả lời ngắn.** `Id == biểu_thức` định nghĩa `Id` là *đồng nghĩa* với biểu thức đó[^bk-def-synonym]; `Op(p1, p2) == ...` định nghĩa toán tử có tham số[^bk-def-op]. `LET d == ... IN e` cho biểu thức `e` trong bối cảnh các định nghĩa cục bộ `d`[^sum-let]. `IF p THEN a ELSE b` bắt buộc có cả hai nhánh[^learn-if]; `CASE` có nhiều nhánh ngăn bởi `[]`.
+> **Trả lời ngắn.** `Id == biểu_thức` định nghĩa `Id` là *đồng nghĩa* với biểu thức đó[^bk-def-synonym]. `Op(p1, p2) == ...` định nghĩa toán tử có tham số[^bk-def-op]. `LET d == ... IN e` cho biểu thức `e` trong bối cảnh các định nghĩa cục bộ `d`[^sum-let]. `IF p THEN a ELSE b` bắt buộc có cả hai nhánh[^learn-if]. `CASE` có nhiều nhánh ngăn bởi `[]`.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `==` giống `macro_rules!` hay `const fn` hơn là `let` — nó không "gán" mà *thay thế* sau khi phân tích cú pháp. Toàn bộ đặc tả là một chồng định nghĩa như vậy, không có câu lệnh nào chạy.
+*Với service `lease-svc`.* Đặc tả `lease-svc` thực chất là một chồng định nghĩa: `Free`, `Held`, `Acquire`, `Release`, `Quota`, mỗi cái dựa trên các cái đứng trước. Không có câu lệnh nào chạy cả. Vì vậy `==` không giống phép gán `let` của Rust: nó khai báo rằng một tên *thay thế* cho một biểu thức. Mục này nói thay thế đó xảy ra thế nào, tên có hiệu lực ở đâu, và cách rẽ nhánh bằng `IF` và `CASE` (ví dụ `Backoff` ở dưới: client xin lease thất bại thì chờ bao lâu).
 
-*Định nghĩa là đồng nghĩa.* Nếu `Id` là một tên đơn giản như `Init` hay `Spec`, định nghĩa `Id == exp` làm `Id` đồng nghĩa với `exp`[^bk-def-synonym]. Việc thay thế làm *sau khi phân tích cú pháp*, không phải trên văn bản thô: `x == a + b` làm `x * c` bằng `(a + b) * c`, không phải `a + b * c`[^bk-def-after-parse]. Với `Id(p) == exp`, `Id(e)` là biểu thức thu được bằng cách thay `p` bằng `e` trong `exp`[^bk-def-op]; tên `Send` đứng một mình (không tham số) không phải là một biểu thức[^bk-def-opname].
+### 6.1 Định nghĩa là đồng nghĩa
 
-*Phạm vi và đặt tên.* Phạm vi của một khai báo hay định nghĩa là phần module đứng *sau* nó[^bk-scope] — phải định nghĩa trước khi dùng. Không được định nghĩa lại một ký hiệu đã có nghĩa[^bk-redecl]; vì thế `(\E v \in S : (e1 /\ \E v \in T : e2))` là bất hợp pháp vì `v` thứ hai nằm trong phạm vi `v` thứ nhất. Sách nói toán học thông thường và ngôn ngữ lập trình cho phép khai báo lại như vậy (che bóng, *shadowing*), nhưng TLA+ cấm vì dễ gây nhầm lẫn và lỗi[^bk-redecl2].
+Nếu `Id` là một tên đơn giản như `Init` hay `Spec`, thì `Id == exp` làm `Id` đồng nghĩa với `exp`[^bk-def-synonym]. Việc thay thế làm *sau khi phân tích cú pháp*, không phải trên văn bản thô: `x == a + b` làm `x * c` bằng `(a + b) * c`, không phải `a + b * c`[^bk-def-after-parse]. Với `Id(p) == exp`, `Id(e)` là biểu thức thu được bằng cách thay `p` bằng `e` trong `exp`[^bk-def-op]. Tên toán tử như `Send` đứng một mình, không kèm đối số, thì không phải một biểu thức[^bk-def-opname].
 
-*`LET`/`IN`.* Dạng tổng quát `LET ∆1 ... ∆n IN e`: các định nghĩa đứng trước dùng được trong các định nghĩa sau[^learn-let-seq]. Ví dụ sách: `LET sq(i) == i * i IN sq(1) + sq(2) + sq(3)` bằng `1 * 1 + 2 * 2 + 3 * 3`, tức 14[^bk-let-ex]. `LET` định nghĩa cả tên không tham số (hằng cục bộ) và toán tử có tham số, đều chỉ có hiệu lực trong phần `IN`.
+### 6.2 Phạm vi và đặt tên
 
-*`IF`.* `IF p THEN e1 ELSE e2` bằng `e1` nếu `p` đúng và `e2` nếu `p` sai[^bk-if]. Vì là biểu thức nên luôn phải có `ELSE`[^learn-if]. Ví dụ trong sách, định nghĩa quan hệ trạng thái kế tiếp của đồng hồ giờ: `HCnxt == hr' = IF hr # 12 THEN hr + 1 ELSE 1`[^bk-hcnxt] (`hr'` là giá trị của `hr` ở trạng thái kế tiếp; xem [Chương 03](03-trang-thai-hanh-vi-action.md)).
+Phạm vi của một khai báo hay định nghĩa là phần module đứng *sau* nó[^bk-scope], nên phải định nghĩa trước khi dùng. TLA+ cũng không cho định nghĩa lại một ký hiệu đã có nghĩa[^bk-redecl]. Vì thế `(\E v \in S : (e1 /\ \E v \in T : e2))` là bất hợp pháp, vì `v` thứ hai nằm trong phạm vi của `v` thứ nhất. Toán học thông thường và các ngôn ngữ lập trình đều cho phép khai báo lại như vậy (che bóng, *shadowing*), nhưng TLA+ cấm vì dễ gây nhầm lẫn và lỗi[^bk-redecl2].
 
-*`CASE`.* Dạng `CASE p1 -> e1 [] p2 -> e2 [] ... [] OTHER -> e`. Ký hiệu ngăn cách là `□` của bản in, gõ `[]`[^bk-ascii-box][^bk-case-sep]. **Cẩn thận**: khác `match` của Rust, nếu nhiều `p_i` cùng đúng thì giá trị là *một trong các* `e_i` tương ứng, ngữ nghĩa không nói là cái nào; sách nói cấu trúc này thường dùng khi các `p_i` rời nhau[^bk-case-disjoint]. Nếu không có `p_i` nào đúng và không có `OTHER` thì giá trị không xác định, còn có `OTHER` thì bằng biểu thức của `OTHER`[^bk-case-none].
+### 6.3 `LET`/`IN`
+
+Dạng tổng quát là `LET ∆1 ... ∆n IN e`, trong đó các định nghĩa đứng trước dùng được trong các định nghĩa sau[^learn-let-seq]. Ví dụ của sách: `LET sq(i) == i * i IN sq(1) + sq(2) + sq(3)` bằng `1 * 1 + 2 * 2 + 3 * 3`, tức 14[^bk-let-ex]. `LET` định nghĩa được cả tên không tham số (hằng cục bộ) lẫn toán tử có tham số, và chúng chỉ có hiệu lực trong phần `IN`. Với `lease-svc`, `LET` hợp để đặt tên cho một bước trung gian như "bảng sau khi thu hồi lease hết hạn" rồi dùng nó vài lần trong phần `IN` (nhận xét của người soạn).
+
+### 6.4 `IF`
+
+`IF p THEN e1 ELSE e2` bằng `e1` nếu `p` đúng và `e2` nếu `p` sai[^bk-if]. Vì là biểu thức nên nó luôn phải có `ELSE`[^learn-if]. `Acquire` ở mục 9 dùng đúng dạng này: nếu key chưa có chủ thì cấp, còn không thì trả bảng cũ. Ví dụ trong sách là quan hệ trạng thái kế tiếp của đồng hồ giờ: `HCnxt == hr' = IF hr # 12 THEN hr + 1 ELSE 1`[^bk-hcnxt] (`hr'` là giá trị của `hr` ở trạng thái kế tiếp, xem [Chương 03](03-trang-thai-hanh-vi-action.md)).
+
+### 6.5 `CASE`
+
+`CASE` có dạng `CASE p1 -> e1 [] p2 -> e2 [] ... [] OTHER -> e`. Ký hiệu ngăn cách là `□` của bản in, gõ `[]`[^bk-ascii-box]. **Cẩn thận**: `CASE` khác `match` của Rust. Nếu nhiều `p_i` cùng đúng, giá trị là *một trong các* `e_i` tương ứng và ngữ nghĩa không nói là cái nào; sách nói cấu trúc này thường dùng khi các `p_i` rời nhau[^bk-case-disjoint]. Nếu không có `p_i` nào đúng và không có `OTHER`, giá trị không xác định; còn có `OTHER` thì giá trị bằng biểu thức của `OTHER`[^bk-case-none].
 
 ```tla
 EXTENDS Naturals
@@ -373,36 +441,42 @@ IsPartialOrder(R(_, _), S) ==
     /\ \A x \in S : ~R(x, x)
 ```
 
-(`IsPartialOrder` là ví dụ trong sách: tham số đầu là một toán tử hai ngôi[^bk-ispo].) Chú ý: ví dụ `CASE` ở trên cố ý chọn các nhánh rời nhau; một `CASE score >= 90 -> "A" [] score >= 80 -> "B" ...` với `score = 95` sẽ làm *cả hai* nhánh đầu đúng và kết quả không xác định theo ngữ nghĩa (nhận xét của người soạn, theo luật của sách ở trên).
+`IsPartialOrder` là ví dụ trong sách, có tham số đầu là một toán tử hai ngôi[^bk-ispo]. Ví dụ `CASE` ở trên cố ý chọn các nhánh rời nhau. Ngược lại, một `CASE score >= 90 -> "A" [] score >= 80 -> "B" ...` với `score = 95` sẽ làm *cả hai* nhánh đầu đúng, và kết quả không xác định theo ngữ nghĩa (nhận xét của người soạn, theo luật của sách ở trên).
 
 <details><summary>Đi sâu: các cấu trúc "ăn" tới cùng, tham số toán tử, và vị trí của <code>==</code></summary>
 
-- **`LET`/`IF`/`CASE` không có từ khóa kết thúc**, nên biểu thức kéo dài hết mức; điều này đôi khi buộc phải thêm ngoặc[^bk-undelim]. Ví dụ `IF x > 0 THEN y + 1 ELSE y - 1 + 2` hiểu là `ELSE (y - 1 + 2)` (mục 15.2.1).
-- **Dấu `[]` của `CASE` trùng ký hiệu với toán tử thời gian "luôn luôn"** `[]`; sách nói ký hiệu ngăn cách `CASE` không phải toán tử thời gian gõ giống nó, và nó kết thúc mọi cấu trúc trừ `CASE` không có `OTHER`[^bk-case-sep]. Toán tử `[]` thời gian học ở chương 05.
-- **Toán tử bậc cao.** Sách cho ví dụ `IsPartialOrder(R(_, _), S)` và nói `IsPartialOrder(>, Nat)` hợp cú pháp, bằng `TRUE` nếu `>` là toán tử thông thường; còn `IsPartialOrder(+, 3)` hợp cú pháp nhưng "ngớ ngẩn"[^bk-ispo-ex]. Nghĩa là TLA+ bắt lỗi *cú pháp* (số đối số) nhưng không bắt lỗi *ngữ nghĩa* (kiểu của đối số); xem mục 8.
-- **`==` là ký hiệu của `≜`** trong bản in. Sách: ngoại lệ chính của quy ước gõ "theo hình" là `==`[^bk-ascii-def]. (Lỗi quen của Learn TLA+: viết `=` một dấu thay cho `==` khi định nghĩa, hoặc `==` thay cho `=` khi so sánh[^learn-eq-err].)
-- **`Cardinality` là ví dụ dùng `LET` với hàm đệ quy cục bộ.** Ngay trong sách, `Cardinality(S)` được định nghĩa bằng `LET CS[T \in SUBSET S] == IF T = {} THEN 0 ELSE 1 + CS[T \ {CHOOSE x : x \in T}] IN CS[S]`, nghĩa là dùng hàm đệ quy cục bộ để vượt luật "toán tử không đệ quy"[^bk-cardinality-let]; module chuẩn `FiniteSets` ở commit ghim giữ đúng định nghĩa này[^repo-card].
+- **`LET`/`IF`/`CASE` không có từ khóa kết thúc**, nên biểu thức kéo dài hết mức; đôi khi điều này buộc phải thêm ngoặc[^bk-undelim]. Ví dụ `IF x > 0 THEN y + 1 ELSE y - 1 + 2` hiểu là `ELSE (y - 1 + 2)` (mục 15.2.1).
+- **Dấu `[]` của `CASE` trùng ký hiệu với toán tử thời gian "luôn luôn"** `[]`. Sách nói ký hiệu ngăn cách của `CASE` không phải toán tử thời gian gõ giống nó, và nó kết thúc mọi cấu trúc trừ `CASE` không có `OTHER`[^bk-case-sep]. Toán tử `[]` thời gian học ở chương 05.
+- **Toán tử bậc cao.** Sách cho ví dụ `IsPartialOrder(R(_, _), S)` và nói `IsPartialOrder(>, Nat)` hợp cú pháp, bằng `TRUE` nếu `>` là toán tử thông thường. `IsPartialOrder(+, 3)` thì hợp cú pháp nhưng "ngớ ngẩn"[^bk-ispo-ex]. Nghĩa là TLA+ bắt lỗi *cú pháp* (số đối số) nhưng không bắt lỗi *ngữ nghĩa* (kiểu của đối số); xem mục 8.
+- **`==` là ký hiệu của `≜`** trong bản in. Sách nói ngoại lệ chính của quy ước gõ "theo hình" là `==`[^bk-ascii-def]. Lỗi quen của Learn TLA+ là viết `=` một dấu thay cho `==` khi định nghĩa, hoặc `==` thay cho `=` khi so sánh[^learn-eq-err].
+- **`Cardinality` dùng `LET` với hàm đệ quy cục bộ.** Ngay trong sách, `Cardinality(S)` được định nghĩa bằng `LET CS[T \in SUBSET S] == IF T = {} THEN 0 ELSE 1 + CS[T \ {CHOOSE x : x \in T}] IN CS[S]`. Cách này dùng hàm đệ quy cục bộ để vượt luật "toán tử không đệ quy"[^bk-cardinality-let]. Module chuẩn `FiniteSets` ở commit ghim giữ đúng định nghĩa này[^repo-card].
 - **Chú thích.** Chú thích khối là `(* ... *)` (lồng được), chú thích cuối dòng là `\*`[^bk-comments].
 
 </details>
 
-**Quay lại Q6:** `==` là đồng nghĩa (không phải gán), `LET` thu hẹp phạm vi định nghĩa, `IF` luôn có `ELSE`, và `CASE` chỉ an toàn khi các nhánh rời nhau hoặc có `OTHER`.
+**Quay lại Q6:** `==` là đồng nghĩa (không phải gán), `LET` thu hẹp phạm vi định nghĩa, `IF` luôn có `ELSE`, và `CASE` chỉ an toàn khi các nhánh rời nhau hoặc có `OTHER`. Với `lease-svc`, `Acquire` là một `IF`, còn `Backoff` là một `CASE` có `OTHER`.
 
 ## 7. Số và các module chuẩn: `Naturals`, `Integers`, `Sequences`, `FiniteSets` (Q7)
 
-> **Trả lời ngắn.** Các *chữ số* như `63` có sẵn trong TLA+, nhưng *tập số* như `Nat` và các phép như `+` thì không: chúng nằm trong module phải nạp bằng `EXTENDS`[^bk-nums-predef]. `Naturals` cho `+ - * ^ < > <= >= .. \div %` và `Nat`; `Integers` thêm `Int` và dấu trừ một ngôi[^bk-int]. Số của TLA+ là số toán học nguyên nghĩa, không phải chuỗi bit[^bk-no-overflow]: không tràn số.
+> **Trả lời ngắn.** Các *chữ số* như `63` có sẵn trong TLA+, nhưng *tập số* như `Nat` và các phép như `+` thì không: chúng nằm trong module, và ta phải nạp bằng `EXTENDS`[^bk-nums-predef]. `Naturals` cho `+ - * ^ < > <= >= .. \div %` và `Nat`; `Integers` thêm `Int` và dấu trừ một ngôi[^bk-int]. Số của TLA+ là số toán học nguyên nghĩa, không phải chuỗi bit, nên không có tràn số[^bk-no-overflow].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như phụ thuộc `Cargo.toml` — ngôn ngữ lõi chỉ có logic và tập hợp, `+` là thứ bạn "import". Lý do hợp lý: ở ví dụ của sách, `+` có thể được định nghĩa là cộng ma trận thay vì cộng số[^bk-extends].
+*Với service `lease-svc`.* Epoch của lease là một số tự nhiên tăng dần: mỗi lần cấp lease, `Acquire` cộng thêm 1. Hàng chờ request cũng cần phép cộng, như `Len(q) + 1`. Cả hai đều dùng `+`, vậy mà `+` không có sẵn trong ngôn ngữ lõi. Mục này trả lời hai câu hỏi: cần nạp gì để có `+`, và "số" của TLA+ giống hay khác `u64` của Rust ở đâu.
 
-*Nạp module.* Sách: toán tử số học như `+` không built-in mà được định nghĩa trong module; các toán tử phổ biến trên số tự nhiên nằm trong module `Naturals`, được nạp bằng `EXTENDS Naturals`[^bk-extends]. Chỉ một dòng `EXTENDS` cho mỗi module, nhiều module ngăn cách bằng dấu phẩy: `EXTENDS Integers, Sequences`[^learn-one-extends]. Một cái bẫy: `Sequences` có dùng phép tính trên số tự nhiên nhưng dùng `LOCAL INSTANCE Naturals`, nên *không* xuất khẩu các định nghĩa đó cho module nạp `Sequences`; sách giải thích là để ai chỉ muốn dùng dãy không bị kéo theo `Naturals`[^bk-extends-seq][^bk-local-inst]. Vậy muốn dùng cả `Len(s) + 1` phải `EXTENDS Naturals, Sequences`.
+### 7.1 Nạp module bằng `EXTENDS`
 
-*Các module.* `Naturals` định nghĩa `+`, `-` hai ngôi, `*`, `^`, `<`, `>`, `<=`, `>=`, `Nat`, `..`, `\div`, `%`[^bk-nat-ops]. `Integers` mở rộng `Naturals` với `Int` và dấu trừ một ngôi[^bk-int]; `Reals` thêm `Real`, `Infinity` và phép chia `/`[^bk-real-div]. Nat là tập con của Int, và Int là tập con của Real[^bk-nat-subset]. Sách nói chi tiết các module số "không có ý nghĩa thực tế": khi viết đặc tả cứ giả định các toán tử có nghĩa quen thuộc[^bk-numbers-practical].
+Toán tử số học như `+` không built-in trong TLA+ mà được định nghĩa trong module. Các toán tử phổ biến trên số tự nhiên nằm trong module `Naturals`, và ta nạp chúng bằng `EXTENDS Naturals`. Lý do hợp lý của thiết kế này là trong một ví dụ của sách, `+` có thể được định nghĩa là cộng ma trận thay vì cộng số[^bk-extends]. Mỗi spec chỉ có một dòng `EXTENDS`, và nhiều module ngăn cách bằng dấu phẩy: `EXTENDS Integers, Sequences`[^learn-one-extends].
 
-*Khoảng `a..b`.* `i..j` là tập các số nguyên từ `i` tới `j`, rỗng nếu `j < i`[^bk-dotdot].
+Có một cái bẫy dễ vấp. `Sequences` dùng phép tính trên số tự nhiên, nhưng nó dùng `LOCAL INSTANCE Naturals`, nên *không* xuất các định nghĩa đó cho module nạp `Sequences`[^bk-local-inst]. Sách giải thích là để một module chỉ muốn dùng dãy không bị kéo theo cả `Naturals`[^bk-extends-seq]. Hệ quả cho `lease-svc`: muốn viết `Len(q) + 1`, bạn phải `EXTENDS Naturals, Sequences`.
 
-*Chia nguyên và dư.* `\div` (chia nguyên)[^learn-div] và `%` (dư) được định nghĩa để với số nguyên `a` và số nguyên dương `b` thì `a % b` nằm trong `0..(b-1)` và `a = b * (a \div b) + (a % b)`[^bk-div-mod]. Tức là phần dư *không âm*.
+### 7.2 Các module số
+
+`Naturals` định nghĩa `+`, `-` hai ngôi, `*`, `^`, `<`, `>`, `<=`, `>=`, `Nat`, `..`, `\div`, `%`[^bk-nat-ops]. `Integers` mở rộng `Naturals` với `Int` và dấu trừ một ngôi[^bk-int]. `Reals` thêm `Real`, `Infinity` và phép chia `/`[^bk-real-div]. `Nat` là tập con của `Int`, và `Int` là tập con của `Real`[^bk-nat-subset]. Sách còn nói chi tiết các module số "không có ý nghĩa thực tế": khi viết đặc tả, cứ giả định các toán tử có nghĩa quen thuộc[^bk-numbers-practical].
+
+`i..j` là tập các số nguyên từ `i` tới `j`, và rỗng nếu `j < i`[^bk-dotdot]. Với `lease-svc`, `1..Len(q)` là tập chỉ số của các request đang chờ.
+
+`\div` là chia nguyên[^learn-div]. `%` là phép lấy dư. Hai toán tử được định nghĩa sao cho với số nguyên `a` và số nguyên dương `b` thì `a % b` nằm trong `0..(b-1)` và `a = b * (a \div b) + (a % b)`[^bk-div-mod]. Tức là phần dư luôn *không âm*.
 
 ```tla
 EXTENDS Naturals, Sequences, FiniteSets    \* một dòng EXTENDS duy nhất
@@ -413,66 +487,83 @@ R            == 17 % 5                     \* 2
 D            == 17 \div 5                  \* 3
 ```
 
-*Không có tràn số.* Chú thích đầu sách nhắc rằng số không phải chuỗi bit; ví dụ `2^33 * 2^33` bằng `2^66`, không phải lỗi tràn[^bk-no-overflow]. Hệ quả: đặc tả mô hình số nguyên *toán học*. Rust thì khác (mục 10); nếu hành vi tràn số/wrap là điều bạn muốn kiểm, phải mô hình nó rõ ràng như `AddU32` ở trên (nhận xét của người soạn).
+### 7.3 Không có tràn số
+
+Chú thích đầu sách nhắc rằng số không phải chuỗi bit; chẳng hạn `2^33 * 2^33` bằng `2^66`, không phải lỗi tràn[^bk-no-overflow]. Hệ quả là đặc tả mô hình số nguyên *toán học*. Với `lease-svc`, điều này có nghĩa epoch trong đặc tả không bao giờ tràn, trong khi nếu code Rust lưu epoch bằng `u32` thì nó có giới hạn. Rust thì khác (mục 10): nếu hành vi tràn hay wrap quanh là điều bạn muốn kiểm, bạn phải mô hình nó rõ ràng như `AddU32` ở trên (nhận xét của người soạn).
 
 <details><summary>Đi sâu: module chuẩn trong repo chỉ là "giả", số học hữu hạn của TLC, và <code>Int</code> với <code>-</code></summary>
 
-- **Module `Naturals` trong repo là định nghĩa giả.** Tệp `Naturals.tla` ở commit ghim nói rõ nó chỉ chứa định nghĩa "giả" (dummy), và mọi công cụ được kỳ vọng tự cài các toán tử đó; sách mới là nơi có module thật[^repo-naturals]. TLC cài chúng bằng Java (các comment trong `Sequences.tla`, `FiniteSets.tla` nói tương tự)[^repo-seq-override]. Sách mô tả cùng cơ chế ở phía TLC: TLC không thể tính `2 + 2` từ định nghĩa của `+` trong module `Naturals` chuẩn, mà nạp một lớp Java thay thế module đó khi gặp `EXTENDS Naturals`[^tlc-override].
+- **Module `Naturals` trong repo là định nghĩa giả.** Tệp `Naturals.tla` ở commit ghim nói rõ nó chỉ chứa định nghĩa "giả" (dummy), và mọi công cụ được kỳ vọng tự cài các toán tử đó; sách mới là nơi có module thật[^repo-naturals]. TLC cài chúng bằng Java, và các comment trong `Sequences.tla`, `FiniteSets.tla` nói tương tự[^repo-seq-override]. Sách mô tả cùng cơ chế ở phía TLC: TLC không thể tính `2 + 2` từ định nghĩa của `+` trong module `Naturals` chuẩn, mà nạp một lớp Java thay thế module đó khi gặp `EXTENDS Naturals`[^tlc-override].
 - **Tập số vô hạn và TLC.** `Nat` và `Int` vô hạn nên TLC không duyệt được: `{i \in Nat : i < 4}` không đánh giá được còn `{i \in 0..5 : i < 4}` thì được[^tlc-enum]. Khi viết đặc tả để chạy TLC, hãy giới hạn bằng khoảng `a..b` với hằng số cấu hình, ví dụ `1..MaxRetries` (nhận xét của người soạn; cách đặt hằng ở chương 04).
-- **`Integers` thêm gì.** Trong repo, `Integers.tla` mở rộng `Naturals` bằng `Int` và định nghĩa dấu trừ một ngôi là `-. a == 0 - a`[^repo-integers]; còn `Naturals` chỉ có dấu trừ hai ngôi[^sum-nat-minus]. (Nhận xét của người soạn: cần dấu trừ một ngôi như `-1` thì `EXTENDS Integers`.)
-- **Số thực.** `Reals` thêm `/` và `Infinity`[^bk-real-div]. Learn TLA+ khuyên TLA+ không có kiểu số thực dấu phẩy động vì ngữ nghĩa quá phức tạp, và khuyến nghị trừu tượng hóa nó đi[^learn-no-float]. Tuy nhiên chương này không đi sâu vào số thực.
+- **`Integers` thêm gì.** Trong repo, `Integers.tla` mở rộng `Naturals` bằng `Int` và định nghĩa dấu trừ một ngôi là `-. a == 0 - a`[^repo-integers]. `Naturals` thì chỉ có dấu trừ hai ngôi[^sum-nat-minus]. Nhận xét của người soạn: cần dấu trừ một ngôi như `-1` thì phải `EXTENDS Integers`.
+- **Số thực.** `Reals` thêm `/` và `Infinity`[^bk-real-div]. Learn TLA+ nói TLA+ không có kiểu số thực dấu phẩy động vì ngữ nghĩa của nó quá phức tạp, và khuyên trừu tượng hóa nó đi[^learn-no-float]. Chương này không đi sâu vào số thực.
 - **Peano.** Sách định nghĩa `Nat` bằng tiên đề Peano trong module `Peano`, tách riêng vì tuple và chuỗi được định nghĩa qua số tự nhiên[^bk-peano].
 
 </details>
 
-**Quay lại Q7:** tập số và phép tính nằm trong module (`Naturals`, `Integers`) phải `EXTENDS`; số là số toán học không tràn, và `Nat` vô hạn nên khi chạy TLC phải thay bằng khoảng hữu hạn.
+**Quay lại Q7:** tập số và phép tính nằm trong module (`Naturals`, `Integers`) phải `EXTENDS`; số là số toán học không tràn, và `Nat` vô hạn nên khi chạy TLC phải thay bằng khoảng hữu hạn. Với `lease-svc`, epoch và `Len(q) + 1` chỉ chạy được sau khi nạp `Naturals`.
 
 ## 8. Không có kiểu: "biểu thức ngớ ngẩn" và cách TLC đánh giá (Q8)
 
-> **Trả lời ngắn.** TLA+ không có hệ thống kiểu: mọi biểu thức đúng cú pháp đều có một nghĩa, kể cả `3/"abc"` — sách gọi là *biểu thức ngớ ngẩn* (silly)[^bk-silly]. Một công thức đúng có thể chứa biểu thức ngớ ngẩn nhưng chân trị của nó không được phụ thuộc vào nghĩa của biểu thức ấy[^bk-silly2]. "Kiểu" chỉ là một invariant bình thường (`x \in S`) bạn tự phát biểu và để công cụ kiểm tra[^bk-type-meaning]. TLC đánh giá `/\`, `\/` từ trái sang phải[^tlc-left-right] và báo lỗi khi đụng biểu thức ngớ ngẩn[^bk-silly-tlc].
+> **Trả lời ngắn.** TLA+ không có hệ thống kiểu: mọi biểu thức đúng cú pháp đều có một nghĩa, kể cả `3/"abc"`, mà sách gọi là *biểu thức ngớ ngẩn* (silly)[^bk-silly]. Một công thức đúng có thể chứa biểu thức ngớ ngẩn, nhưng chân trị của nó không được phụ thuộc vào nghĩa của biểu thức ấy[^bk-silly2]. "Kiểu" chỉ là một invariant bình thường (`x \in S`) mà bạn tự phát biểu và để công cụ kiểm tra[^bk-type-meaning]. TLC đánh giá `/\`, `\/` từ trái sang phải[^tlc-left-right]. Nó cũng báo lỗi khi đụng biểu thức ngớ ngẩn[^bk-silly-tlc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nếu Rust là "kiểm tra mọi thứ lúc biên dịch", thì TLA+ giống như Python thuần cộng với một bộ test (TLC) chạy khắp không gian trạng thái. Không có `cargo check` cho `3/"abc"`; thứ bắt lỗi là lúc TLC đánh giá thật sự.
+*Với service `lease-svc`.* Trong Rust, trình biên dịch từ chối `epoch + "abc"` trước khi chương trình chạy (nhận xét của người soạn). TLA+ thì không có bước đó: `epoch + "abc"` đúng cú pháp, nên nó có một nghĩa nào đó, chỉ là ta không biết nghĩa gì. Vậy ai bắt lỗi trong đặc tả `lease-svc`? Câu trả lời gồm hai phần: bạn tự viết một invariant nói "mọi biến có dạng gì" (thường tên là `TypeOK`), và TLC kiểm nó trên mọi trạng thái, đồng thời báo lỗi khi đánh giá phải một biểu thức ngớ ngẩn. Phần còn lại của mục này giải thích hai cơ chế đó.
 
-*Vì sao không có kiểu?* Sách trả lời thẳng: ngôn ngữ lập trình có kiểu vì kiểu giúp trình biên dịch sinh code hiệu quả và bắt lỗi — lợi ích thắng chi phí; còn với việc viết đặc tả, tác giả thấy chi phí lớn hơn lợi ích[^bk-types-cost]. Toán học thông thường cũng không có kiểu, và một biểu thức như `3/0` mà các nhà toán học vẫn ngầm viết ra mỗi ngày thực ra không "ngớ ngẩn" hơn `3/"abc"`[^bk-silly]. Nhưng một quy tắc cú pháp không thể cấm `3/0` mà không cấm luôn những biểu thức hoàn toàn hợp lý.
+### 8.1 Vì sao không có kiểu
 
-*Kiểu là một invariant.* Sách định nghĩa: biến `v` có kiểu `T` trong đặc tả `Spec` khi `v \in T` là một invariant của `Spec`[^bk-type-def]; "kiểu" là tên của một tính chất bất biến chứ không phải địa vị đặc biệt của ngôn ngữ[^bk-type-meaning]. Ví dụ đồng hồ giờ của sách, tên `TypeInvariant` (và `TypeOK`), việc nó là *tính chất* chứ không phải giả định, được giải thích trọn ở [Chương 03, mục 6](03-trang-thai-hanh-vi-action.md); cách kiểm bằng TLC ở [chương 04](04-invariant-va-tlc.md).
+Sách trả lời thẳng. Ngôn ngữ lập trình có kiểu vì kiểu giúp trình biên dịch sinh code hiệu quả và bắt lỗi, và lợi ích thắng chi phí. Với việc viết đặc tả, tác giả thấy chi phí lớn hơn lợi ích[^bk-types-cost]. Toán học thông thường cũng không có kiểu. Biểu thức `3/0`, thứ các nhà toán học vẫn ngầm viết ra mỗi ngày, thực ra không "ngớ ngẩn" hơn `3/"abc"`[^bk-silly]. Vấn đề là một quy tắc cú pháp không thể cấm `3/0` mà không cấm luôn cả những biểu thức hoàn toàn hợp lý.
+
+### 8.2 Kiểu là một invariant
+
+Sách định nghĩa: biến `v` có kiểu `T` trong đặc tả `Spec` khi `v \in T` là một invariant của `Spec`[^bk-type-def]. "Kiểu" chỉ là tên của một tính chất bất biến chứ không phải địa vị đặc biệt của ngôn ngữ[^bk-type-meaning]. Ví dụ đồng hồ giờ trong sách có invariant tên `TypeInvariant` (và `TypeOK`); vì sao nó là *tính chất* chứ không phải giả định được giải thích trọn ở [Chương 03, mục 6](03-trang-thai-hanh-vi-action.md), còn cách kiểm bằng TLC ở [chương 04](04-invariant-va-tlc.md). Với `lease-svc`, `TypeOK` sẽ như sau.
 
 ```tla
 TypeOK ==
-    /\ queue    \in Seq(Msg)
-    /\ inflight \subseteq Msg
-    /\ status   \in [Node -> {"online", "offline"}]
-    /\ epoch    \in Nat
+    /\ queue  \in Seq(Request)
+    /\ leases \in [Key -> Lease]
+    /\ status \in [Node -> {"up", "down"}]
 ```
 
-(Các biến `queue`, `inflight`, `status`, `epoch` và hằng `Msg`, `Node` ở đây là giả định; chương 03 dạy khai báo.)
+Các biến `queue`, `leases`, `status` và các tập `Request`, `Key`, `Lease`, `Node` ở đây là giả định; chương 03 dạy khai báo, còn `Lease` được định nghĩa ở mục 9.
 
-*Lỗi cú pháp và lỗi ngữ nghĩa.* Sách chỉ ra: lỗi là cú pháp hay ngữ nghĩa quyết định loại công cụ bắt nó. Bộ phân tích cú pháp bắt lỗi cú pháp (ví dụ `Tail(s, t)` sai số đối số) nhưng không bắt lỗi "ngớ ngẩn"[^bk-parser]; TLC báo lỗi khi cố đánh giá biểu thức ngớ ngẩn[^bk-silly-tlc].
+### 8.3 Lỗi cú pháp và lỗi ngữ nghĩa
 
-*Thứ tự đánh giá của TLC.* TLC đánh giá từ trái sang phải: `p /\ q` thì tính `p` trước và chỉ tính `q` nếu `p` đúng; `p \/ q` tính `p` trước và chỉ tính `q` nếu `p` sai; `p => q` được tính như `~p \/ q`[^tlc-left-right]. Hệ quả thực hành: **đặt điều kiện bảo vệ (guard) lên trước**.
+Một lỗi là lỗi cú pháp hay lỗi ngữ nghĩa quyết định công cụ nào bắt nó. Bộ phân tích cú pháp bắt lỗi cú pháp, ví dụ `Tail(s, t)` sai số đối số, nhưng không bắt lỗi "ngớ ngẩn"[^bk-parser]. TLC mới là nơi báo lỗi khi cố đánh giá một biểu thức ngớ ngẩn[^bk-silly-tlc].
+
+### 8.4 Thứ tự đánh giá của TLC
+
+TLC đánh giá từ trái sang phải. Với `p /\ q`, nó tính `p` trước và chỉ tính `q` nếu `p` đúng. Với `p \/ q`, nó tính `p` trước và chỉ tính `q` nếu `p` sai. Còn `p => q` được tính như `~p \/ q`[^tlc-left-right]. Hệ quả thực hành: **đặt điều kiện bảo vệ (guard) lên trước**. Với `lease-svc`, "request đầu hàng chờ là xin lease" phải viết là "hàng chờ khác rỗng `/\` `Head(q)` là xin lease", chứ không đảo lại (nhận xét của người soạn). Hai dòng sau cho thấy khác biệt trên một ví dụ tối giản.
 
 ```tla
 HeadIsZero(x) == (x # <<>>) /\ (x[1] = 0)   \* an toàn: vế trái chặn vế phải
 Bad(x)        == (x[1] = 0) /\ (x # <<>>)   \* logic tương đương, nhưng TLC lỗi khi x = <<>>
 ```
 
-Sách đưa chính ví dụ này: TLC đánh giá được công thức thứ nhất nhưng không đánh giá được công thức thứ hai khi `x = <<>>`, vì `<<>>[1]` là ngớ ngẩn[^bk-seq-silly]; và ghi nhận ta tự nhiên viết công thức thứ nhất vì dễ hiểu hơn[^tlc-natural-order].
+Sách đưa chính ví dụ này: TLC đánh giá được công thức thứ nhất nhưng không đánh giá được công thức thứ hai khi `x = <<>>`, vì `<<>>[1]` là ngớ ngẩn[^bk-seq-silly]. Sách cũng ghi nhận rằng ta tự nhiên viết công thức thứ nhất vì nó dễ hiểu hơn[^tlc-natural-order].
 
-*TLC chỉ duyệt được tập hữu hạn.* TLC đánh giá `\E x \in S : p` bằng cách duyệt từng phần tử của `S`, và báo lỗi nếu tập không "hiển nhiên hữu hạn"[^tlc-giveup]. Danh sách các dạng chỉ đánh giá được khi duyệt được `S`: `\E`, `\A`, `CHOOSE`, `{x \in S : p}`, `{e : x \in S}`, `SUBSET S`, `UNION S`, `[x \in S |-> e]`[^tlc-forms]. Một biểu thức tập chỉ đánh giá được nếu nó bằng một tập hữu hạn, và biểu thức hàm chỉ đánh giá được nếu miền của nó hữu hạn[^tlc-value]. Dạng không chặn `\E x : p`, `\A x : p`, `CHOOSE x : p` thì TLC không đánh giá được[^tlc-unbounded]. Tuy vậy TLC vẫn có thể tính một số biểu thức dù không tính nổi mọi biểu thức con của nó — ví dụ `[n \in Nat |-> n * (n + 1)][3]`[^tlc-partial].
+### 8.5 TLC chỉ duyệt được tập hữu hạn
+
+TLC đánh giá `\E x \in S : p` bằng cách duyệt từng phần tử của `S`, và báo lỗi nếu tập không "hiển nhiên hữu hạn"[^tlc-giveup]. Các dạng chỉ đánh giá được khi duyệt được `S` gồm `\E`, `\A`, `CHOOSE`, `{x \in S : p}`, `{e : x \in S}`, `SUBSET S`, `UNION S` và `[x \in S |-> e]`[^tlc-forms]. Một biểu thức tập chỉ đánh giá được nếu nó bằng một tập hữu hạn, và biểu thức hàm chỉ đánh giá được nếu miền của nó hữu hạn[^tlc-value]. Dạng không chặn `\E x : p`, `\A x : p`, `CHOOSE x : p` thì TLC không đánh giá được[^tlc-unbounded]. Dù vậy TLC vẫn tính được một số biểu thức dù không tính nổi mọi biểu thức con của nó, ví dụ `[n \in Nat |-> n * (n + 1)][3]`[^tlc-partial].
 
 <details><summary>Đi sâu: ba cách diễn giải toán tử Boolean cho giá trị phi-Boolean</summary>
 
-Vì không có kiểu, `2 /\ <<5>>` là biểu thức hợp lệ. Sách phân biệt ba cách diễn giải: *bảo thủ* (giá trị hoàn toàn không xác định, nên các luật logic như giao hoán chỉ đúng với Boolean), *tự do* (giá trị là một Boolean nào đó, nên mọi luật logic đúng[^bk-liberal]) và *vừa phải* (chỉ giả định các biểu thức có `FALSE`/`TRUE` cho giá trị mong đợi, như `FALSE => 2` bằng `TRUE`). Ngữ nghĩa của TLA+ khẳng định các luật của cách diễn giải vừa phải đúng; cách tự do không bắt buộc cũng không bị cấm; và bạn nên viết đặc tả có nghĩa dưới cách vừa phải[^bk-moderate]. Ví dụ để thấy khác biệt: `\A n \in Nat : tnat[n]` với `tnat == [n \in Nat |-> TRUE]` bằng `TRUE` theo cách tự do nhưng không bằng theo cách bảo thủ[^bk-tnat], còn theo cách vừa phải thì bằng `TRUE`[^bk-tnat-mod]; với cách bảo thủ, sách đề nghị viết `tnat[n] = TRUE`[^bk-tnat-safe] (mục 16.1.3). (Nhận xét của người soạn: quy tắc thực hành là *đừng dùng giá trị không phải Boolean làm Boolean*.)
+Vì không có kiểu, `2 /\ <<5>>` là biểu thức hợp lệ. Sách phân biệt ba cách diễn giải:
+
+- *Bảo thủ*: giá trị hoàn toàn không xác định, nên các luật logic như giao hoán chỉ đúng với Boolean.
+- *Tự do*: giá trị là một Boolean nào đó, nên mọi luật logic đều đúng[^bk-liberal].
+- *Vừa phải*: chỉ giả định các biểu thức có `FALSE`/`TRUE` cho giá trị mong đợi, như `FALSE => 2` bằng `TRUE`.
+
+Ngữ nghĩa của TLA+ khẳng định các luật của cách diễn giải vừa phải là đúng. Cách tự do không bắt buộc cũng không bị cấm, và bạn nên viết đặc tả có nghĩa dưới cách vừa phải[^bk-moderate]. Một ví dụ cho thấy khác biệt: `\A n \in Nat : tnat[n]` với `tnat == [n \in Nat |-> TRUE]` bằng `TRUE` theo cách tự do nhưng không bằng theo cách bảo thủ[^bk-tnat]. Theo cách vừa phải thì nó bằng `TRUE`[^bk-tnat-mod]. Với cách bảo thủ, sách đề nghị viết `tnat[n] = TRUE` (mục 16.1.3)[^bk-tnat-safe]. Nhận xét của người soạn: quy tắc thực hành là *đừng dùng giá trị không phải Boolean làm Boolean*.
 
 </details>
 
-**Quay lại Q8:** không có kiểu nghĩa là mọi lỗi "dùng sai kiểu" chỉ lộ ra khi TLC đánh giá; hãy phát biểu kiểu thành invariant `TypeOK`, đặt guard trước các biểu thức có thể ngớ ngẩn, và chỉ đưa tập hữu hạn cho TLC.
+**Quay lại Q8:** không có kiểu nghĩa là mọi lỗi "dùng sai kiểu" chỉ lộ ra khi TLC đánh giá; hãy phát biểu kiểu thành invariant `TypeOK`, đặt guard trước các biểu thức có thể ngớ ngẩn, và chỉ đưa tập hữu hạn cho TLC. Với `lease-svc`, đó là `TypeOK` cho `queue`, `leases`, `status` và guard `q # <<>>` trước `Head(q)`.
 
 ## 9. Ghép lại: một bảng lease nhỏ (mục phụ trợ)
 
-Ví dụ nhỏ này không dạy khái niệm mới; nó ghép mọi mảnh của chương vào một module (minh họa cú pháp, chưa chạy). Bối cảnh backend (nhận xét của người soạn): một bảng lease — mỗi khóa tài nguyên có một chủ sở hữu hiện tại và một số epoch tăng mỗi lần cấp lại.
+Ví dụ này không dạy khái niệm mới; nó ghép mọi mảnh của chương vào một module (minh họa cú pháp, chưa chạy). Đây chính là lõi của `lease-svc` (nhận xét của người soạn): mỗi khóa tài nguyên có một chủ sở hữu hiện tại và một số epoch tăng mỗi lần cấp lại.
 
 ```tla
 ---- MODULE LeaseMath ----
@@ -502,20 +593,20 @@ Quota(L) == \A n \in Node : Cardinality(Held(L, n)) <= 2
 ====
 ```
 
-Đọc từng phần: `Lease` và `Leases` là *tập* (record và hàm); `InitLeases` là *giá trị* thuộc `Leases`; `Acquire` dùng `IF` và `EXCEPT` với đường dẫn lồng `![k].owner` và `@`; `Quota` dùng `\A`, lọc `{k \in Key : ...}` và `Cardinality` từ `FiniteSets`. Chú ý `Acquire` trên khóa đang có chủ trả lại `L` nguyên vẹn — đây là *toán tử trên giá trị*, không phải hành động; việc "bước này được phép xảy ra khi nào" (guard, `Next`) là chương 03.
+Đọc từng phần như sau. `Lease` và `Leases` là *tập* (record và hàm), còn `InitLeases` là *giá trị* thuộc `Leases`. `Acquire` dùng `IF` và `EXCEPT` với đường dẫn lồng `![k].owner` và `@`. `Quota` dùng `\A`, lọc `{k \in Key : ...}` và `Cardinality` từ `FiniteSets`. Chú ý `Acquire` trên khóa đang có chủ trả lại `L` nguyên vẹn: đây là *toán tử trên giá trị*, không phải hành động. Việc "bước này được phép xảy ra khi nào" (guard, `Next`) là chuyện của chương 03.
 
-Lưu ý khi chạy TLC: `NoOwner == CHOOSE v : v \notin Node` là `CHOOSE` không chặn, mà TLC không đánh giá được[^tlc-unbounded]; cách xử lý thường là ghi đè `NoOwner` bằng một giá trị mô hình trong file cấu hình, như sách làm với `NotAnS`[^tlc-notans] (chương 04).
+Khi chạy TLC có một lưu ý: `NoOwner == CHOOSE v : v \notin Node` là `CHOOSE` không chặn, mà TLC không đánh giá được[^tlc-unbounded]. Cách xử lý thường là ghi đè `NoOwner` bằng một giá trị mô hình trong file cấu hình, như sách làm với `NotAnS`[^tlc-notans] (chương 04).
 
 ## 10. Liên hệ với Rust và backend
 
-Đây là nơi tương ứng với việc sau này ([chương 10](10-tu-dac-ta-den-code-rust.md)) bạn nối đặc tả với code Rust. Bảng dưới là *gần đúng có chủ đích*; cột cuối ghi chỗ sai lệch.
+Đây là nơi bạn sẽ nối đặc tả với code Rust sau này ([chương 10](10-tu-dac-ta-den-code-rust.md)). Bảng dưới là *gần đúng có chủ đích*; cột cuối ghi chỗ sai lệch.
 
 | TLA+ | Rust gần nhất | Khác biệt cần nhớ |
 |---|---|---|
 | Tập hữu hạn `{...}` | `HashSet<T>` / `BTreeSet<T>` | TLA+ so sánh tập theo phần tử; tập lồng được; không có "bộ nhớ" |
-| `\cup`, `\cap`, `\`, `\subseteq` | `union`, `intersection`, `difference`, `is_subset` của `HashSet`[^rs-hs-union][^rs-hs-subset] | Rust trả iterator (trừ `is_subset` trả `bool`); TLA+ trả tập |
+| `\cup`, `\cap`, `\`, `\subseteq` | `union`, `intersection`, `difference` của `HashSet`[^rs-hs-union] | Rust trả iterator (trừ `is_subset`[^rs-hs-subset] trả `bool`); TLA+ trả tập |
 | `{x \in S : P}` / `{e : x \in S}` | `iter().filter(..).collect()` / `.map(..).collect::<HashSet<_>>()` | TLA+ tự loại trùng; không có thứ tự duyệt |
-| `\A` / `\E` trên tập | `Iterator::all` / `Iterator::any` | Trên rỗng `all` trả `true`[^rs-all-empty] và `any` trả `false`[^rs-any-empty], khớp `\A`/`\E` trên `{}` |
+| `\A` / `\E` trên tập | `Iterator::all` / `Iterator::any` | Trên rỗng `all` trả `true`[^rs-all-empty]. `any` trả `false`[^rs-any-empty]. Cả hai khớp `\A`/`\E` trên `{}` |
 | `CHOOSE x \in S : P` | `find(P)` trả `Option`[^rs-find] | Rust có `None`; TLA+ cho giá trị không xác định và TLC báo lỗi |
 | Hàm hữu hạn `[S -> T]` | `HashMap<K,V>` / `BTreeMap<K,V>` | Xem bên dưới |
 | `f[x]` ngoài `DOMAIN f` | `map[&k]` panic nếu thiếu khóa[^rs-hm-index]; `get` trả `Option` | "ngớ ngẩn" chứ không panic; TLC lỗi |
@@ -527,20 +618,20 @@ Lưu ý khi chạy TLC: `NoOwner == CHOOSE v : v \notin Node` là `CHOOSE` khôn
 | `Nat`, `Int` | `u64`, `i64` | Không tràn số; với `b > 0`, `%` của TLA+ cho dư không âm trong `0..(b-1)`, cùng hệ thức với `rem_euclid`[^rs-rem-euclid] |
 | `TypeOK` | hệ thống kiểu | Kiểu của TLA+ là *tập*, kiểm bằng TLC |
 
-**`HashMap` ≈ hàm, `struct` ≈ record (nhận xét của người soạn).** Cả hai tương ứng đủ dùng để dịch đặc tả sang code, với bốn chỗ lệch:
+**`HashMap` ≈ hàm, `struct` ≈ record (nhận xét của người soạn).** Cả hai tương ứng đủ dùng để dịch đặc tả `lease-svc` sang code, nhưng có bốn chỗ lệch.
 
-1. *Giá trị so với vùng nhớ.* `HashMap::insert` sửa map tại chỗ và trả về giá trị cũ nếu khóa đã có[^rs-hm-insert]; hàm TLA+ không bao giờ bị sửa — `EXCEPT` dựng hàm khác. Khi dịch bước `Next` thành code, mỗi bước thường tương ứng một lần ghi vào nhiều chỗ; thứ cần đối chiếu là trạng thái *sau* bước.
-2. *Khóa thiếu.* Truy cập `HashMap` bằng `[]` với khóa thiếu thì panic[^rs-hm-index]; trong TLA+ `f[x]` ngoài miền là biểu thức ngớ ngẩn (không xác định, TLC lỗi). Nếu đặc tả của bạn "vô tình" dựa vào miền của hàm, code Rust sẽ cần `get`/`Option` tường minh.
-3. *Struct có kiểu cố định.* Sách Rust nói struct đặt tên cho từng phần dữ liệu để rõ nghĩa, khác tuple[^rs-struct] — đúng tinh thần lý do tồn tại của record trong TLA+[^bk-record-why]. Nhưng record TLA+ không kiểu và còn là hàm: duyệt được `DOMAIN r`, ghép record như toán tử `Override` ở mục 4; struct Rust thì không.
+1. *Giá trị so với vùng nhớ.* `HashMap::insert` sửa map tại chỗ và trả về giá trị cũ nếu khóa đã có[^rs-hm-insert]. Hàm TLA+ thì không bao giờ bị sửa, `EXCEPT` dựng một hàm khác. Khi dịch bước `Next` thành code, mỗi bước thường tương ứng một lần ghi vào nhiều chỗ, và thứ cần đối chiếu là trạng thái *sau* bước.
+2. *Khóa thiếu.* Truy cập `HashMap` bằng `[]` với khóa thiếu thì panic[^rs-hm-index]. Trong TLA+, `f[x]` ngoài miền là biểu thức ngớ ngẩn (không xác định, TLC lỗi). Nếu đặc tả của bạn "vô tình" dựa vào miền của hàm, code Rust sẽ cần `get`/`Option` tường minh.
+3. *Struct có kiểu cố định.* Sách Rust nói struct đặt tên cho từng phần dữ liệu để rõ nghĩa, khác với tuple[^rs-struct]. Đó đúng là lý do record tồn tại trong TLA+[^bk-record-why]. Nhưng record TLA+ không có kiểu và còn là hàm: bạn duyệt được `DOMAIN r` và ghép record bằng toán tử như `Override` ở mục 4, còn struct Rust thì không.
 4. *Cập nhật một phần.* Cú pháp cập nhật struct của Rust (tạo instance mới từ instance khác, đổi vài trường)[^rs-struct-update] là họ hàng gần nhất của `EXCEPT` cho record.
 
-Ngoài ra: filter/map của tập tương ứng iterator adapter ([P9·06 — iterator và closure](../09-rust-language/06-iterator-va-closure.md)); `HashMap` bên trong xem [P10·09 — collections internals](../10-rust-internals/09-collections-internals.md); sai lệch số học Rust (tràn số panic ở debug, wrap ở release[^rs-overflow]) đối lập với số toán học của TLA+[^bk-no-overflow]. Trong hệ thống dữ liệu, "bảng ≈ tập các record" và "trạng thái replica ≈ hàm từ node sang trạng thái" (nhận xét của người soạn); xem ví dụ ở [P12·05 — replication](../12-he-thong-du-lieu/05-replication.md) và [P12·07 — transaction](../12-he-thong-du-lieu/07-transaction.md), những cấu trúc mà [Chương 08](08-dac-ta-giao-thuc-phan-tan.md) và [Chương 09](09-mo-hinh-hoa-he-backend.md) của phase này sẽ đặc tả.
+Ngoài ra, filter và map của tập tương ứng iterator adapter ([P9·06 — iterator và closure](../09-rust-language/06-iterator-va-closure.md)). `HashMap` bên trong xem [P10·09 — collections internals](../10-rust-internals/09-collections-internals.md). Số học Rust tràn thì panic ở debug và wrap ở release[^rs-overflow]. Điều này đối lập với số toán học của TLA+[^bk-no-overflow]. Trong hệ thống dữ liệu, "bảng ≈ tập các record" và "trạng thái replica ≈ hàm từ node sang trạng thái" (nhận xét của người soạn); xem ví dụ ở [P12·05 — replication](../12-he-thong-du-lieu/05-replication.md) và [P12·07 — transaction](../12-he-thong-du-lieu/07-transaction.md), những cấu trúc mà [Chương 08](08-dac-ta-giao-thuc-phan-tan.md) và [Chương 09](09-mo-hinh-hoa-he-backend.md) của phase này sẽ đặc tả.
 
 ## Tóm tắt
 
 - Logic: `/\`, `\/`, `~`, `=>`, `<=>`; `\A`/`\E` chạy trên tập; `=>` chỉ sai khi vế trái đúng mà vế phải sai; bullet `/\`/`\/` thẳng cột thay ngoặc.
 - Tập: `\in`, `\cup`, `\cap`, `\`, `\subseteq`, `SUBSET`, `UNION`, `\X`; dựng tập bằng lọc `{x \in S : P}` và ánh xạ `{e : x \in S}`, luôn từ một tập nguồn.
-- Hàm: `[x \in S |-> e]`, `DOMAIN f`, `[S -> T]`, `[f EXCEPT ![c] = e]` sinh hàm mới (không thêm khóa); thứ ánh xạ nằm trong biến (như trạng thái hệ thống) được viết bằng hàm.
+- Hàm: `[x \in S |-> e]`, `DOMAIN f`, `[S -> T]`, `[f EXCEPT ![c] = e]` sinh hàm mới (không thêm khóa); thứ ánh xạ nằm trong biến (như bảng lease của `lease-svc`) được viết bằng hàm.
 - Record, tuple, sequence đều là hàm (miền: tập chuỗi, `1..n`, `1..n`); `Seq`, `Len`, `Head`, `Tail`, `Append`, `\o`; chỉ số từ 1.
 - `CHOOSE` là một giá trị xác định nhưng không biết là gì, không phải phi tất định; phi tất định viết bằng `\in`/`\E`.
 - `==` là đồng nghĩa, `LET`/`IN` định nghĩa cục bộ, `IF` luôn có `ELSE`, `CASE` chọn nhánh bất kỳ trong các nhánh đúng nên các nhánh nên rời nhau.
@@ -567,16 +658,16 @@ Ngoài ra: filter/map của tập tương ứng iterator adapter ([P9·06 — it
 <details><summary>Đáp án</summary>
 
 1. `((~A) /\ B) => C`: `~` ràng chặt hơn `/\`, và `/\` ràng chặt hơn `=>`[^bk-prec]. Nên thêm ngoặc vì sách khuyên cứ ngoặc khi nghi ngờ[^bk-parens].
-2. `FALSE` và `TRUE`: trên tập rỗng không có phần tử nào nên `\E` luôn sai[^bk-empty], và theo đối ngẫu `\A` luôn đúng[^bk-dual].
-3. Đúng: tập chỉ phụ thuộc phần tử, không phụ thuộc thứ tự hay số lần lặp[^bk-set-same]. Cả hai đều là `{2, 4, 6}` (tính theo định nghĩa lọc và ánh xạ[^bk-filter][^bk-map]) nên bằng nhau.
-4. `{{}, {1}, {2}, {1, 2}}`[^bk-subset-ex]; `UNION {{1}, {1, 2}}` = `{1, 2}` (hợp mọi phần tử, theo định nghĩa[^sum-union]).
-5. `{1, 2}`[^bk-fn-def]. `[f EXCEPT ![3] = 0]` chính là `f` vì 3 không thuộc miền[^bk-except-nondomain]; TLC cảnh báo biểu thức kiểu này[^tlc-nowarning].
+2. `FALSE` và `TRUE`. Trên tập rỗng không có phần tử nào nên `\E` luôn sai[^bk-empty]. Theo đối ngẫu thì `\A` luôn đúng[^bk-dual].
+3. Đúng: tập chỉ phụ thuộc phần tử, không phụ thuộc thứ tự hay số lần lặp[^bk-set-same]. Cả hai tập đều là `{2, 4, 6}` (tính theo định nghĩa lọc và ánh xạ[^bk-filter]) nên bằng nhau.
+4. `{{}, {1}, {2}, {1, 2}}`[^bk-subset-ex]. `UNION {{1}, {1, 2}}` = `{1, 2}` (hợp mọi phần tử, theo định nghĩa[^sum-union]).
+5. `{1, 2}`[^bk-fn-def]. `[f EXCEPT ![3] = 0]` chính là `f` vì 3 không thuộc miền[^bk-except-nondomain]. TLC cảnh báo biểu thức kiểu này[^tlc-nowarning].
 6. Vì `[S -> T]` là tập hàm có miền bằng `S` và miền giá trị là tập con *bất kỳ* của `T`[^bk-fn-set]. Có $3^2 = 9$ hàm (công thức $|B|^{|A|}$[^learn-fnset-size]).
-7. Bằng nhau: record là hàm có miền là tập hữu hạn các chuỗi[^bk-record-def], và `r.a` là viết tắt của `r["a"]`[^bk-record-def].
-8. Theo sách, `Tail(<<>>)` là dãy rỗng (suy ra từ định nghĩa) và `Head(<<>>)` là `<<>>[1]`, một biểu thức ngớ ngẩn; theo module hiện hành `Tail` dùng `CASE s # << >>` nên `Tail(<<>>)` không xác định[^repo-tail]; TLC báo lỗi khi đánh giá `x[1]` với `x = <<>>`[^bk-seq-silly].
+7. Bằng nhau: record là hàm có miền là tập hữu hạn các chuỗi, và `r.a` là viết tắt của `r["a"]`[^bk-record-def].
+8. Theo sách, `Tail(<<>>)` là dãy rỗng (suy ra từ định nghĩa), còn `Head(<<>>)` là `<<>>[1]`, một biểu thức ngớ ngẩn. Theo module hiện hành, `Tail` dùng `CASE s # << >>` nên `Tail(<<>>)` không xác định[^repo-tail]. TLC báo lỗi khi đánh giá `x[1]` với `x = <<>>`[^bk-seq-silly].
 9. Không: trong toán học không có toán tử phi tất định, biểu thức luôn bằng cùng một giá trị[^bk-choose-nondet]. Đặc tả `x = CHOOSE...` cho đúng một hành vi (x luôn bằng một số cố định), còn `x \in Nat` cho vô số hành vi[^bk-choose-vs-in].
 10. Nhánh 1 và 2 cùng đúng, nên kết quả là `"A"` hoặc `"B"` mà ngữ nghĩa không nói là cái nào[^bk-case-disjoint]. Muốn xác định, các nhánh phải rời nhau (ví dụ nhánh thứ hai thêm `score < 90`).
-11. TLC đánh giá `/\` từ trái sang phải, chỉ tính vế phải nếu vế trái đúng[^tlc-left-right]; chiều ngược lại tính `<<>>[1]` — ngớ ngẩn — trước[^bk-seq-silly].
+11. TLC đánh giá `/\` từ trái sang phải, chỉ tính vế phải nếu vế trái đúng[^tlc-left-right]. Chiều ngược lại tính `<<>>[1]`, một biểu thức ngớ ngẩn, trước[^bk-seq-silly].
 12. Vì `Nat` vô hạn: TLC đánh giá `{x \in S : p}` bằng cách duyệt `S` trước, nên không duyệt được `Nat`[^tlc-enum]. Sửa: dùng tập hữu hạn như `0..5` (`{i \in 0..5 : i < 4}`).
 
 </details>

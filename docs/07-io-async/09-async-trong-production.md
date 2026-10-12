@@ -1,6 +1,8 @@
 # P7 · Chương 09 — Async Rust trong production: cancellation, backpressure, blocking
 
-> Chương này nói về **Tokio 1.53.2**, **tokio-util 0.7.18** và Rust 1.95.0. (Nhận xét của người soạn: 0.7.18 là phiên bản ghi trong `tokio-util/Cargo.toml` của tag `tokio-1.53.2`[^tu-pin]; repo này chưa dùng `tokio-util` trong `Cargo.lock`, nên đây là phiên bản người soạn chọn để đọc docs.) Phần `tower` dùng `tower-service` 0.3.3 và `tower` 0.5.2 (cũng là bản người soạn chọn để đọc docs; chương không khẳng định đây là bản mới nhất). Chương này **không** dạy lại runtime, scheduler, `spawn`, `spawn_blocking` hay `select!` từ đầu; những thứ đó đã ở [Chương 08 — Tokio](08-tokio.md). Ở đây chỉ hỏi: *khi dịch vụ chạy thật, cái gì hỏng, và hỏng ở đâu*.
+> Chương này nói về **Tokio 1.53.2**, **tokio-util 0.7.18** và Rust 1.95.0. Bản 0.7.18 của `tokio-util` là bản ghi trong `Cargo.toml` của tag `tokio-1.53.2`[^tu-pin]; repo này chưa dùng `tokio-util` trong `Cargo.lock`, nên đó là bản người soạn chọn để đọc docs. Phần `tower` dùng `tower-service` 0.3.3 và `tower` 0.5.2, cũng là bản người soạn chọn để đọc docs, không có nghĩa là bản mới nhất.
+>
+> Chương **không** dạy lại runtime, scheduler, `spawn`, `spawn_blocking` hay `select!` từ đầu; những thứ đó nằm ở [Chương 08 — Tokio](08-tokio.md). Ở đây chỉ có một câu hỏi: *khi dịch vụ chạy thật, cái gì hỏng, và hỏng ở đâu*. Để câu hỏi có hình hài cụ thể, cả chương bám theo một service giả định tên `checkout`, giới thiệu ở mục 1.
 
 ## Bạn sẽ hiểu được gì
 
@@ -21,54 +23,65 @@
 
 ## 1. Hủy là drop future, và hệ quả cho invariant (Q1)
 
-> **Trả lời ngắn.** Trong Tokio, "hủy" không phải là một ngoại lệ hay tín hiệu gửi vào code đang chạy: future bị hủy khi bị *drop*[^tokio-select-drop], và nó dừng ở đúng chỗ `.await` nó đang treo[^tokio-select-own]. Với task đã `spawn` bị `abort`, mọi biến cục bộ bị hủy bằng destructor (hàm `drop` của từng kiểu)[^tokio-cancel-drop]. Vì vậy code sau `.await` đó không bao giờ chạy, và hàm nhiều bước có thể bị cắt giữa chừng (suy luận của người soạn). Hàm "cancellation safe" là hàm mà việc drop rồi tạo lại nó là thao tác không có tác dụng[^tokio-select-def].
+> **Trả lời ngắn.** Trong Tokio, "hủy" một việc async nghĩa là *drop* future của nó; không có ngoại lệ hay tín hiệu nào chui vào code đang chạy[^tokio-select-drop]. Future dừng đúng ở `.await` nó đang treo[^tokio-select-own]. Mọi biến cục bộ bị hủy bằng destructor (hàm `drop` của kiểu đó)[^tokio-cancel-drop], còn code phía sau `.await` thì không bao giờ chạy. Vì vậy một hàm nhiều bước có thể bị cắt ngang giữa chừng (suy luận của người soạn). Hàm "cancellation safe" là hàm mà drop nó rồi tạo lại thì không mất gì, tức là thao tác no-op[^tokio-select-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhân viên ngân hàng đang làm lệnh chuyển tiền hai bước "trừ tiền tài khoản A" rồi "cộng tiền tài khoản B". Sếp gọi anh ta đi họp giữa hai bước. Nếu hai bước không nằm trong một giao dịch, tiền biến mất. Hủy trong async chính là tiếng gọi đó, và nó chỉ xảy ra *giữa hai bước* (tại `.await`), không bao giờ ở giữa một bước đồng bộ. *Invariant* (điều kiện phải luôn đúng giữa các bước; ở đây là tổng tiền không đổi) bị vỡ ở đúng khoảng giữa hai bước đó.
+*Với service của bạn.* Giả sử `checkout` là một service Tokio nhận `POST /checkout`. Mỗi request nó gọi dịch vụ `payments` để trừ tiền thẻ, ghi đơn vào Postgres, rồi gửi một event sang `shipping`. Ta sẽ bám theo `checkout` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này: handler của một request bị hủy giữa chừng thì `checkout` còn lại trạng thái gì?
 
-*Cơ chế.* Future chỉ tiến lên khi được poll; nó "inert" (không tự chạy)[^future-inert]. Chủ của future (một `select!`, một `timeout`, hay runtime khi `abort`) chỉ cần *thôi poll* rồi drop. Hủy luôn xảy ra tại một `.await`[^tokio-select-own]. Với task đã `spawn`, `abort` làm cùng việc: task dừng ở `.await` nó đã yield và mọi biến cục bộ bị hủy[^tokio-cancel-drop]; chi tiết `abort` ở [Chương 08, mục 5](08-tokio.md).
-
-*Ai drop future của bạn.* Những chỗ quen thuộc: nhánh thua của `select!`[^tokio-select], `timeout` quá hạn[^tokio-timeout], `abort` hoặc tắt runtime[^tokio-cancel-rt], và `JoinSet` bị drop (mục 4). Một số framework web cũng có thể drop future của handler vào lúc kết nối đóng; điều này phụ thuộc framework, người soạn không có nguồn nên không khẳng định (suy luận của người soạn: hãy đọc docs framework bạn dùng, đừng giả định handler luôn chạy tới cuối).
-
-```mermaid
-sequenceDiagram
-  participant S as select! / timeout / abort
-  participant F as future chuyển_tiền
-  participant DB as dịch vụ ngoài
-  S->>F: poll
-  F->>DB: trừ tiền A (.await #1)
-  DB-->>F: xong
-  F->>DB: cộng tiền B (.await #2, đang treo)
-  S--xF: drop (nhánh khác thắng)
-  Note over F,DB: Bước 1 đã xảy ra, bước 2 không bao giờ chạy
-```
+Hai bước đầu của handler trông như sau:
 
 ```rust
 // Minh họa, không phải code để chạy nguyên văn.
-async fn chuyen_tien(a: Id, b: Id, so_tien: u64) -> Result<(), Error> {
-    tru_tien(a, so_tien).await?;   // .await #1
-    cong_tien(b, so_tien).await?;  // .await #2: hủy ở đây thì tiền đã bị trừ
+async fn checkout(req: Order) -> Result<(), Error> {
+    payments.charge(&req.card, req.total).await?; // .await #1: trừ tiền thẻ
+    db.insert_order(&req).await?;                 // .await #2: hủy ở đây thì thẻ đã bị trừ mà không có đơn
     Ok(())
 }
 ```
 
-*Ba cách giữ invariant* (nhận xét của người soạn, dựa trên định nghĩa ở docs):
+Chỗ nguy hiểm là khoảng giữa hai `.await`. Giả sử một `timeout` ở tầng trên (mục 2) hết hạn đúng lúc `insert_order` đang chờ Postgres, và future của handler bị drop. Nó dừng tại `.await #2`: thẻ khách đã bị trừ, còn dòng đơn hàng thì không bao giờ được ghi. Điều kiện "đã trừ tiền thì phải có đơn" là một *invariant*, tức điều phải luôn đúng giữa các bước, và nó vỡ đúng ở khoảng đó. Điểm đáng nhớ là hủy chỉ xảy ra tại `.await`, không bao giờ giữa một đoạn code đồng bộ[^tokio-select-own]. Mọi đoạn nằm giữa hai `.await` đều chạy trọn; rủi ro nằm ở ranh giới giữa các đoạn.
 
-1. **Đưa việc quan trọng ra khỏi đường hủy.** Nếu hai bước phải đi liền nhau, đặt chúng vào một giao dịch phía dịch vụ (transaction DB), hoặc `spawn` chúng thành task riêng: drop `JoinHandle` chỉ tách task chứ không hủy nó[^tokio-jh-detach], task tiếp tục chạy và kết quả bị mất[^tokio-jh-drop]. Cái giá: không còn gì dừng task đó trừ `abort` hoặc tắt runtime.
-2. **Giữ trạng thái ngoài future.** Docs định nghĩa cancel-safe là "drop rồi tạo lại là no-op" và nhắc rằng định nghĩa này sinh ra từ `select!` trong vòng lặp: không có tính chất đó thì bạn mất tiến độ mỗi khi một nhánh khác thắng và vòng lặp chạy lại[^tokio-select-def]. Ví dụ hay gặp là đọc đủ N byte: `read_exact` không an toàn[^tokio-select-safe]; giữ bộ đệm và số byte đã đọc *ngoài* future rồi lặp `read`.
-3. **Dùng đúng hàm cancel-safe, hoặc dùng `&mut future` đã pin** để cùng một future sống qua nhiều vòng `select!`: docs nói cần future `Unpin`, đạt được bằng `Box::pin` hoặc pin trên stack[^sel-pin].
+```mermaid
+sequenceDiagram
+  participant S as select! / timeout / abort
+  participant F as future checkout
+  participant P as payments / Postgres
+  S->>F: poll
+  F->>P: trừ tiền thẻ (.await #1)
+  P-->>F: xong
+  F->>P: ghi đơn (.await #2, đang treo)
+  S--xF: drop (nhánh khác thắng)
+  Note over F,P: Bước 1 đã xảy ra, bước 2 không bao giờ chạy
+```
 
-*Bảng: hàm nào mất gì khi bị drop giữa chừng.* Mỗi dòng đối chiếu với mục "Cancel safety" trong docs của chính method đó (Tokio 1.53.2, tokio-util 0.7.18); danh sách trong docs `select!` chỉ bổ sung và chính nó nói là không đầy đủ[^tokio-select-notexh].
+Hủy đơn giản đến vậy vì future chỉ tiến lên khi có ai đó poll nó; tự nó không chạy[^future-inert]. Bên đang giữ future (một `select!`, một `timeout`, hay runtime khi `abort`) muốn hủy thì chỉ cần thôi poll rồi drop. Task đã `spawn` bị `abort` cũng vậy: nó dừng ở `.await` đã yield và mọi biến cục bộ bị hủy[^tokio-cancel-drop]. Chi tiết `abort` nằm ở [Chương 08, mục 5](08-tokio.md).
+
+Vậy ai sẽ drop future của handler `checkout`? Những chỗ quen thuộc:
+
+- Nhánh thua của `select!`[^tokio-select].
+- `timeout` quá hạn[^tokio-timeout].
+- `abort`, hoặc tắt runtime[^tokio-cancel-rt].
+- `JoinSet` bị drop (mục 4).
+
+Một số framework web còn drop future của handler khi client đóng kết nối. Điều đó phụ thuộc framework và người soạn không có nguồn nên không khẳng định (suy luận của người soạn: hãy đọc docs framework bạn dùng, đừng giả định handler luôn chạy tới cuối).
+
+Giữ invariant có ba cách (nhận xét của người soạn, dựa trên các định nghĩa trong docs):
+
+1. **Đưa việc quan trọng ra khỏi đường hủy.** Hai bước phải đi liền nhau thì hoặc gom vào một transaction phía DB, hoặc `spawn` thành task riêng. Với `checkout`, ta có thể `spawn` cả cặp trừ tiền và ghi đơn thành một task. Khi handler bị hủy, chỉ `JoinHandle` bị drop, mà drop handle chỉ *tách* task chứ không hủy nó[^tokio-jh-detach]. Task vẫn chạy nền, chỉ có kết quả của nó là mất[^tokio-jh-drop]. Cái giá là về sau không còn gì dừng được task đó ngoài `abort` hoặc tắt runtime.
+2. **Giữ trạng thái ngoài future.** Docs định nghĩa cancel-safe là "drop rồi tạo lại là no-op", và định nghĩa này xuất phát từ `select!` trong vòng lặp: nếu future không có tính chất đó thì mỗi lần một nhánh khác thắng và vòng lặp chạy lại, bạn mất tiến độ đã làm[^tokio-select-def]. Ví dụ hay gặp là đọc đủ N byte của request body. `read_exact` không an toàn[^tokio-select-safe], nên hãy giữ bộ đệm và số byte đã đọc *ngoài* future rồi lặp `read`.
+3. **Dùng đúng hàm cancel-safe, hoặc dùng `&mut future` đã pin** để một future sống qua nhiều vòng `select!`. Docs yêu cầu future phải `Unpin`, đạt được bằng `Box::pin` hoặc pin trên stack[^sel-pin].
+
+Muốn biết một hàm cụ thể mất gì khi bị drop giữa chừng, tra bảng dưới. Mỗi dòng đối chiếu với mục "Cancel safety" trong docs của chính method đó (Tokio 1.53.2, tokio-util 0.7.18). Danh sách trong docs `select!` chỉ bổ sung, và chính nó nói mình không đầy đủ[^tokio-select-notexh].
 
 | Hàm | Khi bị drop giữa chừng |
 |---|---|
 | `mpsc::Receiver::recv` | Cancel-safe: chưa có tin nào bị lấy ra khỏi channel[^recv-safe] |
-| `mpsc::Sender::send` | Tin chắc chắn chưa được gửi, nhưng tin bị drop và mất[^send-cancel]; mất vị trí trong hàng đợi[^send-queue] |
-| `mpsc::Sender::reserve` + `Permit::send` | Cách tránh mất tin: giữ chỗ trước rồi mới gửi[^send-reserve]; drop `Permit` trả chỗ lại cho channel[^reserve-drop]. Riêng `reserve().await` bị hủy thì mất vị trí trong hàng đợi[^reserve-queue] |
-| `AsyncReadExt::read_exact` | Không cancel-safe: một phần dữ liệu có thể đã được đọc vào `buf` khi future bị drop[^read-exact-cancel]; docs `select!` xếp nó (cùng `read_to_end`, `read_to_string`, `write_all`) vào nhóm có thể mất dữ liệu[^tokio-select-safe] |
-| `AsyncWriteExt::write_all` | Không cancel-safe: buffer có thể đã được ghi một phần, và lần gọi `write_all` sau bắt đầu lại từ đầu buffer[^write-all-cancel] (suy luận của người soạn: nếu gọi lại với cùng buffer, phần đã ghi sẽ bị ghi lặp) |
-| `Mutex::lock` | Mất vị trí trong hàng đợi công bằng[^mutex-lock-cancel]; docs `select!` xếp vào nhóm không cancel-safe vì lý do này[^tokio-select-queue] |
+| `mpsc::Sender::send` | Tin chắc chắn chưa được gửi, nhưng tin bị drop và mất[^send-cancel]. Vị trí trong hàng đợi cũng mất[^send-queue] |
+| `mpsc::Sender::reserve` + `Permit::send` | Cách tránh mất tin: giữ chỗ trước rồi mới gửi[^send-reserve]. Drop `Permit` thì trả chỗ lại cho channel[^reserve-drop]. Riêng `reserve().await` bị hủy thì mất vị trí trong hàng đợi[^reserve-queue] |
+| `AsyncReadExt::read_exact` | Không cancel-safe: một phần dữ liệu có thể đã nằm trong `buf` khi future bị drop[^read-exact-cancel]. Docs `select!` xếp nó (cùng `read_to_end`, `read_to_string`, `write_all`) vào nhóm có thể mất dữ liệu[^tokio-select-safe] |
+| `AsyncWriteExt::write_all` | Không cancel-safe: buffer có thể đã ghi một phần, và lần `write_all` sau bắt đầu lại từ đầu buffer[^write-all-cancel]. Nếu gọi lại với cùng buffer, phần đã ghi sẽ bị ghi lặp (suy luận của người soạn) |
+| `Mutex::lock` | Mất vị trí trong hàng đợi công bằng[^mutex-lock-cancel]. Docs `select!` xếp nó vào nhóm không cancel-safe vì lý do này[^tokio-select-queue] |
 | `Semaphore::acquire` | Mất vị trí trong hàng đợi công bằng[^sem-acq-cancel] |
 | `Notify::notified` | Mất vị trí trong hàng đợi công bằng[^notified-cancel] |
 | `JoinSet::join_next` | Cancel-safe: không task nào bị lấy ra khỏi set[^js-joinnext-safe] |
@@ -76,56 +89,56 @@ async fn chuyen_tien(a: Id, b: Id, so_tien: u64) -> Result<(), Error> {
 | `CancellationToken::cancelled` | Cancel-safe[^ct-cancelled-safe] |
 | `CancellationToken::run_until_cancelled(fut)` | Cancel-safe chỉ khi `fut` cancel-safe[^ct-run-safe] |
 
-Docs cũng nhắc: hủy thứ không cancel-safe không nhất thiết là sai, ví dụ khi hủy task vì ứng dụng đang tắt thì mất dữ liệu đọc dở thường không quan trọng[^tokio-select-notwrong].
+Hủy một thứ không cancel-safe cũng không nhất thiết là sai. Ví dụ khi bạn hủy task vì ứng dụng đang tắt, mất dữ liệu đọc dở thường không quan trọng[^tokio-select-notwrong].
 
 <details><summary>Đi sâu: <code>Drop</code> là đồng bộ, dọn dẹp async và vị trí của <code>.await</code> trong destructor</summary>
 
-- `Drop::drop` có chữ ký `fn drop(&mut self)`, không phải `async`[^drop-sig]. Suy luận của người soạn: vì vậy destructor của future bị hủy không thể `.await`; việc dọn dẹp bất đồng bộ (đóng kết nối có handshake, flush có chờ) phải đi qua một đường *tường minh* như `async fn close(self)` hoặc một message gửi sang task quản lý tài nguyên, còn `Drop` chỉ làm phần đồng bộ và không chặn.
-- Docs `tokio::task` nhắc rằng hàm đồng bộ bạn gọi từ async cũng chặn thread, "kể cả destructor của đối tượng bị hủy trong code async"[^tokio-sync-in-async]. Hệ quả: `Drop` nặng (đóng file lớn, `join` thread) cũng nằm trong mục 5.
-- `JoinHandle` bảo đảm destructor của task đã chạy xong trước khi bạn quan sát được hoàn thành qua `await`, `is_finished`[^jh-dtor]. Nên muốn chắc chắn việc dọn của task bị `abort` đã xong, hãy `await` handle (hoặc `JoinSet::join_next`), đừng chỉ gọi `abort`[^tokio-abort-async].
-- `abort` một task có thể không ra lỗi cancelled vì task có thể đã xong trước[^jh-abort-complete] (đã nêu ở [Chương 08, mục 5](08-tokio.md)); code của bạn phải xử lý cả `Ok` lẫn `Err(cancelled)`.
+- `Drop::drop` có chữ ký `fn drop(&mut self)`, không phải `async`[^drop-sig]. Suy luận của người soạn: vì vậy destructor của một future bị hủy không thể `.await`. Việc dọn dẹp bất đồng bộ (đóng kết nối có handshake, flush có chờ) phải đi qua một đường *tường minh* như `async fn close(self)` hoặc một message gửi sang task quản lý tài nguyên; `Drop` chỉ làm phần đồng bộ và không chặn.
+- Docs `tokio::task` nhắc rằng hàm đồng bộ bạn gọi từ async cũng chặn thread, kể cả destructor của đối tượng bị hủy trong code async[^tokio-sync-in-async]. Hệ quả là một `Drop` nặng (đóng file lớn, `join` thread) cũng thuộc mục 5.
+- Khi bạn quan sát được task hoàn thành qua `await` hoặc `is_finished`, destructor của task đã chạy xong[^jh-dtor]. Vì vậy muốn chắc việc dọn của task bị `abort` đã xong, hãy `await` handle (hoặc `JoinSet::join_next`). `abort` chỉ *lên lịch* hủy và trả về trước khi hủy xong[^tokio-abort-async].
+- Task bị `abort` vẫn có thể trả `Ok` thay vì lỗi cancelled, vì nó có thể đã xong trước lúc bị hủy[^jh-abort-complete] (đã nêu ở [Chương 08, mục 5](08-tokio.md)). Code của bạn phải xử lý cả `Ok` lẫn `Err(cancelled)`.
 
 </details>
 
-**Quay lại Q1:** hủy là drop future tại `.await`; mọi hàm nhiều bước phải hoặc cancel-safe, hoặc được che khỏi đường hủy (task riêng, transaction), hoặc giữ trạng thái ngoài future.
+**Quay lại Q1:** hủy là drop future tại `.await`; với `checkout`, mọi hàm nhiều bước phải hoặc cancel-safe, hoặc được che khỏi đường hủy (task riêng, transaction), hoặc giữ trạng thái ngoài future.
 
 ## 2. `timeout`: hạn chót không phải là hủy việc phía xa (Q2)
 
-> **Trả lời ngắn.** `timeout(d, fut)` chờ `fut` tối đa `d`; quá hạn thì trả `Err(Elapsed)` và future *bị hủy* (bị drop)[^tokio-timeout], nên mọi điều ở mục 1 đều áp dụng. Nó chỉ drop thứ nó bọc: nếu bạn bọc một `JoinHandle`, task bên trong vẫn chạy tiếp (drop handle chỉ tách task)[^tokio-jh-detach]; `spawn_blocking` đã chạy thì không abort được (chưa chạy thì abort có thể chặn nó khởi động)[^tokio-csb-abort]. Và nó poll future trước khi xét hạn[^tokio-timeout-poll].
+> **Trả lời ngắn.** `timeout(d, fut)` chờ `fut` tối đa `d`. Quá hạn thì nó trả `Err(Elapsed)` và drop future, tức là một lần hủy đúng như mục 1[^tokio-timeout]. Nhưng nó chỉ drop thứ nó bọc. Bọc một `JoinHandle` thì task bên trong vẫn chạy tiếp[^tokio-jh-detach]. Còn `spawn_blocking` đã chạy rồi thì không dừng được[^tokio-csb-abort]. Ngoài ra, nó poll future trước rồi mới xét hạn[^tokio-timeout-poll].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn gọi shipper và nói "10 phút nữa không thấy hàng thì tôi hủy đơn". Hủy đơn là việc *của bạn*; shipper ở ngoài đường có thể đã lấy hàng, và đơn bên kho đã được xử lý. `timeout` cũng thế: nó chỉ ngừng chờ, không có cách nào bảo dịch vụ phía xa dừng.
+*Với `checkout`.* `checkout` gọi `payments` với hạn 2 giây: `timeout(Duration::from_secs(2), payments.charge(..))`. Giả sử hôm đó `payments` mất 3 giây mới trả lời. Sau 2 giây `timeout` trả `Err(Elapsed)`, future gọi `payments` bị drop, và handler báo lỗi cho client. Nhưng phía `payments` không ai biết gì: nó có thể đã trừ tiền thẻ xong. `timeout` chỉ làm `checkout` thôi chờ; nó không có đường nào bảo dịch vụ phía xa dừng (nhận xét của người soạn). Vì vậy lỗi timeout nghĩa là "không biết kết quả", chứ không phải "chưa xảy ra".
 
-Từng điểm cần nhớ:
+Những điều cần nhớ về `timeout`, theo thứ tự hay gặp khi vận hành:
 
-- **`timeout` là bọc một future.** Hết hạn thì trả `Err(Elapsed)` và future bị hủy[^tokio-timeout]; hủy chính `timeout` cũng chỉ là drop future, không cần dọn gì thêm[^to-cancel]. Có thể lấy lại future gốc bằng `Timeout::into_inner`[^to-into-inner].
-- **Poll trước, kiểm hạn sau** (đã nêu ở [Chương 08, mục 7](08-tokio.md)). Nếu future không bao giờ yield giữa chừng thì nó có thể hoàn thành vượt hạn mà không lỗi[^tokio-timeout-poll]. Hạn chót không cứu được code chặn thread (mục 5). (Suy luận của người soạn: `Timeout` được poll bởi chính task đang chạy; khi future bên trong chiếm thread trong một lần `poll`, không có điểm nào để kiểm hạn trước khi lần `poll` đó trả về.)
-- **Hoàn thành tức thì thì luôn thắng.** Nếu future hoàn thành ngay, `timeout` bảo đảm trả `Ok` dù hạn là bao nhiêu[^to-immediate].
-- **Hạn tuyệt đối với `timeout_at`.** `timeout_at(deadline, fut)` đòi future xong trước một `Instant` cho trước[^to-at]. (Nhận xét của người soạn: với một request đi qua nhiều bước, tính hạn chót *một lần* ở cửa vào rồi truyền `Instant` xuống, thay vì mỗi bước tự đặt `timeout(5s)` rồi cộng dồn vượt cam kết với client.)
-- **Timeout bọc một `JoinHandle` không hủy task.** `timeout(d, handle)` quá hạn chỉ drop `handle`, task vẫn chạy nền và kết quả mất[^tokio-jh-drop]. Muốn hủy thật, giữ `AbortHandle` hoặc spawn vào `JoinSet` (mục 4) rồi gọi `abort`.
-- **Timeout bọc `spawn_blocking` còn yếu hơn:** closure đã chạy thì không dừng được, và có thể vẫn chiếm một thread của blocking pool[^tokio-csb-abort].
-- **Timeout quanh hàm không cancel-safe thì mất dữ liệu:** `timeout(d, read_exact(..))` quá hạn là một lần hủy `read_exact` (không an toàn[^tokio-select-safe]); `timeout` quanh `send` làm tin bị drop[^send-cancel]; quanh `acquire` làm bạn mất chỗ trong hàng[^sem-acq-cancel].
+- **`timeout` bọc một future và hủy nó khi hết hạn.** Quá hạn thì trả `Err(Elapsed)` và future bị hủy[^tokio-timeout]. Hủy chính `timeout` cũng chỉ là drop future, không cần dọn gì thêm[^to-cancel]. Nếu cần lấy lại future gốc, dùng `Timeout::into_inner`[^to-into-inner].
+- **Poll trước, kiểm hạn sau** (đã nêu ở [Chương 08, mục 7](08-tokio.md)). Nếu future không yield giữa chừng thì nó có thể hoàn thành vượt hạn mà không báo lỗi[^tokio-timeout-poll]. Cho nên hạn chót không cứu được code chặn thread (mục 5). Lý do (suy luận của người soạn): `Timeout` được poll bởi chính task đang chạy, nên khi future bên trong chiếm thread trong một lần `poll`, không có điểm nào để kiểm hạn trước khi lần `poll` đó trả về.
+- **Hoàn thành tức thì thì luôn thắng.** Future hoàn thành ngay thì `timeout` bảo đảm trả `Ok` dù hạn là bao nhiêu[^to-immediate].
+- **`timeout_at` đặt hạn tuyệt đối.** `timeout_at(deadline, fut)` đòi future xong trước một `Instant` cho trước[^to-at]. Với một request đi qua nhiều bước, nên tính hạn chót *một lần* ở cửa vào rồi truyền `Instant` xuống, thay vì để mỗi bước tự đặt `timeout(5s)` rồi cộng dồn vượt cam kết với client (nhận xét của người soạn).
+- **`timeout` bọc `JoinHandle` không hủy task.** `timeout(d, handle)` quá hạn chỉ drop `handle`; task vẫn chạy nền và kết quả mất[^tokio-jh-drop]. Muốn hủy thật, giữ `AbortHandle` hoặc spawn vào `JoinSet` (mục 4) rồi gọi `abort`.
+- **`timeout` bọc `spawn_blocking` còn yếu hơn.** Closure đã chạy thì không dừng được và vẫn chiếm một thread của blocking pool; chỉ khi chưa chạy thì `abort` mới có thể chặn nó khởi động[^tokio-csb-abort].
+- **`timeout` quanh hàm không cancel-safe thì mất dữ liệu.** `timeout(d, read_exact(..))` quá hạn là một lần hủy `read_exact`, mà hàm này không an toàn[^tokio-select-safe]. `timeout` quanh `send` làm tin bị drop[^send-cancel]. `timeout` quanh `acquire` làm bạn mất chỗ trong hàng[^sem-acq-cancel].
 
-*Hạn chót trong vòng `select!`.* Khi muốn cả một vòng lặp có hạn chót, tạo `sleep` *một lần*, pin nó, rồi đặt `&mut sleep` vào `select!` để các vòng sau không đặt lại đồng hồ; ví dụ trong docs `select!` dùng đúng mẫu này, và nhấn mạnh phải dùng reference đến future `Unpin`[^sel-pin]. Docs cũng cảnh báo mẫu sai dùng `if` precondition để tắt nhánh: cần cẩn thận kẻo bỏ lỡ giá trị[^sel-racy].
+Khi muốn cả một vòng lặp `select!` có hạn chót, hãy tạo `sleep` *một lần*, pin nó, rồi đặt `&mut sleep` vào `select!`, để các vòng sau không đặt lại đồng hồ. Ví dụ trong docs `select!` dùng đúng mẫu này và nhấn mạnh phải dùng reference tới future `Unpin`[^sel-pin]. Docs cũng cảnh báo mẫu dùng `if` precondition để tắt nhánh: phải cẩn thận kẻo bỏ lỡ giá trị[^sel-racy].
 
 <details><summary>Đi sâu: <code>timeout</code> và <code>select!</code> khác nhau chỗ nào</summary>
 
-- `select!` chạy các nhánh *đồng thời nhưng không song song* trên cùng task; nếu một nhánh chặn thread thì mọi nhánh khác đứng[^sel-runtime]. Muốn song song thực thụ, docs bảo `spawn` từng việc rồi đưa `JoinHandle` vào `select!`[^sel-runtime]. Điều này khớp với việc `timeout` không cứu được code chặn.
-- Docs `select!` nói nhánh có `if` precondition `false` bị tắt, nhưng biểu thức future vẫn được tạo mà không poll[^sel-pre].
+- `select!` chạy các nhánh *đồng thời nhưng không song song* trên cùng task; một nhánh chặn thread thì mọi nhánh khác đứng. Muốn song song thực thụ, docs bảo `spawn` từng việc rồi đưa `JoinHandle` vào `select!`[^sel-runtime]. Điều này khớp với việc `timeout` không cứu được code chặn.
+- Nhánh có `if` precondition `false` bị tắt, nhưng biểu thức future của nó vẫn được tạo mà không bao giờ được poll[^sel-pre].
 - Quy tắc thực dụng (nhận xét của người soạn): thứ gì bạn đặt trong `select!` hoặc `timeout` phải là thứ bạn chấp nhận bị drop ở mọi `.await` của nó; xem lại bảng ở mục 1.
 
 </details>
 
-**Quay lại Q2:** `timeout` = ngừng chờ + drop future bên trong; không dừng được task đã spawn, không dừng `spawn_blocking`, không dừng dịch vụ phía xa, và không cứu được future không bao giờ yield.
+**Quay lại Q2:** `timeout` = ngừng chờ + drop future bên trong; nó không dừng task đã spawn, không dừng `spawn_blocking`, không dừng `payments` ở phía xa, và không cứu được future không bao giờ yield.
 
 ## 3. Backpressure: channel bounded, `Semaphore`, `poll_ready` (Q3)
 
-> **Trả lời ngắn.** Backpressure là cơ chế để bên nhận chậm *làm bên gửi chậm theo*, thay vì hàng đợi phình ra vô hạn. Channel bounded của Tokio làm đúng việc này: đầy thì `send` chờ[^mpsc-bounded]; channel unbounded không có backpressure và có thể làm hết bộ nhớ[^unb-mem]. `Semaphore` giới hạn số việc chạy đồng thời[^tokio-sem]. Trong tower, cùng ý tưởng nằm ở `Service::poll_ready`: dịch vụ đầy thì trả `Pending`, caller chịu trách nhiệm hỏi sẵn sàng trước khi gọi[^tower-bp].
+> **Trả lời ngắn.** Backpressure là cơ chế để bên nhận chậm *làm bên gửi chậm theo*, thay vì để hàng đợi phình ra vô hạn. Channel bounded của Tokio làm đúng việc này: đầy thì `send` phải chờ[^mpsc-bounded]. Channel unbounded không có backpressure và có thể làm hết bộ nhớ[^unb-mem]. `Semaphore` giới hạn số việc chạy đồng thời[^tokio-sem]. Trong tower, cùng ý tưởng nằm ở `Service::poll_ready`: dịch vụ đầy thì trả `Pending`, và caller phải hỏi sẵn sàng trước khi gọi[^tower-bp].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ống nước chảy vào bể. Nếu bể có van tràn biết đóng khi đầy (bounded), nước ngừng chảy từ nguồn; nếu bể là cái hố không đáy (unbounded), ống vẫn chảy cho tới khi nền nhà sập (hết RAM, process bị `abort`).
+*Với `checkout`.* Sau khi ghi đơn, mỗi handler của `checkout` gửi một event sang `shipping` qua một writer task, nối với handler bằng channel `mpsc`. Giả sử `shipping` chậm đi gấp mười lần. Nếu channel là unbounded thì mỗi `send` của handler vẫn xong ngay, event chất đống trong RAM của `checkout`, và nếu tình trạng kéo dài, process hết bộ nhớ (suy luận của người soạn, từ các tính chất nêu dưới đây). Nếu channel là bounded thì khi nó đầy, `send` của handler phải chờ, handler chậm lại, và áp lực dồn ngược lên tận client. Hai chuyện này khác nhau ở một chỗ: chậm đi được hay là chết.
 
 ```mermaid
 flowchart LR
@@ -139,17 +152,19 @@ flowchart LR
 
 *Sơ đồ minh họa của người soạn, không phải kiến trúc bắt buộc.*
 
-**Channel bounded và unbounded.** Module `mpsc` có hai biến thể: bounded có giới hạn số tin lưu trong channel, quá giới hạn thì gửi tiếp sẽ chờ tới khi có tin được nhận[^mpsc-bounded]. Unbounded có dung lượng vô hạn nên `send` luôn hoàn thành ngay[^mpsc-unb-always]. Khi channel bounded đầy, `send` bị từ chối và task được thông báo khi có chỗ trống; docs gọi đó là backpressure[^mpsc-bp]. `channel(buffer)` đòi buffer ít nhất 1[^ch-cap]. Với unbounded: nếu bên nhận chậm thì tin được đệm tùy ý[^unb-nobp], bộ nhớ khả dụng là cận ngầm duy nhất và có thể khiến process hết bộ nhớ và bị abort[^unb-mem]. Docs Tokio còn nói dung lượng channel là chìa khóa để dựng chương trình vững vì nó đóng vai trò chính trong xử lý backpressure[^tokio-mpsc-cap].
+**Channel bounded và unbounded.** Module `mpsc` có hai biến thể. Bounded có giới hạn số tin lưu trong channel; vượt giới hạn thì gửi tiếp sẽ chờ tới khi có tin được nhận[^mpsc-bounded]. Khi channel bounded đầy, `send` bị từ chối và task được báo khi có chỗ trống; docs gọi đó là backpressure[^mpsc-bp]. Unbounded thì có dung lượng vô hạn, nên `send` luôn hoàn thành ngay[^mpsc-unb-always]. Bên nhận chậm thì tin cứ được đệm tùy ý[^unb-nobp]. Cận duy nhất là bộ nhớ khả dụng, và nếu chạm cận đó, process có thể hết bộ nhớ rồi bị abort[^unb-mem]. Vì thế docs Tokio coi dung lượng channel là chìa khóa để dựng chương trình vững, vì nó đóng vai chính trong việc xử lý backpressure[^tokio-mpsc-cap].
 
-Ba cách gửi vào channel bounded, tùy điều bạn muốn khi đầy (nhận xét của người soạn):
+Khi channel bounded đầy, bạn có ba cách gửi, tùy muốn gì (nhận xét của người soạn):
 
 | Muốn gì khi đầy | Dùng | Ghi chú |
 |---|---|---|
-| Chờ (đẩy áp lực ngược lên nguồn) | `send().await` | Mất tin nếu bị hủy[^send-cancel]; xếp hàng công bằng[^send-queue] |
-| Từ chối ngay (load shedding: bỏ bớt việc khi quá tải) | `try_send` | Trả về ngay, với hai lỗi tách riêng: bên nhận đã đóng và buffer đầy[^trysend] |
-| Chờ nhưng không để mất tin khi bị hủy | `reserve().await` rồi `permit.send(..)` | Giữ chỗ trước; drop `Permit` trả chỗ[^send-reserve][^reserve-drop]; bản thân `reserve` bị hủy vẫn mất vị trí xếp hàng[^reserve-queue] |
+| Chờ (đẩy áp lực ngược lên nguồn) | `send().await` | Bị hủy thì mất tin[^send-cancel]. Xếp hàng công bằng[^send-queue] |
+| Từ chối ngay (load shedding: bỏ bớt việc khi quá tải) | `try_send` | Trả về ngay, với hai lỗi tách riêng: bên nhận đã đóng, và buffer đầy[^trysend] |
+| Chờ nhưng không mất tin khi bị hủy | `reserve().await` rồi `permit.send(..)` | Giữ chỗ trước rồi mới gửi[^send-reserve]. Drop `Permit` thì trả chỗ[^reserve-drop]. Riêng `reserve` bị hủy vẫn mất vị trí xếp hàng[^reserve-queue] |
 
-**`Semaphore`: giới hạn số việc đồng thời.** Semaphore giữ một tập permit (mỗi permit là một suất được phép chạy); khác mutex ở chỗ cho nhiều bên cùng truy cập[^tokio-sem]. Hết permit thì `acquire` chờ tới khi có permit bị drop[^sem-wait]; hàng đợi công bằng theo thứ tự yêu cầu[^tokio-sem-fair]. Docs có một ví dụ cho server: giới hạn số request xử lý cùng lúc, vì cho phép số request không giới hạn có thể dẫn tới denial-of-service (dịch vụ bị quá tải đến mức không phục vụ được ai)[^sem-ex-dos]. Mẫu: lấy permit *trước khi* spawn; permit lấy bằng `acquire_owned` để di chuyển được vào task, vì semaphore trong ví dụ nằm trong `Arc` chứ không phải biến global (docs nói nếu là global thì `acquire` là đủ)[^sem-owned]; permit nhả khi drop. Nền tảng semaphore ở [P4 · Chương 04](../04-concurrency/04-condition-variable-va-semaphore.md).
+**`Semaphore`: giới hạn số việc đồng thời.** Channel giới hạn lượng việc *đang xếp hàng*; còn lượng việc *đang chạy* cùng lúc là chuyện của `Semaphore`. Semaphore giữ một tập permit, mỗi permit là một suất được phép chạy. Nó khác mutex ở chỗ cho nhiều bên cùng truy cập tài nguyên[^tokio-sem]. Hết permit thì `acquire` chờ tới khi có permit bị drop[^sem-wait]. Hàng chờ công bằng theo thứ tự yêu cầu[^tokio-sem-fair]. Nền tảng semaphore ở mức hệ điều hành nằm ở [P4 · Chương 04](../04-concurrency/04-condition-variable-va-semaphore.md).
+
+Với `checkout`, dùng semaphore để chặn số request xử lý cùng lúc là cách tự nhiên nhất. Docs `Semaphore` có sẵn ví dụ đúng cho server: giới hạn số request, vì để số request không giới hạn có thể dẫn tới denial-of-service (dịch vụ quá tải đến mức không phục vụ được ai)[^sem-ex-dos]. Mẫu là lấy permit *trước khi* spawn. Permit lấy bằng `acquire_owned` để di chuyển được vào task, vì semaphore trong ví dụ nằm trong `Arc` chứ không phải biến global; nếu là global thì `acquire` là đủ[^sem-owned]. Permit được nhả khi bị drop.
 
 ```rust
 // Minh họa mẫu của docs Semaphore: giới hạn kết nối đang xử lý.
@@ -166,55 +181,68 @@ loop {
 }
 ```
 
-Điểm tinh tế: ở đây `acquire_owned` đứng *trước* `accept`, nên khi quá tải, tải bị đẩy về hàng đợi của kernel thay vì bị đệm trong bộ nhớ process (suy luận của người soạn). Ví dụ của docs ghi chú rõ rằng nó lấy permit trước khi nhận socket kế tiếp[^sem-ex-acq], nhưng docs không bình luận về backlog. Hàng đợi của kernel cũng không vô hạn: accept queue dài tối đa `backlog` (bị cắt bởi `somaxconn`), đầy thì client có thể nhận `ECONNREFUSED` hoặc SYN bị bỏ để thử lại sau; cơ chế và số đo ở [P6 · Chương 07, mục 2](../06-networking/07-socket-va-kernel.md). (Giá trị backlog mà `TcpListener::bind` của Tokio đặt không nằm trong nguồn người soạn đã đọc, nên chương không khẳng định.)
+Chi tiết đáng chú ý: `acquire_owned` đứng *trước* `accept`. Ví dụ của docs ghi chú rõ rằng nó lấy permit trước khi nhận socket kế tiếp[^sem-ex-acq], nhưng docs không bình luận gì về backlog. Phần này là suy luận của người soạn: khi quá tải, tải bị đẩy về hàng đợi của kernel thay vì bị đệm trong bộ nhớ của `checkout`.
 
-**`poll_ready` của tower.** Trait `Service` của `tower-service` mô tả một hàm bất đồng bộ từ request sang response và là một trong các abstraction nền tảng của Tower[^tower-svc]. Giao diện `Service` (`tower-service` 0.3.3) tách "sẵn sàng" khỏi "gọi": gọi một service đang đầy lẽ ra phải ra lỗi, và caller có trách nhiệm bảo đảm service sẵn sàng trước khi gọi[^tower-bp]; `poll_ready` trả `Ready` nếu service nhận được request[^tower-ready], trả `Pending` và đánh thức task khi service hết đầy[^tower-pending]. Trước `call` phải có `Ready(Ok(()))`; service được phép panic nếu không[^tower-panic]. Điểm cần chú ý: `poll_ready` *có thể giữ tài nguyên dùng chung* cho lần `call` kế tiếp, nên implementation phải nhả tài nguyên đó nếu service bị drop trước `call`[^tower-reserve]; và khi clone service để chuyển vào future, bản gốc sẵn sàng không có nghĩa bản clone sẵn sàng[^tower-clone]. (Nhận xét của người soạn: đó chính là cùng ý với `mpsc::Sender::reserve`, tức "giữ chỗ rồi mới gửi".) Tower có sẵn các lớp dựng trên ý tưởng này: `ConcurrencyLimit` giới hạn số request đồng thời mà service bên dưới xử lý[^tower-climit], `LoadShed` bỏ request khi service bên trong chưa sẵn sàng[^tower-shed], `Buffer` đặt một mpsc buffer phía trước service[^tower-buffer].
+**`poll_ready` của tower.** Nếu `checkout` được dựng trên tower, ý tưởng backpressure nằm ở trait `Service`. Trait này mô tả một hàm bất đồng bộ từ request sang response và là một trong các abstraction nền tảng của Tower[^tower-svc]. Giao diện của nó tách "sẵn sàng" khỏi "gọi": gọi một service đang đầy lẽ ra phải ra lỗi, nên caller có trách nhiệm bảo đảm service sẵn sàng trước khi gọi[^tower-bp]. Việc hỏi sẵn sàng là `poll_ready`. Nó trả `Ready` nếu service nhận được request[^tower-ready]. Còn khi service đang đầy, nó trả `Pending` rồi đánh thức task lúc service hết đầy[^tower-pending]. Gọi `call` mà chưa có `Ready(Ok(()))` thì service được phép panic[^tower-panic].
+
+Tower có sẵn vài lớp dựng trên ý tưởng này:
+
+- `ConcurrencyLimit` giới hạn số request đồng thời mà service bên dưới xử lý[^tower-climit].
+- `LoadShed` bỏ request khi service bên trong chưa sẵn sàng[^tower-shed].
+- `Buffer` đặt một mpsc buffer phía trước service[^tower-buffer].
 
 <details><summary>Đi sâu: đóng channel và semaphore có kiểm soát; chọn cỡ buffer; gửi từ code đồng bộ</summary>
 
-- **Đóng êm channel:** khi `Receiver` bị drop, mọi tin chưa đọc bị lấy khỏi channel và bỏ đi[^mpsc-drop-recv]. Docs khuyên bên nhận gọi `close` trước (chặn gửi thêm) rồi đọc cạn hàng đợi trước khi drop[^mpsc-clean]. Hết `Sender` và hết tin đệm thì `recv` trả `None`[^mpsc-disc]; hệ quả: một task còn giữ `Sender` clone (mục 4) làm `recv` không bao giờ trả `None`.
-- **Đóng semaphore:** `Semaphore::close` ngăn cấp permit mới và đánh thức mọi bên đang chờ[^sem-close]; hữu ích khi tắt dịch vụ để các `acquire` đang chờ thoát thay vì treo.
-- **Cỡ buffer** (nhận xét của người soạn): docs không cho con số. Buffer lớn chỉ dời lúc "đầy" sang muộn hơn và tăng độ trễ xếp hàng; buffer nhỏ cho áp lực ngược sớm. Chọn theo "chấp nhận trễ bao lâu" và đo (mục 5), không theo "cho khỏi lỗi".
-- **Giữa code đồng bộ và async:** với channel bounded dùng `blocking_send`/`blocking_recv` ở phía đồng bộ[^blocking-chan]; `blocking_send` panic nếu gọi trong ngữ cảnh async[^blocking-send-panic]. Với unbounded, docs khuyên chọn loại channel khớp với phía *nhận*[^blocking-chan].
-- **Vòng channel bounded có thể deadlock** (suy luận của người soạn, không có nguồn): nếu A gửi vào B còn B gửi lại vào A, và cả hai cùng đầy, không ai nhận được.
-- Tham chiếu chéo mục 5: `spawn_blocking` có hàng đợi *không* có backpressure[^tokio-mbt-queue]; đó là nơi nên đặt `Semaphore` của bạn.
+- **Hàng đợi accept của kernel cũng không vô hạn.** Accept queue dài tối đa `backlog` (bị cắt bởi `somaxconn`); đầy thì client có thể nhận `ECONNREFUSED` hoặc SYN bị bỏ để thử lại sau. Cơ chế và số đo ở [P6 · Chương 07, mục 2](../06-networking/07-socket-va-kernel.md). Giá trị backlog mà `TcpListener::bind` của Tokio đặt không nằm trong nguồn người soạn đã đọc, nên chương không khẳng định.
+- **`poll_ready` có thể giữ tài nguyên dùng chung** cho lần `call` kế tiếp, nên implementation phải nhả tài nguyên đó nếu service bị drop trước `call`[^tower-reserve]. Nhận xét của người soạn: đó là cùng ý với `mpsc::Sender::reserve`, tức "giữ chỗ rồi mới gửi".
+- **Clone service cẩn thận.** Khi clone service để chuyển vào future, bản gốc sẵn sàng không có nghĩa bản clone sẵn sàng[^tower-clone].
+- **Đóng êm channel.** Khi `Receiver` bị drop, mọi tin chưa đọc bị lấy khỏi channel và bỏ đi[^mpsc-drop-recv]. Docs khuyên bên nhận gọi `close` trước (chặn gửi thêm) rồi đọc cạn hàng đợi trước khi drop[^mpsc-clean]. Hết `Sender` và hết tin đệm thì `recv` trả `None`[^mpsc-disc]; hệ quả là một task còn giữ `Sender` clone (mục 4) làm `recv` không bao giờ trả `None`.
+- **Đóng semaphore.** `Semaphore::close` ngăn cấp permit mới và đánh thức mọi bên đang chờ[^sem-close]. Hữu ích khi tắt dịch vụ, để các `acquire` đang chờ thoát thay vì treo.
+- **Cỡ buffer** (nhận xét của người soạn): docs không cho con số. Buffer lớn chỉ dời lúc "đầy" sang muộn hơn và tăng độ trễ xếp hàng; buffer nhỏ cho áp lực ngược sớm. Hãy chọn theo "chấp nhận trễ bao lâu" và đo (mục 5), không theo "cho khỏi lỗi". Riêng `channel(buffer)` đòi buffer ít nhất 1[^ch-cap].
+- **Giữa code đồng bộ và async.** Với channel bounded, dùng `blocking_send`/`blocking_recv` ở phía đồng bộ[^blocking-chan]. `blocking_send` panic nếu gọi trong ngữ cảnh async[^blocking-send-panic].
+- **Vòng channel bounded có thể deadlock** (suy luận của người soạn, không có nguồn): A gửi vào B còn B gửi lại vào A, cả hai cùng đầy thì không ai nhận được.
+- **Tham chiếu chéo mục 5.** `spawn_blocking` có hàng đợi *không* có backpressure[^tokio-mbt-queue]; đó là nơi nên đặt `Semaphore` của bạn.
 
 </details>
 
-**Quay lại Q3:** backpressure = bên chậm làm bên nhanh chậm theo; dùng channel bounded cho truyền tin, `Semaphore` cho giới hạn đồng thời, `poll_ready` cho dịch vụ; unbounded chỉ khi biết chắc nguồn bị chặn bằng cách khác.
+**Quay lại Q3:** backpressure là bên chậm làm bên nhanh chậm theo; dùng channel bounded cho truyền tin, `Semaphore` cho giới hạn đồng thời, `poll_ready` cho dịch vụ; unbounded chỉ khi biết chắc nguồn đã bị chặn bằng cách khác.
 
 ## 4. Structured concurrency và task leak: `JoinSet`, `AbortHandle`, `TaskTracker` (Q4)
 
-> **Trả lời ngắn.** `tokio::spawn` tạo task độc lập: drop `JoinHandle` chỉ tách task[^tokio-jh-detach], và Tokio không bảo đảm task được spawn sẽ chạy tới khi hoàn thành[^tokio-spawn-lifecycle]. Không ai "sở hữu" task, nên task có thể rò, lỗi bị nuốt. `JoinSet` đặt task dưới một chủ: drop set thì mọi task bị abort ngay[^js-drop]. Khi chỉ cần *chờ* cả nhóm mà không giữ kết quả, `TaskTracker` của tokio-util có những tính năng riêng mà `JoinSet` thiếu[^tt-mem]; docs của nó khuyên chỉ dùng khi cần một trong các tính năng đó[^tt-unique].
+> **Trả lời ngắn.** `tokio::spawn` tạo task độc lập: drop `JoinHandle` chỉ tách task[^tokio-jh-detach]. Tokio cũng không bảo đảm task được spawn sẽ chạy tới khi hoàn thành[^tokio-spawn-lifecycle]. Không ai "sở hữu" task, nên task có thể rò và lỗi bị nuốt. `JoinSet` đặt task dưới một chủ: drop set thì mọi task bị abort ngay[^js-drop]. Khi chỉ cần *chờ* cả nhóm mà không giữ kết quả, `TaskTracker` của tokio-util có vài tính năng mà `JoinSet` thiếu[^tt-mem]. Docs của nó khuyên chỉ dùng khi cần một trong các tính năng đó[^tt-unique].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thầu chính giao việc cho nhiều thầu phụ. "Structured concurrency" (cách gọi của người soạn cho quy ước, không phải thuật ngữ của docs Tokio) nghĩa là thầu phụ không được sống lâu hơn công trình của thầu chính: khi thầu chính rời đi, mọi thầu phụ đều đã xong hoặc đã bị gọi về. `tokio::spawn` trần không có quy ước đó: nó giao việc rồi cắt dây. Rust cũng không ép điều này; nó chỉ đòi `'static`, mà nguyên nhân thì ở [Chương 08, mục 3](08-tokio.md).
+*Với `checkout`.* Handler `checkout` có hai kiểu việc con. Kiểu thứ nhất là *fan-out*: gọi song song `inventory`, `pricing` và `fraud` để lấy tồn kho, giá và điểm gian lận. Kiểu thứ hai là *fire-and-forget*: `tokio::spawn(gui_email_xac_nhan(..))` rồi không quan tâm nữa. Cả hai đều là task con của một request. Câu hỏi là khi request kết thúc, sớm hay muộn, đám task con đó thuộc về ai và còn sống bao lâu.
 
-**Các kiểu rò task** (nhận xét của người soạn, mỗi kiểu kèm mẩu docs liên quan):
+Với `tokio::spawn` trần thì câu trả lời là: không thuộc về ai. Hàm giao việc rồi cắt dây. Rust không ép điều này; nó chỉ đòi `'static`, mà nguyên nhân thì ở [Chương 08, mục 3](08-tokio.md). Ta gọi cách làm ngược lại, trong đó task con không sống lâu hơn scope tạo ra nó, là *structured concurrency* (cách gọi của người soạn cho quy ước này, không phải thuật ngữ trong docs Tokio).
 
-1. **Task nền không có lối thoát.** Vòng lặp `loop { rx.recv().await ... }` chạy mãi nếu channel không bao giờ đóng. Channel chỉ đóng khi *mọi* `Sender` bị drop và tin đệm đã đọc hết[^mpsc-disc]; chỉ cần một clone `Sender` nằm trong một task khác (hoặc trong chính task đang nhận) là `recv` không bao giờ trả `None`.
-2. **Task giữ tài nguyên.** Task mang một `OwnedSemaphorePermit`, một kết nối DB, một lock; nếu task kẹt, tài nguyên kẹt theo. Permit chỉ nhả khi bị drop[^sem-wait].
-3. **Lỗi bị nuốt.** Task panic thì chỉ `await` handle mới thấy `JoinError`[^tokio-task-panic]; handle đã drop thì không ai thấy (suy luận của người soạn từ việc kết quả bị mất khi drop handle[^tokio-jh-drop]).
-4. **Kết quả tích tụ.** `JoinSet` giữ giá trị trả về của mọi task đã thêm; nếu bạn cứ thêm mà không bao giờ `join_next` thì kết quả chất lên, ngốn bộ nhớ dù hầu hết task đã xong[^tt-mem].
+**Các kiểu rò task** hay gặp ở `checkout` (nhận xét của người soạn, mỗi kiểu kèm mẩu docs liên quan):
+
+1. **Task nền không có lối thoát.** Writer task chạy `loop { rx.recv().await ... }` sẽ chạy mãi nếu channel không bao giờ đóng. Channel chỉ đóng khi *mọi* `Sender` bị drop và tin đệm đã đọc hết[^mpsc-disc]. Chỉ cần một clone `Sender` nằm trong task khác (hoặc ngay trong task đang nhận) là `recv` không bao giờ trả `None`.
+2. **Task giữ tài nguyên.** Task mang một `OwnedSemaphorePermit`, một kết nối DB hoặc một lock; nếu task kẹt thì tài nguyên kẹt theo. Permit chỉ nhả khi bị drop[^sem-wait].
+3. **Lỗi bị nuốt.** Task panic thì chỉ `await` handle mới thấy `JoinError`[^tokio-task-panic]. Handle đã drop thì không ai thấy (suy luận của người soạn, từ việc kết quả bị mất khi drop handle[^tokio-jh-drop]).
+4. **Kết quả tích tụ.** `JoinSet` giữ giá trị trả về của mọi task đã thêm; cứ thêm mà không bao giờ `join_next` thì kết quả chất lên và ngốn bộ nhớ, dù hầu hết task đã xong[^tt-mem].
 5. **Ranh giới runtime.** Tắt runtime (kể cả trả về từ `#[tokio::main]`) hủy mọi task ngay lập tức[^tokio-cancel-rt]. Không có "rò vĩnh viễn", nhưng có "việc bị cắt ngang" nếu bạn không `join` (mục 6).
 
-**`JoinSet`.** Là tập hợp các task spawn trên runtime, mọi task phải cùng kiểu trả về `T`[^js-same-type]; các task trả về theo thứ tự hoàn thành, không theo thứ tự spawn[^js-unordered]. `spawn` trả `AbortHandle` để hủy từ xa một task riêng[^js-spawn-abort]. Điểm mấu chốt cho production: **drop `JoinSet` là abort toàn bộ**[^js-drop], tức là early-return (`?`) trong hàm đang giữ set tự động dọn các task con. Các thao tác chính:
+**`JoinSet`** giải quyết phần fan-out của `checkout`. Đó là một tập task spawn trên runtime, mọi task phải cùng kiểu trả về `T`[^js-same-type]. Kết quả trả về theo thứ tự hoàn thành chứ không theo thứ tự spawn[^js-unordered]. `spawn` trả `AbortHandle` để hủy từ xa một task riêng[^js-spawn-abort]. Điểm mấu chốt cho production là **drop `JoinSet` sẽ abort toàn bộ**[^js-drop], nên early-return bằng `?` trong hàm đang giữ set tự động dọn các task con. Các thao tác chính:
 
 | Thao tác | Ý nghĩa |
 |---|---|
 | `join_next().await` | Lấy kết quả task xong tiếp theo; cancel-safe nên đặt được trong `select!`[^js-joinnext-safe] |
 | `abort_all()` | Abort, nhưng **không** gỡ task khỏi set; muốn chờ hủy xong phải `join_next` tới khi rỗng[^js-abortall] |
-| `shutdown().await` | Tương đương `abort_all` rồi `join_next` tới hết; bỏ qua panic của các task đang tắt[^js-shutdown] |
-| `join_all()` | Nếu một task lỗi `JoinError` thì **panic** và hủy các task còn lại[^js-joinall]; muốn xử lý lỗi kiểu khác phải tự lặp `join_next` |
+| `shutdown().await` | Tương đương `abort_all` rồi `join_next` tới hết[^js-shutdown] |
+| `join_all()` | Nếu một task lỗi `JoinError` thì **panic** và hủy các task còn lại[^js-joinall]. Muốn xử lý lỗi kiểu khác phải tự lặp `join_next` |
 | `detach_all()` | Gỡ task khỏi set mà không abort; chúng chạy tiếp ngay cả khi set bị drop[^js-detach] |
 
-Drop một `AbortHandle` **không** abort task, chỉ bỏ quyền abort[^ah-drop]; ngược lại với `JoinSet`.
+Drop một `AbortHandle` thì ngược lại: nó **không** abort task, chỉ bỏ quyền abort[^ah-drop].
+
+Đây là mẫu fail-fast cho fan-out của `checkout`: lỗi đầu tiên dừng cả nhóm.
 
 ```rust
 // Minh họa mẫu fail-fast: lỗi đầu tiên dừng cả nhóm.
 let mut set = tokio::task::JoinSet::new();
-for url in urls { set.spawn(fetch(url)); }
+for dv in [inventory, pricing, fraud] { set.spawn(goi_dich_vu(dv)); }
 
 let mut ket_qua = Vec::new();
 while let Some(res) = set.join_next().await {
@@ -236,85 +264,94 @@ flowchart TD
   S["tokio::spawn trần"] -.-> O["task mồ côi: không ai chờ, không ai hủy"]
 ```
 
-**`TaskTracker` (tokio-util).** Docs của nó nói `JoinSet` nhiều tính năng hơn, nên chỉ dùng `TaskTracker` khi cần một tính năng riêng[^tt-unique]: task xong thì giải phóng bộ nhớ ngay[^tt-mem]; thêm task không cần `&mut`; clone được để chia sẻ cho nhiều task[^tt-share]; và có trạng thái "đã đóng" để `wait` không hoàn thành sớm khi tracker còn trống[^tt-notclosed]. Đổi lại, **drop `TaskTracker` không abort** task[^tt-nodrop]. Docs chỉ định mục đích: `CancellationToken` báo tắt, `TaskTracker` chờ chúng tắt xong[^tt-purpose]. Chi tiết dùng ở mục 6.
+**`TaskTracker` (tokio-util)** hợp với trường hợp thứ hai: ta chỉ cần biết mọi task đã xong, không cần kết quả. Docs của nó nói `JoinSet` nhiều tính năng hơn, nên chỉ dùng `TaskTracker` khi cần một tính năng riêng[^tt-unique]. Những tính năng đó là:
+
+- Task xong thì được giải phóng bộ nhớ ngay[^tt-mem].
+- Thêm task không cần `&mut`, và tracker clone được để chia sẻ cho nhiều task[^tt-share].
+- Có trạng thái "đã đóng", để `wait` không hoàn thành sớm khi tracker còn trống[^tt-notclosed].
+
+Đổi lại, **drop `TaskTracker` không abort** task[^tt-nodrop]. Docs chỉ định rõ mục đích: `CancellationToken` để báo tắt, còn `TaskTracker` để chờ chúng tắt xong[^tt-purpose]. Cách dùng chi tiết nằm ở mục 6.
 
 <details><summary>Đi sâu: hàng đợi <code>spawn_blocking</code> trong JoinSet; <code>JoinHandle</code> và destructor; kết hợp với Semaphore</summary>
 
-- `JoinSet` có cả `spawn_blocking`[^js-spawn-blocking], nhưng `abort` một task `spawn_blocking` không có tác dụng nếu nó đã chạy[^tokio-csb-abort]; `shutdown()` là `abort_all` rồi `join_next` tới hết[^js-shutdown], nên (suy luận của người soạn) vẫn phải chờ closure đó chạy xong.
-- Khi `join_next` / `JoinHandle::await` cho bạn kết quả, destructor của task *đã chạy xong*[^jh-dtor]; đó là lý do `shutdown()` chờ được "đã dọn xong" chứ không chỉ "đã báo hủy".
-- Giới hạn số task đồng thời trong một `JoinSet`: lấy permit từ `Semaphore` trước khi `spawn`, đưa permit vào task (mẫu ở mục 3). Nhờ vậy cả số task lẫn bộ nhớ kết quả có cận (nhận xét của người soạn).
-- `JoinHandle` đã bị `abort` có thể vẫn trả `Ok` nếu task hoàn thành trước lúc hủy[^jh-abort-complete] (xem [Chương 08, mục 5](08-tokio.md)); không nên dựa vào "chắc chắn là `Err(cancelled)`".
+- `JoinSet` có cả `spawn_blocking`[^js-spawn-blocking]. Nhưng `abort` một task `spawn_blocking` không có tác dụng nếu nó đã chạy[^tokio-csb-abort]. `shutdown()` là `abort_all` rồi `join_next` tới hết[^js-shutdown], nên (suy luận của người soạn) vẫn phải chờ closure đó chạy xong.
+- Khi `join_next` hoặc `JoinHandle::await` cho bạn kết quả, destructor của task *đã chạy xong*[^jh-dtor]. Đó là lý do `shutdown()` chờ được "đã dọn xong" chứ không chỉ "đã báo hủy".
+- Muốn giới hạn số task đồng thời trong một `JoinSet`, lấy permit từ `Semaphore` trước khi `spawn` và đưa permit vào task (mẫu ở mục 3). Nhờ vậy cả số task lẫn bộ nhớ kết quả có cận (nhận xét của người soạn).
+- `JoinHandle` đã bị `abort` vẫn có thể trả `Ok` nếu task hoàn thành trước lúc hủy[^jh-abort-complete] (xem [Chương 08, mục 5](08-tokio.md)). Đừng dựa vào "chắc chắn là `Err(cancelled)`".
 
 </details>
 
-**Quay lại Q4:** `spawn` trần là task mồ côi; hãy đặt task dưới một chủ (`JoinSet` khi cần kết quả và hủy theo scope, `TaskTracker` khi chỉ cần chờ), và nhớ hai dây tình cờ giữ task sống: clone `Sender` và permit.
+**Quay lại Q4:** `spawn` trần tạo task mồ côi; hãy đặt task dưới một chủ (`JoinSet` khi cần kết quả và hủy theo scope, `TaskTracker` khi chỉ cần chờ), và nhớ hai sợi dây tình cờ giữ task sống: clone `Sender` và permit.
 
 ## 5. Blocking trong async: phân loại, chọn công cụ, phát hiện (Q5)
 
-> **Trả lời ngắn.** Task trên một worker chạy xen kẽ, nên một thao tác chặn làm đứng cả thread đó[^task-block]; việc đổi task chỉ xảy ra ở `.await`[^tokio-await-only]. Việc chặn đưa sang `spawn_blocking` (việc hữu hạn)[^csb-bounded], thread riêng (việc chạy rất lâu)[^tokio-csb-long] hoặc pool riêng như rayon[^tokio-rayon]. Phát hiện: theo dõi số đo của runtime, như thời gian bận của worker[^m-busy] và (cần `tokio_unstable`) thời gian poll trung bình[^m-poll-mean].
+> **Trả lời ngắn.** Nhiều task chạy xen kẽ trên một worker, nên một thao tác chặn làm đứng cả thread đó[^task-block]. Việc đổi task chỉ xảy ra ở `.await`[^tokio-await-only]. Vì vậy việc chặn cần đưa đi chỗ khác. `spawn_blocking` dành cho việc hữu hạn[^csb-bounded]. Việc chạy rất lâu thì nên có thread riêng[^tokio-csb-long]. CPU nặng thì dùng một pool riêng như rayon[^tokio-rayon]. Để phát hiện, hãy theo dõi số đo của runtime, như thời gian bận của worker[^m-busy]. Nếu bật `tokio_unstable` thì còn có thời gian poll trung bình[^m-poll-mean].
 
 **Giải thích.**
 
-[Chương 08, mục 4](08-tokio.md) đã giải thích *vì sao* chặn là xấu và so sánh `spawn_blocking`/`block_in_place`. Mục này đi tiếp: **cái gì thực tế hay bị chặn, chọn công cụ nào, và làm sao biết mình đang chặn.**
+*Với `checkout`.* [Chương 08, mục 4](08-tokio.md) đã giải thích *vì sao* chặn là xấu và so sánh `spawn_blocking` với `block_in_place`. Mục này đi tiếp: cái gì thực tế hay bị chặn, chọn công cụ nào, và làm sao biết mình đang chặn. Giả sử `checkout` chạy 4 worker và có một hàm `render_hoa_don_pdf` mất 300 ms, không có `.await` nào bên trong. Request nào gọi hàm đó sẽ giữ nguyên một worker trong 300 ms, và mọi task đang xếp trên worker ấy, kể cả các request chỉ cần 1 ms, đều đứng chờ (nhận xét của người soạn, từ tính chất đã nêu ở trên). Chặn nặng nề như vậy thì ai cũng thấy; cái khó là những chỗ chặn mà không ai nhận ra.
 
-Hình dung (nhận xét của người soạn): đường một làn; một xe tải dừng bốc hàng chặn cả đoạn đường, dù mỗi xe sau chỉ cần đi 1 giây. `spawn_blocking` là làn bốc hàng riêng.
-
-**Những thứ hay lọt vào code async mà không ai nhận ra** (nhận xét của người soạn):
+**Những thứ hay lọt vào code async** (nhận xét của người soạn):
 
 - Client đồng bộ: driver DB sync, HTTP client blocking, SDK chỉ có API sync.
 - `std::fs`, `std::net`, DNS qua `getaddrinfo` kiểu sync. (`tokio::fs` mặc định đã chạy trên `spawn_blocking`[^tokio-fs-always]; ngoại lệ io_uring thử nghiệm ở [chương 03, mục 6](03-kqueue-io-uring.md).)
-- `std::thread::sleep`, `Mutex::lock` của std trên lock có contention cao.
-- CPU nặng không có `.await`: băm mật khẩu, nén, parse JSON khổng lồ, regex xấu, serialize lớn.
-- Destructor nặng: docs nhắc rằng hàm không-async bạn gọi từ code async cũng chặn, kể cả destructor[^tokio-sync-in-async].
-- `block_on` lồng nhau: gọi `Runtime::block_on` trong ngữ cảnh async thì panic[^rt-blockon-panic]; `Handle::block_on` cũng panic khi gọi từ ngữ cảnh async như bên trong `block_on` hoặc hàm gắn `tokio::main`[^hblock-panic].
+- `std::thread::sleep`, hoặc `Mutex::lock` của std trên lock có contention cao.
+- CPU nặng không có `.await`: băm mật khẩu, nén, parse JSON khổng lồ, regex xấu, serialize lớn, dựng PDF như ở trên.
+- Destructor nặng: hàm không-async bạn gọi từ code async cũng chặn, kể cả destructor[^tokio-sync-in-async].
+- `block_on` lồng nhau: gọi `Runtime::block_on` trong ngữ cảnh async thì panic[^rt-blockon-panic]. `Handle::block_on` cũng panic khi gọi từ ngữ cảnh async, như bên trong `block_on` hoặc hàm gắn `tokio::main`[^hblock-panic].
 
-**Chọn công cụ** (docs cho từng dòng, bảng là tổng hợp của người soạn; so sánh chi tiết `spawn_blocking` với `block_in_place` ở [Chương 08, mục 4](08-tokio.md)):
+**Chọn công cụ.** Docs cho từng dòng, bảng là tổng hợp của người soạn; so sánh chi tiết `spawn_blocking` với `block_in_place` ở [Chương 08, mục 4](08-tokio.md).
 
 | Loại việc | Công cụ | Điều kiện / cảnh báo |
 |---|---|---|
-| Việc chặn hữu hạn (gọi driver sync, đọc file qua `std`) | `spawn_blocking` | Dành cho việc chặn có giới hạn và rồi sẽ xong; mỗi lần gọi chiếm một thread của pool suốt thời gian chạy[^csb-bounded] |
-| CPU nặng nhiều lần | `spawn_blocking` + `Semaphore`, hoặc pool riêng như rayon[^tokio-rayon] | Giới hạn mặc định của pool rất lớn[^csb-limit-large]; docs bảo dùng semaphore để giới hạn số phép tính song song[^csb-sem]; hàng đợi không có backpressure[^tokio-mbt-queue] |
-| Vòng lặp nền chạy mãi (consumer sync, worker) | `thread::spawn` riêng | Docs: việc chạy vô hạn hoặc rất lâu nên dùng thread riêng[^tokio-csb-long]; nói chuyện với async bằng channel bounded và `blocking_send`/`blocking_recv`[^blocking-chan] |
-| Chặn tại chỗ trên worker hiện tại | `block_in_place` | Chỉ multi-thread (panic trên current_thread[^bip-panic]); executor giao các task khác sang worker mới trước khi chặn[^tokio-bip]; code chạy đồng thời *trong cùng task* (như `join!`) bị treo[^tokio-bip-join] |
-| Code sync trong `block_in_place` cần gọi lại async | `Handle::block_on` | Docs: code trong `block_in_place` có thể dùng `block_on` để vào lại ngữ cảnh async[^bip-reenter] |
+| Việc chặn hữu hạn (gọi driver sync, đọc file qua `std`) | `spawn_blocking` | Dành cho việc chặn có giới hạn và rồi sẽ xong. Mỗi lần gọi chiếm một thread của pool suốt thời gian chạy[^csb-bounded] |
+| CPU nặng nhiều lần (như dựng PDF) | `spawn_blocking` + `Semaphore`, hoặc pool riêng như rayon[^tokio-rayon] | Giới hạn thread mặc định của pool rất lớn[^csb-limit-large]. Docs bảo dùng semaphore để giới hạn số phép tính song song[^csb-sem]. Hàng đợi của pool không có backpressure[^tokio-mbt-queue] |
+| Vòng lặp nền chạy mãi (consumer sync, worker) | `thread::spawn` riêng | Docs bảo việc chạy vô hạn hoặc rất lâu nên dùng thread riêng[^tokio-csb-long]. Nói chuyện với async bằng channel bounded và `blocking_send`/`blocking_recv`[^blocking-chan] |
+| Chặn tại chỗ trên worker hiện tại | `block_in_place` | Chỉ chạy được trên multi-thread, còn trên current_thread thì panic[^bip-panic]. Executor giao các task khác sang worker mới trước khi chặn[^tokio-bip]. Code chạy đồng thời *trong cùng task* (như `join!`) bị treo[^tokio-bip-join] |
+| Code sync trong `block_in_place` cần gọi lại async | `Handle::block_on` | Code trong `block_in_place` có thể dùng `block_on` để vào lại ngữ cảnh async[^bip-reenter] |
 
-Hai điều dễ vấp (nhận xét của người soạn): (1) chặn bằng `block_in_place` hay `spawn_blocking` đều **không hủy được** một khi đã chạy[^tokio-bip-cancel][^tokio-csb-abort], nên `timeout` không cứu bạn (mục 2); (2) khi runtime tắt, `spawn_blocking` đang chạy bị chờ vô hạn nếu không có `shutdown_timeout`[^tokio-csb-shutdown] (mục 6).
+Có hai điều dễ vấp (nhận xét của người soạn). Thứ nhất, một khi đã chạy thì cả `block_in_place` lẫn `spawn_blocking` đều **không hủy được**. Docs nói thẳng điều đó với `block_in_place`[^tokio-bip-cancel]. Với `spawn_blocking`, `abort` lên một closure đã chạy không có tác dụng[^tokio-csb-abort]. Cho nên `timeout` không cứu bạn (mục 2). Thứ hai, khi runtime tắt, `spawn_blocking` đang chạy bị chờ vô hạn nếu bạn không dùng `shutdown_timeout`[^tokio-csb-shutdown] (mục 6).
 
-**Phát hiện.** Các trang docs dẫn ở đây không mô tả cơ chế tự động báo "đang bị chặn" (người soạn không khẳng định Tokio hoàn toàn không có cơ chế nào ngoài những trang này); đường thực tế là *đo*. `Handle::metrics()` trả một view cho biết runtime đang chạy ra sao[^rt-metrics], kiểu `RuntimeMetrics`:
+**Phát hiện.** Các trang docs dẫn ở đây không mô tả cơ chế tự động báo "đang bị chặn" (người soạn không khẳng định Tokio hoàn toàn không có cơ chế nào ngoài những trang này), nên đường thực tế là *đo*. `Handle::metrics()` trả một view cho biết runtime đang chạy ra sao[^rt-metrics]; kiểu của nó là `RuntimeMetrics`. Ba số đáng theo dõi:
 
-- `worker_total_busy_duration(worker)`: thời gian worker đã bận; bắt đầu từ 0 khi runtime được tạo, tăng khi worker xử lý việc, không bao giờ giảm hay reset; nếu một worker bận nhiều, nó kiểm tra sự kiện vào ít hơn[^m-busy]. Trang docs của hàm này chỉ ghi điều kiện `target_has_atomic=64`, không ghi `tokio_unstable`.
-- Các số sau, theo trang docs của từng hàm, chỉ có khi bật cờ build `tokio_unstable`. `worker_mean_poll_time(worker)` là trung bình mũ (exponentially weighted moving average, mẫu gần đây nặng hơn) của thời gian mỗi lần poll task, hiện chỉ có ở multi-thread runtime[^m-poll-mean]; `budget_forced_yield_count()` đếm số lần task bị ép nhường lại cho scheduler do cạn *coop budget* (hạn mức tự nguyện mà mỗi task có giữa hai lần phải nhường; xem [Chương 08, mục 4](08-tokio.md))[^m-forced]; `blocking_queue_depth()` đếm số tác vụ đang xếp trong blocking pool[^m-queue].
+- `worker_total_busy_duration(worker)`: thời gian worker đã bận. Nó bắt đầu từ 0 khi runtime được tạo, tăng khi worker xử lý việc, không bao giờ giảm hay reset; worker bận nhiều thì kiểm tra sự kiện vào ít đi[^m-busy]. Trang docs của hàm này chỉ ghi điều kiện `target_has_atomic=64`, không ghi `tokio_unstable`.
+- `worker_mean_poll_time(worker)`: trung bình mũ (exponentially weighted moving average, mẫu gần đây nặng hơn) của thời gian mỗi lần poll task. Theo docs, số này chỉ có khi bật cờ build `tokio_unstable` và hiện chỉ có ở multi-thread runtime[^m-poll-mean].
+- `blocking_queue_depth()`: số tác vụ đang xếp trong blocking pool, cũng cần `tokio_unstable`[^m-queue].
 
-Cách đọc (suy luận của người soạn, docs chỉ định nghĩa từng số): poll time trung bình tăng vọt trong khi không đổi tải → có một task giữ worker quá lâu giữa hai `.await`; `blocking_queue_depth` > 0 kéo dài → blocking pool đã bão hòa nên việc xếp hàng làm trễ; một worker bận gần 100% còn các worker khác rảnh → chặn hoặc CPU nặng dồn về một chỗ. Dấu hiệu ngoài runtime: độ trễ đuôi (p99: mức mà 99% request nhanh hơn) tăng đồng loạt cho mọi endpoint, `sleep`/timer trễ hơn hạn.
+Ngoài ra có `budget_forced_yield_count()` (cũng cần `tokio_unstable`), đếm số lần task bị ép nhường lại cho scheduler do cạn *coop budget*, tức hạn mức tự nguyện mà mỗi task có giữa hai lần phải nhường (xem [Chương 08, mục 4](08-tokio.md))[^m-forced].
+
+Cách đọc các số này là suy luận của người soạn, vì docs chỉ định nghĩa từng số. Poll time trung bình tăng vọt trong khi tải không đổi nghĩa là có một task giữ worker quá lâu giữa hai `.await`. `blocking_queue_depth` lớn hơn 0 kéo dài nghĩa là blocking pool đã bão hòa nên việc xếp hàng làm trễ. Một worker bận gần 100% trong khi các worker khác rảnh nghĩa là chặn hoặc CPU nặng đang dồn về một chỗ. Dấu hiệu ngoài runtime: độ trễ đuôi (p99, mức mà 99% request nhanh hơn) tăng đồng loạt cho mọi endpoint, hoặc `sleep`/timer trễ hơn hạn.
 
 <details><summary>Đi sâu: tắt runtime có blocking; <code>Handle::block_on</code> trên current-thread; thread riêng và dọn dẹp</summary>
 
 - `Runtime::shutdown_timeout(d)` chờ tối đa `d` cho mọi việc đã spawn dừng[^rt-shutdown-timeout]. Nó không hủy việc chặn: chúng chỉ được phép tiếp tục chạy sau khi hàm trả về[^bip-shutdown].
-- `Drop` của runtime chờ vô hạn các việc đang chạy[^tokio-runtime-shutdown]; docs Runtime còn mô tả `shutdown_background` cho trường hợp drop runtime từ bên trong runtime khác, với cái giá có thể rò việc chặn đang chạy[^rt-shutdown-bg].
-- Trên current-thread runtime, `Handle::block_on` không điều khiển được I/O và timer: chỉ `Runtime::block_on` làm được, trừ khi có thread khác đang gọi nó[^tokio-driving-ct]; (nhận xét của người soạn) một lý do nữa để không chạy async trong `spawn_blocking` trừ khi bạn hiểu runtime đang là loại nào.
-- Thread riêng giữ vòng lặp nền (consumer Kafka sync, v.v.) cần một đường tắt tường minh: nhận cờ/`CancellationToken` qua `is_cancelled` hoặc kênh, rồi thoát; chương này không có nguồn riêng cho điều đó (nhận xét của người soạn).
+- `Drop` của runtime chờ vô hạn các việc đang chạy[^tokio-runtime-shutdown]. Docs Runtime còn mô tả `shutdown_background` cho trường hợp drop runtime từ bên trong runtime khác, với cái giá là có thể rò việc chặn đang chạy[^rt-shutdown-bg].
+- Trên current-thread runtime, `Handle::block_on` không điều khiển được I/O và timer: chỉ `Runtime::block_on` làm được, trừ khi có thread khác đang gọi nó[^tokio-driving-ct]. Nhận xét của người soạn: đó là một lý do nữa để không chạy async trong `spawn_blocking` trừ khi bạn hiểu runtime đang là loại nào.
+- Thread riêng giữ vòng lặp nền (consumer Kafka sync, v.v.) cần một đường tắt tường minh: nhận cờ hoặc `CancellationToken` qua `is_cancelled` hay một kênh, rồi thoát. Chương này không có nguồn riêng cho điều đó (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q5:** đừng để worker bị chặn; phân loại việc (hữu hạn / lặp mãi / CPU), chọn `spawn_blocking` (kèm semaphore), thread riêng, hoặc rayon; và gắn đồng hồ đo để phát hiện khi chặn lọt vào.
+**Quay lại Q5:** đừng để worker bị chặn; phân loại việc (hữu hạn / lặp mãi / CPU), chọn `spawn_blocking` (kèm semaphore), thread riêng hoặc rayon, và gắn đồng hồ đo để phát hiện khi chặn lọt vào.
 
 ## 6. Graceful shutdown ở production: cây token, tracker, hạn chót (Q6)
 
-> **Trả lời ngắn.** [Chương 08, mục 8](08-tokio.md) đã nêu ba phần: biết khi nào tắt, báo tắt, chờ tắt xong. Ở production cần thêm: một **cây** `CancellationToken` (token cha hủy thì mọi token con bị hủy[^ct-child]), `TaskTracker` được `close` rồi `wait`[^tt-wait-both] và **một hạn chót** cho cả quá trình, vì task không chịu dừng thì `wait` không bao giờ trả về (suy luận của người soạn từ định nghĩa của `wait`). Hủy chỉ là *yêu cầu*: task phải tự lắng nghe `cancelled()`[^ct-intro].
+> **Trả lời ngắn.** [Chương 08, mục 8](08-tokio.md) đã nêu ba phần của tắt êm: biết khi nào tắt, báo tắt, chờ tắt xong. Ở production cần thêm ba thứ. Một là *cây* `CancellationToken`, trong đó hủy token cha thì mọi token con bị hủy[^ct-child]. Hai là `TaskTracker` được `close` rồi `wait`[^tt-wait-both]. Ba là một hạn chót cho cả quá trình, vì task không chịu dừng thì `wait` không bao giờ trả về (suy luận của người soạn, từ định nghĩa của `wait`). Cũng cần nhớ rằng hủy chỉ là *yêu cầu*: task phải tự lắng nghe `cancelled()`[^ct-intro].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đóng nhà hàng đúng giờ. Treo biển "ngừng nhận khách" (token cha), từng khu vực nhận biển và phục vụ nốt bàn đang ăn (token con), quản lý đứng ở cửa đếm khách còn trong quán (tracker), và có giờ chốt: quá 30 phút thì khóa cửa, ai chưa xong thì mời ra.
+*Với `checkout`.* Khi bạn rolling update, orchestrator gửi `SIGTERM` tới pod `checkout` (chi tiết với Kubernetes ở phần Đi sâu cuối mục). Lúc đó process đang có đủ thứ dở dang: vài handler đang ở giữa bước trừ tiền và ghi đơn, writer task còn event chưa gửi sang `shipping`, một `spawn_blocking` đang dựng PDF. Ta muốn ba điều: ngừng nhận request mới, cho việc đang chạy làm nốt, và vẫn thoát đúng hạn nếu có thứ kẹt. Các công cụ dưới đây nhắm vào đúng ba điều đó.
 
 **`CancellationToken`** là token báo yêu cầu hủy cho một hoặc nhiều task[^ct-intro]. Những tính chất cần biết:
 
-- `cancelled()` trả một future hoàn thành khi có yêu cầu hủy[^ct-cancelled-now]; nó cancel-safe[^ct-cancelled-safe], nên đặt được trong `select!` ở vòng lặp.
-- `child_token()` tạo token tự bị hủy khi token hiện tại bị hủy; hủy con không hủy cha, khác với `clone`[^ct-child]. Dùng cho cây: gốc → server → từng kết nối.
-- `cancel()` hủy token và mọi token con, đánh thức mọi task đang chờ. Không nguyên tử: thread khác chạy song song có thể thấy con này đã hủy trong khi con kia chưa; nhưng khi `cancel()` trả về thì mọi con đã hủy hết[^ct-cancel-atomic].
-- `drop_guard()` tạo guard hủy token (và mọi con) khi bị drop, trừ khi được tháo[^ct-dropguard]. Hữu ích để một scope (ví dụ `main`) hủy cây khi thoát bất thường (nhận xét của người soạn).
-- `run_until_cancelled(fut)` chạy `fut`; nếu token bị hủy thì trả `None` và `fut` bị drop[^ct-run]. Nếu token đã bị hủy từ trước thì trả `None` ngay; sau đó, khi hoàn thành và hủy đồng thời, nó thiên về hoàn thành[^ct-run-bias]. Nó chỉ cancel-safe nếu `fut` cancel-safe[^ct-run-safe], nên đừng bọc cả một hàm nhiều bước không cancel-safe.
+- `cancelled()` trả một future hoàn thành khi có yêu cầu hủy[^ct-cancelled-now]. Nó cancel-safe[^ct-cancelled-safe], nên đặt được trong `select!` ở vòng lặp.
+- `child_token()` tạo token tự bị hủy khi token hiện tại bị hủy; hủy con không hủy cha, khác với `clone`[^ct-child]. Nhờ đó ta dựng được cây: gốc → server → từng kết nối.
+- `cancel()` hủy token và mọi token con, đánh thức mọi task đang chờ. Nó không nguyên tử: thread khác chạy song song có thể thấy con này đã hủy trong khi con kia chưa. Nhưng khi `cancel()` trả về thì mọi con đã hủy hết[^ct-cancel-atomic].
+- `drop_guard()` tạo guard hủy token (và mọi con) khi bị drop, trừ khi được tháo[^ct-dropguard]. Hữu ích để một scope như `main` hủy cả cây khi thoát bất thường (nhận xét của người soạn).
+- `run_until_cancelled(fut)` chạy `fut`; nếu token bị hủy thì trả `None` và `fut` bị drop[^ct-run]. Nó chỉ cancel-safe nếu `fut` cancel-safe[^ct-run-safe], nên đừng bọc cả một hàm nhiều bước không cancel-safe.
 
-**`TaskTracker`.** `wait` chờ cho tới khi tracker **vừa đã `close` vừa rỗng**[^tt-wait-both]; không `close` thì `wait` không hoàn thành dù tracker rỗng[^tt-notclosed]. Khi `wait` trả về, mọi task đã thoát và destructor của future đã chạy xong[^tt-wait-dtor]. `close` cho phép các `wait` hoàn thành nhưng không ngăn bạn spawn thêm task[^tt-close]. `track_future` đếm future là một task, và gỡ nó khi future *bị drop* chứ không phải khi `poll` trả `Ready`[^tt-track-future].
+**`TaskTracker`** lo phần chờ. `wait` chờ cho tới khi tracker **vừa đã `close` vừa rỗng**[^tt-wait-both]. Quên `close` thì `wait` không hoàn thành dù tracker rỗng[^tt-notclosed]. Khi `wait` trả về, mọi task đã thoát và destructor của future đã chạy xong[^tt-wait-dtor]. Chú ý `close` chỉ cho phép các `wait` hoàn thành chứ không ngăn bạn spawn thêm task[^tt-close].
+
+Ghép lại, khung tắt êm của `checkout` trông như sau:
 
 ```rust
 // Minh họa khung: token + tracker + hạn chót. Không chạy nguyên văn.
@@ -332,7 +369,7 @@ if tokio::time::timeout(Duration::from_secs(25), tracker.wait()).await.is_err() 
 }
 ```
 
-*Khung code trên và sơ đồ dưới là minh họa của người soạn; thứ tự từng bước dựa vào các tính chất đã nêu ở trên.*
+*Khung code trên và sơ đồ dưới là minh họa của người soạn; thứ tự từng bước dựa vào các tính chất đã nêu.*
 
 ```mermaid
 sequenceDiagram
@@ -351,21 +388,23 @@ sequenceDiagram
   M->>M: đóng channel, shutdown_timeout runtime
 ```
 
-**Thứ tự an toàn** (nhận xét của người soạn, mỗi bước dựa vào tính chất ở trên):
+Thứ tự an toàn (nhận xét của người soạn, mỗi bước dựa vào tính chất ở trên):
 
-1. **Ngừng nhận việc mới** trước: vòng accept đặt `token.cancelled()` trong `select!`; sau bước này không có kết nối mới, nên số việc cần chờ chỉ giảm.
+1. **Ngừng nhận việc mới trước.** Vòng accept đặt `token.cancelled()` trong `select!`. Sau bước này không còn kết nối mới, nên số việc cần chờ chỉ giảm.
 2. **Báo tắt** bằng `cancel()` ở gốc; các nhánh `child_token` nhận tự động.
-3. **Cho task hoàn thành việc đang dở**: mỗi task kiểm tra token *giữa* các đơn vị công việc, không cắt ngang một đơn vị không cancel-safe (mục 1). Dùng `select!` với `biased;` để cancel được kiểm tra đầu tiên cũng được: `biased;` làm `select!` poll các nhánh theo thứ tự từ trên xuống[^tokio-select-biased], còn mặc định nó chọn ngẫu nhiên nhánh kiểm tra trước[^tokio-select-fair].
-4. **`close()` rồi `wait()` trong một `timeout`** (mục 2): hết hạn thì ghi log, rồi chấp nhận để phần còn lại bị hủy khi runtime tắt[^tokio-cancel-rt].
-5. **Xả channel**: bên nhận gọi `close`, đọc cạn rồi mới drop, để không mất tin đã đệm[^mpsc-clean].
-6. **Tắt runtime có hạn chót** nếu có `spawn_blocking`/`block_in_place` (mục 5): không thì `Drop` chờ vô hạn[^tokio-csb-shutdown].
+3. **Cho task hoàn thành việc đang dở.** Mỗi task kiểm tra token *giữa* các đơn vị công việc, không cắt ngang một đơn vị không cancel-safe (mục 1). Nếu muốn cancel được kiểm tra đầu tiên, dùng `select!` với `biased;`: nó poll các nhánh theo thứ tự từ trên xuống[^tokio-select-biased]. Mặc định `select!` chọn ngẫu nhiên nhánh kiểm tra trước[^tokio-select-fair].
+4. **`close()` rồi `wait()` trong một `timeout`** (mục 2). Hết hạn thì ghi log, rồi chấp nhận để phần còn lại bị hủy khi runtime tắt[^tokio-cancel-rt].
+5. **Xả channel.** Bên nhận gọi `close`, đọc cạn rồi mới drop, để không mất tin đã đệm[^mpsc-clean].
+6. **Tắt runtime có hạn chót** nếu có `spawn_blocking` hoặc `block_in_place` (mục 5); không thì `Drop` chờ vô hạn[^tokio-csb-shutdown].
 
 <details><summary>Đi sâu: chọn <code>JoinSet</code> hay <code>TaskTracker</code>; tắt khi bị hủy lần hai; cây token vs <code>watch</code></summary>
 
-- Nếu bạn cần *kết quả* hoặc *lỗi* của từng task thì `JoinSet`; nếu chỉ cần chờ thì `TaskTracker` (clone được, không cần `&mut`, không tích kết quả[^tt-share][^tt-mem]; suy luận của người soạn: tiện khi task con phải spawn thêm task). Docs `TaskTracker` nói `JoinSet` nhiều tính năng hơn nên chỉ dùng `TaskTracker` khi cần một tính năng riêng của nó[^tt-unique].
-- Docs `signal` gọi chủ đề signal là rất rắc rối[^tokio-signal-care]; một chiến lược hay gặp (nhận xét của người soạn): tín hiệu lần đầu bắt đầu tắt êm, tín hiệu lần hai thoát ngay.
-- Trong 08, ví dụ chạy thử dùng `watch` thay token để chỉ cần crate `tokio`; `CancellationToken` thêm cây cha–con và `run_until_cancelled`, đổi lại cần thêm phụ thuộc `tokio-util`.
-- Kubernetes: khi xóa pod, kubelet gửi `SIGTERM` kèm hạn grace; hết hạn thì gửi `KILL` cho tiến trình còn lại[^k8s-kill], và hạn mặc định là 30 giây[^k8s-default]. Nên (nhận xét của người soạn) thời gian grace bạn đặt trong `timeout` phải *nhỏ hơn* hạn này; chi tiết `SIGTERM` ở [Chương 08, mục 8](08-tokio.md).
+- Cần *kết quả* hoặc *lỗi* của từng task thì dùng `JoinSet`; chỉ cần chờ thì dùng `TaskTracker`. Tracker clone được, không cần `&mut` và không tích kết quả[^tt-share]; suy luận của người soạn: tiện khi task con phải spawn thêm task. Docs `TaskTracker` nói `JoinSet` nhiều tính năng hơn nên chỉ dùng `TaskTracker` khi cần một tính năng riêng của nó[^tt-unique].
+- `track_future` đếm một future là một task, và gỡ nó khi future *bị drop* chứ không phải khi `poll` trả `Ready`[^tt-track-future].
+- `run_until_cancelled` trên token đã hủy từ trước thì trả `None` ngay. Từ lần poll sau, nếu hoàn thành và hủy xảy ra đồng thời thì nó thiên về hoàn thành[^ct-run-bias].
+- Docs `signal` gọi chủ đề signal là rất rắc rối[^tokio-signal-care]. Một chiến lược hay gặp (nhận xét của người soạn): tín hiệu lần đầu bắt đầu tắt êm, tín hiệu lần hai thoát ngay.
+- Trong chương 08, ví dụ chạy thử dùng `watch` thay token để chỉ cần crate `tokio`. `CancellationToken` thêm cây cha–con và `run_until_cancelled`, đổi lại cần thêm phụ thuộc `tokio-util`.
+- Kubernetes: khi xóa pod, kubelet gửi `SIGTERM` kèm hạn grace; hết hạn thì gửi `KILL` cho tiến trình còn lại[^k8s-kill]. Hạn mặc định là 30 giây[^k8s-default]. Vì vậy thời gian grace bạn đặt trong `timeout` phải *nhỏ hơn* hạn này (nhận xét của người soạn). Chi tiết `SIGTERM` ở [Chương 08, mục 8](08-tokio.md).
 
 </details>
 
@@ -373,55 +412,55 @@ sequenceDiagram
 
 ## 7. `Send` và `!Send` qua `.await`: `MutexGuard` (Q7)
 
-> **Trả lời ngắn.** `tokio::spawn` đòi future `Send` vì task có thể được gửi sang thread khác để chạy[^tokio-spawn-thread]; mọi giá trị *sống qua một `.await`* nằm trong future nên cũng phải `Send`. `std::sync::MutexGuard` cố ý là `!Send` vì trên pthreads phải nhả khóa ở đúng thread đã lấy nó[^std-guard-pthread]. Giữ nó qua `.await` thì future không còn `Send` và `spawn` không biên dịch. Sửa bằng cách cho guard chết trước `.await`, hoặc dùng mutex của Tokio nếu thật sự cần giữ qua `.await`.
+> **Trả lời ngắn.** `tokio::spawn` đòi future `Send` vì task có thể được gửi sang thread khác để chạy[^tokio-spawn-thread]; mọi giá trị *sống qua một `.await`* nằm trong future nên cũng phải `Send`. `std::sync::MutexGuard` cố ý là `!Send`, vì trên pthreads khóa phải được nhả ở đúng thread đã lấy nó[^std-guard-pthread]. Giữ guard qua `.await` thì future không còn `Send` và `spawn` không biên dịch. Cách sửa là cho guard chết trước `.await`, hoặc dùng mutex của Tokio nếu thật sự cần giữ khóa qua `.await`.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chìa khóa phòng gắn tên người mượn. Nếu bạn đưa việc (future) cho nhân viên ca khác tiếp tục giữa chừng mà vẫn cầm chìa của ca trước, nhân viên mới không có quyền trả chìa; `!Send` là biển "chìa này không được trao tay".
+*Với `checkout`.* `checkout` giữ bảng giá trong một `Arc<std::sync::Mutex<HashMap<..>>>` dùng chung cho mọi handler. Handler khóa mutex, đọc giá, rồi `.await` gọi `pricing` để hỏi khuyến mãi, trong khi guard vẫn còn sống. Kết quả là `tokio::spawn(handler)` không biên dịch. Vì sao compiler từ chối, và sửa thế nào?
 
-*Chuỗi lập luận.*
+Lập luận đi qua bốn bước:
 
-1. Task có thể chạy trên thread hiện tại hoặc bị chuyển sang thread khác[^tokio-spawn-thread]; `Send` là "kiểu có thể chuyển qua ranh giới thread"[^std-send]; nên `spawn` đòi `F: Future + Send + 'static`[^tokio-spawn-sig].
-2. Future của `async fn` là state machine (xem [chương 05](05-future-poll-waker.md), [06](06-async-await-pin.md)). Docs `spawn` nói: có thể dùng giá trị `!Send` trong task, miễn là chúng chỉ tồn tại *giữa* các lần `.await`[^tokio-spawn-send]. Ví dụ của docs: `Rc` trong một block không có `.await` thì được; giữ `Rc` qua `yield_now().await` thì không. Docs cảnh báo thông báo lỗi biên dịch khi giữ giá trị `!Send` qua `.await` là không thân thiện, dạng `cannot be sent between threads safely`[^tokio-spawn-rc-err].
-3. `MutexGuard` của std: `!Send` "để tối đa tính di động giữa các nền tảng"; trên hệ dùng pthreads có yêu cầu phải nhả khóa ở thread đã lấy, nên guard không được `Send` để khỏi bị drop từ thread khác[^std-guard-nsend][^std-guard-pthread]. Sau `.await`, future có thể được poll tiếp trên thread khác; guard sẽ bị drop ở đó, vi phạm quy tắc trên (suy luận của người soạn từ hai nguồn).
-4. Vì vậy compiler *chặn* mẫu này (suy luận của người soạn: chặn để bạn không giữ khóa qua `.await`). Ngay cả khi compiler không chặn vì task không bị chuyển giữa các thread, Tokio nói giữ guard std qua `.await` hầu như không bao giờ cho code đồng thời đúng vì dễ dẫn tới deadlock (các bên chờ nhau mãi)[^tokio-mutex-deadlock]. (Nhận xét của người soạn: lỗi `Send` là tính năng; đừng "sửa" bằng cách tìm kiểu guard `Send` để cho qua mặt compiler.)
+1. Task có thể chạy trên thread hiện tại hoặc bị chuyển sang thread khác[^tokio-spawn-thread]. `Send` là "kiểu có thể chuyển qua ranh giới thread"[^std-send]. Vì vậy `spawn` đòi `F: Future + Send + 'static`[^tokio-spawn-sig].
+2. Future của `async fn` là một state machine (xem [chương 05](05-future-poll-waker.md), [06](06-async-await-pin.md)), và biến nào sống qua `.await` đều nằm trong đó. Docs `spawn` nói bạn vẫn dùng được giá trị `!Send` trong task, miễn là chúng chỉ tồn tại *giữa* các lần `.await`[^tokio-spawn-send]. Ví dụ của docs: `Rc` trong một block không có `.await` thì được, còn giữ `Rc` qua `yield_now().await` thì không. Docs cảnh báo thông báo lỗi biên dịch khi giữ giá trị `!Send` qua `.await` là không thân thiện, dạng `cannot be sent between threads safely`[^tokio-spawn-rc-err].
+3. `MutexGuard` của std là `!Send` "để tối đa tính di động giữa các nền tảng"[^std-guard-nsend]. Lý do cụ thể: trên hệ dùng pthreads có yêu cầu phải nhả khóa ở thread đã lấy, nên guard không được `Send` để khỏi bị drop từ thread khác[^std-guard-pthread]. Sau `.await`, future có thể được poll tiếp trên thread khác và guard sẽ bị drop ở đó, vi phạm quy tắc trên (suy luận của người soạn, từ hai nguồn).
+4. Vì vậy compiler *chặn* mẫu này (suy luận của người soạn: chặn để bạn không giữ khóa qua `.await`). Ngay cả khi compiler không chặn, vì task không bị chuyển giữa các thread, Tokio vẫn nói giữ guard std qua `.await` hầu như không bao giờ cho code đồng thời đúng, vì dễ dẫn tới deadlock (các bên chờ nhau mãi)[^tokio-mutex-deadlock]. Lỗi `Send` là một tính năng; đừng "sửa" bằng cách tìm kiểu guard `Send` để qua mặt compiler (nhận xét của người soạn).
 
-*Cách sửa, từ ưu tiên cao xuống thấp* (nhận xét của người soạn):
+Cách sửa, từ ưu tiên cao xuống thấp (nhận xét của người soạn). Hai ví dụ đầu cho thấy khác biệt:
 
 ```rust
 // SAI: guard sống qua .await  => future !Send, spawn không biên dịch
-async fn sai(m: &std::sync::Mutex<Vec<u32>>) {
-    let g = m.lock().unwrap();
-    gui_di(g.len()).await;
+async fn sai(gia: &std::sync::Mutex<Vec<u32>>) {
+    let g = gia.lock().unwrap();
+    hoi_pricing(g.len()).await;
 }
 
 // ĐÚNG 1: rút dữ liệu ra trong scope ngắn, guard chết trước .await
-async fn dung1(m: &std::sync::Mutex<Vec<u32>>) {
-    let n = { let g = m.lock().unwrap(); g.len() };
-    gui_di(n).await;
+async fn dung1(gia: &std::sync::Mutex<Vec<u32>>) {
+    let n = { let g = gia.lock().unwrap(); g.len() };
+    hoi_pricing(n).await;
 }
 ```
 
-1. **Thu hẹp phạm vi guard** (như ví dụ trên và như ví dụ `Rc` trong docs `spawn`[^tokio-spawn-send]): copy/clone dữ liệu cần dùng ra rồi để guard chết trước `.await`. Dữ liệu thuần thì mutex std/`parking_lot` vẫn được khuyên dùng trong code async[^tokio-mutex-data].
-2. **Cẩn thận với temporary.** Scrutinee (biểu thức ngay sau từ khóa `match`) không phải phạm vi temporary, nên temporary trong scrutinee có thể sống tới hết câu lệnh `match`[^ref-match-tmp]. `match m.lock().unwrap().get(&k) { Some(v) => dung(v).await, ... }` giữ guard qua `.await` dù bạn không viết `let g`. Tách thành `let v = m.lock().unwrap().get(&k).cloned();` rồi `match v` (suy luận của người soạn từ quy tắc Reference).
-3. **Cần giữ khóa qua `.await`** (ví dụ tuần tự hóa truy cập kết nối DB): dùng `tokio::sync::Mutex`, thiết kế để guard được giữ qua `.await`[^tokio-mutex-diff], đổi lại đắt hơn[^tokio-mutex-prefer]. Docs còn gợi ý: thường tốt hơn là spawn một task quản lý tài nguyên I/O và dùng message passing[^tokio-mutex-pattern].
-4. **Chấp nhận `!Send`:** chạy trên một thread bằng `LocalSet`/`spawn_local`, lập lịch future `!Send` cùng nhau trên một thread[^tokio-localset].
+1. **Thu hẹp phạm vi guard**, như ví dụ trên và như ví dụ `Rc` trong docs `spawn`[^tokio-spawn-send]: copy hoặc clone dữ liệu cần dùng ra rồi để guard chết trước `.await`. Với dữ liệu thuần, mutex của std hay `parking_lot` vẫn được khuyên dùng trong code async[^tokio-mutex-data].
+2. **Cẩn thận với temporary.** Scrutinee (biểu thức ngay sau từ khóa `match`) không phải phạm vi temporary, nên temporary trong scrutinee có thể sống tới hết câu lệnh `match`[^ref-match-tmp]. Vì vậy `match gia.lock().unwrap().get(&k) { Some(v) => dung(v).await, ... }` giữ guard qua `.await` dù bạn không viết `let g`. Hãy tách thành `let v = gia.lock().unwrap().get(&k).cloned();` rồi `match v` (suy luận của người soạn, từ quy tắc trong Reference).
+3. **Cần giữ khóa qua `.await`** (ví dụ tuần tự hóa truy cập một kết nối DB): dùng `tokio::sync::Mutex`, thiết kế để guard được giữ qua `.await`[^tokio-mutex-diff]. Đổi lại nó đắt hơn mutex chặn[^tokio-mutex-prefer]. Docs còn gợi ý rằng thường tốt hơn là spawn một task quản lý tài nguyên I/O và dùng message passing[^tokio-mutex-pattern].
+4. **Chấp nhận `!Send`.** Chạy trên một thread bằng `LocalSet`/`spawn_local`, lập lịch các future `!Send` cùng nhau trên một thread[^tokio-localset].
 
-Không phải mọi future đều phải `Send`: `Handle::block_on` có chữ ký `block_on<F: Future>` không có ràng buộc `Send`[^hblock-sig] (suy luận của người soạn: vì future chạy ngay trên thread hiện tại, nó không rời thread).
+Không phải future nào cũng phải `Send`. `Handle::block_on` có chữ ký `block_on<F: Future>`, không có ràng buộc `Send`[^hblock-sig]; suy luận của người soạn: vì future chạy ngay trên thread hiện tại, nó không rời thread.
 
 <details><summary>Đi sâu: <code>Sync</code>, <code>Arc&lt;Mutex&lt;_&gt;&gt;</code> và <code>Send</code> của chính mutex; vì sao lỗi hiện ra ở chỗ <code>spawn</code></summary>
 
-- `std::sync::MutexGuard` vẫn là `Sync` khi `T: Sync`; chỉ `Send` bị cấm[^std-guard-sync]. Còn `std::sync::Mutex<T>` là `Send` khi `T: Send`[^std-mutex-send], và docs nói `T` phải `Send` thì `Mutex<T>` mới `Sync`[^std-mutex-sync]; nên `Arc<Mutex<T>>` đưa vào task thì ổn, chỉ *guard* mới không đi qua `.await` (suy luận của người soạn từ các impl trên).
-- Lỗi báo ở chỗ `spawn` chứ không ở chỗ giữ guard, vì ràng buộc `Send` nằm trên tham số của `spawn`[^tokio-spawn-sig] và compiler suy ra `Send` của future từ các biến sống qua `.await` (suy luận của người soạn). Docs `spawn` nói thông báo lỗi có thể "không thân thiện", kể cả dạng `cycle detected`[^tokio-spawn-rc-err].
-- Ở ví dụ `Rc`, docs chỉ ra: ép `Rc` ở trong scope không có `.await` là cách làm cho nó "không sống qua `.await`"[^tokio-spawn-send].
+- `std::sync::MutexGuard` vẫn là `Sync` khi `T: Sync`; chỉ `Send` bị cấm[^std-guard-sync]. Còn `std::sync::Mutex<T>` là `Send` khi `T: Send`[^std-mutex-send]. Docs nói `T` phải `Send` thì `Mutex<T>` mới `Sync`[^std-mutex-sync]. Nên `Arc<Mutex<T>>` đưa vào task thì ổn, chỉ *guard* mới không đi qua `.await` (suy luận của người soạn, từ các impl trên).
+- Lỗi báo ở chỗ `spawn` chứ không ở chỗ giữ guard, vì ràng buộc `Send` nằm trên tham số của `spawn`[^tokio-spawn-sig]; compiler suy ra `Send` của future từ các biến sống qua `.await` (suy luận của người soạn). Docs `spawn` nói thông báo lỗi có thể "không thân thiện", kể cả dạng `cycle detected`[^tokio-spawn-rc-err].
+- Ở ví dụ `Rc`, docs chỉ ra rằng ép `Rc` nằm trong scope không có `.await` là cách làm nó "không sống qua `.await`"[^tokio-spawn-send].
 
 </details>
 
-**Quay lại Q7:** future `spawn`ed phải `Send`, nên biến sống qua `.await` phải `Send`; `MutexGuard` std là `!Send` vì quy tắc pthread, và cách sửa chuẩn là cho guard chết trước `.await` (hoặc dùng mutex Tokio/`LocalSet` khi thật sự cần).
+**Quay lại Q7:** future được `spawn` phải `Send`, nên biến sống qua `.await` phải `Send`; `MutexGuard` của std là `!Send` vì quy tắc pthread, và cách sửa chuẩn là cho guard chết trước `.await` (hoặc dùng mutex Tokio/`LocalSet` khi thật sự cần).
 
 ## Liên hệ với Rust: checklist một dịch vụ Tokio (nhận xét của người soạn)
 
-Đây là bản tổng hợp *của người soạn*; mỗi dòng trỏ về mục có nguồn.
+Đây là bản tổng hợp *của người soạn*; mỗi dòng trỏ về mục có nguồn. Thử áp nó lên `checkout` trước khi lên production.
 
 | Câu hỏi khi review | Mục |
 |---|---|
@@ -435,14 +474,15 @@ Không phải mọi future đều phải `Send`: `Handle::block_on` có chữ k�
 
 ## Tóm tắt
 
-- Hủy trong Tokio là drop future tại `.await`; destructor chạy, code sau `.await` không chạy[^tokio-cancel-drop]. Hàm cancel-safe là hàm drop-rồi-tạo-lại là no-op[^tokio-select-def].
-- `mpsc::send` cancel: tin không được gửi nhưng bị mất; `reserve`+`Permit` để giữ tin[^send-cancel][^send-reserve]. `recv`, `join_next`, `&mut JoinHandle`, `cancelled` là cancel-safe[^recv-safe][^js-joinnext-safe][^jh-mut-safe][^ct-cancelled-safe]; `read_exact`, `write_all`, `Mutex::lock`, `Semaphore::acquire`, `Notify::notified` thì không[^read-exact-cancel][^write-all-cancel][^mutex-lock-cancel][^sem-acq-cancel][^notified-cancel].
-- `timeout` poll trước xét hạn, drop future khi quá hạn[^tokio-timeout-poll][^tokio-timeout]; không dừng task đã spawn, `spawn_blocking`, hay dịch vụ phía xa.
-- Bounded channel cho backpressure[^mpsc-bp]; unbounded có thể hết bộ nhớ[^unb-mem]; `Semaphore` giới hạn đồng thời[^tokio-sem]; `poll_ready` của tower là cùng ý tưởng ở tầng service[^tower-bp].
-- `spawn` trần tách task; `JoinSet` drop = abort cả nhóm[^js-drop]; `TaskTracker` chỉ để chờ[^tt-nodrop].
-- Blocking: `spawn_blocking` (hữu hạn) + semaphore; thread riêng (vô hạn)[^tokio-csb-long]; phát hiện bằng `RuntimeMetrics`[^m-busy][^m-poll-mean].
-- Graceful shutdown: cây token (`child_token`), `close` + `wait` tracker, hạn chót, `shutdown_timeout`[^ct-child][^tt-wait-both][^rt-shutdown-timeout].
-- Giữ `MutexGuard` std qua `.await` làm future `!Send`[^std-guard-pthread]; thu hẹp scope guard, cẩn thận temporary trong `match`[^ref-match-tmp].
+- Hủy trong Tokio là drop future tại `.await`: destructor chạy, code sau `.await` không chạy[^tokio-cancel-drop]. Hàm cancel-safe là hàm mà drop rồi tạo lại là no-op[^tokio-select-def].
+- `mpsc::send` bị hủy thì tin không được gửi nhưng bị mất[^send-cancel]. Muốn giữ tin thì dùng `reserve` + `Permit`[^send-reserve].
+- `recv`, `join_next`, `&mut JoinHandle` và `cancelled` là cancel-safe[^recv-safe]. `read_exact`, `write_all`, `Mutex::lock`, `Semaphore::acquire` và `Notify::notified` thì không[^tokio-select-safe].
+- `timeout` poll trước rồi mới xét hạn[^tokio-timeout-poll]. Quá hạn thì nó drop future[^tokio-timeout]. Nó không dừng task đã spawn, `spawn_blocking` hay dịch vụ phía xa.
+- Bounded channel cho backpressure[^mpsc-bp]. Unbounded có thể làm hết bộ nhớ[^unb-mem]. `Semaphore` giới hạn đồng thời[^tokio-sem]. `poll_ready` của tower là cùng ý tưởng ở tầng service[^tower-bp].
+- `spawn` trần tách task. `JoinSet` drop thì abort cả nhóm[^js-drop]. `TaskTracker` chỉ để chờ[^tt-nodrop].
+- Blocking: `spawn_blocking` (việc hữu hạn) kèm semaphore; thread riêng cho việc chạy vô hạn[^tokio-csb-long]; phát hiện bằng `RuntimeMetrics`[^m-busy].
+- Graceful shutdown gồm cây token (`child_token`)[^ct-child], rồi `close` + `wait` trên tracker, rồi một hạn chót. Tracker chỉ `wait` xong khi đã đóng và rỗng[^tt-wait-both]. Nếu có `spawn_blocking`, tắt runtime bằng `shutdown_timeout`[^rt-shutdown-timeout].
+- Giữ `MutexGuard` std qua `.await` làm future `!Send`[^std-guard-pthread]. Hãy thu hẹp scope của guard và cẩn thận với temporary trong `match`[^ref-match-tmp].
 
 ## Câu hỏi tự kiểm tra
 
@@ -459,21 +499,20 @@ Không phải mọi future đều phải `Send`: `Handle::block_on` có chữ k�
 11. `tracker.wait()` không bao giờ trả về dù không còn task; nguyên nhân thường gặp là gì?
 12. Vì sao `std::sync::MutexGuard` là `!Send`, và `match m.lock().unwrap().get(..) { .. .await .. }` có vấn đề gì?
 
-
 <details><summary>Đáp án</summary>
 
-1. Tại `.await` nơi future đang treo; biến cục bộ bị hủy bằng destructor và code sau `.await` không chạy[^tokio-cancel-drop][^tokio-select-own].
-2. `read_exact` không cancel-safe, hủy giữa chừng có thể mất dữ liệu đã đọc[^tokio-select-safe]; docs định nghĩa cancel-safe là drop-rồi-tạo-lại là no-op, vòng lặp `select!` sẽ mất tiến độ[^tokio-select-def]. Sửa: lặp `read` với bộ đệm và số byte đã đọc giữ *ngoài* future.
-3. Bảo đảm tin chưa được gửi, nhưng bị drop và mất[^send-cancel]. Dùng `reserve()` rồi `Permit::send`[^send-reserve]; drop `Permit` trả chỗ[^reserve-drop].
-4. Quá hạn thì `handle` bị drop; drop `JoinHandle` chỉ tách task, task chạy tiếp nền, kết quả mất[^tokio-jh-detach][^tokio-jh-drop]. Muốn hủy phải `abort`.
-5. `timeout` poll future trước khi xét hạn, nên future không yield có thể hoàn thành vượt hạn mà không lỗi[^tokio-timeout-poll]; (suy luận của người soạn) một lần `poll` bị `std::thread::sleep` chiếm thread thì không có điểm nào để kiểm hạn trước khi nó trả về. `select!` cũng vậy: các nhánh chạy trên cùng thread nên nhánh chặn làm các nhánh khác đứng[^sel-runtime].
-6. `send().await` chờ tới khi có chỗ[^mpsc-bounded]; `try_send` trả ngay với lỗi đầy hoặc đóng[^trysend]; `reserve().await` chờ rồi giữ chỗ để gửi sau mà không mất tin khi bị hủy[^send-reserve].
-7. Permit phải di chuyển qua ranh giới task (vào `tokio::spawn`), nên dùng `acquire_owned` trên `Arc<Semaphore>`; docs nói nếu semaphore là biến global thì `acquire` là đủ[^sem-owned].
-8. Trả `Ready(Ok(()))` nghĩa là có thể gọi `call`[^tower-ready]; `Pending` + đánh thức khi hết đầy[^tower-pending]. Clone: bản gốc sẵn sàng không có nghĩa bản clone sẵn sàng; gọi mà chưa `poll_ready` có thể panic[^tower-clone][^tower-panic].
-9. Drop `JoinSet` abort mọi task[^js-drop]; drop `TaskTracker` không abort[^tt-nodrop]; drop `AbortHandle` không abort, chỉ bỏ quyền abort[^ah-drop]. `abort_all` không gỡ task khỏi set: phải gọi `join_next` tới khi rỗng[^js-abortall], hoặc dùng `shutdown().await`[^js-shutdown].
-10. Ví dụ (hai ví dụ đầu là nhận xét của người soạn): client DB sync, `std::fs`, destructor nặng[^tokio-sync-in-async], CPU không `.await`[^tokio-await-only]. Số đo: `worker_total_busy_duration`[^m-busy], `worker_mean_poll_time` (cần `tokio_unstable`)[^m-poll-mean]; ngoài ra `blocking_queue_depth`[^m-queue].
-11. Quên gọi `close()`: `wait` chỉ hoàn thành khi tracker vừa đã đóng vừa rỗng[^tt-wait-both][^tt-notclosed].
-12. Trên pthreads phải nhả khóa ở thread đã lấy, nên guard `!Send`[^std-guard-pthread]; trong `match`, temporary ở scrutinee có thể sống tới hết câu lệnh nên guard vẫn sống qua `.await`[^ref-match-tmp] (suy luận), làm future `!Send`.
+1. Tại `.await` nơi future đang treo. Biến cục bộ bị hủy bằng destructor và code sau `.await` không chạy[^tokio-cancel-drop].
+2. `read_exact` không cancel-safe: hủy giữa chừng có thể mất dữ liệu đã đọc[^tokio-select-safe]. Docs định nghĩa cancel-safe là drop rồi tạo lại là no-op, và vòng lặp `select!` sẽ mất tiến độ nếu hàm không có tính chất đó[^tokio-select-def]. Sửa: lặp `read` với bộ đệm và số byte đã đọc giữ *ngoài* future.
+3. Tin được bảo đảm là chưa gửi, nhưng bị drop và mất[^send-cancel]. Để tránh mất tin, dùng `reserve()` rồi `Permit::send`[^send-reserve]. Drop `Permit` thì trả chỗ lại[^reserve-drop].
+4. Quá hạn thì `handle` bị drop. Drop `JoinHandle` chỉ tách task[^tokio-jh-detach]. Task chạy tiếp nền và kết quả mất[^tokio-jh-drop]. Muốn hủy phải `abort`.
+5. `timeout` poll future trước khi xét hạn, nên future không yield có thể hoàn thành vượt hạn mà không lỗi[^tokio-timeout-poll]. Suy luận của người soạn: một lần `poll` bị `std::thread::sleep` chiếm thread thì không có điểm nào để kiểm hạn trước khi nó trả về. `select!` cũng vậy: các nhánh chạy trên cùng thread nên một nhánh chặn làm các nhánh khác đứng[^sel-runtime].
+6. `send().await` chờ tới khi có chỗ[^mpsc-bounded]. `try_send` trả ngay với lỗi đầy hoặc đóng[^trysend]. `reserve().await` chờ rồi giữ chỗ để gửi sau mà không mất tin khi bị hủy[^send-reserve].
+7. Permit phải di chuyển qua ranh giới task (vào `tokio::spawn`), nên dùng `acquire_owned` trên `Arc<Semaphore>`. Docs nói nếu semaphore là biến global thì `acquire` là đủ[^sem-owned].
+8. Trả `Ready(Ok(()))` nghĩa là có thể gọi `call`[^tower-ready]; `Pending` kèm đánh thức khi hết đầy[^tower-pending]. Clone thì khác: bản gốc sẵn sàng không có nghĩa bản clone sẵn sàng[^tower-clone]. Gọi `call` mà chưa `poll_ready` thì service được phép panic[^tower-panic].
+9. Drop `JoinSet` abort mọi task[^js-drop]. Drop `TaskTracker` không abort[^tt-nodrop]. Drop `AbortHandle` cũng không abort, chỉ bỏ quyền abort[^ah-drop]. `abort_all` không gỡ task khỏi set, nên phải gọi `join_next` tới khi rỗng[^js-abortall]. Cách khác là `shutdown().await`[^js-shutdown].
+10. Ví dụ (hai ví dụ đầu là nhận xét của người soạn): client DB sync, `std::fs`, destructor nặng[^tokio-sync-in-async]. Số đo: `worker_total_busy_duration`[^m-busy]. Số đo thứ hai là `worker_mean_poll_time`, cần `tokio_unstable`[^m-poll-mean]. Ngoài ra có `blocking_queue_depth`[^m-queue].
+11. Quên gọi `close()`: `wait` chỉ hoàn thành khi tracker vừa đã đóng vừa rỗng[^tt-wait-both]. Không `close` thì `wait` bị chặn dù tracker rỗng[^tt-notclosed].
+12. Trên pthreads khóa phải được nhả ở thread đã lấy, nên guard là `!Send`[^std-guard-pthread]. Trong `match`, temporary ở scrutinee có thể sống tới hết câu lệnh, nên guard vẫn sống qua `.await`[^ref-match-tmp] (suy luận) và làm future `!Send`.
 
 </details>
 

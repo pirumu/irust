@@ -25,25 +25,27 @@
 
 ## 1. Chọn độ trừu tượng: giữ gì, bỏ gì, đặt ranh giới nguyên tử ở đâu (Q1)
 
-> **Trả lời ngắn.** Một spec là bản mô tả *trừu tượng* của thiết kế, đi kèm bản trừu tượng của *môi trường* nó chạy trong đó (crash, mạng, pause)[^aws-abstract]. Giữ những gì quyết định đúng/sai: dữ liệu ở từng kho, thông điệp đang bay, từng bước mà hệ thật coi là nguyên tử, và các sự kiện lỗi. Bỏ phần còn lại, vì spec càng chi tiết thì càng nhiều state[^lt-detail]. Độ trừu tượng đúng là mức thô nhất mà vẫn tái hiện được lỗi bạn đang săn (nhận xét của người soạn).
+> **Trả lời ngắn.** Spec là bản mô tả *thô* của thiết kế, đi kèm một bản mô tả thô của môi trường mà thiết kế chạy trong đó: crash, mạng chậm, process bị treo[^aws-abstract]. Bạn chỉ giữ những gì quyết định đúng hay sai: dữ liệu ở từng kho, thông điệp đang bay, các bước mà hệ thật bảo đảm nguyên tử, và các sự kiện lỗi. Mọi thứ khác nên bỏ, vì spec càng chi tiết thì số state càng phình ra[^lt-detail]. Mức trừu tượng đúng là mức thô nhất mà vẫn còn tái hiện được lỗi bạn đang săn (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): sơ đồ tàu điện ngầm không vẽ khoảng cách thật hay độ cong của đường ray; nó chỉ giữ thứ tự các ga và chỗ đổi tuyến — vậy mà đủ để trả lời "đi từ A đến B phải đổi tàu ở đâu". Spec là sơ đồ tàu điện của hệ thống: bỏ payload, tải, độ trễ cụ thể; giữ thứ tự các bước và những chỗ hai tiến trình có thể chen vào nhau.
+*Với service `orders`.* Từ đầu đến cuối chương ta bám theo một service giả định tên `orders`, viết bằng Rust, chạy vài replica. Mỗi đơn hàng nó ghi vào DB, đặt một bản vào cache, phát event `OrderPlaced` lên broker, và một consumer lấy event đó để trừ tiền qua cổng thanh toán. Ngoài ra còn một job đối soát mà tại mỗi thời điểm chỉ một replica được chạy, nhờ giữ một lease. Mỗi mục sau lấy một mảnh của `orders` làm đối tượng của một spec (nhận xét của người soạn: đây là ví dụ để giảng, không phải code trong repo). Câu hỏi của mục này đến trước mọi spec: với một hệ như `orders`, trong đầu ta phải giữ gì, vứt gì?
 
-Sáu quyết định gặp ở mọi spec backend (danh sách là nhận xét của người soạn; từng ý có nguồn riêng):
+Có sáu quyết định gặp lại ở mọi spec backend. Danh sách là của người soạn tổng hợp, còn từng ý có nguồn riêng.
 
-1. **Biến = những nơi dữ liệu có thể bất đồng.** Mỗi kho (bảng DB, cache, broker) là một biến; thông điệp đang bay là một tập hoặc dãy. Dữ liệu bên trong thì co lại thật nhỏ: thay vì tải máy chủ 0..100, người có kinh nghiệm chỉ giữ 0..3 hoặc một cờ boolean[^lt-load]. Chỉ giữ chi tiết khi lỗi phụ thuộc vào nó.
+1. **Biến: mỗi nơi dữ liệu có thể lệch nhau là một biến.** Bảng đơn hàng trong DB, cache, broker, mỗi thứ một biến; thông điệp đang bay là một tập hoặc một dãy. Dữ liệu bên trong thì co lại thật nhỏ: thay vì mô hình tải máy chủ từ 0 đến 100, người có kinh nghiệm chỉ giữ 0..3 hoặc một cờ boolean[^lt-load]. Với `orders`, spec chỉ cần id của đơn, không cần JSON của đơn. Chi tiết nào chưa đụng tới lỗi thì chưa cần giữ.
 
-2. **Một label = một bước nguyên tử.** Trong PlusCal, một bước chạy từ label này đến label kế tiếp[^pm-step]; với thuật toán đa tiến trình, người viết nên tự chọn grain of atomicity[^pm-grain]. Quy tắc thực hành (nhận xét của người soạn): thao tác mà hệ thật *bảo đảm* nguyên tử — một transaction DB, một lệnh compare-and-set, một `fetch_max` nguyên tử — là *một* label; hai thao tác mà giữa chúng tiến trình khác chen được (đọc DB rồi mới set cache; commit rồi mới publish) là *hai* label. Chọn grain quá thô có thể che mất lỗi thật; quá mịn thì model checking quá lâu[^lt-grain].
+2. **Label: một label là một bước nguyên tử.** Trong PlusCal, một bước chạy từ label này đến label kế tiếp[^pm-step]. Với thuật toán nhiều process, chính người viết phải chọn grain of atomicity, tức độ thô của một bước[^pm-grain]. Quy tắc thực hành (nhận xét của người soạn): thao tác mà hệ thật *bảo đảm* nguyên tử, như một transaction DB, một lệnh compare-and-set hay một `fetch_max` nguyên tử, là *một* label. Hai thao tác mà giữa chúng process khác chen vào được, như đọc DB rồi mới set cache, hay commit rồi mới publish, là *hai* label. Chọn bước quá thô có thể che mất lỗi thật, còn quá mịn thì model checking chạy quá lâu[^lt-grain].
 
-3. **Môi trường là một phần của spec.** AWS mô tả cách làm: nêu đặc tính môi trường mà hệ thống dựa vào ("what must go right"), rồi đặc tả tác động của từng sự kiện có thể xảy ra — lỗi mạng và hồi phục, lỗi đĩa, process crash và restart, thao tác của người vận hành[^aws-events]. Họ thấy cách này ít sai sót hơn cách liệt kê "cái gì có thể hỏng"[^aws-needs-right]. Với PlusCal: crash là một nhánh `either … or` bỏ qua bước (kèm ngân sách, mục 3 và 5); trùng/mất thông điệp là nhánh nondeterministic; **pause không cần mô hình riêng**, vì thuật toán đa tiến trình được thực thi bằng cách liên tục chọn một tiến trình *bất kỳ* và chạy một bước của nó[^pm-arbitrary] — nên một tiến trình đứng yên giữa hai label lâu tùy ý là hành vi hợp lệ (suy luận của người soạn từ câu trích).
+3. **Môi trường cũng là một phần của spec.** AWS làm như sau: nêu những đặc tính của môi trường mà hệ thống dựa vào ("what must go right"), rồi đặc tả tác động của từng sự kiện có thể xảy ra: lỗi mạng và hồi phục, lỗi đĩa, process crash rồi restart, thao tác của người vận hành[^aws-events]. Họ thấy cách này ít sai sót hơn việc liệt kê "cái gì có thể hỏng"[^aws-needs-right]. Trong PlusCal, crash là một nhánh `either … or` bỏ qua bước (kèm ngân sách, xem mục 3 và 5). Trùng hoặc mất thông điệp cũng là một nhánh nondeterministic, nghĩa là spec không chọn trước nhánh nào mà TLC thử cả hai. Còn **pause thì không cần mô hình riêng**: thuật toán nhiều process được thực thi bằng cách liên tục chọn một process *bất kỳ* rồi chạy một bước của nó[^pm-arbitrary], nên một process đứng yên giữa hai label lâu tùy ý đã là hành vi hợp lệ (suy luận của người soạn từ nguồn).
 
-4. **Thời gian: trừu tượng hóa tối đa.** Kleppmann: các thuật toán trong mô hình bất đồng bộ thường bảo đảm safety mà không cần giả định thời gian; chỉ liveness phụ thuộc timeout hay failure detector[^kb-safety-liveness]. Hệ quả cho spec (suy luận của người soạn): hết hạn lease, timeout RPC chỉ cần là hành động "có thể xảy ra bất cứ lúc nào", không cần đồng hồ. Khi bắt buộc phải có "thời gian", spec trong repo Examples dùng một *bộ đếm logic* (`TimeoutCounter`, tăng một đơn vị mỗi lần kích hoạt timeout)[^ex-cp-timeout]; còn Lamport, ở chương real-time của sách, dùng biến `now`[^ss-now] và nhận xét rằng đặc tả real-time không phổ biến: spec thường nói hệ *làm gì* chứ không nói *mất bao lâu*[^ss-realtime-rare].
+4. **Thời gian: trừu tượng hóa tối đa.** Các thuật toán trong mô hình bất đồng bộ thường bảo đảm safety mà không cần giả định gì về thời gian; chỉ liveness mới phụ thuộc vào timeout hay failure detector[^kb-safety-liveness]. Vậy lease hết hạn hay RPC timeout chỉ cần là hành động "có thể xảy ra bất cứ lúc nào", không cần đồng hồ (suy luận của người soạn). Khi buộc phải có "thời gian", spec trong repo Examples dùng một *bộ đếm logic* tên `TimeoutCounter`, tăng một đơn vị mỗi lần timeout kích hoạt[^ex-cp-timeout]. Lamport thì dùng biến `now` ở chương real-time của sách[^ss-now]. Ông cũng ghi nhận rằng đặc tả real-time không phổ biến, vì spec thường nói hệ *làm gì* chứ không nói *mất bao lâu*[^ss-realtime-rare].
 
-5. **Tính chất: nói rõ cái gì "không bao giờ" và cái gì "rồi sẽ".** AWS chia hai loại: safety ("hệ được phép làm gì", ví dụ mọi dữ liệu đã commit luôn còn nguyên và đúng)[^aws-safety] và liveness ("hệ phải rồi sẽ làm gì")[^aws-liveness]. Chương này chủ yếu kiểm safety; liveness cần fairness ([chương 05](05-liveness-va-fairness.md)).
+5. **Tính chất: phân biệt "không bao giờ" với "rồi sẽ".** AWS chia tính chất thành hai loại. Safety cho biết hệ được phép làm gì, ví dụ mọi dữ liệu đã commit luôn còn nguyên và đúng[^aws-safety]. Liveness cho biết hệ phải rồi sẽ làm gì[^aws-liveness]. Chương này chủ yếu kiểm safety; liveness cần fairness, xem [chương 05](05-liveness-va-fairness.md).
 
-6. **Biên hữu hạn.** TLC duyệt state; spec phải có biên (số client, số message, ngân sách crash). Chi tiết ở mục 7.
+6. **Biên hữu hạn.** TLC duyệt từng state nên spec phải có biên: số client, số message, ngân sách crash. Chi tiết ở mục 7.
+
+Cả quy trình gói lại trong sơ đồ sau.
 
 ```mermaid
 flowchart LR
@@ -57,7 +59,7 @@ flowchart LR
   G --> S
 ```
 
-Bảng ánh xạ thành phần backend sang cấu trúc spec (nhận xét của người soạn, dùng xuyên suốt chương):
+Bảng dưới đây ánh xạ từng thành phần backend sang cấu trúc spec, và ta dùng nó xuyên suốt chương (nhận xét của người soạn).
 
 | Thành phần hệ thật | Trong spec |
 | --- | --- |
@@ -70,33 +72,34 @@ Bảng ánh xạ thành phần backend sang cấu trúc spec (nhận xét của 
 | Retry | vòng `while` có trần `MaxRetries` |
 | Tải, độ trễ, kích thước payload | bỏ |
 
-*Một ví dụ có thật: Checkpoint Coordination trong `tlaplus/Examples`.* Tác giả viết spec này (2017) khi thiết kế tính năng điều phối checkpoint trên một cluster năm replica có primary được bầu[^ex-cp-intro]. Mô hình lỗi nêu thẳng trong README: replica crash rồi hồi phục, đường mạng giữa hai replica hỏng rồi hồi phục, và tốc độ trôi của thời gian khác nhau giữa các replica[^ex-cp-failure]. Trong spec, lỗi môi trường nằm trong những hành động riêng của `Next` (như `NodeFailure`, `NodeRecovery`, `NetworkFailure`)[^ex-cp-next], còn thời gian là bộ đếm `TimeoutCounter` tăng ở hành động `TriggerTimeout`[^ex-cp-timeout]. README ghi rằng TLC tìm ra một trace 12 bước cho một lỗi tinh vi do một "tối ưu hóa" gây ra[^ex-cp-12], và file `MCCheckpointCoordinationFailure.cfg` tái hiện trace đó[^ex-cp-failcfg]; manifest của repo ghi kết quả `safety failure` cho model Failure đó[^ex-cp-manifest]. (Đây là kết quả do repo ghi; chương này không chạy lại.)
+*Một spec có thật để đối chiếu: Checkpoint Coordination trong `tlaplus/Examples`.* Tác giả viết nó (2017) khi thiết kế tính năng điều phối checkpoint trên một cluster năm replica có primary được bầu[^ex-cp-intro]. README nêu thẳng mô hình lỗi: replica crash rồi hồi phục, đường mạng giữa hai replica hỏng rồi hồi phục, và tốc độ trôi của thời gian khác nhau giữa các replica[^ex-cp-failure]. Trong spec, mỗi loại lỗi là một hành động riêng của `Next`, như `NodeFailure`, `NodeRecovery`, `NetworkFailure`[^ex-cp-next]. Thời gian thì là bộ đếm `TimeoutCounter`, tăng ở hành động `TriggerTimeout`[^ex-cp-timeout]. Nói cách khác, đúng khuôn của sáu quyết định ở trên.
 
 <details><summary>Đi sâu: luật PlusCal cần nhớ, thứ TLA+ không làm được, và spec không phải code</summary>
 
-- **Luật label.** Hai lệnh gán cho cùng một biến không được nằm trong cùng một bước: giữa chúng phải có label[^pm-assign-once]. Thân `with` không được chứa label[^pm-with-label]. `either` chọn nondeterministic một nhánh *thực thi được*[^pm-either]. Khi chạy bằng TLC, định danh process phải so sánh được với nhau[^pm-ids]; TLC coi model value so sánh được với mọi giá trị và luôn khác chúng[^ss-modelvalue] — nên một process tên chuỗi `"lock_service"` sống chung với một tập process là model value được.
-- **Deadlock giả.** Khi mọi process đã xong, bộ dịch PlusCal tự thêm một hành động "mọi thứ đã hoàn tất, không có gì xảy ra" để TLC không coi là deadlock[^lt-terminating]. Nhưng một process kiểu `while TRUE do await … end while` luôn kẹt ở `await` khi hết việc, và TLC báo deadlock: sách mô tả tùy chọn `-deadlock` để tắt kiểm tra này[^ss-deadlock-opt]; trong file cấu hình, ví dụ cấu hình của spec Chameneos ở `tlaplus/Examples` dùng dòng `CHECK_DEADLOCK FALSE`[^ex-chameneos-cfg]. Các spec mục 2, 3, 5, 6 có process như vậy nên cần điều đó; spec mục 4 thì không, vì mọi process của nó đều kết thúc (suy luận của người soạn từ cấu trúc spec).
-- **Thứ TLA+ không bắt được.** AWS nói rõ có hai loại vấn đề: lỗi logic (spec bắt được) và suy giảm hiệu năng "nổi lên" do vòng phản hồi, ví dụ một server chậm nhất thời làm client timeout, client retry, tải tăng, server càng chậm[^aws-emergent]. Họ viết rằng chưa biết cách khả thi để mô hình hóa một hệ thật nhằm dự đoán hành vi đó[^aws-emergent-no]. Vì vậy mục 6 chỉ mô hình hóa *tác dụng phụ lặp* của retry, không mô hình hóa *bão retry*.
-- **Spec không phải code.** Câu hỏi thường gặp nhất ở AWS là làm sao biết code cài đặt đúng thiết kế đã kiểm; câu trả lời của họ là "không biết"[^aws-code]. Spec vẫn giúp: giúp làm đúng thiết kế, một bước cần thiết để làm đúng code[^aws-code-help]; và bất biến tìm được dùng để viết assertion trong code (suy luận của người soạn từ cùng đoạn). Chương 10 nói tiếp phần nối spec với code.
-- **Bậc thang trừu tượng.** Cùng một hệ có thể được mô tả ở nhiều mức, mỗi mức phục vụ một mục đích như hiểu hệ quả của đồng thời mịn hơn[^aws-ladder]; học cách nối các mức ở [chương 07](07-refinement.md).
+- **Kết quả của spec Checkpoint Coordination.** README ghi rằng TLC tìm ra một trace 12 bước cho một lỗi tinh vi do một "tối ưu hóa" gây ra[^ex-cp-12]. File `MCCheckpointCoordinationFailure.cfg` tái hiện đúng trace đó[^ex-cp-failcfg]. Manifest của repo ghi kết quả `safety failure` cho model Failure ấy[^ex-cp-manifest]. Đây là kết quả do repo ghi; chương này không chạy lại.
+- **Luật label.** Hai lệnh gán cho cùng một biến không được nằm trong cùng một bước, nên giữa chúng phải có label[^pm-assign-once]. Thân `with` không được chứa label[^pm-with-label]. `either` chọn nondeterministic một nhánh *thực thi được*[^pm-either]. Khi chạy bằng TLC, định danh các process phải so sánh được với nhau[^pm-ids]. TLC coi model value là so sánh được với mọi giá trị và luôn khác chúng[^ss-modelvalue], nên một process tên chuỗi `"lock_service"` sống chung được với một tập process là model value.
+- **Deadlock giả.** Khi mọi process đã xong, bộ dịch PlusCal tự thêm một hành động "mọi thứ đã hoàn tất, không có gì xảy ra" để TLC không coi đó là deadlock[^lt-terminating]. Nhưng một process kiểu `while TRUE do await … end while` luôn kẹt ở `await` khi hết việc, và TLC sẽ báo deadlock. Sách mô tả tùy chọn `-deadlock` để tắt kiểm tra này[^ss-deadlock-opt]. Trong file cấu hình, spec Chameneos ở `tlaplus/Examples` dùng dòng `CHECK_DEADLOCK FALSE`[^ex-chameneos-cfg]. Spec ở mục 2, 3, 5, 6 có process như vậy nên cần tắt kiểm tra; spec mục 4 thì không, vì mọi process của nó đều kết thúc (suy luận của người soạn từ cấu trúc spec).
+- **Thứ TLA+ không bắt được.** AWS tách hai loại vấn đề: lỗi logic, mà spec bắt được, và suy giảm hiệu năng "nổi lên" từ vòng phản hồi. Ví dụ một server chậm nhất thời làm client timeout, client retry, tải tăng, server càng chậm[^aws-emergent]. Họ viết rằng chưa biết cách khả thi để mô hình hóa một hệ thật nhằm dự đoán hành vi đó[^aws-emergent-no]. Vì vậy mục 6 chỉ mô hình hóa *tác dụng phụ lặp* của retry, không mô hình hóa *bão retry*.
+- **Spec không phải code.** Câu hỏi AWS gặp nhiều nhất là làm sao biết code cài đặt đúng thiết kế đã kiểm, và câu trả lời của họ là "không biết"[^aws-code]. Spec vẫn có ích: nó giúp làm đúng thiết kế, bước đầu tiên không thể thiếu để làm đúng code[^aws-code-help]. Ngoài ra, bất biến tìm được có thể đem viết thành assertion trong code (suy luận của người soạn từ cùng đoạn). [Chương 10](10-tu-dac-ta-den-code-rust.md) nói tiếp phần nối spec với code.
+- **Bậc thang trừu tượng.** Cùng một hệ có thể mô tả ở nhiều mức, mỗi mức phục vụ một mục đích, chẳng hạn mức mịn hơn để hiểu hệ quả của đồng thời[^aws-ladder]. Cách nối các mức với nhau ở [chương 07](07-refinement.md).
 
 </details>
 
-**Quay lại Q1:** giữ biến ở nơi dữ liệu có thể bất đồng, label ở ranh giới mà hệ thật bảo đảm nguyên tử, lỗi môi trường thành hành động, thời gian thành "có thể xảy ra bất cứ lúc nào" — rồi chỉ làm mịn khi trace bạn cần bị che mất.
+**Quay lại Q1:** với `orders`, ta giữ biến ở nơi dữ liệu có thể lệch nhau, đặt label ở ranh giới mà hệ thật bảo đảm nguyên tử, biến lỗi môi trường thành hành động và thời gian thành "có thể xảy ra bất cứ lúc nào"; chỉ làm mịn thêm khi trace cần xem bị che mất.
 
 ## 2. Distributed lock với lease và fencing token (Q2)
 
-> **Trả lời ngắn.** Lease là khóa có hạn: nó chỉ giải phóng khóa của node chết, không ngăn được chủ cũ vừa tỉnh dậy ghi tiếp[^kb-pause-lease]. Trong spec, "hết hạn" là một hành động xảy ra bất cứ lúc nào, và "pause" là việc một client không được chạy bước kế tiếp; hai thứ đó đủ để tạo ra trace ghi sai thứ tự. Fencing token sửa điều đó, nhưng chỉ khi *tài nguyên đích* tự kiểm tra token và từ chối ghi có token đi lùi[^kb-fencing-active]; trong spec dưới đây, việc kiểm và việc ghi nằm cùng một bước nguyên tử (lựa chọn mô hình của người soạn).
+> **Trả lời ngắn.** Lease là khóa có hạn. Nó giải phóng được khóa của một node đã chết, nhưng không ngăn được chủ cũ vừa tỉnh dậy ghi tiếp[^kb-pause-lease]. Trong spec, "hết hạn" là một hành động xảy ra bất cứ lúc nào, còn "pause" là việc một client không được chạy bước kế tiếp; chỉ hai thứ đó đã đủ dựng ra trace ghi sai thứ tự. Fencing token sửa được lỗi này, nhưng chỉ khi *kho lưu trữ* tự kiểm token và từ chối ghi có token đi lùi[^kb-fencing-active]; trong spec dưới đây, việc kiểm và việc ghi nằm trong cùng một bước nguyên tử (lựa chọn mô hình của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thẻ gửi xe có hạn, và barie nhớ số thẻ lớn nhất đã vào. Thẻ hết hạn là cách bãi thu hồi chỗ; barie nhớ số thẻ là cách chặn chiếc xe cầm thẻ cũ chen vào sau khi chỗ đã giao người khác. Cơ chế vận hành đầy đủ nằm ở [P12·08 mục 7–8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md); ở đây ta chỉ hỏi: *viết thành spec thì lỗi hiện ra thế nào?*
+*Với service `orders`.* Mỗi giờ `orders` chạy một job đối soát: gom các đơn đã thanh toán, tính tổng rồi ghi kết quả vào một kho lưu trữ. Hai replica cùng chạy job thì kết quả của replica này đè lên replica kia, nên các replica tranh nhau một lease trên dịch vụ khóa, và chỉ replica nào giữ lease mới được ghi. Nghe đủ an toàn, vậy mà vẫn hỏng. Replica A lấy được lease rồi bị GC pause quá hạn; lease hết hạn, replica B lấy lease mới, ghi kết quả; A tỉnh dậy, tin rằng mình vẫn là chủ, và ghi đè kết quả mới bằng kết quả cũ. Mục này hỏi: viết kịch bản đó thành spec thì lỗi hiện ra thế nào (nhận xét của người soạn: `orders` và job đối soát là ví dụ giả định)? Cơ chế vận hành đầy đủ của lease và fencing nằm ở [P12·08 mục 7–8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md).
 
-Kleppmann nhấn mạnh rằng ngay cả với một dịch vụ khóa hoàn hảo, đoạn code "lấy khóa → ghi → nhả khóa" vẫn hỏng nếu client bị pause quá hạn lease[^kb-perfect]. Ông cũng chỉ ra rằng thêm một lần kiểm tra hạn ngay trước khi ghi không sửa được, vì tiến trình có thể bị pause đúng giữa lần kiểm tra và lần ghi[^kb-nocheck] (lập luận đầy đủ ở [P12·08 mục 7](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md)). Hai điều đó chính là thứ spec dưới đây sẽ làm lộ ra.
+Lỗi này không do dịch vụ khóa dở: ngay cả với một dịch vụ khóa hoàn hảo, đoạn code "lấy khóa → ghi → nhả khóa" vẫn hỏng nếu client bị pause quá hạn lease[^kb-perfect]. Thêm một lần kiểm tra hạn ngay trước khi ghi cũng không cứu được, vì client có thể bị pause đúng giữa lần kiểm tra và lần ghi[^kb-nocheck]. Lập luận đầy đủ ở [P12·08 mục 7](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md). Hai điều đó chính là thứ spec dưới đây sẽ làm lộ ra.
 
-**Spec minh họa (PlusCal, chưa chạy TLC).** Ta mô hình hóa: một dịch vụ khóa hoàn hảo (một biến `holder`, một bộ đếm `next_token`), một tiến trình `lock_service` có thể làm hết hạn lease bất cứ lúc nào, nhiều client, và một kho lưu trữ ghi lại lịch sử các lần ghi được chấp nhận.
+**Spec minh họa (PlusCal, chưa chạy TLC).** Spec gồm một dịch vụ khóa hoàn hảo (một biến `holder` và một bộ đếm `next_token`), một process `lock_service` có thể làm lease hết hạn bất cứ lúc nào, nhiều client (mỗi client là một replica `orders`), và một kho lưu trữ ghi lại lịch sử các lần ghi được chấp nhận.
 
-Nếu chưa quen ký hiệu trong spec: `/\` là "và", `\/` là "hoặc", `~` là phủ định, `/=` là "khác", `<<>>` là dãy rỗng, `\in`/`\notin`/`\union` là "thuộc"/"không thuộc"/"hợp"; chúng được giải nghĩa ở [chương 02](02-toan-nen-tang.md). Các từ khóa PlusCal (`process`, label, `await`, `either`, `with`, `while`, `self`, `pc`) ở [chương 06](06-pluscal.md).
+Nếu chưa quen ký hiệu: `/\` là "và", `\/` là "hoặc", `~` là phủ định, `/=` là "khác", `<<>>` là dãy rỗng, `\in`/`\notin`/`\union` là "thuộc"/"không thuộc"/"hợp". Chúng được giải nghĩa ở [chương 02](02-toan-nen-tang.md). Các từ khóa PlusCal (`process`, label, `await`, `either`, `with`, `while`, `self`, `pc`) ở [chương 06](06-pluscal.md).
 
 ```tla
 ---- MODULE LeaseFencing ----
@@ -146,15 +149,15 @@ end algorithm; *)
 ====
 ```
 
-Cách đọc từng phần:
+Đọc spec theo từng phần:
 
-- *Process `lock_service`.* Nhánh `Expire` luôn bật khi có người giữ lease. Đây là sự trừu tượng hóa thời gian của mục 1: ta không đếm giờ, ta cho phép hết hạn xảy ra *bất cứ lúc nào*. Nhờ đó mọi lịch hết hạn thực tế đều là một lịch của spec (suy luận của người soạn: spec bao trùm thực tế, nên không bỏ sót hành vi thật).
-- *Process `client`.* Hai label = hai bước nguyên tử. Giữa `Acquire` và `Write`, TLC được phép chạy bất kỳ process nào khác bao nhiêu bước tùy ý; đó chính là "pause" (GC, preempt, page fault) hay "gói ghi bị trễ trên mạng" — Kleppmann liệt kê cả hai làm nguyên nhân[^kb-network-delay]. Trong spec, hai nguyên nhân vật lý khác nhau co về *một* cơ chế: client không được chạy bước kế (nhận xét của người soạn).
-- *Hằng `Fencing`.* `FALSE` là kho ngây thơ, ghi mọi thứ. `TRUE` là kho kiểm token: chỉ chấp nhận nếu token không nhỏ hơn token lớn nhất đã thấy, đúng như Kleppmann mô tả: kho phải đóng vai chủ động kiểm token và từ chối ghi có token đi lùi[^kb-fencing-active].
-- *Biến lịch sử `log` và invariant `NoStaleWrite`.* Tính chất cần bảo vệ không phải "chỉ một client giữ lease" (dịch vụ khóa luôn bảo đảm điều đó vì `holder` là một biến), mà là "kho không áp dụng một ghi của lease cũ sau một ghi của lease mới hơn". Muốn phát biểu điều đó cần nhớ thứ tự ghi, nên ta thêm biến `log`. Biến chỉ phục vụ kiểm tra như vậy gọi là biến phụ/lịch sử (xem mục 7 về cái giá của nó).
-- Khi chạy, tắt kiểm tra deadlock (mục 1) vì `lock_service` không bao giờ kết thúc, và chạy hai lần: `Fencing = FALSE` (kỳ vọng thấy vi phạm) rồi `Fencing = TRUE`.
+- *Process `lock_service`.* Nhánh `Expire` bật bất cứ khi nào có người giữ lease. Ta không đếm giờ mà cho phép hết hạn xảy ra *bất cứ lúc nào*, đúng như đã bàn ở mục 1. Nhờ đó mọi lịch hết hạn trong thực tế đều là một lịch của spec, tức spec bao trùm thực tế và không bỏ sót hành vi thật (suy luận của người soạn).
+- *Process `client`.* Hai label là hai bước nguyên tử. Giữa `Acquire` và `Write`, TLC được chạy bất kỳ process nào khác với số bước tùy ý. Khoảng đó chính là "pause" (GC, bị preempt, page fault) hay gói ghi bị trễ trên mạng, và Kleppmann liệt kê cả hai là nguyên nhân[^kb-network-delay]. Trong spec, hai nguyên nhân vật lý khác nhau co về *một* cơ chế: client không được chạy bước kế (nhận xét của người soạn).
+- *Hằng `Fencing`.* `FALSE` là kho ngây thơ, ghi mọi thứ nó nhận. `TRUE` là kho có kiểm token: chỉ chấp nhận ghi nếu token không nhỏ hơn token lớn nhất đã thấy. Đó đúng là điều cần làm: kho phải chủ động kiểm token và từ chối ghi có token đi lùi[^kb-fencing-active].
+- *Biến lịch sử `log` và invariant `NoStaleWrite`.* Tính chất cần bảo vệ không phải "chỉ một client giữ lease", vì dịch vụ khóa luôn bảo đảm điều đó (`holder` chỉ là một biến). Tính chất thật là "kho không áp dụng một ghi của lease cũ sau một ghi của lease mới hơn". Muốn phát biểu được nó phải nhớ thứ tự các lần ghi, nên ta thêm biến `log`. Biến chỉ phục vụ việc kiểm như vậy gọi là biến phụ hay biến lịch sử; mục 7 nói về cái giá của nó.
+- Khi chạy, tắt kiểm tra deadlock (mục 1) vì `lock_service` không bao giờ kết thúc, và chạy hai lần: `Fencing = FALSE` (kỳ vọng thấy vi phạm), rồi `Fencing = TRUE`.
 
-**Trace tay khi `Fencing = FALSE` (suy luận của người soạn, chưa chạy TLC).** Với `Clients = {c1, c2}`:
+**Trace tay khi `Fencing = FALSE` (suy luận của người soạn, chưa chạy TLC).** Lấy `Clients = {c1, c2}`, trong đó `c1` là replica A và `c2` là replica B của `orders`:
 
 1. `c1.Acquire`: `holder = c1`, `my_tok[c1] = 1`, `next_token = 2`.
 2. `lock_service.Expire`: `holder = NULL`. Trong lúc đó `c1` đơn giản là không được chạy bước nào (pause).
@@ -162,9 +165,9 @@ Cách đọc từng phần:
 4. `c2.Write`: kho chấp nhận; `log = <<[client |-> c2, tok |-> 2]>>`.
 5. `c1.Write`: vì `~Fencing` đúng nên ghi vẫn được chấp nhận; `log = <<(c2, 2), (c1, 1)>>`.
 
-Ở bước 5, với `i = 1`, `j = 2`: `log[1].tok = 2` không `<=` `log[2].tok = 1`, nên `NoStaleWrite` sai. Đây là đúng kịch bản mà Kleppmann vẽ: client thứ nhất tỉnh dậy sau khi lease hết hạn và vẫn ghi[^kb-pause-lease]. Hai client và một lần acquire mỗi client là đủ: bản vi phạm nhỏ nhất (suy luận của người soạn).
+Ở bước 5, với `i = 1` và `j = 2`, ta có `log[1].tok = 2` không `<=` `log[2].tok = 1`, nên `NoStaleWrite` sai. Đây đúng là kịch bản Kleppmann vẽ: client thứ nhất tỉnh dậy sau khi lease hết hạn và vẫn ghi[^kb-pause-lease]. Hai client, mỗi client một lần acquire, là đủ; theo suy luận của người soạn, đó cũng là bản vi phạm nhỏ nhất.
 
-**Cùng trace khi `Fencing = TRUE` (suy luận, chưa chạy TLC).** Bước 4 cho `storage_max = 2`. Bước 5: `my_tok[c1] = 1 < 2` và `Fencing` đúng, nên điều kiện `~Fencing \/ my_tok >= storage_max` sai, `log` không đổi. Đây chính là cơ chế "kho nhớ đã xử lý token cao hơn nên từ chối token thấp hơn"[^kb-fencing].
+**Cùng trace khi `Fencing = TRUE` (suy luận, chưa chạy TLC).** Sau bước 4, `storage_max = 2`. Ở bước 5, `my_tok[c1] = 1 < 2` và `Fencing` đúng, nên điều kiện `~Fencing \/ my_tok >= storage_max` sai và `log` không đổi. Đó là cơ chế "kho nhớ đã xử lý token cao hơn nên từ chối token thấp hơn"[^kb-fencing].
 
 ```mermaid
 sequenceDiagram
@@ -186,11 +189,9 @@ sequenceDiagram
   end
 ```
 
-*Vì sao fencing đúng, lập luận quy nạp (suy luận của người soạn).* Khi `Fencing = TRUE`, ta có bất biến phụ: `storage_max` bằng token của phần tử cuối trong `log` (hoặc 0 nếu `log` rỗng) và `log` không giảm. Bước `Acquire` và `Expire` không đụng tới `log` hay `storage_max`. Bước `Write` chỉ thêm phần tử khi `my_tok >= storage_max`, tức không nhỏ hơn token cuối; sau đó `storage_max = my_tok` bằng token cuối mới. Nếu bị từ chối thì không có gì đổi. Khởi đầu (`log` rỗng, `storage_max = 0`) thỏa bất biến. Vậy `NoStaleWrite` đúng ở mọi state — với điều kiện duy nhất là *kiểm token và ghi là một bước nguyên tử* (đi sâu, bên dưới). Lưu ý: lập luận này không dùng tới tính đơn điệu của `next_token`; nó chỉ chứng minh `log` không giảm theo token. Chính tính đơn điệu của `next_token` (giả định về dịch vụ khóa, xem (c)) nối "token nhỏ hơn" với "lease cũ hơn", nhờ đó `NoStaleWrite` mới có nghĩa "không áp dụng ghi của lease cũ sau ghi của lease mới".
-
 <details><summary>Đi sâu: thêm bước kiểm tra, tách kiểm tra khỏi ghi, và giả định ẩn của spec</summary>
 
-**(a) Thêm một label `Check` giữa `Acquire` và `Write` không sửa được.** Giả sử client tự kiểm tra còn giữ lease trước khi ghi (spec `Fencing = FALSE`):
+**(a) Thêm một label `Check` giữa `Acquire` và `Write` không sửa được.** Giả sử client tự kiểm tra mình còn giữ lease trước khi ghi (spec `Fencing = FALSE`):
 
 ```tla
   Check:                      \* client tự kiểm tra: "mình còn giữ lease không?"
@@ -199,7 +200,7 @@ sequenceDiagram
     \* như cũ
 ```
 
-Trace (suy luận của người soạn, chưa chạy TLC): `c1.Acquire`; `c1.Check` thành công vì `holder = c1`; rồi `c1` bị pause; `Expire`; `c2.Acquire`, `c2.Check`, `c2.Write` (`log = <<(c2, 2)>>`); `c1.Write` chạy tiếp và ghi `(c1, 1)` sau `(c2, 2)`, `NoStaleWrite` sai. Spec tái hiện đúng nhận xét của Kleppmann: kiểm tra hạn ngay trước khi ghi không sửa được vì pause có thể rơi vào giữa kiểm tra và ghi[^kb-nocheck]. Ý nghĩa tổng quát (nhận xét của người soạn): "check rồi act" qua hai label luôn là một cửa sổ cho interleaving; chỉ có một bước nguyên tử *ở nơi giữ dữ liệu* mới đóng được cửa sổ đó.
+Trace (suy luận của người soạn, chưa chạy TLC): `c1.Acquire`; `c1.Check` thành công vì `holder = c1`; rồi `c1` bị pause; `Expire`; `c2.Acquire`, `c2.Check`, `c2.Write` (`log = <<(c2, 2)>>`); sau đó `c1.Write` chạy tiếp và ghi `(c1, 1)` sau `(c2, 2)`, `NoStaleWrite` sai. Spec tái hiện đúng nhận xét rằng kiểm tra hạn ngay trước khi ghi không sửa được, vì pause có thể rơi vào giữa kiểm tra và ghi[^kb-nocheck]. Bài học chung (nhận xét của người soạn): "check rồi act" qua hai label luôn mở một cửa sổ cho interleaving, và chỉ một bước nguyên tử *ở nơi giữ dữ liệu* mới đóng được cửa sổ đó.
 
 **(b) Tách "kiểm token" khỏi "ghi" ở kho cũng hỏng.** Nếu kho cài đặt thành hai label:
 
@@ -219,31 +220,34 @@ begin
 end process;
 ```
 
-thì trace (suy luận, chưa chạy TLC) là: `c1.Acquire` (token 1); `c1.CheckToken` đặt `ok = TRUE` vì `storage_max = 0`; `c1` pause; `Expire`; `c2.Acquire` (token 2); `c2.CheckToken`, `c2.Apply` → `storage_max = 2`, `log = <<(c2, 2)>>`; `c1.Apply` chạy với `ok = TRUE` cũ và ghi `(c1, 1)`, đồng thời hạ `storage_max` về 1. `NoStaleWrite` sai. Bài học nối với code (xem "Liên hệ với Rust"): token check và ghi phải cùng một critical section hoặc cùng một câu lệnh có điều kiện ở kho.
+thì trace (suy luận, chưa chạy TLC) là: `c1.Acquire` (token 1); `c1.CheckToken` đặt `ok = TRUE` vì `storage_max = 0`; `c1` pause; `Expire`; `c2.Acquire` (token 2); `c2.CheckToken`, `c2.Apply` làm `storage_max = 2` và `log = <<(c2, 2)>>`; rồi `c1.Apply` chạy với `ok = TRUE` đã cũ, ghi `(c1, 1)` và hạ `storage_max` về 1. `NoStaleWrite` sai. Bài học khi nối với code (xem "Liên hệ với Rust"): kiểm token và ghi phải nằm trong cùng một critical section, hoặc trong cùng một câu lệnh có điều kiện ở kho.
 
-**(c) Giả định ẩn: `next_token` tăng đơn điệu qua mọi lần failover của dịch vụ khóa.** Trong spec đó là một biến duy nhất, không bao giờ hỏng. Khi bàn về việc thêm fencing token cho Redlock, Kleppmann nhận xét nhiều khả năng cần cả một thuật toán consensus chỉ để sinh token[^kb-fencing-consensus]; giả định tăng đơn điệu qua failover trong spec của ta là phần chưa được kiểm chứng (nhận xét của người soạn). Cách làm đúng tinh thần AWS: viết giả định này thành *đặc tính môi trường* tường minh trong spec[^aws-env-props], rồi nếu cần thì tinh chỉnh bằng một spec mức thấp hơn ([chương 07](07-refinement.md)).
+**(c) Giả định ẩn: `next_token` tăng đơn điệu qua mọi lần failover của dịch vụ khóa.** Trong spec, nó chỉ là một biến duy nhất và không bao giờ hỏng. Thực tế khó hơn: khi bàn việc thêm fencing token cho Redlock, Kleppmann nhận xét rằng nhiều khả năng phải có cả một thuật toán consensus chỉ để sinh token[^kb-fencing-consensus]. Giả định tăng đơn điệu qua failover trong spec của ta vì thế chưa được kiểm chứng (nhận xét của người soạn). Cách làm hợp tinh thần AWS là viết giả định này thành *đặc tính môi trường* tường minh trong spec[^aws-env-props], rồi nếu cần thì tinh chỉnh bằng một spec mức thấp hơn ([chương 07](07-refinement.md)).
 
-**(d) Thời gian tường minh.** Có thể thêm biến `now` đếm tới một `MaxTime` hữu hạn và chỉ cho `Expire` bật khi `now` đã qua hạn, theo tinh thần biến `now` của Lamport[^ss-now]. Thêm điều đó không làm lỗi biến mất (pause vẫn là "không bước"), nhưng làm nhân state lên với số giá trị của `now` (suy luận của người soạn). Với lý do ở mục 1 — safety không dựa vào thời gian — bản nondeterministic là lựa chọn mặc định tốt hơn.
+**(d) Thời gian tường minh.** Có thể thêm biến `now` đếm tới một `MaxTime` hữu hạn, và chỉ cho `Expire` bật khi `now` đã qua hạn, theo tinh thần biến `now` của Lamport[^ss-now]. Lỗi không vì thế mà biến mất, vì pause vẫn chỉ là "không bước"; nhưng số state bị nhân lên với số giá trị của `now` (suy luận của người soạn). Theo lý do ở mục 1, safety không dựa vào thời gian, nên bản nondeterministic là lựa chọn mặc định tốt hơn.
 
-**(e) Liên hệ rộng.** Các ví dụ thực tế về lease có hoặc không có fencing (Kubernetes `leaderelection`, Chubby, etcd) đã được dẫn nguồn ở [P12·08 mục 8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md). Số thế hệ (term) trong Raft là cùng họ ý tưởng với fencing token; xem [P12·09](../12-he-thong-du-lieu/09-consistency-va-consensus.md) (nhận xét của người soạn).
+**(e) Liên hệ rộng.** Các ví dụ thực tế về lease có hoặc không có fencing (Kubernetes `leaderelection`, Chubby, etcd) đã được dẫn nguồn ở [P12·08 mục 8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md). Số thế hệ (term) trong Raft thuộc cùng họ ý tưởng với fencing token; xem [P12·09](../12-he-thong-du-lieu/09-consistency-va-consensus.md) (nhận xét của người soạn).
+
+**(f) Vì sao fencing đúng: lập luận quy nạp (suy luận của người soạn).** Khi `Fencing = TRUE`, ta có bất biến phụ: `storage_max` bằng token của phần tử cuối trong `log` (hoặc 0 nếu `log` rỗng), và `log` không giảm. `Acquire` và `Expire` không đụng tới `log` hay `storage_max`. `Write` chỉ thêm phần tử khi `my_tok >= storage_max`, tức không nhỏ hơn token cuối; ngay sau đó `storage_max = my_tok` chính là token cuối mới. Nếu ghi bị từ chối thì không có gì đổi. Trạng thái đầu (`log` rỗng, `storage_max = 0`) thỏa bất biến. Vậy `NoStaleWrite` đúng ở mọi state, với một điều kiện duy nhất: *kiểm token và ghi là một bước nguyên tử*. Lưu ý lập luận này không dùng tính đơn điệu của `next_token`; nó chỉ chứng minh `log` không giảm theo token. Chính tính đơn điệu của `next_token` (giả định về dịch vụ khóa, xem (c)) mới nối "token nhỏ hơn" với "lease cũ hơn", và nhờ vậy `NoStaleWrite` mới mang nghĩa "không áp dụng ghi của lease cũ sau ghi của lease mới".
 
 </details>
 
-**Quay lại Q2:** hết hạn = hành động tự do, pause = client không được chạy; hai điều đó đủ để lease một mình ghi sai thứ tự, và chỉ kiểm token *ở kho, trong cùng bước nguyên tử với việc ghi* mới đóng được lỗi.
+**Quay lại Q2:** với job đối soát của `orders`, hết hạn là hành động tự do và pause là client không được chạy; hai điều đó đủ để lease một mình ghi sai thứ tự, và chỉ kiểm token *ở kho, trong cùng bước nguyên tử với việc ghi* mới đóng được lỗi.
+
 
 ## 3. Hàng đợi at-least-once và consumer idempotent (Q3)
 
-> **Trả lời ngắn.** Hàng đợi at-least-once chỉ hứa không mất tin, không hứa không trùng: nếu consumer xử lý xong nhưng chưa kịp ack thì tin sẽ được giao lại[^k-ack-problem]. Trong spec, "mất ack" là một nhánh nondeterministic và "hết hạn visibility" là một hành động của broker; kết quả là tác dụng phụ có thể chạy hai lần. Consumer idempotent sửa được, miễn là bản ghi "đã xử lý" nằm trong *cùng một bước nguyên tử* với tác dụng phụ.
+> **Trả lời ngắn.** Hàng đợi at-least-once chỉ hứa không mất tin, không hứa không trùng: nếu consumer xử lý xong nhưng chưa kịp ack thì tin sẽ được giao lại[^k-ack-problem]. Trong spec, "mất ack" là một nhánh nondeterministic và "hết hạn visibility" là một hành động của broker; hệ quả là tác dụng phụ có thể chạy hai lần. Consumer idempotent sửa được chuyện này, miễn là bản ghi "đã xử lý" nằm trong *cùng một bước nguyên tử* với tác dụng phụ.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thợ giao hàng gõ cửa đưa gói hàng; bạn ký nhận nhưng tờ biên nhận bị gió thổi bay trước khi tới tay hãng; hãng không thấy biên nhận nên cử người giao lần nữa. Muốn không nhận hai lần, nhà bạn phải có sổ ghi "đã nhận gói số X", và việc *mở gói* với việc *ghi sổ* không được tách rời.
+*Với service `orders`.* Mỗi đơn mới, `orders` phát một event `OrderPlaced`, và một consumer lấy event đó để trừ tiền khách qua cổng thanh toán. Broker chỉ hứa giao ít nhất một lần. Giả sử consumer trừ tiền xong rồi chết trước khi kịp ack: broker không thấy ack nên giao lại event cho một consumer khác, và khách bị trừ tiền lần thứ hai. Mục này hỏi: dựng kịch bản đó thành spec thì lỗi hiện ra ở đâu, và bản ghi "đơn này đã trừ tiền" phải đặt ở chỗ nào (nhận xét của người soạn: ví dụ giả định)?
 
-Cơ chế thực tế: khi dùng manual acknowledgement, RabbitMQ requeue mọi delivery chưa ack khi channel hoặc connection đóng[^rmq-requeue], nên consumer phải chuẩn bị xử lý redelivery và thiết kế idempotent[^rmq-idem]. Phần lý thuyết (idempotency, dedup cần bộ nhớ bền) ở [P12·11 mục 4](../12-he-thong-du-lieu/11-stream-processing.md) và [P12·12 mục 4–5](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md); dưới đây là spec.
+Broker thật cư xử đúng như vậy. Khi dùng manual acknowledgement, RabbitMQ requeue mọi delivery chưa ack lúc channel hoặc connection đóng[^rmq-requeue]. Vì thế consumer phải sẵn sàng nhận lại tin và thiết kế idempotent[^rmq-idem]. Phần lý thuyết (idempotency, dedup cần bộ nhớ bền) ở [P12·11 mục 4](../12-he-thong-du-lieu/11-stream-processing.md) và [P12·12 mục 4–5](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md); dưới đây là spec.
 
-*Chọn cách biểu diễn hàng đợi.* Learntla nêu hai cách. Hàng đợi "phá hủy" (đọc xong là mất khỏi dãy) dễ viết, nhưng không phát biểu được tính chất dựa vào lịch sử, như "một tin chưa từng được xếp hàng hai lần"[^lt-queue-mutable]. Hàng đợi bất biến kèm con trỏ đọc `i` giữ nguyên lịch sử nhưng khó viết hơn[^lt-queue-immutable]. Mỗi thông điệp nên có `id` để phân biệt các tin cùng nội dung[^lt-queue-id]. Ở đây ta chỉ cần *tập* các id và một *trạng thái* cho từng id: `ready`, `inflight`, `acked`; thứ tự giao bị bỏ có chủ ý (mục "Đi sâu").
+*Chọn cách biểu diễn hàng đợi.* Learntla nêu hai cách. Hàng đợi "phá hủy", đọc xong là tin biến mất khỏi dãy, dễ viết nhưng không phát biểu được tính chất dựa vào lịch sử, như "một tin chưa từng được xếp hàng hai lần"[^lt-queue-mutable]. Hàng đợi bất biến kèm con trỏ đọc `i` giữ nguyên lịch sử nhưng khó viết hơn[^lt-queue-immutable]. Mỗi thông điệp nên có `id` để phân biệt các tin cùng nội dung[^lt-queue-id]. Với bài toán này ta chỉ cần *tập* các id cùng một *trạng thái* cho từng id (`ready`, `inflight`, `acked`); thứ tự giao bị bỏ có chủ ý (xem mục Đi sâu).
 
-**Spec minh họa (PlusCal, chưa chạy TLC).**
+**Spec minh họa (PlusCal, chưa chạy TLC).** Mỗi `m` trong `Msgs` là một event `OrderPlaced`, và `effects[m]` đếm số lần tiền thật sự bị trừ cho đơn đó.
 
 ```tla
 ---- MODULE AtLeastOnce ----
@@ -304,12 +308,12 @@ end algorithm; *)
 
 Chú giải:
 
-- `broker.Redeliver` không có điều kiện thời gian: tin `inflight` có thể quay lại `ready` bất cứ lúc nào. Nó gộp hai chuyện thật — consumer crash và consumer chỉ chậm — vào một hành động (nhận xét của người soạn). Mỗi lần `with` chọn một phần tử của tập rỗng thì bước đó không thực thi được[^lt-with-empty].
-- `Handle` là *một* label: kiểm `seen`, tăng `effects`, ghi `seen` cùng lúc. Nó mô hình hóa một transaction DB bao quanh "áp dụng tác dụng phụ + ghi bản ghi đã xử lý".
-- Nhánh `or` của `Ack` là mất ack hoặc consumer chết sau khi làm xong. Nó có ngân sách `MaxCrashes`, để ta nói "tối đa K lần crash" thay vì crash vô hạn (mục 7).
-- `AtMostOneEffect` là tính chất "tác dụng phụ không chạy quá một lần cho mỗi tin" — ta *muốn* nó đúng khi `Dedup = TRUE` và *kỳ vọng* nó sai khi `Dedup = FALSE`.
+- `broker.Redeliver` không có điều kiện thời gian: tin `inflight` có thể quay lại `ready` bất cứ lúc nào. Một hành động gộp được hai chuyện thật, consumer crash và consumer chỉ chậm (nhận xét của người soạn). Khi tập mà `with` chọn rỗng thì bước đó không thực thi được[^lt-with-empty].
+- `Handle` là *một* label: kiểm `seen`, tăng `effects` và ghi `seen` xảy ra cùng lúc. Nó mô hình hóa một transaction DB bao quanh "áp dụng tác dụng phụ và ghi bản ghi đã xử lý".
+- Nhánh `or` của `Ack` là mất ack, hoặc consumer chết sau khi làm xong. Nó có ngân sách `MaxCrashes` để ta nói được "tối đa K lần crash" thay vì crash vô hạn (xem mục 7).
+- `AtMostOneEffect` là tính chất "tác dụng phụ không chạy quá một lần cho mỗi tin". Ta *muốn* nó đúng khi `Dedup = TRUE` và *kỳ vọng* nó sai khi `Dedup = FALSE`.
 
-**Trace tay khi `Dedup = FALSE`, một consumer, `MaxCrashes >= 1` (suy luận của người soạn, chưa chạy TLC).** Với `Msgs = {m1}`, `Consumers = {c1}`:
+**Trace tay khi `Dedup = FALSE`, một consumer, `MaxCrashes >= 1` (suy luận của người soạn, chưa chạy TLC).** Với `Msgs = {m1}` (một đơn) và `Consumers = {c1}`:
 
 1. `c1.Receive`: `status[m1] = "inflight"`, `cur = m1`.
 2. `c1.Handle`: `effects[m1] = 1`.
@@ -317,9 +321,9 @@ Chú giải:
 4. `broker.Redeliver`: `status[m1] = "ready"`.
 5. `c1.Receive` rồi `c1.Handle`: `effects[m1] = 2`, `AtMostOneEffect` sai.
 
-Một tin, một consumer, một lần crash là đủ — đúng tình huống mà tài liệu thiết kế Kafka nêu cho các hệ thống nhắn tin dùng xác nhận (ack): consumer xử lý xong nhưng hỏng trước khi gửi xác nhận thì tin bị tiêu thụ hai lần (Kafka tự xử lý khác, bằng vị trí đọc của consumer)[^k-ack-problem].
+Một tin, một consumer, một lần crash là đủ. Đây cũng là tình huống tài liệu thiết kế Kafka nêu cho các hệ thống nhắn tin dùng xác nhận: consumer xử lý xong nhưng hỏng trước khi gửi xác nhận thì tin bị tiêu thụ hai lần (Kafka tự xử lý khác, bằng vị trí đọc của consumer)[^k-ack-problem].
 
-**Khi `Dedup = TRUE` (suy luận, chưa chạy TLC).** `Handle` chỉ tăng `effects[cur]` khi `cur \notin seen` và đồng thời thêm `cur` vào `seen`; vậy bất biến quy nạp là: với mọi `m`, `effects[m] = 1` nếu `m \in seen` và `effects[m] = 0` nếu không. Bất biến này kéo theo `AtMostOneEffect`, và mọi bước khác không đụng `effects`/`seen`. Nó đúng *vì* hai biến được cập nhật trong cùng một label.
+**Khi `Dedup = TRUE` (suy luận, chưa chạy TLC).** `Handle` chỉ tăng `effects[cur]` khi `cur \notin seen`, và đồng thời thêm `cur` vào `seen`. Vì vậy bất biến quy nạp là: với mọi `m`, `effects[m] = 1` nếu `m \in seen`, và `effects[m] = 0` nếu không. Bất biến này kéo theo `AtMostOneEffect`, còn mọi bước khác không đụng tới `effects` hay `seen`. Nó đúng *vì* hai biến được cập nhật trong cùng một label.
 
 **Tách dedup khỏi tác dụng phụ thì hỏng.** Thay `Handle` bằng hai label (chưa chạy TLC):
 
@@ -332,31 +336,31 @@ Một tin, một consumer, một lần crash là đủ — đúng tình huống 
     seen := seen \union {cur};
 ```
 
-Trace với hai consumer `c1`, `c2` (suy luận): `c1.Receive` (m1 inflight); `c1.Effect` (`effects[m1] = 1`, `seen` vẫn rỗng); `c1` pause; `broker.Redeliver` (m1 ready); `c2.Receive`; `c2.Effect` thấy `m1 \notin seen` nên `effects[m1] = 2` — `AtMostOneEffect` sai, dù `Dedup = TRUE` và không có crash nào. Đây là lý do ở thực tế bản ghi dedup và thay đổi dữ liệu phải chung transaction DB.
+Trace với hai consumer `c1`, `c2` (suy luận): `c1.Receive` (m1 inflight); `c1.Effect` (`effects[m1] = 1`, `seen` vẫn rỗng); `c1` pause; `broker.Redeliver` (m1 ready); `c2.Receive`; `c2.Effect` thấy `m1 \notin seen` nên `effects[m1] = 2`. `AtMostOneEffect` sai dù `Dedup = TRUE` và không có crash nào. Đây là lý do ngoài thực tế, bản ghi dedup và thay đổi dữ liệu phải chung một transaction DB.
 
 <details><summary>Đi sâu: thứ tự, at-most-once, liveness, ack muộn</summary>
 
-- **Thứ tự.** Dùng tập bỏ thông tin về thứ tự giao. Nếu tính chất cần thứ tự (ví dụ "sự kiện của cùng một khóa được xử lý theo thứ tự gửi"), hàng đợi phải là dãy hoặc hàng đợi bất biến kèm chỉ số, và nhớ rằng hàng đợi bất biến có thể làm mô hình không còn hữu hạn nếu đọc mãi[^lt-queue-warning].
-- **At-most-once.** Learntla gợi ý mô hình giao-tối-đa-một-lần bằng cách giao tin cho một *tập con* người nhận hợp lệ: phần nằm ngoài tập con là không nhận được[^lt-amo]. Trong spec trên, đảo thứ tự để `Ack` chạy trước `Handle` cho ngữ nghĩa tương ứng: nếu consumer chết giữa hai bước thì tác dụng phụ mất; tài liệu Kafka gọi đó là at-most-once ở phía consumer[^kafka-consumer-amo]. Muốn thấy điều đó trong spec cần thêm một nhánh crash giữa hai label, và tính chất bị vi phạm lúc đó là "tin đã `acked` thì `effects >= 1`" (suy luận của người soạn, chưa chạy TLC).
-- **Liveness.** "Mọi tin rồi sẽ được ack" cần `fair process` hoặc khai fairness, cộng ngân sách crash hữu hạn; nếu không, nhánh crash lặp mãi là một hành vi hợp lệ không bao giờ ack. Chi tiết ở [chương 05](05-liveness-va-fairness.md). Chương này không khẳng định liveness của spec trên.
-- **Ack của consumer chậm.** Spec cho phép một consumer chậm ack một tin mà consumer khác đang xử lý; đó là hành vi của hàng đợi dùng visibility timeout (nhận xét của người soạn). Nếu hệ của bạn có quy tắc khác (ví dụ ack kèm token của lần giao), viết lại `Ack` theo quy tắc đó.
-- **Outbox ở đầu kia.** Nếu *producer* cũng cần bảo đảm "ghi DB và phát tin cùng sống cùng chết", đó là mục 5.
+- **Thứ tự.** Dùng tập thì bỏ đi thông tin về thứ tự giao. Nếu tính chất cần thứ tự (ví dụ "sự kiện của cùng một khóa được xử lý theo thứ tự gửi"), hàng đợi phải là dãy, hoặc hàng đợi bất biến kèm chỉ số. Cần nhớ rằng hàng đợi bất biến có thể làm mô hình không còn hữu hạn nếu đọc mãi[^lt-queue-warning].
+- **At-most-once.** Learntla gợi ý mô hình giao-tối-đa-một-lần bằng cách giao tin cho một *tập con* người nhận hợp lệ: phần nằm ngoài tập con là không nhận được[^lt-amo]. Trong spec trên, đảo thứ tự cho `Ack` chạy trước `Handle` sẽ ra ngữ nghĩa tương ứng: nếu consumer chết giữa hai bước thì tác dụng phụ mất. Tài liệu Kafka gọi đó là at-most-once ở phía consumer[^kafka-consumer-amo]. Muốn thấy điều này trong spec cần thêm một nhánh crash giữa hai label, và tính chất bị vi phạm lúc đó là "tin đã `acked` thì `effects >= 1`" (suy luận của người soạn, chưa chạy TLC).
+- **Liveness.** "Mọi tin rồi sẽ được ack" cần `fair process` hoặc khai fairness, cộng ngân sách crash hữu hạn. Nếu không, nhánh crash lặp mãi là một hành vi hợp lệ mà tin không bao giờ được ack. Chi tiết ở [chương 05](05-liveness-va-fairness.md); chương này không khẳng định liveness của spec trên.
+- **Ack của consumer chậm.** Spec cho phép một consumer chậm ack một tin mà consumer khác đang xử lý. Đó là hành vi của hàng đợi dùng visibility timeout (nhận xét của người soạn). Nếu hệ của bạn có quy tắc khác, ví dụ ack kèm token của lần giao, hãy viết lại `Ack` theo quy tắc đó.
+- **Outbox ở đầu kia.** Nếu *producer* cũng cần bảo đảm "ghi DB và phát tin cùng sống cùng chết" thì đó là chuyện của mục 5.
 
 </details>
 
-**Quay lại Q3:** at-least-once nghĩa là spec của bạn *phải* cho phép giao lặp; consumer idempotent chỉ đúng khi bản ghi dedup và tác dụng phụ là một bước nguyên tử — tách hai label ra là trace trùng lặp xuất hiện.
+**Quay lại Q3:** với `OrderPlaced`, at-least-once nghĩa là spec của bạn *phải* cho phép giao lặp; consumer trừ tiền idempotent chỉ đúng khi bản ghi dedup và tác dụng phụ là một bước nguyên tử, và tách hai label ra là trace trừ tiền hai lần xuất hiện.
 
 ## 4. Cache-aside và cuộc đua stale cache (Q4)
 
-> **Trả lời ngắn.** Với cache-aside, ứng dụng đọc cache, nếu trượt thì đọc DB rồi đặt vào cache; khi ghi thì ghi DB rồi xóa mục trong cache[^az-order]. Cuộc đua: một reader đọc DB giá trị cũ, writer cập nhật DB và xóa cache, rồi reader mới đặt giá trị cũ vào cache — cache giữ giá trị cũ cho tới khi hết hạn. Facebook gọi đó là *stale set*[^fb-stale] và sửa bằng lease token gắn với khóa cache[^fb-lease].
+> **Trả lời ngắn.** Với cache-aside, ứng dụng đọc cache; nếu trượt thì đọc DB rồi đặt kết quả vào cache, còn khi ghi thì ghi DB rồi xóa mục tương ứng trong cache[^az-order]. Cuộc đua nằm ở chỗ một reader đọc DB được giá trị cũ, writer cập nhật DB và xóa cache, rồi reader mới đặt giá trị cũ vào cache, và cache giữ giá trị cũ cho tới khi hết hạn. Facebook gọi đó là *stale set*[^fb-stale]. Cách họ sửa là lease token gắn với khóa cache[^fb-lease].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đi xem bảng giá ở quầy, chép giá cũ vào giấy nhớ, đang đi ra quầy dán thì quầy trưởng đổi giá và xé bảng cũ; bạn không biết chuyện đó và vẫn dán tờ giấy giá cũ lên. Từ đó mọi người tin tờ giấy của bạn.
+*Với service `orders`.* Trang chi tiết đơn của `orders` đọc trạng thái đơn qua cache. Khi một đơn chuyển từ "chờ thanh toán" sang "đã thanh toán", `orders` ghi DB rồi xóa mục cache của đơn. Lúc đó một request khác đang xem trang đơn: nó đọc DB trước khi bản ghi đổi, nên cầm trong tay trạng thái cũ; nó chưa kịp đặt vào cache thì writer đã ghi DB và xóa cache xong; rồi nó mới đặt trạng thái cũ vào. Từ đó khách thấy "chờ thanh toán" cho tới khi mục cache hết hạn, dù DB đã ghi "đã thanh toán" (nhận xét của người soạn: ví dụ giả định). Mục này dựng đúng cuộc đua đó thành spec.
 
-Tài liệu Azure nói rõ giữa lần ghi và lần đọc kế tiếp, reader có thể trượt cache hoặc thoáng thấy dữ liệu cũ[^az-stale-window] — nghĩa là *một số* độ cũ là chủ ý của mẫu thiết kế. Vì vậy tính chất đúng không thể là "cache luôn bằng DB" (state nào cũng thế), mà là: **khi hệ đã yên (quiescent), cache hoặc trống hoặc bằng DB**. Cache chứa giá trị cũ *mãi mãi* mới là lỗi, và "mãi mãi" của cache thật bị chặn bởi TTL (không mô hình hóa ở đây) (nhận xét của người soạn).
+Điều cần chốt trước là spec phải khẳng định *cái gì*. Tài liệu Azure nói rõ rằng giữa lần ghi và lần đọc kế tiếp, reader có thể trượt cache hoặc thoáng thấy dữ liệu cũ[^az-stale-window]. Nghĩa là *một chút* độ cũ là chủ ý của mẫu thiết kế này, nên tính chất đúng không thể là "cache luôn bằng DB" (state nào cũng thế). Nó phải là: **khi hệ đã yên (quiescent), cache hoặc trống hoặc bằng DB**. Cache giữ giá trị cũ *mãi mãi* mới là lỗi, và với cache thật thì "mãi mãi" bị TTL chặn lại (spec này không mô hình hóa TTL; nhận xét của người soạn).
 
-**Spec minh họa (PlusCal, chưa chạy TLC).** Một writer ghi DB rồi xóa cache; mỗi reader đọc một lần theo cache-aside. `epoch` mô phỏng lease token: tăng mỗi lần cache bị xóa.
+**Spec minh họa (PlusCal, chưa chạy TLC).** Một writer ghi DB rồi xóa cache; mỗi reader đọc một lần theo cache-aside. Giá trị 0 là trạng thái cũ, 1 là trạng thái mới. Biến `epoch` mô phỏng lease token: nó tăng mỗi lần cache bị xóa.
 
 ```tla
 ---- MODULE CacheAside ----
@@ -407,7 +411,7 @@ end algorithm; *)
 ====
 ```
 
-Chú giải: `ReadCache` là *một* label vì nó là một thao tác tại cache (kèm token); `ReadDB` và `FillCache` là hai label tách rời vì giữa "đọc DB" và "đặt cache" tiến trình khác chen được — đó là cửa sổ lỗi. Writer có hai label: ghi DB trước, xóa cache sau, đúng thứ tự khuyến nghị[^az-order].
+`ReadCache` là *một* label vì nó là một thao tác tại cache (kèm nhận token). `ReadDB` và `FillCache` là hai label tách rời, vì giữa "đọc DB" và "đặt cache" process khác chen vào được; đó chính là cửa sổ lỗi. Writer có hai label, ghi DB trước rồi xóa cache sau, đúng thứ tự được khuyến nghị[^az-order].
 
 **Trace tay khi `UseLease = FALSE`, `Readers = {r1}` (suy luận của người soạn, chưa chạy TLC).**
 
@@ -417,7 +421,7 @@ Chú giải: `ReadCache` là *một* label vì nó là một thao tác tại cac
 4. `writer.Invalidate`: `cache = NULL` (vốn đã trống), `epoch = 1`.
 5. `r1.FillCache`: `~hit` đúng và `~UseLease` đúng nên `cache = 0`.
 
-Mọi process đã `Done` (state yên); `cache = 0` khác `NULL`, và khác `db = 1`; `CacheNotStale` sai. Đây là stale set: một cập nhật cache bị sắp xếp lại sau lần xóa, đúng như Facebook mô tả (các cập nhật đồng thời vào memcache bị đảo thứ tự)[^fb-stale].
+Lúc này mọi process đã `Done`, tức state yên, mà `cache = 0` khác `NULL` và khác `db = 1`, nên `CacheNotStale` sai. Đó là stale set: một lần đặt cache bị xếp sau lần xóa, giống như Facebook mô tả việc các cập nhật đồng thời vào memcache bị đảo thứ tự[^fb-stale].
 
 ```mermaid
 sequenceDiagram
@@ -433,29 +437,30 @@ sequenceDiagram
   Note over K,D: yên rồi: cache = 0, db = 1
 ```
 
-**Khi `UseLease = TRUE` (suy luận, chưa chạy TLC).** Ở bước 5, `epoch = 1` khác `tok = 0` nên `FillCache` không đặt gì; cache vẫn trống. Facebook mô tả đúng ý đó: memcached cấp token ràng buộc với khóa khi miss; client trình token khi set; memcached có thể từ chối nếu token bị vô hiệu bởi một lệnh delete[^fb-lease-verify], tương tự load-link/store-conditional[^fb-ll-sc]. Lập luận tổng quát cho `CacheNotStale` khi có lease (suy luận): nếu `FillCache` đặt giá trị khi `epoch = tok` thì `Invalidate` chưa chạy giữa `ReadCache` và `FillCache`. Hoặc `Invalidate` đã chạy *trước* `ReadCache` — khi đó `WriteDB` đã chạy trước nó, nên `ReadDB` thấy `db = 1` — hoặc nó chưa chạy và sẽ chạy sau, xóa cache trước khi writer `Done`. Cả hai trường hợp state yên đều có `cache = NULL` hoặc `cache = 1 = db`.
+**Khi `UseLease = TRUE` (suy luận, chưa chạy TLC).** Ở bước 5, `epoch = 1` khác `tok = 0` nên `FillCache` không đặt gì, và cache vẫn trống. Facebook cũng làm vậy: memcached cấp một token ràng buộc với khóa khi miss, client trình token đó khi set, và memcached có thể từ chối nếu token đã bị vô hiệu bởi một lệnh delete[^fb-lease-verify]. Cơ chế này tương tự load-link/store-conditional[^fb-ll-sc]. Lập luận tổng quát cho `CacheNotStale` khi có lease (suy luận) đi như sau. Nếu `FillCache` đặt giá trị khi `epoch = tok` thì `Invalidate` chưa chạy giữa `ReadCache` và `FillCache`. Có hai khả năng: hoặc `Invalidate` đã chạy *trước* `ReadCache`, khi đó `WriteDB` đã chạy trước nó nên `ReadDB` thấy `db = 1`; hoặc `Invalidate` chưa chạy và sẽ chạy sau, xóa cache trước khi writer `Done`. Ở cả hai trường hợp, state yên đều có `cache = NULL` hoặc `cache = 1 = db`.
 
-**Đảo thứ tự của writer: lease không cứu được (suy luận, chưa chạy TLC).** Nếu writer xóa cache *trước* rồi mới ghi DB (hoán đổi hai label), trace là: `writer.Invalidate` (`epoch = 1`); `r1.ReadCache` trượt, `tok = 1`; `r1.ReadDB`, `v = 0`; `writer.WriteDB` (`db = 1`); `r1.FillCache` thấy `epoch = tok = 1` nên đặt `cache = 0`. State yên, `cache = 0 ≠ db = 1`. Tài liệu Azure nói đúng điều này bằng lời: thứ tự các bước quan trọng; xóa cache trước khi cập nhật kho dữ liệu mở ra một cửa sổ nhỏ để client đọc bản cũ và đặt lại vào cache[^az-bad-order]. Một lệnh sửa mẫu hình (lease) không bù được một lỗi về thứ tự thao tác (nhận xét của người soạn).
+**Đảo thứ tự của writer: lease không cứu được (suy luận, chưa chạy TLC).** Giả sử writer xóa cache *trước* rồi mới ghi DB (hoán đổi hai label). Trace là: `writer.Invalidate` (`epoch = 1`); `r1.ReadCache` trượt, `tok = 1`; `r1.ReadDB`, `v = 0`; `writer.WriteDB` (`db = 1`); `r1.FillCache` thấy `epoch = tok = 1` nên đặt `cache = 0`. State yên có `cache = 0 ≠ db = 1`. Tài liệu Azure nói đúng điều này bằng lời: thứ tự các bước quan trọng, và xóa cache trước khi cập nhật kho dữ liệu mở ra một cửa sổ nhỏ để client đọc bản cũ rồi đặt lại vào cache[^az-bad-order]. Một lệnh sửa ở tầng giao thức như lease không bù được lỗi về thứ tự thao tác (nhận xét của người soạn).
 
 <details><summary>Đi sâu: những gì spec này bỏ, thundering herd, và nhiều writer</summary>
 
-- **Thundering herd.** Lease của Facebook giải hai vấn đề: stale set và thundering herd (một khóa nóng liên tục bị ghi làm các lần đọc đổ xuống đường tốn kém)[^fb-herd]. Spec chỉ bắt stale set; thundering herd là vấn đề tải, ngoài tầm safety/liveness đơn giản (xem lại giới hạn ở mục 1).
-- **Nhiều writer.** Spec có một writer. Với hai writer, DB và cache có thể bị hai lần ghi xen kẽ theo thứ tự khác nhau ở hai nơi; đó là bài toán khác (bất biến "cache theo kịp DB" cần một số phiên bản). Muốn kiểm, thêm một writer và biến phiên bản — chưa viết ở đây vì chưa có nguồn để đối chiếu.
-- **TTL.** Azure khuyên chính sách hết hạn phải khớp mẫu truy cập; hết hạn quá ngắn thì ứng dụng cứ phải nạp lại[^az-lifetime]. TTL là yếu tố thời gian: trong spec nó là một hành động "xóa mục cache bất cứ lúc nào"; thêm hành động đó làm stale set *tự lành*, nhưng không làm trace trên biến mất — chỉ đổi "mãi mãi" thành "đến khi TTL chạy" (nhận xét của người soạn).
-- **Write-through.** Cập nhật cả DB lẫn cache trong cùng một thao tác ghi để reader thấy giá trị mới ngay sau khi ghi thành công, khác với cache-aside[^az-writethrough]. Cái giá (nhận xét của người soạn): hai nơi phải ghi cùng lúc, nên nó thừa hưởng bài toán dual write ở mục 5.
+- **Thundering herd.** Lease của Facebook giải hai vấn đề: stale set và thundering herd, tức một khóa nóng liên tục bị ghi làm các lần đọc đổ xuống đường tốn kém[^fb-herd]. Spec chỉ bắt được stale set. Thundering herd là vấn đề về tải, ngoài tầm safety hay liveness đơn giản (xem lại giới hạn ở mục 1).
+- **Nhiều writer.** Spec có một writer. Với hai writer, DB và cache có thể nhận hai lần ghi xen kẽ theo thứ tự khác nhau ở hai nơi, và đó là một bài toán khác (bất biến "cache theo kịp DB" cần một số phiên bản). Muốn kiểm thì thêm một writer và một biến phiên bản; chương này chưa viết vì chưa có nguồn để đối chiếu.
+- **TTL.** Azure khuyên chính sách hết hạn phải khớp với mẫu truy cập; hết hạn quá ngắn thì ứng dụng cứ phải nạp lại liên tục[^az-lifetime]. TTL là một yếu tố thời gian: trong spec, nó là hành động "xóa mục cache bất cứ lúc nào". Thêm hành động đó làm stale set *tự lành*, nhưng không làm trace trên biến mất; nó chỉ đổi "mãi mãi" thành "đến khi TTL chạy" (nhận xét của người soạn).
+- **Write-through.** Mẫu này cập nhật cả DB lẫn cache trong cùng một thao tác ghi, để reader thấy giá trị mới ngay sau khi ghi thành công; cache-aside thì không làm vậy[^az-writethrough]. Cái giá (nhận xét của người soạn): hai nơi phải ghi cùng lúc, nên nó thừa hưởng bài toán dual write ở mục 5.
 - **Liên hệ P12.** Cache là *dữ liệu dẫn xuất*; xem [P12·12 mục 1](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md).
 
 </details>
 
-**Quay lại Q4:** vì "cache luôn bằng DB" không phải mục tiêu của cache-aside, tính chất đúng là "khi yên, cache trống hoặc bằng DB"; cuộc đua là reader giữ giá trị cũ qua một lần ghi + xóa, và lease token (hoặc sửa đúng thứ tự thao tác) là thứ chặn nó.
+**Quay lại Q4:** với trang đơn của `orders`, "cache luôn bằng DB" không phải mục tiêu; tính chất đúng là "khi yên, cache trống hoặc bằng DB". Cuộc đua là reader giữ giá trị cũ qua một lần ghi và xóa, và thứ chặn nó là lease token hoặc thứ tự thao tác đúng.
+
 
 ## 5. Transactional outbox (Q5)
 
-> **Trả lời ngắn.** Dual write — ghi DB rồi gửi tin, hai việc riêng — luôn có một khoảng hở: sập giữa hai việc thì DB đổi mà tin biến mất[^msio-fail]. Outbox ghi tin vào một bảng *cùng transaction* với dữ liệu nghiệp vụ; một tiến trình riêng gửi tin đi[^msio-solution], nên tin được gửi nếu và chỉ nếu transaction commit[^msio-benefit]. Cái giá: relay có thể gửi một tin nhiều lần[^msio-dup], nên phía nhận phải idempotent (mục 3).
+> **Trả lời ngắn.** Dual write, tức ghi DB rồi gửi tin bằng hai việc riêng, luôn có một khoảng hở: sập giữa hai việc thì DB đã đổi mà tin biến mất[^msio-fail]. Outbox ghi tin vào một bảng *cùng transaction* với dữ liệu nghiệp vụ, rồi một process riêng đi gửi tin[^msio-solution]. Nhờ vậy tin được gửi nếu và chỉ nếu transaction commit[^msio-benefit]. Cái giá là relay có thể gửi một tin nhiều lần[^msio-dup], nên phía nhận phải idempotent (mục 3).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn vừa ký hợp đồng (ghi DB) và cần báo cho kế toán (gửi tin). Nếu *sau khi ký* bạn mới đi báo, mà bạn ngất giữa đường thì kế toán không bao giờ biết. Outbox là: *trong cùng lúc ký*, bạn kẹp một tờ "cần báo kế toán" vào hồ sơ; một nhân viên khác đọc tờ đó và đi báo — nếu họ ngất rồi đi báo lại thì kế toán có thể nghe hai lần, nhưng không bao giờ không nghe.
+*Với service `orders`.* Nhận một đơn, `orders` phải làm hai việc: ghi đơn vào DB, và phát `OrderPlaced` để consumer ở mục 3 đi trừ tiền. Nếu viết hai việc này rời nhau thì sẽ có lúc process chết giữa chừng. Chết sau khi commit và trước khi publish thì đơn nằm trong DB mà không ai trừ tiền. Publish trước rồi commit sau thì event đi mà đơn có thể chưa bao giờ tồn tại (nhận xét của người soạn: ví dụ giả định). Ta dựng hai mô hình: dual write, rồi outbox.
 
 Mô hình thứ nhất: dual write (chưa chạy TLC).
 
@@ -488,7 +493,7 @@ end algorithm; *)
 ====
 ```
 
-Trace tay (suy luận của người soạn, chưa chạy TLC): `svc[o1].Commit` (`db_orders = {o1}`); `svc[o1].Publish` chọn nhánh `skip`; `svc[o1]` xong. State yên, `db_orders = {o1}` còn `published = {}`, nên `NoLostEvent` sai: một order đã commit mà không có sự kiện nào. Với một order là đủ. Đảo thứ tự (publish trước, commit sau, với một nhánh transaction không commit) cho lỗi ngược lại: sự kiện về một order chưa từng được commit — vi phạm một tính chất kiểu `published \subseteq db_orders` (không phải `NoLostEvent`; suy luận của người soạn). Hai lỗi này đúng là hai kịch bản mà tài liệu microservices.io nêu: gửi tin giữa transaction thì không có gì bảo đảm transaction sẽ commit; gửi sau commit thì không bảo đảm khỏi sập trước khi gửi[^msio-fail].
+Trace tay (suy luận của người soạn, chưa chạy TLC): `svc[o1].Commit` (`db_orders = {o1}`); `svc[o1].Publish` chọn nhánh `skip`; `svc[o1]` xong. State yên có `db_orders = {o1}` mà `published = {}`, nên `NoLostEvent` sai: một order đã commit mà không có event nào. Một order là đủ. Đảo thứ tự (publish trước, commit sau, kèm một nhánh transaction không commit) thì ra lỗi ngược lại: event về một order chưa từng được commit. Lỗi này vi phạm một tính chất kiểu `published \subseteq db_orders`, không phải `NoLostEvent` (suy luận của người soạn). Hai lỗi đó khớp với hai kịch bản microservices.io nêu: gửi tin giữa transaction thì không có gì bảo đảm transaction sẽ commit, còn gửi sau commit thì không bảo đảm process khỏi sập trước khi gửi[^msio-fail].
 
 Mô hình thứ hai: outbox (chưa chạy TLC).
 
@@ -545,37 +550,37 @@ end algorithm; *)
 ====
 ```
 
-Các tính chất và vì sao chúng là loại tính chất đó (suy luận của người soạn, chưa chạy TLC):
+Các tính chất, và lý do mỗi cái thuộc loại nào (suy luận của người soạn, chưa chạy TLC):
 
-- `Atomic` (`db_orders = outbox`) đúng ở mọi state: hai biến chỉ đổi trong cùng label `Txn`. Đây là "bất biến lõi" của outbox; mọi tính chất còn lại dựa vào nó.
-- `NoPhantom` đúng: `published[o]` chỉ tăng khi `cur = o` với `o \in outbox`, và `outbox = db_orders`.
-- `NoLostEvent` đúng: `sent` chỉ thêm `cur` *sau* `Publish`, nên `o \in sent` kéo theo `published[o] >= 1`; khi mọi `svc` xong và `outbox = sent`, mọi order trong `db_orders = outbox` đã thuộc `sent`. Lưu ý vế trái `outbox = sent`: đây là tính chất safety "nếu relay đã gửi hết thì không mất", chứ không phải "relay rồi sẽ gửi hết" — cái sau là liveness, cần `relay` được chạy công bằng và ngân sách crash hữu hạn ([chương 05](05-liveness-va-fairness.md)); chương này không khẳng định nó.
-- `AtMostOnce` **sai**. Trace (cần `MaxCrashes >= 1`): `svc[o1].Txn`; `relay.Poll` (`cur = o1`); `relay.Publish` (`published[o1] = 1`); `relay.MarkSent` nhánh `or` (`crashes = 1`, `o1` chưa vào `sent`); vòng lặp: `Poll` chọn lại `o1`; `Publish` (`published[o1] = 2`). Đó chính là nhược điểm microservices.io ghi: message relay có thể phát một tin nhiều lần[^msio-dup]; AWS cũng khuyên làm consumer idempotent bằng cách theo dõi các tin đã xử lý[^aws-dup].
+- `Atomic` (`db_orders = outbox`) đúng ở mọi state, vì hai biến chỉ đổi cùng nhau trong label `Txn`. Đây là bất biến lõi của outbox; các tính chất còn lại dựa vào nó.
+- `NoPhantom` đúng: `published[o]` chỉ tăng khi `cur = o` với `o \in outbox`, mà `outbox = db_orders`.
+- `NoLostEvent` đúng: `sent` chỉ thêm `cur` *sau* `Publish`, nên `o \in sent` kéo theo `published[o] >= 1`. Khi mọi `svc` đã xong và `outbox = sent`, mọi order trong `db_orders = outbox` đều đã thuộc `sent`. Lưu ý vế trái `outbox = sent`: đây là tính chất safety "nếu relay đã gửi hết thì không mất", không phải "relay rồi sẽ gửi hết". Cái sau là liveness, cần `relay` được chạy công bằng và ngân sách crash hữu hạn ([chương 05](05-liveness-va-fairness.md)); chương này không khẳng định nó.
+- `AtMostOnce` **sai**. Trace (cần `MaxCrashes >= 1`): `svc[o1].Txn`; `relay.Poll` (`cur = o1`); `relay.Publish` (`published[o1] = 1`); `relay.MarkSent` rẽ nhánh `or` (`crashes = 1`, `o1` chưa vào `sent`); vòng lặp lại, `Poll` chọn lại `o1`; `Publish` (`published[o1] = 2`). Đó chính là nhược điểm microservices.io ghi: message relay có thể phát một tin nhiều lần[^msio-dup]. AWS cũng khuyên làm consumer idempotent bằng cách theo dõi các tin đã xử lý[^aws-dup].
 
-Ngân sách `MaxCrashes` làm mô hình hữu hạn. Nếu bỏ nó, relay có thể chết và phát lại mãi: `published[o]` không có trần, TLC sẽ không bao giờ kết thúc (xem "unbound model" ở mục 7). Ngoài ra `relay` kẹt ở `with` khi không còn dòng nào chưa gửi, nên cũng như mục 1, cần tắt kiểm deadlock.
+Ngân sách `MaxCrashes` giữ cho mô hình hữu hạn. Bỏ nó đi thì relay có thể chết và phát lại mãi, `published[o]` không có trần, và TLC không bao giờ kết thúc (xem "unbound model" ở mục 7). Ngoài ra `relay` kẹt ở `with` khi không còn dòng nào chưa gửi, nên giống mục 1, cần tắt kiểm deadlock.
 
 <details><summary>Đi sâu: thứ tự, CDC, và ghép với consumer idempotent</summary>
 
-- **Thứ tự gửi.** AWS lưu ý outbox nên gửi tin theo cùng thứ tự mà service cập nhật DB[^aws-order]. `outbox` là tập nên không biểu diễn thứ tự; nếu thứ tự là một yêu cầu, thêm một số thứ tự cho mỗi dòng và một tính chất "thứ tự publish không đảo so với thứ tự commit" (chưa viết ở đây).
-- **Relay bằng CDC.** Debezium có transform riêng cho outbox: connector chỉ cần bắt thay đổi trong bảng outbox[^debezium-outbox-capture]. Trong spec, "relay đọc outbox rồi publish" và "CDC bắt outbox rồi publish" cùng một khuôn; khác nhau ở chỗ đánh dấu `sent`. Xem [P12·12 mục 6](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md).
-- **Ghép với mục 3.** Hai spec ghép được: `published[o]` của outbox là nguồn của hàng đợi at-least-once ở mục 3, `Handle` có dedup theo `o`. Kết quả mong đợi (suy luận của người soạn) là hiệu ứng "tác dụng phụ đúng một lần" ở cuối chuỗi dù có hai nơi trùng lặp.
-- **Trừu tượng hóa broker.** Spec coi broker là một bộ đếm: đủ cho tính chất về mất/trùng; không đủ để bàn về thứ tự hay phân vùng.
+- **Thứ tự gửi.** AWS lưu ý outbox nên gửi tin theo cùng thứ tự mà service cập nhật DB[^aws-order]. `outbox` trong spec là một tập nên không biểu diễn được thứ tự. Nếu thứ tự là yêu cầu, hãy thêm một số thứ tự cho mỗi dòng và một tính chất "thứ tự publish không đảo so với thứ tự commit" (chưa viết ở đây).
+- **Relay bằng CDC.** Debezium có transform riêng cho outbox: connector chỉ cần bắt thay đổi trong bảng outbox[^debezium-outbox-capture]. Trong spec, "relay đọc outbox rồi publish" và "CDC bắt outbox rồi publish" cùng một khuôn; chỗ khác nhau chỉ là cách đánh dấu `sent`. Xem [P12·12 mục 6](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md).
+- **Ghép với mục 3.** Hai spec ghép được: `published[o]` của outbox là nguồn của hàng đợi at-least-once ở mục 3, và `Handle` dedup theo `o`. Kết quả mong đợi (suy luận của người soạn) là tác dụng phụ "đúng một lần" ở cuối chuỗi, dù có hai nơi trùng lặp.
+- **Trừu tượng hóa broker.** Spec coi broker là một bộ đếm. Thế là đủ để bàn chuyện mất hay trùng, nhưng không đủ để bàn về thứ tự hay phân vùng.
 
 </details>
 
-**Quay lại Q5:** outbox đổi "hai việc rời nhau" thành "một transaction + một relay lặp lại được"; bất biến lõi là `db_orders = outbox`, và trùng lặp là cái giá cố ý phải trả — bắt bằng idempotent ở phía nhận.
+**Quay lại Q5:** với `orders`, outbox đổi "hai việc rời nhau" thành "một transaction cộng một relay lặp lại được"; bất biến lõi là `db_orders = outbox`, và trùng lặp là cái giá phải trả có chủ ý, bắt bằng idempotent ở phía nhận.
 
 ## 6. Retry và timeout (Q6)
 
-> **Trả lời ngắn.** Timeout không cho client biết yêu cầu đã chạy hay chưa: một lần timeout hay lỗi không nhất thiết có nghĩa là tác dụng phụ chưa xảy ra[^abl-sideeffects]. Vì vậy retry một thao tác có tác dụng phụ mà không idempotent sẽ làm tác dụng phụ lặp[^abl-idem]. Spec cho thấy lỗi ở mức logic và chỉ ra chỗ sửa (idempotency key phía server); còn *bão retry* làm quá tải nằm ngoài tầm spec[^aws-emergent-no].
+> **Trả lời ngắn.** Timeout không cho client biết yêu cầu đã chạy hay chưa: một lần timeout hay lỗi không nhất thiết có nghĩa là tác dụng phụ chưa xảy ra[^abl-sideeffects]. Vì vậy retry một thao tác có tác dụng phụ mà không idempotent sẽ làm tác dụng phụ lặp[^abl-idem]. Spec cho thấy lỗi ở mức logic và chỉ ra chỗ sửa (idempotency key phía server); còn *bão retry* làm quá tải thì nằm ngoài tầm spec[^aws-emergent-no].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn bấm nút "thanh toán", màn hình quay mãi; bạn bấm lại. Nếu hệ thống không có cách nhận ra "đây vẫn là lần bấm đó", bạn bị trừ tiền hai lần.
+*Với service `orders`.* Consumer ở mục 3 gọi cổng thanh toán để trừ tiền, với timeout 2 giây và retry khi quá hạn. Cổng đã nhận yêu cầu và đang trừ tiền, nhưng hồi đáp về chậm hơn 2 giây. Consumer tưởng thất bại, gửi lại, và khách bị trừ hai lần (nhận xét của người soạn: ví dụ giả định, con số 2 giây chỉ để minh họa). Muốn hết chuyện đó, cổng phải nhận ra "đây vẫn là yêu cầu cũ".
 
-Kleppmann mô tả đúng tình huống: client gửi RPC mà không nhận hồi đáp thì không biết server đã nhận và xử lý chưa; gửi lại có thể làm thao tác chạy nhiều lần (như trừ thẻ hai lần)[^kleppmann-rpc]. Phía API, một idempotency key là khóa duy nhất mà client sinh ra để server nhận ra các lần retry của cùng yêu cầu[^stripe-key]; cơ chế và cách server lưu key ở [P12·12 mục 4](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md), phía Rust ở [P7·09 mục 2](../07-io-async/09-async-trong-production.md). Chương này chỉ dựng lại cơ chế đó thành spec.
+Kleppmann mô tả đúng tình huống này: client gửi RPC mà không nhận được hồi đáp thì không biết server đã nhận và xử lý chưa, và gửi lại có thể làm thao tác chạy nhiều lần, như trừ thẻ hai lần[^kleppmann-rpc]. Phía API, idempotency key là một khóa duy nhất do client sinh ra, để server nhận ra các lần retry của cùng một yêu cầu[^stripe-key]. Cơ chế và cách server lưu key ở [P12·12 mục 4](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md), phía Rust ở [P7·09 mục 2](../07-io-async/09-async-trong-production.md). Chương này chỉ dựng cơ chế đó thành spec.
 
-**Spec minh họa (PlusCal, chưa chạy TLC).** Một client gửi một yêu cầu logic, tối đa `MaxRetries` lần; mỗi lần gửi là một *attempt* mang số thứ tự. Mạng là hai tập: yêu cầu đang bay và hồi đáp đang bay. Timeout là nhánh `skip` — client bỏ cuộc đợi và gửi lại.
+**Spec minh họa (PlusCal, chưa chạy TLC).** Một client gửi một yêu cầu logic, tối đa `MaxRetries` lần; mỗi lần gửi là một *attempt* mang số thứ tự. Mạng là hai tập: yêu cầu đang bay và hồi đáp đang bay. Timeout là nhánh `skip`: client bỏ cuộc đợi và gửi lại.
 
 ```tla
 ---- MODULE RetryTimeout ----
@@ -634,7 +639,7 @@ end algorithm; *)
 ====
 ```
 
-Chú giải: timeout là `skip` không có điều kiện, nên client có thể bỏ cuộc đợi *ngay lập tức*, kể cả khi server chuẩn bị trả lời — đó là mô hình bất đồng bộ không giả định thời gian, nhất quán với mục 1. Hồi đáp "bị mất" không cần hành động riêng: client timeout rồi bỏ qua hồi đáp cũ, hoặc nhận nó ở vòng sau (nhận xét của người soạn). `MaxRetries` giữ mô hình hữu hạn. Process `server` không bao giờ kết thúc nên cần tắt kiểm deadlock (mục 1). Server và client đều không có "crash" riêng ở đây; thêm được bằng cách giống ngân sách ở mục 3.
+Chú giải: timeout là một `skip` không có điều kiện, nên client có thể bỏ cuộc đợi *ngay lập tức*, kể cả khi server sắp trả lời. Đó là mô hình bất đồng bộ không giả định gì về thời gian, nhất quán với mục 1. Hồi đáp "bị mất" không cần hành động riêng: client timeout rồi bỏ qua hồi đáp cũ, hoặc nhận nó ở vòng sau (nhận xét của người soạn). `MaxRetries` giữ mô hình hữu hạn. Process `server` không bao giờ kết thúc nên cần tắt kiểm deadlock (mục 1). Spec này chưa có "crash" riêng cho server hay client; có thể thêm bằng ngân sách như ở mục 3.
 
 **Trace tay khi `Idem = FALSE`, `MaxRetries >= 2` (suy luận của người soạn, chưa chạy TLC).**
 
@@ -644,36 +649,36 @@ Chú giải: timeout là `skip` không có điều kiện, nên client có thể
 4. `server.Serve` chọn `a = 1`: `applied = 1`.
 5. `server.Serve` chọn `a = 2`: `Idem` sai nên `applied = 2`.
 
-`AppliedAtMostOnce` sai. Chỉ cần hai attempt và một yêu cầu logic. Đây chính là tác dụng phụ lặp mà Kleppmann và AWS cảnh báo[^kleppmann-rpc][^abl-idem].
+`AppliedAtMostOnce` sai, và chỉ cần hai attempt cho một yêu cầu logic. Đây là tác dụng phụ lặp mà Kleppmann cảnh báo[^kleppmann-rpc]. AWS cũng cảnh báo retry thao tác không idempotent theo cách tương tự[^abl-idem].
 
-**Khi `Idem = TRUE` (suy luận, chưa chạy TLC).** Bất biến quy nạp: `applied = 1` nếu `done` và `applied = 0` nếu không. Bước 5 giờ thấy `done` đúng nên chỉ trả lời lại: `applied` vẫn là 1. `OkImpliesApplied` đúng ở cả hai chế độ: `client_ok` chỉ đặt khi nhận được hồi đáp, và hồi đáp chỉ sinh ra sau một lần `Serve`, mà `Serve` luôn dẫn tới `applied >= 1` (hoặc đã có `done`, tức `applied = 1` từ trước). Tính chất "client tin thành công thì server thật sự đã làm" không phụ thuộc idempotency; idempotency chỉ bảo vệ khỏi *làm quá*.
+**Khi `Idem = TRUE` (suy luận, chưa chạy TLC).** Bất biến quy nạp: `applied = 1` nếu `done`, và `applied = 0` nếu không. Ở bước 5, server giờ thấy `done` đúng nên chỉ trả lời lại, `applied` vẫn là 1. `OkImpliesApplied` đúng ở cả hai chế độ: `client_ok` chỉ được đặt khi nhận hồi đáp, hồi đáp chỉ sinh ra sau một lần `Serve`, và `Serve` luôn dẫn tới `applied >= 1` (hoặc đã có `done`, tức `applied = 1` từ trước). Tính chất "client tin thành công thì server thật sự đã làm" không phụ thuộc idempotency; idempotency chỉ bảo vệ khỏi việc *làm quá*.
 
 <details><summary>Đi sâu: backoff, bão retry, lưu key, và timeout như failure detector</summary>
 
-- **Backoff không có trong spec — có chủ ý.** Retry làm tăng tải lên hệ đang quá tải; vì vậy AWS dùng backoff để tải lên backend đều hơn[^abl-backoff]. Backoff chỉ có ý nghĩa với *tải và thời gian*, thứ mà spec đã bỏ ở mục 1. Spec chỉ bắt được hệ quả logic (tác dụng phụ lặp), không bắt được hiện tượng quá tải tự khuếch đại; AWS tự nhận chưa có cách khả thi mô hình hóa hiện tượng đó[^aws-emergent-no].
-- **Server phải nhớ key ở bộ nhớ bền.** Spec dùng biến `done` bền vĩnh viễn. Thật ra, dedup trong mô hình crash-recovery đòi hỏi lưu request hoặc metadata ở stable storage để phát hiện trùng được cả sau crash[^kleppmann-dedup]; và key thường có hạn dùng (xem [P12·12 mục 4](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md)). Hết hạn key là một hành động mới trong spec mà ta nên mô hình hóa nếu lo "retry đến sau khi key đã bị xóa" (nhận xét của người soạn).
-- **Timeout là failure detector không hoàn hảo.** Nhánh `skip` nói đúng điều đó: client không thể phân biệt "server chậm" với "server chết" từ một lần timeout. Xem [P12·08 mục 4](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md).
-- **Liveness.** "Cuối cùng client có `client_ok`" cần giả định fairness và không thể bảo đảm khi `MaxRetries` hữu hạn mà mọi attempt đều timeout. Muốn phát biểu đúng, viết thêm giả định "mạng rồi sẽ giao được" ở [chương 05](05-liveness-va-fairness.md).
+- **Backoff không có trong spec, và đó là chủ ý.** Retry làm tăng tải lên một hệ đang quá tải, nên AWS dùng backoff để tải lên backend đều hơn[^abl-backoff]. Backoff chỉ có nghĩa với *tải và thời gian*, thứ mà spec đã bỏ ở mục 1. Spec chỉ bắt được hệ quả logic (tác dụng phụ lặp), không bắt được hiện tượng quá tải tự khuếch đại. AWS tự nhận chưa có cách khả thi để mô hình hóa hiện tượng đó[^aws-emergent-no].
+- **Server phải nhớ key ở bộ nhớ bền.** Spec dùng biến `done` bền vĩnh viễn. Thực tế, dedup trong mô hình crash-recovery đòi lưu request hoặc metadata ở stable storage, để phát hiện trùng được cả sau crash[^kleppmann-dedup]. Key thường cũng có hạn dùng (xem [P12·12 mục 4](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md)). Nếu lo "retry đến sau khi key đã bị xóa" thì hết hạn key là một hành động mới nên mô hình hóa (nhận xét của người soạn).
+- **Timeout là failure detector không hoàn hảo.** Nhánh `skip` nói đúng điều đó: từ một lần timeout, client không thể phân biệt "server chậm" với "server chết". Xem [P12·08 mục 4](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md).
+- **Liveness.** "Cuối cùng client có `client_ok`" cần giả định fairness, và không thể bảo đảm khi `MaxRetries` hữu hạn mà mọi attempt đều timeout. Muốn phát biểu đúng, hãy viết thêm giả định "mạng rồi sẽ giao được", theo [chương 05](05-liveness-va-fairness.md).
 
 </details>
 
-**Quay lại Q6:** timeout không cho biết tác dụng phụ đã xảy ra chưa, nên retry chỉ an toàn khi server nhận ra yêu cầu lặp; spec bắt được lỗi logic đó (hai attempt, một lần `applied` thừa) nhưng không bắt được hiệu ứng tải của bão retry.
+**Quay lại Q6:** timeout không cho `orders` biết tiền đã bị trừ hay chưa, nên retry chỉ an toàn khi cổng thanh toán nhận ra yêu cầu lặp; spec bắt được lỗi logic đó (hai attempt, một lần `applied` thừa) nhưng không bắt được hiệu ứng tải của bão retry.
 
 ## 7. Giữ không gian trạng thái trong tầm TLC (Q7)
 
-> **Trả lời ngắn.** TLC duyệt mọi state đạt được, và số state thường tăng *mũ* theo tham số mô hình[^ss-exp]. Cách kiểm soát: luôn bắt đầu bằng mô hình thật nhỏ[^ss-tiny], dùng ít hằng[^lt-small] và ít chi tiết nhất có thể[^lt-detail], tận dụng symmetry, ngân sách lỗi và constraint khi cần, và tách mô hình kiểm safety khỏi mô hình kiểm liveness[^lt-safety-liveness]. Và hãy nghi ngờ mọi lần "không thấy lỗi": rất dễ thỏa một tính chất safety chỉ bằng cách không làm gì[^ss-suspicious].
+> **Trả lời ngắn.** TLC duyệt mọi state đạt được, và số state thường tăng *mũ* theo tham số của mô hình[^ss-exp]. Cách kiểm soát là bắt đầu từ mô hình thật nhỏ, ít hằng và ít chi tiết nhất có thể[^ss-tiny]. Khi cần mới thêm symmetry, ngân sách lỗi và constraint, và kiểm safety với liveness bằng hai mô hình riêng[^lt-safety-liveness]. Cuối cùng hãy nghi ngờ mọi lần "không thấy lỗi", vì rất dễ thỏa một tính chất safety chỉ bằng cách không làm gì[^ss-suspicious].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn muốn thử mọi cách xếp ghế cho một đám cưới. Với 4 khách là chuyện nhỏ; với 12 khách thì không máy nào đếm hết. Nhưng phần lớn "ghế lệch" (xếp người ngồi cạnh kẻ thù) đã lộ ra từ bàn 4 người — bạn không cần bàn 12 để tìm ra nó.
+*Với service `orders`.* Giả sử bạn đã viết xong spec at-least-once ở mục 3 và muốn kiểm nó với "thật đầy đủ": mười đơn, năm consumer, cho phép ba lần crash. TLC sẽ chạy rất lâu. Trong khi đó lỗi trừ tiền hai lần chỉ cần một đơn, một consumer, một lần crash để lộ ra. Nói cách khác, lỗi thiết kế thường nhỏ hơn nhiều so với mô hình mà ta định dùng để tìm nó, và việc giữ mô hình trong tầm TLC chính là việc chọn đúng cỡ nhỏ đó (nhận xét của người soạn).
 
-*Mô hình nhỏ trước.* Sách của Lamport: luôn bắt đầu thử spec với mô hình *nhỏ xíu*: tập process và tập giá trị chỉ một phần tử, hàng đợi độ dài một[^ss-tiny]; một spec chưa được thử thường có nhiều lỗi, và mô hình nhỏ bắt nhanh các lỗi đơn giản; khi mô hình rất nhỏ hết lỗi thì tăng dần[^ss-small-first]. Learntla nói cùng ý: phần lớn lỗi xuất hiện trong không gian nhỏ, nên không có nhiều lợi ích khi dùng hằng khổng lồ; nên giữ cấu hình nhỏ để lặp nhanh và chỉ chạy cấu hình lớn khi cấu hình nhỏ đã qua[^lt-small].
+*Mô hình nhỏ trước.* Lamport khuyên khi mới thử spec thì bắt đầu bằng mô hình nhỏ xíu: tập process và tập giá trị chỉ một phần tử, hàng đợi độ dài một[^ss-tiny]. Lý do là một spec chưa từng chạy thường còn nhiều lỗi, và mô hình nhỏ bắt nhanh các lỗi đơn giản; khi mô hình rất nhỏ hết lỗi thì mới tăng dần[^ss-small-first]. Learntla nói cùng ý: phần lớn lỗi xuất hiện trong không gian nhỏ, nên hằng khổng lồ không có lợi mấy; hãy giữ cấu hình nhỏ để lặp nhanh, và chỉ chạy cấu hình lớn khi cấu hình nhỏ đã qua[^lt-small].
 
-Điều đó khớp với các spec chương này (suy luận của người soạn từ trace tay): lỗi lease cần hai client; lỗi hàng đợi cần một tin, một consumer, một lần crash; lỗi cache cần một reader, một writer; lỗi outbox cần một order và một lần crash relay; lỗi retry cần một yêu cầu và hai attempt. Mọi con số "hai", "một" đó là tham số của mô hình mà TLC chạy được trong tích tắc.
+Điều đó khớp với các spec của chương này (suy luận của người soạn từ trace tay). Lỗi lease cần hai client. Lỗi hàng đợi cần một tin, một consumer, một lần crash. Lỗi cache cần một reader và một writer. Lỗi outbox cần một order và một lần crash relay. Lỗi retry cần một yêu cầu và hai attempt. Mọi con số "hai", "một" đó là tham số mô hình mà TLC chạy xong trong tích tắc.
 
-*Ước lượng cỡ.* Learntla gợi ý ước lượng trước: mô hình tốn thời gian theo thời gian sinh state và số state, và số state thường là yếu tố lấn át[^lt-two-factors]. Kích cỡ các kiểu tập xếp chồng lên nhau, và một cấu trúc như `[A \X B -> SUBSET C]` thường là nguồn của rắc rối[^lt-stack]. Ví dụ thô cho spec hàng đợi ở mục 3 (suy luận của người soạn; cận trên của tích miền giá trị các biến toàn cục, chưa tính `pc`, `cur`, `crashes`; *không phải* số state đạt được): với `M` tin, `C` consumer, `K = MaxCrashes`: `status` có 3^M giá trị, `seen` có 2^M, `effects[m]` tối đa C + K + 1 giá trị (mỗi lần một consumer nhận tin `m` kết thúc bằng một crash — tốn ngân sách, tổng cộng K — hoặc bằng một ack; sau ack, `m` không còn `ready` nên không ai nhận được nữa, và mỗi consumer chỉ giữ một lượt nhận tại một thời điểm, nên số lần nhận không quá C + K), nên tích cỡ (6·(C + K + 1))^M. Với C = 2, K = 2: 30^3 = 27 000 khi M = 3 nhưng 30^4 = 810 000 khi M = 4 — thêm một tin nhân lên 30 lần. Điều này khớp lời Lamport rằng số state đạt được thường là hàm mũ của tham số[^ss-exp].
+*Ước lượng cỡ.* Learntla gợi ý ước lượng trước khi chạy: thời gian của mô hình phụ thuộc vào thời gian sinh state và số state, và số state thường là yếu tố lấn át[^lt-two-factors]. Kích cỡ các kiểu tập xếp chồng lên nhau, và một cấu trúc như `[A \X B -> SUBSET C]` thường là nguồn của rắc rối[^lt-stack]. Thử tính thô cho spec hàng đợi ở mục 3 (suy luận của người soạn; đây là cận trên của tích miền giá trị các biến toàn cục, chưa tính `pc`, `cur`, `crashes`, và *không phải* số state đạt được). Với `M` tin, `C` consumer, `K = MaxCrashes`: `status` có 3^M giá trị, `seen` có 2^M, và `effects[m]` có tối đa C + K + 1 giá trị. Con số cuối đến từ chỗ này: mỗi lần một consumer nhận tin `m` kết thúc bằng một crash (tốn ngân sách, tổng cộng K) hoặc bằng một ack; sau ack, `m` không còn `ready` nên không ai nhận được nữa; và mỗi consumer chỉ giữ một lượt nhận tại một thời điểm, nên số lần nhận không quá C + K. Tích các cỡ là (6·(C + K + 1))^M. Với C = 2, K = 2: 30^3 = 27 000 khi M = 3, nhưng 30^4 = 810 000 khi M = 4, tức thêm một tin nhân lên 30 lần. Điều này khớp lời Lamport rằng số state đạt được thường là hàm mũ của tham số[^ss-exp].
 
-*Symmetry.* Nếu spec không phân biệt các client/tin/consumer với nhau, đổi chỗ chúng không đổi việc một hành vi có thỏa spec hay không. Lamport: ghi `SYMMETRY Perms` với `Perms == Permutations(Proc)` trong file cấu hình làm TLC không thêm state `s` nếu đã có state tương đương qua một hoán vị; với n process, số state phải duyệt giảm theo hệ số n!, tức n giai thừa[^ss-sym]. Trong spec mục 3 sẽ là:
+*Symmetry.* Nếu spec không phân biệt các client, tin hay consumer với nhau, thì đổi chỗ chúng không làm đổi việc một hành vi có thỏa spec hay không. Lamport chỉ cách tận dụng: ghi `SYMMETRY Perms` với `Perms == Permutations(Proc)` trong file cấu hình, và TLC sẽ không thêm state `s` nếu đã có state tương đương qua một hoán vị. Với n process, số state phải duyệt giảm theo hệ số n!, tức n giai thừa[^ss-sym]. Với spec mục 3 sẽ là:
 
 ```tla
 Sym == Permutations(Msgs) \union Permutations(Consumers)   \* đặt trong module sau END TRANSLATION; Permutations thuộc module TLC
@@ -692,29 +697,35 @@ SYMMETRY Sym
 CHECK_DEADLOCK FALSE
 ```
 
-(File cấu hình minh họa do người soạn viết, theo khuôn các file `.cfg` trong `tlaplus/Examples`: ví dụ model KeyValueStore đặt `SYMMETRY TxIdSymmetric`[^ex-kvs-sym]. Chưa chạy TLC. Tên module khai `Msgs`, `Consumers` là model value.) Hai điều cần cẩn thận. Một: symmetry chỉ đúng khi *spec và tính chất* thật sự đối xứng; nếu không, TLC có thể không in nổi trace khi gặp lỗi[^ss-sym-trace]; spec dùng `CHOOSE` trên model value hay so sánh thứ tự các id là dấu hiệu phá đối xứng (nhận xét của người soạn). Hai: với kiểm *liveness*, sách cảnh báo TLC có thể kiểm sai: bỏ sót lỗi, báo lỗi không có thật, hoặc đưa counterexample sai[^ss-sym-liveness]. Learntla cũng nói liveness chậm hơn nhiều và không dùng được symmetry[^lt-safety-liveness]. Vậy: giữ hai file cấu hình, một cho safety (có symmetry), một cho liveness (hằng nhỏ hơn).
+File cấu hình trên là minh họa do người soạn viết, theo khuôn các file `.cfg` trong `tlaplus/Examples`: model KeyValueStore ở đó đặt `SYMMETRY TxIdSymmetric`[^ex-kvs-sym]. Chưa chạy TLC; `Msgs` và `Consumers` được khai là model value. Dùng symmetry cần cẩn thận hai điều. Một: symmetry chỉ đúng khi *spec và tính chất* thật sự đối xứng, nếu không TLC có thể không in nổi trace khi gặp lỗi[^ss-sym-trace]. Spec dùng `CHOOSE` trên model value, hay so sánh thứ tự các id, là dấu hiệu phá đối xứng (nhận xét của người soạn). Hai: với kiểm *liveness*, sách cảnh báo TLC có thể kiểm sai, như bỏ sót lỗi, báo lỗi không có thật hoặc đưa counterexample sai[^ss-sym-liveness]. Learntla cũng nói liveness chậm hơn nhiều và không dùng được symmetry[^lt-safety-liveness]. Vậy hãy giữ hai file cấu hình: một cho safety (có symmetry), một cho liveness (hằng nhỏ hơn).
 
-*Constraint và ngân sách.* Có hai cách để chặn mô hình vô hạn: đặt biên *trong spec* (ngân sách `MaxCrashes`, trần `MaxRetries`, như mục 3, 5, 6) hoặc đặt `CONSTRAINT` ở cấu hình. Learntla khuyên: phần lớn trường hợp mô hình vô hạn là lỗi spec (quên một kiểm tra), nên sửa spec trước[^lt-unbound-err]; khi không sửa được thì thêm state constraint, hoặc dùng `TLCGet("level")` để giới hạn độ sâu[^lt-tlcget]. Có hai điểm tinh vi:
+*Constraint và ngân sách.* Có hai cách chặn một mô hình vô hạn: đặt biên *trong spec* (ngân sách `MaxCrashes`, trần `MaxRetries`, như mục 3, 5, 6), hoặc đặt `CONSTRAINT` ở file cấu hình. Learntla khuyên nên sửa spec trước, vì phần lớn trường hợp mô hình vô hạn là do spec lỗi (quên một phép kiểm)[^lt-unbound-err]. Khi không sửa được thì thêm state constraint, hoặc dùng `TLCGet("level")` để giới hạn độ sâu[^lt-tlcget]. Có hai điểm tinh vi:
 
-- Ràng buộc không phải ở "kiểm tra", mà ở "dừng mở rộng". Theo thuật toán của sách, TLC kiểm invariant trên state mới `t` *trước*, rồi mới xét `Constraint` để quyết định có thêm `t` vào hàng đợi không[^ss-alg-inv]. Hệ quả (suy luận của người soạn từ thuật toán): state ngay sát biên vẫn được kiểm invariant, nhưng các state *sau* nó không được sinh.
-- Constraint cắt hành vi: learntla cảnh báo đừng dùng khi kiểm temporal property, vì cắt đi một phần hành vi thì model checker không còn đủ hành vi để đánh giá liveness[^lt-bound-warning].
+- Constraint chặn việc "dừng mở rộng", không chặn việc "kiểm tra". Theo thuật toán trong sách, TLC kiểm invariant trên state mới `t` *trước*, rồi mới xét `Constraint` để quyết định có thêm `t` vào hàng đợi hay không[^ss-alg-inv]. Hệ quả (suy luận của người soạn từ thuật toán): state sát biên vẫn được kiểm invariant, nhưng các state *sau* nó thì không được sinh.
+- Constraint cắt bớt hành vi, nên learntla cảnh báo đừng dùng khi kiểm temporal property: cắt đi một phần hành vi thì model checker không còn đủ hành vi để đánh giá liveness[^lt-bound-warning].
 
-*Biến phụ và `VIEW`.* Biến lịch sử như `log` ở mục 2 làm số state nở ra: các hành vi trước đây dẫn tới cùng một state giờ khác nhau ở biến phụ. Learntla: `VIEW` cho TLC so sánh state *không tính* biến phụ, giúp khử cái giá đó, nhưng dễ vô tình loại state hợp lệ, nên dùng rất cẩn thận[^lt-views].
+*Biến phụ và `VIEW`.* Biến lịch sử như `log` ở mục 2 làm số state nở ra: những hành vi trước đây dẫn tới cùng một state giờ lại khác nhau ở biến phụ. Learntla chỉ ra `VIEW` cho TLC so sánh state *không tính* biến phụ, khử được cái giá đó. Tuy vậy `VIEW` dễ vô tình loại state hợp lệ, nên chỉ dùng rất cẩn thận[^lt-views].
 
-*Giảm chi tiết, gộp action, bỏ "loader".* Heuristic quan trọng nhất của learntla: mô hình càng chi tiết thì càng nhiều state[^lt-detail]; nếu cần mô hình chi tiết, hãy viết spec đơn giản ở mức cao rồi đặt mô hình chi tiết thành một refinement[^lt-refine]. Gộp hai label thành một giảm số chỗ chen, nhưng chỉ khi hệ thật *thật sự* nguyên tử ở đó; learntla nhắc rằng đặt grain quá thô có thể che mất lỗi thật[^lt-grain]. Tiến trình "loader" chỉ để dựng trạng thái đầu có thể thay bằng một `Init` nondeterministic[^lt-loader]. Với hệ ở chương này (nhận xét của người soạn), `Handle` ở mục 3 gộp "tác dụng phụ + dedup" vì DB bảo đảm nguyên tử — gộp *đúng*; còn gộp `ReadDB` và `FillCache` ở mục 4 sẽ xóa luôn lỗi cần săn — gộp *sai*.
+*Giảm chi tiết, gộp action, bỏ "loader".* Heuristic quan trọng nhất của learntla là mô hình càng chi tiết thì càng nhiều state[^lt-detail]. Nếu cần mô hình chi tiết, hãy viết spec đơn giản ở mức cao rồi đặt mô hình chi tiết thành một refinement[^lt-refine]. Gộp hai label thành một làm giảm số chỗ chen vào, nhưng chỉ khi hệ thật *thật sự* nguyên tử ở đó, vì đặt grain quá thô có thể che mất lỗi thật[^lt-grain]. Một process "loader" chỉ để dựng trạng thái đầu có thể thay bằng một `Init` nondeterministic[^lt-loader]. Với hệ ở chương này (nhận xét của người soạn): `Handle` ở mục 3 gộp "tác dụng phụ và dedup" vì DB bảo đảm nguyên tử, nên gộp *đúng*; còn gộp `ReadDB` với `FillCache` ở mục 4 sẽ xóa luôn lỗi cần săn, nên gộp *sai*.
 
-*Chạy bao lâu, bao nhiêu worker.* Chạy từ dòng lệnh, TLC mặc định dùng một worker và 25% RAM, nên cần truyền `-workers`[^lt-workers]. Số liệu từ repo Examples cho thấy chi phí tăng mạnh theo cỡ: ba cấu hình cho cùng spec KeyValueStore (snapshot isolation). `MCKVSSafetySmall.cfg` có 2 key, 2 giá trị, 3 transaction[^ex-kvs-small-cfg] và manifest ghi 40 giây[^ex-kvs-small]. `MCKVSSafetyMedium.cfg` có 3 key, 3 giá trị, 2 transaction, kèm symmetry[^ex-kvs-medium-cfg], ghi 4 phút 30 giây[^ex-kvs-medium]. `MCKVSSafetyLarge.cfg` có 3 key, 2 giá trị, 3 transaction, kèm symmetry[^ex-kvs-large-cfg], ghi 7 giờ 16 phút[^ex-kvs-large]. Cả ba đều `success`. Từ Small lên Large là chừng 650 lần (26 160 giây chia 40 giây; số của manifest repo, không rõ phần cứng). Trong lần kiểm chứng phần sao chép/chịu lỗi của DynamoDB, AWS chạy phiên bản phân tán của TLC trên cụm mười máy EC2[^aws-distributed] để kiểm một thể hiện "đủ lớn" cho độ tin cậy cao[^aws-sufficient].
+*Không rỗng: đừng tin một lần "thành công".* Có hai kiểu kết quả rỗng thường gặp (nhận xét của người soạn):
 
-*Mô phỏng ngẫu nhiên.* Khi mô hình đã vượt tầm duyệt hết, Lamport: chạy mô hình lớn nhất mà kiên nhẫn cho phép, rồi chạy chế độ simulation trên mô hình lớn hơn; mô phỏng ngẫu nhiên không hiệu quả để tìm lỗi tinh vi, nhưng đáng thử[^ss-sim]. Con số "35 bước" của lỗi DynamoDB gợi ý vì sao tìm ngẫu nhiên khó (suy luận của người soạn: một trace dài như vậy khó gặp bằng bước chọn ngẫu nhiên; AWS không nói về simulation): AWS ghi trace lỗi ngắn nhất dài 35 bước ở mức cao[^aws-35], và cho rằng sự hiếm gặp của chuỗi sự kiện kép không phải lý do để bỏ qua chúng[^aws-improbable].
+1. *Tính chất rỗng.* `CacheNotStale` ở mục 4 chỉ ràng buộc state "yên". Nếu không state yên nào đạt được (ví dụ lỡ một `await` luôn sai), TLC báo "không có lỗi" mà chẳng kiểm gì. Cách thử rẻ là thêm một invariant mà bạn *biết* phải sai khi đạt trạng thái mục tiêu, ví dụ `NotQuiescent == ~Quiescent`, rồi chạy và kỳ vọng TLC báo vi phạm. Nếu không thấy vi phạm, spec chưa bao giờ đến được state yên.
+2. *Hành động không bao giờ bật.* Một lỗi phổ biến là một action không bật khi lẽ ra phải bật, làm một số state không bao giờ đạt tới. Lamport khuyên dùng tùy chọn coverage để phát hiện action không bao giờ bật[^ss-coverage]. Learntla cùng tinh thần: nếu đổi spec để một thread lặp mãi không làm gì, thì invariant về kết quả cuối cùng *trivially* qua[^lt-trivial]. Sách nói thẳng safety dễ thỏa bằng cách không làm gì[^ss-suspicious].
 
-*Không rỗng: "đừng tin thành công".* Hai kiểu kết quả rỗng thường gặp (nhận xét của người soạn):
+<details><summary>Đi sâu: số đo thực tế, mô phỏng ngẫu nhiên, quy trình đề xuất và các cờ</summary>
 
-1. *Tính chất rỗng.* `CacheNotStale` ở mục 4 chỉ ràng buộc state "yên"; nếu không state yên nào đạt được (ví dụ lỡ `await` luôn sai), TLC báo "không có lỗi" mà chẳng kiểm gì. Cách thử rẻ: thêm một invariant mà bạn *biết* phải sai khi trạng thái mục tiêu đạt được, ví dụ `NotQuiescent == ~Quiescent`, rồi chạy và kỳ vọng TLC báo vi phạm. Nếu không vi phạm, spec chưa bao giờ đến state yên.
-2. *Hành động không bao giờ bật.* Lamport: một lỗi phổ biến là một action không bật khi lẽ ra phải bật, ngăn một số state được đạt tới; dùng tùy chọn coverage để phát hiện action không bao giờ bật[^ss-coverage]. Cùng tinh thần, learntla cảnh báo: nếu đổi spec để một thread lặp mãi không làm gì thì invariant về kết quả cuối cùng *trivially* qua[^lt-trivial]; sách nói thẳng safety dễ thỏa bằng cách không làm gì[^ss-suspicious].
+**Chạy bao lâu, bao nhiêu worker.** Chạy từ dòng lệnh, TLC mặc định dùng một worker và 25% RAM, nên cần truyền `-workers`[^lt-workers]. Số liệu từ repo Examples cho thấy chi phí tăng mạnh theo cỡ mô hình: ba cấu hình cho cùng spec KeyValueStore (snapshot isolation).
 
-<details><summary>Đi sâu: quy trình đề xuất cho một spec backend, và các cờ thực tế</summary>
+- `MCKVSSafetySmall.cfg` có 2 key, 2 giá trị, 3 transaction[^ex-kvs-small-cfg]. Manifest ghi 40 giây[^ex-kvs-small].
+- `MCKVSSafetyMedium.cfg` có 3 key, 3 giá trị, 2 transaction, kèm symmetry[^ex-kvs-medium-cfg]. Manifest ghi 4 phút 30 giây[^ex-kvs-medium].
+- `MCKVSSafetyLarge.cfg` có 3 key, 2 giá trị, 3 transaction, kèm symmetry[^ex-kvs-large-cfg]. Manifest ghi 7 giờ 16 phút[^ex-kvs-large].
 
-Quy trình (nhận xét của người soạn, tổng hợp từ các nguồn trên):
+Cả ba đều `success`. Từ Small lên Large là chừng 650 lần (26 160 giây chia 40 giây; số của manifest repo, không rõ phần cứng). Với phần sao chép và chịu lỗi của DynamoDB, AWS chạy phiên bản phân tán của TLC trên cụm mười máy EC2[^aws-distributed]. Mục đích là kiểm một thể hiện "đủ lớn" cho độ tin cậy cao[^aws-sufficient].
+
+**Mô phỏng ngẫu nhiên.** Khi mô hình đã vượt tầm duyệt hết, Lamport khuyên chạy mô hình lớn nhất mà kiên nhẫn cho phép, rồi chạy chế độ simulation trên mô hình lớn hơn. Mô phỏng ngẫu nhiên không hiệu quả để tìm lỗi tinh vi, nhưng đáng thử[^ss-sim]. Con số "35 bước" của lỗi DynamoDB gợi ý vì sao tìm ngẫu nhiên khó (suy luận của người soạn: một trace dài như vậy khó gặp bằng bước chọn ngẫu nhiên; AWS không nói về simulation). AWS ghi rằng trace lỗi ngắn nhất dài 35 bước ở mức cao[^aws-35]. Họ cũng cho rằng sự hiếm gặp của chuỗi sự kiện kép không phải lý do để bỏ qua chúng[^aws-improbable].
+
+**Quy trình đề xuất cho một spec backend** (nhận xét của người soạn, tổng hợp từ các nguồn trên):
 
 1. Viết spec ở mức thô nhất; chạy với `Msgs`, `Clients`, … đều một phần tử và `Fencing`/`Dedup` ở chế độ *sai* — bạn *phải* thấy counterexample. Không thấy: tính chất hoặc spec đang rỗng.
 2. Đọc counterexample: đây là lỗi thiết kế, hay lỗi do mô hình môi trường quá hào phóng (ví dụ lease hết hạn *ngay lập tức* khi client chưa kịp làm gì — vẫn là hành vi hợp lệ trong mô hình bất đồng bộ)?
@@ -727,24 +738,25 @@ Cờ thực tế: `-deadlock` hoặc `CHECK_DEADLOCK FALSE` (mục 1), `-workers
 
 </details>
 
-**Quay lại Q7:** bắt đầu từ mô hình nhỏ nhất vẫn tái hiện lỗi; mỗi tăng tham số nhân mũ số state; symmetry, ngân sách, constraint, view là công cụ chỉnh cỡ — mỗi cái có cái giá về độ tin cậy cần ghi lại; và một lần "không thấy lỗi" chỉ đáng tin sau khi bạn đã thấy mô hình *bắt được* lỗi ở chế độ sai.
+**Quay lại Q7:** với `orders`, hãy bắt đầu từ mô hình nhỏ nhất vẫn tái hiện được lỗi. Mỗi lần tăng tham số là nhân mũ số state; symmetry, ngân sách, constraint và view là công cụ chỉnh cỡ, mỗi cái đều có cái giá về độ tin cậy cần ghi lại; và một lần "không thấy lỗi" chỉ đáng tin sau khi bạn đã thấy mô hình *bắt được* lỗi ở chế độ sai.
+
 
 ## 8. Apalache: symbolic, SMT, khi TLC không đủ (Q8)
 
-> **Trả lời ngắn.** TLC liệt kê từng state; Apalache dịch bài toán kiểm tra thành các ràng buộc logic và nhờ bộ giải SMT (Z3 mặc định, CVC5 thử nghiệm) tìm lời giải[^ap-symbolic][^ap-smt]. Nhờ đó nó kiểm được bất biến quy nạp cho thực thi dài tùy ý và xử lý miền số lớn mà không liệt kê. Đổi lại: spec phải gắn kiểu, không dùng được toàn bộ ngôn ngữ, mô hình vẫn phải hữu hạn, và tài liệu của chính Apalache nói hiệu quả hơn hay kém hơn TLC tùy spec[^ap-depends].
+> **Trả lời ngắn.** TLC liệt kê từng state, còn Apalache dịch bài toán kiểm tra thành các ràng buộc logic rồi giao cho một bộ giải SMT tìm lời giải[^ap-symbolic]. Bộ giải mặc định là Z3, và CVC5 ở mức thử nghiệm[^ap-smt]. Nhờ đó nó kiểm được bất biến quy nạp cho thực thi dài tùy ý và xử lý được miền số lớn mà không cần liệt kê. Đổi lại, spec phải gắn kiểu, không dùng được toàn bộ ngôn ngữ, mô hình vẫn phải hữu hạn, và chính tài liệu của Apalache nói hiệu quả hơn hay kém TLC là tùy spec[^ap-depends].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): TLC giống một thanh tra đi qua từng căn phòng của tòa nhà để xem có gì sai; Apalache giống một luật sư hỏi: "có tồn tại một chuỗi sự kiện nào thỏa các điều kiện này mà dẫn tới vi phạm không?" rồi nhờ một bộ giải logic trả lời — mà không phải đi qua từng phòng.
+*Với service `orders`.* Ở mục 2, TLC kiểm fencing của job đối soát với vài replica và token nhỏ. Giả sử giờ bạn muốn hơn thế: token là số nguyên bình thường chứ không bị khóa trong 1..3, và muốn một kết luận cho thực thi dài tùy ý, không chỉ cho phạm vi mà TLC kịp duyệt. TLC đi qua từng state nên đuối ở cả hai chuyện đó. Apalache nhìn bài toán theo hướng khác: "có tồn tại một chuỗi sự kiện nào thỏa các điều kiện này mà dẫn tới vi phạm không?", rồi giao câu hỏi cho bộ giải logic thay vì đi qua từng state (nhận xét của người soạn).
 
-*Cách hoạt động.* Apalache trích các *symbolic transition* từ spec — phân `Next` thành tuyển của các action đơn giản hơn — rồi dịch `Init` và các action sang công thức SMT[^ap-theory]. Một chuỗi `k` bước được mã hóa thành `Init(s0) /\ A(s0, s1) /\ ... /\ A(s_{k-1}, s_k)`, và để tìm vi phạm bất biến `Inv` người ta thêm `~Inv(s0) \/ ... \/ ~Inv(sk)`; điều quan trọng là giá trị của `s0, …, sk` *không* được liệt kê như TLC mà do bộ giải SMT tìm[^ap-theory-enum]. Hệ quả (suy luận của người soạn): việc "duyệt" nằm trong bộ giải; chi phí phụ thuộc cấu trúc công thức, không đơn thuần là số state.
+*Cách hoạt động.* Apalache trích các *symbolic transition* từ spec, tức tách `Next` thành tuyển của những action đơn giản hơn, rồi dịch `Init` và các action sang công thức SMT[^ap-theory]. Một chuỗi `k` bước được mã hóa thành `Init(s0) /\ A(s0, s1) /\ ... /\ A(s_{k-1}, s_k)`. Để tìm vi phạm bất biến `Inv`, người ta thêm `~Inv(s0) \/ ... \/ ~Inv(sk)`. Điều quan trọng là giá trị của `s0, …, sk` *không* được liệt kê như ở TLC mà do bộ giải SMT tìm[^ap-theory-enum]. Hệ quả (suy luận của người soạn): việc "duyệt" nằm trong bộ giải, nên chi phí phụ thuộc cấu trúc của công thức chứ không đơn thuần là số state.
 
 *Hai chế độ kiểm.*
 
-- **Bounded model checking (mặc định).** Kiểm các thực thi có độ dài tối đa `--length` (mặc định 10 bước `Next`)[^ap-length]. Tài liệu nói thẳng đây là kỹ thuật *không đầy đủ*: nếu một lỗi cần thực thi dài hơn để lộ ra thì có thể bị bỏ sót[^ap-bmc-incomplete].
-- **Bất biến quy nạp.** Để kiểm thực thi dài tùy ý, người ta tìm một công thức `IndInv` thỏa hai điều kiện: trạng thái đầu thỏa `TypeOK /\ IndInv`, và bước `Next` từ một state thỏa `TypeOK /\ IndInv` dẫn tới state cũng thỏa[^ap-ind]. Khi đó chạy hai lệnh `check` ngắn (`--init=Init --inv=IndInv --length=0` và `--init=IndInv --inv=IndInv --length=1`), rồi lệnh thứ ba kiểm `IndInv` kéo theo tính chất an toàn đang quan tâm[^ap-indcmds]. Tài liệu lưu ý: nếu `IndInv` quá yếu, bước ba sẽ cho counterexample và bạn phải mạnh hóa nó[^ap-ind-weak].
+- **Bounded model checking (mặc định).** Apalache kiểm các thực thi có độ dài tối đa `--length`, mặc định 10 bước `Next`[^ap-length]. Tài liệu nói thẳng đây là kỹ thuật *không đầy đủ*: nếu một lỗi cần thực thi dài hơn mới lộ ra thì có thể bị bỏ sót[^ap-bmc-incomplete].
+- **Bất biến quy nạp.** Để kiểm thực thi dài tùy ý, ta tìm một công thức `IndInv` thỏa hai điều kiện: trạng thái đầu thỏa `TypeOK /\ IndInv`, và từ một state thỏa `TypeOK /\ IndInv`, bước `Next` dẫn tới state cũng thỏa[^ap-ind]. Khi đó chạy hai lệnh `check` ngắn (`--init=Init --inv=IndInv --length=0` và `--init=IndInv --inv=IndInv --length=1`), rồi lệnh thứ ba kiểm `IndInv` kéo theo tính chất an toàn đang quan tâm[^ap-indcmds]. Tài liệu lưu ý rằng nếu `IndInv` quá yếu thì bước ba sẽ cho counterexample, và bạn phải mạnh hóa nó[^ap-ind-weak].
 
-*Spec tương ứng, viết bằng TLA+ thuần có chú thích kiểu (chưa chạy Apalache).* Dưới đây là bản TLA+ của kho có fencing ở mục 2, viết để Apalache kiểm được. Mỗi `CONSTANT`/`VARIABLE` phải có chú thích kiểu `\* @type: …;`[^ap-types]; mỗi biến phải có *đúng một* phép gán `x' = e` trong mỗi symbolic transition, nếu không Apalache báo lỗi[^ap-assign]; bởi vậy các hành động bên dưới liệt kê mọi biến, kể cả bằng `UNCHANGED`. Hằng được khởi tạo qua một toán tử `ConstInit` hoặc khai như toán tử (như `N == 3`)[^ap-constops]. Hai toán tử `ConstFenced`/`ConstUnfenced` bên dưới viết theo khuôn `ConstInit` của tài liệu (như `BIRTH_YEAR \in 0..99 /\ …`[^ap-constinit]) nhưng dùng `=` thay `\in` (suy luận của người soạn, chưa chạy). Dãy `log` được thay bằng hai biến lịch sử (`applied_max`, `stale_applied`) cho gọn (nhận xét của người soạn); nhớ rằng Apalache không làm gì được với tập `Seq(S)` vô hạn[^ap-seq].
+*Spec tương ứng, viết bằng TLA+ thuần có chú thích kiểu (chưa chạy Apalache).* Dưới đây là bản TLA+ của kho có fencing ở mục 2, viết để Apalache kiểm được. Mỗi `CONSTANT` và `VARIABLE` phải có chú thích kiểu `\* @type: …;`[^ap-types]. Mỗi biến phải có *đúng một* phép gán `x' = e` trong mỗi symbolic transition, nếu không Apalache báo lỗi[^ap-assign]; vì vậy các hành động bên dưới liệt kê mọi biến, kể cả bằng `UNCHANGED`. Hằng được khởi tạo qua một toán tử `ConstInit`, hoặc khai như một toán tử (như `N == 3`)[^ap-constops]. Hai toán tử `ConstFenced` và `ConstUnfenced` bên dưới viết theo khuôn `ConstInit` của tài liệu (như `BIRTH_YEAR \in 0..99 /\ …`[^ap-constinit]) nhưng dùng `=` thay cho `\in` (suy luận của người soạn, chưa chạy). Dãy `log` được thay bằng hai biến lịch sử (`applied_max`, `stale_applied`) cho gọn (nhận xét của người soạn), vì Apalache không làm gì được với tập `Seq(S)` vô hạn[^ap-seq].
 
 ```tla
 ---------------------------- MODULE LeaseFencingApa ----------------------------
@@ -864,18 +876,18 @@ apalache-mc check --cinit=ConstFenced --init=IndInv   --inv=NoStaleWrite --lengt
 
 *Hai kết quả mong đợi (suy luận của người soạn, chưa chạy Apalache).*
 
-- Với `Fencing = FALSE`: có counterexample dài 5 bước — `Acquire(1)`, `Expire`, `Acquire(2)`, `WriteOk(2)` (`applied_max = 2`), `WriteOk(1)` (`stale_applied = (FALSE \/ 1 < 2) = TRUE`). Dài 5 nằm trong trần mặc định 10[^ap-length].
-- Với `Fencing = TRUE`: `IndInv` là bất biến quy nạp. `Init` thỏa (cả `storage_max` và `applied_max` bằng 0, `stale_applied` sai). `WriteOk(c)` khi `Fencing` đúng: `my_tok[c] >= storage_max = applied_max`, nên `stale_applied'` vẫn sai, và `storage_max' = applied_max' = my_tok[c]` giữ đẳng thức. `WriteReject` chỉ đổi `pc`; các hành động còn lại không đụng bốn biến đó. Vì vậy ba lệnh trên đều nên báo không có vi phạm. Đây là lập luận tay của mục 2 viết lại cho bộ giải.
+- Với `Fencing = FALSE`: có counterexample dài 5 bước, gồm `Acquire(1)`, `Expire`, `Acquire(2)`, `WriteOk(2)` (`applied_max = 2`), `WriteOk(1)` (`stale_applied = (FALSE \/ 1 < 2) = TRUE`). Dài 5 nằm trong trần mặc định 10[^ap-length].
+- Với `Fencing = TRUE`: `IndInv` là bất biến quy nạp. `Init` thỏa (cả `storage_max` và `applied_max` bằng 0, `stale_applied` sai). Với `WriteOk(c)` khi `Fencing` đúng, `my_tok[c] >= storage_max = applied_max`, nên `stale_applied'` vẫn sai, và `storage_max' = applied_max' = my_tok[c]` giữ đẳng thức. `WriteReject` chỉ đổi `pc`; các hành động còn lại không đụng bốn biến đó. Vì vậy ba lệnh trên đều nên báo không có vi phạm. Đây là lập luận tay ở mục 2, viết lại cho bộ giải.
 
-*Giới hạn Apalache cần biết.*
+*Giới hạn của Apalache.*
 
-- Mọi tham số cố định và hữu hạn, mọi cấu trúc dữ liệu hữu hạn[^ap-assume], và chỉ phân tích thực thi hữu hạn có trần độ dài[^ap-assume-exec]. Với "N client tùy ý", Apalache một mình không trả lời; ta chỉ kiểm với N cụ thể (ở trên là 3).
-- Có những cấu trúc không hỗ trợ: tập `Seq(S)` vô hạn (tạm thời có `Gen(n)` để sinh dãy tối đa `n` phần tử)[^ap-gen]; khoảng số nguyên `a..b` với cận không hằng không mã hóa được[^ap-range]; `CHOOSE` không dùng trực tiếp được, từ bản 0.16.1 tài liệu khuyên dùng `Some`, `ApaFoldSet` hoặc `ApaFoldSeqLeft`[^ap-features].
-- Với PlusCal: bộ dịch PlusCal xóa comment nên không gắn được chú thích kiểu trực tiếp trong code PlusCal; tutorial của Apalache đề xuất tạo một module kiểu riêng, dùng `INSTANCE` để các `CONSTANT`/`VARIABLE` có kiểu thay thế cho bản gốc, và module này không bị ảnh hưởng khi PlusCal đổi[^ap-pluscal][^ap-instance]. Vậy spec mục 2–6 không chạy thẳng trên Apalache mà cần phiên bản TLA+ đã dịch cộng module kiểu.
+- Mọi tham số phải cố định và hữu hạn, mọi cấu trúc dữ liệu hữu hạn[^ap-assume]. Apalache cũng chỉ phân tích các thực thi hữu hạn, có trần độ dài[^ap-assume-exec]. Với "N client tùy ý", một mình Apalache không trả lời được; ta chỉ kiểm với N cụ thể (ở trên là 3).
+- Một số cấu trúc không được hỗ trợ. Tập `Seq(S)` vô hạn là một (tạm thời có `Gen(n)` để sinh dãy tối đa `n` phần tử)[^ap-gen]. Khoảng số nguyên `a..b` với cận không hằng cũng không mã hóa được[^ap-range]. `CHOOSE` không dùng trực tiếp được; từ bản 0.16.1 tài liệu khuyên dùng `Some`, `ApaFoldSet` hoặc `ApaFoldSeqLeft`[^ap-features].
+- Với PlusCal, bộ dịch xóa comment nên không gắn được chú thích kiểu ngay trong code PlusCal. Tutorial của Apalache đề xuất tạo một module kiểu riêng[^ap-pluscal]. Module này dùng `INSTANCE` để các `CONSTANT` và `VARIABLE` có kiểu thay thế cho bản gốc, và không bị ảnh hưởng khi PlusCal đổi[^ap-instance]. Vậy spec ở mục 2–6 không chạy thẳng trên Apalache mà cần phiên bản TLA+ đã dịch cộng module kiểu.
 - Apalache tự mô tả là còn thử nghiệm, nên hãy chuẩn bị dùng dòng lệnh và giúp tìm lỗi[^ap-experimental].
-- Liveness: Apalache dùng phép biến đổi liveness-to-safety[^ap-liveness]; vì vậy với liveness hãy đọc lại tài liệu hiện hành trước khi dựa vào (nhận xét của người soạn).
+- Về liveness, Apalache dùng phép biến đổi liveness-to-safety[^ap-liveness]. Vì vậy hãy đọc lại tài liệu hiện hành trước khi dựa vào nó cho liveness (nhận xét của người soạn).
 
-*Nhanh hơn TLC không phải mặc định.* Chính tutorial PlusCal của Apalache cho một ví dụ: kiểm tính loại trừ lẫn nhau (mutual exclusion) của thuật toán Bakery với bốn process, tối đa 10 bước, ghi `It took me 0 days 0 hours 32 min 2 sec` — kèm lời rằng phân tích này chưa đầy đủ vì trần 10 bước[^ap-bakery-time]. (Số liệu từ trang tài liệu, không rõ phần cứng; không so với TLC trên cùng máy.) Cũng chính tài liệu này nêu: tùy spec, TLC hoặc Apalache có thể hiệu quả hơn[^ap-depends].
+*Nhanh hơn TLC không phải mặc định.* Chính tutorial PlusCal của Apalache có một ví dụ: kiểm tính loại trừ lẫn nhau (mutual exclusion) của thuật toán Bakery với bốn process, tối đa 10 bước, và trang ghi `It took me 0 days 0 hours 32 min 2 sec`, kèm lời rằng phân tích này chưa đầy đủ vì trần 10 bước[^ap-bakery-time]. Số liệu này lấy từ trang tài liệu, không rõ phần cứng, và không so với TLC trên cùng máy. Cũng chính tài liệu đó nêu rằng tùy spec, TLC hoặc Apalache có thể hiệu quả hơn[^ap-depends].
 
 ```mermaid
 flowchart TD
@@ -892,37 +904,37 @@ flowchart TD
 
 <details><summary>Đi sâu: một ví dụ miền số lớn, simulate, các loại invariant</summary>
 
-- **Miền hằng lớn.** Tài liệu Apalache có ví dụ khởi tạo hằng bằng khoảng: `ConstInit == BIRTH_YEAR \in 0..99 /\ LICENSE_AGE \in 10..99`; với ràng buộc đó Apalache tìm thấy vi phạm an toàn, ví dụ `BIRTH_YEAR = 89` và `LICENSE_AGE = 10`[^ap-constinit]. Ý nghĩa cho spec backend (suy luận của người soạn): thay vì chạy TLC cho từng tổ hợp (ví dụ `MaxRetries`, `TTL`, kích thước batch), một lần chạy symbolic có thể quét cả khoảng. Lưu ý giới hạn khoảng với cận không hằng ở trên.
+- **Miền hằng lớn.** Tài liệu Apalache có ví dụ khởi tạo hằng bằng khoảng: `ConstInit == BIRTH_YEAR \in 0..99 /\ LICENSE_AGE \in 10..99`. Với ràng buộc đó, Apalache tìm thấy vi phạm an toàn, chẳng hạn `BIRTH_YEAR = 89` và `LICENSE_AGE = 10`[^ap-constinit]. Với spec backend, ý nghĩa là (suy luận của người soạn) thay vì chạy TLC cho từng tổ hợp (ví dụ `MaxRetries`, `TTL`, kích thước batch), một lần chạy symbolic có thể quét cả khoảng. Lưu ý giới hạn khoảng với cận không hằng ở trên.
 - **`simulate`.** Chế độ này chọn ngẫu nhiên một dãy action rồi kiểm invariant trên tập con các thực thi chỉ dùng thứ tự action đó; tài liệu nói thường nhanh hơn nhiều so với `check`[^ap-simulate].
-- **Ba loại invariant.** Ngoài invariant trạng thái, Apalache kiểm *action invariant* (dùng biến có dấu phẩy `'`, tức tính chất trên cặp state liền nhau) và *trace invariant* (nhận lịch sử thực thi)[^ap-inv-kinds]; tài liệu khuyên dùng trace invariant cho kiểm thử, còn để kiểm chứng thì nên dùng temporal property[^ap-trace-warning]. Action invariant là lựa chọn tự nhiên cho tính chất "token không đi lùi" thay cho biến lịch sử `stale_applied`: nhận xét của người soạn, chưa chạy.
-- **Trạng thái dự án.** Tài liệu Apalache là trang sống; tên lệnh, cờ và danh sách tính năng hỗ trợ có thể đổi. Kiểm lại trang gốc trước khi dựa vào chi tiết trong chương này.
+- **Ba loại invariant.** Ngoài invariant trạng thái, Apalache còn kiểm *action invariant* (dùng biến có dấu phẩy `'`, tức tính chất trên cặp state liền nhau) và *trace invariant* (nhận lịch sử thực thi)[^ap-inv-kinds]. Tài liệu khuyên dùng trace invariant cho kiểm thử, còn để kiểm chứng thì nên dùng temporal property[^ap-trace-warning]. Action invariant là lựa chọn tự nhiên cho tính chất "token không đi lùi" thay cho biến lịch sử `stale_applied` (nhận xét của người soạn, chưa chạy).
+- **Trạng thái dự án.** Tài liệu Apalache là trang sống: tên lệnh, cờ và danh sách tính năng hỗ trợ có thể đổi. Hãy kiểm lại trang gốc trước khi dựa vào chi tiết trong chương này.
 
 </details>
 
-**Quay lại Q8:** Apalache là bộ kiểm *bổ sung*, không thay thế TLC: nó mạnh ở bất biến quy nạp cho thực thi dài tùy ý và miền số lớn, nhưng đòi kiểu, cần phiên bản TLA+ của spec PlusCal, vẫn bị giới hạn hữu hạn, và không bảo đảm nhanh hơn.
+**Quay lại Q8:** Apalache là bộ kiểm *bổ sung* cho TLC chứ không thay thế nó: với `orders`, nó mạnh ở bất biến quy nạp cho thực thi dài tùy ý và miền số lớn, nhưng đòi gắn kiểu, cần phiên bản TLA+ của spec PlusCal, vẫn bị giới hạn hữu hạn, và không bảo đảm nhanh hơn.
 
 ## Liên hệ với Rust và backend (nhận xét của người soạn)
 
-*Chỗ Rust và công cụ backend đứng trên các khái niệm trên.* Chương này nhấn mạnh: spec chỉ bảo đảm những gì grain of atomicity của nó bảo đảm, nên câu hỏi khi viết code là "bước nguyên tử của spec ứng với cái gì trong chương trình?".
+Phần này chỉ ra Rust và các công cụ backend đứng ở đâu so với các khái niệm trên. Bài học chung: spec chỉ bảo đảm những gì grain of atomicity của nó bảo đảm, nên khi viết code `orders` câu hỏi cần đặt ra là "bước nguyên tử của spec tương ứng với cái gì trong chương trình?".
 
-1. **Một label ↔ một critical section hay một câu lệnh có điều kiện.** Ở mục 2, `Write` kiểm token và ghi trong *một* label. Trong Rust, `AtomicU64::fetch_max` cập nhật giá trị bằng max của giá trị hiện tại và đối số, rồi trả về giá trị cũ[^rust-fetch-max]. Nhưng dùng `fetch_max` để "kiểm token" rồi *ghi dữ liệu thật* ở một lệnh sau là *hai* label — đúng lỗi ở trace (b) mục 2: client token cũ qua phép kiểm, bị chen bởi client token mới, rồi ghi. Fencing đúng cần kiểm và áp dụng trong cùng một mutex, hoặc một câu lệnh có điều kiện ở kho (ví dụ `UPDATE … WHERE fence <= $token`), tức nơi *giữ dữ liệu* làm phép so sánh (nhận xét của người soạn). Memory model của Rust nói thêm về thứ tự các thao tác nguyên tử ở [P4·06](../04-concurrency/06-memory-model.md); lỗi "kiểm rồi mới làm" thuộc họ atomicity violation ở [P4·05 mục 2](../04-concurrency/05-concurrency-bug-va-deadlock.md).
-2. **Timeout ↔ hủy phía client, không hủy việc phía server.** `tokio::time::timeout` trả về `Elapsed` và *hủy* future nếu quá hạn[^tokio-timeout]; việc hủy chỉ xảy ra ở phía bạn. Yêu cầu đã gửi có thể đã chạy ở server: đúng chỗ hở mục 6 mô tả. Hệ quả: gọi API có tác dụng phụ trong `timeout` rồi retry cần idempotency key ở phía server; xem [P7·09 mục 2](../07-io-async/09-async-trong-production.md) (nhận xét của người soạn).
-3. **Pause ↔ điểm chen interleaving.** Spec không cần hành động "pause" vì interleaving bao trùm nó (mục 1). Trong code Rust bất đồng bộ, mỗi `.await` là một chỗ mà task khác chạy xen vào; với thread OS, preempt có thể xảy ra ở bất kỳ chỗ nào. Vì thế mỗi "check rồi act" qua `.await` hay qua hai lệnh nên được coi là hai label (nhận xét của người soạn).
-4. **Outbox, dedup ↔ transaction DB.** Một transaction DB ứng với *một* label ở spec; kiểu của Rust không diễn tả được "DB và broker cùng nguyên tử", đó là lý do outbox ghi tin vào cùng transaction. Phần cài đặt cụ thể (thư viện DB, relay) thuộc chương 10 và [P12·12](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md).
-5. **Spec ↔ code.** Spec kiểm *thiết kế*, không kiểm code: AWS thẳng thắn nói họ không có cách để biết chắc code cài đặt đúng thiết kế đã kiểm[^aws-code]. Cách làm cầu nối (sinh test từ trace, `loom`/`shuttle`/`stateright`, assertion lấy từ bất biến) là nội dung [chương 10](10-tu-dac-ta-den-code-rust.md).
+1. **Một label ứng với một critical section hay một câu lệnh có điều kiện.** Ở mục 2, `Write` kiểm token và ghi trong *một* label. Trong Rust, `AtomicU64::fetch_max` cập nhật giá trị bằng max của giá trị hiện tại và đối số, rồi trả về giá trị cũ[^rust-fetch-max]. Nhưng nếu job đối soát của `orders` dùng `fetch_max` để "kiểm token" rồi *ghi dữ liệu thật* ở một lệnh sau, thì đó là *hai* label, và đúng là lỗi ở trace (b) mục 2: replica token cũ qua phép kiểm, bị replica token mới chen vào, rồi vẫn ghi. Fencing đúng cần kiểm và áp dụng trong cùng một mutex, hoặc trong một câu lệnh có điều kiện ngay ở kho (ví dụ `UPDATE … WHERE fence <= $token`), tức là nơi *giữ dữ liệu* tự làm phép so sánh (nhận xét của người soạn). Memory model của Rust nói thêm về thứ tự các thao tác nguyên tử ở [P4·06](../04-concurrency/06-memory-model.md); lỗi "kiểm rồi mới làm" thuộc họ atomicity violation ở [P4·05 mục 2](../04-concurrency/05-concurrency-bug-va-deadlock.md).
+2. **Timeout chỉ hủy phía client, không hủy việc phía server.** `tokio::time::timeout` trả về `Elapsed` và *hủy* future nếu quá hạn[^tokio-timeout]; việc hủy chỉ xảy ra ở phía bạn. Yêu cầu đã gửi tới cổng thanh toán có thể đã chạy xong ở bên kia, đúng chỗ hở mục 6 mô tả. Vì vậy khi gọi API có tác dụng phụ trong `timeout` rồi retry, server phải có idempotency key; xem [P7·09 mục 2](../07-io-async/09-async-trong-production.md) (nhận xét của người soạn).
+3. **Pause ứng với điểm chen interleaving.** Spec không cần hành động "pause" vì interleaving đã bao trùm nó (mục 1). Trong code Rust bất đồng bộ, mỗi `.await` là chỗ task khác có thể chạy xen vào; với thread OS, preempt có thể xảy ra ở bất kỳ chỗ nào. Vì thế mỗi "check rồi act" qua `.await` hay qua hai lệnh nên coi là hai label (nhận xét của người soạn).
+4. **Outbox và dedup ứng với transaction DB.** Một transaction DB tương ứng với *một* label trong spec. Hệ thống kiểu của Rust không diễn tả được "DB và broker cùng nguyên tử", đó là lý do outbox ghi tin vào cùng transaction với dữ liệu. Phần cài đặt cụ thể (thư viện DB, relay) thuộc chương 10 và [P12·12](../12-he-thong-du-lieu/12-dung-dan-va-tich-hop-du-lieu.md).
+5. **Spec kiểm thiết kế, không kiểm code.** AWS thẳng thắn nói họ không có cách để biết chắc code cài đặt đúng thiết kế đã kiểm[^aws-code]. Cách làm cầu nối (sinh test từ trace, `loom`/`shuttle`/`stateright`, assertion lấy từ bất biến) là nội dung của [chương 10](10-tu-dac-ta-den-code-rust.md).
 
 ## Tóm tắt
 
-- Mô hình hóa backend là chọn: biến ở nơi dữ liệu có thể bất đồng, label ở ranh giới nguyên tử của hệ thật, lỗi môi trường thành hành động, thời gian thành "có thể xảy ra bất cứ lúc nào" (mục 1).
-- Pause không cần mô hình riêng: interleaving đã bao trùm; "check rồi act" qua hai label luôn là một cửa sổ lỗi.
-- Lease một mình hỏng khi chủ cũ bị pause; fencing token chỉ an toàn khi kho kiểm token *và* ghi trong cùng bước nguyên tử và token tăng đơn điệu (mục 2).
-- At-least-once nghĩa là spec phải cho phép giao lặp; idempotent đúng khi bản ghi dedup cùng bước nguyên tử với tác dụng phụ (mục 3).
-- Cache-aside: tính chất đúng là "khi yên, cache trống hoặc bằng DB"; stale set là reader giữ giá trị cũ qua một lần ghi + xóa; lease token hay thứ tự thao tác đúng chặn nó (mục 4).
-- Outbox biến dual write thành một transaction cộng một relay lặp lại được; trùng lặp là cái giá; bất biến lõi là `db_orders = outbox` (mục 5).
-- Retry với timeout cần idempotency phía server; bão retry (hiệu năng nổi lên) nằm ngoài tầm TLA+ theo chính AWS (mục 6).
-- Không gian trạng thái: mô hình nhỏ trước, mũ theo tham số, symmetry/ngân sách/constraint/view có cái giá, tách safety khỏi liveness, và chỉ tin "không lỗi" sau khi thấy mô hình bắt được lỗi ở chế độ sai (mục 7).
-- Apalache kiểm bất biến quy nạp và miền số lớn nhờ SMT, nhưng đòi kiểu, giới hạn hữu hạn và không đảm bảo nhanh hơn TLC (mục 8).
-- Mọi kết luận "vi phạm" trong chương là suy luận có nhãn kèm trace tay, chưa chạy TLC/Apalache.
+- Mô hình hóa backend là chọn: biến ở nơi dữ liệu có thể lệch nhau, label ở ranh giới nguyên tử của hệ thật, lỗi môi trường thành hành động, thời gian thành "có thể xảy ra bất cứ lúc nào" (mục 1).
+- Pause không cần mô hình riêng vì interleaving đã bao trùm nó; "check rồi act" qua hai label luôn là một cửa sổ lỗi.
+- Lease một mình hỏng khi chủ cũ bị pause. Fencing token chỉ an toàn khi kho kiểm token *và* ghi trong cùng bước nguyên tử, và token tăng đơn điệu (mục 2).
+- At-least-once nghĩa là spec phải cho phép giao lặp; consumer idempotent đúng khi bản ghi dedup nằm cùng bước nguyên tử với tác dụng phụ (mục 3).
+- Cache-aside: tính chất đúng là "khi yên, cache trống hoặc bằng DB". Stale set là reader giữ giá trị cũ qua một lần ghi và xóa; lease token hoặc thứ tự thao tác đúng chặn được nó (mục 4).
+- Outbox biến dual write thành một transaction cộng một relay lặp lại được; trùng lặp là cái giá, và bất biến lõi là `db_orders = outbox` (mục 5).
+- Retry kèm timeout cần idempotency phía server; bão retry (hiệu năng nổi lên) nằm ngoài tầm TLA+ theo chính AWS (mục 6).
+- Về không gian trạng thái: mô hình nhỏ trước, số state tăng mũ theo tham số, symmetry, ngân sách, constraint và view đều có cái giá, kiểm safety tách khỏi liveness, và chỉ tin "không lỗi" sau khi thấy mô hình bắt được lỗi ở chế độ sai (mục 7).
+- Apalache kiểm bất biến quy nạp và miền số lớn nhờ SMT, nhưng đòi gắn kiểu, vẫn bị giới hạn hữu hạn và không bảo đảm nhanh hơn TLC (mục 8).
+- Mọi kết luận "vi phạm" trong chương là suy luận có nhãn kèm trace tay, chưa chạy TLC hay Apalache.
 
 ## Câu hỏi tự kiểm tra
 
@@ -952,7 +964,7 @@ flowchart TD
 9. Không có trần thì số attempt và nội dung `req_net` vô hạn: mô hình không hữu hạn. Spec chỉ biểu diễn logic tác dụng phụ; bão retry là hiệu ứng tải/thời gian nổi lên, AWS nói chưa biết cách khả thi để mô hình hóa[^aws-emergent-no].
 10. Có: TLC kiểm invariant trên state mới trước, rồi mới xét `Constraint`[^ss-alg-inv]. Nhưng constraint cắt hành vi nên liveness có thể đánh giá sai[^lt-bound-warning].
 11. Khoảng n! lần với n process hoán vị được[^ss-sym]. Với liveness, TLC có thể bỏ sót lỗi, báo lỗi không có thật hoặc in counterexample sai[^ss-sym-liveness].
-12. (i) Trạng thái đầu thỏa `TypeOK /\ IndInv`; (ii) từ state thỏa `TypeOK /\ IndInv`, bước `Next` dẫn tới state thỏa lại[^ap-ind]. PlusCal translator xóa comment nên chú thích kiểu không đặt trực tiếp trong PlusCal; module kiểu dùng `INSTANCE` thay các `CONSTANT`/`VARIABLE` có kiểu và không bị ghi đè khi PlusCal đổi[^ap-pluscal][^ap-instance].
+12. (i) Trạng thái đầu thỏa `TypeOK /\ IndInv`; (ii) từ state thỏa `TypeOK /\ IndInv`, bước `Next` dẫn tới state thỏa lại[^ap-ind]. Bộ dịch PlusCal xóa comment nên chú thích kiểu không đặt trực tiếp trong PlusCal[^ap-pluscal]. Module kiểu dùng `INSTANCE` để thay các `CONSTANT`/`VARIABLE` có kiểu, và không bị ghi đè khi PlusCal đổi[^ap-instance].
 
 </details>
 

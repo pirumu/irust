@@ -4,43 +4,71 @@
 
 ## Bạn sẽ hiểu được gì
 
-- **Q1.** Disposition, default action, pending, mask, delivery khác nhau ở đâu; handler thực sự chạy lúc nào? → mục 2
-- **Q2.** Signal chuẩn khác signal real-time thế nào? → mục 3
-- **Q3.** `sigaction`, `sigprocmask`, `pthread_sigmask` làm gì? → mục 4
-- **Q4.** `EINTR` từ đâu ra và `SA_RESTART` cứu được gì? → mục 5
-- **Q5.** Vì sao handler chỉ được gọi hàm async-signal-safe? → mục 6
-- **Q6.** Vì sao handler `SIGCHLD` phải lặp `waitpid`; `SIGPIPE`/`EPIPE` hoạt động ra sao? → mục 7
-- **Q7.** `SIGTERM` khác `SIGKILL` thế nào; graceful shutdown dựa vào đâu; PID 1 trong container đặc biệt chỗ nào? → mục 8
-- **Q8.** `signalfd(2)` và `sigwaitinfo(2)` giải quyết vấn đề gì; signal tương tác với thread ra sao? → mục 9
+1. **Q1.** Một signal đi từ lúc phát sinh tới lúc handler của `orders` chạy qua những bước nào? Disposition, pending, mask, delivery là gì và handler thực sự chạy lúc nào? → mục 2
+2. **Q2.** Vì sao ba `SIGCHLD` đến sát nhau có thể chỉ gọi handler một lần, còn signal real-time thì không? → mục 3
+3. **Q3.** `sigaction`, `sigprocmask`, `pthread_sigmask` mỗi cái chỉnh cái gì? → mục 4
+4. **Q4.** Vì sao `read` của một handler thread bỗng trả `EINTR`, và `SA_RESTART` cứu được đến đâu? → mục 5
+5. **Q5.** Vì sao trong handler chỉ được gọi hàm async-signal-safe? → mục 6
+6. **Q6.** Vì sao handler `SIGCHLD` phải lặp `waitpid`, và `SIGPIPE`/`EPIPE` hoạt động ra sao? → mục 7
+7. **Q7.** `SIGTERM` khác `SIGKILL` thế nào, graceful shutdown dựa vào đâu, và PID 1 trong container đặc biệt chỗ nào? → mục 8
+8. **Q8.** `signalfd(2)` và `sigwaitinfo(2)` giải quyết vấn đề gì, và signal tương tác với thread ra sao? → mục 9
 
 ## Kiến thức cần trước
+
+Chương này dùng lại service `orders` của [Chương 01](01-os-va-kernel.md): một process Rust chạy trên Linux, có main thread `accept` kết nối và vài handler thread. Ở đây ta cho nó chạy trong một Pod Kubernetes.
 
 - [Chương 01 — OS và kernel](01-os-va-kernel.md): user mode/kernel mode, trap, interrupt (cần cho mục 2).
 - [Chương 02 — System call](02-system-call.md): trap, `errno`, wrapper libc.
 - [Chương 03 — Process](03-process.md): `fork`/`exec`/`wait`, zombie, orphan, process group.
 - [Chương 04 — File descriptor và VFS](04-file-descriptor-va-vfs.md): fd, pipe (cần cho `SIGPIPE` và `signalfd`).
 
+---
+
 ## 1. Signal giải quyết vấn đề gì
 
-Một process cần được báo về những sự kiện *không do nó chủ động hỏi*: Ctrl-C, con vừa chết, ghi vào pipe không còn reader, orchestrator muốn dừng nó. Hệ signal là hạ tầng chuyển những sự kiện bên ngoài như vậy tới process, kèm cách nhận và xử lý chúng trong process[^ostep-signals]; `kill()` gửi signal tới một process hoặc một process group[^kill-send]. Theo nhận xét của người soạn, signal *bất đồng bộ* (đến lúc nào không báo trước) và khó dùng đúng vì hai điều, sẽ gặp ở các mục sau: handler (hàm bạn đăng ký để chạy khi signal tới) chạy chen vào chương trình ở chỗ không báo trước (mục 2 và mục 6), và signal chuẩn có thể bị gộp (mục 3).
+Một service chạy lâu luôn có những sự kiện mà nó không tự đi hỏi. Kubelet quyết định dừng Pod chứa `orders`. Một process con `pdf-gen`, chuyên render hóa đơn PDF, vừa chết (nhận xét của người soạn: `pdf-gen` là ví dụ giả định). Một handler thread ghi vào pipe tới process con mà con đã đóng đầu đọc. Khi chạy thử trên máy mình, bạn bấm Ctrl-C. Trong cả bốn trường hợp `orders` đang làm việc khác, và OS cần một cách để báo tin cho nó.
+
+Cách đó là signal: hạ tầng của OS để chuyển các sự kiện từ bên ngoài tới process, kèm cách để process nhận và xử lý chúng[^ostep-signals]. Process cũng tự gửi được: `kill()` gửi một signal bất kỳ tới một process hoặc một process group[^kill-send].
+
+Signal khó dùng đúng vì hai lẽ, và ta sẽ gặp cả hai ở các mục sau (nhận xét của người soạn). Thứ nhất, signal *bất đồng bộ*: nó đến lúc nào không ai báo trước, và handler, tức hàm bạn đăng ký để chạy khi signal tới, chen vào chương trình ở một chỗ tùy ý (mục 2 và mục 6). Thứ hai, signal chuẩn có thể bị gộp, nên đếm số signal nhận được không cho ra số sự kiện (mục 3).
+
+---
 
 ## 2. Mô hình: disposition, pending, mask, delivery (Q1)
 
-> **Trả lời ngắn.** Mỗi signal có một *disposition* — cách process phản ứng khi signal được *deliver* (giao tới nó): làm hành động mặc định, bỏ qua, hoặc chạy một hàm do bạn đăng ký, gọi là *handler*[^sig-disp][^sig-choose]. Signal đã sinh ra nhưng đang bị chặn (block) thì nằm chờ ở trạng thái *pending* cho đến khi được bỏ chặn[^sig-pending]. Disposition thuộc về cả process, còn danh sách signal đang bị chặn (*mask*) thuộc về từng thread[^sig-perproc][^sig-thread-mask]. Handler được gọi vào lúc kernel quay thread về user mode[^sig-delivery-check].
+> **Trả lời ngắn.** Mỗi signal có một *disposition*, tức cách process phản ứng khi signal được *deliver* (giao tới nó): làm hành động mặc định, bỏ qua, hoặc chạy một hàm do bạn đăng ký, gọi là *handler*[^sig-disp]. Signal đã phát sinh mà đang bị chặn (block) thì nằm chờ ở trạng thái *pending* cho tới khi được bỏ chặn[^sig-pending]. Disposition là của cả process, còn danh sách signal đang bị chặn, gọi là *mask*, là của từng thread[^sig-thread-mask]. Handler không chạy ngay lúc signal phát sinh mà chạy khi kernel đưa thread về user mode[^sig-delivery-check].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): signal giống cuộc gọi đến một công ty. Disposition là quy định của công ty cho từng loại cuộc gọi (chuyển cho nhân viên nào, hay bỏ qua); mask là chế độ "không làm phiền" của từng nhân viên: cuộc gọi đến lúc đó không mất, chỉ nằm chờ đến khi nhân viên tắt chế độ này.
+*Với service `orders`.* Giả sử Pod chứa `orders` bị dừng và kubelet gửi `SIGTERM` tới nó (mục 8 nói kỹ phần Kubernetes). Lúc đó một handler thread có thể đang ghi dở một đơn hàng. Câu hỏi của mục này: signal tới thì process phản ứng thế nào, thread nào nhận, và handler xen vào chỗ nào của code đang chạy? Để trả lời cần ba khái niệm: disposition, pending và mask.
 
-**Bước 1: disposition và hành động mặc định.** Mỗi signal có một disposition hiện tại, quyết định process phản ứng ra sao khi signal được *deliver* (giao tới process)[^sig-disp]. Hành động mặc định là một trong năm loại: `Term` (kết thúc process), `Ign` (bỏ qua), `Core` (kết thúc và ghi core dump), `Stop` (dừng process), `Cont` (tiếp tục nếu đang dừng)[^sig-actions]. Process đổi disposition bằng `sigaction(2)` (hoặc `signal(2)`, kém portable khi đặt handler) để chọn một trong ba: làm mặc định, bỏ qua, hoặc *bắt* bằng *signal handler* — một hàm do lập trình viên viết, tự động được gọi khi signal được deliver[^sig-choose].
+### 2.1 Disposition và hành động mặc định
 
-**Bước 2: phạm vi và thừa kế.** Disposition là thuộc tính **theo process**: process nhiều thread thì disposition của một signal giống nhau cho mọi thread[^sig-perproc]. `fork` cho con bản sao disposition của cha; `execve` đặt lại disposition của signal *có handler* về mặc định, còn signal *bị ignore* thì giữ nguyên[^sig-fork-exec]. Lý do có lẽ là địa chỉ code handler của chương trình cũ không còn tồn tại sau `execve` (suy luận của người soạn, man page không nêu lý do).
+Mỗi signal có một disposition hiện tại, quyết định process phản ứng ra sao khi signal được deliver[^sig-disp]. Nếu bạn không đăng ký gì thì kernel chạy hành động mặc định của signal đó, và hành động này thuộc một trong năm loại: `Term` (kết thúc process), `Ign` (bỏ qua), `Core` (kết thúc và ghi core dump), `Stop` (dừng process), `Cont` (tiếp tục nếu đang dừng)[^sig-actions].
 
-**Bước 3: hai signal không thể can thiệp.** `SIGKILL` và `SIGSTOP` không thể bị catch, block hay ignore[^sig-uncatchable]. `sigaction` trả `EINVAL` nếu bạn thử đổi hành động của chúng[^sigaction-einval].
+Muốn đổi, process gọi `sigaction(2)` (hoặc `signal(2)`, kém portable khi đặt handler) để chọn một trong ba cách: giữ mặc định, bỏ qua, hoặc *bắt* signal bằng một handler, là hàm do lập trình viên viết và kernel tự gọi khi signal tới[^sig-choose].
 
-**Bước 4: pending và mask.** Một signal có thể bị *block*: nó sẽ không được deliver cho đến khi được unblock. Khoảng thời gian từ lúc signal được sinh ra đến lúc được deliver gọi là *pending*[^sig-pending]. Mỗi thread có *signal mask* riêng, là tập signal thread đó đang block[^sig-thread-mask].
+Có hai signal bạn không đổi được. `SIGKILL` và `SIGSTOP` không thể bị catch, block hay ignore[^sig-uncatchable]. Nếu thử đổi hành động của chúng thì `sigaction` trả `EINVAL`[^sigaction-einval].
 
-**Bước 5: signal đi tới đâu.** Có hai kiểu đích. *Process-directed*: nhắm vào cả process (do `kill(2)`, `sigqueue(3)`, hoặc kernel sinh ra không vì hardware exception)[^sig-procdir]. *Thread-directed*: nhắm một thread cụ thể, ví dụ vì một lệnh máy gây hardware exception (`SIGSEGV` do truy cập bộ nhớ sai, `SIGFPE` do lỗi số học) hoặc vì gửi tới một thread cụ thể bằng `tgkill(2)`/`pthread_kill(3)`[^sig-hw][^sig-tgkill]. Signal process-directed có thể được deliver cho *bất kỳ* thread nào đang không block nó; nếu nhiều thread cùng không block, kernel chọn một thread tùy ý[^sig-directed].
+### 2.2 Phạm vi và thừa kế
+
+Disposition là thuộc tính của process: process nhiều thread thì mọi thread dùng chung một disposition cho mỗi signal[^sig-perproc]. Vì vậy handler `SIGTERM` do thread nào của `orders` cài thì cũng có hiệu lực cho cả main thread lẫn các handler thread.
+
+Khi `orders` sinh process con `pdf-gen`, hai lời gọi xử lý disposition khác nhau. `fork` cho con một bản sao disposition của cha. `execve` thì đặt lại disposition của các signal *có handler* về mặc định, còn signal đang *bị ignore* thì giữ nguyên[^sig-fork-exec]. Lý do có lẽ là sau `execve` code handler của chương trình cũ không còn trong bộ nhớ (suy luận của người soạn; man page không nêu lý do).
+
+### 2.3 Pending và mask
+
+Một signal có thể bị *block*: kernel sẽ không deliver nó cho tới khi nó được unblock. Khoảng thời gian từ lúc signal phát sinh tới lúc được deliver gọi là *pending*[^sig-pending]. Mỗi thread có một *signal mask* riêng, là tập signal mà thread đó đang block[^sig-thread-mask]. Chẳng hạn nếu mọi thread của `orders` đều block `SIGTERM` thì signal không mất; nó nằm pending cho tới khi một thread unblock (nhận xét của người soạn, suy ra từ hai định nghĩa trên).
+
+### 2.4 Signal đi tới thread nào
+
+Process nhiều thread còn một câu hỏi nữa: signal rơi vào thread nào? Có hai kiểu đích. Signal *process-directed* nhắm vào cả process, do `kill(2)`, `sigqueue(3)` hoặc do kernel sinh ra không vì hardware exception[^sig-procdir]. Signal *thread-directed* nhắm một thread cụ thể, ví dụ khi một lệnh máy gây hardware exception (`SIGSEGV` do truy cập bộ nhớ sai, `SIGFPE` do lỗi số học)[^sig-hw]. Gửi thẳng tới một thread bằng `tgkill(2)`/`pthread_kill(3)` cũng cho signal loại này[^sig-tgkill].
+
+`SIGTERM` mà kubelet gửi cho `orders` thuộc loại process-directed. Kernel có thể giao nó cho bất kỳ thread nào đang không block, và nếu nhiều thread cùng không block thì chọn tùy ý[^sig-directed]. Nên bạn đừng giả định main thread là nơi nhận.
+
+### 2.5 Handler thực sự chạy lúc nào
+
+Hình dưới gộp các bước trên thành một đường đi của signal:
 
 ```mermaid
 flowchart TD
@@ -53,7 +81,7 @@ flowchart TD
   D -->|"handler"| H["kernel dựng frame trên stack,<br/>gọi handler"]
 ```
 
-**Bước 6: khi nào handler thực sự chạy.** Theo man page: mỗi khi có chuyển từ kernel mode sang user mode (ví dụ khi return từ system call, hoặc khi một thread được lên lịch chạy lại), kernel kiểm tra xem có signal pending, không bị block, mà process đã đặt handler hay không[^sig-delivery-check]. Nếu có, kernel làm các bước sau (nhận xét của người soạn: đây không phải interrupt phần cứng; về trap, interrupt và chuyển giữa kernel mode với user mode xem [Chương 01, mục 3 và 4](01-os-va-kernel.md)):
+Handler không chạy ngay lúc signal phát sinh. Mỗi khi một thread chuyển từ kernel mode về user mode, chẳng hạn khi return từ system call hoặc khi được xếp lịch chạy lại, kernel kiểm tra xem có signal nào đang pending, không bị block, mà process đã đặt handler hay không[^sig-delivery-check]. Đây không phải interrupt phần cứng (nhận xét của người soạn; về trap, interrupt và chuyển giữa hai chế độ xem [Chương 01, mục 3 và 4](01-os-va-kernel.md)). Nếu có, kernel dựng bối cảnh gọi handler như sau:
 
 ```mermaid
 sequenceDiagram
@@ -71,35 +99,49 @@ sequenceDiagram
   K->>U: khôi phục thanh ghi + mask, chạy tiếp chỗ bị ngắt
 ```
 
-Hệ quả: mặc định handler chạy trên stack bình thường của chính thread bị ngắt[^sig-stack-default], và sau khi handler return thì thread chạy tiếp ở đúng chỗ nó bị ngắt[^sig-resume]. Từ đó (suy luận của người soạn) handler có thể được gọi khi thread đang ở giữa một hàm thư viện, và đó là gốc của vấn đề ở mục 6.
+Mặc định handler chạy trên stack bình thường của chính thread bị ngắt[^sig-stack-default]. Khi handler return, thread chạy tiếp đúng chỗ nó bị ngắt[^sig-resume]. Từ đó suy ra (suy luận của người soạn) rằng handler có thể xen vào giữa một hàm thư viện đang chạy dở trên thread đó, và đây là gốc của vấn đề ở mục 6.
 
 <details><summary>Đi sâu: frame trên stack, trampoline, số hiệu signal</summary>
 
-Signal bị gỡ khỏi tập pending trước khi handler chạy; nếu handler được cài bằng `sigaction(2)` với cờ `SA_ONSTACK` và thread đã khai báo stack thay thế bằng `sigaltstack(2)` thì kernel dùng stack đó[^sig-frame]. Ngữ cảnh được lưu vào một frame trên stack gồm PC, trạng thái thanh ghi cần để chạy lại chương trình, signal mask và thiết lập stack thay thế của thread[^sig-frame-list]. Trong lúc handler chạy, `sa_mask` và chính signal đang deliver bị thêm vào mask (trừ khi dùng `SA_NODEFER`)[^sig-mask-during]. Khi handler return, signal trampoline gọi `sigreturn(2)` để khôi phục trạng thái, kể cả mask[^sig-trampoline]. Kernel không ghi lại trạng thái đặc biệt nào cho biết thread "đang ở trong handler"[^sig-nokernelstate].
+Trước khi chạy handler, kernel gỡ signal khỏi tập pending. Nếu handler được cài bằng `sigaction(2)` với cờ `SA_ONSTACK` và thread đã khai báo stack thay thế bằng `sigaltstack(2)` thì kernel dùng stack đó. Rồi nó lưu ngữ cảnh vào một frame đặc biệt trên stack[^sig-frame]. Frame chứa PC, trạng thái thanh ghi cần để chạy lại chương trình, signal mask và thiết lập stack thay thế của thread[^sig-frame-list]. Trong lúc handler chạy, `sa_mask` và chính signal đang deliver bị thêm vào mask, trừ khi dùng `SA_NODEFER`[^sig-mask-during]. Khi handler return, signal trampoline gọi `sigreturn(2)` để khôi phục trạng thái, kể cả mask[^sig-trampoline].
 
-Số hiệu signal phụ thuộc kiến trúc: bảng của man page có cột riêng cho x86/ARM (và đa số kiến trúc khác), Alpha/SPARC, MIPS, PARISC[^sig-num-arch]; code portable nên dùng tên macro (nhận xét của người soạn). Ở cột x86/ARM, `SIGKILL` là 9[^sig-num-kill], `SIGTERM` là 15[^sig-num-term], `SIGCHLD` là 17[^sig-num-chld]. `SIGCHLD` mặc định là `Ign`[^sig-tbl-chld], `SIGINT` là `Term`[^sig-tbl-int].
+Số hiệu signal phụ thuộc kiến trúc: bảng của man page có cột riêng cho x86/ARM (và đa số kiến trúc khác), Alpha/SPARC, MIPS, PARISC[^sig-num-arch]. Vì vậy code portable nên dùng tên macro thay vì số (nhận xét của người soạn). Ở cột x86/ARM:
+
+- `SIGKILL` là 9[^sig-num-kill].
+- `SIGTERM` là 15[^sig-num-term].
+- `SIGCHLD` là 17[^sig-num-chld].
+
+Hành động mặc định của `SIGCHLD` là `Ign`[^sig-tbl-chld].
 
 </details>
 
-**Quay lại Q1:** disposition (theo process) quyết định phản ứng, mask (theo thread) quyết định signal nào phải chờ ở trạng thái pending, và handler được gọi lúc kernel quay thread về user mode khi thấy signal pending, không bị block và có handler.
+**Quay lại Q1:** disposition (theo process) quyết định phản ứng, mask (theo thread) quyết định signal nào phải chờ ở pending, và handler được gọi lúc kernel đưa thread về user mode, khi thấy có signal pending, không bị block và có handler.
+
+---
 
 ## 3. Signal chuẩn và signal real-time (Q2)
 
-> **Trả lời ngắn.** Signal chuẩn (như `SIGINT`, `SIGTERM`, `SIGCHLD`) không xếp hàng: nếu cùng loại gửi nhiều lần trong lúc đang bị chặn thì chỉ còn một cái đang chờ[^sig-noqueue]. Signal real-time (dải `SIGRTMIN`…`SIGRTMAX`) thì xếp hàng được, giữ thứ tự gửi và mang theo được một giá trị[^sig-rt-queue][^sig-rt-order][^sig-rt-sigqueue]. Vì thế (nhận xét của người soạn), với signal chuẩn đừng dùng số lần nhận signal làm số lần sự kiện.
+> **Trả lời ngắn.** Signal chuẩn (như `SIGINT`, `SIGTERM`, `SIGCHLD`) không xếp hàng: nếu cùng một loại phát sinh nhiều lần trong lúc đang bị chặn thì chỉ còn một cái pending[^sig-noqueue]. Signal real-time (dải `SIGRTMIN`…`SIGRTMAX`) thì xếp hàng được và được deliver theo đúng thứ tự gửi[^sig-rt-order]. Gửi bằng `sigqueue(3)` thì còn kèm được một giá trị[^sig-rt-sigqueue]. Vì vậy với signal chuẩn, đừng lấy số lần nhận signal làm số lần sự kiện (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): signal chuẩn như một lá cờ trên hộp thư: cờ đã dựng thì có thêm mười người bấm chuông cũng chỉ thấy một lá cờ. Signal real-time như một chồng thư: mỗi lá được giữ lại và đọc theo thứ tự.
+*Với service `orders`.* Giả sử ba process `pdf-gen` render xong gần như cùng lúc và cùng thoát. Kernel gửi cho `orders` ba `SIGCHLD`, và bạn nghĩ handler sẽ chạy ba lần. Có thể nó chỉ chạy một lần. Mục 7 sẽ cho thấy hậu quả, còn mục này giải thích vì sao.
+
+### 3.1 Signal chuẩn bị gộp, real-time thì không
+
+Với signal chuẩn, ba lần phát sinh khi đang bị block chỉ để lại một signal pending, nên sau khi unblock nó được deliver đúng một lần[^sig-noqueue]. Signal real-time thì khác: mỗi lần gửi là một phần tử trong hàng đợi. Bảng dưới so sánh hai loại:
 
 | | Signal chuẩn (standard) | Real-time |
 |---|---|---|
 | Hàng đợi | không queue: nhiều lần sinh khi đang bị block chỉ còn một pending[^sig-noqueue] | nhiều instance cùng loại được queue[^sig-rt-queue] |
-| Thứ tự deliver | không xác định[^sig-order-std] | có bảo đảm: cùng loại theo thứ tự gửi[^sig-rt-order]; khác loại thì số thấp trước[^sig-rt-order2] |
+| Thứ tự deliver | không xác định[^sig-order-std] | có bảo đảm: cùng loại theo thứ tự gửi[^sig-rt-order] |
 | Dữ liệu đi kèm | lần đến sau không ghi đè `siginfo_t` của lần đang pending: process nhận thông tin của lần đầu[^sig-siginfo-first] | `sigqueue(3)` gửi kèm một số nguyên hoặc con trỏ[^sig-rt-sigqueue] |
 
-Signal real-time không có ý nghĩa định sẵn[^sig-rt-meaning] và nếu không có handler thì mặc định cũng kết thúc process[^sig-rt-default].
+Real-time signal không có ý nghĩa định sẵn; ứng dụng tự quy ước dùng chúng vào việc gì[^sig-rt-meaning].
 
-**Thí nghiệm: signal chuẩn bị gộp, real-time thì không.** Đã chạy trong container Linux aarch64: block `SIGUSR1` và `SIGRTMIN`, gửi mỗi loại 3 lần (`raise` cho `SIGUSR1`, `sigqueue` cho `SIGRTMIN`), rồi `sigpending`, rồi unblock. Kết quả:
+### 3.2 Thử: signal chuẩn bị gộp, real-time thì không
+
+Đã chạy trong container Linux aarch64: block `SIGUSR1` và `SIGRTMIN`, gửi mỗi loại 3 lần (`raise` cho `SIGUSR1`, `sigqueue` cho `SIGRTMIN`), rồi `sigpending`, rồi unblock. Kết quả:
 
 ```text
 pending USR1=1 RTMIN=1
@@ -110,135 +152,191 @@ handler calls after unblock (3 USR1 + 3 RT sent) = 4
 
 <details><summary>Đi sâu: dải số real-time, SIGRTMIN, giới hạn hàng đợi</summary>
 
-Kernel Linux hỗ trợ 33 signal real-time đánh số 32 đến 64, nhưng glibc dùng nội bộ một số và điều chỉnh `SIGRTMIN`[^sig-rt-range], nên chương trình phải dùng `SIGRTMIN+n` thay vì số cứng[^sig-rt-hard]. Số signal có thể queue bị giới hạn theo từng user bằng `RLIMIT_SIGPENDING`[^sig-rtlimit] (về giới hạn tài nguyên nói chung: [Chương 06, mục 6](06-user-quyen-proc-sys.md)).
+Kernel Linux hỗ trợ 33 signal real-time đánh số từ 32 đến 64. Nhưng glibc dùng nội bộ một vài signal trong số đó và chỉnh lại `SIGRTMIN`[^sig-rt-range]. Vì vậy chương trình phải viết `SIGRTMIN+n` thay vì số cứng[^sig-rt-hard]. Khi nhiều signal real-time khác loại cùng pending thì deliver từ số thấp tới số cao[^sig-rt-order2]. Signal real-time không có handler thì mặc định cũng kết thúc process[^sig-rt-default]. Số signal có thể queue bị giới hạn theo từng user bằng `RLIMIT_SIGPENDING`[^sig-rtlimit] (về giới hạn tài nguyên nói chung: [Chương 06, mục 6](06-user-quyen-proc-sys.md)).
 
 </details>
 
-**Quay lại Q2:** signal chuẩn bị gộp khi chờ, real-time thì xếp hàng có thứ tự và mang dữ liệu; vì vậy một `SIGCHLD` có thể đại diện cho nhiều sự kiện.
+**Quay lại Q2:** signal chuẩn bị gộp khi chờ, real-time thì xếp hàng có thứ tự và mang dữ liệu; vì vậy một `SIGCHLD` có thể đại diện cho nhiều process con vừa chết.
+
+---
 
 ## 4. Các system call điều khiển: `sigaction`, `sigprocmask`, `pthread_sigmask` (Q3)
 
-> **Trả lời ngắn.** `sigaction` cho process đổi cách phản ứng với một signal (đặt handler, cờ, các signal bị chặn trong lúc handler chạy)[^sigaction-desc]. `sigprocmask` và `pthread_sigmask` đổi danh sách signal đang bị chặn của thread gọi[^sigprocmask-desc]. Chương trình nhiều thread nên dùng `pthread_sigmask`[^sigprocmask-mt][^pthsig-same].
+> **Trả lời ngắn.** `sigaction` cho process đổi cách phản ứng với một signal: đặt handler, đặt cờ, và chọn những signal bị chặn trong lúc handler chạy[^sigaction-desc]. `sigprocmask` và `pthread_sigmask` đổi danh sách signal đang bị chặn của thread gọi[^sigprocmask-desc]. Chương trình nhiều thread nên dùng `pthread_sigmask`[^pthsig-same].
 
 **Giải thích.**
 
-Theo hình dung ở mục 2 (nhận xét của người soạn): `sigaction` là sửa quy định của công ty, còn `pthread_sigmask` là bật/tắt chế độ "không làm phiền" của riêng một nhân viên.
+*Với service `orders`.* Muốn shutdown êm, `orders` phải bắt `SIGTERM`, và việc đó làm bằng `sigaction`. Muốn các thread của nó không bị signal chen vào lúc không muốn, nó chặn signal bằng `pthread_sigmask`. Mục này là bản liệt kê hai nhóm API đó. Lưu ý một phân công: `sigaction` đổi chuyện của cả process, còn mask thì chỉ đổi cho một thread.
 
-**`sigaction(2)`.** Nó đổi hành động của process khi nhận một signal; `signum` là signal hợp lệ bất kỳ trừ `SIGKILL` và `SIGSTOP`[^sigaction-desc]. Gọi với `act` là `NULL` để *đọc* hành động hiện tại[^sigaction-query]. Trong `struct sigaction`:
+### 4.1 `sigaction(2)`
 
-- `sa_handler`: `SIG_DFL`, `SIG_IGN`, hoặc con trỏ hàm nhận số signal làm đối số duy nhất[^sigaction-handler].
-- `sa_sigaction` + cờ `SA_SIGINFO`: handler nhận ba đối số, thứ hai là con trỏ `siginfo_t` chứa thông tin thêm về signal[^sigaction-siginfo][^sigaction-info-arg]. Với `SIGCHLD`, nó điền `si_pid`, `si_uid`, `si_status`… cho con liên quan[^sigaction-chld-info].
-- `sa_mask`: signal bị block *trong khi handler chạy*; signal gây ra handler cũng bị block trừ khi dùng `SA_NODEFER`[^sigaction-mask].
-- `sa_flags`: đáng nhớ là `SA_RESTART` (mục 5)[^sigaction-restart], `SA_ONSTACK` (chạy handler trên stack thay thế khai báo bằng `sigaltstack(2)`, xem phần Đi sâu ở mục 2)[^sig-frame], `SA_NOCLDSTOP` và `SA_NOCLDWAIT` (chỉ có nghĩa với `SIGCHLD`)[^sigaction-nocldstop][^sigaction-nocldwait], `SA_RESETHAND` (về mặc định khi vào handler)[^sigaction-resethand].
+`sigaction` đổi hành động của process khi nhận một signal. Tham số `signum` là signal hợp lệ bất kỳ trừ `SIGKILL` và `SIGSTOP`[^sigaction-desc]. Gọi với `act` là `NULL` thì nó chỉ *đọc* hành động hiện tại[^sigaction-query]. Các trường quan trọng của `struct sigaction`:
 
-**Vì sao không dùng `signal(2)`?** signal(7) ghi `signal(2)` kém portable khi thiết lập handler[^sig-signal-portable]; chi tiết nằm ở man page signal(2), chương này chưa đối chiếu trang đó. Quy tắc thực dụng (nhận xét của người soạn): dùng `sigaction` để mask, restart, one-shot do bạn chỉ định.
+- `sa_handler`: một trong `SIG_DFL` (mặc định), `SIG_IGN` (bỏ qua), hoặc con trỏ hàm nhận số signal làm đối số duy nhất[^sigaction-handler].
+- `sa_sigaction` cùng cờ `SA_SIGINFO`: handler nhận ba đối số thay vì một[^sigaction-siginfo]. Đối số thứ hai là con trỏ `siginfo_t`, chứa thêm thông tin về signal[^sigaction-info-arg]. Với `SIGCHLD`, nó điền `si_pid`, `si_uid`, `si_status`… cho con liên quan[^sigaction-chld-info].
+- `sa_mask`: các signal bị block *trong khi handler chạy*. Signal gây ra handler cũng bị block, trừ khi dùng `SA_NODEFER`[^sigaction-mask].
+- `sa_flags`, đáng nhớ gồm:
+  - `SA_RESTART`: cho một số system call tự chạy lại sau khi bị signal cắt ngang (mục 5)[^sigaction-restart].
+  - `SA_ONSTACK`: chạy handler trên stack thay thế khai báo bằng `sigaltstack(2)` (xem phần Đi sâu ở mục 2)[^sig-frame].
+  - `SA_NOCLDSTOP`: không nhận `SIGCHLD` khi con chỉ dừng hoặc tiếp tục, chỉ có nghĩa với `SIGCHLD`[^sigaction-nocldstop].
+  - `SA_NOCLDWAIT`: con kết thúc không thành zombie, cũng chỉ dành cho `SIGCHLD`[^sigaction-nocldwait].
+  - `SA_RESETHAND`: về mặc định ngay khi vào handler[^sigaction-resethand].
 
-**`sigprocmask(2)` và `pthread_sigmask(3)`.** `sigprocmask()` đọc/đổi signal mask của thread gọi[^sigprocmask-desc]. Tham số `how` chọn cách đổi: `SIG_BLOCK` đặt mask mới là hợp của mask hiện tại và `set`[^sigprocmask-block]; `SIG_UNBLOCK` bỏ các signal trong `set` khỏi mask, còn `SIG_SETMASK` đặt mask bằng đúng `set`[^sigprocmask-others]. Với `set = NULL`, mask không đổi nhưng giá trị hiện tại vẫn trả về trong `oldset`[^sigprocmask-query]. Cách này dùng để lưu mask cũ rồi khôi phục sau đó (nhận xét của người soạn).
+Còn `signal(2)` thì kém portable khi dùng để đặt handler[^sig-signal-portable]. Lý do chi tiết nằm ở man page `signal(2)`, chương này không đối chiếu trang đó. Quy tắc thực dụng (nhận xét của người soạn): cần tự chọn mask, restart hay one-shot cho handler thì dùng `sigaction`.
 
-Ở chương trình đa thread, hành vi của `sigprocmask` là *unspecified* (chuẩn không quy định); hãy dùng `pthread_sigmask(3)`, giống hệt nhưng POSIX quy định rõ cho đa thread[^sigprocmask-mt][^pthsig-same]. Thread mới thừa kế bản sao mask của thread tạo ra nó[^pthsig-inherit]; con `fork` thừa kế mask của cha và mask được giữ qua `execve`[^sig-maskinherit]. Tập pending thì khác: con `fork` bắt đầu rỗng, còn `execve` giữ nguyên[^sig-pendfork].
+### 4.2 `sigprocmask(2)` và `pthread_sigmask(3)`
 
-Mẫu chống race (nhận xét của người soạn, dựa trên các sự thật trên): `SIG_BLOCK` *trước* khi tạo thread hoặc child để mọi thread mới thừa kế mask đã block, rồi dành một thread hoặc một fd (mục 9) nhận signal đồng bộ.
+`sigprocmask` đọc và đổi signal mask của thread gọi[^sigprocmask-desc]. Tham số `how` chọn cách đổi: `SIG_BLOCK` đặt mask mới là hợp của mask hiện tại và `set`[^sigprocmask-block]; `SIG_UNBLOCK` bỏ các signal trong `set` khỏi mask, còn `SIG_SETMASK` đặt mask bằng đúng `set`[^sigprocmask-others]. Nếu `set` là `NULL` thì mask không đổi, nhưng giá trị hiện tại vẫn trả về trong `oldset`[^sigprocmask-query]. Thói quen thường gặp là lấy mask cũ ra, chặn tạm một số signal, rồi khôi phục mask cũ (nhận xét của người soạn).
+
+Với chương trình đa thread, hành vi của `sigprocmask` là *unspecified*, tức chuẩn không quy định[^sigprocmask-mt]. Thay vào đó hãy dùng `pthread_sigmask(3)`: nó giống hệt `sigprocmask`, chỉ khác là POSIX quy định rõ cách dùng trong chương trình đa thread[^pthsig-same].
+
+### 4.3 Mask đi theo thread, theo `fork` và `execve`
+
+Thread mới thừa kế một bản sao mask của thread tạo ra nó[^pthsig-inherit]. Con tạo bằng `fork` thừa kế mask của cha, và mask được giữ nguyên qua `execve`[^sig-maskinherit]. Tập pending thì khác: con `fork` bắt đầu với tập rỗng, còn `execve` giữ nguyên tập pending[^sig-pendfork].
+
+Từ những điều trên rút ra một mẫu chống race (nhận xét của người soạn). `orders` gọi `SIG_BLOCK` *trước* khi tạo các handler thread hoặc process con, để mọi thread mới sinh ra đã mang mask chặn signal. Sau đó nó dành riêng một thread, hoặc một fd (mục 9), để nhận signal một cách đồng bộ.
 
 <details><summary>Đi sâu: các bẫy với signal phần cứng</summary>
 
-Theo POSIX, hành vi của process là *không xác định* sau khi nó ignore `SIGFPE`, `SIGILL` hoặc `SIGSEGV` không do `kill(2)`/`raise(3)` sinh ra. Man page nêu ví dụ: chia số nguyên cho 0 có thể sinh `SIGFPE` trên một số kiến trúc, và ignore signal này có thể dẫn tới vòng lặp vô tận[^sigaction-hwignore]. Hiểu đơn giản (nhận xét của người soạn): ignore các signal này không làm lỗi phần cứng biến mất.
+Theo POSIX, hành vi của process là *không xác định* sau khi nó ignore `SIGFPE`, `SIGILL` hoặc `SIGSEGV` mà signal đó không do `kill(2)`/`raise(3)` sinh ra. Man page nêu ví dụ: chia số nguyên cho 0 có thể sinh `SIGFPE` trên một số kiến trúc, và ignore signal này có thể dẫn tới vòng lặp vô tận[^sigaction-hwignore]. Hiểu đơn giản (nhận xét của người soạn): ignore không làm lỗi phần cứng biến mất.
 
-Với `sigprocmask`: block `SIGKILL`/`SIGSTOP` bị lờ đi *âm thầm*[^sigprocmask-silent]; `SIGBUS`/`SIGFPE`/`SIGILL`/`SIGSEGV` sinh ra khi đang bị block (không do `kill`/`sigqueue`/`raise`) cho kết quả undefined[^sigprocmask-hw].
+Với `sigprocmask`, việc block `SIGKILL`/`SIGSTOP` bị lờ đi *âm thầm*[^sigprocmask-silent]. Còn nếu `SIGBUS`, `SIGFPE`, `SIGILL` hoặc `SIGSEGV` phát sinh trong lúc đang bị block (không do `kill`/`sigqueue`/`raise`) thì kết quả là undefined[^sigprocmask-hw].
 
 </details>
 
-**Quay lại Q3:** `sigaction` đặt *cách phản ứng* của cả process; `pthread_sigmask` đặt *cái gì tạm chờ* của từng thread; nên block trước khi tạo thread/child.
+**Quay lại Q3:** `sigaction` đặt *cách phản ứng* của cả process, `pthread_sigmask` đặt *cái gì tạm phải chờ* của từng thread; nên block trước khi tạo thread hoặc process con.
+
+---
 
 ## 5. `EINTR` và `SA_RESTART` (Q4)
 
-> **Trả lời ngắn.** Nếu signal đến lúc thread đang ngủ trong một system call chặn và handler được gọi, thì khi handler chạy xong, call đó hoặc tự chạy lại, hoặc báo lỗi `EINTR` (nghĩa là "bị ngắt"), tùy call và tùy handler có cờ `SA_RESTART` hay không[^sig-eintr]. `SA_RESTART` chỉ cứu được một số call; một số khác, như `epoll_wait`, `poll`, `select`, không bao giờ được chạy lại[^sig-norestart]. Vì vậy (nhận xét của người soạn) code gọi syscall phải luôn sẵn sàng thử lại khi gặp `EINTR`.
+> **Trả lời ngắn.** Nếu signal đến lúc thread đang ngủ trong một system call chặn và handler được gọi, thì khi handler chạy xong call đó hoặc tự chạy lại, hoặc trả lỗi `EINTR` ("bị ngắt"), tùy call và tùy handler có cờ `SA_RESTART` hay không[^sig-eintr]. `SA_RESTART` chỉ cứu được một số call; `epoll_wait`, `poll`, `select` không bao giờ được chạy lại[^sig-norestart]. Vì vậy code gọi syscall thô phải luôn sẵn sàng thử lại khi gặp `EINTR` (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đang chờ tổng đài trả lời thì có người vỗ vai (signal). Bạn quay lại xử lý xong thì có hai khả năng: tự gọi lại ngay (restart), hoặc đặt máy xuống và báo "bị gián đoạn" (`EINTR`) để chương trình quyết định.
+*Với service `orders`.* Một handler thread của `orders` đang `read` trên socket, chờ client gửi tiếp. Đúng lúc đó `SIGTERM` đến và handler chạy. Khi handler xong, `read` của thread làm gì: chờ tiếp như chưa có chuyện gì, hay trả lỗi cho code của bạn? Câu trả lời quyết định bạn có phải viết vòng retry hay không.
 
-**Vấn đề.** Thread đang ngủ trong một system call chặn (ví dụ `read` trên pipe rỗng) thì signal đến và handler được gọi. Sau khi handler return, call đó nên làm gì? Theo signal(7): hoặc tự được khởi động lại, hoặc lỗi `EINTR`, tùy interface và tùy handler có `SA_RESTART` hay không[^sig-eintr]. `SA_RESTART` làm "một số" system call restartable qua signal, tương thích ngữ nghĩa BSD[^sigaction-restart].
+### 5.1 Hai kết cục và ba nhóm call
 
-**Ba nhóm theo signal(7):**
+Sau khi handler return, call đang bị ngắt có hai kết cục: tự khởi động lại, hoặc lỗi `EINTR`. Kết cục nào xảy ra tùy interface và tùy handler có được cài với `SA_RESTART` hay không[^sig-eintr]. `SA_RESTART` làm "một số" system call restartable qua signal, tương thích với ngữ nghĩa BSD[^sigaction-restart]. Danh sách trong man page chia thành ba nhóm.
 
-- *Restart nếu có `SA_RESTART`, ngược lại `EINTR`*[^sig-restart-rule] — gồm `read`/`write` trên thiết bị chậm (terminal, pipe, socket)[^sig-slowdev]; họ `wait`[^sig-restart-wait]; `accept`/`connect`/`recv`/`send` trên socket, *trừ khi* socket có timeout[^sig-restart-list]. Danh sách trong signal(7) còn dài hơn.
-- *Không bao giờ restart dù có `SA_RESTART`, luôn `EINTR`*[^sig-norestart-rule] — gồm **`epoll_wait`, `epoll_pwait`, `poll`, `ppoll`, `select`, `pselect`**[^sig-norestart]; các call nhận dữ liệu (`accept`, `recv`…) trên socket đã đặt timeout `SO_RCVTIMEO`[^sig-norestart-sock]; các call chờ signal (`pause`, `sigsuspend`, `sigtimedwait`, `sigwaitinfo`)[^sig-norestart-wait]; các hàm sleep (`nanosleep`…)[^sig-norestart-sleep].
-- `read`/`write` thiết bị chậm đã chuyển được một phần dữ liệu thì khi bị ngắt trả *thành công* với số byte đã chuyển[^sig-partial]; I/O đĩa cục bộ không bị signal ngắt[^sig-disk].
+**Nhóm 1: restart nếu có `SA_RESTART`, nếu không thì `EINTR`.**[^sig-restart-rule] Gồm:
 
-**Thí nghiệm: `read` trên pipe với và không có `SA_RESTART`.** Đã chạy (C, container Linux aarch64): handler rỗng cho `SIGALRM`, `alarm(1)`, `read` trên pipe rỗng (ở trường hợp có `SA_RESTART`, một child ghi byte sau 2 giây):
+- `read`/`write` trên thiết bị chậm, như terminal, pipe, socket[^sig-slowdev].
+- Họ `wait`[^sig-restart-wait].
+- `accept`/`connect`/`recv`/`send` trên socket, *trừ khi* socket đã đặt timeout[^sig-restart-list].
+
+**Nhóm 2: không bao giờ restart dù có `SA_RESTART`, luôn `EINTR`.**[^sig-norestart-rule] Gồm:
+
+- `epoll_wait`, `epoll_pwait`, `poll`, `ppoll`, `select`, `pselect`[^sig-norestart].
+- Các call nhận dữ liệu (`accept`, `recv`…) trên socket đã đặt timeout `SO_RCVTIMEO`[^sig-norestart-sock].
+- Các call chờ signal: `pause`, `sigsuspend`, `sigtimedwait`, `sigwaitinfo`[^sig-norestart-wait].
+- Các hàm sleep như `nanosleep`[^sig-norestart-sleep].
+
+**Nhóm 3: đã chuyển được một phần dữ liệu.** `read`/`write` trên thiết bị chậm mà đã chuyển được một ít dữ liệu thì khi bị ngắt sẽ trả *thành công* với số byte đã chuyển[^sig-partial]. Riêng I/O đĩa cục bộ không bị signal ngắt, vì đĩa không tính là thiết bị chậm[^sig-disk].
+
+### 5.2 Thử: `read` trên pipe với và không có `SA_RESTART`
+
+Đã chạy (C, container Linux aarch64): handler rỗng cho `SIGALRM`, `alarm(1)`, rồi `read` trên pipe rỗng. Ở trường hợp có `SA_RESTART`, một process con ghi một byte vào pipe sau 2 giây.
 
 ```text
 SA_RESTART=0: read returned -1 errno=Interrupted system call
 SA_RESTART=1: read returned 1 errno=-
 ```
 
-**Hệ quả (nhận xét của người soạn).** `SA_RESTART` không phải thuốc chữa mọi thứ: event loop dùng `epoll_wait`/`poll` vẫn nhận `EINTR`[^sig-norestart], phải lặp lại. Mọi chỗ gọi syscall thô nên có vòng retry-on-`EINTR`. `wait` cũng có thể trả `EINTR`[^wait-eintr].
+Không có `SA_RESTART`, `read` bị cắt và trả `-1` với `EINTR`. Có `SA_RESTART`, `read` tự chạy lại sau khi handler xong và cuối cùng lấy được byte con ghi.
+
+### 5.3 Hệ quả cho `orders`
+
+`SA_RESTART` không phải thuốc chữa mọi thứ (nhận xét của người soạn). Event loop của `orders` mà dùng `epoll_wait` hay `poll` thì vẫn nhận `EINTR` dù có `SA_RESTART`[^sig-norestart], và phải tự gọi lại. Nên mọi chỗ gọi syscall thô cần một vòng retry-on-`EINTR`. Ngay cả `wait` cũng có thể trả `EINTR`[^wait-eintr].
 
 <details><summary>Đi sâu: helper retry của std</summary>
 
-std có helper `cvt_r` làm đúng việc retry khi `EINTR`[^rs-cvt-r]; dùng ở đâu thì xem [Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md).
+std có helper `cvt_r` làm đúng việc này: gặp `-1` với `errno` là `EINTR` thì gọi lại[^rs-cvt-r]. Nó được dùng ở đâu thì xem [Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md).
 
 </details>
 
 **Quay lại Q4:** `EINTR` là cách kernel báo "call bị signal cắt ngang"; `SA_RESTART` chỉ che được một phần, nên vòng retry-on-`EINTR` vẫn cần.
 
+---
+
 ## 6. Async-signal-safety: vì sao handler nguy hiểm (Q5)
 
-> **Trả lời ngắn.** Handler chạy chen vào chương trình chính, nên có thể ngắt một hàm thư viện đang sửa dữ liệu dở dang. Nếu handler gọi lại chính hàm đó, nó chạy trên dữ liệu chưa nhất quán và kết quả không đoán trước được[^safety-stdio]. Vì vậy handler chỉ nên gọi những hàm được đánh dấu là *async-signal-safe* — gọi an toàn được từ trong handler[^safety-def].
+> **Trả lời ngắn.** Handler chạy chen vào chương trình chính, nên có thể ngắt một hàm thư viện đang sửa dữ liệu dở dang. Nếu handler lại gọi chính hàm đó thì nó chạy trên dữ liệu chưa nhất quán và kết quả không đoán trước được[^safety-stdio]. Vì vậy handler chỉ nên gọi những hàm được đánh dấu *async-signal-safe*, tức gọi an toàn được từ trong handler[^safety-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đang giữa chừng sửa một sổ cái (ghi dòng mới nhưng chưa cập nhật tổng); có người chen vào đọc sổ cái và tính toán dựa trên con số tạm. Kết quả sai, vì sổ chưa ở trạng thái hợp lệ.
+*Với service `orders`.* Handler `SIGTERM` đầu tiên người ta hay viết cho `orders` là ghi một dòng log "đang tắt", dọn dẹp rồi thoát. Nhưng handler chạy trên thread đang làm việc dở. Nếu lúc đó thread ấy đang ở giữa một hàm thư viện (in log, cấp phát bộ nhớ) mà handler lại gọi chính thư viện đó thì sao? Mục này trả lời câu hỏi đó và cho một cách viết handler an toàn.
 
-**Định nghĩa.** Man page signal-safety(7): hàm async-signal-safe là hàm có thể gọi an toàn từ trong signal handler; nhiều hàm không như vậy, đặc biệt là các hàm không reentrant[^safety-def].
+### 6.1 Vì sao hàm thư viện không chịu được bị chen ngang
 
-**Ví dụ kinh điển.** Thư viện stdio phải duy trì một buffer cấp phát tĩnh cùng các bộ đếm và con trỏ cho vị trí hiện tại[^safety-stdio-all]. Giả sử chương trình chính đang ở giữa `printf(3)`, buffer và biến liên quan mới cập nhật một phần; nếu lúc đó handler cũng gọi `printf`, lời gọi thứ hai chạy trên dữ liệu không nhất quán và kết quả không đoán trước được[^safety-stdio]. Một hàm an toàn khi nó *reentrant* (gọi lại được khi lần gọi trước chưa xong, vì không dùng trạng thái dùng chung đang dở dang), hoặc *atomic đối với signal* (không thể bị handler ngắt giữa chừng)[^safety-why].
+Man page lấy thư viện stdio làm ví dụ kinh điển: mọi hàm của nó đều không async-signal-safe. Khi làm buffered I/O, stdio phải giữ một buffer cấp phát tĩnh cùng các bộ đếm và con trỏ cho biết lượng dữ liệu và vị trí hiện tại[^safety-stdio-all]. Giả sử chương trình chính đang ở giữa `printf(3)` và mới cập nhật buffer cùng các biến liên quan một phần. Nếu lúc đó handler cũng gọi `printf`, lần gọi thứ hai chạy trên dữ liệu không nhất quán và kết quả không đoán trước được[^safety-stdio].
 
-**Hai cách đối phó** theo man page: (a) handler chỉ gọi hàm async-signal-safe *và* bản thân handler reentrant đối với biến toàn cục của chương trình chính; (b) block signal trong chương trình chính mỗi khi gọi hàm không an toàn hoặc đụng dữ liệu toàn cục mà handler cũng dùng[^safety-choices]. Cách (b) khó áp dụng ở chương trình phức tạp, nên thực tế chọn (a)[^safety-choice-a].
+Từ đó có định nghĩa: hàm async-signal-safe là hàm gọi an toàn được từ trong handler, và nhiều hàm không như vậy, nhất là các hàm không reentrant[^safety-def]. Một hàm an toàn khi nó *reentrant* (gọi lại được lúc lần gọi trước chưa xong, vì không đụng trạng thái dùng chung đang dở), hoặc *atomic đối với signal* (handler không thể ngắt giữa chừng)[^safety-why].
 
-**Hai chi tiết dễ bị bỏ sót**, đều có trong man page:
+### 6.2 Hai cách đối phó
 
-1. **`errno`.** Đọc/ghi `errno` là async-signal-safe *với điều kiện* handler lưu `errno` lúc vào và khôi phục trước khi return[^safety-errno].
-2. **`longjmp` ra khỏi handler.** Nếu handler ngắt một hàm không an toàn rồi thoát bằng `longjmp`/`siglongjmp`, mà sau đó chương trình gọi tiếp hàm không an toàn, hành vi là undefined[^safety-longjmp].
+Man page nêu hai cách. Cách (a): handler chỉ gọi hàm async-signal-safe *và* bản thân handler reentrant đối với biến toàn cục của chương trình chính. Cách (b): block signal ở chương trình chính mỗi khi nó gọi hàm không an toàn, hoặc đụng dữ liệu toàn cục mà handler cũng dùng[^safety-choices]. Cách (b) khó áp dụng với chương trình phức tạp, nên thực tế người ta chọn (a)[^safety-choice-a].
 
-**Mẫu handler tối thiểu** (nhận xét của người soạn): handler chỉ đặt một cờ hoặc ghi một byte vào pipe rồi return (`write(2)` có trong bảng hàm async-signal-safe[^safety-write]); việc thật (log, giải phóng tài nguyên, đóng kết nối) do vòng lặp chính làm. Giới lập trình thường gọi mẫu ghi-một-byte-vào-pipe này là *self-pipe trick* (tên thông dụng; các nguồn đã tải không dùng tên này). Mục 9 cho thấy `signalfd` bỏ hẳn handler, mục 10 cho thấy tokio làm đúng mẫu này.
+### 6.3 Hai chi tiết dễ bỏ sót
+
+Chi tiết thứ nhất là `errno`. Đọc và ghi `errno` trong handler là async-signal-safe với điều kiện handler lưu `errno` lúc vào và khôi phục trước khi return[^safety-errno]. Nếu quên, handler có thể ghi đè `errno` của một system call mà chương trình chính đang chờ kết quả (nhận xét của người soạn).
+
+Chi tiết thứ hai là `longjmp`. Giả sử handler ngắt một hàm không an toàn rồi thoát bằng `longjmp`/`siglongjmp`, mà sau đó chương trình lại gọi tiếp một hàm không an toàn: hành vi lúc đó là undefined[^safety-longjmp].
+
+### 6.4 Mẫu handler tối thiểu
+
+Handler của `orders` nên chỉ đặt một cờ hoặc ghi một byte vào pipe rồi return, vì `write(2)` có trong bảng hàm async-signal-safe[^safety-write] (nhận xét của người soạn). Việc thật, như ghi log, giải phóng tài nguyên, đóng kết nối, do vòng lặp chính làm khi nó thấy cờ hoặc thấy byte. Giới lập trình gọi cách ghi một byte vào pipe này là *self-pipe trick* (tên thông dụng; các nguồn đã tải không dùng tên này). Mục 9 cho thấy `signalfd` bỏ hẳn handler, và mục 10 cho thấy tokio làm đúng mẫu này.
 
 <details><summary>Đi sâu: bảng hàm của POSIX, vì sao <code>printf</code>/<code>malloc</code> không có trong đó</summary>
 
-POSIX.1 quy định tập hàm bắt buộc phải async-signal-safe[^safety-posix]. Bảng của man page có, ví dụ, `write(2)`[^safety-write], `_exit(2)`[^safety-exit], `sem_post(3)`[^safety-sem], `wait(2)`/`waitpid(2)`[^safety-wait]. `printf` và `malloc` **không** có trong bảng đó: người soạn đã tìm văn bản man page bookworm (6.03) và `malloc`/`free` không xuất hiện ở bất kỳ đâu, còn `printf` chỉ xuất hiện trong đoạn giải thích ví dụ phía trên, không nằm trong bảng. Với `printf`, man page nói thẳng hơn: chọn thư viện stdio làm ví dụ vì mọi hàm của nó đều không async-signal-safe[^safety-stdio-all].
+POSIX.1 quy định một tập hàm mà bản cài đặt bắt buộc phải làm cho async-signal-safe[^safety-posix]. Bảng của man page có, chẳng hạn:
 
-Đọc cho đúng mức: bảng liệt kê các hàm POSIX *bắt buộc* async-signal-safe, và man page nói một bản cài đặt *có thể* cung cấp thêm hàm an toàn nhưng chuẩn không đòi hỏi[^safety-posix]. Vì vậy, với `malloc`, kết luận có nguồn chỉ là "POSIX không bảo đảm"; còn "không an toàn" là suy luận của người soạn (lấy từ cơ chế: `malloc` giữ cấu trúc dữ liệu chung của allocator, cùng loại vấn đề với buffer stdio ở trên) — hãy coi nó là không an toàn trong code portable.
+- `write(2)`[^safety-write]
+- `_exit(2)`[^safety-exit]
+- `sem_post(3)`[^safety-sem]
+- `wait(2)` và `waitpid(2)`[^safety-wait]
+
+`printf` và `malloc` **không** có trong bảng. Người soạn đã tìm văn bản man page bookworm (6.03): `malloc`/`free` không xuất hiện ở đâu cả, còn `printf` chỉ xuất hiện trong đoạn giải thích ví dụ, không nằm trong bảng. Với `printf`, man page còn nói thẳng: stdio được chọn làm ví dụ vì mọi hàm của nó đều không async-signal-safe[^safety-stdio-all].
+
+Cần đọc bảng cho đúng mức. Bảng liệt kê các hàm POSIX *bắt buộc* async-signal-safe, và một bản cài đặt *có thể* cung cấp thêm hàm an toàn nhưng chuẩn không đòi hỏi[^safety-posix]. Vì vậy với `malloc`, kết luận có nguồn chỉ là "POSIX không bảo đảm". Còn "không an toàn" là suy luận của người soạn: `malloc` giữ cấu trúc dữ liệu chung của allocator, cùng loại vấn đề với buffer stdio ở trên. Trong code portable, hãy coi `malloc` là không an toàn.
 
 </details>
 
 **Quay lại Q5:** handler chạy chen giữa chương trình, nên chỉ hàm không dựa vào trạng thái dở dang (async-signal-safe) mới được gọi; cách an toàn nhất là chỉ đặt cờ hoặc ghi một byte.
 
+---
+
 ## 7. `SIGCHLD` và `SIGPIPE` (Q6)
 
-> **Trả lời ngắn.** `SIGCHLD` là signal chuẩn[^sig-tbl-chld] nên không xếp hàng[^sig-noqueue]: nhiều con chết gần nhau có thể chỉ để lại một `SIGCHLD` đang chờ, và handler chỉ `waitpid` một lần sẽ bỏ sót con. Vì vậy (nhận xét của người soạn, rút ra từ hai điều trên) handler phải gọi `waitpid` lặp lại, mỗi lần với cờ `WNOHANG` (trả về ngay thay vì chờ), cho đến khi không còn con nào để thu[^wait-nohang]. Còn `SIGPIPE`: ghi vào pipe không còn ai đọc thì process nhận `SIGPIPE`, mặc định bị kết thúc[^sig-tbl-pipe]; nếu ignore thì `write` trả lỗi `EPIPE`[^pipe-sigpipe].
+> **Trả lời ngắn.** `SIGCHLD` báo một process con vừa dừng hoặc kết thúc[^sig-tbl-chld]. Nó là signal chuẩn nên không xếp hàng[^sig-noqueue]: nhiều con chết gần nhau có thể chỉ để lại một `SIGCHLD` đang chờ, và handler chỉ `waitpid` một lần sẽ bỏ sót con. Vì vậy handler phải gọi `waitpid` lặp lại, mỗi lần với cờ `WNOHANG` (trả về ngay thay vì chờ), cho tới khi không còn con nào để thu[^wait-nohang] (nhận xét của người soạn, rút ra từ hai điều trên). Còn `SIGPIPE`: ghi vào pipe không còn ai đọc thì process nhận `SIGPIPE`, mặc định bị kết thúc[^sig-tbl-pipe]. Nếu process ignore nó thì `write` trả lỗi `EPIPE`[^pipe-sigpipe].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `SIGCHLD` như chuông cửa: nếu nhiều khách bấm liên tiếp lúc bạn đang bận, bạn chỉ nghe được một hồi chuông; ra mở cửa thì phải đón hết hàng người đứng chờ, không chỉ người đầu tiên.
+*Với service `orders`.* `orders` sinh vài process con `pdf-gen` để render hóa đơn, và có handler thread ghi dữ liệu vào pipe tới một con. Hai chuyện có thể xảy ra mà bạn không chủ động: con chết (cha nhận `SIGCHLD`), và con đóng đầu đọc pipe trong khi cha vẫn ghi (cha nhận `SIGPIPE`). Mục này xem `orders` phải làm gì cho mỗi chuyện.
 
-**`SIGCHLD` báo gì, và cha phải làm gì.** `SIGCHLD` báo rằng một con vừa dừng hoặc kết thúc; hành động mặc định của nó là `Ign` (bỏ qua)[^sig-tbl-chld]. Con kết thúc mà cha chưa `wait` thì thành zombie, chiếm một slot trong bảng process của kernel[^wait-zombie]; cơ chế zombie, orphan và việc `init` nhận con mồ côi: [Chương 03, mục 7](03-process.md).
+### 7.1 `SIGCHLD`: cha phải thu hoạch con
 
-**Hai cách thu hoạch con.** (1) *Bắt* `SIGCHLD` rồi gọi `wait`/`waitpid`: hành vi lịch sử của BSD và System V về việc ignore `SIGCHLD` khác nhau, nên đây là cách portable duy nhất để con không thành zombie[^sigaction-ignchld]. (2) Đặt disposition của `SIGCHLD` là `SIG_IGN`, hoặc dùng cờ `SA_NOCLDWAIT`: con kết thúc không thành zombie, nhưng `wait`/`waitpid` sẽ chặn đến khi mọi con kết thúc rồi lỗi `ECHILD`[^wait-sigign], nghĩa là cha không còn lấy được exit status của từng con (suy luận của người soạn). Lưu ý riêng của man page: dù disposition mặc định của `SIGCHLD` là "ignore", đặt tường minh `SIG_IGN` cho kết quả khác về zombie[^wait-sigign-default].
+`SIGCHLD` báo một con vừa dừng hoặc kết thúc, và hành động mặc định của nó là `Ign`, tức bỏ qua[^sig-tbl-chld]. Con kết thúc mà cha chưa `wait` thì thành zombie, chiếm một slot trong bảng process của kernel[^wait-zombie]. Cơ chế zombie, orphan và việc `init` nhận con mồ côi nằm ở [Chương 03, mục 7](03-process.md).
 
-**Bẫy: một signal = nhiều con chết.** Vì signal chuẩn không queue (mục 3)[^sig-noqueue], nhiều con chết gần nhau có thể chỉ cho **một** lần `SIGCHLD`. Handler chỉ `waitpid` một lần sẽ bỏ sót zombie. Cách đúng (nhận xét của người soạn, rút ra từ hai điều trên) là **lặp `waitpid(-1, ..., WNOHANG)` đến khi hết**; `WNOHANG` làm call trả ngay nếu chưa có con nào kết thúc[^wait-nohang], nên vòng lặp dừng lại thay vì chặn.
+Có hai cách để con không thành zombie. Cách thứ nhất là *bắt* `SIGCHLD` rồi gọi `wait`/`waitpid`. Hành vi lịch sử của BSD và System V về việc ignore `SIGCHLD` khác nhau, nên đây là cách portable duy nhất[^sigaction-ignchld]. Cách thứ hai là đặt disposition của `SIGCHLD` là `SIG_IGN`, hoặc dùng cờ `SA_NOCLDWAIT`: con kết thúc không thành zombie, nhưng `wait`/`waitpid` sẽ chặn tới khi mọi con kết thúc rồi lỗi `ECHILD`[^wait-sigign]. Nghĩa là cha không còn lấy được exit status của từng con (suy luận của người soạn). Man page cũng lưu ý riêng: dù disposition mặc định của `SIGCHLD` là "ignore", đặt tường minh `SIG_IGN` cho kết quả khác về zombie[^wait-sigign-default].
 
-Đã chạy: block `SIGCHLD`, tạo 3 con thoát ngay, đợi chúng chết, rồi unblock để handler chạy. Hai biến thể handler:
+### 7.2 Bẫy: một signal, nhiều con chết
+
+Đây là chỗ mục 3 trở thành chuyện thật. Vì signal chuẩn không queue[^sig-noqueue], ba `pdf-gen` chết gần nhau có thể chỉ cho **một** lần `SIGCHLD`. Handler chỉ `waitpid` một lần sẽ thu một con và bỏ sót hai zombie. Cách đúng là **lặp `waitpid(-1, ..., WNOHANG)` tới khi hết** (nhận xét của người soạn, rút ra từ hai điều trên). `WNOHANG` làm call trả về ngay nếu chưa có con nào kết thúc[^wait-nohang], nên vòng lặp dừng lại thay vì chặn.
+
+Đã chạy: block `SIGCHLD`, tạo 3 con thoát ngay, đợi chúng chết, rồi unblock để handler chạy. Hai biến thể handler cho kết quả:
 
 ```text
 single-waitpid handler: reaped inside handler=1, left as zombie after handler=2
 loop handler: reaped inside handler=3, left as zombie after handler=0
 ```
 
-Handler `waitpid` một lần thu 1 con, để 2 zombie; handler lặp với `WNOHANG` thu đủ 3. Block/unblock dùng để *tái hiện* việc gộp một cách xác định; thực tế việc gộp phụ thuộc thời điểm (suy luận của người soạn).
+Handler `waitpid` một lần thu 1 con và để lại 2 zombie. Handler lặp với `WNOHANG` thu đủ 3. Block rồi unblock ở đây chỉ để *tái hiện* việc gộp một cách xác định; ngoài thực tế, việc gộp phụ thuộc thời điểm các con chết (suy luận của người soạn).
 
-**SIGPIPE.** Hình dung (nhận xét của người soạn): nói vào điện thoại khi đầu dây bên kia đã cúp máy; hệ thống báo bạn bằng một tiếng chuông to (signal) thay vì chỉ một thông báo lỗi nhỏ. Nếu mọi fd của đầu *đọc* một pipe đã đóng, `write(2)` làm sinh `SIGPIPE` cho process gọi; nếu process đang ignore signal này thì `write` lỗi `EPIPE`[^pipe-sigpipe] (pipe và EOF: [Chương 04, mục 8](04-file-descriptor-va-vfs.md)). Mặc định của `SIGPIPE` là `Term`[^sig-tbl-pipe]; số hiệu của nó là 13 ở mọi cột kiến trúc của bảng[^sig-num-pipe].
+### 7.3 `SIGPIPE`: ghi vào pipe không còn người đọc
 
-Mục này chỉ khẳng định hành vi với **pipe**; với socket (kết nối đã đóng) và cờ `MSG_NOSIGNAL`, xem [P6 — Socket API, mục 6](../06-networking/07-socket-va-kernel.md). Nhận xét của người soạn: server dài hạn thường không muốn bị giết bởi một đầu kết nối hỏng, nên ignore `SIGPIPE` để lỗi hiện ra là `EPIPE`.
+Quay lại handler thread ghi vào pipe tới `pdf-gen`. Nếu mọi fd của đầu *đọc* pipe đã đóng thì `write(2)` làm kernel sinh `SIGPIPE` cho process gọi, còn nếu process đang ignore signal này thì `write` lỗi `EPIPE`[^pipe-sigpipe]. Pipe và EOF xem thêm ở [Chương 04, mục 8](04-file-descriptor-va-vfs.md). Mặc định `SIGPIPE` là `Term`[^sig-tbl-pipe], nên với một chương trình không ignore signal này, một `pdf-gen` chết sớm có thể kéo theo việc cha bị kết thúc (nhận xét của người soạn; runtime Rust xử lý khác, xem mục 10).
 
 Đã chạy (C): con ghi vào pipe không còn reader.
 
@@ -247,45 +345,63 @@ ign=0: child killed by signal 13
 ign=1: child exit 0        (write returned -1, errno=Broken pipe)
 ```
 
-Không ignore → con chết vì signal 13; ignore → `write` trả `-1` với `EPIPE`. (Output thật của thử nghiệm bị in lặp do buffer stdio bị `fork` nhân đôi: lỗi của chương trình thử, không phải hành vi signal.)
+Không ignore thì con chết vì signal 13; ignore thì `write` trả `-1` với `EPIPE`. (Output thật của thử nghiệm bị in lặp do buffer stdio bị `fork` nhân đôi: đó là lỗi của chương trình thử, không phải hành vi signal.)
+
+Mục này chỉ khẳng định hành vi với **pipe**. Với socket (kết nối đã đóng) và cờ `MSG_NOSIGNAL`, xem [P6 — Socket API, mục 6](../06-networking/07-socket-va-kernel.md). Server chạy dài thường không muốn bị giết chỉ vì một kết nối hỏng, nên ignore `SIGPIPE` để lỗi hiện ra là `EPIPE` (nhận xét của người soạn).
 
 <details><summary>Đi sâu: <code>SIGCHLD</code> và trạng thái con, <code>SA_NOCLDSTOP</code>, <code>Child</code> của Rust</summary>
 
-Cách đọc exit status của con (`WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG`, và việc status chỉ giữ 8 bit thấp): [Chương 03, mục 6](03-process.md). Hai chi tiết riêng cho `SIGCHLD`: mặc định `waitpid` chỉ đợi con *kết thúc*[^wait-options], và `SA_NOCLDSTOP` tắt `SIGCHLD` khi con dừng hoặc tiếp tục[^sigaction-nocldstop].
+Cách đọc exit status của con (`WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG`, và việc status chỉ giữ 8 bit thấp) nằm ở [Chương 03, mục 6](03-process.md). Hai chi tiết riêng cho `SIGCHLD`: mặc định `waitpid` chỉ đợi con *kết thúc*[^wait-options]. Còn cờ `SA_NOCLDSTOP` tắt `SIGCHLD` khi con dừng hoặc tiếp tục[^sigaction-nocldstop].
 
-Rust: std không tự `wait` con kể cả khi `Child` bị drop[^rs-child-zombie] ([Chương 07, mục 4](07-rust-tren-giao-dien-he-thong.md)).
+Phía Rust: std không tự `wait` con kể cả khi `Child` bị drop[^rs-child-zombie] ([Chương 07, mục 4](07-rust-tren-giao-dien-he-thong.md)).
 
 </details>
 
 **Quay lại Q6:** `SIGCHLD` có thể gộp nhiều cái chết thành một lần, nên handler phải lặp `waitpid(-1, WNOHANG)`; `SIGPIPE` bị ignore thì lỗi hiện ra ở `write` là `EPIPE`.
 
+---
+
 ## 8. `SIGTERM` vs `SIGKILL`, graceful shutdown và PID 1 (Q7)
 
-> **Trả lời ngắn.** `SIGTERM` là signal yêu cầu process kết thúc, nhưng process bắt (catch) được nó để dọn dẹp rồi mới thoát[^sigaction-desc]; `SIGKILL` thì không bắt, không chặn, không bỏ qua được nên process không có cơ hội dọn[^sig-uncatchable]. "Graceful shutdown" là quy ước của ứng dụng đứng trên cơ chế đó, không phải tính năng kernel (nhận xét của người soạn). Trong container, process PID 1 (process đầu tiên trong không gian PID riêng của container, gọi là *PID namespace*) có luật riêng: signal gửi từ bên trong namespace chỉ tới được nó nếu nó đã cài handler[^pidns-onlyhandled].
+> **Trả lời ngắn.** `SIGTERM` là signal yêu cầu process kết thúc, nhưng process bắt (catch) được nó để dọn dẹp rồi mới thoát[^sigaction-desc]. `SIGKILL` thì không bắt, không chặn, không bỏ qua được nên process không có cơ hội dọn[^sig-uncatchable]. "Graceful shutdown" là quy ước của ứng dụng xây trên cơ chế đó chứ không phải tính năng của kernel (nhận xét của người soạn). Trong container, process PID 1 có luật riêng: signal gửi từ bên trong PID namespace chỉ tới được nó nếu nó đã cài handler[^pidns-onlyhandled].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `SIGTERM` như tiếng chuông báo hết giờ làm: nhân viên nghe thấy thì lưu việc, tắt máy rồi ra về. `SIGKILL` như ngắt cầu dao cả tòa nhà: không ai kịp lưu gì.
+*Với service `orders`.* Khi Pod chứa `orders` bị dừng, `orders` cần xử lý nốt các request đang chạy, đóng kết nối, flush log rồi mới thoát; nếu bị giết giữa chừng thì đơn hàng đang ghi dở có thể hỏng. Câu hỏi của mục này: `orders` biết mình sắp bị dừng bằng cách nào, được bao nhiêu thời gian, và vì sao đôi khi `SIGTERM` có vẻ "không tới"?
 
-**`SIGTERM` và `SIGKILL`.** `SIGTERM` mặc định là `Term`[^sig-tbl-term] và bắt được, nên process có thể coi nó là yêu cầu để dọn dẹp rồi thoát có trật tự (nhận xét của người soạn). `SIGKILL` cũng mặc định `Term`[^sig-tbl-kill] nhưng không thể bắt nên process không có cơ hội dọn dẹp (suy luận của người soạn từ việc handler không thể được đặt cho `SIGKILL`[^sig-uncatchable]). "Graceful shutdown" vì thế là **quy ước ứng dụng đứng trên cơ chế signal**, không phải tính năng của kernel (nhận xét của người soạn): bắt `SIGTERM` (và thường `SIGINT`), ngừng nhận việc mới, chờ việc đang chạy xong trong hạn, đóng tài nguyên, rồi thoát.
+### 8.1 `SIGTERM` và `SIGKILL`
 
-**Kubernetes.** Khi một Pod bị dừng có thứ tự (graceful), kubelet yêu cầu container runtime dừng các container bằng cách trước hết gửi `TERM` (SIGTERM), kèm một thời hạn (grace period), tới main process của mỗi container[^k8s-term]; phần mô tả luồng dừng Pod nói rõ đó là process 1 bên trong container[^k8s-pid1]. Thời hạn mặc định là 30 giây[^k8s-grace-default]; hết hạn thì runtime gửi `KILL` tới các process còn chạy[^k8s-kill]. Nhiều runtime tôn trọng `STOPSIGNAL` của image và gửi signal đó thay vì `TERM`[^k8s-stopsignal]. Nhận xét của người soạn: ứng dụng backend chạy trong Kubernetes nên coi `SIGTERM` là *lệnh bắt đầu* graceful shutdown và phải hoàn tất *trong grace period*; sau đó không còn cơ hội.
+`SIGTERM` mặc định là `Term`[^sig-tbl-term], và vì bắt được nên process có thể coi nó là lời yêu cầu: dọn dẹp rồi thoát có trật tự (nhận xét của người soạn). `SIGKILL` cũng mặc định là `Term`[^sig-tbl-kill]. Nhưng không ai đặt handler cho nó được[^sig-uncatchable], nên process không có cơ hội dọn dẹp (suy luận của người soạn).
 
-**PID 1 trong container.** Hình dung (nhận xét của người soạn): PID 1 như quản đốc của một nhà xưởng; nhân viên trong xưởng không được tự ý "tắt" quản đốc, trừ khi quản đốc đã đăng ký cách xử lý tín hiệu đó. PID namespace cô lập không gian số PID (process ở namespace khác nhau có thể trùng PID)[^pidns-isolate], và PID trong namespace mới bắt đầu từ 1[^pidns-start]. Process đầu tiên trong namespace là "init" của namespace đó và nhận nuôi các process mồ côi[^pidns-orphan] (chi tiết: [Chương 03, mục 7](03-process.md) và [P8 — Namespaces](../08-containers/02-namespaces.md)).
+Vì vậy graceful shutdown là **quy ước của ứng dụng xây trên cơ chế signal**, không phải tính năng của kernel (nhận xét của người soạn). Nội dung quy ước thường là: bắt `SIGTERM` (và thường cả `SIGINT`), ngừng nhận việc mới, chờ việc đang chạy xong trong hạn, đóng tài nguyên, rồi thoát.
 
-PID 1 có luật signal riêng:
+### 8.2 Kubernetes dừng một Pod
 
-1. Từ *bên trong* namespace, chỉ những signal mà init đã cài handler mới gửi tới init được; hạn chế này áp dụng cả với process đặc quyền, để chặn việc vô tình giết init[^pidns-onlyhandled]. Tương tự trên hệ thống thường: `kill(2)` ghi rằng chỉ những signal mà init đã cài handler mới gửi được tới process ID 1[^kill-init].
-2. Từ *namespace tổ tiên*, quy tắc giống nhưng có ngoại lệ: `SIGKILL` và `SIGSTOP` được deliver cưỡng bức khi gửi từ namespace tổ tiên[^pidns-sigkill-ancestor]. Còn signal khác chỉ tới được init khi init có handler cho nó[^pidns-ancestor].
-3. Nếu init của namespace kết thúc, kernel kết thúc mọi process trong namespace bằng `SIGKILL`[^pidns-initdie].
+Khi một Pod bị dừng có thứ tự, kubelet nhờ container runtime dừng các container bằng cách trước hết gửi `TERM` (`SIGTERM`), kèm một thời hạn (grace period), tới main process của mỗi container[^k8s-term]. Phần mô tả luồng dừng Pod nói rõ đó là process 1 bên trong container[^k8s-pid1]. Thời hạn mặc định là 30 giây[^k8s-grace-default]. Hết hạn mà còn process chạy thì runtime gửi `KILL` cho chúng[^k8s-kill]. Nhiều runtime còn tôn trọng `STOPSIGNAL` của image và gửi signal đó thay vì `TERM`[^k8s-stopsignal].
 
-**Hệ quả với `SIGTERM`.** PID 1 *không có handler* `SIGTERM` sẽ không bị `SIGTERM` từ bên trong namespace giết (luật 1); có handler thì nhận bình thường (suy luận của người soạn từ luật 1).
+Với `orders`, điều này nghĩa là: coi `SIGTERM` là *lệnh bắt đầu* graceful shutdown và phải hoàn tất *trong grace period*; sau đó không còn cơ hội (nhận xét của người soạn).
 
-**Liên hệ thực tế (nhận xét của người soạn).** Kubelet nhờ runtime gửi `SIGTERM` tới process 1 của container[^k8s-pid1]. Runtime nằm ngoài PID namespace của container, tức ở namespace tổ tiên (suy luận của người soạn), nên theo luật 2 signal chỉ tới được ứng dụng PID 1 nếu ứng dụng có handler; không có thì container sống tới hết grace period rồi bị `SIGKILL` (deliver cưỡng bức)[^k8s-kill][^pidns-sigkill-ancestor]. [P8·08, mục 3](../08-containers/08-rust-trong-container.md) đo trường hợp này với `docker stop`. Vì vậy ứng dụng làm PID 1 cần tự cài handler `SIGTERM`, hoặc container nên chạy một chương trình init nhỏ làm PID 1 để chuyển signal cho ứng dụng. PID 1 còn phải `wait` các con mồ côi được giao ([Chương 03, mục 7](03-process.md)); cơ chế PID namespace đầy đủ (`--fork`, `/proc`, lồng nhau): [P8 Chương 02, mục 4](../08-containers/02-namespaces.md).
+### 8.3 PID 1 trong container
+
+Có một chi tiết làm `SIGTERM` có thể "không tới" `orders`: nếu `orders` là process PID 1 trong container. Ta cần hiểu PID namespace trước. PID namespace cô lập không gian số PID, nên process ở namespace khác nhau có thể trùng PID[^pidns-isolate]. PID trong namespace mới bắt đầu từ 1[^pidns-start]. Process đầu tiên trong namespace là "init" của namespace đó và nhận nuôi các process mồ côi[^pidns-orphan] (chi tiết: [Chương 03, mục 7](03-process.md) và [P8 — Namespaces](../08-containers/02-namespaces.md)).
+
+PID 1 có ba luật signal riêng:
+
+1. Signal gửi từ *bên trong* namespace chỉ tới được init nếu init đã cài handler cho nó. Hạn chế này áp dụng cả với process đặc quyền, để chặn việc vô tình giết init[^pidns-onlyhandled]. Trên hệ thống thường cũng vậy: `kill(2)` ghi rằng chỉ những signal mà init đã cài handler mới gửi được tới process ID 1[^kill-init].
+2. Signal gửi từ *namespace tổ tiên* theo cùng quy tắc, nhưng có ngoại lệ: `SIGKILL` và `SIGSTOP` được deliver cưỡng bức[^pidns-sigkill-ancestor]. Signal khác chỉ tới init khi init có handler cho nó[^pidns-ancestor].
+3. Nếu init của namespace kết thúc, kernel kết thúc mọi process còn lại trong namespace bằng `SIGKILL`[^pidns-initdie].
+
+### 8.4 Ghép lại: `SIGTERM` có tới được `orders` không
+
+Từ luật 1, một PID 1 *không có handler* `SIGTERM` sẽ không bị `SIGTERM` từ bên trong namespace giết, còn có handler thì nhận bình thường (suy luận của người soạn từ luật 1).
+
+Còn với Kubernetes, kubelet nhờ runtime gửi `SIGTERM` tới process 1 của container[^k8s-pid1]. Runtime nằm ngoài PID namespace của container, tức ở namespace tổ tiên (suy luận của người soạn), nên theo luật 2 signal chỉ tới được ứng dụng PID 1 nếu ứng dụng có handler. Không có handler thì container sống tới hết grace period rồi bị `SIGKILL`, và `SIGKILL` thì được deliver cưỡng bức[^pidns-sigkill-ancestor] (nhận xét của người soạn). [P8·08, mục 3](../08-containers/08-rust-trong-container.md) đo đúng trường hợp này với `docker stop`.
+
+Vì vậy nếu `orders` làm PID 1 thì nó cần tự cài handler `SIGTERM`; hoặc cho container chạy một chương trình init nhỏ làm PID 1 để chuyển signal tới `orders`. PID 1 còn phải `wait` các con mồ côi được giao cho nó ([Chương 03, mục 7](03-process.md)). Cơ chế PID namespace đầy đủ (`--fork`, `/proc`, lồng nhau) nằm ở [P8 Chương 02, mục 4](../08-containers/02-namespaces.md).
 
 <details><summary>Đi sâu: quyền gửi signal, <code>kill(pid, 0)</code> và thí nghiệm PID 1</summary>
 
-**Quyền gửi signal.** Theo `kill(2)`: người gửi phải có đặc quyền (trên Linux là `CAP_KILL` trong user namespace của đích), hoặc real/effective UID của người gửi bằng real/saved set-user-ID của đích[^kill-perm]. Tham số `pid` dương/0: một process / cả process group[^kill-pid]. `kill(pid, 0)` không gửi gì nhưng vẫn kiểm tra tồn tại và quyền[^kill-sig0]; man page nhắc rằng process "tồn tại" có thể là một zombie chưa được `wait`[^kill-zombie], nên `kill(pid, 0)` thành công không chứng minh process còn *chạy* (suy luận của người soạn). Về các loại ID và capability: [Chương 06](06-user-quyen-proc-sys.md).
+**Quyền gửi signal.** Người gửi phải có đặc quyền (trên Linux là `CAP_KILL` trong user namespace của đích), hoặc real/effective UID của người gửi phải bằng real/saved set-user-ID của đích[^kill-perm]. Tham số `pid` dương nghĩa là gửi tới một process, `pid` bằng 0 nghĩa là gửi tới cả process group của người gọi[^kill-pid]. `kill(pid, 0)` không gửi gì nhưng vẫn kiểm tra tồn tại và quyền[^kill-sig0]. Man page nhắc rằng process "tồn tại" có thể là một zombie chưa được `wait`[^kill-zombie], nên `kill(pid, 0)` thành công không chứng minh process còn *chạy* (suy luận của người soạn). Về các loại ID và capability: [Chương 06](06-user-quyen-proc-sys.md).
 
 **Thí nghiệm PID 1.** Đã chạy (C, trong container Linux aarch64 của lab, chương trình là PID 1 qua `exec`, một child gửi `kill(1, SIGTERM)` cho nó):
 
@@ -296,50 +412,56 @@ PID1: got SIGTERM in handler
 PID1 still alive
 ```
 
-Ở một lần chạy khác, *không đặt handler* và child gửi cả `SIGTERM` lẫn `SIGKILL`: cả hai `kill` trả `0` và PID 1 vẫn sống. Khớp với luật 1; `kill` trả `0` chỉ cho biết lời gọi được chấp nhận, không nói signal có tác dụng (suy luận của người soạn). Cả hai đều là **quan sát một lần chạy**.
+Ở một lần chạy khác, *không đặt handler*, child gửi cả `SIGTERM` lẫn `SIGKILL`: cả hai `kill` trả `0` và PID 1 vẫn sống. Khớp với luật 1. Lưu ý `kill` trả `0` chỉ cho biết lời gọi được chấp nhận, không nói signal có tác dụng (suy luận của người soạn). Cả hai đều là **quan sát một lần chạy**.
 
 </details>
 
-**Quay lại Q7:** `SIGTERM` bắt được nên là chỗ để graceful shutdown; `SIGKILL` thì không; riêng PID 1 chỉ nhận signal mà nó có handler (trừ `SIGKILL`/`SIGSTOP` từ namespace tổ tiên).
+**Quay lại Q7:** `SIGTERM` bắt được nên là chỗ để graceful shutdown, `SIGKILL` thì không; riêng PID 1 chỉ nhận signal mà nó có handler (trừ `SIGKILL`/`SIGSTOP` từ namespace tổ tiên).
+
+---
 
 ## 9. `signalfd(2)`, `sigwaitinfo(2)` và signal với thread (Q8)
 
-> **Trả lời ngắn.** Ngoài handler (chạy bất đồng bộ và bị ràng buộc bởi async-signal-safety, mục 6), Linux cho nhận signal *đồng bộ*: `sigwaitinfo` chặn thread gọi đến khi có signal[^sig-sync-wait], còn `signalfd` biến signal thành một fd để `read`[^sig-sync]. fd này dùng chung được với `poll`/`epoll`[^sfd-def], nên signal trở thành một nguồn sự kiện trong event loop. Với thread: disposition chung cả process, mask riêng từng thread[^sig-perproc][^sig-thread-mask].
+> **Trả lời ngắn.** Ngoài handler (chạy bất đồng bộ và bị ràng buộc bởi async-signal-safety, mục 6), Linux cho nhận signal *đồng bộ*: `sigwaitinfo` chặn thread gọi tới khi có signal[^sig-sync-wait]. Còn `signalfd` biến signal thành một fd để `read`[^sig-sync]. fd này dùng chung được với `poll`/`epoll`[^sfd-def], nên signal trở thành một nguồn sự kiện trong event loop. Với thread: disposition chung cả process, mask riêng từng thread[^sig-thread-mask].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì để chuông điện thoại bất ngờ reo giữa lúc bạn đang làm việc (handler), bạn tắt chuông và định kỳ mở hộp thư thoại (đọc fd) lúc thuận tiện.
+*Với service `orders`.* Giả sử `orders` có một event loop `epoll` canh các socket. Bạn muốn `SIGTERM` cũng hiện ra trong loop đó như một sự kiện bình thường, thay vì phải viết handler theo luật hạn chế của mục 6. Đó là việc của `signalfd`. Mục này cũng trả lời chuyện đã hứa ở mục 2 và 4: signal gửi cho cả process thì thread nào nên nhận?
 
-**Vấn đề.** Handler bất đồng bộ buộc bạn tuân thủ async-signal-safety (mục 6) và không phải là một fd để đưa vào `poll`/`epoll` (nhận xét của người soạn). Hai cách nhận signal *đồng bộ* có sẵn: `sigwaitinfo(2)`/`sigtimedwait(2)`/`sigwait(3)` chặn đến khi một signal trong tập được deliver rồi trả thông tin về nó[^sig-sync-wait]; hoặc `signalfd(2)` trả về một fd để đọc thông tin signal được deliver cho caller, mỗi `read` chặn đến khi có signal trong tập[^sig-sync].
+### 9.1 Nhận signal đồng bộ
 
-**Cơ chế `signalfd`.**
+Handler là cách nhận signal bất đồng bộ: bạn phải tuân thủ async-signal-safety (mục 6), và handler không phải một fd để đưa vào `poll`/`epoll` (nhận xét của người soạn). Linux cho hai cách nhận signal *đồng bộ*, tức chủ động chờ tới khi signal được deliver rồi lấy thông tin về nó. Cách thứ nhất là họ `sigwaitinfo(2)`/`sigtimedwait(2)`/`sigwait(3)`: chúng chặn tới khi một signal trong tập đã chọn được deliver[^sig-sync-wait]. Cách thứ hai là `signalfd(2)`: nó trả về một fd để đọc thông tin về các signal được deliver cho caller, và mỗi `read` chặn tới khi có signal trong tập[^sig-sync].
+
+### 9.2 Cơ chế `signalfd`
 
 1. Block các signal muốn nhận bằng `sigprocmask(2)`, để chúng không bị xử lý theo disposition mặc định[^sfd-block].
-2. Gọi `signalfd(-1, &mask, flags)`: `-1` nghĩa là tạo fd mới gắn với tập signal; truyền một signalfd có sẵn thay cho `-1` thì thay tập signal của fd đó[^sfd-replace]. `SFD_NONBLOCK` đặt `O_NONBLOCK` ngay lúc tạo (đỡ một lần `fcntl`), `SFD_CLOEXEC` đặt close-on-exec[^sfd-flags] (về `O_CLOEXEC`: [Chương 04, mục 4](04-file-descriptor-va-vfs.md)).
-3. `read(2)` trả một hoặc nhiều `struct signalfd_siginfo`[^sfd-read-struct] (128 byte[^sfd-128]) mô tả signal; đọc *tiêu thụ* signal: nó không còn pending, handler sẽ không chạy cho nó và `sigwaitinfo` cũng không nhận được[^sfd-read]. Nếu không signal nào pending, `read` chặn, hoặc trả `EAGAIN` nếu fd non-blocking[^sfd-read2].
-4. fd đọc được (với `select`/`poll`) khi có signal trong tập đang pending[^sfd-readable], và cũng dùng được với `epoll`[^sfd-def]. Đây là lợi ích chính: signal trở thành một nguồn sự kiện như socket trong cùng event loop (xem [P7 — select/poll/epoll](../07-io-async/02-select-poll-epoll.md)).
+2. Gọi `signalfd(-1, &mask, flags)`. Giá trị `-1` nghĩa là tạo fd mới gắn với tập signal; truyền một signalfd có sẵn thay cho `-1` thì thay tập signal của fd đó[^sfd-replace]. `SFD_NONBLOCK` đặt `O_NONBLOCK` ngay lúc tạo nên đỡ một lần `fcntl`, còn `SFD_CLOEXEC` đặt close-on-exec[^sfd-flags] (về `O_CLOEXEC`: [Chương 04, mục 4](04-file-descriptor-va-vfs.md)).
+3. `read(2)` trả một hoặc nhiều `struct signalfd_siginfo` mô tả signal[^sfd-read-struct]. Mỗi struct dài 128 byte[^sfd-128]. Đọc là *tiêu thụ* signal: nó không còn pending, handler sẽ không chạy cho nó và `sigwaitinfo` cũng không nhận được[^sfd-read]. Nếu không có signal nào pending thì `read` chặn, hoặc trả `EAGAIN` nếu fd non-blocking[^sfd-read2].
+4. fd đọc được (với `select`/`poll`) khi có signal trong tập đang pending[^sfd-readable]. Nó dùng được cả với `epoll`[^sfd-def]. Đây là lợi ích chính: signal thành một nguồn sự kiện như socket, nằm trong cùng event loop (xem [P7 — select/poll/epoll](../07-io-async/02-select-poll-epoll.md)).
 
-Đã chạy: block `SIGUSR2`, `signalfd`, `sigqueue` một lần, `read` một `struct signalfd_siginfo`:
+Đã chạy: block `SIGUSR2`, tạo `signalfd`, `sigqueue` một lần, rồi `read` một `struct signalfd_siginfo`:
 
 ```text
 signalfd read 128 bytes (sizeof=128) signo=12 pid_matches=1
 ```
 
-`SIGUSR2` là số 12 ở cột x86/ARM của bảng số hiệu (mục 2)[^sig-num-usr2]; `ssi_pid` khớp PID người gửi.
+`SIGUSR2` là số 12 ở cột x86/ARM của bảng số hiệu (mục 2)[^sig-num-usr2], và `ssi_pid` khớp PID của người gửi.
 
-**`sigwaitinfo` và thread.** `sigwaitinfo` cùng ý tưởng nhưng chặn thread gọi. Trong chương trình đa thread, signal cần được block ở **mọi thread**, kẻo bị xử lý theo disposition mặc định ở thread không gọi `sigwaitinfo`[^sigwait-mt]; nhiều thread cùng chờ một signal thì chỉ một thread nhận, không xác định thread nào[^sigwait-multi].
+### 9.3 `sigwaitinfo` và thread
 
-**Signal và thread nói chung.** Disposition theo process[^sig-perproc], mask theo thread[^sig-thread-mask], thread mới thừa kế mask của thread tạo ra nó[^pthsig-inherit]. Hệ quả: một handler đặt bởi bất kỳ thread nào có hiệu lực cho cả process, và signal gửi cho process có thể rơi vào *bất kỳ* thread nào không block nó[^sig-directed]. Nếu không kiểm soát mask, handler có thể chạy giữa lúc một thread worker đang giữ lock hoặc đang trong `malloc` (nhận xét của người soạn, từ mục 6 và mục 2).
+`sigwaitinfo` cùng ý tưởng với `signalfd` nhưng chặn ngay thread gọi. Trong chương trình đa thread, signal cần được block ở **mọi thread**, kẻo ở một thread không gọi `sigwaitinfo` nó bị xử lý theo disposition mặc định[^sigwait-mt]. Nếu nhiều thread cùng chờ một signal thì chỉ một thread nhận, và không xác định được là thread nào[^sigwait-multi].
 
-**Mẫu có nguồn: thread chuyên xử lý signal.** Ví dụ trong `pthread_sigmask(3)`: block một số signal ở main thread rồi tạo một thread riêng lấy chúng bằng `sigwait(3)`[^pthsig-example]. Thread tạo sau thừa kế mask đã block (mục 4), nên (suy luận của người soạn) chỉ thread chuyên trách chờ bằng `sigwait` nhận chúng. Đây là mô hình thay thế handler, cùng họ với `signalfd`.
+### 9.4 Signal và thread nói chung
 
-Thread nói chung: [P4 — Thread](../04-concurrency/01-thread.md).
+Gộp lại các luật ở mục 2 và 4: disposition theo process[^sig-perproc]. Mask theo thread[^sig-thread-mask]. Thread mới thừa kế mask của thread tạo ra nó[^pthsig-inherit]. Hệ quả là handler do bất kỳ thread nào đặt đều có hiệu lực cho cả process, và signal gửi cho process có thể rơi vào *bất kỳ* thread nào không block nó[^sig-directed]. Nếu không kiểm soát mask, handler của `orders` có thể chạy giữa lúc một handler thread đang giữ lock hoặc đang trong `malloc` (nhận xét của người soạn, từ mục 6 và mục 2).
+
+Cách kiểm soát đã có sẵn trong ví dụ của `pthread_sigmask(3)`: block một số signal ở main thread, rồi tạo một thread riêng lấy chúng bằng `sigwait(3)`[^pthsig-example]. Thread tạo sau thừa kế mask đã block (mục 4), nên chỉ thread chuyên trách chờ bằng `sigwait` nhận chúng (suy luận của người soạn). Đây là mô hình thay thế handler, cùng họ với `signalfd`. Về thread nói chung: [P4 — Thread](../04-concurrency/01-thread.md).
 
 <details><summary>Đi sâu: giới hạn của signalfd</summary>
 
-- Không nhận được signal sinh *đồng bộ* như `SIGSEGV`, `SIGFPE`; chúng chỉ bắt được bằng handler[^sfd-limits]. `SIGKILL`/`SIGSTOP` bị lờ âm thầm[^sfd-kill].
-- Signal phải được block và mask được thừa kế qua `fork`/`exec`, nên child chạy chương trình khác thường phải unblock chúng trước `execve`[^sfd-exec]; không làm được khi child do hàm thư viện tự spawn ngầm, lúc đó phải dùng handler ghi vào một fd (cùng ý tưởng với *self-pipe* ở mục 6)[^sfd-lib].
-- Nếu cha đã thêm signalfd vào một `epoll` instance rồi `fork`, child thừa kế fd và `read` được signal gửi cho child, nhưng `epoll_wait` không báo fd đó sẵn sàng[^sfd-fork][^sfd-epoll].
+- Không nhận được signal sinh *đồng bộ* như `SIGSEGV`, `SIGFPE`; chúng chỉ bắt được bằng handler[^sfd-limits]. `SIGKILL`/`SIGSTOP` bị lờ đi âm thầm[^sfd-kill].
+- Signal phải được block, và mask được thừa kế qua `fork`/`exec`, nên child chạy chương trình khác thường phải unblock chúng trước `execve`[^sfd-exec]. Khi child do một hàm thư viện tự spawn ngầm thì bạn không làm được việc đó, và phải dùng handler ghi vào một fd (cùng ý tưởng với *self-pipe* ở mục 6)[^sfd-lib].
+- Nếu cha đã thêm signalfd vào một `epoll` instance rồi `fork`, child thừa kế fd và `read` được signal gửi cho child[^sfd-fork]. Nhưng `epoll_wait` không báo fd đó sẵn sàng[^sfd-epoll].
 - Trong chương trình đa thread, thread đọc signalfd nhận signal nhắm vào chính nó và signal nhắm vào cả process, không nhận signal nhắm vào thread khác[^sfd-thread].
 - API **chỉ có trên Linux**[^sfd-linux]. Hệ BSD có filter `EVFILT_SIGNAL` của kqueue cho việc tương tự ([P7 — kqueue](../07-io-async/03-kqueue-io-uring.md); nguồn ở đó là man page FreeBSD, chưa kiểm chứng trên macOS).
 
@@ -347,30 +469,36 @@ Thread nói chung: [P4 — Thread](../04-concurrency/01-thread.md).
 
 **Quay lại Q8:** `signalfd` và `sigwaitinfo` đưa signal về dạng đồng bộ, tránh hạn chế của handler; vì mask theo thread còn disposition theo process, hãy block signal trước khi tạo thread và để một nơi duy nhất nhận.
 
+---
+
 ## 10. Liên hệ với Rust
 
-**`SIGPIPE` trong Rust** (cơ chế đầy đủ, hai đường spawn và bẫy `println!`: [Chương 07, mục 5](07-rust-tren-giao-dien-he-thong.md)). Từ 2014 runtime Rust trên Unix đặt `SIGPIPE` là `SIG_IGN` lúc khởi động[^rs-rt-sigpipe], vì nếu không thì một số nền tảng sẽ giết chương trình khi gặp `EPIPE`[^rs-sigpipe-comment]. Hệ quả quan sát được (đã chạy, rustc 1.95.0, Linux): ghi vào `std::io::pipe()` đã đóng reader trả `Err` thay vì giết process, với `kind=BrokenPipe raw=Some(32)`. Runtime init "không bảo đảm chạy" khi Rust code được gọi từ bên ngoài[^rs-init-notrun], nên đừng giả định `SIGPIPE` luôn bị ignore ở đó.
+Với `orders` viết bằng Rust, các điều ở trên vẫn nguyên giá trị: Rust không đổi cách kernel gửi signal. Phần này nói runtime Rust đã làm sẵn gì quanh `SIGPIPE`, `Child::kill` khác graceful shutdown ra sao, và tokio xử lý signal thế nào.
 
-Con do `Command` spawn thì không thừa kế việc ignore: std đặt lại `SIGPIPE` về `SIG_DFL` trong con trước khi `exec` (nếu không dùng `-Zon-broken-pipe`)[^rs-child-sigpipe-reset][^rs-child-sigpipe-fork]. Việc ignore sống sót qua `execve`[^sig-fork-exec] là lý do dễ hiểu cho bước này, nhưng comment của std chỉ nói "tương thích ngược" (suy luận của người soạn).
+**`SIGPIPE` trong Rust** (cơ chế đầy đủ, hai đường spawn và bẫy `println!`: [Chương 07, mục 5](07-rust-tren-giao-dien-he-thong.md)). Từ 2014, runtime Rust trên Unix đặt `SIGPIPE` thành `SIG_IGN` lúc khởi động[^rs-rt-sigpipe]. Lý do: nếu không thì trên một số nền tảng chương trình bị giết ngay khi gặp `EPIPE`[^rs-sigpipe-comment]. Hệ quả quan sát được (đã chạy, rustc 1.95.0, Linux): ghi vào một `std::io::pipe()` đã đóng reader trả `Err` thay vì giết process, với `kind=BrokenPipe raw=Some(32)`. Tuy vậy runtime init "không bảo đảm chạy" khi Rust code được gọi từ bên ngoài[^rs-init-notrun], nên đừng giả định `SIGPIPE` luôn bị ignore ở đó.
 
-**`Child::kill` là `SIGKILL`.** `Child::kill` buộc child thoát và tương đương gửi `SIGKILL` trên Unix[^rs-child-kill]; vì vậy nó *không phải* graceful shutdown. Muốn gửi `SIGTERM` phải dùng `libc::kill` (FFI, cần `unsafe`) hoặc thư viện bọc (nhận xét của người soạn). Việc `Child` không tự `wait`: [Chương 07, mục 4](07-rust-tren-giao-dien-he-thong.md).
+Con do `Command` spawn thì không thừa kế việc ignore này: std đặt lại `SIGPIPE` về `SIG_DFL` trong con trước khi `exec`, trừ khi dùng `-Zon-broken-pipe`[^rs-child-sigpipe-reset]. Code của std làm việc đó bằng lời gọi `signal(SIGPIPE, SIG_DFL)`[^rs-child-sigpipe-fork]. Việc ignore sống sót qua `execve` (mục 2) là một lý do dễ hiểu cho bước này, nhưng comment của std chỉ nói "tương thích ngược" (suy luận của người soạn).
 
-**std không có API signal cấp cao** (người soạn đã tìm văn bản trang chủ tài liệu `std` 1.95.0, gồm danh sách module và macro: không có mục nào nhắc tới signal; đây là kết quả tìm kiếm, không phải trích dẫn). Bắt signal trong Rust nghĩa là FFI tới `sigaction`/`signalfd` qua crate `libc` (hàm extern gọi là `unsafe`[^rs-unsafe-extern]; xem [Chương 07, mục 7](07-rust-tren-giao-dien-he-thong.md)) hoặc crate bọc. Hạn chế async-signal-safety của mục 6 vẫn đúng với handler viết bằng Rust (suy luận của người soạn).
+**`Child::kill` là `SIGKILL`.** `Child::kill` buộc child thoát, và tương đương gửi `SIGKILL` trên Unix[^rs-child-kill]. Nên nó *không phải* graceful shutdown: nếu `orders` muốn dừng `pdf-gen` nhẹ nhàng thì phải gửi `SIGTERM` bằng `libc::kill` (FFI, cần `unsafe`) hoặc một thư viện bọc (nhận xét của người soạn). Việc `Child` không tự `wait`: [Chương 07, mục 4](07-rust-tren-giao-dien-he-thong.md).
 
-**tokio.** `tokio::signal` nhắc rằng signal handling nói chung là một chủ đề rất rắc rối, cần dùng cẩn thận[^tokio-warn]. Trong source tokio 1.53.2, handler ở mức thấp làm đúng mẫu handler tối thiểu của mục 6: đặt cờ báo signal đã đến rồi ghi một byte để đánh thức driver của tokio; comment trong source nói hai thao tác này đều phải async-signal-safe[^tokio-selfpipe]. Comment nói "pipe", còn code ghi byte vào một `UnixStream` ghép đôi (socket pair) do `UnixStream::pair()` tạo ra[^tokio-pair], cùng ý tưởng self-pipe (nhận xét của người soạn). Tài liệu `signal()` nêu: signal có thể bị gộp *nhiều hơn* mức kernel đã gộp[^tokio-coalesce], và handler libc đã đăng ký *không bao giờ được gỡ*[^tokio-unregister]. Nghĩa là (suy luận của người soạn) sau khi đăng ký `SignalKind::terminate()`, `SIGTERM` không còn tự kết thúc process; chương trình *phải* chủ động thoát. Dùng `tokio::signal` cho graceful shutdown: [P7·08 — Tokio](../07-io-async/08-tokio.md) và [P8·08, mục 4](../08-containers/08-rust-trong-container.md).
+**std không có API signal cấp cao.** Người soạn đã tìm văn bản trang chủ tài liệu `std` 1.95.0, gồm danh sách module và macro, và không có mục nào nhắc tới signal; đây là kết quả tìm kiếm, không phải trích dẫn. Bắt signal trong Rust nghĩa là FFI tới `sigaction`/`signalfd` qua crate `libc`, hoặc dùng crate bọc. Hàm extern gọi là `unsafe`[^rs-unsafe-extern] (xem [Chương 07, mục 7](07-rust-tren-giao-dien-he-thong.md)). Hạn chế async-signal-safety của mục 6 vẫn đúng với handler viết bằng Rust (suy luận của người soạn).
 
-Vòng retry `EINTR` (`cvt_r`) của std: [Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md).
+**tokio.** Tài liệu của `tokio::signal` cảnh báo rằng xử lý signal nói chung là một chủ đề rất rắc rối, cần dùng cẩn thận[^tokio-warn]. Trong source tokio 1.53.2, handler mức thấp làm đúng mẫu handler tối thiểu ở mục 6: đặt một cờ báo signal đã đến, rồi ghi một byte để đánh thức driver của tokio. Comment trong source nói cả hai thao tác phải async-signal-safe[^tokio-selfpipe]. Comment nhắc "pipe", nhưng code ghi byte vào một `UnixStream` ghép đôi (socket pair) do `UnixStream::pair()` tạo ra[^tokio-pair]; ý tưởng vẫn là self-pipe (nhận xét của người soạn).
+
+Về hành vi: tài liệu `signal()` nêu rằng signal có thể bị gộp *nhiều hơn* mức kernel đã gộp[^tokio-coalesce]. Handler libc đã đăng ký *không bao giờ được gỡ*[^tokio-unregister]. Suy ra (suy luận của người soạn): sau khi đăng ký `SignalKind::terminate()`, `SIGTERM` không còn tự kết thúc process, và chương trình *phải* chủ động thoát. Dùng `tokio::signal` cho graceful shutdown: [P7·08 — Tokio](../07-io-async/08-tokio.md) và [P8·08, mục 4](../08-containers/08-rust-trong-container.md). Vòng retry `EINTR` (`cvt_r`) của std: [Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md).
+
+---
 
 ## Tóm tắt
 
-- Disposition theo process, mask theo thread; signal pending giữa lúc sinh và lúc deliver.
-- Kernel chạy handler khi quay về user mode: dựng frame trên stack, thêm `sa_mask` và chính signal vào mask, `sigreturn` khôi phục.
+- Disposition theo process, mask theo thread; signal ở trạng thái pending giữa lúc phát sinh và lúc deliver.
+- Kernel chạy handler khi đưa thread về user mode: dựng frame trên stack, thêm `sa_mask` và chính signal vào mask, rồi `sigreturn` khôi phục.
 - Signal chuẩn không queue; real-time queue được, có thứ tự, mang được dữ liệu.
-- Dùng `sigaction`, `pthread_sigmask`; block signal *trước* khi tạo thread/child.
+- Dùng `sigaction` và `pthread_sigmask`; block signal *trước* khi tạo thread hoặc process con.
 - `SA_RESTART` không restart `epoll_wait`/`poll`/`select`/sleep: luôn retry khi `EINTR`.
-- Handler chỉ gọi hàm async-signal-safe, lưu/khôi phục `errno`; tốt nhất chỉ đặt cờ hoặc ghi một byte.
-- Handler `SIGCHLD` phải lặp `waitpid(-1, WNOHANG)`; `SIGPIPE` ignore thì `write` lỗi `EPIPE` (runtime Rust ignore sẵn).
-- `SIGTERM` bắt được, `SIGKILL` không; graceful shutdown là quy ước ứng dụng.
+- Handler chỉ gọi hàm async-signal-safe và lưu/khôi phục `errno`; tốt nhất chỉ đặt cờ hoặc ghi một byte.
+- Handler `SIGCHLD` phải lặp `waitpid(-1, WNOHANG)`; `SIGPIPE` bị ignore thì `write` lỗi `EPIPE` (runtime Rust ignore sẵn).
+- `SIGTERM` bắt được, `SIGKILL` không; graceful shutdown là quy ước của ứng dụng.
 - PID 1 chỉ nhận signal nó có handler (trừ `SIGKILL`/`SIGSTOP` từ namespace tổ tiên).
 - `signalfd` (chỉ Linux) và `sigwaitinfo` nhận signal đồng bộ, tránh handler.
 
@@ -379,21 +507,21 @@ Vòng retry `EINTR` (`cvt_r`) của std: [Chương 07, mục 2](07-rust-tren-gia
 1. Disposition và signal mask thuộc process hay thread? Qua `fork` và `execve` chúng ra sao?
 <details><summary>Đáp án</summary>
 
-Disposition theo process[^sig-perproc], mask theo thread[^sig-thread-mask]. `fork` thừa kế cả hai; `execve` đặt lại handler về mặc định, giữ ignore[^sig-fork-exec], và giữ mask[^sig-maskinherit]. Tập pending: con `fork` rỗng, `execve` giữ[^sig-pendfork].
+Disposition theo process[^sig-perproc]. Mask theo thread[^sig-thread-mask]. `fork` thừa kế cả hai. `execve` đặt lại handler về mặc định và giữ ignore[^sig-fork-exec]. Mask thì `execve` giữ nguyên[^sig-maskinherit]. Tập pending thì con `fork` bắt đầu rỗng, còn `execve` giữ nguyên[^sig-pendfork].
 
 </details>
 
 2. Gửi `SIGUSR1` 5 lần khi bị block rồi unblock: handler chạy mấy lần? Với `SIGRTMIN` qua `sigqueue` thì sao?
 <details><summary>Đáp án</summary>
 
-1 lần với signal chuẩn[^sig-noqueue]; 5 lần với real-time[^sig-rt-queue].
+Signal chuẩn chạy 1 lần[^sig-noqueue]. Real-time chạy 5 lần[^sig-rt-queue].
 
 </details>
 
-3. Vì sao `printf` trong handler nguy hiểm, và hai cách khắc phục?
+3. Vì sao `printf` trong handler nguy hiểm, và có hai cách khắc phục nào?
 <details><summary>Đáp án</summary>
 
-stdio có buffer và biến trạng thái tĩnh; bị ngắt giữa chừng rồi gọi lại chạy trên dữ liệu không nhất quán[^safety-stdio]. (a) chỉ gọi hàm async-signal-safe và handler reentrant, (b) block signal quanh chỗ không an toàn[^safety-choices]; thực tế chọn (a)[^safety-choice-a].
+stdio có buffer và biến trạng thái tĩnh; bị ngắt giữa chừng rồi gọi lại thì chạy trên dữ liệu không nhất quán[^safety-stdio]. Hai cách: (a) chỉ gọi hàm async-signal-safe và để handler reentrant, hoặc (b) block signal quanh chỗ không an toàn[^safety-choices]. Thực tế chọn (a)[^safety-choice-a].
 
 </details>
 
@@ -407,42 +535,42 @@ Không; `epoll_wait`, `poll`, `select` không bao giờ được restart[^sig-no
 5. Handler `SIGCHLD` gọi `waitpid` một lần mà vẫn còn zombie: vì sao, sửa sao?
 <details><summary>Đáp án</summary>
 
-Signal chuẩn không queue nên nhiều con chết có thể chỉ cho một `SIGCHLD`[^sig-noqueue]; lặp `waitpid(-1, ..., WNOHANG)` đến hết[^wait-nohang].
+Signal chuẩn không queue nên nhiều con chết có thể chỉ cho một `SIGCHLD`[^sig-noqueue]. Sửa bằng cách lặp `waitpid(-1, ..., WNOHANG)` tới hết[^wait-nohang].
 
 </details>
 
 6. Ghi vào pipe không còn reader: mặc định và khi ignore `SIGPIPE` xảy ra gì?
 <details><summary>Đáp án</summary>
 
-Mặc định process nhận `SIGPIPE` và (Term) kết thúc[^sig-tbl-pipe]; ignore thì `write` lỗi `EPIPE`[^pipe-sigpipe].
+Mặc định process nhận `SIGPIPE` và (hành động `Term`) bị kết thúc[^sig-tbl-pipe]. Nếu ignore thì `write` lỗi `EPIPE`[^pipe-sigpipe].
 
 </details>
 
 7. Vì sao `signalfd` đi cùng `sigprocmask(SIG_BLOCK)`, và nó không nhận loại signal nào?
 <details><summary>Đáp án</summary>
 
-Để signal không bị xử lý theo disposition mặc định[^sfd-block]. Không nhận signal đồng bộ như `SIGSEGV`/`SIGFPE`[^sfd-limits], và `SIGKILL`/`SIGSTOP`[^sfd-kill].
+Để signal không bị xử lý theo disposition mặc định[^sfd-block]. Nó không nhận signal sinh đồng bộ như `SIGSEGV`/`SIGFPE`[^sfd-limits]. Nó cũng không nhận `SIGKILL`/`SIGSTOP`[^sfd-kill].
 
 </details>
 
 8. PID 1 trong PID namespace không có handler `SIGTERM`: `SIGTERM` từ trong namespace thì sao? `SIGKILL` từ namespace tổ tiên thì sao?
 <details><summary>Đáp án</summary>
 
-`SIGTERM` từ bên trong không tới được init[^pidns-onlyhandled]; `SIGKILL` từ namespace tổ tiên được deliver cưỡng bức[^pidns-sigkill-ancestor].
+`SIGTERM` từ bên trong không tới được init[^pidns-onlyhandled]. `SIGKILL` từ namespace tổ tiên được deliver cưỡng bức[^pidns-sigkill-ancestor].
 
 </details>
 
 9. Kubernetes dừng một Pod: signal nào được gửi tới đâu, bao lâu thì bị `SIGKILL`, và ứng dụng nên làm gì với `SIGTERM`?
 <details><summary>Đáp án</summary>
 
-Kubelet nhờ container runtime gửi `TERM` kèm grace period tới main process của mỗi container[^k8s-term], tức process 1 trong container[^k8s-pid1]; mặc định 30 giây[^k8s-grace-default], hết hạn thì gửi `KILL` cho các process còn chạy[^k8s-kill]. Ứng dụng nên coi `TERM` là lệnh bắt đầu graceful shutdown và hoàn tất trong grace period (nhận xét của người soạn).
+Kubelet nhờ container runtime gửi `TERM` kèm grace period tới main process của mỗi container[^k8s-term]. Đó là process 1 trong container[^k8s-pid1]. Mặc định là 30 giây[^k8s-grace-default]. Hết hạn thì gửi `KILL` cho các process còn chạy[^k8s-kill]. Ứng dụng nên coi `TERM` là lệnh bắt đầu graceful shutdown và hoàn tất trong grace period (nhận xét của người soạn).
 
 </details>
 
 10. Process nhiều thread: signal gửi cho cả process sẽ rơi vào thread nào, và làm sao để chỉ một thread xử lý nó?
 <details><summary>Đáp án</summary>
 
-Signal process-directed có thể tới bất kỳ thread nào không block nó; nếu nhiều thread cùng không block, kernel chọn tùy ý[^sig-directed]. Block signal ở mọi thread rồi để một thread chuyên trách chờ bằng `sigwait`/`sigwaitinfo`[^sigwait-mt][^pthsig-example], hoặc đọc `signalfd` (suy luận của người soạn từ mục 4 và mục 9).
+Signal process-directed có thể tới bất kỳ thread nào không block nó; nếu nhiều thread cùng không block thì kernel chọn tùy ý[^sig-directed]. Cách làm: block signal ở mọi thread rồi để một thread chuyên trách chờ bằng `sigwait`/`sigwaitinfo`[^sigwait-mt]. Ví dụ của `pthread_sigmask(3)` làm đúng như vậy[^pthsig-example]. Hoặc đọc `signalfd` (suy luận của người soạn từ mục 4 và mục 9).
 
 </details>
 
@@ -465,7 +593,6 @@ Signal process-directed có thể tới bất kỳ thread nào không block nó;
 [^sig-fork-exec]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "A child created via fork(2) inherits a copy of its parent's signal dispositions. During an execve(2), the dispositions of handled signals are reset to the default; the dispositions of ignored signals are left unchanged."
 [^sig-uncatchable]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "The signals SIGKILL and SIGSTOP cannot be caught, blocked, or ignored."
 [^sigaction-einval]: sigaction(2), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages-dev/sigaction.2.en.html> — "This will also be generated if an attempt is made to change the action for SIGKILL or SIGSTOP, which cannot be caught or ignored."
-[^sig-tbl-int]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "SIGINT P1990 Term Interrupt from keyboard"
 [^sig-tbl-kill]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "SIGKILL P1990 Term Kill signal"
 [^sig-num-kill]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "SIGKILL 9 9 9 9"
 [^sig-tbl-pipe]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "SIGPIPE P1990 Term Broken pipe: write to pipe with no readers; see pipe(7)"
@@ -475,7 +602,6 @@ Signal process-directed có thể tới bất kỳ thread nào không block nó;
 [^sig-num-chld]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "SIGCHLD 17 20 18 18"
 [^sig-num-usr2]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "SIGUSR2 12 31 17 17"
 [^sig-num-arch]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "The numeric value for each signal is given in the table below. As shown in the table, many signals have different numeric values on different architectures. The first numeric value in each table row shows the signal number on x86, ARM, and most other architectures; the second value is for Alpha and SPARC; the third is for MIPS; and the last is for PARISC."
-[^sig-num-pipe]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "SIGPIPE 13 13 13 13"
 [^sig-pending]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "A signal may be blocked, which means that it will not be delivered until it is later unblocked. Between the time when it is generated and when it is delivered a signal is said to be pending."
 [^sig-thread-mask]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "Each thread in a process has an independent signal mask, which indicates the set of signals that the thread is currently blocking."
 [^sig-hw]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "A signal may be thread-directed because it was generated as a consequence of executing a specific machine-language instruction that triggered a hardware exception (e.g., SIGSEGV for an invalid memory access, or SIGFPE for a math error)"
@@ -488,7 +614,6 @@ Signal process-directed có thể tới bất kỳ thread nào không block nó;
 [^sig-mask-during]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "The signal being delivered is also added to the signal mask, unless SA_NODEFER was specified when registering the handler. These signals are thus blocked while the handler executes."
 [^sig-trampoline]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "The signal trampoline calls sigreturn(2), a system call that uses the information in the stack frame created in step 1 to restore the thread to its state before the signal handler was called. The thread's signal mask and alternate signal stack settings are restored as part of this procedure."
 [^sig-resume]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "Upon completion of the call to sigreturn(2), the kernel transfers control back to user space, and the thread recommences execution at the point where it was interrupted by the signal handler."
-[^sig-nokernelstate]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "the kernel does not record any special state information indicating that the thread is currently executing inside a signal handler."
 [^sig-noqueue]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "Standard signals do not queue. If multiple instances of a standard signal are generated while that signal is blocked, then only one instance of the signal is marked as pending (and the signal will be delivered just once when it is unblocked)."
 [^sig-siginfo-first]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "In the case where a standard signal is already pending, the siginfo_t structure (see sigaction(2)) associated with that signal is not overwritten on arrival of subsequent instances of the same signal. Thus, the process will receive the information associated with the first instance of the signal."
 [^sig-rt-queue]: signal(7), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages/signal.7.en.html> — "Multiple instances of real-time signals can be queued. By contrast, if multiple instances of a standard signal are delivered while that signal is currently blocked, then only one instance is queued."

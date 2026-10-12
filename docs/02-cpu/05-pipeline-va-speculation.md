@@ -17,19 +17,25 @@
 - (Không bắt buộc) [Chương 03 — Assembly x86-64 và AArch64](03-assembly-x86-64-va-aarch64.md): đọc được lệnh `cmp`/`jcc`/`b.cond`, `cmov`/`csel` — giúp ở mục 2 và mục 7; theo [tổng quan phase](00-tong-quan.md), chương này độc lập với chương 03–04.
 - Khái niệm cache ở mức "truy cập bộ nhớ có thể mất hàng trăm cycle"; chi tiết ở [Chương 06 — Cache hierarchy và NUMA](06-cache-va-numa.md).
 
+Bạn đã viết service Rust và biết một vòng lặp `for` có `if` bên trong là gì; chương này cho thấy CPU thật sự chạy vòng lặp đó ra sao. Cả chương bám theo một service giả định tên `ingest`, giới thiệu ở mục 1.
+
 ## 1. Pipeline: chồng lấn lệnh để tăng throughput (Q1)
 
-> **Trả lời ngắn.** Một CPU đơn giản làm trọn từng lệnh qua nhiều bước rồi mới sang lệnh kế, nên phần cứng của mỗi bước phần lớn thời gian đứng không[^dis-each-stage]. Pipeline bắt đầu lệnh kế tiếp trước khi lệnh hiện tại xong, nên các lệnh chồng lấn nhau[^dis-pipe]. Mỗi lệnh vẫn mất đủ số cycle như trước (latency không giảm)[^dis-latency], nhưng số lệnh hoàn tất mỗi đơn vị thời gian (throughput) tăng[^dis-throughput].
+> **Trả lời ngắn.** Một CPU đơn giản làm trọn từng lệnh qua nhiều bước rồi mới sang lệnh kế, nên mạch của mỗi bước phần lớn thời gian đứng không[^dis-each-stage]. Pipeline cho lệnh kế tiếp bắt đầu trước khi lệnh hiện tại xong, nên các lệnh chồng lấn nhau[^dis-pipe]. Mỗi lệnh vẫn mất đủ số cycle như trước, tức latency không giảm[^dis-latency]. Nhưng số lệnh hoàn tất trong một đơn vị thời gian, tức throughput, thì tăng[^dis-throughput].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): dây chuyền lắp ráp, mỗi trạm làm một công đoạn; một chiếc xe vẫn mất cùng thời gian từ đầu đến cuối, nhưng cứ mỗi nhịp lại có một chiếc xe ra khỏi dây chuyền.
+*Với service `ingest`.* Hãy hình dung `ingest`, một service viết bằng Rust, nhận từng lô event qua mạng. Mỗi event có một trường `priority: u8`, và hot loop của service duyệt cả lô để cộng dồn những event có priority từ 128 trở lên. Ta sẽ bám theo `ingest` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Mỗi event chỉ tốn vài lệnh máy, nhưng một lô có hàng triệu event, nên tốc độ chạy của vài lệnh đó quyết định `ingest` nhanh hay chậm. Câu hỏi của mục này: CPU hoàn tất được bao nhiêu lệnh mỗi cycle, và vì sao không phải mỗi lệnh một lần bốn cycle?
 
-Một CPU đơn giản thực thi mỗi lệnh qua vài bước: lấy lệnh từ bộ nhớ (Fetch), giải mã và đọc thanh ghi nguồn (Decode), thực thi trên ALU (Execute), ghi kết quả về thanh ghi (WriteBack)[^dis-4stage]. Nếu CPU làm trọn một lệnh rồi mới sang lệnh kế, thì N lệnh tốn 4N cycle, tức CPI = 4 (CPI là số cycle trung bình cho mỗi lệnh)[^dis-cpi4]. Điểm lãng phí: mạch của mỗi stage chỉ làm việc có ích một cycle trong mỗi bốn cycle[^dis-each-stage]; ví dụ mạch Fetch, sau khi nạp xong một lệnh, ba cycle kế tiếp không làm gì có ích[^dis-idle]. Như giặt đồ: load thứ nhất sang máy sấy thì load thứ hai vào máy giặt ngay[^dis-laundry].
+### 1.1 Một CPU đơn giản phí phần cứng ra sao
 
-**Pipelining** là việc bắt đầu thực thi lệnh kế tiếp trước khi lệnh hiện tại hoàn tất[^dis-pipe]. Các lệnh vẫn được thực thi theo thứ tự, nhưng chúng chồng lấn nhau[^dis-overlap]. Khi pipeline đã "đầy" — mọi stage đều có lệnh đang chạy, và mỗi lệnh đi sau lệnh trước đúng một stage[^dis-behind] — CPU hoàn tất một lệnh mỗi cycle (CPI = 1)[^dis-full].
+Một CPU đơn giản chạy mỗi lệnh qua bốn bước: Fetch lấy lệnh từ bộ nhớ, Decode giải mã và đọc thanh ghi nguồn, Execute cho ALU làm phép toán, WriteBack ghi kết quả về thanh ghi[^dis-4stage]. Nếu CPU làm trọn một lệnh rồi mới sang lệnh kế thì N lệnh tốn 4N cycle[^dis-cpi4], tức CPI = 4 (CPI là số cycle trung bình cho mỗi lệnh).
 
-Trục thời gian cho pipeline 4 stage (F = Fetch, D = Decode, E = Execute, W = WriteBack; bảng do người soạn vẽ lại theo mô tả của Dive into Systems):
+Cái phí nằm ở chỗ mạch của mỗi bước chỉ làm việc có ích đúng một cycle trong bốn[^dis-each-stage]. Lấy mạch Fetch: nạp xong một lệnh, nó không làm gì có ích trong ba cycle kế tiếp[^dis-idle]. Với `ingest`, nghĩa là trong lúc lệnh cộng của event này đang chạy, mạch Fetch ngồi không dù lệnh đọc event kế tiếp đã sẵn sàng được nạp (nhận xét của người soạn).
+
+### 1.2 Chồng lấn các lệnh
+
+Pipelining sửa chuyện đó bằng cách bắt đầu lệnh kế tiếp trước khi lệnh hiện tại hoàn tất[^dis-pipe]. Các lệnh vẫn chạy theo thứ tự, chỉ là chúng chồng lấn nhau[^dis-overlap]. Bảng dưới là trục thời gian của ba lệnh liên tiếp trong pipeline 4 stage (F = Fetch, D = Decode, E = Execute, W = WriteBack; bảng do người soạn vẽ lại theo mô tả của nguồn):
 
 | Cycle | 1 | 2 | 3 | 4 | 5 | 6 |
 |---|---|---|---|---|---|---|
@@ -37,11 +43,15 @@ Trục thời gian cho pipeline 4 stage (F = Fetch, D = Decode, E = Execute, W =
 | Lệnh 2 | | F | D | E | W | |
 | Lệnh 3 | | | F | D | E | W |
 
-Từ cycle 4 trở đi, cycle nào cũng có một lệnh hoàn tất[^dis-fill4]. Để ý rằng **latency** của một lệnh (số cycle nó đi qua pipeline) *không giảm* — vẫn là bốn[^dis-latency]. Cái tăng là **throughput**: số lệnh hoàn tất trong một đơn vị thời gian[^dis-throughput].
+Khi pipeline đã đầy, tức mọi stage đều có lệnh đang chạy, CPU hoàn tất một lệnh mỗi cycle[^dis-full]. Trong bảng, từ cycle 4 trở đi cycle nào cũng có một lệnh hoàn tất, và CPI giảm về 1[^dis-fill4].
+
+### 1.3 Cái gì tăng, cái gì không
+
+Latency của một lệnh, tức số cycle nó đi qua pipeline, vẫn là bốn[^dis-latency]. Cái tăng là throughput, số lệnh CPU hoàn tất trong một đơn vị thời gian[^dis-throughput]. Với `ingest`, mỗi event vẫn đi qua các lệnh của nó mất đúng ngần ấy cycle; điều `ingest` được lợi là cả lô event xong sớm hơn nhiều (nhận xét của người soạn).
 
 <details><summary>Đi sâu: bao nhiêu stage, và vì sao lệnh không đồng đều</summary>
 
-Lệnh load/store cần thêm một stage truy cập bộ nhớ (Memory), nên pipeline kinh điển có năm stage: Fetch–Decode–Execute–Memory–WriteBack[^dis-5stage]. Số stage thay đổi theo thiết kế: ARM đời đầu có ba stage[^dis-arm3]; Pentium đời đầu có năm stage nhưng các đời sau có nhiều hơn đáng kể[^dis-depth], và Intel Core i7 có pipeline 14 stage[^dis-i7].
+Lệnh load/store cần thêm một stage truy cập bộ nhớ (Memory), nên pipeline kinh điển có năm stage: Fetch–Decode–Execute–Memory–WriteBack[^dis-5stage]. Số stage thay đổi theo thiết kế. ARM đời đầu có ba stage[^dis-arm3]. Pentium đời đầu có năm stage nhưng các đời sau có nhiều hơn đáng kể[^dis-depth]. Intel Core i7 có pipeline 14 stage[^dis-i7].
 
 ```mermaid
 flowchart LR
@@ -51,95 +61,117 @@ flowchart LR
     M --> W[WriteBack<br/>ghi thanh ghi đích]
 ```
 
-Sơ đồ do người soạn vẽ theo danh sách năm stage của Dive into Systems[^dis-5stage-list].
+Sơ đồ do người soạn vẽ theo danh sách năm stage của nguồn[^dis-5stage-list].
 
-Không phải lệnh nào cũng qua đủ stage[^dis-uneven]. Trong ví dụ của Dive into Systems, lệnh nạp từ bộ nhớ cần cả năm stage và các lệnh chỉ dùng thanh ghi cần bốn[^dis-uneven-ex]. Lệnh nhảy (`JMP`) chỉ cần ba stage vì không ghi thanh ghi đa dụng[^dis-jmp3]. Sự không đồng đều này là nguồn gốc của một tình huống va chạm mà sách minh họa: lệnh năm stage và lệnh bốn stage cùng muốn ghi một thanh ghi ở cùng một cycle[^dis-same-write] (xem Đi sâu của mục 2).
+Không phải lệnh nào cũng qua đủ stage[^dis-uneven]. Trong ví dụ của sách, lệnh nạp từ bộ nhớ cần cả năm stage, còn các lệnh chỉ dùng thanh ghi cần bốn[^dis-uneven-ex]. Lệnh nhảy (`JMP`) chỉ cần ba stage vì không ghi thanh ghi đa dụng[^dis-jmp3]. Sự không đồng đều này dẫn tới một tình huống va chạm mà sách minh họa: một lệnh năm stage và một lệnh bốn stage cùng muốn ghi một thanh ghi ở cùng một cycle[^dis-same-write] (xem Đi sâu của mục 2).
 
 </details>
 
-**Quay lại Q1:** pipeline chồng lấn các lệnh nên mạch nào cũng luôn có việc; mỗi lệnh vẫn mất cùng số cycle nhưng cứ mỗi cycle có một lệnh hoàn tất.
+**Quay lại Q1:** pipeline chồng lấn các lệnh nên mạch nào cũng luôn có việc; mỗi lệnh vẫn mất cùng số cycle, nhưng cứ mỗi cycle có một lệnh hoàn tất, nên cả lô event của `ingest` chạy xong sớm hơn.
 
 ## 2. Hazard: khi các lệnh chồng lấn va vào nhau (Q2)
 
-> **Trả lời ngắn.** Chồng lấn lệnh gây rắc rối (hazard) khi các lệnh tranh nhau phần cứng hoặc phụ thuộc nhau; có ba loại: structural, data, control[^ww-three]. Data hazard chủ yếu được chữa bằng forwarding thay vì chèn bubble làm stall[^dis-fwd][^dis-bubble]. Control hazard (nhánh) buộc CPU đoán, và đoán sai thì phải flush pipeline, rất tốn kém[^dis-flush].
+> **Trả lời ngắn.** Chồng lấn lệnh gây rắc rối (hazard) khi các lệnh tranh nhau phần cứng hoặc phụ thuộc nhau. Có ba loại: structural, data và control[^ww-three]. Với data hazard, CPU không chèn thêm bubble làm stall pipeline mà chủ yếu dùng forwarding[^dis-fwd]. Control hazard (nhánh) buộc CPU phải đoán; đoán sai thì phải flush pipeline, rất tốn kém[^dis-flush].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ở dây chuyền, trạm sau cần bộ phận mà trạm trước chưa làm xong (data), cần biết xe rẽ trái hay phải mới biết lắp gì (control), hoặc hai trạm cùng đòi một cái máy (structural).
+*Với service `ingest`.* Vòng lặp của `ingest` có đủ cả ba kiểu rắc rối. Phép cộng dồn ở mỗi vòng cần tổng của vòng trước. Giá trị event vừa đọc từ bộ nhớ phải dùng ngay để so với 128. Và chính phép so sánh đó là một nhánh. Mục này đi qua từng loại; riêng nhánh sẽ là chủ đề của mục 3.
 
-Khi một lệnh bị buộc chờ lệnh khác xong mới đi tiếp, ta có một **pipeline stall**; CPU và compiler cố hết sức tránh stall[^dis-stall].
+Trước hết cần một từ: khi một lệnh bị buộc chờ lệnh khác xong mới đi tiếp, ta có một **pipeline stall**, và CPU lẫn compiler cố hết sức tránh nó[^dis-stall].
 
-*Data hazard và forwarding.* **Data hazard** xảy ra khi hai lệnh cùng truy cập một dữ liệu trong pipeline[^dis-data]. Ví dụ (assembly giả của Dive into Systems):
+### 2.1 Data hazard và forwarding
+
+**Data hazard** xảy ra khi hai lệnh cùng truy cập một dữ liệu trong pipeline[^dis-data]. Ví dụ (assembly giả trong Dive into Systems):
 
 ```
 MOV 4, Reg2           # Reg2 = 4
 ADD Reg2, Reg2, Reg2  # Reg2 = Reg2 + Reg2
 ```
 
-`ADD` cần giá trị `Reg2` mà `MOV` chưa kịp ghi. Chèn thêm "bubble" (NOP trong pipeline) là giải pháp tồi vì làm stall pipeline[^dis-bubble]. Cách CPU dùng là **operand forwarding**: pipeline lấy kết quả của phép toán trước trực tiếp[^dis-fwd], không đợi nó được ghi vào thanh ghi[^ww-fwd]. Forwarding không phải lúc nào cũng tránh được stall: nếu lệnh sau cần giá trị mà lệnh trước (một lệnh `load`) chưa tạo ra kịp thì không thể forward ngược thời gian[^ww-loaduse]; trong pipeline năm stage của bài giảng, trường hợp load-use này cần stall một cycle[^ww-loaduse-stall].
+`ADD` cần giá trị `Reg2` mà `MOV` chưa kịp ghi. Vòng lặp của `ingest` có đúng kiểu này ở phép cộng dồn: vòng sau cần tổng mà vòng trước vừa tính (nhận xét của người soạn).
 
-*Control hazard: nhánh.* Pipeline được tối ưu cho các lệnh nối tiếp nhau; cấu trúc điều khiển như `if` và vòng lặp có thể ảnh hưởng nghiêm trọng đến hiệu năng pipeline[^dis-opt-seq]. **Control hazard** xảy ra khi pipeline gặp lệnh nhảy/có điều kiện: nó phải "đoán" nhánh có được thực hiện không[^dis-ctrl]. Vấn đề, theo ví dụ của sách: không thể biết nhánh có được thực hiện hay không cho đến khi lệnh nhảy thực thi xong, nhưng lúc đó các lệnh phía sau đã được nạp vào pipeline[^dis-ctrl-late]. Nếu nhánh đi hướng khác với các lệnh đã nạp (trong ví dụ của sách: nhánh được thực hiện), các lệnh "rác" đó phải bị loại bỏ (**flush**) trước khi nạp lại pipeline, và Dive into Systems nói thẳng: flush pipeline rất tốn kém[^dis-flush].
+Chèn thêm "bubble" (một NOP trong pipeline) để đợi là giải pháp kém, vì nó làm stall pipeline[^dis-bubble]. CPU làm khác: **operand forwarding**, tức pipeline lấy kết quả của phép toán trước trực tiếp[^dis-fwd]. Nó không đợi kết quả đó được ghi vào thanh ghi[^ww-fwd].
 
-Một lưu ý về phân loại: bài giảng của Walla Walla University ghi control hazard là một trường hợp đặc biệt của data hazard, được tách thành loại riêng vì được xử lý theo cách khác[^ww-ctrl-special].
+Forwarding không cứu được mọi trường hợp. Nếu lệnh trước là `load` và giá trị chưa kịp có khi lệnh sau cần, thì không thể forward ngược thời gian[^ww-loaduse]. Trong pipeline năm stage của bài giảng, trường hợp load-use này cần stall một cycle[^ww-loaduse-stall]. Với `ingest`, đó là lúc vừa đọc `priority` của một event từ bộ nhớ đã đem so với 128 ngay (nhận xét của người soạn).
 
-Dive into Systems liệt kê ba hướng xử lý[^dis-options]:
+### 2.2 Control hazard: nhánh
 
-| Hướng | Cách làm | Nhược điểm |
-|---|---|---|
-| Stall | Gặp nhánh thì chèn bubble, chờ biết kết quả[^dis-opt-stall] | Mất hiệu năng ở *mọi* nhánh[^dis-stall-branch] |
-| Branch prediction | Dự đoán hướng nhánh dựa trên các lần chạy trước[^dis-bp] | Đoán sai thì flush (như trên); sách ghi nhận cách này gần đây gây lỗ hổng bảo mật (Spectre)[^dis-bp-vuln] |
-| Eager execution | Chạy cả hai phía, rồi chọn kết quả bằng lệnh chuyển dữ liệu có điều kiện (`cmov` trên x86, `csel` trên ARMv8-A)[^dis-eager] | Không áp dụng cho mọi code; nguy hiểm với dereference con trỏ và side effect[^dis-eager-limit] |
+Pipeline được tối ưu cho các lệnh nối tiếp nhau, còn `if` và vòng lặp có thể ảnh hưởng nghiêm trọng đến hiệu năng của nó[^dis-opt-seq]. **Control hazard** xảy ra khi pipeline gặp lệnh nhảy hoặc lệnh có điều kiện: nó phải "đoán" xem nhánh có được thực hiện hay không[^dis-ctrl].
 
-*Structural hazard.* **Structural hazard** là xung đột khi dùng một tài nguyên phần cứng[^ww-struct]; chi tiết ở phần Đi sâu.
+Vì sao phải đoán? Vì không thể biết nhánh có được thực hiện cho đến khi lệnh nhảy chạy xong, mà lúc đó các lệnh phía sau đã được nạp vào pipeline[^dis-ctrl-late]. Nếu nhánh đi hướng khác với các lệnh đã nạp (trong ví dụ của sách: nhánh được thực hiện), những lệnh "rác" đó phải bị loại bỏ (**flush**) trước khi nạp lại pipeline, và flush pipeline rất tốn kém[^dis-flush].
+
+Phần cứng có ba hướng đối phó[^dis-options]:
+
+- **Stall**: gặp nhánh thì chèn bubble và chờ đến khi chắc chắn[^dis-opt-stall]. Cách này đúng nhưng mất hiệu năng ở *mọi* nhánh[^dis-stall-branch].
+- **Branch prediction**: đoán hướng nhánh dựa trên các lần chạy trước[^dis-bp]. Đoán sai thì flush như trên, và sách ghi nhận cách này gần đây gây ra lỗ hổng bảo mật (Spectre)[^dis-bp-vuln].
+- **Eager execution**: chạy cả hai phía rồi chọn kết quả bằng lệnh chuyển dữ liệu có điều kiện (`cmov` trên x86, `csel` trên ARMv8-A)[^dis-eager]. Không phải code nào cũng áp dụng được, và cách này nguy hiểm khi có dereference con trỏ hay side effect[^dis-eager-limit].
+
+### 2.3 Structural hazard
+
+**Structural hazard** là xung đột khi hai lệnh cùng dùng một tài nguyên phần cứng[^ww-struct]. Loại này do người thiết kế chip lo chứ không phải code của bạn (nhận xét của người soạn); phần Đi sâu bên dưới có ví dụ.
 
 <details><summary>Đi sâu: structural hazard (bộ nhớ chung) và ví dụ hai lệnh ghi cùng thanh ghi</summary>
 
-Ví dụ trong bài giảng: một bộ nhớ chung cho cả lệnh và dữ liệu sẽ gây structural hazard trong kiến trúc pipeline[^ww-mem], vì lệnh load/store cần truy cập dữ liệu[^ww-ldst] nên việc nạp lệnh phải stall đúng cycle đó[^ww-fetchstall]. Bài giảng ghi cách chữa là dùng bộ nhớ lệnh và bộ nhớ dữ liệu riêng (I$ và D$)[^ww-sep], và ở slide tóm tắt ghi rằng structural hazard được giải quyết bằng cách thiết kế pipeline cho đúng[^ww-resolved]; nghĩa là việc này thuộc người thiết kế phần cứng chứ không phải lập trình viên (vế sau là nhận xét của người soạn).
+Bài giảng lấy ví dụ một bộ nhớ chung cho cả lệnh và dữ liệu: nó gây structural hazard trong kiến trúc pipeline[^ww-mem]. Lý do là lệnh load/store cần truy cập dữ liệu[^ww-ldst]. Vì vậy việc nạp lệnh phải stall đúng cycle đó[^ww-fetchstall]. Cách chữa là dùng bộ nhớ lệnh và bộ nhớ dữ liệu riêng (I$ và D$)[^ww-sep]. Slide tóm tắt của bài giảng ghi rằng structural hazard được giải quyết bằng cách thiết kế pipeline cho đúng[^ww-resolved]; nghĩa là việc này thuộc người thiết kế phần cứng chứ không phải lập trình viên (vế sau là nhận xét của người soạn).
 
-Dive into Systems đưa thêm một ví dụ va chạm do lệnh dài ngắn khác nhau, ngay sau định nghĩa data hazard[^dis-data] (sách xếp nó vào data hazard; hai trang sách đã tải không dùng thuật ngữ structural hazard): lệnh `MOV` nạp từ bộ nhớ (năm stage) và lệnh `ADD` chỉ dùng thanh ghi (bốn stage) cùng muốn ghi `Reg1` ở cùng một cycle; CPU ngăn tình huống đó bằng cách ép mọi lệnh đi đủ năm stage, lệnh ngắn hơn được đệm bằng bubble[^dis-bubble-pad]. Đặt cạnh ví dụ bộ nhớ chung ở trên, cả hai đều là hai lệnh đòi cùng một thứ ở cùng một cycle (nhận xét của người soạn).
+Dive into Systems đưa thêm một ví dụ va chạm do lệnh dài ngắn khác nhau, ngay sau định nghĩa data hazard[^dis-data] (sách xếp nó vào data hazard; hai trang sách đã tải không dùng thuật ngữ structural hazard). Lệnh `MOV` nạp từ bộ nhớ (năm stage) và lệnh `ADD` chỉ dùng thanh ghi (bốn stage) cùng muốn ghi `Reg1` ở cùng một cycle. CPU ngăn tình huống đó bằng cách ép mọi lệnh đi đủ năm stage, và lệnh ngắn hơn được đệm bằng bubble[^dis-bubble-pad]. Đặt cạnh ví dụ bộ nhớ chung ở trên, cả hai đều là hai lệnh đòi cùng một thứ ở cùng một cycle (nhận xét của người soạn).
+
+Về phân loại: bài giảng của Walla Walla University ghi control hazard là một trường hợp đặc biệt của data hazard, được tách thành loại riêng vì được xử lý theo cách khác[^ww-ctrl-special].
 
 </details>
 
-**Quay lại Q2:** structural = tranh tài nguyên (chữa bằng thiết kế), data = phụ thuộc dữ liệu (chữa chủ yếu bằng forwarding; load-use vẫn phải stall), control = nhánh (chữa bằng dự đoán; đoán sai thì flush).
+**Quay lại Q2:** structural = tranh tài nguyên (chữa bằng thiết kế), data = phụ thuộc dữ liệu (chữa chủ yếu bằng forwarding; load-use vẫn phải stall), control = nhánh (chữa bằng dự đoán; đoán sai thì flush). Trong `ingest`, phép cộng dồn thuộc loại data, còn `if priority >= 128` thuộc loại control.
 
 ## 3. Branch prediction: đoán nhánh và giá của đoán sai (Q3)
 
-> **Trả lời ngắn.** Nếu mỗi nhánh đều phải đứng chờ thì mất hiệu năng[^dis-stall-branch], nên giải pháp phổ biến nhất là dự đoán hướng nhánh dựa trên các lần thực thi trước[^dis-bp] rồi chạy tiếp theo hướng đã đoán[^sp-spec]. Đoán đúng thì giữ kết quả; đoán sai thì phải bỏ công việc đã chạy nhầm và nạp lại pipeline từ đường đúng, một việc được sách gọi là tốn kém[^dis-flush].
+> **Trả lời ngắn.** Nếu mỗi nhánh đều phải đứng chờ thì mất hiệu năng[^dis-stall-branch]. Vì vậy cách phổ biến nhất là dự đoán hướng nhánh dựa trên các lần thực thi trước[^dis-bp]. CPU chạy tiếp theo hướng đã đoán thay vì chờ[^sp-spec]. Đoán đúng thì giữ kết quả. Đoán sai thì phải bỏ phần việc chạy nhầm và nạp lại pipeline từ đường đúng, một việc sách gọi là tốn kém[^dis-flush].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): người phục vụ đoán khách gọi món quen thuộc và bê ra trước; đoán đúng thì khỏi chờ, đoán sai thì phải dọn đi làm lại.
+*Với service `ingest`.* Nhánh `if priority >= 128` chạy một lần cho mỗi event, tức hàng triệu lần mỗi lô. CPU không thể đứng chờ ở từng lần, nên nó đoán. Đoán tốt hay không tùy việc dữ liệu trong lô có quy luật hay không (suy luận của người soạn; mục 7 có phép đo).
 
-Chờ ở mọi nhánh làm mất hiệu năng[^dis-stall-branch], nên bộ dự đoán nhánh (branch predictor) là giải pháp phổ biến nhất: nó đoán hướng nhánh dựa trên các lần thực thi trước đó[^dis-bp], và sách nhận xét các bộ dự đoán hiện đại rất chính xác[^dis-bp-acc].
+### 3.1 CPU đoán rồi chạy tiếp
 
-Điều quan trọng: sau khi đoán, CPU **tiếp tục chạy theo hướng đã đoán** thay vì chờ[^sp-spec]. Nếu đoán đúng, công việc đó được giữ lại; nếu sai, CPU bỏ các lệnh đã chạy nhầm bằng cách nạp lại trạng thái từ checkpoint rồi chạy tiếp theo đường đúng[^sp-wrong]. Cơ chế "speculative execution" này mô tả chi tiết ở mục 5.
+Bộ dự đoán nhánh (branch predictor) đoán hướng của nhánh dựa trên các lần thực thi trước đó[^dis-bp]. Sách nhận xét các bộ dự đoán hiện đại rất chính xác[^dis-bp-acc].
 
-Chi phí của một lần đoán sai gồm: kết quả các lệnh đã chạy nhầm bị bỏ, và pipeline phải nạp lại[^dis-flush]. Bài báo Spectre viết rằng khi đoán sai, processor loại bỏ phần thực thi suy đoán sai bằng cách trả trạng thái thanh ghi về checkpoint, cho hiệu năng tương đương việc đứng chờ[^sp-idle]; bài báo không bàn gì đến việc nạp lại pipeline (tôi đã tìm từ "pipeline" trong bản tải về và không thấy). Con số cycle cụ thể phụ thuộc vi kiến trúc nên chương này không đưa con số chung nào. Một ví dụ cho một thiết kế cụ thể: slide bài giảng (theo giáo trình Computer Organization and Design) mô tả pipeline Core i7 sâu 14 stage và ghi rằng một lần đoán nhánh sai tốn 17 clock cycle[^ww-i7]; còn bài báo Meltdown mô tả rằng trên chip Intel, khi dự đoán sai, reorder buffer cho phép quay lui bằng cách xóa reorder buffer và khởi tạo lại unified reservation station[^md-rollback]. Mục 7 có một phép đo thật trên máy của người soạn.
+Điều quan trọng là sau khi đoán, CPU không chờ mà **tiếp tục chạy theo hướng đã đoán**: nó lưu checkpoint trạng thái thanh ghi, rồi thực thi các lệnh trên đường đã đoán[^sp-spec]. Đoán đúng thì giữ lại phần việc đã làm. Đoán sai thì CPU bỏ các lệnh đã chạy nhầm bằng cách nạp lại trạng thái từ checkpoint, rồi chạy tiếp theo đường đúng[^sp-wrong]. Cơ chế này tên là speculative execution, mục 5 sẽ nói kỹ.
+
+### 3.2 Một lần đoán sai tốn bao nhiêu
+
+Một lần đoán sai tốn hai thứ: kết quả của các lệnh chạy nhầm bị bỏ, và pipeline phải nạp lại[^dis-flush]. Về phần đầu, bài báo Spectre viết rằng processor loại bỏ phần thực thi sai bằng cách trả trạng thái thanh ghi về checkpoint, cho hiệu năng tương đương việc đứng chờ[^sp-idle]. Bài báo không bàn gì đến việc nạp lại pipeline (người soạn đã tìm từ "pipeline" trong bản tải về và không thấy).
+
+Con số cycle cụ thể phụ thuộc vi kiến trúc nên chương này không đưa con số chung nào. Chỉ có một ví dụ cho một thiết kế cụ thể: slide bài giảng (theo giáo trình Computer Organization and Design) mô tả pipeline Core i7 sâu 14 stage và ghi rằng một lần đoán nhánh sai tốn 17 clock cycle[^ww-i7]. Còn bài báo Meltdown mô tả chip Intel: khi đoán sai, reorder buffer cho phép quay lui bằng cách xóa reorder buffer và khởi tạo lại unified reservation station[^md-rollback]. Mục 7 có một phép đo thật trên máy của người soạn.
 
 <details><summary>Đi sâu: BTB và lịch sử nhánh</summary>
 
-Bài báo Spectre mô tả thành phần **Branch Target Buffer (BTB)**: nó lưu ánh xạ từ địa chỉ các lệnh nhảy vừa thực thi gần đây đến địa chỉ đích[^sp-btb], nên CPU có thể đoán địa chỉ kế tiếp trước cả khi giải mã lệnh nhảy[^sp-btb-pred]. Với nhánh có điều kiện, chỉ ghi địa chỉ đích là chưa đủ để đoán kết quả, nên CPU còn giữ lịch sử kết quả các nhánh gần đây[^sp-hist]. Bài báo cũng dẫn một phân tích BTB trên chip Intel Haswell[^sp-haswell] — đó là chi tiết cài đặt của một dòng chip, không phải mọi CPU.
+Bài báo Spectre mô tả thành phần **Branch Target Buffer (BTB)**, lưu ánh xạ từ địa chỉ các lệnh nhảy vừa chạy gần đây sang địa chỉ đích[^sp-btb]. Nhờ đó CPU đoán được địa chỉ code kế tiếp ngay cả trước khi giải mã lệnh nhảy[^sp-btb-pred]. Với nhánh có điều kiện, biết địa chỉ đích thôi chưa đủ để đoán kết quả, nên CPU còn giữ lịch sử kết quả các nhánh gần đây[^sp-hist]. Bài báo cũng dẫn một phân tích BTB trên chip Intel Haswell[^sp-haswell]; đó là chi tiết cài đặt của một dòng chip, không phải mọi CPU.
 
-Về các kiểu bộ dự đoán, bài báo Meltdown điểm qua: mức đơn giản nhất dùng một bộ đếm để ghi lại kết quả lần trước của nhánh[^md-bp-1lvl]; các CPU hiện đại thường dùng bộ dự đoán thích nghi hai mức[^md-bp-modern], loại nhớ lịch sử các kết quả gần nhất nên đoán được các mẫu lặp đều[^md-bp-hist].
+Về các kiểu bộ dự đoán, bài báo Meltdown điểm qua như sau. Mức đơn giản nhất dùng một bộ đếm ghi lại kết quả lần trước của nhánh[^md-bp-1lvl]. CPU hiện đại thường dùng bộ dự đoán thích nghi hai mức[^md-bp-modern]. Loại này nhớ lịch sử các kết quả gần nhất nên đoán được các mẫu lặp đều[^md-bp-hist].
 
 </details>
 
-**Quay lại Q3:** chờ mọi nhánh quá đắt nên CPU đoán và chạy tiếp; đoán sai thì bỏ công việc nhầm và nạp lại pipeline.
+**Quay lại Q3:** chờ mọi nhánh quá đắt nên CPU đoán và chạy tiếp; đoán sai thì bỏ phần việc nhầm và nạp lại pipeline. Với `ingest`, nhánh `if priority >= 128` chạy hàng triệu lần mỗi lô nên mỗi lần đoán sai đều cộng dồn vào thời gian chạy.
 
 ## 4. Superscalar, out-of-order và register renaming (Q4)
 
-> **Trả lời ngắn.** Pipeline đơn giản hoàn tất tối đa một lệnh mỗi cycle, nên CPI không xuống dưới 1 (suy luận của người soạn từ mục 1). Superscalar phát nhiều hơn một lệnh mỗi cycle[^gwu-ss]; out-of-order thực thi lệnh ngay khi tài nguyên sẵn sàng thay vì theo đúng thứ tự chương trình[^md-ooo]; register renaming gán động tên khác nhau cho các định nghĩa khác nhau của cùng một thanh ghi để bỏ các phụ thuộc "giả"[^gwu-false]. Kết quả vẫn đúng vì lệnh được retire theo thứ tự qua reorder buffer[^sp-rob].
+> **Trả lời ngắn.** Pipeline đơn giản hoàn tất tối đa một lệnh mỗi cycle nên CPI không xuống dưới 1 (suy luận của người soạn từ mục 1). Superscalar phát nhiều hơn một lệnh mỗi cycle[^gwu-ss]. Out-of-order thực thi lệnh ngay khi tài nguyên sẵn sàng thay vì theo đúng thứ tự chương trình[^md-ooo]. Register renaming gán động tên khác nhau cho các định nghĩa khác nhau của cùng một thanh ghi để bỏ các phụ thuộc "giả"[^gwu-false]. Kết quả vẫn đúng vì lệnh được retire theo thứ tự qua reorder buffer[^sp-rob].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bếp có nhiều đầu bếp; ai có đủ nguyên liệu thì nấu trước, nhưng phục vụ vẫn mang món ra theo đúng thứ tự khách gọi.
+*Với service `ingest`.* Ở mỗi event, vòng lặp của `ingest` làm vài việc gần như độc lập: đọc event, so sánh, cộng dồn (nhận xét của người soạn). Một pipeline đơn giản vẫn chỉ hoàn tất một lệnh mỗi cycle, dù CPU có sẵn đủ mạch để làm nhiều hơn. Mục này nói CPU nâng trần đó thế nào mà không làm tổng của `ingest` bị sai.
 
-Pipeline hoàn tất một lệnh mỗi cycle (mục 1) nên CPI không thể thấp hơn 1 (suy luận của người soạn từ chính định nghĩa đó). Hai bước nâng trần đó:
+### 4.1 Hai cách nâng trần CPI
 
-1. **Superscalar**: bộ xử lý có thể phát (issue) hơn một lệnh mỗi cycle[^gwu-ss]. (Hệ quả suy ra: CPI lý tưởng có thể dưới 1 — suy luận của người soạn.) Khác với việc chỉ làm pipeline *sâu hơn*: bảng thuật ngữ của bài giảng GWU liệt kê riêng "superpipelined" là pipeline sâu nhưng không superscalar, ví dụ MIPS R5000 có 8 stage[^gwu-deep].
+Pipeline hoàn tất một lệnh mỗi cycle (mục 1) nên CPI không thể thấp hơn 1 (suy luận của người soạn từ chính định nghĩa đó). Có hai bước để vượt trần ấy:
+
+1. **Superscalar**: bộ xử lý phát (issue) được hơn một lệnh mỗi cycle[^gwu-ss]. Hệ quả suy ra là CPI lý tưởng có thể dưới 1 (suy luận của người soạn).
 2. **Out-of-order execution (OoO)**: thay vì xử lý lệnh theo đúng thứ tự chương trình, CPU thực thi lệnh ngay khi mọi tài nguyên cần thiết sẵn sàng; trong lúc một execution unit bận, các unit khác chạy trước được[^md-ooo]. Bài báo Spectre diễn đạt: lệnh phía sau trong luồng lệnh có thể chạy song song với, và đôi khi *trước*, lệnh đứng trước[^sp-ooo].
 
-Làm sao đảm bảo kết quả vẫn đúng như chạy tuần tự? Bằng cách *thực thi* mất trật tự nhưng *retire* (hoàn tất) đúng thứ tự: lệnh đã xong được xếp vào **reorder buffer**, và chỉ retire khi mọi lệnh đứng trước đã hoàn thành và retire; chỉ khi retire kết quả mới được commit và nhìn thấy từ bên ngoài[^sp-rob]. Bài giảng GWU mô tả kiến trúc tổng thể như một lõi out-of-order kẹp giữa front-end theo thứ tự và back-end theo thứ tự[^gwu-sandwich].
+### 4.2 Vì sao kết quả vẫn đúng
+
+Chạy mất trật tự mà kết quả vẫn như chạy tuần tự là nhờ tách hai việc: *thực thi* thì mất trật tự, còn *retire* (hoàn tất) thì đúng thứ tự. Lệnh đã xong được xếp vào **reorder buffer**. Nó chỉ retire khi mọi lệnh đứng trước đã hoàn thành và retire, và chỉ lúc đó kết quả mới được commit và nhìn thấy từ bên ngoài[^sp-rob]. Với `ingest`, nghĩa là CPU có thể chạy phép cộng của event thứ 10 trước phép so sánh của event thứ 9, nhưng tổng của cả lô vẫn đúng như chạy tuần tự (nhận xét của người soạn).
+
+Bài giảng GWU mô tả kiến trúc tổng thể như một lõi out-of-order kẹp giữa front-end theo thứ tự và back-end theo thứ tự[^gwu-sandwich]:
 
 ```mermaid
 flowchart LR
@@ -150,25 +182,33 @@ flowchart LR
 
 Sơ đồ trên là sơ đồ khái niệm do người soạn vẽ; trên chip Intel mà bài báo Meltdown mô tả, reorder buffer còn lo cả cấp phát và đổi tên thanh ghi ở phía trước (xem Đi sâu bên dưới).
 
-*Register renaming.* Có những phụ thuộc "giả": hai lệnh dùng cùng *tên* thanh ghi nhưng không thực sự truyền dữ liệu cho nhau (write-after-read, write-after-write)[^gwu-war-waw]. Nếu chỉ vì trùng tên mà phải xếp hàng thì uổng phí. **Register renaming** giải quyết bằng cách gán động tên khác nhau cho các định nghĩa khác nhau của cùng một thanh ghi để loại bỏ phụ thuộc giả[^gwu-false], tức gán động thanh ghi vật lý cho lệnh[^gwu-rename]. Ở mức khái niệm: thanh ghi trong assembly (`rax`, `x0`…) là thanh ghi *kiến trúc*, bên dưới CPU ánh xạ động sang thanh ghi vật lý (suy luận của người soạn từ định nghĩa trên).
+### 4.3 Register renaming
 
-<details><summary>Đi sâu: Tomasulo và mô tả trên chip Intel</summary>
+Có những phụ thuộc "giả": hai lệnh dùng cùng *tên* thanh ghi nhưng không thật sự truyền dữ liệu cho nhau (write-after-read, write-after-write)[^gwu-war-waw]. Nếu chỉ vì trùng tên mà phải xếp hàng thì uổng phí. **Register renaming** gỡ chuyện này bằng cách gán động tên khác nhau cho các định nghĩa khác nhau của cùng một thanh ghi, để loại bỏ phụ thuộc giả[^gwu-false]. Nói cách khác, CPU gán động thanh ghi vật lý cho lệnh[^gwu-rename].
 
-Bài báo Meltdown kể rằng thuật toán Tomasulo (1967) dùng reservation station để đổi tên thanh ghi, giải quyết các hazard RAW, WAR và WAW[^md-tomasulo]. Trên chip Intel mà bài báo Meltdown mô tả, lệnh x86 được front-end nạp và giải mã thành micro-op (µOP) gửi sang execution engine[^md-decode-uop]; reorder buffer chịu trách nhiệm cấp thanh ghi, đổi tên thanh ghi và retire[^md-rob-intel]; các µOP được chuyển cho reservation station rồi tới các execution unit[^md-uop]. Đây là mô tả cho một dòng chip cụ thể, không phải mọi CPU.
+Ở mức khái niệm, thanh ghi trong assembly (`rax`, `x0`…) là thanh ghi *kiến trúc*, và bên dưới CPU ánh xạ động chúng sang thanh ghi vật lý (suy luận của người soạn từ định nghĩa trên). Trong vòng lặp của `ingest`, mỗi vòng nạp event vào cùng một thanh ghi; nhờ renaming, vòng sau dùng được thanh ghi vật lý khác mà không phải đợi vòng trước dùng xong (nhận xét của người soạn, mức khái niệm; code compiler thật sinh ra có thể khác).
+
+<details><summary>Đi sâu: superpipelined, Tomasulo và mô tả trên chip Intel</summary>
+
+Superscalar khác với việc chỉ làm pipeline *sâu hơn*. Bảng thuật ngữ của bài giảng GWU liệt kê riêng "superpipelined" là pipeline sâu nhưng không superscalar, ví dụ MIPS R5000 có 8 stage[^gwu-deep].
+
+Bài báo Meltdown kể rằng thuật toán Tomasulo (1967) dùng reservation station để đổi tên thanh ghi, giải quyết các hazard RAW, WAR và WAW[^md-tomasulo]. Trên chip Intel mà bài báo mô tả, front-end nạp lệnh x86 và giải mã thành micro-op (µOP) gửi sang execution engine[^md-decode-uop]. Reorder buffer chịu trách nhiệm cấp thanh ghi, đổi tên thanh ghi và retire[^md-rob-intel]. Các µOP được chuyển cho reservation station rồi tới các execution unit[^md-uop]. Đây là mô tả cho một dòng chip cụ thể, không phải mọi CPU.
 
 </details>
 
-**Quay lại Q4:** superscalar phát nhiều lệnh/cycle, OoO chạy lệnh khi sẵn sàng nhưng retire theo thứ tự, renaming bỏ phụ thuộc giả về tên thanh ghi.
+**Quay lại Q4:** superscalar phát nhiều lệnh mỗi cycle, OoO chạy lệnh khi sẵn sàng nhưng retire theo thứ tự, renaming bỏ phụ thuộc giả về tên thanh ghi; nhờ vậy `ingest` chạy nhanh hơn mà tổng vẫn đúng.
 
 ## 5. Speculative execution và gốc của Spectre/Meltdown (Q5)
 
-> **Trả lời ngắn.** Khi CPU chạm một nhánh mà hướng đi còn phụ thuộc vào lệnh chưa xong, nó lưu checkpoint thanh ghi, đoán đường đi và chạy suy đoán theo đó[^sp-spec]; đoán sai thì quay về checkpoint[^sp-idle]. Về mặt kiến trúc, việc này vô hình với chương trình[^sp-logical], nhưng nó có thể để lại dấu vết trong cache, buffer và branch predictor, và phần mềm độc hại có thể dùng các hiệu ứng phụ đó để suy ra dữ liệu đặc quyền[^kd-problem]. Đó là gốc của Spectre; Meltdown dùng cùng ý tưởng ở dạng chạy mất trật tự trước khi exception được xử lý[^sp-md-nobp] (xem lưu ý thuật ngữ bên dưới).
+> **Trả lời ngắn.** Khi CPU chạm một nhánh mà hướng đi còn phụ thuộc vào lệnh chưa xong, nó lưu checkpoint thanh ghi, đoán đường đi và chạy suy đoán theo đó[^sp-spec]. Đoán sai thì quay về checkpoint[^sp-idle]. Về mặt kiến trúc, việc này vô hình với chương trình[^sp-logical]. Nhưng nó có thể để lại dấu vết trong cache, buffer và branch predictor, và phần mềm độc hại có thể dùng các hiệu ứng phụ đó để suy ra dữ liệu đặc quyền[^kd-problem]. Đó là gốc của Spectre. Meltdown dùng cùng ý tưởng ở dạng chạy mất trật tự trước khi exception được xử lý[^sp-md-nobp] (xem lưu ý thuật ngữ bên dưới).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một thám tử đoán thủ phạm và đi thu thập chứng cứ trước khi có lệnh; nếu đoán sai thì hủy hồ sơ, nhưng bụi đường dính trên giày thì vẫn còn đó để người ngoài đo được.
+*Với service `ingest`.* Giả sử `ingest` có thêm một endpoint tra cứu: client gửi `id`, handler kiểm tra `id < limits.len()` rồi mới đọc `limits[id]`. Với CPU, kiểm tra biên đó cũng là một nhánh. Nếu `limits.len()` đang nằm ngoài cache thì CPU không muốn đứng chờ, nên nó chạy tiếp theo hướng đã đoán. Mục này giải thích CPU làm gì trong lúc chờ, và vì sao chuyện đó thành lỗ hổng khi `ingest` chạy chung máy với code của người khác. Đoạn tình huống này là minh họa của người soạn: nó mượn hình dạng đoạn code trong bài báo Spectre, không khẳng định `ingest` thật sự khai thác được.
 
-*Cơ chế và lý do tồn tại.* Bài báo Spectre đưa tình huống điển hình: luồng điều khiển phụ thuộc vào giá trị nằm trong RAM mà chưa có trong cache, nên có thể mất hàng trăm chu kỳ xung nhịp mới biết giá trị. Thay vì đứng chờ, CPU đoán hướng, lưu checkpoint thanh ghi, và chạy tiếp theo đường đã đoán[^sp-hundreds]. Khi giá trị về, CPU kiểm tra: đoán sai thì quay về checkpoint[^sp-idle], đoán đúng thì commit và thu được lợi ích hiệu năng lớn[^sp-correct].
+### 5.1 CPU chạy trước để khỏi chờ
+
+Bài báo Spectre nêu tình huống điển hình: luồng điều khiển phụ thuộc vào một giá trị nằm trong RAM mà chưa có trong cache, nên có thể mất vài trăm chu kỳ xung nhịp mới biết giá trị đó. Thay vì đứng chờ, CPU đoán hướng, lưu checkpoint thanh ghi, và chạy tiếp theo đường đã đoán[^sp-hundreds]. Khi giá trị về, CPU kiểm tra lại. Đoán sai thì quay về checkpoint[^sp-idle]. Đoán đúng thì commit kết quả, và khoảng thời gian chờ đã được dùng cho việc có ích nên hiệu năng tăng đáng kể[^sp-correct].
 
 ```mermaid
 sequenceDiagram
@@ -187,19 +227,29 @@ sequenceDiagram
 
 Sơ đồ do người soạn vẽ lại theo mô tả của bài báo Spectre ở trên, không phải hình trong bài báo.
 
-Ở mức kiến trúc (cái chương trình quan sát qua thanh ghi và bộ nhớ), speculative execution vô hình: các thay đổi của lệnh nằm ngoài đường chạy đúng bị hủy để "logical state" của chương trình như thể chạy đúng đường[^sp-logical]. Vấn đề nằm ở chỗ *vi kiến trúc* (microarchitecture): cache, buffer, branch predictor.
+### 5.2 Vô hình về kiến trúc, không vô hình về vi kiến trúc
 
-*Vì sao thành lỗ hổng.* Tài liệu kernel Linux tóm gọn: CPU dùng thực thi suy đoán để tăng hiệu năng, nhưng việc đó có thể để lại dấu vết của truy cập bộ nhớ hoặc phép tính trong cache, buffer và branch predictor của bộ xử lý; phần mềm độc hại có thể tác động vào đường thực thi suy đoán rồi dùng các hiệu ứng phụ trong cache/buffer để suy ra dữ liệu đặc quyền chạm đến trong lúc suy đoán[^kd-problem]. Hai lỗ hổng điển hình của loại này là Meltdown và Spectre (nhận xét của người soạn); trang meltdownattack.com tóm tắt: Meltdown phá lớp cô lập cơ bản nhất giữa ứng dụng người dùng và hệ điều hành[^site-melt], còn Spectre phá lớp cô lập giữa các ứng dụng với nhau[^site-spec].
+Ở mức kiến trúc, tức cái chương trình quan sát được qua thanh ghi và bộ nhớ, speculative execution là vô hình: các thay đổi của lệnh nằm ngoài đường chạy đúng bị hủy, nên "logical state" của chương trình như thể nó chạy đúng đường[^sp-logical]. Với `ingest`, nghĩa là dù CPU đã đọc `limits[id]` với `id` quá biên, handler không bao giờ thấy giá trị đó trong thanh ghi hay biến của nó (nhận xét của người soạn). Vấn đề nằm ở *vi kiến trúc* (microarchitecture): cache, buffer, branch predictor.
 
-*Lưu ý thuật ngữ.* Bài báo Meltdown dùng "speculative execution" theo nghĩa hẹp — chuỗi lệnh theo sau một nhánh — và dùng "out-of-order execution" cho mọi cách chạy một lệnh trước khi kết quả của mọi lệnh đứng trước đã được commit[^md-terms]. Theo nghĩa hẹp đó, Spectre dựa vào dự đoán nhánh còn Meltdown thì không[^sp-md-nobp]. Cả hai giống nhau ở chỗ phần chạy tạm bị hủy về mặt kiến trúc nhưng thay đổi ở các thành phần vi kiến trúc như nội dung cache vẫn có thể còn lại[^sp-survive]. Chương này gọi chung là "thực thi suy đoán" theo nghĩa rộng "chạy trước khi chắc chắn" (nhận xét của người soạn).
+### 5.3 Vì sao thành lỗ hổng
 
-*Đọc dấu vết bằng cách nào.* Side channel (kênh phụ) nghĩa là rò thông tin qua các hiệu ứng phụ quan sát được ngoài đầu ra chính của phép tính[^sp-sidechannel]. Bài báo Spectre dùng kỹ thuật Flush+Reload: kẻ tấn công trước hết đẩy một cache line dùng chung với nạn nhân ra khỏi cache, để nạn nhân chạy một lúc, rồi đo thời gian đọc bộ nhớ tại địa chỉ ứng với dòng đó[^sp-fr1]; nếu nạn nhân đã chạm vào dòng thì dữ liệu nằm trong cache và lần đọc nhanh, nếu không thì lần đọc chậm[^sp-fr2]. Bước đẩy dòng ra khỏi cache dùng một lệnh máy chuyên dụng, ví dụ `clflush` của x86[^sp-clflush]. Vậy chỉ cần đo thời gian truy cập là biết nạn nhân có chạm vào dòng đó hay không.
+Tài liệu kernel Linux tóm gọn vấn đề như sau. CPU dùng thực thi suy đoán để tăng hiệu năng, nhưng việc đó có thể để lại dấu vết của truy cập bộ nhớ hoặc phép tính trong cache, buffer và branch predictor của bộ xử lý. Phần mềm độc hại có thể tác động vào đường thực thi suy đoán, rồi dùng các hiệu ứng phụ trong cache và buffer để suy ra dữ liệu đặc quyền mà đường đó đã chạm đến[^kd-problem].
+
+Hai lỗ hổng điển hình của loại này là Meltdown và Spectre (nhận xét của người soạn). Trang của nhóm tác giả tóm tắt rằng Meltdown phá lớp cô lập cơ bản nhất giữa ứng dụng người dùng và hệ điều hành[^site-melt]. Spectre thì phá lớp cô lập giữa các ứng dụng với nhau[^site-spec]. Nếu `ingest` chạy chung máy với service khác, đây là lớp cô lập mà Spectre nhắm vào (nhận xét của người soạn).
+
+### 5.4 Lưu ý thuật ngữ
+
+Bài báo Meltdown dùng "speculative execution" theo nghĩa hẹp, chỉ chuỗi lệnh theo sau một nhánh, và dùng "out-of-order execution" cho mọi cách chạy một lệnh trước khi kết quả của mọi lệnh đứng trước đã được commit[^md-terms]. Theo nghĩa hẹp đó, Spectre dựa vào dự đoán nhánh còn Meltdown thì không[^sp-md-nobp]. Cả hai giống nhau ở chỗ phần chạy tạm bị hủy về mặt kiến trúc, nhưng thay đổi ở các thành phần vi kiến trúc như nội dung cache vẫn có thể còn lại[^sp-survive]. Chương này gọi chung là "thực thi suy đoán" theo nghĩa rộng "chạy trước khi chắc chắn" (nhận xét của người soạn).
+
+### 5.5 Đọc dấu vết bằng cách nào
+
+Side channel (kênh phụ) nghĩa là rò thông tin qua các hiệu ứng phụ quan sát được, nằm ngoài đầu ra chính của phép tính[^sp-sidechannel]. Bài báo Spectre dùng kỹ thuật Flush+Reload. Trước hết kẻ tấn công đẩy một cache line dùng chung với nạn nhân ra khỏi cache, để nạn nhân chạy một lúc, rồi đo thời gian đọc bộ nhớ tại địa chỉ ứng với dòng đó[^sp-fr1]. Nếu nạn nhân đã chạm vào dòng thì dữ liệu nằm trong cache và lần đọc nhanh; nếu không thì lần đọc chậm[^sp-fr2]. Bước đẩy dòng ra khỏi cache dùng một lệnh máy chuyên dụng, ví dụ `clflush` của x86[^sp-clflush]. Vậy chỉ cần đo thời gian truy cập là biết nạn nhân có chạm vào dòng đó hay không.
 
 <details><summary>Đi sâu: kiến trúc bị ảnh hưởng, Spectre v1, v2 và Meltdown</summary>
 
-**Kiến trúc bị ảnh hưởng.** Spectre không giới hạn ở x86: kernel docs liệt kê trong các CPU dễ tổn thương cả Intel, AMD, IBM POWER/zSeries, ARM tầm cao, Apple CPUs và MIPS tầm cao[^kd-affected], và nhóm tác giả đã kiểm chứng Spectre trên Intel, AMD và ARM[^site-spec-hw]. Meltdown hẹp hơn: FAQ trên trang của nhóm tác giả nói họ mới kiểm chứng Meltdown trên Intel, chưa rõ AMD có bị hay không, và theo ARM một số bộ xử lý của ARM cũng bị[^site-melt-hw] (câu đó không ghi ngày, nên tôi không biết nó còn đúng đến hôm nay không). Tài liệu PTI của kernel nằm trong mục x86 (`arch/x86`) và mô tả PTI là biện pháp chống tấn công kiểu Meltdown vào không gian địa chỉ user/kernel dùng chung[^kd-pti-melt]; còn việc một máy cụ thể có bị Meltdown hay không thì đọc từ sysfs (mục 6).
+**Kiến trúc bị ảnh hưởng.** Spectre không giới hạn ở x86: kernel docs liệt kê trong các CPU dễ tổn thương cả Intel, AMD, IBM POWER/zSeries, ARM tầm cao, Apple CPUs và MIPS tầm cao[^kd-affected]. Nhóm tác giả đã kiểm chứng Spectre trên Intel, AMD và ARM[^site-spec-hw]. Meltdown hẹp hơn: FAQ trên trang của nhóm tác giả nói họ mới kiểm chứng Meltdown trên Intel, chưa rõ AMD có bị hay không, và theo ARM một số bộ xử lý của ARM cũng bị[^site-melt-hw] (câu đó không ghi ngày, nên tôi không biết nó còn đúng đến hôm nay không). Tài liệu PTI của kernel nằm trong mục x86 (`arch/x86`) và mô tả PTI là biện pháp chống tấn công kiểu Meltdown vào không gian địa chỉ user/kernel dùng chung[^kd-pti-melt]. Còn việc một máy cụ thể có bị Meltdown hay không thì đọc từ sysfs (mục 6).
 
-**Spectre variant 1 — bounds check bypass (CVE-2017-5753)[^kd-cve].** Kernel docs: variant 1 khai thác thực thi suy đoán của *nhánh có điều kiện*[^kd-variants]. Với kiểm tra biên mảng, thực thi suy đoán có thể bỏ qua nhánh kiểm tra và truy cập bộ nhớ ngoài biên *trước khi* kiểm tra được giải quyết; truy cập suy đoán đó để lại hiệu ứng phụ, tạo side channel làm rò thông tin[^kd-v1]. Kernel docs lưu ý thêm: dù tên là "Bounds Check Bypass", variant 1 không chỉ về kiểm tra biên mảng do người dùng kiểm soát mà có thể ảnh hưởng *bất kỳ kiểm tra điều kiện nào*[^kd-v1-any].
+**Spectre variant 1 — bounds check bypass.** Biến thể này mang mã CVE-2017-5753[^kd-cve]. Kernel docs nói variant 1 khai thác thực thi suy đoán của *nhánh có điều kiện*[^kd-variants]. Với kiểm tra biên mảng, thực thi suy đoán có thể bỏ qua nhánh kiểm tra và truy cập bộ nhớ ngoài biên *trước khi* kiểm tra được giải quyết. Truy cập suy đoán đó để lại hiệu ứng phụ, tạo side channel làm rò thông tin[^kd-v1]. Kernel docs lưu ý thêm: dù tên là "Bounds Check Bypass", variant 1 không chỉ về kiểm tra biên mảng do người dùng kiểm soát mà có thể ảnh hưởng *bất kỳ kiểm tra điều kiện nào*[^kd-v1-any].
 
 Đoạn mã minh họa trong bài báo Spectre[^sp-v1-code] như sau (kiểm tra biên, rồi một lần đọc mảng phụ thuộc vào giá trị đọc được):
 
@@ -208,39 +258,44 @@ if (x < array1_size)
     y = array2[array1[x] * 256];
 ```
 
-Kịch bản: kẻ tấn công "huấn luyện" branch predictor bằng cách gọi code với giá trị hợp lệ để nó kỳ vọng `if` đúng; sau đó gọi với `x` nằm ngoài biên `array1` trong khi kích thước `array1` chưa nằm trong cache[^sp-v1-train]. CPU đoán kiểm tra biên là đúng và suy đoán thực thi `array2[array1[x] * 256]`; thay đổi trạng thái cache do lần đọc `array2` đó không được hoàn tác khi CPU nhận ra mình đoán sai, và kẻ tấn công phát hiện được để đọc ra một byte bộ nhớ nạn nhân[^sp-v1].
+Kịch bản: kẻ tấn công "huấn luyện" branch predictor bằng cách gọi code với giá trị hợp lệ để nó kỳ vọng `if` đúng; sau đó gọi với `x` nằm ngoài biên `array1` trong khi kích thước `array1` chưa nằm trong cache[^sp-v1-train]. CPU đoán kiểm tra biên là đúng và suy đoán thực thi `array2[array1[x] * 256]`. Thay đổi trạng thái cache do lần đọc `array2` đó không được hoàn tác khi CPU nhận ra mình đoán sai, và kẻ tấn công phát hiện được để đọc ra một byte bộ nhớ nạn nhân[^sp-v1].
 
-**Spectre variant 2 — branch target injection (CVE-2017-5715)[^kd-cve].** Kernel docs: variant 2 dùng thực thi suy đoán của *nhánh gián tiếp*[^kd-variants]. Bộ dự đoán nhánh gián tiếp có thể bị kẻ tấn công tác động, làm code "gadget" chạy suy đoán và để lộ dữ liệu nhạy cảm; hiệu ứng phụ trong cache đo được để suy ra giá trị[^kd-v2]. Kẻ tấn công có thể điều khiển các nhánh gián tiếp suy đoán của nạn nhân tới code gadget bằng cách "đầu độc" BTB[^kd-poison], và trên hệ thống có SMT (hyper-threading) thì tấn công khả thi từ luồng anh em vì L1 cache và BTB có thể được chia sẻ giữa các hardware thread của một core[^kd-smt].
+**Spectre variant 2 — branch target injection.** Biến thể này mang mã CVE-2017-5715[^kd-cve]. Kernel docs nói variant 2 dùng thực thi suy đoán của *nhánh gián tiếp*[^kd-variants]. Bộ dự đoán nhánh gián tiếp có thể bị kẻ tấn công tác động, làm code "gadget" chạy suy đoán và để lộ dữ liệu nhạy cảm; hiệu ứng phụ trong cache đo được để suy ra giá trị[^kd-v2]. Kẻ tấn công có thể điều khiển các nhánh gián tiếp suy đoán của nạn nhân tới code gadget bằng cách "đầu độc" BTB[^kd-poison]. Trên hệ thống có SMT (hyper-threading), tấn công khả thi từ luồng anh em vì L1 cache và BTB có thể được chia sẻ giữa các hardware thread của một core[^kd-smt].
 
-**Meltdown (CVE-2017-5754).** Meltdown khai thác OoO chứ không dựa vào dự đoán nhánh[^sp-md-nobp]: bài báo Meltdown mô tả rằng khi một lệnh gây exception, lệnh phía sau có thể *đã* chạy một phần mất trật tự nhưng chưa retire, nên không có hiệu ứng kiến trúc[^md-exc] — nhưng chúng vẫn có hiệu ứng vi kiến trúc, ví dụ dữ liệu bị nạp vào cache[^md-micro]. Bài báo nói rõ kẻ tấn công đọc bộ nhớ đặc quyền trong luồng OoO rồi truyền ra ngoài qua một covert channel vi kiến trúc như Flush+Reload[^md-dump]. Trang nhóm tác giả gán Meltdown cho CVE-2017-5754[^site-cve] và cho biết đã có bản vá Linux là KPTI (trước đây là KAISER)[^site-patch].
+**Meltdown (CVE-2017-5754).** Meltdown khai thác OoO chứ không dựa vào dự đoán nhánh[^sp-md-nobp]. Bài báo Meltdown mô tả rằng khi một lệnh gây exception, lệnh phía sau có thể *đã* chạy một phần mất trật tự nhưng chưa retire, nên không có hiệu ứng kiến trúc[^md-exc]. Nhưng chúng vẫn có hiệu ứng vi kiến trúc, ví dụ dữ liệu bị nạp vào cache[^md-micro]. Bài báo nói rõ kẻ tấn công đọc bộ nhớ đặc quyền trong luồng OoO rồi truyền ra ngoài qua một covert channel vi kiến trúc như Flush+Reload[^md-dump]. Trang nhóm tác giả gán Meltdown cho CVE-2017-5754[^site-cve]. Trang đó cũng cho biết đã có bản vá Linux là KPTI (trước đây là KAISER)[^site-patch].
 
-Cơ chế chi tiết theo mô tả của bài báo Meltdown (cho chip Intel): CPU kiểm tra bit quyền của địa chỉ ảo song song với việc dịch địa chỉ ảo sang vật lý[^md-perm]. Exception chỉ được ghi nhận khi lệnh `MOV` nạp địa chỉ kernel retire — lúc đó pipeline bị flush để loại các kết quả của những lệnh chạy mất trật tự phía sau — nhưng có một race condition giữa việc nâng exception và bước đưa dữ liệu vào cache của cuộc tấn công[^md-race].
+Cơ chế chi tiết theo mô tả của bài báo Meltdown (cho chip Intel): CPU kiểm tra bit quyền của địa chỉ ảo song song với việc dịch địa chỉ ảo sang vật lý[^md-perm]. Exception chỉ được ghi nhận khi lệnh `MOV` nạp địa chỉ kernel retire; lúc đó pipeline bị flush để loại các kết quả của những lệnh chạy mất trật tự phía sau. Nhưng có một race condition giữa việc nâng exception và bước đưa dữ liệu vào cache của cuộc tấn công[^md-race].
 
 </details>
 
-**Quay lại Q5:** speculative execution chạy trước khi biết đường đúng; kết quả kiến trúc bị hủy khi sai nhưng dấu vết vi kiến trúc (cache) vẫn còn — đó là gốc của Spectre (qua dự đoán nhánh) và, theo nghĩa rộng "chạy trước khi chắc chắn", cả Meltdown (qua thực thi mất trật tự quanh exception).
+**Quay lại Q5:** speculative execution chạy trước khi biết đường đúng; kết quả kiến trúc bị hủy khi sai nhưng dấu vết vi kiến trúc (cache) vẫn còn. Đó là gốc của Spectre (qua dự đoán nhánh) và, theo nghĩa rộng "chạy trước khi chắc chắn", cả Meltdown (qua thực thi mất trật tự quanh exception). Với `ingest`, kiểm tra biên của endpoint tra cứu là loại nhánh mà Spectre v1 nhắm tới.
 
 ## 6. Phòng thủ trong Linux và cách đọc trạng thái (Q6)
 
-> **Trả lời ngắn.** Trên x86, Linux dùng PTI (hai bộ page table) cho Meltdown[^kd-pti], retpoline hoặc Enhanced IBRS cho Spectre v2[^kd-retpoline][^kd-eibrs], và làm sạch con trỏ bằng macro `nospec` kèm rào `LFENCE` ở từng chỗ đã xác định cho Spectre v1[^kd-nospec][^kd-lfence]. Trạng thái trên máy đọc từ các file trong `/sys/devices/system/cpu/vulnerabilities/`[^kd-sysfs].
+> **Trả lời ngắn.** Trên x86, Linux chống Meltdown bằng PTI, tức dùng hai bộ page table[^kd-pti]. Với Spectre v2, kernel dùng retpoline[^kd-retpoline]; phần cứng có Enhanced IBRS thì dùng nó thay retpoline[^kd-eibrs]. Với Spectre v1, kernel làm sạch con trỏ bằng macro `nospec` ở những chỗ đã xác định[^kd-nospec]. Ở một số điểm nó còn thêm rào `LFENCE`[^kd-lfence]. Trạng thái trên máy đọc từ các file trong `/sys/devices/system/cpu/vulnerabilities/`[^kd-sysfs].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): khóa từng cửa một — mỗi cửa là một lỗ hổng, mỗi ổ khóa là một biện pháp; không có chìa khóa vạn năng.
+*Với service `ingest`.* `ingest` là code user, không tự vá được lỗ hổng phần cứng; việc đó thuộc về kernel và firmware của máy nó chạy. Có hai chuyện `ingest` thật sự gặp. Một là mỗi `conn.read` là một system call, tức một lần vào và ra kernel, nên nếu máy bật PTI thì mỗi lần như vậy đắt thêm (suy luận của người soạn từ phần "Cái giá của PTI" bên dưới). Hai là bạn cần biết node đang chạy `ingest` bật những biện pháp nào; nếu `ingest` chạy trong container thì nó dùng chung kernel của máy chủ (nhận xét của người soạn), nên đáp án nằm ở kernel của máy chủ chứ không ở image.
 
-| Cơ chế | Chống gì | Nguồn |
-|---|---|---|
-| **PTI** (Page Table Isolation; tài liệu nằm dưới `arch/x86`): hai bộ page table, bộ dùng khi chạy user chỉ chứa lượng kernel tối thiểu để vào/ra kernel | Meltdown | kernel docs[^kd-pti][^kd-pti-min][^kd-pti-melt] |
-| **Retpoline** ("return trampolines") cho mọi nhánh gián tiếp | Spectre v2 | kernel docs[^kd-retpoline][^kd-retpoline-all] |
-| **Enhanced IBRS** (x86, nếu phần cứng có) thay retpoline | Spectre v2 | kernel docs[^kd-eibrs] |
-| Làm sạch con trỏ (`nospec` accessor) ở những chỗ kernel đã xác định; rào `LFENCE` ở code copy-from-user và ở đường vào `swapgs` | Spectre v1 | kernel docs[^kd-nospec][^kd-lfence][^kd-swapgs] |
+### 6.1 Mỗi lỗ hổng một biện pháp
 
-Retpoline hoạt động thế nào, ở mức khái niệm: compiler biến các lệnh gọi/nhảy gián tiếp trong kernel thành return trampoline[^kd-retpoline-compiler], và các đường thực thi suy đoán bên trong trampoline bị "nhốt" trong một vòng lặp vô hạn để không nhảy tới gadget[^kd-retpoline-how].
+Không có chìa khóa vạn năng; mỗi lỗ hổng có một biện pháp riêng. Dưới đây là phần x86.
 
-1. Mitigation của Spectre v1 trong kernel là *từng chỗ một*: tài liệu kernel thừa nhận các biện pháp được đặt theo từng trường hợp và không có đảm bảo rằng mọi vector tấn công v1 đã được che[^kd-casebycase].
-2. PTI nghĩa là chuyển page table ở mỗi lần vào/ra kernel (syscall, interrupt, exception)[^kd-pti-switch]. Cái giá, theo chính docs kernel: mỗi lần vào/ra kernel phải ghi thanh ghi CR3 và một lần ghi cỡ một trăm cycle[^kd-pti-cost]; trên máy không có PCID, mỗi lần ghi CR3 còn xả toàn bộ TLB (bộ đệm các ánh xạ page table — xem [Chương 03 của phase Memory](../03-memory/03-page-table-va-tlb.md))[^kd-pti-tlb], còn có PCID thì việc đổi page table rẻ hơn[^kd-pti-pcid]. Kết luận "syscall đắt hơn" là suy luận của người soạn từ các câu trên; docs không đưa số đo cho cả hệ thống.
+- **PTI** (Page Table Isolation; tài liệu nằm dưới `arch/x86`) chống Meltdown[^kd-pti-melt]. Kernel dựng một bộ page table độc lập, chỉ dùng khi chạy ứng dụng user[^kd-pti]. Bộ này chỉ chứa lượng kernel tối thiểu để vào và ra kernel[^kd-pti-min].
+- **Retpoline** ("return trampolines") chống Spectre v2: kernel tự bảo vệ khỏi việc dùng các entry BTB bị đầu độc[^kd-retpoline]. Nó áp dụng cho mọi nhánh gián tiếp[^kd-retpoline-all]. Về cách làm, compiler biến các lệnh gọi hoặc nhảy gián tiếp trong kernel thành return trampoline[^kd-retpoline-compiler]. Các đường thực thi suy đoán bên trong trampoline bị "nhốt" trong một vòng lặp vô hạn để không nhảy tới gadget[^kd-retpoline-how].
+- **Enhanced IBRS** cũng chống Spectre v2 và thay cho retpoline, khi CPU x86 có tính năng này trong phần cứng[^kd-eibrs].
+- **Spectre v1** được chặn bằng cách làm sạch con trỏ qua các accessor `nospec` ở những chỗ kernel đã xác định[^kd-nospec]. Code copy-from-user có thêm rào `LFENCE` để `access_ok()` không bị đoán sai[^kd-lfence]. Biến thể `swapgs` có thêm `LFENCE` ở đường vào interrupt, exception và NMI khi cần[^kd-swapgs].
 
-Bạn xem trạng thái trên máy Linux qua sysfs: kernel có giao diện cho biết hệ thống có dễ tổn thương không và đang bật biện pháp nào[^kd-sysfs]. Mỗi file trong `/sys/devices/system/cpu/vulnerabilities/` mang tên một lỗ hổng[^kd-abi-files], như `meltdown`, `spectre_v1`, `spectre_v2`[^kd-abi-list]; giá trị có ba dạng chung: `Not affected` (CPU không bị ảnh hưởng), `Vulnerable` (bị ảnh hưởng và chưa có biện pháp nào đang bật) hoặc `Mitigation: …` (bị ảnh hưởng và biện pháp đó đang bật)[^kd-abi-values]. Riêng trên x86, docs liệt kê cho `spectre_v1` chuỗi như `Mitigation: usercopy/swapgs barriers and __user pointer sanitization`[^kd-sysfs-v1val] và cho `spectre_v2` các chuỗi như `Mitigation: Retpolines`[^kd-sysfs-v2val].
+Biện pháp cho Spectre v1 chỉ đặt từng chỗ một: tài liệu kernel thừa nhận các biện pháp được đặt theo từng trường hợp và không có đảm bảo rằng mọi vector tấn công v1 đã được che[^kd-casebycase].
+
+### 6.2 Cái giá của PTI
+
+PTI nghĩa là chuyển page table ở mỗi lần vào và ra kernel: khi vào kernel qua syscall, interrupt hay exception thì dùng bản kernel đầy đủ, khi về user mode thì dùng lại bản user[^kd-pti-switch]. Theo chính docs kernel, mỗi lần vào và ra phải ghi thanh ghi CR3, và một lần ghi cỡ một trăm cycle[^kd-pti-cost]. Trên máy không có PCID, mỗi lần ghi CR3 còn xả toàn bộ TLB, tức bộ đệm các ánh xạ page table (xem [Chương 03 của phase Memory](../03-memory/03-page-table-va-tlb.md))[^kd-pti-tlb]. PCID là tính năng cho phép bỏ qua việc xả toàn bộ TLB khi đổi page table, nên có PCID thì việc đổi rẻ hơn[^kd-pti-pcid]. Kết luận "syscall của `ingest` đắt hơn" là suy luận của người soạn từ các câu trên; docs không đưa số đo cho cả hệ thống.
+
+### 6.3 Đọc trạng thái trên máy
+
+Kernel Linux có giao diện sysfs cho biết hệ thống có dễ tổn thương không và đang bật biện pháp nào[^kd-sysfs]. Mỗi file trong `/sys/devices/system/cpu/vulnerabilities/` mang tên một lỗ hổng[^kd-abi-files]. Ví dụ `meltdown`, `spectre_v1`, `spectre_v2`[^kd-abi-list]. Giá trị có ba dạng chung: `Not affected` (CPU không bị ảnh hưởng), `Vulnerable` (bị ảnh hưởng và chưa có biện pháp nào đang bật) hoặc `Mitigation: …` (bị ảnh hưởng và biện pháp đó đang bật)[^kd-abi-values]. Riêng trên x86, docs liệt kê cho `spectre_v1` chuỗi như `Mitigation: usercopy/swapgs barriers and __user pointer sanitization`[^kd-sysfs-v1val]. Cho `spectre_v2`, docs liệt kê các chuỗi như `Mitigation: Retpolines`[^kd-sysfs-v2val].
 
 <details><summary>Đi sâu: quan sát thật trên Apple M3 Pro (container AArch64)</summary>
 
@@ -257,26 +312,28 @@ Các file còn lại (`mds`, `l1tf`, `retbleed`, `srbds`, `tsa`, …) đều ghi
 
 Giải nghĩa bốn dòng trên bằng source kernel v6.8 (gần với kernel `6.8.0-117-generic` của container, nhưng bản Ubuntu có thể khác chi tiết nhỏ; tôi không đọc source của bản Ubuntu):
 
-- `meltdown:Not affected` — theo ABI doc, `Not affected` nghĩa là CPU không bị ảnh hưởng bởi lỗ hổng đó[^kd-abi-values].
-- `spectre_v1:Mitigation: __user pointer sanitization` — mã arm64 của kernel luôn in đúng chuỗi này cho Spectre v1, kèm chú thích rằng kernel không bảo vệ được userspace ở điểm này, mỗi chương trình tự lo[^arm-v1-comment]. Vì thế không có phần `usercopy/swapgs barriers` như chuỗi x86 trong docs ở trên (suy luận của người soạn: phần đó gắn với code vào kernel của x86 nên arm64 không in).
-- `spectre_v2:Mitigation: CSV2, but not BHB` — chú thích trong mã arm64 liệt kê một trường hợp là CPU được giảm thiểu bằng phần cứng và quảng bá qua trường `ID_AA64PFR0_EL1.CSV2`[^arm-v2-csv2]; nền tảng bị ảnh hưởng bởi Spectre-BHB thì không được báo `Not affected` cho Spectre v2, và code gán nhãn `CSV2` cho trường hợp đó[^arm-v2-bhb]. Hậu tố `, but not BHB` là chuỗi code in khi trạng thái Spectre-BHB là SPECTRE_VULNERABLE[^arm-v2-str]. Tôi không kiểm tra vì sao VM này rơi vào trạng thái BHB đó.
-- `spec_store_bypass:Vulnerable` — mã arm64 in `Vulnerable` khi trạng thái Spectre-v4 là SPECTRE_VULNERABLE[^arm-v4-show]; ở bước phần cứng, CPU nằm trong danh sách an toàn thì là UNAFFECTED, có tính năng SSBS thì MITIGATED, còn lại VULNERABLE[^arm-v4-hw] (mã còn hỏi thêm firmware; tôi không biết vì sao VM này không có biện pháp nào và không kiểm chứng). Theo ABI doc, `Vulnerable` nghĩa là CPU bị ảnh hưởng và không có biện pháp nào đang bật[^kd-abi-values].
+- `meltdown:Not affected`: theo ABI doc, `Not affected` nghĩa là CPU không bị ảnh hưởng bởi lỗ hổng đó[^kd-abi-values].
+- `spectre_v1:Mitigation: __user pointer sanitization`: mã arm64 của kernel luôn in đúng chuỗi này cho Spectre v1, kèm chú thích rằng kernel không bảo vệ được userspace ở điểm này, mỗi chương trình tự lo[^arm-v1-comment]. Vì thế không có phần `usercopy/swapgs barriers` như chuỗi x86 trong docs ở trên (suy luận của người soạn: phần đó gắn với code vào kernel của x86 nên arm64 không in).
+- `spectre_v2:Mitigation: CSV2, but not BHB`: chú thích trong mã arm64 liệt kê một trường hợp là CPU được giảm thiểu bằng phần cứng và quảng bá qua trường `ID_AA64PFR0_EL1.CSV2`[^arm-v2-csv2]. Nền tảng bị ảnh hưởng bởi Spectre-BHB thì không được báo `Not affected` cho Spectre v2, và code gán nhãn `CSV2` cho trường hợp đó[^arm-v2-bhb]. Hậu tố `, but not BHB` là chuỗi code in khi trạng thái Spectre-BHB là SPECTRE_VULNERABLE[^arm-v2-str]. Tôi không kiểm tra vì sao VM này rơi vào trạng thái BHB đó.
+- `spec_store_bypass:Vulnerable`: mã arm64 in `Vulnerable` khi trạng thái Spectre-v4 là SPECTRE_VULNERABLE[^arm-v4-show]. Ở bước phần cứng, CPU nằm trong danh sách an toàn thì là UNAFFECTED, có tính năng SSBS thì MITIGATED, còn lại VULNERABLE[^arm-v4-hw] (mã còn hỏi thêm firmware; tôi không biết vì sao VM này không có biện pháp nào và không kiểm chứng). Theo ABI doc, `Vulnerable` nghĩa là CPU bị ảnh hưởng và không có biện pháp nào đang bật[^kd-abi-values].
 
 Container dùng kernel của VM Linux chạy trên Mac, nên đây là trạng thái của VM đó trên chip M3 Pro, không phải của macOS (giải thích của người soạn về cách container chạy trên macOS).
 
 </details>
 
-**Quay lại Q6:** trên x86, PTI cho Meltdown, retpoline/eIBRS cho Spectre v2, `nospec`/`LFENCE` từng chỗ cho Spectre v1; trạng thái đọc ở sysfs.
+**Quay lại Q6:** trên x86, PTI cho Meltdown, retpoline hoặc eIBRS cho Spectre v2, `nospec`/`LFENCE` từng chỗ cho Spectre v1; trạng thái đọc ở sysfs. Với `ingest`, cái giá đáng nhớ nhất là mỗi syscall có thể đắt hơn khi máy bật PTI.
 
 ## 7. Hệ quả với code: nhánh khó đoán và branchless (Q7)
 
-> **Trả lời ngắn.** Nhánh phụ thuộc dữ liệu ngẫu nhiên làm chậm vì CPU phải đoán sai nhiều, còn trên dữ liệu đã sắp xếp thì nhánh có mẫu dễ đoán (suy luận của người soạn, không đo bộ đếm hiệu năng). Trong phép đo của người soạn trên một chip, cùng vòng lặp có nhánh chậm hơn khoảng 7 lần trên dữ liệu ngẫu nhiên so với đã sắp xếp, còn biến thể không nhánh chạy ổn định. Tránh nhánh bằng lệnh chuyển dữ liệu có điều kiện (`cmov`/`csel`) hoặc bằng phép tính số học như mask trong phép đo giữ pipeline chạy liên tục[^dis-eager], nhưng không áp dụng cho mọi code[^dis-eager-limit].
+> **Trả lời ngắn.** Nhánh phụ thuộc dữ liệu ngẫu nhiên làm chậm chương trình vì CPU đoán sai nhiều, còn trên dữ liệu đã sắp xếp thì nhánh có mẫu dễ đoán (suy luận của người soạn, không đo bộ đếm hiệu năng). Trong phép đo của người soạn trên một chip, cùng vòng lặp có nhánh chậm hơn khoảng 7 lần trên dữ liệu ngẫu nhiên so với đã sắp xếp, còn biến thể không nhánh chạy ổn định. Lệnh chuyển dữ liệu có điều kiện (`cmov`/`csel`) cho phép tránh nhánh mà vẫn giữ pipeline chạy liên tục[^dis-eager]; phép đo dùng mask số học với cùng mục đích. Cách này không áp dụng được cho mọi code[^dis-eager-limit].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đoán đúng khi nhánh như "toàn không rồi toàn có" thì như đoán mưa trong mùa khô; còn như tung đồng xu thì không bộ đoán nào cứu được.
+*Với service `ingest`.* Mục này chạm thẳng vào code của bạn: hot loop của `ingest` chính là vòng lặp có `if priority >= 128` mà mục 3 đã nói tới. Cùng một lô event, nếu priority nằm theo thứ tự thì nhánh có mẫu cực dễ đoán, còn nếu lẫn lộn ngẫu nhiên thì nhánh khó đoán hơn nhiều (suy luận của người soạn; phép đo dưới đây không đọc bộ đếm hiệu năng). Ta đo thử xem chênh lệch đó lớn cỡ nào.
 
-Mục tiêu thí nghiệm: xem nhánh phụ thuộc dữ liệu ngẫu nhiên đắt cỡ nào so với cùng dữ liệu đã sắp xếp, và so với biến thể không nhánh. Dữ liệu: 1.048.576 phần tử `u8` (xorshift, seed cố định), một bản ngẫu nhiên, một bản `sort_unstable`; mỗi hàm chạy 15 lần, lấy lần nhanh nhất; Apple M3 Pro (AArch64, macOS). Assembly cho thấy `sum_branchy` có lệnh nhảy có điều kiện (`tbz`) thật, bản branchless thì không. Mã nguồn ở phần Đi sâu.
+### 7.1 Thí nghiệm
+
+Mục tiêu: xem nhánh phụ thuộc dữ liệu ngẫu nhiên đắt cỡ nào so với cùng dữ liệu đã sắp xếp, và so với biến thể không nhánh. Dữ liệu là 1.048.576 phần tử `u8` (xorshift, seed cố định) đóng vai priority của một lô event: một bản ngẫu nhiên, một bản `sort_unstable`. Mỗi hàm chạy 15 lần, lấy lần nhanh nhất, trên Apple M3 Pro (AArch64, macOS). Assembly cho thấy `sum_branchy` có lệnh nhảy có điều kiện (`tbz`) thật, còn bản branchless thì không. Mã nguồn ở phần Đi sâu cuối mục.
 
 Kết quả (chạy hai lần, số khớp nhau):
 
@@ -285,19 +342,19 @@ Kết quả (chạy hai lần, số khớp nhau):
 | Có nhánh (`if`) | 2644 µs (2,52 ns/phần tử) | 371 µs (0,35 ns/phần tử) |
 | Không nhánh (mask) | 309–321 µs (≈0,30 ns/phần tử) | 316 µs (0,30 ns/phần tử) |
 
-Đọc kết quả:
+### 7.2 Đọc kết quả
 
-- Cùng một code có nhánh chạy chậm hơn khoảng 7 lần trên dữ liệu ngẫu nhiên so với đã sắp xếp (2644/371 ≈ 7,1). Cùng code, cùng giá trị, chỉ khác thứ tự. Điều này khớp với việc dữ liệu đã sắp xếp cho nhánh một mẫu cực dễ đoán (hết một đoạn toàn "không" rồi toàn "có"), còn ngẫu nhiên thì nhánh gần như tung đồng xu (suy luận của người soạn; tôi không đọc bộ đếm hiệu năng nên không có số mispredict thực). Bộ dự đoán thích nghi nhớ lịch sử các kết quả gần nhất để đoán mẫu lặp đều: xem Đi sâu ở mục 3.
+- Cùng một code có nhánh chạy chậm hơn khoảng 7 lần trên dữ liệu ngẫu nhiên so với đã sắp xếp (2644/371 ≈ 7,1), dù code và giá trị giống nhau, chỉ khác thứ tự. Điều này khớp với việc dữ liệu đã sắp xếp cho nhánh một mẫu cực dễ đoán (hết một đoạn toàn "không" rồi toàn "có"), còn dữ liệu ngẫu nhiên khiến nhánh gần như tung đồng xu (suy luận của người soạn; tôi không đọc bộ đếm hiệu năng nên không có số mispredict thực). Bộ dự đoán thích nghi nhớ lịch sử các kết quả gần nhất để đoán mẫu lặp đều: xem Đi sâu ở mục 3.
 - Nếu giả định ≈50% nhánh bị đoán sai ở dữ liệu ngẫu nhiên và ≈0% ở dữ liệu đã sắp xếp (giả định, chưa đo), phần chênh ≈2273 µs chia cho ≈524.000 lần đoán sai cho ≈4,3 ns mỗi lần.
-- Bản branchless chạy ổn định ở ≈0,3 ns/phần tử bất kể thứ tự dữ liệu: nhanh hơn bản có nhánh ≈8 lần trên dữ liệu ngẫu nhiên, nhưng trên dữ liệu đã sắp xếp chỉ nhỉnh hơn một chút (≈316 µs so với 371 µs) — chênh lệch nhỏ, không nên khái quát. Quy tắc rút ra từ số đo (nhận xét của người soạn, một chip): branchless mua *tính ổn định*, và lợi lớn chỉ khi nhánh khó đoán — cùng hướng với lời cảnh báo của docs `select_unpredictable` ở dưới.
-- Với phiên bản `if` viết thẳng, không `black_box`, compiler tự do: hàm chạy ≈18 µs (≈0,02 ns/phần tử) trên cả hai dữ liệu. Tôi không phân tích assembly của trường hợp này; nhiều khả năng compiler đã đổi vòng lặp thành code không nhánh/vectorize (suy luận). Bài học: *trước khi tự viết branchless, xem compiler đã làm giúp chưa*.
+- Bản branchless chạy ổn định ở ≈0,3 ns/phần tử bất kể thứ tự dữ liệu. Nó nhanh hơn bản có nhánh ≈8 lần trên dữ liệu ngẫu nhiên, nhưng trên dữ liệu đã sắp xếp chỉ nhỉnh hơn một chút (≈316 µs so với 371 µs); chênh lệch nhỏ như vậy không nên khái quát. Quy tắc rút ra từ số đo (nhận xét của người soạn, một chip): branchless mua *tính ổn định*, và lợi lớn chỉ khi nhánh khó đoán, cùng hướng với lời cảnh báo của docs `select_unpredictable` ở dưới.
+- Với phiên bản `if` viết thẳng, không `black_box`, compiler tự do: hàm chạy ≈18 µs (≈0,02 ns/phần tử) trên cả hai dữ liệu. Tôi không phân tích assembly của trường hợp này; nhiều khả năng compiler đã đổi vòng lặp thành code không nhánh hoặc vectorize (suy luận). Bài học: *trước khi tự viết branchless, xem compiler đã làm giúp chưa*.
 
 Giới hạn: một chip, một compiler, một cỡ dữ liệu.
 
-*Khi nào branchless đáng giá.*
+### 7.3 Khi nào branchless đáng giá
 
-- Eager execution/chuyển dữ liệu có điều kiện (`cmov`, `csel`) giữ pipeline chạy liên tục[^dis-eager], nhưng không phải code nào cũng dùng được, và nguy hiểm khi có dereference con trỏ hay side effect[^dis-eager-limit]. Chi tiết lệnh `cmov`/`csel` ở [Chương 03](03-assembly-x86-64-va-aarch64.md).
-- Tài liệu Rust cho `select_unpredictable` nói rõ cả hai chiều: trên nền tảng có `cmov`/`csel`, optimizer có thể dùng chúng để tránh nhánh, có lợi khi branch predictor đang chật vật[^rs-su-cmov]; nhưng lowering đó không được đảm bảo[^rs-su], và có thể *giảm* hiệu năng nếu điều kiện vốn dễ đoán; docs khuyên benchmark[^rs-su-perf].
+- Eager execution hay chuyển dữ liệu có điều kiện (`cmov`, `csel`) giữ pipeline chạy liên tục[^dis-eager]. Không phải code nào cũng dùng được, và cách này nguy hiểm khi có dereference con trỏ hay side effect[^dis-eager-limit]. Chi tiết lệnh `cmov`/`csel` ở [Chương 03](03-assembly-x86-64-va-aarch64.md).
+- Tài liệu Rust cho `select_unpredictable` nói rõ cả hai chiều. Trên nền tảng có `cmov`/`csel`, optimizer có thể dùng chúng để tránh nhánh, và điều đó có lợi khi branch predictor đang chật vật[^rs-su-cmov]. Nhưng lowering đó không được đảm bảo[^rs-su]. Nó còn có thể *giảm* hiệu năng nếu điều kiện vốn dễ đoán, nên docs khuyên benchmark[^rs-su-perf].
 
 <details><summary>Đi sâu: mã đo (rustc -O, rustc 1.95.0)</summary>
 
@@ -331,46 +388,57 @@ fn sum_branchless(data: &[u8]) -> u64 {
 
 </details>
 
-**Quay lại Q7:** nhánh khó đoán làm chậm vì đoán sai; branchless mua tính ổn định, chỉ lợi lớn khi nhánh thật sự khó đoán và nên đo/benchmark trước.
+**Quay lại Q7:** nhánh khó đoán làm chậm vì đoán sai; branchless mua tính ổn định, chỉ lợi lớn khi nhánh thật sự khó đoán và nên đo/benchmark trước. Với `ingest`, nếu priority trong lô không có thứ tự thì `if priority >= 128` là ứng viên đáng đo.
 
 ## 8. Liên hệ với Rust: `std::hint`, `#[cold]`, `#[inline]` (Q8)
 
-> **Trả lời ngắn.** Module `std::hint` chứa các gợi ý (hint) về cách sinh code hoặc tối ưu, hầu hết nhắm vào compiler[^rs-hint]; riêng `spin_loop` phát một lệnh máy báo cho CPU[^rs-spin]. Ở Rust 1.95.0, `black_box`, `spin_loop`, `cold_path` và `select_unpredictable` đã stable (bảng dưới), còn `likely`/`unlikely` chỉ ở nightly[^rs-likely][^rs-unlikely]. `#[cold]` và `#[inline]` cũng chỉ là hint cho compiler[^rs-attr-cold][^rs-inline-modes]; chúng tác động lên code được sinh ra, không "lập trình" trực tiếp branch predictor (suy luận của người soạn).
+> **Trả lời ngắn.** Module `std::hint` chứa các gợi ý (hint) về cách sinh code hoặc tối ưu, hầu hết nhắm vào compiler[^rs-hint]; riêng `spin_loop` phát một lệnh máy báo cho CPU[^rs-spin]. Ở Rust 1.95.0, `black_box`, `spin_loop`, `cold_path` và `select_unpredictable` đã stable (bảng dưới), còn `likely` và `unlikely` chỉ ở nightly[^rs-likely]. `#[cold]` và `#[inline]` cũng chỉ là hint cho compiler[^rs-attr-cold]; chúng tác động lên code được sinh ra chứ không "lập trình" trực tiếp branch predictor (suy luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đây là những tờ ghi chú dán lên bản vẽ cho thợ xây (compiler) — họ có thể làm theo hoặc không, và ghi chú sai có thể làm công trình tệ hơn.
+*Với service `ingest`.* Trong code Rust của `ingest`, những gợi ý này có chỗ dùng rất cụ thể. Nhánh xử lý event hỏng gần như không bao giờ chạy, và bạn muốn compiler đẩy nó ra khỏi đường nóng. Điều kiện `priority >= 128` có thể khó đoán, và bạn muốn thử bản không nhánh. Khi viết benchmark cho hot loop, bạn cần compiler đừng xóa mất đoạn code đang đo. Mỗi chỗ có một hint ứng với nó, nhưng hint chỉ là lời khuyên cho compiler và không hứa gì về hiệu năng.
 
-Module `std::hint` được mô tả là chứa các gợi ý cho compiler ảnh hưởng đến cách code được sinh ra hoặc tối ưu, có thể là hint lúc compile hoặc lúc chạy[^rs-hint]. Trạng thái trong Rust **1.95.0**:
+### 8.1 Trạng thái trong Rust 1.95.0
+
+Module `std::hint` chứa các gợi ý cho compiler về cách code được sinh ra hoặc tối ưu, có thể là hint lúc compile hoặc lúc chạy[^rs-hint]. Trạng thái trong Rust **1.95.0**:
 
 | Hàm | Trạng thái 1.95.0 | Ghi chú |
 |---|---|---|
-| `black_box` | stable từ 1.66.0 (const từ 1.86.0) | để benchmark; xem dưới |
-| `spin_loop` | stable từ 1.49.0 | busy-wait |
-| `cold_path` | stable từ 1.95.0 | đánh dấu đường nguội |
-| `select_unpredictable` | stable từ 1.88.0 | hint "điều kiện khó đoán"; có thể thành `cmov`/`csel` nhưng không bảo đảm |
-| `likely` / `unlikely` | **chỉ nightly** (`likely_unlikely`, issue #151619) | không dùng được trên stable |
+| `black_box` | stable từ 1.66.0 (const từ 1.86.0)[^rs-bb-ver] | để benchmark; xem dưới |
+| `spin_loop` | stable từ 1.49.0[^rs-spin-ver] | busy-wait |
+| `cold_path` | stable từ 1.95.0[^rs-cold-ver] | đánh dấu đường nguội |
+| `select_unpredictable` | stable từ 1.88.0[^rs-su-ver] | hint "điều kiện khó đoán"; có thể thành `cmov`/`csel` nhưng không bảo đảm |
+| `likely` | **chỉ nightly** (`likely_unlikely`, issue #151619)[^rs-likely] | không dùng được trên stable |
+| `unlikely` | **chỉ nightly** (`likely_unlikely`, issue #151619)[^rs-unlikely] | không dùng được trên stable |
 
-Cột trạng thái dựa trên trang docs 1.95.0 của từng hàm[^rs-bb-ver][^rs-spin-ver][^rs-cold-ver][^rs-su-ver][^rs-likely][^rs-unlikely]. Kiểm tra trực tiếp: `std::hint::likely(true)` trên rustc 1.95.0 stable cho lỗi `E0658: use of unstable library feature 'likely_unlikely'`; còn đoạn dùng `cold_path()` và `select_unpredictable` biên dịch và chạy được. Docs của `likely` tự khuyên xem `cold_path()` là lựa chọn phù hợp hơn cho code Rust idiomatic[^rs-likely-see].
+Kiểm tra trực tiếp: `std::hint::likely(true)` trên rustc 1.95.0 stable cho lỗi `E0658: use of unstable library feature 'likely_unlikely'`; còn đoạn dùng `cold_path()` và `select_unpredictable` biên dịch và chạy được. Docs của `likely` tự khuyên xem `cold_path()` là lựa chọn phù hợp hơn cho code Rust idiomatic[^rs-likely-see].
 
-**`black_box`**: là hàm identity, nhưng khác `std::convert::identity` ở chỗ compiler được khuyến khích giả định nó có thể dùng đối số theo mọi cách hợp lệ — hữu ích khi viết benchmark để compiler không tối ưu mất phần code cần đo[^rs-bb]. Ngược lại docs nhấn mạnh nó chỉ là "best-effort": chương trình không được dựa vào nó cho tính đúng đắn ngoài việc nó là identity, và nó không đem lại bảo đảm cho mục đích mật mã/bảo mật[^rs-bb-besteffort]. Ở mục 7, `black_box` được dùng để chặn compiler biến `if` thành `csel`; docs không hứa hiệu ứng đó, nên đây là điều đã kiểm bằng assembly của lần đo (lệnh `tbz` còn nguyên), không phải điều `black_box` bảo đảm. Cách dùng `black_box` trong benchmark nói kỹ hơn ở mục "`black_box` và đo hiệu năng đúng" của [Chương 07 — Rust và máy](07-rust-va-may.md).
+### 8.2 `black_box`: giữ lại code đang đo
 
-**`cold_path` và `select_unpredictable`**: `cold_path` gợi ý compiler rằng đường này nguội; compiler có thể tối ưu đường không nguội và đánh đổi đường nguội[^rs-cold]. Docs cảnh báo hint không đảm bảo hiệu ứng cụ thể và dùng sai có thể *giảm* hiệu năng nếu nhánh được gọi nhiều hơn dự kiến[^rs-cold-warn]. Tương tự, `select_unpredictable` có hành vi tương đương `if b { t } else { f }`[^rs-su-func] nhưng có thể sinh assembly khác[^rs-su-equiv].
+`black_box` là hàm identity, nhưng khác `std::convert::identity` ở chỗ compiler được khuyến khích giả định nó có thể dùng đối số theo mọi cách hợp lệ. Nhờ vậy nó hữu ích khi viết benchmark, để compiler không tối ưu mất phần code cần đo[^rs-bb]. Ngược lại, docs nhấn mạnh nó chỉ là "best-effort": chương trình không được dựa vào nó cho tính đúng đắn ngoài việc nó là identity, và nó không đem lại bảo đảm cho mục đích mật mã hay bảo mật[^rs-bb-besteffort].
+
+Ở mục 7, `black_box` được dùng để chặn compiler biến `if` thành `csel`. Docs không hứa hiệu ứng đó, nên đây là điều đã kiểm bằng assembly của lần đo (lệnh `tbz` còn nguyên), không phải điều `black_box` bảo đảm. Cách dùng `black_box` trong benchmark nói kỹ hơn ở mục "`black_box` và đo hiệu năng đúng" của [Chương 07 — Rust và máy](07-rust-va-may.md).
+
+### 8.3 `cold_path` và `select_unpredictable`
+
+`cold_path` gợi ý compiler rằng đường này nguội; compiler có thể tối ưu đường không nguội và đánh đổi đường nguội[^rs-cold]. Docs cảnh báo hint không đảm bảo hiệu ứng cụ thể, và dùng sai có thể *giảm* hiệu năng nếu nhánh được gọi nhiều hơn dự kiến[^rs-cold-warn]. Với `ingest`, đây là hint hợp với nhánh xử lý event hỏng.
+
+`select_unpredictable` có hành vi tương đương `if b { t } else { f }`[^rs-su-func]. Nhưng nó có thể sinh assembly khác[^rs-su-equiv]. Với `ingest`, đây là hint hợp với điều kiện `priority >= 128` khi lô không có thứ tự; mục 7.3 đã nói khi nào nó lợi, khi nào hại.
 
 Lưu ý (đã chạy thử `cold_path` và `select_unpredictable` trên rustc 1.95.0, biên dịch được; chưa đo hiệu năng): các hint này tác động lên **code mà compiler sinh ra** (bố trí khối cơ bản, chọn nhánh hay `cmov`), không "lập trình" branch predictor trực tiếp (suy luận của người soạn từ việc docs mô tả chúng là hint cho compiler).
 
 <details><summary>Đi sâu: <code>spin_loop</code>, <code>#[cold]</code> và <code>#[inline]</code></summary>
 
-**`spin_loop`**: phát ra một lệnh máy để báo cho CPU rằng nó đang trong vòng busy-wait; CPU có thể nhờ đó tiết kiệm điện hoặc chuyển hyper-thread[^rs-spin]. Khác với `thread::yield_now`, nó không tương tác với OS[^rs-spin-yield]. Docs nêu một trường hợp dùng phổ biến là "bounded optimistic spinning" trong vòng CAS của primitive đồng bộ, và khuyến nghị mạnh *kết thúc vòng spin sau số lần lặp hữu hạn rồi gọi syscall chặn phù hợp* để tránh vấn đề như priority inversion[^rs-spin-bound]. Trên nền tảng không hỗ trợ tín hiệu này nó không làm gì[^rs-spin-noop].
+**`spin_loop`** phát ra một lệnh máy để báo cho CPU rằng nó đang trong vòng busy-wait; CPU có thể nhờ đó tiết kiệm điện hoặc chuyển hyper-thread[^rs-spin]. Khác với `thread::yield_now`, nó không tương tác với OS[^rs-spin-yield]. Docs nêu một trường hợp dùng phổ biến là "bounded optimistic spinning" trong vòng CAS của primitive đồng bộ. Docs cũng khuyến nghị mạnh *kết thúc vòng spin sau số lần lặp hữu hạn rồi gọi syscall chặn phù hợp* để tránh vấn đề như priority inversion[^rs-spin-bound]. Trên nền tảng không hỗ trợ tín hiệu này nó không làm gì[^rs-spin-noop].
 
-Rust Reference mô tả hai thuộc tính codegen này (mục "Code generation attributes"):
+Rust Reference mô tả hai thuộc tính codegen còn lại (mục "Code generation attributes"):
 
 - `#[cold]` gợi ý rằng hàm được đánh dấu hiếm khi được gọi, có thể giúp compiler sinh code tốt hơn[^rs-attr-cold]. Dùng cho đường lỗi để đẩy code xử lý lỗi ra khỏi đường nóng (nhận xét của người soạn về cách dùng).
-- `#[inline]` gợi ý nên đặt bản sao code của hàm vào nơi gọi thay vì sinh lời gọi hàm[^rs-inline-intro]. Có ba chế độ: `#[inline]`, `#[inline(always)]` và `#[inline(never)]`[^rs-inline-list]; Reference ghi chú trong *mọi* dạng, đây chỉ là hint — compiler có thể bỏ qua[^rs-inline-modes]. rustc tự inline khi thấy đáng làm; Reference cảnh báo dùng thuộc tính này cẩn thận vì quyết định inline tồi có thể làm chương trình chậm đi[^rs-inline-warn]. Ví dụ asm và cách kiểm tra hàm đã inline hay chưa có ở mục Inlining của [Chương 07 — Rust và máy](07-rust-va-may.md).
+- `#[inline]` gợi ý nên đặt bản sao code của hàm vào nơi gọi thay vì sinh lời gọi hàm[^rs-inline-intro]. Có ba chế độ: `#[inline]`, `#[inline(always)]` và `#[inline(never)]`[^rs-inline-list]. Reference ghi chú trong *mọi* dạng, đây chỉ là hint và compiler có thể bỏ qua[^rs-inline-modes]. rustc tự inline khi thấy đáng làm; Reference cảnh báo dùng thuộc tính này cẩn thận vì quyết định inline tồi có thể làm chương trình chậm đi[^rs-inline-warn]. Ví dụ asm và cách kiểm tra hàm đã inline hay chưa có ở mục Inlining của [Chương 07 — Rust và máy](07-rust-va-may.md).
 
 </details>
 
-**Quay lại Q8:** các hint của `std::hint`, `#[cold]` và `#[inline]` chỉ tác động lên code compiler sinh (trừ `spin_loop`, báo thẳng cho CPU), không bảo đảm hiệu ứng; `likely`/`unlikely` chưa dùng được trên stable.
+**Quay lại Q8:** các hint của `std::hint`, `#[cold]` và `#[inline]` chỉ tác động lên code compiler sinh (trừ `spin_loop`, báo thẳng cho CPU), không bảo đảm hiệu ứng; `likely`/`unlikely` chưa dùng được trên stable. Với `ingest`: `cold_path` cho nhánh event hỏng, `select_unpredictable` cho điều kiện khó đoán, `black_box` khi benchmark.
 
 ## Tóm tắt
 
@@ -387,28 +455,28 @@ Rust Reference mô tả hai thuộc tính codegen này (mục "Code generation a
 1. Pipeline có làm giảm thời gian chạy của *một* lệnh không? Nó cải thiện cái gì?
 <details><summary>Đáp án</summary>
 
-Không; latency một lệnh giữ nguyên,[^dis-latency] throughput tăng nhờ chồng lấn lệnh.[^dis-throughput]
+Không; latency một lệnh giữ nguyên.[^dis-latency] Throughput tăng nhờ chồng lấn lệnh.[^dis-throughput]
 
 </details>
 
 2. Nêu ba loại hazard và một cách xử lý của mỗi loại.
 <details><summary>Đáp án</summary>
 
-Structural (tranh tài nguyên; thiết kế pipeline đúng, ví dụ tách bộ nhớ lệnh/dữ liệu),[^ww-resolved] data (chủ yếu forwarding; riêng load-use vẫn phải stall),[^dis-fwd][^ww-loaduse] control (branch prediction, hoặc chuyển dữ liệu có điều kiện).[^dis-options]
+Structural (tranh tài nguyên) chữa bằng thiết kế pipeline đúng, ví dụ tách bộ nhớ lệnh và dữ liệu.[^ww-resolved] Data chủ yếu chữa bằng forwarding.[^dis-fwd] Riêng load-use vẫn phải stall.[^ww-loaduse] Control chữa bằng branch prediction, hoặc chuyển dữ liệu có điều kiện.[^dis-options]
 
 </details>
 
 3. Vì sao flush pipeline xảy ra khi đoán nhánh sai?
 <details><summary>Đáp án</summary>
 
-Vì các lệnh sau lệnh nhảy đã được nạp vào pipeline trước khi biết nhánh;[^dis-ctrl-late] nếu hướng sai, chúng là "rác" và phải bị loại.[^dis-flush]
+Vì các lệnh sau lệnh nhảy đã được nạp vào pipeline trước khi biết nhánh.[^dis-ctrl-late] Nếu hướng sai, chúng là "rác" và phải bị loại.[^dis-flush]
 
 </details>
 
 4. Forwarding khác với thêm bubble ở điểm nào?
 <details><summary>Đáp án</summary>
 
-Bubble làm pipeline stall; forwarding đưa kết quả phép toán trước thẳng cho lệnh sau mà không chờ ghi thanh ghi.[^dis-bubble][^dis-fwd]
+Bubble làm pipeline stall.[^dis-bubble] Forwarding đưa kết quả phép toán trước thẳng cho lệnh sau mà không chờ ghi thanh ghi.[^dis-fwd]
 
 </details>
 
@@ -422,7 +490,7 @@ Không thay đổi kết quả kiến trúc: lệnh chạy mất trật tự nh�
 6. Tại sao thực thi suy đoán có thể rò dữ liệu dù kết quả bị hủy?
 <details><summary>Đáp án</summary>
 
-Hủy chỉ khôi phục trạng thái kiến trúc; hiệu ứng phụ trong cache/buffer vẫn còn và đo được qua side channel.[^kd-problem][^sp-v1]
+Hủy chỉ khôi phục trạng thái kiến trúc. Hiệu ứng phụ trong cache và buffer vẫn còn và đo được qua side channel.[^kd-problem] Ví dụ ở Spectre v1: thay đổi trạng thái cache không được hoàn tác khi CPU nhận ra đã đoán sai.[^sp-v1]
 
 </details>
 
@@ -436,28 +504,28 @@ v1 khai thác nhánh có điều kiện; v2 khai thác nhánh gián tiếp.[^kd-
 8. Meltdown khác Spectre ở cơ chế kích hoạt suy đoán thế nào?
 <details><summary>Đáp án</summary>
 
-Meltdown dựa vào lệnh chạy mất trật tự sau một lệnh gây exception (chưa retire nhưng đã để lại dấu vết cache),[^md-exc][^md-micro] không cần dự đoán nhánh.[^sp-md-nobp]
+Meltdown dựa vào lệnh chạy mất trật tự sau một lệnh gây exception; các lệnh đó chưa retire nên không có hiệu ứng kiến trúc.[^md-exc] Nhưng chúng đã để lại dấu vết cache.[^md-micro] Meltdown không cần dự đoán nhánh.[^sp-md-nobp]
 
 </details>
 
 9. PTI chống Meltdown bằng cách nào?
 <details><summary>Đáp án</summary>
 
-Dùng hai bộ page table;[^kd-pti] bộ dành cho chạy user chỉ chứa tối thiểu thứ cần để vào/ra kernel,[^kd-pti-min] và được đổi sang bản kernel đầy đủ khi vào kernel.[^kd-pti-switch]
+Dùng hai bộ page table.[^kd-pti] Bộ dành cho chạy user chỉ chứa tối thiểu thứ cần để vào và ra kernel.[^kd-pti-min] Khi vào kernel, page table được đổi sang bản kernel đầy đủ.[^kd-pti-switch]
 
 </details>
 
 10. Trên Rust 1.95.0, dùng `std::hint::likely` được không? Thay bằng gì?
 <details><summary>Đáp án</summary>
 
-Không, nó chỉ ở nightly (E0658 trên stable); docs gợi ý `cold_path()`.[^rs-likely][^rs-likely-see]
+Không, nó chỉ ở nightly (E0658 trên stable).[^rs-likely] Docs gợi ý `cold_path()`.[^rs-likely-see]
 
 </details>
 
 11. Vì sao PTI làm mỗi lần vào/ra kernel đắt hơn?
 <details><summary>Đáp án</summary>
 
-Vì phải ghi thanh ghi CR3 để đổi page table ở mỗi lần vào và ra kernel (docs kernel ghi cỡ một trăm cycle mỗi lần ghi);[^kd-pti-cost] trên máy không có PCID, mỗi lần ghi CR3 còn xả toàn bộ TLB.[^kd-pti-tlb]
+Vì phải ghi thanh ghi CR3 để đổi page table ở mỗi lần vào và ra kernel (docs kernel ghi cỡ một trăm cycle mỗi lần ghi).[^kd-pti-cost] Trên máy không có PCID, mỗi lần ghi CR3 còn xả toàn bộ TLB.[^kd-pti-tlb]
 
 </details>
 
@@ -477,10 +545,8 @@ Vì phải ghi thanh ghi CR3 để đổi page table ở mỗi lần vào và ra
 [^dis-cpi4]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "To execute a sequence of N instructions takes 4N clock cycles, as each is executed one at a time, in order, by the CPU."
 [^dis-each-stage]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "the CPU circuitry associated with implementing each stage is only actively involved in instruction execution once every four cycles."
 [^dis-idle]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "the fetch circuitry in the CPU is not used to perform any useful action related to executing an instruction for the next three clock cycles."
-[^dis-laundry]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "the second load can go in the washing machine while the first load is in the dryer"
 [^dis-pipe]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "CPU pipelining is this idea of starting the execution of the next instruction before the current instruction has fully completed its execution."
 [^dis-overlap]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "CPU pipelining executes instructions in order, but it allows the execution of a sequence of instructions to overlap."
-[^dis-behind]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "each subsequent instruction is one stage behind its predecessor."
 [^dis-full]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "When the pipeline is full, the CPU completes the execution of one instruction every clock cycle!"
 [^dis-fill4]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "Starting with the fourth clock cycle the pipeline fills, meaning that the CPU completes the execution of one instruction every cycle, achieving a CPI of 1"
 [^dis-latency]: Dive into Systems, 5.7 Pipelining — <https://diveintosystems.org/book/C5-Arch/pipelining.html> — "Notice that the total number of cycles required to execute a single instruction (the instruction latency) has not decreased in pipelined execution—it still takes four cycles for each instruction to execute."

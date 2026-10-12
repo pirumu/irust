@@ -1,6 +1,6 @@
 # P1 · Chương 03 — Process
 
-> Mọi điều về kernel/syscall ở đây là về **Linux** (man page Debian bookworm). Ví dụ "đã chạy" được chạy trong container Linux aarch64 của `labs/linux.sh` (kernel 6.8, rustc 1.95.0): đó là quan sát một lần chạy, không phải bảo đảm. Câu không có chú thích là nhận xét hoặc suy luận của người soạn.
+> Phạm vi: mọi điều về kernel và syscall trong chương này là về **Linux** (man page Debian bookworm). Các ví dụ "đã chạy" chạy trong container Linux aarch64 của `labs/linux.sh` (kernel 6.8, rustc 1.95.0); đó là quan sát một lần chạy, không phải bảo đảm. Câu không có chú thích là nhận xét hoặc suy luận của người soạn.
 
 ## Bạn sẽ hiểu được gì
 
@@ -20,25 +20,41 @@
 
 ## 1. Từ chương trình đến process (Q1)
 
-> **Trả lời ngắn.** Chương trình là một dãy lệnh nằm yên trên đĩa[^ostep-program-disk]; process là chương trình đang chạy[^ostep-proc]. Để dừng rồi chạy tiếp một process, kernel giữ một cấu trúc riêng cho nó và lưu các thanh ghi (những ô nhớ nhỏ trong CPU, xem [Phase 2 · Chương 01, mục 3](../02-cpu/01-mo-hinh-may-va-isa.md)) vào đó; khôi phục các thanh ghi ấy là cách cho process chạy tiếp[^ostep-regctx].
+> **Trả lời ngắn.** Chương trình là một dãy lệnh nằm yên trên đĩa[^ostep-program-disk]. Process là chương trình đang chạy[^ostep-proc]. Để dừng một process rồi cho nó chạy tiếp đúng chỗ cũ, kernel giữ cho mỗi process một cấu trúc riêng và cất các thanh ghi (những ô nhớ nhỏ nằm ngay trong CPU, xem [Phase 2 · Chương 01, mục 3](../02-cpu/01-mo-hinh-may-va-isa.md)) vào đó. Nạp lại các thanh ghi ấy là cách cho process chạy tiếp[^ostep-regctx].
 
-**Giải thích.** Hình dung (nhận xét của người soạn): file thực thi giống công thức nấu ăn, còn process là một căn bếp đang nấu theo công thức đó — cùng công thức có thể có nhiều bếp chạy cùng lúc, mỗi bếp một trạng thái riêng.
+**Giải thích.**
+
+*Với service của bạn.* Cả chương bám theo một service giả định tên `media-api` (nhận xét của người soạn: ví dụ minh họa, không phải code trong repo). Nó là server HTTP viết bằng Rust, nhận file video do client upload. Với mỗi file, nó chạy `ffmpeg` như một process con để đổi định dạng, rồi trả kết quả. Service đóng gói trong container, nên `media-api` là process PID 1 của container đó.
+
+Ta sẽ đi theo đúng đường của một upload: process con của `media-api` ra đời thế nào (`fork`, mục 3), biến thành `ffmpeg` ra sao (`exec`, mục 4), `media-api` biết `ffmpeg` xong hay chết bằng cách nào (`wait`, mục 6), và chuyện gì xảy ra khi nó quên dọn (zombie, mục 7). Nhưng trước hết là câu hỏi gốc: dưới mắt kernel, `media-api` là gì, và kernel phải nhớ những gì về nó?
 
 ### 1.1 Process gồm gì
 
-OSTEP mô tả process qua *machine state*: trước hết là bộ nhớ nó địa chỉ hóa được (*address space*), chứa lệnh và dữ liệu[^ostep-machine-state]; các thanh ghi, trong đó program counter chỉ lệnh kế tiếp[^ostep-regs]; và thông tin I/O như danh sách file đang mở[^ostep-io-info].
+Muốn dừng `media-api` giữa chừng rồi chạy tiếp mà không mất gì, kernel phải biết trạng thái máy (*machine state*) của process gồm những phần nào. Có ba phần:
 
-Biến chương trình thành process gồm: nạp code và dữ liệu tĩnh từ đĩa vào bộ nhớ[^ostep-load] (OS hiện đại nạp *lazily*, khi cần[^ostep-lazy]), cấp stack và khởi tạo nó bằng `argc`/`argv` cho `main()`[^ostep-argv], và thiết lập I/O — trên Unix mỗi process mặc định có ba fd cho stdin, stdout, stderr[^ostep-std-fds]. Trên Linux, việc thay chương trình đang chạy của một process bằng chương trình mới là việc của `execve` (mục 4)[^exec-replace].
+- **Bộ nhớ** mà process truy cập được, gọi là *address space*. Lệnh của chương trình và dữ liệu nó đọc ghi đều nằm trong đó[^ostep-machine-state].
+- **Thanh ghi**. Quan trọng nhất là program counter (PC), cho biết lệnh nào sẽ chạy kế tiếp[^ostep-regs].
+- **Thông tin I/O**, chẳng hạn danh sách các file process đang mở[^ostep-io-info]. Với `media-api`, đó là socket đang nghe, các kết nối của client và file log.
+
+Còn từ file `media-api` trên đĩa đến process đang chạy, OS làm mấy việc theo thứ tự. Nó nạp code và dữ liệu tĩnh từ đĩa vào bộ nhớ[^ostep-load]. OS hiện đại không nạp một lượt mà nạp *lazily*, tức đoạn code hay dữ liệu nào cần tới mới nạp[^ostep-lazy]. Tiếp theo nó cấp stack và điền tham số cho `main()`, gồm `argc` và mảng `argv`[^ostep-argv]. Cuối cùng là I/O: trên Unix, mỗi process mặc định có ba file descriptor (fd, số nguyên đại diện cho một file đang mở) cho standard input, output và error[^ostep-std-fds]. Mỗi lần `media-api` gọi `println!`, dòng log đi ra qua stdout trong số đó.
+
+Trên Linux, việc thay chương trình đang chạy của một process bằng chương trình khác là việc của `execve` (mục 4)[^exec-replace]. `ffmpeg` sẽ vào process con của `media-api` theo đường này.
 
 ### 1.2 PCB và process list
 
-OSTEP: OS giữ một *process list* chứa thông tin về mọi process trong hệ thống; mỗi mục của danh sách gọi là *Process Control Block* (PCB)[^ostep-pcb-list] — một C struct chứa thông tin về một process, còn gọi là process descriptor[^ostep-pcb]. Struct này chứa *register context*: khi process bị dừng, thanh ghi của nó được lưu ở đó, và khôi phục chúng là cách cho process chạy tiếp, kỹ thuật gọi là *context switch*[^ostep-regctx] (cơ chế ở [Chương 01](01-os-va-kernel.md), mục 5).
+Để làm được những việc trên cho cả chục process cùng lúc, kernel giữ một *process list* chứa thông tin về mọi process trong máy. Mỗi mục của danh sách gọi là *Process Control Block* (PCB)[^ostep-pcb-list]. PCB chỉ là một C struct chứa thông tin của một process, và còn một tên khác là process descriptor[^ostep-pcb].
 
-Trên Linux, fork(2) nhắc tới một *task structure* riêng được tạo cho mỗi con[^fork-cow] (suy luận của người soạn: đó là cấu trúc đóng vai PCB của Linux). `/proc` là giao diện của kernel tới các cấu trúc dữ liệu của nó[^proc-iface]; thông tin theo từng process nằm dưới `/proc/<pid>/…` ([Chương 06](06-user-quyen-proc-sys.md), mục 4).
+Trong struct đó có *register context*: khi process bị dừng, thanh ghi của nó được cất vào đây, và nạp lại chúng là cách cho process chạy tiếp. Kỹ thuật này tên là *context switch* (cơ chế ở [Chương 01](01-os-va-kernel.md), mục 5)[^ostep-regctx]. Với `media-api`, mỗi lần kernel đổi core của nó sang `ffmpeg` rồi đổi lại, PCB của `media-api` là nơi giữ trạng thái chờ sẵn.
+
+Linux đặt tên khác sách. fork(2) nhắc tới một *task structure* riêng cho mỗi process con[^fork-cow], và ta đoán đó là cấu trúc đóng vai PCB của Linux (suy luận của người soạn). Muốn nhìn các cấu trúc này từ ngoài thì dùng `/proc`, giao diện của kernel tới dữ liệu của nó[^proc-iface]. Thông tin theo từng process nằm dưới `/proc/<pid>/…` ([Chương 06](06-user-quyen-proc-sys.md), mục 4).
 
 ### 1.3 Trạng thái
 
-OSTEP đơn giản hóa còn ba trạng thái: *running* (đang chạy trên một CPU)[^ostep-states], *ready* (sẵn sàng chạy nhưng OS chưa chọn nó lúc này)[^ostep-ready], *blocked* (đã làm việc khiến nó chưa chạy được cho đến khi có sự kiện khác)[^ostep-blocked-def]. Ready → running là được *schedule*, running → ready là bị *deschedule*; process blocked (ví dụ vì I/O) ở yên cho tới khi sự kiện xảy ra rồi về ready[^ostep-blocked]. OSTEP còn nhắc một trạng thái khởi tạo lúc process đang được tạo[^ostep-initfinal] và một trạng thái cuối: process đã thoát nhưng chưa được dọn — trên Unix gọi là *zombie* — để cha còn xem được return code[^ostep-zombie].
+Trong đời mình, process lúc thì đang có CPU, lúc thì phải chờ. Sách giáo khoa đơn giản hóa còn ba trạng thái. *Running*: process đang chạy lệnh trên một CPU[^ostep-states]. *Ready*: process sẵn sàng chạy, nhưng lúc này OS chưa chọn nó[^ostep-ready]. *Blocked*: process vừa làm một việc khiến nó chưa chạy được, cho tới khi có sự kiện khác xảy ra[^ostep-blocked-def].
+
+Các trạng thái chuyển qua lại như sau. Ready → running nghĩa là process được *schedule*, running → ready là bị *deschedule*. Process blocked, ví dụ vì đã khởi tạo một thao tác I/O, ở yên cho tới khi sự kiện xảy ra rồi mới về ready[^ostep-blocked]. Chẳng hạn một handler thread của `media-api` đang chờ `ffmpeg` ghi ra byte đầu tiên thì ở trạng thái blocked, không tốn CPU (nhận xét của người soạn).
+
+Sách còn nhắc hai trạng thái ở hai đầu đời process. Đầu đời là một trạng thái khởi tạo, lúc process đang được tạo[^ostep-initfinal]. Cuối đời là trạng thái process đã thoát nhưng chưa được dọn, trên Unix gọi là *zombie*. Trạng thái này có ích vì cha còn xem được return code của con[^ostep-zombie]. Mục 7 sẽ quay lại zombie.
 
 ```mermaid
 stateDiagram-v2
@@ -55,34 +71,50 @@ stateDiagram-v2
 
 <details><summary>Đi sâu: các ký tự trạng thái trong /proc trên Linux</summary>
 
-Linux chi tiết hơn: trường `state` của `/proc/<pid>/stat` là một ký tự — `R` Running, `S` sleeping (interruptible), `D` uninterruptible disk sleep, `Z` Zombie, `T` stopped, `t` tracing stop, `X` Dead (man page còn liệt kê vài ký tự khác)[^proc-stat-state]; `/proc/<pid>/status` có dòng `State` ghi cùng thông tin[^proc-state] (cách đọc `/proc`: [Chương 06](06-user-quyen-proc-sys.md), mục 4).
+Linux chi tiết hơn sách. Trường `state` của `/proc/<pid>/stat` là một ký tự: `R` Running, `S` sleeping (interruptible), `D` uninterruptible disk sleep, `Z` Zombie, `T` stopped, `t` tracing stop, `X` Dead (man page còn liệt kê vài ký tự khác)[^proc-stat-state]. File `/proc/<pid>/status` có dòng `State` ghi cùng thông tin[^proc-state]. Cách đọc `/proc` nằm ở [Chương 06](06-user-quyen-proc-sys.md), mục 4.
 
 </details>
 
-**Quay lại Q1:** process là chương trình đang chạy cùng trạng thái máy (bộ nhớ, thanh ghi, I/O) mà kernel giữ trong PCB để dừng và tiếp tục.
+**Quay lại Q1:** process là chương trình đang chạy cùng trạng thái máy (bộ nhớ, thanh ghi, I/O); kernel giữ trạng thái đó trong PCB để dừng và tiếp tục được. Với `media-api`, cả service lẫn mỗi `ffmpeg` nó sinh ra đều là process như vậy.
 
 ## 2. Danh tính của process
 
-Mỗi process có PID duy nhất, không âm, gán khi tạo bằng `fork(2)` và lấy bằng `getpid(2)`[^cred-pid]. PID cha (PPID) lấy bằng `getppid`[^getpid-ppid]. Cả PID và PPID được giữ nguyên qua `execve`[^cred-pid-exec][^cred-ppid-exec] — điều này sẽ quan trọng ở mục 4: `exec` không tạo process mới.
+Mỗi process có một PID duy nhất, là số nguyên không âm, gán lúc tạo bằng `fork(2)`. Process lấy PID của mình bằng `getpid(2)`[^cred-pid]. PID của cha (PPID) lấy bằng `getppid`[^getpid-ppid]. Với `media-api`, mỗi `ffmpeg` nó spawn có PID riêng, còn PPID của nó là PID của `media-api`.
 
-PID không vô hạn: `fork` có thể lỗi `EAGAIN` khi chạm `RLIMIT_NPROC` (giới hạn số process của một user), `/proc/sys/kernel/threads-max` (trần toàn hệ thống) hoặc số PID tối đa `/proc/sys/kernel/pid_max`[^fork-eagain]; rò rỉ process (kể cả zombie, mục 7) vì thế có thể làm cạn các giới hạn đó (suy luận của người soạn). UID/GID và capabilities thuộc [Chương 06](06-user-quyen-proc-sys.md); process group và session ở mục 8.
+PID của process giữ nguyên qua `execve`[^cred-pid-exec]. PPID cũng vậy[^cred-ppid-exec]. Điều này quan trọng ở mục 4, vì nó nói rằng `exec` không tạo process mới.
+
+PID không phải vô hạn. `fork` có thể lỗi `EAGAIN` khi chạm một trong ba giới hạn: `RLIMIT_NPROC` (số process của một user), `/proc/sys/kernel/threads-max` (trần toàn hệ thống) hoặc số PID tối đa `/proc/sys/kernel/pid_max`[^fork-eagain]. Vì vậy một service rò rỉ process, kể cả zombie (mục 7), có thể làm cạn các giới hạn đó (suy luận của người soạn). UID/GID và capabilities thuộc [Chương 06](06-user-quyen-proc-sys.md); process group và session ở mục 8.
 
 ## 3. `fork`: nhân bản một process (Q2)
 
-> **Trả lời ngắn.** `fork` tạo process mới bằng cách nhân bản chính process đang gọi nó[^fork-copy]. Nó rẻ vì Linux không chép ngay bộ nhớ: theo man page, chi phí chỉ là sao chép *page table* của cha (bảng ánh xạ địa chỉ của process) và tạo *task structure* (cấu trúc quản lý process) cho con, nhờ kỹ thuật *copy-on-write*[^fork-cow]. Ý tưởng của copy-on-write: hai bên dùng chung các trang bộ nhớ, trang nào có bên ghi vào thì mới được chép riêng (giải thích của người soạn).
+> **Trả lời ngắn.** `fork` tạo process mới bằng cách nhân bản chính process đang gọi nó[^fork-copy]. Nó rẻ vì Linux không chép bộ nhớ ngay. Chi phí chỉ là sao chép *page table* của cha (bảng ánh xạ địa chỉ của process) và tạo *task structure* (cấu trúc quản lý process) cho con, nhờ kỹ thuật *copy-on-write*[^fork-cow]. Ý tưởng của copy-on-write: hai bên dùng chung các trang bộ nhớ, và trang nào có bên ghi vào thì kernel mới chép riêng trang đó (giải thích của người soạn).
 
-**Giải thích.** Hình dung (nhận xét của người soạn): hai người cùng đọc một cuốn sổ chung; ai muốn viết vào trang nào thì trang ấy mới được photocopy riêng.
+**Giải thích.**
+
+*Với `media-api`.* Mỗi upload cần một process `ffmpeg`, và một cách để có nó là cho `media-api` `fork` rồi `exec` (Chương 07 nói `Command` chọn giữa cách này và `posix_spawn` ra sao):
+
+```rust
+let child = Command::new("ffmpeg").args(["-i", "in.mov", "out.mp4"]).spawn()?;
+```
+
+Cái khó nằm ở chỗ lúc này `media-api` có thể đang giữ vài GiB buffer upload trong RAM. Nếu `fork` chép hết chỗ đó thì mỗi lần spawn sẽ đắt và phí, vì con sắp thay ruột bằng `ffmpeg` ngay sau đó. Thực tế `fork` không chép, và lý do là copy-on-write (3.2).
 
 ### 3.1 Ngữ nghĩa
 
-`fork()` tạo process mới bằng cách nhân bản process gọi[^fork-copy]. Hai bên chạy trong hai không gian bộ nhớ riêng, lúc fork nội dung giống nhau, và ghi/map/unmap ở một bên không ảnh hưởng bên kia[^fork-mem]. Trả về: PID của con ở cha, `0` ở con, `-1` ở cha khi lỗi (không có con nào được tạo)[^fork-ret]. OSTEP gọi nó là routine kỳ lạ nhất bạn từng gọi[^ostep-fork-strange]. Con là bản sao gần như y hệt[^ostep-fork-copy] và không bắt đầu từ `main`, mà chạy tiếp từ sau lời gọi `fork` như thể chính nó vừa gọi `fork`[^ostep-fork-nomain].
+`fork()` tạo process mới bằng cách nhân bản process gọi nó[^fork-copy]. Con là bản sao gần như y hệt của cha[^ostep-fork-copy]. Hai bên chạy trong hai không gian bộ nhớ riêng. Lúc fork nội dung giống nhau, nhưng sau đó mọi thao tác ghi, map hay unmap ở bên này không ảnh hưởng bên kia[^fork-mem].
 
-Con "gần như" y hệt: man page nói con là bản sao y hệt của cha *trừ* một danh sách khác biệt[^fork-exact]. Ba khác biệt đáng nhớ: PID riêng, không trùng process group hay session nào[^fork-pid]; tập signal pending ([Chương 05](05-signal.md)) ban đầu rỗng[^fork-pending]; không thừa hưởng timer của cha[^fork-timers]. Những thứ con thừa hưởng và đáng chú ý nhất cho backend:
+Điểm dễ nhầm là con không chạy lại từ `main`. Nó chạy tiếp từ ngay sau lời gọi `fork`, như thể chính nó vừa gọi `fork`[^ostep-fork-nomain]. Vì vậy một lời gọi trả về hai lần ở hai process khác nhau: cha nhận PID của con, con nhận `0`, và nếu lỗi thì cha nhận `-1` và không có con nào được tạo[^fork-ret]. Code dựa vào giá trị này để biết mình đang là bên nào.
 
-- **fd**: con nhận bản sao bảng fd, mỗi fd trỏ cùng *open file description* với fd của cha — hai bên chia sẻ offset và status flags[^fork-fds] ([Chương 04](04-file-descriptor-va-vfs.md), mục 2).
-- **signal disposition** (cách xử lý mỗi signal)[^signal-fork] ([Chương 05](05-signal.md)); **UID/GID**[^cred-ids-fork] ([Chương 06](06-user-quyen-proc-sys.md)); **process group và session**[^cred-pgid] (mục 8).
+Chữ "gần như" có lý do: man page nói con là bản sao y hệt của cha *trừ* một danh sách khác biệt[^fork-exact]. Ba khác biệt đáng nhớ là: con có PID riêng, không trùng với process group hay session nào đang có[^fork-pid]; tập signal đang chờ xử lý (pending, xem [Chương 05](05-signal.md)) của con ban đầu rỗng[^fork-pending]; và con không thừa hưởng timer của cha[^fork-timers].
 
-Riêng với thread (mục 10): con chỉ có một thread (thread đã gọi `fork`) nhưng không gian địa chỉ được nhân bản nguyên, kể cả trạng thái mutex và condition variable[^fork-thread]. Hệ quả: sau `fork` trong chương trình đa luồng, con chỉ được gọi an toàn các hàm *async-signal-safe* (tập hàm liệt kê trong signal-safety(7); xem [Chương 05](05-signal.md)) cho đến khi gọi `execve`[^fork-signalsafe].
+Ngược lại, với backend, những thứ con thừa hưởng đáng chú ý nhất là:
+
+- **fd**: con nhận bản sao bảng fd của cha, và mỗi fd trỏ cùng *open file description* với fd tương ứng của cha. Nghĩa là hai bên chia sẻ offset và status flags[^fork-fds] ([Chương 04](04-file-descriptor-va-vfs.md), mục 2). Với `media-api`, mọi socket và file log đang mở đều có mặt trong con.
+- **signal disposition** (cách xử lý mỗi signal)[^signal-fork] ([Chương 05](05-signal.md)).
+- **UID/GID**[^cred-ids-fork] ([Chương 06](06-user-quyen-proc-sys.md)).
+- **process group và session**[^cred-pgid] (mục 8).
+
+`media-api` có nhiều thread, nên còn một chuyện về thread (mục 10). Con chỉ có một thread, chính là thread đã gọi `fork`, nhưng cả không gian địa chỉ của cha được nhân bản, kể cả trạng thái mutex và condition variable[^fork-thread]. Vì vậy sau `fork` trong chương trình đa luồng, con chỉ được gọi an toàn các hàm *async-signal-safe* (tập hàm liệt kê trong signal-safety(7); xem [Chương 05](05-signal.md)) cho đến khi gọi `execve`[^fork-signalsafe].
 
 ```mermaid
 sequenceDiagram
@@ -101,11 +133,13 @@ sequenceDiagram
 
 (Sơ đồ rút gọn: `SIGCHLD` là termination signal của con sinh bởi `fork`[^fork-sigchld]; cha chưa `wait` thì con thành zombie, xem mục 6–7.)
 
-Thứ tự chạy của cha và con **không xác định**[^ostep-nondet] — scheduler (phần của kernel quyết định process nào được chạy) chọn process chạy tại mỗi thời điểm[^ostep-scheduler]. Muốn có thứ tự phải đồng bộ, thường bằng `wait` — OSTEP ghi rằng thêm lời gọi `wait()` ở cha làm output xác định[^ostep-wait-det].
+Cuối cùng, cha và con chạy theo thứ tự nào thì **không xác định**[^ostep-nondet]. Scheduler, phần của kernel quyết định process nào được chạy, chọn process chạy tại mỗi thời điểm[^ostep-scheduler]. Muốn có thứ tự cố định thì phải đồng bộ, thường bằng `wait`: thêm một lời gọi `wait()` ở cha là output trở nên xác định[^ostep-wait-det].
 
 ### 3.2 Vì sao `fork` rẻ: copy-on-write
 
-Nhân bản toàn bộ bộ nhớ từng là cách làm cũ và thường lãng phí, vì ngay sau đó thường có `exec`[^vfork-hist]. Trên Linux, `fork()` dùng các trang copy-on-write (COW); chi phí chỉ là thời gian và bộ nhớ để sao chép *page table* của cha và tạo task structure cho con[^fork-cow]. Ý tưởng (giải thích của người soạn về COW): sau fork hai bên dùng chung trang vật lý; khi một bên *ghi*, kernel mới chép riêng trang đó. Cơ chế chi tiết, kể cả thí nghiệm đo bộ nhớ dùng chung bằng PSS, ở [Phase 3 · Chương 05, mục 4](../03-memory/05-bo-nho-tien-trinh-linux.md).
+Hồi xưa `fork` chép toàn bộ bộ nhớ của cha, và thường là phí công vì ngay sau đó hầu như luôn có `exec`[^vfork-hist]. Trên Linux, `fork()` dùng các trang copy-on-write (COW), nên chi phí chỉ còn là thời gian và bộ nhớ để sao chép *page table* của cha và tạo task structure cho con[^fork-cow].
+
+Ý tưởng của COW (giải thích của người soạn): sau `fork`, hai bên dùng chung các trang vật lý. Khi một bên *ghi* vào trang nào, kernel mới chép riêng trang đó cho bên ấy. Với `media-api`, vài GiB buffer vẫn nằm yên một bản duy nhất cho tới khi có ai ghi vào. Cơ chế chi tiết, kể cả thí nghiệm đo bộ nhớ dùng chung bằng PSS, nằm ở [Phase 3 · Chương 05, mục 4](../03-memory/05-bo-nho-tien-trinh-linux.md).
 
 <details><summary>Đi sâu: thí nghiệm 1 GiB và vfork/posix_spawn/clone</summary>
 
@@ -116,58 +150,71 @@ Thử nghiệm đã chạy (Rust gọi `fork` qua FFI; aarch64, kernel 6.8; mộ
 - Con ghi 1 byte vào mỗi trang 4 KiB của 256 MiB đầu (65.536 lần) mất ~70 ms (≈1 µs/trang, gồm page fault COW).
 - Cha vẫn thấy `v[0] == 1` trong khi con ghi `2` — đúng ngữ nghĩa "ghi ở một bên không ảnh hưởng bên kia"[^fork-mem].
 
-Vì chi phí gồm sao chép page table[^fork-cow], (suy luận của người soạn) thời gian `fork` tăng theo lượng bộ nhớ đã map; số 2,3 ms là quan sát, không phải công thức.
+Chi phí của `fork` gồm sao chép page table[^fork-cow], nên (suy luận của người soạn) thời gian `fork` tăng theo lượng bộ nhớ đã map; số 2,3 ms là quan sát, không phải công thức.
 
 ### 3.3 `vfork`, `posix_spawn`, `clone`
 
-`vfork` là trường hợp đặc biệt của `clone(2)`, tạo process mới *không sao chép page table của cha*[^vfork-desc]; đổi lại thread gọi bị treo đến khi con thoát hoặc `execve`, và trong thời gian đó con dùng chung toàn bộ bộ nhớ với cha, kể cả stack[^vfork-susp]. Từ glibc 2.24, `posix_spawn()` bắt đầu bằng `clone(2)` với cờ `CLONE_VM` và `CLONE_VFORK` (bản cũ hơn dùng `fork(2)`, hoặc có thể `vfork(2)`)[^posix-spawn-clone]; cách `Command` của Rust chọn giữa `posix_spawn` và `fork`+`exec` ở [Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 3. Còn wrapper `fork` của glibc từ 2.3.3 không gọi syscall `fork` mà gọi `clone(2)` với flags cho cùng hiệu quả[^fork-glibc] ([Chương 02](02-system-call.md), mục 3); về ngữ nghĩa, man page nói `fork()` tương đương `clone(2)` với flags chỉ là `SIGCHLD`[^fork-clone-eq] (mục 10).
+`vfork` là trường hợp đặc biệt của `clone(2)`, tạo process mới *mà không sao chép page table của cha*[^vfork-desc]. Đổi lại, thread gọi bị treo cho đến khi con thoát hoặc `execve`, và trong thời gian đó con dùng chung toàn bộ bộ nhớ với cha, kể cả stack[^vfork-susp].
+
+Từ glibc 2.24, `posix_spawn()` bắt đầu bằng `clone(2)` với cờ `CLONE_VM` và `CLONE_VFORK`; bản cũ hơn dùng `fork(2)`, hoặc có thể `vfork(2)`[^posix-spawn-clone]. Cách `Command` của Rust chọn giữa `posix_spawn` và `fork`+`exec` nằm ở [Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 3.
+
+Còn wrapper `fork` của glibc từ 2.3.3 không gọi syscall `fork` mà gọi `clone(2)` với flags cho cùng hiệu quả[^fork-glibc] ([Chương 02](02-system-call.md), mục 3). Về ngữ nghĩa, man page nói `fork()` tương đương `clone(2)` với flags chỉ là `SIGCHLD`[^fork-clone-eq] (mục 10).
 
 </details>
 
-**Quay lại Q2:** `fork` nhân bản process với bộ nhớ riêng, và nhờ copy-on-write nó chỉ sao chép page table chứ không chép dữ liệu.
+**Quay lại Q2:** `fork` nhân bản process với bộ nhớ riêng, và nhờ copy-on-write nó chỉ sao chép page table chứ không chép dữ liệu; nên `media-api` spawn `ffmpeg` không phải trả giá bằng cả đống buffer upload.
 
 ## 4. `exec`: thay chương trình đang chạy (Q3)
 
-> **Trả lời ngắn.** `execve` thay chương trình đang chạy trong process bằng chương trình khác, với stack, heap và dữ liệu khởi tạo lại[^exec-replace]; process vẫn là process cũ[^ostep-exec-transform] nên PID giữ nguyên[^cred-pid-exec]. fd đang mở vẫn mở, trừ fd được đánh dấu "đóng khi exec" (close-on-exec)[^exec-fds-default][^exec-fds]; hàm xử lý signal đã cài (signal handler) bị đặt lại về mặc định[^exec-handlers]. Environment của chương trình mới là mảng `envp` mà bên gọi truyền vào[^exec-envp]; process group và session cũng giữ nguyên[^cred-pgid] (job control, mục 8).
+> **Trả lời ngắn.** `execve` thay chương trình đang chạy trong process bằng một chương trình khác, với stack, heap và dữ liệu khởi tạo lại[^exec-replace]. Process vẫn là process cũ[^ostep-exec-transform]. Vì vậy PID giữ nguyên[^cred-pid-exec]. fd đang mở vẫn mở[^exec-fds-default]. Ngoại lệ là fd đã đánh dấu close-on-exec (đóng khi exec)[^exec-fds]. Các hàm xử lý signal đã cài (signal handler) bị đặt lại về mặc định[^exec-handlers]. Environment của chương trình mới là mảng `envp` mà bên gọi truyền vào[^exec-envp]. Process group và session cũng giữ nguyên[^cred-pgid] (job control, mục 8).
 
-**Giải thích.** Hình dung (nhận xét của người soạn): như thay toàn bộ đầu bếp và công thức trong cùng một căn bếp, nhưng giữ nguyên số bếp và các đường ống đã nối sẵn.
+**Giải thích.**
 
-Theo OSTEP, `exec` **không tạo process mới**, mà biến chương trình đang chạy thành chương trình khác[^ostep-exec-transform]; `exec` thành công thì không bao giờ return[^exec-noreturn] (nên mã sau `exec` chỉ chạy khi `exec` lỗi).
+*Với `media-api`.* Ngay sau `fork`, process con vẫn đang chạy code của `media-api`. Để nó thành `ffmpeg`, con gọi `execve` với đường dẫn tới `ffmpeg`. Từ lúc đó code, stack và heap là của `ffmpeg`, nhưng PID vẫn là PID con vừa được cấp, và những fd con thừa hưởng từ `media-api` vẫn còn mở. Hai chuyện này là chỗ dễ sai nhất, nên mục này xem kỹ cái gì sống sót qua `exec` (4.1).
+
+Trước hết cần nắm một điều: `exec` **không tạo process mới**. Nó biến chương trình đang chạy thành một chương trình khác[^ostep-exec-transform]. Nếu `exec` thành công thì nó không bao giờ return[^exec-noreturn], nên code đứng sau lời gọi `exec` chỉ chạy khi `exec` lỗi.
 
 ### 4.1 Cái gì sống sót qua `exec`, cái gì không
 
-Man page nói tất cả thuộc tính process được giữ nguyên, **trừ** một danh sách[^exec-preserved]. Phần quan trọng cho người viết server:
+Man page ghi rằng mọi thuộc tính của process được giữ nguyên qua `execve`, *trừ* một danh sách[^exec-preserved]. Bảng dưới là phần quan trọng với người viết server:
 
 | Thuộc tính | Qua `execve` | Nguồn |
 |---|---|---|
-| PID, PPID | giữ nguyên | [^cred-pid-exec][^cred-ppid-exec] |
+| PID | giữ nguyên | [^cred-pid-exec] |
+| PPID | giữ nguyên | [^cred-ppid-exec] |
 | process group ID, session ID | giữ nguyên | [^cred-pgid] |
-| fd | **giữ mở** mặc định; fd đánh dấu close-on-exec thì đóng | [^exec-fds-default][^exec-fds] |
+| fd | **giữ mở** mặc định | [^exec-fds-default] |
+| fd đánh dấu close-on-exec | bị đóng | [^exec-fds] |
 | signal handler đã cài | reset về mặc định | [^exec-handlers] |
 | signal bị ignore | giữ nguyên (ignore) | [^signal-exec] |
 | memory mapping | không giữ | [^exec-mmap] |
 | thread khác ngoài thread gọi | bị hủy | [^exec-threads] |
 | real UID/GID, supplementary groups | giữ nguyên | [^exec-ids] |
-| effective UID | đổi sang chủ file nếu file có bit set-user-ID, trừ khi `nosuid`, `no_new_privs` hoặc ptrace (chi tiết: [Chương 06](06-user-quyen-proc-sys.md), mục 2) | [^exec-suid][^exec-suid-ignored] |
+| effective UID | đổi sang chủ file nếu file có bit set-user-ID (chi tiết: [Chương 06](06-user-quyen-proc-sys.md), mục 2) | [^exec-suid] |
+| effective UID, khi `nosuid`, `no_new_privs` hoặc ptrace | không đổi | [^exec-suid-ignored] |
 | environment | do bên gọi quyết định, qua tham số `envp` (mục 9) | [^exec-envp] |
 
-Tác động cho backend (nhận xét của người soạn): socket/file mở không có `O_CLOEXEC` bị mọi chương trình `exec` sau đó thừa hưởng (fd rò rỉ), và signal bị ignore cũng vậy. Cờ `O_CLOEXEC` và lý do `open` + `fcntl` không đủ khi đa luồng: [Chương 04](04-file-descriptor-va-vfs.md), mục 4.
+Với backend, đây là chỗ gây lỗi thật (nhận xét của người soạn). Socket hay file nào đang mở mà không có `O_CLOEXEC`, ví dụ socket nghe cổng 8080 của `media-api`, sẽ còn mở trong `ffmpeg` và trong mọi chương trình `exec` sau đó: đó là fd rò rỉ. Signal bị ignore cũng bị thừa hưởng theo cách ấy. Cờ `O_CLOEXEC`, và lý do `open` rồi `fcntl` không đủ khi đa luồng, nằm ở [Chương 04](04-file-descriptor-va-vfs.md), mục 4.
 
 <details><summary>Đi sâu: script và ELF interpreter</summary>
 
-`pathname` phải là file thực thi nhị phân hoặc script bắt đầu bằng `#!interpreter`[^exec-script]; với ELF liên kết động, interpreter ghi trong segment `PT_INTERP` nạp các shared object cần thiết; man page ghi interpreter này thường là `/lib/ld-linux.so.2` với chương trình liên kết glibc[^exec-elf-interp].
+`pathname` phải là file thực thi nhị phân hoặc script bắt đầu bằng `#!interpreter`[^exec-script]. Với ELF liên kết động, interpreter ghi trong segment `PT_INTERP` sẽ nạp các shared object cần thiết; man page ghi interpreter này thường là `/lib/ld-linux.so.2` với chương trình liên kết glibc[^exec-elf-interp].
 
 </details>
 
-**Quay lại Q3:** `exec` biến process hiện tại thành chương trình khác, giữ PID, group, session và fd không close-on-exec, còn reset handler và bỏ memory mapping.
+**Quay lại Q3:** `exec` biến process hiện tại thành chương trình khác, giữ PID, group, session và fd không close-on-exec, còn reset handler và bỏ memory mapping. Với `media-api`, `ffmpeg` nhận fd của service trừ những fd đã đánh dấu close-on-exec.
 
 ## 5. Vì sao tách `fork` khỏi `exec` (Q4)
 
-> **Trả lời ngắn.** Tách đôi để shell chạy code của chính nó trong con, sau `fork` và trước `exec`, nhằm đổi môi trường của chương trình sắp chạy[^ostep-fork-exec]. Ví dụ *redirect* (chuyển hướng, như `cmd > file`) dựa vào việc fd mở được giữ qua `exec`[^ostep-redirect]. Theo ví dụ OSTEP ngay dưới, shell nối stdout của con vào file rồi mới `exec`, nên chương trình mới ghi ra stdout mà không biết đó là file.
+> **Trả lời ngắn.** Tách đôi để shell có chỗ chạy code của chính nó trong process con, sau `fork` và trước `exec`, nhằm đổi môi trường của chương trình sắp chạy[^ostep-fork-exec]. Ví dụ điển hình là *redirect* (chuyển hướng, như `cmd > file`): nó dựa vào việc fd đang mở được giữ qua `exec`[^ostep-redirect]. Shell nối stdout của con vào file rồi mới `exec`, nên chương trình mới cứ ghi ra stdout mà không biết đó là file.
 
-**Giải thích.** Hình dung (nhận xét của người soạn): thợ sửa nhà vào phòng, đổi ổ cắm và biển hiệu trước, rồi mới để người thuê mới dọn vào; nếu thuê và dọn vào cùng một bước thì không có chỗ để sửa.
+**Giải thích.**
 
-Tạo process bằng hai bước (nhân bản rồi thay ruột) thoạt nhìn là thừa. Nhưng shell chạy được code *giữa* `fork` và `exec`, code đó đổi môi trường của chương trình sắp chạy[^ostep-fork-exec]. Ví dụ `wc p3.c > newfile.txt` theo OSTEP: trong con, trước `exec`, shell đóng stdout rồi mở file đích; vì Unix tìm fd trống bắt đầu từ số 0, file mới nhận đúng fd của stdout[^ostep-fd-lowest], và vì fd mở được giữ qua `exec`[^ostep-redirect], `wc` ghi stdout vào file mà không biết gì. Pipe được làm tương tự bằng `pipe()`: output một process nối vào pipe trong kernel, input process kia nối vào cùng pipe[^ostep-pipe]. Chuỗi syscall thật (`open`, `dup2`, `close`) và pipe: [Chương 04](04-file-descriptor-va-vfs.md), mục 7–8.
+*Với `media-api`.* Giả sử `media-api` muốn log của `ffmpeg` đi vào file `encode.log` thay vì lẫn vào log của service. Nó phải đổi stdout của con trước khi `ffmpeg` bắt đầu chạy, và làm được vì cách tạo process có hai bước: sau `fork` con vẫn còn là `media-api` và đổi được fd, rồi mới `exec`. Đúng việc này shell làm hằng ngày với `cmd > file`, nên ta xem shell làm thế nào.
+
+Tạo process bằng hai bước (nhân bản rồi thay ruột) thoạt nhìn là thừa. Nhưng nó cho shell chạy code *giữa* `fork` và `exec`, và code đó đổi môi trường của chương trình sắp chạy[^ostep-fork-exec]. Lấy lệnh `wc p3.c > newfile.txt`. Trong con, trước `exec`, shell đóng stdout rồi mở file đích. Unix tìm fd trống bắt đầu từ số 0, nên file mới nhận đúng fd của stdout[^ostep-fd-lowest]. Rồi vì fd đang mở được giữ qua `exec`[^ostep-redirect], `wc` ghi ra stdout là ghi vào file mà không hề biết.
+
+Pipe làm theo cùng cách, bằng `pipe()`: output của process này nối vào một pipe trong kernel, input của process kia nối vào chính pipe đó[^ostep-pipe]. Chuỗi syscall thật (`open`, `dup2`, `close`) và pipe nằm ở [Chương 04](04-file-descriptor-va-vfs.md), mục 7–8.
 
 <details><summary>Đi sâu: sơ đồ trình tự của shell</summary>
 
@@ -187,29 +234,35 @@ Sơ đồ là mô hình khái niệm theo OSTEP; shell thật có thể khác ch
 
 </details>
 
-**Quay lại Q4:** vì giữa `fork` và `exec` shell sắp đặt fd và môi trường cho con, và `exec` giữ nguyên các sắp đặt đó.
+**Quay lại Q4:** giữa `fork` và `exec`, shell (hay `media-api`) sắp đặt fd và môi trường cho con, và `exec` giữ nguyên các sắp đặt đó.
 
 ## 6. Kết thúc, `wait` và exit status (Q5)
 
-> **Trả lời ngắn.** Khi con kết thúc, cha gọi `wait` và nhận một số nguyên `wstatus` gói cả cách con kết thúc (tự thoát hay bị signal giết) lẫn mã thoát[^wait-wstatus-int]; nên đọc bằng macro `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG` thay vì tự tách bit (nhận xét của người soạn). Mã thoát chỉ giữ 8 bit thấp, nên con gọi `exit(300)` thì cha thấy 44[^exit-status-mask]. Con bị signal (một thông báo gửi tới process, [Chương 05](05-signal.md)) giết thì `WIFSIGNALED` đúng và `WTERMSIG` cho số signal đó[^wait-wifsignaled].
+> **Trả lời ngắn.** Khi con kết thúc, cha gọi `wait` và nhận một số nguyên `wstatus` gói cả cách con kết thúc (tự thoát hay bị signal giết) lẫn mã thoát[^wait-wstatus-int]. Nên đọc `wstatus` bằng các macro `WIFEXITED`, `WEXITSTATUS`, `WIFSIGNALED`, `WTERMSIG` thay vì tự tách bit (nhận xét của người soạn). Mã thoát chỉ giữ 8 bit thấp, nên con gọi `exit(300)` thì cha thấy 44[^exit-status-mask]. Con bị signal (một thông báo gửi tới process, xem [Chương 05](05-signal.md)) giết thì `WIFSIGNALED` đúng và `WTERMSIG` cho số signal đó[^wait-wifsignaled].
 
-**Giải thích.** Hình dung (nhận xét của người soạn): `wstatus` như phiếu báo cáo của công nhân gửi về quản đốc; quản đốc phải đọc đúng ô (thoát bình thường hay bị chặn giữa chừng) thay vì nhìn con số thô.
+**Giải thích.**
+
+*Với `media-api`.* Sau khi spawn, `media-api` phải biết `ffmpeg` làm xong hay hỏng: nó thoát với mã 0, thoát với mã lỗi, hay bị giết giữa chừng (ví dụ bị OOM killer, nhận xét của người soạn). Câu trả lời nằm trong `wstatus` mà `wait` trả về. Đọc sai thì log và logic retry của service sai theo, nên mục này đi từ lúc con thoát (6.1), qua lúc cha chờ (6.2), đến cách đọc `wstatus` (6.3).
 
 ### 6.1 `exit` và `_exit`
 
-Khác biệt giữa hai hàm: `exit(3)` gọi các hàm đăng ký bằng `atexit`/`on_exit` theo thứ tự ngược[^exit3-atexit] và flush (đẩy dữ liệu còn trong bộ đệm ra) rồi đóng mọi stdio stream[^exit3-flush]; `_exit` thì không gọi các hàm đó và không flush stdio[^exit-no-atexit]. Cả hai chuyển `status & 0xFF` cho cha làm exit status[^exit3-status][^exit-status-mask]; `_exit` đóng mọi fd, giao các con của process cho `init(1)` (hoặc "subreaper" gần nhất) và gửi `SIGCHLD` cho cha[^exit-status].
+Con kết thúc bằng một trong hai hàm, và chúng khác nhau. `exit(3)` gọi các hàm đã đăng ký bằng `atexit`/`on_exit` theo thứ tự ngược với lúc đăng ký[^exit3-atexit]. Sau đó nó flush (đẩy dữ liệu còn trong bộ đệm ra) và đóng mọi stdio stream[^exit3-flush]. `_exit` thì không gọi các hàm đó và không flush stdio[^exit-no-atexit].
 
-Lưu ý: syscall `_exit` thô của Linux chỉ kết thúc thread gọi; việc reparent con và gửi `SIGCHLD` chỉ xảy ra khi đó là thread cuối của nhóm[^exit-thread], còn wrapper libc `_exit` kết thúc cả process (glibc từ 2.3 gọi `exit_group(2)`)[^exit-wrapper].
+Cả hai đều chuyển `status & 0xFF` cho cha làm exit status[^exit3-status]. `_exit` còn làm thêm ba việc: đóng mọi fd, giao các con của process cho `init(1)` (hoặc "subreaper" gần nhất), và gửi `SIGCHLD` cho cha[^exit-status].
+
+Một lưu ý về syscall thô: `_exit` của Linux chỉ kết thúc thread gọi. Việc reparent con và gửi `SIGCHLD` chỉ xảy ra khi đó là thread cuối của nhóm[^exit-thread]. Còn wrapper libc `_exit` kết thúc cả process, vì glibc từ 2.3 gọi `exit_group(2)`[^exit-wrapper].
 
 ### 6.2 `wait`, `waitpid`
 
-`wait` và họ hàng chờ *thay đổi trạng thái* của con: con thoát, bị signal làm dừng, hoặc được signal làm chạy tiếp[^wait-desc]; mặc định `waitpid` chỉ chờ con *thoát*, muốn chờ cả dừng/tiếp tục phải chỉ định thêm option[^wait-default-term]. Nếu con đã đổi trạng thái thì gọi trả về ngay; không thì chặn cho đến khi có con đổi trạng thái hoặc một signal handler làm gián đoạn[^wait-already]. Với con đã thoát, `wait` cho phép hệ thống giải phóng tài nguyên của con[^wait-release].
+`wait` và các hàm cùng họ chờ *thay đổi trạng thái* của con: con thoát, con bị signal làm dừng, hoặc con được signal làm chạy tiếp[^wait-desc]. Mặc định `waitpid` chỉ chờ con *thoát*; muốn chờ cả dừng hay tiếp tục thì phải chỉ định thêm option[^wait-default-term].
 
-Lựa chọn con bằng `pid` của `waitpid`: `-1` là mọi con[^wait-any]; `< -1` là mọi con có process group ID bằng |pid|[^wait-pgid]; `WNOHANG` trả về ngay nếu chưa có con nào thoát[^wait-nohang]. Không có con chưa-wait thì `wait()` lỗi `ECHILD`[^wait-echild].
+Nếu con đã đổi trạng thái thì lời gọi trả về ngay. Nếu chưa, nó chặn cho tới khi có con đổi trạng thái hoặc một signal handler làm gián đoạn[^wait-already]. Với con đã thoát, `wait` cho phép hệ thống giải phóng tài nguyên của con[^wait-release].
+
+Tham số `pid` của `waitpid` chọn con cần chờ. `-1` nghĩa là mọi con[^wait-any]. Giá trị `< -1` nghĩa là mọi con có process group ID bằng |pid|[^wait-pgid]. Cờ `WNOHANG` trả về ngay nếu chưa có con nào thoát[^wait-nohang]. Nếu không còn con nào chưa được wait thì `wait()` lỗi `ECHILD`[^wait-echild].
 
 ### 6.3 Đọc `wstatus`
 
-`wstatus` là một `int` nhồi nhiều thông tin[^wait-wstatus-int]; dùng macro, đừng tự tách bit (nhận xét của người soạn):
+`wstatus` là một `int` nhồi nhiều thông tin vào[^wait-wstatus-int]. Dùng macro thay vì tự tách bit (nhận xét của người soạn):
 
 | Macro | Nghĩa |
 |---|---|
@@ -229,56 +282,68 @@ Ví dụ đã chạy (Rust gọi `fork`/`waitpid`/`_exit` qua FFI; mỗi dòng m
 | `_exit(300)` | `0x2c00` | `WIFEXITED`, status **44** (= 300 & 0xFF) |
 | bị `kill(pid, 9)` | `0x0009` | `WIFSIGNALED`, `WTERMSIG` = 9 |
 
-`waitpid` trả đúng PID con ở cả ba dòng, và biến `x` của cha vẫn là 100 dù con đã tăng bản sao của nó. 300 → 44 khớp "`status & 0xFF`"[^exit-status-mask]. Nhận xét của người soạn: worker bị OOM killer giết (SIGKILL) khác worker tự `exit(137)` ở `WIFSIGNALED`; supervisor tốt log hai trường hợp riêng.
+`waitpid` trả đúng PID con ở cả ba dòng, và biến `x` của cha vẫn là 100 dù con đã tăng bản sao của nó. 300 → 44 khớp với "`status & 0xFF`"[^exit-status-mask]. Nhận xét của người soạn: một `ffmpeg` bị OOM killer giết (SIGKILL) khác một `ffmpeg` tự `exit(137)` ở `WIFSIGNALED`; supervisor tốt log hai trường hợp riêng.
 
 </details>
 
-**Quay lại Q5:** `wstatus` phân biệt thoát bình thường (8 bit thấp) với chết vì signal; luôn đọc bằng macro.
+**Quay lại Q5:** `wstatus` phân biệt thoát bình thường (8 bit thấp) với chết vì signal; luôn đọc bằng macro. `media-api` cần phân biệt hai trường hợp này khi quyết định retry.
 
 ## 7. Zombie, orphan, reaping và PID 1 (Q6)
 
-> **Trả lời ngắn.** Con kết thúc mà cha chưa gọi `wait` thì thành *zombie*: kernel vẫn giữ lại PID, trạng thái thoát và thông tin tài nguyên đã dùng để cha lấy sau[^wait-zombie]. Nếu cha chết trước, các con thành *orphan* (mồ côi) và được `init(1)` (process PID 1) — hoặc một "subreaper" gần nhất, tức process đã tự nhận vai trò đó — nhận làm con nuôi[^exit-status]. Trong container, process PID 1 của PID namespace (không gian PID riêng) là cha của mọi orphan trong đó[^pidns-init]; vì vậy nó cần tự `wait` để dọn zombie (suy luận của người soạn) và, từ trong namespace, chỉ nhận được signal mà nó đã cài handler[^pidns-sig].
+> **Trả lời ngắn.** Con kết thúc mà cha chưa gọi `wait` thì thành *zombie*: kernel vẫn giữ lại PID, trạng thái thoát và thông tin tài nguyên đã dùng để cha lấy sau[^wait-zombie]. Nếu cha chết trước, các con thành *orphan* (mồ côi) và được `init(1)` (process PID 1) nhận làm con nuôi, hoặc một "subreaper" gần nhất, tức process đã tự nhận vai trò đó[^exit-status]. Trong container, process PID 1 của PID namespace (không gian PID riêng) là cha của mọi orphan trong đó[^pidns-init]. Vì vậy nó cần tự `wait` để dọn zombie (suy luận của người soạn). Ngoài ra, từ trong namespace, nó chỉ nhận được signal mà nó đã cài handler[^pidns-sig].
 
-**Giải thích.** Hình dung (nhận xét của người soạn): zombie như hồ sơ nhân viên đã nghỉ việc nhưng chưa ai ký nhận bàn giao; hồ sơ vẫn chiếm một ngăn tủ cho đến khi quản lý (cha) ký. Nếu quản lý biến mất, phòng nhân sự (init) nhận ký thay.
+**Giải thích.**
+
+*Với `media-api`.* Mỗi upload sinh một `ffmpeg`. Nếu handler spawn xong mà không `wait`, mỗi `ffmpeg` đã chết sẽ nằm lại thành một zombie. Và vì `media-api` là PID 1 của container, nó còn là cha của mọi orphan trong container đó, nên phải dọn luôn cả những process không phải do nó sinh ra. Mục này giải thích cả hai chuyện.
 
 ### 7.1 Zombie
 
-Con kết thúc mà chưa được `wait` thì thành *zombie*: kernel giữ lại một lượng tối thiểu thông tin (PID, termination status, resource usage) để cha lấy sau[^wait-zombie]. Zombie vẫn chiếm một slot trong process table; bảng đầy thì không tạo được process mới[^wait-table], và `/proc/<pid>/cmdline` của nó rỗng[^proc-cmdline]. Thử nghiệm đã chạy: cha `fork` ra con rồi ngủ không `wait`; `/proc/<pid>/status` của con hiện `State: Z (zombie)` với `PPid` là PID cha, `cmdline` rỗng, và sau `waitpid` thư mục `/proc/<pid>` biến mất.
+Con kết thúc mà chưa được `wait` thì thành *zombie*. Kernel giữ lại một lượng tối thiểu thông tin (PID, termination status, resource usage) để cha lấy sau[^wait-zombie]. Zombie vẫn chiếm một slot trong process table, và bảng đầy thì không tạo được process mới[^wait-table]. File `/proc/<pid>/cmdline` của zombie rỗng[^proc-cmdline].
 
-**Reaping** (thu hoạch) là việc cha gọi `wait*` để xóa zombie. Một cách tự động hóa theo man page: đặt disposition (cách xử lý, [Chương 05](05-signal.md)) của `SIGCHLD` thành `SIG_IGN` hoặc cờ `SA_NOCLDWAIT`, khi đó con kết thúc không thành zombie[^wait-sigign] — nhưng cha mất khả năng lấy exit status của con (khi ấy `wait` chờ hết con rồi lỗi `ECHILD`[^wait-sigign-echild]). Chi tiết về `SIGCHLD` và bẫy nhiều con chết cùng lúc: [Chương 05](05-signal.md), mục 7.
+Thử nghiệm đã chạy: cha `fork` ra con rồi ngủ không `wait`; `/proc/<pid>/status` của con hiện `State: Z (zombie)` với `PPid` là PID cha, `cmdline` rỗng, và sau `waitpid` thư mục `/proc/<pid>` biến mất.
+
+**Reaping** (thu hoạch) là việc cha gọi `wait*` để xóa zombie. Man page nêu một cách tự động hóa: đặt disposition (cách xử lý, xem [Chương 05](05-signal.md)) của `SIGCHLD` thành `SIG_IGN`, hoặc dùng cờ `SA_NOCLDWAIT`, thì con kết thúc không thành zombie[^wait-sigign]. Cái giá là cha mất khả năng lấy exit status của con: khi ấy `wait` chờ hết con rồi lỗi `ECHILD`[^wait-sigign-echild]. Chi tiết về `SIGCHLD` và bẫy nhiều con chết cùng lúc nằm ở [Chương 05](05-signal.md), mục 7.
 
 ### 7.2 Orphan và reparenting
 
-Khi cha chết trước, các con trở thành *orphan* và được `init(1)` thừa hưởng (hoặc "subreaper" gần nhất)[^exit-status]. `init` tự động `wait` để dọn zombie của chúng[^wait-init]. Thử nghiệm đã chạy: cha `fork` ra con, cha ngủ 0,2 s rồi `_exit`; con ghi lại `getppid()` lúc đầu và sau 0,6 s: `before=7 after=1` — PID cha đổi sang 1 sau khi cha chết. (PID 1 ở đây là `bash` của lab trong PID namespace của container, xem 7.3.)
+Khi cha chết trước, các con trở thành *orphan* và được `init(1)` thừa hưởng, hoặc "subreaper" gần nhất[^exit-status]. `init` tự động `wait` để dọn zombie của chúng[^wait-init].
+
+Thử nghiệm đã chạy: cha `fork` ra con, cha ngủ 0,2 s rồi `_exit`; con ghi lại `getppid()` lúc đầu và sau 0,6 s: `before=7 after=1`. PID cha đổi sang 1 sau khi cha chết. (PID 1 ở đây là `bash` của lab trong PID namespace của container, xem 7.3.)
 
 ### 7.3 Subreaper và PID 1 trong container
 
-PID namespace thêm một lớp: process đầu tiên trong namespace có PID 1, là "init" của namespace và là cha của mọi orphan trong đó[^pidns-init]. Hai điều có nguồn cần biết khi chạy service trong container: nếu init của namespace chết, kernel giết mọi process trong namespace bằng `SIGKILL`[^pidns-kill]; và từ trong namespace, chỉ signal mà init đã cài handler mới gửi tới nó được, kể cả từ process đặc quyền[^pidns-sig]. Luật signal đầy đủ của PID 1 (kể cả ngoại lệ `SIGKILL`/`SIGSTOP` gửi từ namespace tổ tiên) và graceful shutdown: [Chương 05](05-signal.md), mục 8; cơ chế namespace: [Phase 8 · Namespaces](../08-containers/02-namespaces.md).
+PID namespace thêm một lớp nữa. Process đầu tiên trong namespace có PID 1, là "init" của namespace, và là cha của mọi orphan trong đó[^pidns-init]. Khi chạy service trong container có hai điều có nguồn cần biết. Thứ nhất, nếu init của namespace chết, kernel giết mọi process trong namespace bằng `SIGKILL`[^pidns-kill]. Thứ hai, từ trong namespace chỉ signal mà init đã cài handler mới gửi tới nó được, kể cả khi người gửi là process đặc quyền[^pidns-sig].
 
-Suy luận của người soạn: chương trình của bạn làm PID 1 mà không `wait` orphan được giao thì chúng thành zombie không ai dọn, và không cài handler `SIGTERM` thì `kill -TERM 1` gửi từ trong namespace không có tác dụng như với process thường.
+Luật signal đầy đủ của PID 1 (kể cả ngoại lệ `SIGKILL`/`SIGSTOP` gửi từ namespace tổ tiên) và graceful shutdown nằm ở [Chương 05](05-signal.md), mục 8; cơ chế namespace ở [Phase 8 · Namespaces](../08-containers/02-namespaces.md).
 
-**Liên hệ backend (nhận xét của người soạn).** Service spawn subprocess (`ffmpeg`, `git`) mà quên `wait` sẽ tích zombie cho tới khi chạm các giới hạn ở mục 2 (`pid_max`, `RLIMIT_NPROC`…); khi đó `fork` lỗi `EAGAIN`[^fork-eagain], mà mô tả chuẩn của `EAGAIN` là "Resource temporarily unavailable"[^errno-eagain].
+Từ đó suy ra hai bẫy cho `media-api` (suy luận của người soạn). Nếu `media-api` làm PID 1 mà không `wait` những orphan được giao, chúng thành zombie không ai dọn. Và nếu nó không cài handler `SIGTERM` thì `kill -TERM 1` gửi từ trong namespace không có tác dụng như với process thường.
+
+**Liên hệ backend (nhận xét của người soạn).** Service spawn subprocess (`ffmpeg`, `git`) mà quên `wait` sẽ tích zombie cho tới khi chạm các giới hạn ở mục 2 (`pid_max`, `RLIMIT_NPROC`…). Khi đó `fork` lỗi `EAGAIN`[^fork-eagain]. Mô tả chuẩn của `EAGAIN` là "Resource temporarily unavailable"[^errno-eagain].
 
 <details><summary>Đi sâu: prctl(PR_SET_CHILD_SUBREAPER)</summary>
 
-`prctl(PR_SET_CHILD_SUBREAPER)` (Linux ≥ 3.4) cho process đóng vai `init(1)` với hậu duệ: orphan được gắn vào subreaper sống gần nhất[^subreaper]; sau đó `getppid` của orphan trả PID subreaper, và khi orphan kết thúc thì subreaper nhận `SIGCHLD` để `wait`[^subreaper-ppid]. Thuộc tính này không thừa hưởng qua `fork`/`clone` nhưng giữ qua `execve`[^subreaper-inherit].
+`prctl(PR_SET_CHILD_SUBREAPER)` (Linux ≥ 3.4) cho process đóng vai `init(1)` với hậu duệ của nó: orphan được gắn vào subreaper sống gần nhất[^subreaper]. Sau đó `getppid` của orphan trả PID subreaper, và khi orphan kết thúc thì subreaper nhận `SIGCHLD` để `wait`[^subreaper-ppid]. Thuộc tính này không thừa hưởng qua `fork`/`clone` nhưng giữ qua `execve`[^subreaper-inherit].
 
 </details>
 
-**Quay lại Q6:** zombie là con đã chết chưa được reap, orphan được init/subreaper nhận, và PID 1 trong container đóng vai init của namespace nên cũng gánh việc reap đó (suy luận của người soạn).
+**Quay lại Q6:** zombie là con đã chết chưa được reap, orphan được init hoặc subreaper nhận, và PID 1 trong container đóng vai init của namespace nên cũng gánh việc reap đó (suy luận của người soạn).
 
 ## 8. Process group, session, controlling terminal, job control (Q7)
 
-> **Trả lời ngắn.** Shell xếp các process của một lệnh (hoặc cả pipeline như `ls | wc`) vào cùng một *process group*, còn gọi là *job*[^cred-pgrp-def]. Các group nằm trong một *session*, và mọi process trong session dùng chung một terminal điều khiển (*controlling terminal*)[^cred-ctty]. Bấm Ctrl-C thì signal được gửi tới các process của job đang ở foreground[^cred-ctrlc] — job duy nhất được phép đọc từ terminal[^cred-fg]; vì cả pipeline cùng một group nên tất cả đều nhận signal.
+> **Trả lời ngắn.** Shell xếp các process của một lệnh (hoặc cả pipeline như `ls | wc`) vào cùng một *process group*, còn gọi là *job*[^cred-pgrp-def]. Các group nằm trong một *session*, và mọi process trong session dùng chung một terminal điều khiển (*controlling terminal*)[^cred-ctty]. Bấm Ctrl-C thì signal gửi tới các process của job đang ở foreground[^cred-ctrlc]. Đó cũng là job duy nhất được phép đọc từ terminal[^cred-fg]. Vì cả pipeline cùng một group nên tất cả đều nhận signal.
 
-**Giải thích.** Hình dung (nhận xét của người soạn): khi bạn gõ `ls | wc` rồi Ctrl-C, cả hai process phải dừng; khi chạy `vim &` ở nền, nó không được cướp bàn phím. Cần một đơn vị "công việc" lớn hơn process. Man page credentials(7): session và process group là các abstraction sinh ra để hỗ trợ *shell job control*[^cred-pgrp].
+**Giải thích.**
+
+*Với `media-api`.* Trong lúc phát triển, bạn chạy `./media-api 2>&1 | tee run.log` ở terminal rồi bấm Ctrl-C. Bạn muốn cả `media-api` lẫn `tee` dừng, và nếu có `ffmpeg` đang chạy dở thì nó cũng không nên sống sót. Muốn vậy cần một đơn vị "công việc" lớn hơn process, để terminal biết gửi signal cho ai. Man page credentials(7) nói session và process group chính là các abstraction sinh ra để hỗ trợ *shell job control*[^cred-pgrp].
 
 ### 8.1 Các khái niệm
 
-- **Process group** (còn gọi *job*): tập process chung process group ID; shell tạo một group mới cho process(es) chạy một lệnh hoặc pipeline — ví dụ hai process của `ls | wc` nằm cùng một group[^cred-pgrp-def]. Process có PID bằng PGID là *group leader*[^cred-leader].
-- **Session**: tập process chung session ID; mọi thành viên của một group cùng một session, nên session và group tạo thành phân cấp hai tầng chặt chẽ[^cred-hier]. Session mới tạo khi gọi `setsid(2)`; session ID bằng PID của người gọi, người đó là *session leader*[^cred-session].
-- **Controlling terminal**: mọi process trong session dùng chung một terminal điều khiển, được thiết lập khi session leader mở terminal lần đầu (trừ khi dùng `O_NOCTTY`); một terminal là controlling terminal của tối đa một session[^cred-ctty].
-- **Foreground/background**: tối đa một job trong session là foreground; chỉ foreground job được đọc từ terminal — background job đọc thì cả group bị `SIGTTIN` và bị dừng[^cred-fg]. Phím sinh signal (như Ctrl-C) gửi signal tới các process của foreground job[^cred-ctrlc]. `tcsetpgrp(3)` đặt foreground process group của terminal[^tcsetpgrp].
+- **Process group** (còn gọi *job*): tập process chung process group ID. Shell tạo một group mới cho process(es) chạy một lệnh hoặc pipeline, ví dụ hai process của `ls | wc` nằm cùng một group[^cred-pgrp-def]. Process có PID bằng PGID là *group leader*[^cred-leader].
+- **Session**: tập process chung session ID. Mọi thành viên của một group cùng một session, nên session và group tạo thành phân cấp hai tầng chặt chẽ[^cred-hier]. Session mới tạo khi gọi `setsid(2)`; session ID bằng PID của người gọi, và người đó là *session leader*[^cred-session].
+- **Controlling terminal**: mọi process trong session dùng chung một terminal điều khiển. Nó được thiết lập khi session leader mở terminal lần đầu (trừ khi dùng `O_NOCTTY`), và một terminal là controlling terminal của tối đa một session[^cred-ctty].
+- **Foreground/background**: tối đa một job trong session là foreground, và chỉ foreground job được đọc từ terminal. Background job mà đọc thì cả group bị `SIGTTIN` và bị dừng[^cred-fg]. Phím sinh signal (như Ctrl-C) gửi signal tới các process của foreground job[^cred-ctrlc]. `tcsetpgrp(3)` đặt foreground process group của terminal[^tcsetpgrp].
+
+Áp vào ví dụ: `fork` cho con thừa hưởng process group và session của cha[^cred-pgid], nên `ffmpeg` mà `media-api` spawn nằm cùng group với `media-api` và `tee`. Vì vậy Ctrl-C cũng tới nó (suy luận của người soạn từ hai nguồn trên). Muốn tách nó ra thì xếp con vào group riêng (mục 8.2 và 11.1).
 
 ```mermaid
 flowchart TD
@@ -305,35 +370,37 @@ flowchart TD
 
 ### 8.2 API
 
-`setpgid(pid, pgid)` đặt PGID: `pid == 0` nghĩa là chính mình, `pgid == 0` nghĩa là PGID = PID của process đó[^setpgid-desc]. Chuyển process sang group khác chỉ được khi cả hai group cùng session[^setpgid-same-session]. `bash` dùng `setpgid`/`getpgrp` để làm job control[^setpgid-bash].
+`setpgid(pid, pgid)` đặt PGID: `pid == 0` nghĩa là chính mình, `pgid == 0` nghĩa là PGID bằng PID của process đó[^setpgid-desc]. Chỉ chuyển được process sang group khác khi cả hai group cùng session[^setpgid-same-session]. `bash` dùng `setpgid`/`getpgrp` để làm job control[^setpgid-bash].
 
-Có một cái bẫy ghi trong `ERRORS`: sửa PGID của một *con* đã gọi `execve` thì lỗi `EACCES`[^setpgid-eacces]. Vì vậy (suy luận của người soạn) cha không thể đợi tới lúc con đã `exec` mới xếp con vào group; hướng dẫn "Implementing a Shell" của glibc cho cả shell lẫn từng con cùng gọi `setpgid`: mỗi con phải vào group trước khi chạy chương trình mới, shell cần mọi con đã trong group trước khi chạy tiếp, và nếu cả hai cùng gọi thì kết quả đúng bất kể bên nào đến trước[^glibc-shell-race].
+Có một cái bẫy ghi trong `ERRORS`: sửa PGID của một *con* đã gọi `execve` thì lỗi `EACCES`[^setpgid-eacces]. Vì vậy cha không thể đợi tới lúc con đã `exec` mới xếp con vào group (suy luận của người soạn). Hướng dẫn "Implementing a Shell" của glibc cho cả shell lẫn từng con cùng gọi `setpgid`. Lý do: mỗi con phải vào group trước khi chạy chương trình mới, shell cần mọi con đã trong group trước khi chạy tiếp, và nếu cả hai cùng gọi thì kết quả đúng bất kể bên nào đến trước[^glibc-shell-race].
 
-`setsid()` tạo session mới nếu người gọi chưa là process group leader; người gọi thành leader của session mới lẫn của một group mới[^setsid-leader], và là process duy nhất trong cả hai; session mới ban đầu không có controlling terminal[^setsid-new]. Nếu đã là group leader thì `setsid` lỗi `EPERM`[^setsid-eperm]. Nên cách chắc chắn: `fork`, cha `_exit`, con (không thể là group leader) gọi `setsid`[^setsid-daemon] — (nhận xét của người soạn) đây là bước đầu của kỹ thuật "daemonize" cổ điển.
+`setsid()` tạo session mới nếu người gọi chưa là process group leader. Người gọi thành leader của session mới và của một group mới[^setsid-leader], và là process duy nhất trong cả hai. Session mới ban đầu không có controlling terminal[^setsid-new]. Nếu người gọi đã là group leader thì `setsid` lỗi `EPERM`[^setsid-eperm]. Muốn chắc chắn thành công thì `fork`, cha `_exit`, con (không thể là group leader) gọi `setsid`[^setsid-daemon]. Đây là bước đầu của kỹ thuật "daemonize" cổ điển (nhận xét của người soạn).
 
-Chiều ngược lại: nếu terminal bị hangup (và cờ `CLOCAL` của terminal chưa đặt) thì session leader nhận `SIGHUP`; nếu session leader kết thúc thì mọi process trong foreground group của controlling terminal nhận `SIGHUP`[^setsid-hup]. (Nhận xét của người soạn: vì vậy job chạy dưới một session gắn terminal có thể bị `SIGHUP` khi terminal đóng, và `nohup`/`setsid` thường được dùng để tách job khỏi nó.)
+Chiều ngược lại: nếu terminal bị hangup (và cờ `CLOCAL` của terminal chưa đặt) thì session leader nhận `SIGHUP`; nếu session leader kết thúc thì mọi process trong foreground group của controlling terminal nhận `SIGHUP`[^setsid-hup]. Nhận xét của người soạn: vì vậy job chạy dưới một session gắn terminal có thể bị `SIGHUP` khi terminal đóng, và `nohup`/`setsid` thường được dùng để tách job khỏi nó.
 
-Thử nghiệm đã chạy: trong script không tương tác (không job control), `ps` cho thấy `sh`, `ps`, `cat` đều `PGID=1 SID=1` (suy luận của người soạn: shell không bật job control nên không tạo group mới); còn `setsid -w sh -c 'ps -o pid,ppid,pgid,sid,tty,comm -p $$'` in `PID=PGID=SID=19` và `TT=?` — session mới, không có terminal (đúng với man page về session mới[^setsid-new]).
+Thử nghiệm đã chạy: trong script không tương tác (không job control), `ps` cho thấy `sh`, `ps`, `cat` đều `PGID=1 SID=1` (suy luận của người soạn: shell không bật job control nên không tạo group mới). Còn `setsid -w sh -c 'ps -o pid,ppid,pgid,sid,tty,comm -p $$'` in `PID=PGID=SID=19` và `TT=?`: session mới, không có terminal, đúng với man page về session mới[^setsid-new].
 
-`/proc/<pid>/stat` có các trường `pgrp`, `session`, `tty_nr`[^proc-stat-pgrp] và `tpgid` (foreground group của terminal)[^proc-stat-tpgid].
+`/proc/<pid>/stat` có các trường `pgrp`, `session`, `tty_nr`[^proc-stat-pgrp]. Trường `tpgid` cho biết foreground group của terminal[^proc-stat-tpgid].
 
 </details>
 
-**Quay lại Q7:** Ctrl-C nhắm vào foreground process group của terminal, và shell xếp cả pipeline vào cùng một group nên tất cả nhận SIGINT.
+**Quay lại Q7:** Ctrl-C nhắm vào foreground process group của terminal, và shell xếp cả pipeline vào cùng một group nên tất cả nhận SIGINT; con của `media-api` cũng nhận trừ khi được xếp group riêng.
 
 ## 9. `argv` và environment (Q8)
 
-> **Trả lời ngắn.** Bên gọi `execve` quyết định cả hai thứ đưa vào chương trình mới: `argv` là mảng chuỗi tham số dòng lệnh kết thúc bằng con trỏ `NULL`[^exec-argv][^exec-argv-null], còn `envp` là mảng chuỗi môi trường, theo quy ước dạng `key=value`[^exec-envp]. `fork` cho con một bản sao environment của cha[^environ-inherit]. `argv[0]` theo quy ước là tên file được chạy[^exec-argv], nhưng đó chỉ là quy ước nên bên gọi có thể đặt khác (mục 9.2).
+> **Trả lời ngắn.** Bên gọi `execve` quyết định cả hai thứ đưa vào chương trình mới. `argv` là mảng chuỗi tham số dòng lệnh[^exec-argv]. Mảng này phải kết thúc bằng con trỏ `NULL`[^exec-argv-null]. `envp` là mảng chuỗi môi trường, theo quy ước dạng `key=value`[^exec-envp]. `fork` cho con một bản sao environment của cha[^environ-inherit]. `argv[0]` theo quy ước là tên file được chạy[^exec-argv], nhưng đó chỉ là quy ước nên bên gọi có thể đặt khác (mục 9.2).
 
-**Giải thích.** Hình dung (nhận xét của người soạn): `argv` là phiếu yêu cầu đưa cho đầu bếp mới, `envp` là các biển báo dán trong bếp; người gọi `execve` quyết định viết gì lên chúng.
+**Giải thích.**
+
+*Với `media-api`.* Khi spawn `ffmpeg`, `media-api` là bên gọi `execve`: nó quyết định `ffmpeg` nhận những tham số nào (`-i in.mov out.mp4`) và những biến môi trường nào. Không có bước nào khác chen vào việc đó. Mục này xem hai thứ ấy vào process mới bằng cách nào và nhìn lại chúng ra sao từ ngoài.
 
 ### 9.1 Chúng đi vào process thế nào
 
-Ở phía chương trình mới, theo OSTEP, OS khởi tạo stack bằng `argc`/`argv` cho `main`[^ostep-argv]. Tham số thứ ba `envp` của `main` không có trong POSIX; theo POSIX đọc environment qua biến ngoài `environ(7)`[^exec-main3].
+Ở phía chương trình mới, OS khởi tạo stack bằng `argc` và `argv` cho `main`[^ostep-argv]. Tham số thứ ba `envp` của `main` không có trong POSIX; theo POSIX thì đọc environment qua biến ngoài `environ(7)`[^exec-main3].
 
-Environment được thừa hưởng: `fork` cho con bản sao[^environ-inherit], còn `execve` truyền `envp` do bên gọi chọn[^exec-envp]; vì thế `NAME=value command` của shell chỉ đặt biến trong phạm vi process chạy lệnh đó[^environ-shell].
+Environment được thừa hưởng theo hai bước. `fork` cho con một bản sao[^environ-inherit]. Rồi `execve` truyền `envp` do bên gọi chọn[^exec-envp]. Vì thế `NAME=value command` của shell chỉ đặt biến trong phạm vi process chạy lệnh đó[^environ-shell].
 
-Tổng kích thước `argv`+`envp` bị giới hạn, vượt thì `execve` lỗi `E2BIG`[^exec-e2big]; từ Linux 2.6.23 giới hạn dẫn xuất từ `RLIMIT_STACK` mềm[^exec-argmax]. Thử nghiệm đã chạy:
+Tổng kích thước `argv` và `envp` có giới hạn; vượt thì `execve` lỗi `E2BIG`[^exec-e2big]. Từ Linux 2.6.23, giới hạn này dẫn xuất từ `RLIMIT_STACK` mềm[^exec-argmax]. Thử nghiệm đã chạy:
 
 ```text
 $ env -i A=1 B=two sh -c 'tr "\0" "\n" < /proc/self/environ'
@@ -347,12 +414,12 @@ $ echo "parent Y=[$Y]"                  # shell cha không thấy: parent Y=[]
 
 ### 9.2 `argv[0]` là quy ước, không phải sự thật
 
-`argv[0]` theo quy ước chứa tên file[^exec-argv], nhưng bên gọi `execve` đặt gì cũng được (suy luận của người soạn từ chữ "theo quy ước" của man page). Thử nghiệm đã chạy: `bash -c 'exec -a fancy-name sh -c "echo pid=$$ argv0=$0 ..."'` in cùng PID với shell trước `exec` (7), `argv0=fancy-name`, và `/proc/<pid>/cmdline` hiện `fancy-name -c …`. Docs Rust xác nhận ở phía nhận: phần tử đầu của `env::args_os()` có thể bị đặt thành văn bản tùy ý, thậm chí có thể không tồn tại, nên không nên dựa vào nó cho bảo mật[^rs-args-os].
+`argv[0]` theo quy ước chứa tên file[^exec-argv]. Bên gọi `execve` đặt gì cũng được (suy luận của người soạn từ chữ "theo quy ước" của man page). Thử nghiệm đã chạy: `bash -c 'exec -a fancy-name sh -c "echo pid=$$ argv0=$0 ..."'` in cùng PID với shell trước `exec` (7), `argv0=fancy-name`, và `/proc/<pid>/cmdline` hiện `fancy-name -c …`. Docs Rust xác nhận ở phía nhận: phần tử đầu của `env::args_os()` có thể bị đặt thành văn bản tùy ý, thậm chí có thể không tồn tại, nên không nên dựa vào nó cho bảo mật[^rs-args-os].
 
 ### 9.3 Nhìn từ ngoài: `/proc`
 
-- `/proc/<pid>/cmdline`: command line của process, các chuỗi cách nhau bằng byte null; nếu sau `exec` process sửa chuỗi argv thì thay đổi hiện ở đây[^proc-cmdline-fmt]; với zombie, file này rỗng[^proc-cmdline].
-- `/proc/<pid>/environ`: environment *ban đầu* khi chương trình được `execve`[^proc-environ-init]; sửa bằng `putenv` sau đó **không** hiện ở file này[^proc-environ].
+- `/proc/<pid>/cmdline`: command line của process, các chuỗi cách nhau bằng byte null. Nếu sau `exec` process sửa chuỗi argv thì thay đổi hiện ở đây[^proc-cmdline-fmt]. Với zombie, file này rỗng[^proc-cmdline].
+- `/proc/<pid>/environ`: environment *ban đầu* khi chương trình được `execve`[^proc-environ-init]. Sửa bằng `putenv` sau đó **không** hiện ở file này[^proc-environ].
 
 </details>
 
@@ -360,7 +427,9 @@ $ echo "parent Y=[$Y]"                  # shell cha không thấy: parent Y=[]
 
 ## 10. `clone(2)`: nền chung của process và thread (giới thiệu)
 
-`clone` tạo process con giống `fork`, nhưng cho kiểm soát chính xác phần ngữ cảnh nào dùng chung: không gian địa chỉ, bảng fd, bảng signal handler, và còn cho đặt con vào namespace riêng[^clone-desc][^clone-share]. Một vài cờ cho thấy mô hình:
+Đến đây ta đã thấy `media-api` tạo process con bằng `fork`. Nhưng chính `media-api` cũng có nhiều thread, và trên Linux thread với process có chung gốc: syscall `clone`.
+
+`clone` tạo process con giống `fork`, nhưng cho kiểm soát chính xác hơn phần ngữ cảnh nào dùng chung[^clone-desc]. Cụ thể, bên gọi chọn có chia sẻ không gian địa chỉ, bảng fd và bảng signal handler hay không, và còn đặt được con vào namespace riêng[^clone-share]. Một vài cờ cho thấy mô hình:
 
 | Cờ | Tác dụng |
 |---|---|
@@ -370,11 +439,13 @@ $ echo "parent Y=[$Y]"                  # shell cha không thấy: parent Y=[]
 | `CLONE_THREAD` | con thuộc cùng *thread group* với cha[^clone-thread] |
 | `CLONE_NEWPID` | tạo con trong PID namespace mới[^clone-newpid] |
 
-Trong kernel Linux, thread không phải cấu trúc riêng mà là một process tạo bằng `clone(2)`, và `pthread_create(3)` được cài bằng `clone(2)`[^wait-linux-thread]; `getpid(2)` trả TGID (thread group ID) của nhóm thread, và mỗi thread có TID riêng toàn hệ thống[^clone-getpid]. `clone3()` là bản mới, tập hợp cha của `clone()`, kèm vài cải tiến API như thêm chỗ cho cờ mới và tách rõ hơn cách dùng các đối số[^clone3]. Chi tiết thread thuộc [Phase 4 · Chương 01](../04-concurrency/01-thread.md), namespace thuộc [Phase 8](../08-containers/02-namespaces.md). Điều cần nhớ: `fork`, `vfork` và tạo thread là biến thể của `clone`, khác nhau ở cờ chia sẻ; cờ `CLONE_NEW*` thêm namespace.
+Trong kernel Linux, thread không phải một cấu trúc riêng mà là một process tạo bằng `clone(2)`, và `pthread_create(3)` cũng được cài bằng `clone(2)`[^wait-linux-thread]. Hệ quả: `getpid(2)` trả TGID (thread group ID) của nhóm thread, và mỗi thread có TID riêng trên toàn hệ thống[^clone-getpid]. `clone3()` là bản mới, tập hợp cha của `clone()`, kèm vài cải tiến API như thêm chỗ cho cờ mới và tách rõ hơn cách dùng các đối số[^clone3].
+
+Chi tiết thread thuộc [Phase 4 · Chương 01](../04-concurrency/01-thread.md), namespace thuộc [Phase 8](../08-containers/02-namespaces.md). Điều cần nhớ: `fork`, `vfork` và tạo thread là biến thể của `clone`, khác nhau ở cờ chia sẻ; cờ `CLONE_NEW*` thêm namespace.
 
 ## 11. Liên hệ với Rust
 
-Module `std::process` chủ yếu lo việc spawn và làm việc với process con, cộng thêm `abort` và `exit` để kết thúc process hiện tại[^rs-process-mod]. Chương này chỉ nối khái niệm của mục 3–9 với kiểu Rust tương ứng: cơ chế bên trong `Command::spawn` (chọn `posix_spawn` hay `fork`+`exec`, vì sao `pre_exec` là `unsafe`) và việc `Stdio` ánh xạ lên `dup2` nằm ở [Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 3 và 4. Các thí nghiệm `fork`/`waitpid` ở mục 3 và 6 gọi thẳng `libc` qua FFI ([Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 7).
+Module `std::process` chủ yếu lo việc spawn và làm việc với process con, cộng thêm `abort` và `exit` để kết thúc process hiện tại[^rs-process-mod]. Với `media-api`, đây là phần code Rust mà các mục 3–9 nằm bên dưới. Chương này chỉ nối khái niệm của mục 3–9 với kiểu Rust tương ứng. Cơ chế bên trong `Command::spawn` (chọn `posix_spawn` hay `fork`+`exec`, vì sao `pre_exec` là `unsafe`) và việc `Stdio` ánh xạ lên `dup2` nằm ở [Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 3 và 4. Các thí nghiệm `fork`/`waitpid` ở mục 3 và 6 gọi thẳng `libc` qua FFI ([Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 7).
 
 ### 11.1 `Command`: các tùy chọn ứng với khái niệm của chương
 
@@ -383,21 +454,23 @@ Module `std::process` chủ yếu lo việc spawn và làm việc với process 
 | Khái niệm | API Rust | Ghi chú |
 |---|---|---|
 | environment thừa hưởng (mục 9.1) | mặc định của `Command` | con thừa hưởng environment của cha[^rs-env-inherit] |
-| `argv[0]` là quy ước (mục 9.2) | `CommandExt::arg0` | đặt `argv[0]` khác đường dẫn mặc định[^rs-arg0] (cùng ý với `exec -a` ở mục 9.2 — nhận xét của người soạn) |
+| `argv[0]` là quy ước (mục 9.2) | `CommandExt::arg0` | đặt `argv[0]` khác đường dẫn mặc định[^rs-arg0] (cùng ý với `exec -a` ở mục 9.2, nhận xét của người soạn) |
 | `setpgid` (mục 8.2) | `CommandExt::process_group` | `process_group(0)` đặt PGID của con, tương đương `setpgid` trong con nhưng có thể hiệu quả hơn[^rs-process-group] |
 | `setsid` (mục 8.2) | `CommandExt::setsid` | chỉ là API nightly-only[^rs-setsid] |
 | `execve` không return (mục 4) | `CommandExt::exec` | làm hết phần setup rồi gọi `execvp`; thành công thì không return[^rs-exec] |
-| chỉ gọi hàm async-signal-safe sau `fork` (mục 3.1) | `CommandExt::pre_exec` (`unsafe`) | closure chạy trong con, môi trường rất hạn chế: không bảo đảm `malloc`, `std::env`, mutex[^rs-preexec-safety]; cùng gốc với ràng buộc ở mục 3.1[^fork-signalsafe] (nhận xét của người soạn) |
+| chỉ gọi hàm async-signal-safe sau `fork` (mục 3.1) | `CommandExt::pre_exec` (`unsafe`) | closure chạy trong con, môi trường rất hạn chế: không bảo đảm `malloc`, `std::env`, mutex[^rs-preexec-safety]. Cùng gốc với ràng buộc ở mục 3.1 (nhận xét của người soạn) |
 
 ### 11.2 `Child`: không tự `wait`
 
-`Child` **không** có `Drop` dọn process: nếu bạn không bảo đảm nó đã thoát thì nó tiếp tục chạy kể cả khi handle ra khỏi scope[^rs-child-nodrop]. Docs nói thẳng: để lại quá nhiều zombie có thể cạn tài nguyên toàn cục như PID, và thư viện chuẩn không tự `wait` con (kể cả khi `Child` bị drop) mà để lập trình viên tự làm[^rs-child-zombie]. Thử nghiệm đã chạy: `Command::new("true").spawn()`, ngủ 200 ms rồi `drop(child)`; `/proc/<id>/status` vẫn hiện `State: Z (zombie)`. `Child::wait` chờ con thoát hẳn rồi trả status[^rs-wait]; `try_wait` không chặn và, nếu con đã thoát, thì trên Unix PID được reaped[^rs-try-wait]; `kill` tương đương gửi `SIGKILL` trên Unix[^rs-kill]. Hiểu lầm cần tránh: "drop `Child` thì con được dọn" — sai theo docs; dịch vụ chạy lâu phải tự `wait`/`try_wait` (nhận xét của người soạn). Phân tích `Child` và zombie đầy đủ hơn: [Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 4.
+`Child` **không** có `Drop` dọn process: nếu bạn không bảo đảm nó đã thoát thì nó tiếp tục chạy kể cả khi handle ra khỏi scope[^rs-child-nodrop]. Docs nói thẳng: để lại quá nhiều zombie có thể cạn tài nguyên toàn cục như PID, và thư viện chuẩn không tự `wait` con (kể cả khi `Child` bị drop) mà để lập trình viên tự làm[^rs-child-zombie]. Với `media-api`, đó là lý do mỗi `Child` của `ffmpeg` phải có một chỗ gọi `wait` hoặc `try_wait`.
+
+Thử nghiệm đã chạy: `Command::new("true").spawn()`, ngủ 200 ms rồi `drop(child)`; `/proc/<id>/status` vẫn hiện `State: Z (zombie)`. `Child::wait` chờ con thoát hẳn rồi trả status[^rs-wait]. `try_wait` không chặn, và nếu con đã thoát thì trên Unix PID được reaped[^rs-try-wait]. `kill` tương đương gửi `SIGKILL` trên Unix[^rs-kill]. Hiểu lầm cần tránh: "drop `Child` thì con được dọn" là sai theo docs; dịch vụ chạy lâu phải tự `wait`/`try_wait` (nhận xét của người soạn). Phân tích `Child` và zombie đầy đủ hơn: [Chương 07](07-rust-tren-giao-dien-he-thong.md), mục 4.
 
 ### 11.3 `ExitStatus` ánh xạ `wstatus`
 
-`ExitStatus::code()` trên Unix trả `None` nếu process bị signal kết thúc[^rs-exitstatus-code]; exit status bị cắt còn 8 bit[^rs-exitstatus-8bit]. `ExitStatusExt` (Unix) cho phần còn lại: trên Unix `ExitStatus` có thể biểu diễn *bất kỳ wait status nào*, không chỉ exit status[^rs-esx-any]; `signal()` trả signal giết process, nghĩa là `WIFSIGNALED` → `WTERMSIG`[^rs-esx-sig]. Thử nghiệm đã chạy: `sh -c "exit 300"` cho `code=Some(44) signal=None raw=0x2c00`; `sh -c "kill -9 $$"` cho `code=None signal=Some(9) success=false` — khớp bảng ở mục 6.3.
+`ExitStatus::code()` trên Unix trả `None` nếu process bị signal kết thúc[^rs-exitstatus-code]. Exit status bị cắt còn 8 bit[^rs-exitstatus-8bit]. `ExitStatusExt` (Unix) cho phần còn lại: trên Unix `ExitStatus` có thể biểu diễn *bất kỳ wait status nào*, không chỉ exit status[^rs-esx-any]. Hàm `signal()` trả signal giết process, nghĩa là `WIFSIGNALED` → `WTERMSIG`[^rs-esx-sig]. Thử nghiệm đã chạy: `sh -c "exit 300"` cho `code=Some(44) signal=None raw=0x2c00`; `sh -c "kill -9 $$"` cho `code=None signal=Some(9) success=false`, khớp bảng ở mục 6.3.
 
-`std::process::exit(code)` kết thúc process ngay: không chạy destructor trên stack hiện tại hay của thread khác[^rs-exit]; docs khuyến nghị trả `ExitCode`/`Result` từ `main` thay vì gọi nó[^rs-exit-rec]. Theo cài đặt hiện tại, nó vẫn chạy các exit handler đăng ký bằng `atexit`[^rs-exit-atexit] — tức gần với `exit(3)` hơn `_exit` ở mục 6.1 (suy luận của người soạn).
+`std::process::exit(code)` kết thúc process ngay: không chạy destructor trên stack hiện tại hay của thread khác[^rs-exit]. Docs khuyến nghị trả `ExitCode`/`Result` từ `main` thay vì gọi nó[^rs-exit-rec]. Theo cài đặt hiện tại, nó vẫn chạy các exit handler đăng ký bằng `atexit`[^rs-exit-atexit], tức gần với `exit(3)` hơn `_exit` ở mục 6.1 (suy luận của người soạn).
 
 ## Tóm tắt
 
@@ -417,7 +490,7 @@ Module `std::process` chủ yếu lo việc spawn và làm việc với process 
 
 <details><summary>Đáp án</summary>
 
-Không: bộ nhớ riêng[^fork-mem]. Copy-on-write: chỉ sao chép page table và tạo task structure[^fork-cow]; trang chỉ được chép khi có bên ghi.
+Không, vì bộ nhớ của hai bên riêng nhau[^fork-mem]. Copy-on-write chỉ sao chép page table và tạo task structure[^fork-cow]; trang chỉ được chép khi có bên ghi.
 
 </details>
 
@@ -425,7 +498,7 @@ Không: bộ nhớ riêng[^fork-mem]. Copy-on-write: chỉ sao chép page table 
 
 <details><summary>Đáp án</summary>
 
-Giữ: PID[^cred-pid-exec], process group/session[^cred-pgid], fd không close-on-exec[^exec-fds-default][^exec-fds], real UID/GID[^exec-ids], signal bị ignore[^signal-exec]. Mất: handler signal[^exec-handlers], memory mapping[^exec-mmap], thread khác[^exec-threads].
+Giữ nguyên: PID[^cred-pid-exec]. Process group và session cũng vậy[^cred-pgid]. fd không close-on-exec vẫn mở[^exec-fds-default]. Real UID/GID giữ nguyên[^exec-ids]. Signal bị ignore cũng giữ nguyên[^signal-exec]. Mất: handler signal bị reset[^exec-handlers]. Memory mapping không còn[^exec-mmap]. Thread khác bị hủy[^exec-threads].
 
 </details>
 
@@ -433,7 +506,7 @@ Giữ: PID[^cred-pid-exec], process group/session[^cred-pgid], fd không close-o
 
 <details><summary>Đáp án</summary>
 
-Để chạy code giữa hai bước đổi môi trường chương trình sắp chạy[^ostep-fork-exec], ví dụ redirect: đóng stdout, mở file nhận fd nhỏ nhất[^ostep-fd-lowest], fd được giữ qua `exec`[^ostep-redirect].
+Để chạy code giữa hai bước, đổi môi trường của chương trình sắp chạy[^ostep-fork-exec]. Ví dụ redirect: đóng stdout, mở file để nó nhận fd nhỏ nhất[^ostep-fd-lowest]. Fd này được giữ qua `exec`[^ostep-redirect].
 
 </details>
 
@@ -441,7 +514,7 @@ Giữ: PID[^cred-pid-exec], process group/session[^cred-pgid], fd không close-o
 
 <details><summary>Đáp án</summary>
 
-44, vì chỉ `status & 0xFF` được trả[^exit-status-mask]. Bị SIGKILL: `WIFEXITED` sai, `WIFSIGNALED` đúng, `WTERMSIG` = 9[^wait-wifsignaled]. Rust: `code()` là `None`, `signal()` là `Some(9)`[^rs-exitstatus-code][^rs-esx-sig].
+Cha thấy 44, vì chỉ `status & 0xFF` được trả[^exit-status-mask]. Nếu bị SIGKILL thì `WIFEXITED` sai, `WIFSIGNALED` đúng và `WTERMSIG` = 9[^wait-wifsignaled]. Trong Rust, `code()` là `None`[^rs-exitstatus-code]. Còn `signal()` là `Some(9)`[^rs-esx-sig].
 
 </details>
 
@@ -449,7 +522,7 @@ Giữ: PID[^cred-pid-exec], process group/session[^cred-pgid], fd không close-o
 
 <details><summary>Đáp án</summary>
 
-Con đã thoát chưa được wait; kernel giữ PID, status, resource usage[^wait-zombie]. Tích tụ làm đầy process table[^wait-table]. Cha chết thì `init`/subreaper nhận và dọn[^wait-init][^subreaper].
+Zombie là con đã thoát chưa được wait; kernel giữ PID, status, resource usage[^wait-zombie]. Tích tụ làm đầy process table[^wait-table]. Cha chết thì `init` dọn[^wait-init]. Nếu có subreaper thì subreaper nhận thay[^subreaper].
 
 </details>
 
@@ -457,7 +530,7 @@ Con đã thoát chưa được wait; kernel giữ PID, status, resource usage[^w
 
 <details><summary>Đáp án</summary>
 
-PID 1 là cha của mọi orphan trong namespace[^pidns-init] (không `wait` thì thành zombie — suy luận); chỉ signal có handler mới tới được nó từ trong namespace[^pidns-sig]; init chết thì cả namespace bị SIGKILL[^pidns-kill].
+PID 1 là cha của mọi orphan trong namespace[^pidns-init], nên không `wait` thì chúng thành zombie (suy luận). Chỉ signal có handler mới tới được nó từ trong namespace[^pidns-sig]. Init chết thì cả namespace bị SIGKILL[^pidns-kill].
 
 </details>
 
@@ -465,7 +538,7 @@ PID 1 là cha của mọi orphan trong namespace[^pidns-init] (không `wait` th�
 
 <details><summary>Đáp án</summary>
 
-Cho process của foreground job[^cred-ctrlc]. `setsid` tạo session mới và một group mới, người gọi là leader của cả hai[^setsid-leader], chưa có controlling terminal[^setsid-new]; lỗi `EPERM` nếu người gọi đã là group leader[^setsid-eperm].
+Cho process của foreground job[^cred-ctrlc]. `setsid` tạo session mới và một group mới, người gọi là leader của cả hai[^setsid-leader]. Session mới chưa có controlling terminal[^setsid-new]. Nó lỗi `EPERM` nếu người gọi đã là group leader[^setsid-eperm].
 
 </details>
 
@@ -473,7 +546,7 @@ Cho process của foreground job[^cred-ctrlc]. `setsid` tạo session mới và 
 
 <details><summary>Đáp án</summary>
 
-Không, chỉ là quy ước[^exec-argv][^rs-args-os]. File `environ` chỉ chứa environment ban đầu lúc `execve`[^proc-environ-init]; thay đổi sau đó (như `putenv`) không hiện ở đó[^proc-environ].
+Không, `argv[0]` chỉ là quy ước[^exec-argv]; docs Rust cũng khuyên không dựa vào nó cho bảo mật[^rs-args-os]. File `environ` chỉ chứa environment ban đầu lúc `execve`[^proc-environ-init]. Thay đổi sau đó (như `putenv`) không hiện ở đó[^proc-environ].
 
 </details>
 
@@ -481,7 +554,7 @@ Không, chỉ là quy ước[^exec-argv][^rs-args-os]. File `environ` chỉ ch�
 
 <details><summary>Đáp án</summary>
 
-`Child` không có `Drop` dọn process[^rs-child-nodrop]; con thoát mà không ai wait thì thành zombie (đã chạy: `State: Z`); std khuyến nghị tự `wait`/`try_wait`[^rs-child-zombie][^rs-try-wait].
+`Child` không có `Drop` dọn process[^rs-child-nodrop]. Con thoát mà không ai wait thì thành zombie (đã chạy: `State: Z`). Std khuyến nghị tự `wait` hoặc `try_wait`[^rs-child-zombie].
 
 </details>
 
@@ -489,7 +562,7 @@ Không, chỉ là quy ước[^exec-argv][^rs-args-os]. File `environ` chỉ ch�
 
 <details><summary>Đáp án</summary>
 
-Mỗi con phải vào group trước khi chạy chương trình mới, và shell cần mọi con đã trong group trước khi chạy tiếp; nếu cả hai cùng gọi thì kết quả đúng bất kể bên nào đến trước[^glibc-shell-race]. Cha không thể trì hoãn quá lúc con `execve`, vì sửa PGID của con đã `execve` thì lỗi `EACCES`[^setpgid-eacces].
+Mỗi con phải vào group trước khi chạy chương trình mới, và shell cần mọi con đã trong group trước khi chạy tiếp. Nếu cả hai cùng gọi thì kết quả đúng bất kể bên nào đến trước[^glibc-shell-race]. Cha không thể trì hoãn quá lúc con `execve`, vì sửa PGID của con đã `execve` thì lỗi `EACCES`[^setpgid-eacces].
 
 </details>
 
@@ -498,10 +571,6 @@ Mỗi con phải vào group trước khi chạy chương trình mới, và shell
 - OSTEP ch.4 ([cpu-intro.pdf](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf)) và ch.5 ([cpu-api.pdf](https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-api.pdf)) — mô hình trạng thái và cách shell dùng `fork`/`exec`/`wait`.
 - [fork(2)](https://manpages.debian.org/bookworm/manpages-dev/fork.2.en.html), [execve(2)](https://manpages.debian.org/bookworm/manpages-dev/execve.2.en.html), [wait(2)](https://manpages.debian.org/bookworm/manpages-dev/wait.2.en.html) — danh sách đầy đủ thuộc tính và macro `W*`.
 - [credentials(7)](https://manpages.debian.org/bookworm/manpages/credentials.7.en.html) — định nghĩa PID, process group, session, controlling terminal và foreground job dùng ở mục 2 và 8.
-- [pid_namespaces(7)](https://manpages.debian.org/bookworm/manpages/pid_namespaces.7.en.html) — init của namespace; nền cho Phase 8.
-- [Chương 04 — File descriptor và VFS](04-file-descriptor-va-vfs.md) — `dup2`, pipe và redirect ở mức syscall: phần tiếp nối của mục 5.
-- [Chương 05 — Signal](05-signal.md) — `SIGCHLD`, `SIGTERM` và graceful shutdown của PID 1: phần tiếp nối của mục 6–7.
-- [Chương 07 — Rust trên giao diện hệ thống](07-rust-tren-giao-dien-he-thong.md) — `Command::spawn`, `Child`, `Stdio`, FFI chi tiết: phần tiếp nối của mục 11.
 
 [^ostep-proc]: OSTEP, ch.4 The Abstraction: The Process — <https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf> — "The definition of a process, informally, is quite simple: it is a running program"
 [^ostep-program-disk]: OSTEP, ch.4 The Abstraction: The Process — <https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-intro.pdf> — "The program itself is a lifeless thing: it just sits there on the disk, a bunch of instructions (and maybe some static data), waiting to spring into action."
@@ -534,7 +603,6 @@ Mỗi con phải vào group trước khi chạy chương trình mới, và shell
 [^fork-copy]: fork(2), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages-dev/fork.2.en.html> — "fork() creates a new process by duplicating the calling process."
 [^fork-mem]: fork(2), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages-dev/fork.2.en.html> — "The child process and the parent process run in separate memory spaces. At the time of fork() both memory spaces have the same content. Memory writes, file mappings (mmap(2)), and unmappings (munmap(2)) performed by one of the processes do not affect the other."
 [^fork-ret]: fork(2), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages-dev/fork.2.en.html> — "On success, the PID of the child process is returned in the parent, and 0 is returned in the child. On failure, -1 is returned in the parent, no child process is created, and errno is set to indicate the error."
-[^ostep-fork-strange]: OSTEP, ch.5 Interlude: Process API — <https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-api.pdf> — "However, be forewarned: it is certainly the strangest routine you will ever call1"
 [^ostep-fork-copy]: OSTEP, ch.5 Interlude: Process API — <https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-api.pdf> — "the process that is created is an (almost) exact copy of the calling process."
 [^ostep-fork-nomain]: OSTEP, ch.5 Interlude: Process API — <https://pages.cs.wisc.edu/~remzi/OSTEP/cpu-api.pdf> — "doesn’t start running at main(), like you might expect (note, the “hello” message only got printed out once); rather, it just comes into life as if it had called fork() itself."
 [^fork-pid]: fork(2), Linux man-pages (Debian bookworm) — <https://manpages.debian.org/bookworm/manpages-dev/fork.2.en.html> — "The child has its own unique process ID, and this PID does not match the ID of any existing process group (setpgid(2)) or session."

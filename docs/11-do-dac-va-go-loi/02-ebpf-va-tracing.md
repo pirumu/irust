@@ -1,6 +1,6 @@
 # P11 · Chương 02 — eBPF, tracepoint, kprobe/uprobe và ftrace
 
-> Mọi khẳng định về kernel là về **Linux**. Nguồn: tài liệu kernel `docs.kernel.org` (trang này không ghim phiên bản; nội dung có thể mới hơn kernel bạn đang chạy), man page Debian bookworm (`bpf(2)`, `perf_event_open(2)`, `capabilities(7)`, `bpf-helpers(7)`, `bpftrace(8)` — bản bpftrace trong bookworm là 0.17.0[^bt-ver]), reference guide + tutorial bpftrace gắn tag `v0.17.0`, và docs Rust 1.95.0 / docs.rs có ghim phiên bản. Chương này **không** có thí nghiệm: các dòng lệnh là minh họa lấy từ tài liệu, không kèm output do người soạn chạy.
+> Mọi khẳng định về kernel là về **Linux**. Nguồn là tài liệu kernel `docs.kernel.org` (trang không ghim phiên bản, nên có thể mới hơn kernel bạn đang chạy), man page Debian bookworm (`bpf(2)`, `perf_event_open(2)`, `capabilities(7)`, `bpf-helpers(7)`, `bpftrace(8)`; bản bpftrace trong bookworm là 0.17.0[^bt-ver]), reference guide và tutorial bpftrace gắn tag `v0.17.0`, cùng docs Rust 1.95.0 và docs.rs có ghim phiên bản. Chương này **không** có thí nghiệm: các dòng lệnh là minh họa lấy từ tài liệu, không kèm output do người soạn chạy.
 
 ## Bạn sẽ hiểu được gì
 
@@ -23,32 +23,42 @@ Phần **Liên hệ với Rust** (mục 9): uprobe trên symbol Rust (mangling, 
 
 ## 1. Tracing và sampling (Q1)
 
-> **Trả lời ngắn.** *Tracing* chạy một đoạn code nhỏ **mỗi lần** một sự kiện xảy ra tại điểm móc[^tp-called]; thấy đủ từng sự kiện nhưng chi phí tăng theo số sự kiện (một kprobe hit tốn cỡ micro-giây theo tài liệu kernel)[^kprobe-hit-cost]. *Sampling* chỉ ghi lại trạng thái **định kỳ** — sau mỗi N sự kiện[^pe-sample-def] hoặc theo một tần số mong muốn mà kernel cố đạt bằng cách tự chỉnh period[^pe-sample-freq] — nên chi phí do tốc độ lấy mẫu bạn đặt quyết định chứ không theo từng sự kiện (suy luận của người soạn), nhưng kết quả là thống kê, không phải danh sách đầy đủ.
+> **Trả lời ngắn.** Tracing là gắn một đoạn code nhỏ vào một điểm trong kernel hoặc chương trình, và đoạn code đó chạy **mỗi lần** điểm ấy được đi qua[^tp-called]. Bạn thấy đủ từng sự kiện, nhưng điểm càng nóng thì càng tốn: với kprobe (mục 3), tài liệu kernel đo mỗi lần chạy cỡ micro-giây[^kprobe-hit-cost]. Sampling chỉ ghi trạng thái theo chu kỳ, sau mỗi N sự kiện[^pe-sample-def]. Bạn cũng có thể đặt một tần số mong muốn và để kernel tự chỉnh period[^pe-sample-freq]. Vì vậy chi phí của sampling do tốc độ lấy mẫu bạn đặt quyết định (suy luận của người soạn), nhưng đổi lại kết quả chỉ là thống kê, không phải danh sách đầy đủ.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn muốn biết cầu nào đông. *Tracing* là đặt người ghi biển số từng xe qua cầu — biết chính xác xe nào, lúc nào, nhưng giờ cao điểm người ghi bị quá tải. *Sampling* là cứ 10 giây chụp một tấm ảnh toàn cảnh — chi phí cố định, nhưng ảnh không cho bạn biết một chiếc xe cụ thể mất bao lâu để qua.
+*Với service `orders`.* Hãy hình dung `orders`, một service Rust chạy trên host Linux, nhận vài nghìn request mỗi giây. Một buổi chiều p99 của `POST /orders` tăng vọt, và bạn không muốn deploy lại bản có thêm log (nhận xét của người soạn: đây là tình huống giả định, không phải code trong repo; ta bám theo `orders` suốt chương). Lúc đó có hai câu hỏi khác nhau: "CPU đang tốn ở đâu nói chung?" và "request nào chậm, chậm ở bước nào?". Hai câu hỏi dẫn tới hai cách quan sát, và chi phí của chúng tăng theo hai quy luật khác nhau.
 
-*Cách perf phân loại.* `perf_event_open(2)` chia event thành hai loại: *counting* (đếm tổng số lần xảy ra) và *sampled*[^pe-flavors]. Event kiểu sampled ghi định kỳ số đo vào một buffer mà user space đọc qua `mmap(2)`[^pe-sampling-buf]. "Định kỳ" ở đây có hai dạng: một event sampling sinh thông báo overflow sau mỗi `sample_period` sự kiện, và khi overflow thì dữ liệu được ghi vào mmap buffer[^pe-sample-def]; hoặc đặt `sample_freq` để kernel tự điều chỉnh period nhằm đạt tần số mong muốn[^pe-sample-freq].
+### 1.1 Tracing: chạy handler mỗi lần sự kiện xảy ra
 
-*Tracing ở mức tracepoint/kprobe.* Khi một tracepoint đang "bật", hàm bạn gắn vào được gọi mỗi lần tracepoint được thực thi, ngay trong ngữ cảnh của code gọi[^tp-called]. Kprobe cũng vậy: tài liệu kprobes đo bằng cách bắn liên tục vào một điểm và báo 1–2 triệu hit mỗi giây tùy kiến trúc, trên CPU thời 2005[^kprobe-hit-cost]. Hệ quả (suy luận của người soạn): nếu hàm bị móc chạy 1 triệu lần/giây, bạn trả chi phí handler 1 triệu lần/giây; chi phí này do **hệ thống** quyết định, không do bạn.
+Tracing gắn một hàm nhỏ (handler) vào một điểm móc, và hàm đó chạy mỗi lần điểm móc được đi qua. Với tracepoint, tức điểm móc do kernel đặt sẵn (mục 3 nói kỹ), hàm bạn gắn vào được gọi mỗi lần tracepoint chạy, ngay trong ngữ cảnh của code gọi[^tp-called]. Kprobe, điểm móc gắn động, cũng vậy: tài liệu kprobes đo bằng cách bắn liên tục vào một điểm và báo 1–2 triệu hit mỗi giây tùy kiến trúc, trên CPU thời 2005[^kprobe-hit-cost].
 
-*Sampling ở mức bpftrace.* Probe `profile` của bpftrace bắn trên mỗi CPU theo chu kỳ đã chỉ định[^bt-profile], và dùng `perf_events` bên dưới[^btref-profile-perf]. Tutorial bpftrace chọn 99 Hz thay vì 100 Hz vì muốn tần số đủ cao để thấy cả bức tranh lớn lẫn nhỏ nhưng không quá cao để làm nhiễu hiệu năng, và tránh tần số tròn vì lấy mẫu có thể chạy đồng pha với các hoạt động định kỳ khác[^bttut-99hz].
+Với `orders`, điều này có nghĩa là nếu bạn móc một hàm kernel mà service gọi 1 triệu lần mỗi giây thì bạn trả chi phí handler 1 triệu lần mỗi giây. Chi phí do tải của hệ thống quyết định, không do bạn chọn (suy luận của người soạn). Bù lại, bạn thấy từng lần gọi: thao tác nào, lúc nào, lần nào chậm.
+
+### 1.2 Sampling: chạy theo nhịp
+
+Sampling ghi lại trạng thái theo một nhịp chứ không theo từng sự kiện. `perf_event_open(2)` chia event làm hai loại: *counting*, tức đếm tổng số lần xảy ra, và *sampled*[^pe-flavors]. Event kiểu sampled ghi định kỳ số đo vào một buffer mà user space đọc qua `mmap(2)`[^pe-sampling-buf].
+
+"Định kỳ" ở đây có hai dạng. Dạng thứ nhất: event sinh thông báo overflow sau mỗi `sample_period` sự kiện, và lúc đó dữ liệu được ghi vào buffer[^pe-sample-def]. Dạng thứ hai: bạn đặt `sample_freq` và kernel tự chỉnh period để đạt tần số mong muốn[^pe-sample-freq].
+
+bpftrace dùng dạng sau qua probe `profile`: nó bắn trên từng CPU theo chu kỳ bạn chỉ định[^bt-profile]. Bên dưới, probe này chạy trên `perf_events`[^btref-profile-perf]. Tutorial của bpftrace chọn 99 Hz chứ không phải 100 Hz, vì muốn tần số đủ cao để thấy cả bức tranh lớn lẫn nhỏ mà không làm nhiễu hiệu năng, và tránh số tròn vì lấy mẫu có thể trùng nhịp với các hoạt động định kỳ khác[^bttut-99hz].
+
+### 1.3 Chọn cách nào cho `orders`
 
 | | Tracing (tracepoint, kprobe, uprobe) | Sampling (`perf` timer/cycles, `profile:hz:99`) |
 |---|---|---|
-| Khi nào handler chạy | Mỗi lần điểm móc được chạy tới[^tp-called] | Mỗi chu kỳ/mỗi N sự kiện[^pe-sample-def] |
+| Khi nào handler chạy | Mỗi lần điểm móc được chạy tới[^tp-called] | Mỗi chu kỳ, hoặc mỗi N sự kiện[^pe-sample-def] |
 | Chi phí tăng theo | Tần suất của sự kiện bị móc | Tần số lấy mẫu bạn chọn |
 | Trả lời tốt | "Thao tác này mất bao lâu, lần nào chậm?", đếm chính xác, quan hệ trước–sau | "CPU đang tốn ở đâu nói chung?" |
 | Trả lời kém | Sự kiện quá dày (hàm gọi hàng triệu lần/giây) | Sự kiện hiếm, ngắn, rơi giữa hai lần lấy mẫu (suy luận của người soạn) |
 
-(Nhận xét của người soạn: với backend, câu hỏi "p99 của handler này tới từ đâu" cần *tracing* — bạn muốn thấy từng request chậm. Câu hỏi "CPU 80% mà không biết đang chạy hàm nào" cần *sampling*. Hai công cụ bổ sung nhau; chương 01 nói về nhánh sampling.)
+Với `orders`, câu hỏi "p99 của handler này tới từ đâu" cần tracing, vì bạn muốn thấy từng request chậm. Câu hỏi "CPU 80% mà không biết đang chạy hàm nào" cần sampling. Hai công cụ bổ sung nhau (nhận xét của người soạn); [chương 01](01-perf-va-sampling-profiler.md) nói về nhánh sampling.
 
 <details><summary>Đi sâu: các con số trong tài liệu kernel và giới hạn tần số mẫu</summary>
 
-- Tài liệu kprobes ghi: trên CPU thông dụng năm 2005, một kprobe hit tốn 0.5–1.0 micro-giây; return probe hit lâu hơn 50–75%[^kprobe-hit-cost][^kretprobe-cost]. Đây là số đo của phần cứng cũ; chỉ dùng để thấy bậc độ lớn, không dùng làm dự báo cho máy bạn.
+- Tài liệu kprobes ghi rằng trên CPU thông dụng năm 2005, một kprobe hit tốn 0.5–1.0 micro-giây[^kprobe-hit-cost]. Return probe hit lâu hơn 50–75%[^kretprobe-cost]. Đây là số đo của phần cứng cũ; chỉ dùng để thấy bậc độ lớn, không dùng làm dự báo cho máy bạn.
 - Sampling cũng không miễn phí: kernel có giới hạn `perf_event_max_sample_rate`, và tài liệu cảnh báo đặt quá cao có thể khiến người dùng lấy mẫu ở tần số làm giảm hiệu năng toàn máy, thậm chí treo máy[^pe-max-rate].
-- Tracing và sampling có thể dùng *cùng* một cơ chế bên dưới: `perf_event_open` nhận cả event sampling lẫn `PERF_TYPE_TRACEPOINT` (tracepoint của kernel)[^pe-type-tp] và các PMU động kprobe/uprobe[^pe-kuprobe-pmu].
+- Tracing và sampling có thể dùng *cùng* một cơ chế bên dưới. `perf_event_open` nhận cả event sampling lẫn `PERF_TYPE_TRACEPOINT`, tức tracepoint của kernel[^pe-type-tp]. Nó cũng nhận các PMU động `kprobe` và `uprobe`[^pe-kuprobe-pmu].
 
 </details>
 
@@ -56,32 +66,40 @@ Hình dung (nhận xét của người soạn): bạn muốn biết cầu nào �
 
 ## 2. ftrace và tracefs (Q2)
 
-> **Trả lời ngắn.** ftrace là bộ tracing có sẵn trong kernel, được thiết kế để giúp nhà phát triển xem chuyện gì đang diễn ra bên trong kernel[^ftrace-intro]. Bạn điều khiển nó bằng cách đọc/ghi các file trong hệ thống file `tracefs`, thường gắn ở `/sys/kernel/tracing`[^ftrace-tracefs][^ftrace-mount]: chọn tracer, bật event, rồi đọc kết quả từ file `trace` hoặc `trace_pipe`.
+> **Trả lời ngắn.** ftrace là bộ tracing có sẵn trong kernel, sinh ra để giúp developer xem bên trong kernel đang diễn ra chuyện gì[^ftrace-intro]. Bạn điều khiển nó bằng cách đọc và ghi các file trong hệ thống file `tracefs`[^ftrace-tracefs]. Hệ thống file này thường gắn ở `/sys/kernel/tracing`[^ftrace-mount]. Chọn tracer, bật event, rồi đọc kết quả từ file `trace` hoặc `trace_pipe`.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ftrace giống một bảng điều khiển công nghiệp mà mỗi công tắc là một file. Muốn bật chức năng nào thì `echo` tên nó vào đúng file; muốn xem kết quả thì `cat` file khác. Không cần thư viện hay công cụ riêng — shell là đủ.
+*Với service `orders`.* Giả sử p99 của `orders` tăng đúng lúc service nhận kết nối, và bạn nghi lỗi nằm trong kernel: không biết kernel gọi những hàm nào khi `orders` `accept` rồi `read`. Host production chỉ có shell, không cài thêm công cụ nào. ftrace hợp với tình huống này, vì tài liệu có hẳn các ví dụ điều khiển tracer chỉ bằng tracefs, không dùng công cụ user-land nào[^ftrace-no-userland].
 
-*Bước 1 — tracefs.* Chọn bất kỳ tùy chọn ftrace nào khi build kernel thì tracefs được cấu hình theo, và thư mục `/sys/kernel/tracing` xuất hiện[^ftrace-mount]. Tài liệu ftrace nói nó dùng tracefs để chứa cả file điều khiển lẫn file hiển thị kết quả[^ftrace-tracefs]. Cách cũ là qua debugfs (thường ở `/sys/kernel/debug/tracing`); khi mount debugfs, tracefs cũng được tự mount vào đó để tương thích ngược[^ftrace-debugfs].
+### 2.1 tracefs
 
-*Bước 2 — chọn thứ muốn quan sát.* Ftrace thực chất là một khung gồm nhiều tiện ích tracing, không chỉ là "function tracer" (theo cách tài liệu mô tả)[^ftrace-framework]. Các thành phần dùng ở bước này:
+Chọn bất kỳ tùy chọn ftrace nào khi build kernel thì tracefs được cấu hình theo, và thư mục `/sys/kernel/tracing` xuất hiện[^ftrace-mount]. Trong thư mục đó là cả file điều khiển lẫn file hiển thị kết quả[^ftrace-tracefs]. Cách cũ là đi qua debugfs, thường ở `/sys/kernel/debug/tracing`; khi mount debugfs, tracefs cũng được tự mount vào đó để tương thích ngược[^ftrace-debugfs].
 
-- `available_tracers` liệt kê các tracer đã được biên dịch vào kernel; ghi tên một tracer vào `current_tracer` để chọn[^ftrace-avail-tracers][^ftrace-current-tracer]. Ví dụ `function` (theo dõi lúc *vào* các hàm kernel mà ftrace trace được — không phải hàm nào cũng được, xem phần Đi sâu) và `function_graph` (theo dõi cả lúc vào lẫn lúc ra, nhờ đó vẽ được đồ thị lời gọi hàm)[^ftrace-fn-tracer][^ftrace-fngraph].
-- `events/` chứa các *event tracepoint* (còn gọi là static tracepoint) đã được biên dịch vào kernel, xếp theo hệ thống con; ghi `1` vào các file `enable` để bật[^ftrace-events-dir]. `available_events` liệt kê event bật được và `set_event` là nơi ghi tên event để bật[^ftrace-avail-events][^ftrace-set-event].
-- `kprobe_events` dùng để thêm điểm móc động (xem mục 3)[^ftrace-kprobe-events].
+### 2.2 Chọn thứ muốn quan sát
 
-*Bước 3 — bật/tắt ghi.* `tracing_on` cho biết/đặt việc ghi vào ring buffer có được bật không; chú ý rằng ghi `0` chỉ tắt việc *ghi* vào ring buffer, còn overhead của tracing vẫn có thể còn đó[^ftrace-tracing-on].
+ftrace thực chất là một khung gồm nhiều tiện ích tracing, không chỉ là "function tracer" mà người ta hay nhắc[^ftrace-framework]. Ba nhóm file bạn dùng ở bước này:
 
-*Bước 4 — đọc kết quả.* Có hai file đọc, khác nhau ở chỗ có "tiêu thụ" dữ liệu hay không:
+- **Tracer.** `available_tracers` liệt kê các tracer đã biên dịch vào kernel[^ftrace-avail-tracers]. Ghi tên một tracer vào `current_tracer` để chọn[^ftrace-current-tracer]. Tracer `function` theo dõi lúc *vào* các hàm kernel mà ftrace trace được[^ftrace-fn-tracer] (không phải hàm nào cũng trace được, phần Đi sâu nói vì sao). Tracer `function_graph` theo dõi cả lúc vào lẫn lúc ra, nên vẽ được đồ thị lời gọi hàm[^ftrace-fngraph].
+- **Event.** Thư mục `events/` chứa các *event tracepoint* (còn gọi là static tracepoint) đã biên dịch vào kernel, xếp theo hệ thống con[^ftrace-events-dir]. `available_events` liệt kê event bật được[^ftrace-avail-events]. Ghi tên event vào `set_event` để bật nó[^ftrace-set-event].
+- **Điểm móc động.** `kprobe_events` dùng để thêm điểm móc động (xem mục 3)[^ftrace-kprobe-events].
+
+### 2.3 Bật/tắt ghi và đọc kết quả
+
+`tracing_on` cho biết và đặt việc ghi vào ring buffer có bật hay không. Ghi `0` chỉ tắt việc *ghi* vào ring buffer, còn overhead của tracing vẫn có thể còn đó[^ftrace-tracing-on].
+
+Kết quả đọc từ hai file, khác nhau ở chỗ có "tiêu thụ" dữ liệu hay không:
 
 | File | Hành vi |
 |---|---|
-| `trace` | Không phải consumer; nếu tracing đang tắt thì mỗi lần đọc cho cùng kết quả[^ftrace-trace-file]. Mở để ghi với `O_TRUNC` thì xóa nội dung ring buffer[^ftrace-trace-trunc]. |
-| `trace_pipe` | Đọc sẽ block tới khi có dữ liệu mới[^ftrace-pipe-block]; dữ liệu đã đọc bị tiêu thụ, lần đọc tuần tự sau không thấy lại[^ftrace-pipe-consume]. |
+| `trace` | Không phải consumer, nên nếu tracing đang tắt thì mỗi lần đọc cho cùng kết quả[^ftrace-trace-file]. Mở để ghi với `O_TRUNC` thì xóa nội dung ring buffer[^ftrace-trace-trunc]. |
+| `trace_pipe` | Đọc sẽ block tới khi có dữ liệu mới[^ftrace-pipe-block]. Dữ liệu đã đọc bị tiêu thụ, lần đọc tuần tự sau không thấy lại[^ftrace-pipe-consume]. |
 
-*Bước 5 — buffer theo từng CPU.* Buffer ftrace được định nghĩa theo từng CPU: mỗi CPU một buffer để ghi nguyên tử và không bị cache bouncing[^ftrace-percpu]. Hệ quả (suy luận của người soạn): thứ tự sự kiện giữa các CPU được ghép lại khi đọc dựa vào timestamp, không phải một hàng đợi toàn cục duy nhất.
+Buffer của ftrace được định nghĩa theo từng CPU: mỗi CPU một buffer để ghi nguyên tử và không bị cache bouncing[^ftrace-percpu]. Hệ quả (suy luận của người soạn): thứ tự sự kiện giữa các CPU được ghép lại khi đọc dựa vào timestamp, không phải từ một hàng đợi toàn cục duy nhất.
 
-Minh họa của người soạn (dựa trên việc tài liệu ftrace mô tả điều khiển tracer chỉ bằng giao diện tracefs, không dùng công cụ user-land nào[^ftrace-no-userland]):
+### 2.4 Ghép lại
+
+Minh họa của người soạn, dựng từ các file nêu ở trên:
 
 ```sh
 cd /sys/kernel/tracing
@@ -90,74 +108,89 @@ cat trace_pipe                    # đọc, block đến khi có dữ liệu
 echo nop > current_tracer        # tắt tracer
 ```
 
-(Các lệnh trên là minh họa của người soạn dựa trên các file đã nêu ở trên; không có output kèm theo vì không chạy.)
+(Các lệnh trên không có output kèm theo vì không chạy.) Trên host của `orders`, bạn đọc `trace_pipe` trong lúc gửi một request, rồi xem kernel gọi những hàm nào.
 
 <details><summary>Đi sâu: vì sao function tracer gần như không tốn gì khi tắt (dynamic ftrace)</summary>
 
 - Khi `CONFIG_DYNAMIC_FTRACE` được bật, hệ thống chạy với overhead gần như bằng không lúc function tracing đang tắt[^ftrace-dyn-zero].
-- Cơ chế: gcc chèn một lời gọi `mcount` ở đầu mọi hàm kernel (do cờ `-pg`)[^ftrace-mcount]; từ gcc 4.6 trên x86 có `-mfentry` gọi `__fentry__` thay thế (gọi trước khi tạo stack frame)[^ftrace-fentry]. Lúc khởi động, trước khi SMP khởi tạo, code dynamic ftrace quét bảng các vị trí này và đổi chúng thành `nop`, đồng thời ghi lại danh sách vào `available_filter_functions`[^ftrace-nops][^ftrace-recorded].
-- Khi bật tracing, các `nop` bị vá ngược thành lời gọi vào hạ tầng ftrace. Tài liệu nói cách sửa code phụ thuộc kiến trúc; cách mới mà nó mô tả là: đặt breakpoint tại vị trí cần sửa, đồng bộ các CPU, sửa phần còn lại của lệnh, đồng bộ lần nữa rồi gỡ breakpoint[^ftrace-patch].
+- Cơ chế bắt đầu từ compiler. gcc chèn một lời gọi `mcount` ở đầu mọi hàm kernel (do cờ `-pg`)[^ftrace-mcount]. Từ gcc 4.6, trên x86 có `-mfentry` để gọi `__fentry__` thay thế (gọi trước khi tạo stack frame)[^ftrace-fentry].
+- Lúc khởi động, trước khi SMP khởi tạo, code dynamic ftrace quét bảng các vị trí này và đổi chúng thành `nop`[^ftrace-nops]. Nó cũng ghi lại các vị trí vào danh sách `available_filter_functions`[^ftrace-recorded].
+- Khi bật tracing, các `nop` bị vá ngược thành lời gọi vào hạ tầng ftrace. Cách sửa code phụ thuộc kiến trúc; cách mới mà tài liệu mô tả là đặt breakpoint tại vị trí cần sửa, đồng bộ các CPU, sửa phần còn lại của lệnh, đồng bộ lần nữa rồi gỡ breakpoint[^ftrace-patch].
 - Vì biết chính xác từng vị trí, ftrace chọn được hàm nào bị trace: ghi tên hàm vào `set_ftrace_filter` thì chỉ các hàm đó được trace[^ftrace-filter]. `available_filter_functions` liệt kê hàm ftrace đã xử lý và trace được[^ftrace-avail-filter].
-- Không phải hàm nào cũng trace được: có phần bị chặn bằng `notrace`, và các hàm inline không được trace[^ftrace-notrace]. (Liên hệ Rust, mục 9: tính chất "hàm bị inline thì không còn là một điểm để móc" cũng đúng với uprobe.)
-- `trace_marker` cho phép *ứng dụng* ghi chuỗi vào ring buffer của ftrace, hữu ích để đồng bộ user space với sự kiện kernel[^ftrace-marker]. (Nhận xét của người soạn: một dịch vụ Rust có thể mở file này và ghi dấu "bắt đầu request X" để đặt cạnh các event kernel trong cùng dòng thời gian.)
+- Không phải hàm nào cũng trace được: có phần bị chặn bằng `notrace`, và các hàm inline không được trace[^ftrace-notrace]. (Liên hệ Rust, mục 9: hàm bị inline thì không còn là một điểm để móc, điều này cũng đúng với uprobe.)
+- `trace_marker` cho phép *ứng dụng* ghi chuỗi vào ring buffer của ftrace, hữu ích để đồng bộ user space với sự kiện kernel[^ftrace-marker]. Một service Rust như `orders` có thể mở file này và ghi dấu "bắt đầu request X" để đặt cạnh các event kernel trong cùng dòng thời gian (nhận xét của người soạn).
 - Thống kê ring buffer mỗi CPU có trường `overrun`: số event bị mất do ghi đè khi buffer đầy[^ftrace-overrun].
 
 </details>
 
-**Quay lại Q2:** ftrace = framework tracing trong kernel; tracefs là bề mặt điều khiển bằng file; chọn tracer/event, đọc `trace` hoặc `trace_pipe`; nhờ vá `nop`↔call lúc chạy nên gần như miễn phí khi tắt.
+**Quay lại Q2:** ftrace là framework tracing trong kernel, tracefs là bề mặt điều khiển bằng file; bạn chọn tracer hoặc event rồi đọc `trace` hay `trace_pipe`, và nhờ vá `nop`↔call lúc chạy nên gần như miễn phí khi tắt.
 
 ## 3. Tracepoint (tĩnh) và kprobe/uprobe (động) (Q3)
 
-> **Trả lời ngắn.** Tracepoint là điểm móc do người viết kernel **đặt sẵn** trong code, gọi một hàm probe bạn đăng ký lúc runtime[^tp-hook]; khi chưa có probe nào thì gần như không tốn gì[^tp-off]. Kprobe thì chèn điểm móc vào **gần như bất kỳ lệnh nào** của kernel (trừ danh sách cấm) lúc đang chạy, mặc định bằng cách thay lệnh đó bằng một breakpoint[^kprobe-int3]; uprobe là phiên bản tương tự cho user space[^uprobe-similar]. Đổi lại, chỗ gắn là chi tiết cài đặt nội bộ, không có cam kết ổn định[^qa-kprobe-abi]. Với uprobe, bạn còn phải tự cung cấp offset của điểm cần móc trong object[^uprobe-offset].
+> **Trả lời ngắn.** Tracepoint là điểm móc do người viết kernel **đặt sẵn** trong code, cho bạn đăng ký một hàm probe lúc runtime[^tp-hook]. Khi chưa có probe nào thì nó gần như không tốn gì[^tp-off]. Kprobe thì chèn điểm móc vào **gần như bất kỳ lệnh nào** của kernel (trừ danh sách cấm) lúc kernel đang chạy, mặc định bằng cách thay lệnh đó bằng một breakpoint[^kprobe-int3]. Uprobe là phiên bản tương tự cho user space[^uprobe-similar]. Đổi lại, chỗ gắn của kprobe là chi tiết cài đặt nội bộ, không có cam kết ổn định[^qa-kprobe-abi]. Với uprobe, bạn còn phải tự cung cấp offset của điểm cần móc trong object[^uprobe-offset].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tòa nhà có sẵn các đồng hồ đo ở những chỗ kiến trúc sư thấy quan trọng — đó là tracepoint: vị trí cố định, có nhãn, có tài liệu. Kprobe là việc khoan một lỗ vào bất kỳ đường ống nào để gắn cảm biến tạm: linh hoạt, nhưng khi tòa nhà được sửa lại thì ống có thể không còn ở chỗ cũ.
+*Với service `orders`.* Muốn biết `orders` làm gì với file, bạn có ba chỗ để móc. Chỗ thứ nhất là tracepoint ở lúc vào syscall `openat`, một điểm dev kernel đã đặt sẵn. Chỗ thứ hai là kprobe vào một hàm nội bộ như `vfs_read`, chỗ không ai đặt sẵn cho bạn. Chỗ thứ ba là uprobe vào một hàm nằm trong chính binary `orders`. Ba loại này khác nhau ở chỗ ai đặt điểm móc, và từ đó kéo theo khác nhau về độ ổn định.
 
-*Tracepoint.* Bạn cần hai thứ: một định nghĩa tracepoint đặt trong header, và câu lệnh gọi tracepoint trong code C[^tp-two]. Một tracepoint "tắt" không có tác dụng gì ngoài một chút phạt thời gian (kiểm tra một điều kiện rẽ nhánh) và phạt dung lượng (vài byte cho lời gọi hàm ở cuối hàm cùng một cấu trúc dữ liệu ở section riêng)[^tp-off]. Khi "bật" (có probe), hàm của bạn được gọi mỗi lần tracepoint chạy, trong ngữ cảnh của bên gọi[^tp-called]. Việc kiểm tra bật/tắt có thể dùng `static_key` và jump label để tránh rẽ nhánh có điều kiện[^tp-static-key]. Macro tiện lợi `TRACE_EVENT` định nghĩa tracepoint đồng thời phơi nó thành một *trace event* trong thư mục `/sys/kernel/tracing/events`[^tp-trace-event]; hạ tầng event tracing cho phép dùng tracepoint mà không cần viết module kernel để đăng ký probe, nhưng không phải tracepoint nào cũng dùng được qua đây — dev kernel phải cung cấp phần định nghĩa cách lưu và in thông tin[^ev-intro][^ev-not-all].
+### 3.1 Tracepoint
 
-*Kprobe.* Các bước theo tài liệu kprobes:
+Muốn có một tracepoint, dev kernel cần hai thứ: một định nghĩa đặt trong header, và câu lệnh gọi tracepoint trong code C[^tp-two]. Tracepoint là hook nhẹ, truyền được số tham số tùy ý, với prototype khai báo trong header[^tp-proto]. Khi tracepoint "tắt" (chưa có probe), nó chỉ tốn một chút thời gian để kiểm tra điều kiện rẽ nhánh, cộng vài byte cho lời gọi hàm ở cuối hàm và một cấu trúc dữ liệu ở section riêng[^tp-off]. Kernel còn dùng `static_key` và jump label để việc kiểm tra bật/tắt không cần rẽ nhánh có điều kiện[^tp-static-key]. Khi "bật" (có probe), hàm của bạn được gọi mỗi lần tracepoint chạy, trong ngữ cảnh của bên gọi[^tp-called].
+
+Cách dễ nhất để dùng tracepoint là qua trace event. Macro `TRACE_EVENT` định nghĩa tracepoint và đồng thời phơi nó thành một *trace event* trong thư mục `/sys/kernel/tracing/events`[^tp-trace-event]. Hạ tầng event tracing cho phép dùng tracepoint mà không cần viết kernel module để đăng ký probe[^ev-intro]. Nhưng không phải tracepoint nào cũng dùng được kiểu này: dev kernel phải cung cấp phần định nghĩa cách lưu và in thông tin[^ev-not-all].
+
+### 3.2 Kprobe
+
+Kprobes cho phép bạn đột nhập động vào gần như mọi hàm kernel và thu thông tin hiệu năng mà không làm gián đoạn hệ thống[^kprobe-intro]. Các bước diễn ra như sau:
 
 1. Khi đăng ký, kprobes sao chép lệnh bị móc và thay (các) byte đầu của lệnh bằng lệnh breakpoint (`int3` trên x86)[^kprobe-int3].
-2. Khi CPU chạm breakpoint thì trap xảy ra, thanh ghi được lưu, quyền điều khiển qua kprobes; kprobes gọi `pre_handler`[^kprobe-trap].
-3. Kprobes chạy từng bước (single-step) bản *sao* của lệnh gốc — không chạy tại chỗ, vì khi đó phải gỡ breakpoint tạm thời, mở một cửa sổ nhỏ để CPU khác chạy lọt qua điểm móc[^kprobe-singlestep].
-4. Sau đó gọi `post_handler` (nếu có) và tiếp tục với lệnh kế tiếp[^kprobe-post].
+2. Khi CPU chạm breakpoint thì trap xảy ra, thanh ghi được lưu, quyền điều khiển qua kprobes, và kprobes gọi `pre_handler`[^kprobe-trap].
+3. Kprobes chạy từng bước (single-step) bản *sao* của lệnh gốc, không chạy tại chỗ. Lý do là chạy tại chỗ thì phải gỡ breakpoint tạm thời, và việc đó mở một cửa sổ nhỏ cho CPU khác chạy lọt qua điểm móc[^kprobe-singlestep].
+4. Sau đó kprobes gọi `post_handler` (nếu có) và tiếp tục với lệnh kế tiếp[^kprobe-post].
 
-*Kretprobe (móc lúc hàm trả về).* `register_kretprobe()` đặt một kprobe ở đầu hàm; khi hàm được gọi, kprobes lưu địa chỉ trả về và thay bằng địa chỉ một "trampoline"; khi hàm `ret`, trampoline bị chạm, handler trả về được gọi, rồi kprobes nhảy về địa chỉ trả về đã lưu[^kretprobe-how].
+Kprobe chỉ bắt được lúc *vào* hàm. Để bắt lúc hàm trả về, ta dùng kretprobe: `register_kretprobe()` đặt một kprobe ở đầu hàm, lưu địa chỉ trả về của hàm rồi thay bằng địa chỉ một "trampoline". Khi hàm `ret`, trampoline bị chạm, handler trả về được gọi, rồi kprobes nhảy về địa chỉ trả về đã lưu[^kretprobe-how].
 
-*Uprobe.* Tương tự kprobe nhưng cho user space[^uprobe-similar]. Điểm khác nằm ở cách chỉ định vị trí: giao diện uprobe event yêu cầu người dùng tự tính offset của điểm móc trong object[^uprobe-offset]; cú pháp là `p[:[GRP/][EVENT]] PATH:OFFSET [FETCHARGS]`, với `PATH` là đường dẫn tới file thực thi hoặc thư viện[^uprobe-syntax][^uprobe-path]. Ví dụ trong tài liệu: `zfree` trong `/bin/zsh` nằm ở địa chỉ `0x446420`, object được nạp ở `0x00400000`, nên offset là `0x46420`[^uprobe-zsh-ex]. Bộ nhớ lấy ra từ uprobe chỉ có thể là user space[^uprobe-usermem].
+### 3.3 Uprobe
 
-Ba cách giao tiếp với các điểm móc này (đều nằm trong tài liệu đã đọc): qua tracefs (`kprobe_events`, `uprobe_events`, hay `dynamic_events` thống nhất cả hai[^kprobetrace-dynamic][^uprobe-dynamic]); qua `perf_event_open` với PMU động `kprobe`/`uprobe` (từ Linux 4.17)[^pe-kuprobe-pmu]; hoặc qua eBPF (mục 4).
+Uprobe giống kprobe nhưng dành cho user space[^uprobe-similar]. Điểm khác nằm ở cách chỉ định vị trí: giao diện uprobe event yêu cầu bạn tự tính offset của điểm móc trong object[^uprobe-offset]. Cú pháp là `p[:[GRP/][EVENT]] PATH:OFFSET [FETCHARGS]`[^uprobe-syntax]. Trong đó `PATH` là đường dẫn tới file thực thi hoặc thư viện[^uprobe-path]. Ví dụ trong tài liệu: `zfree` trong `/bin/zsh` nằm ở địa chỉ `0x446420` và object được nạp ở `0x00400000`, nên offset là `0x46420`[^uprobe-zsh-ex]. Bộ nhớ lấy ra từ uprobe chỉ có thể là user space[^uprobe-usermem].
+
+Với `orders`, uprobe cho bạn móc vào một hàm Rust của chính service, miễn là bạn tìm được symbol và offset của nó. Mục 9 nói chuyện đó khó đến đâu với binary Rust.
+
+### 3.4 Ba loại, đặt cạnh nhau
 
 | | Tracepoint | Kprobe | Uprobe |
 |---|---|---|---|
 | Ai đặt điểm móc | Dev kernel, lúc viết code[^tp-hook] | Bạn, lúc chạy[^kprobe-intro] | Bạn, lúc chạy[^uprobe-similar] |
-| Phạm vi | Chỗ dev kernel đã chọn | "Hầu như mọi" lệnh kernel, trừ blacklist[^kprobe-blacklist] | File thực thi/thư viện user space[^uprobe-path] |
-| Đối số | Có kiểu theo prototype khai báo[^tp-proto] | Lấy từ thanh ghi (`$argN`, "best effort"; đối số truyền qua stack không được hỗ trợ)[^kprobetrace-arg-best] | Lấy từ thanh ghi/bộ nhớ user space[^uprobe-fetch] |
-| Ổn định giữa các bản kernel/binary | Theo man page bpftrace, tracepoint *thường* có giao diện ổn định hơn kprobe[^bt-tracepoint-stable]; nhưng kernel không cam kết ABI[^qa-tp-abi] | Không cam kết[^qa-kprobe-abi] | Phụ thuộc symbol của binary; xem mục 9 |
+| Phạm vi | Chỗ dev kernel đã chọn | "Hầu như mọi" lệnh kernel, trừ blacklist[^kprobe-blacklist] | File thực thi hoặc thư viện user space[^uprobe-path] |
+| Đối số | Có kiểu theo prototype khai báo[^tp-proto] | Lấy từ thanh ghi (`$argN`, "best effort"; đối số truyền qua stack không được hỗ trợ)[^kprobetrace-arg-best] | Lấy từ thanh ghi hoặc bộ nhớ user space[^uprobe-fetch] |
+| Ổn định giữa các bản kernel/binary | Kernel không cam kết ABI[^qa-tp-abi] | Không cam kết[^qa-kprobe-abi] | Phụ thuộc symbol của binary; xem mục 9 |
 
-(Dòng cuối của bảng dựa trên ba nguồn nói ở hai mức khác nhau, nên không mâu thuẫn: man page bpftrace nói tracepoint *thường* có giao diện ổn định hơn kprobe vì không phụ thuộc việc một hàm kernel còn tồn tại[^bt-tracepoint-stable]; tutorial bpftrace viết gọn hơn là tracepoint "có API ổn định"[^bttut-tp-stable]; còn tài liệu BPF design Q&A của kernel nói rõ tracepoint **không** thuộc ABI ổn định và có thể vỡ ở kernel mới[^qa-tp-abi]. Cách đọc (suy luận của người soạn): chữ "ổn định" của bpftrace là so sánh tương đối với kprobe, cách nói tuyệt đối của tutorial là diễn đạt giản lược; khi hai bên lệch nhau thì lấy tài liệu kernel làm chuẩn — tracepoint ít đổi hơn tên hàm nội bộ, nhưng đừng coi là hợp đồng cứng.)
+Có ba cách giao tiếp với các điểm móc này. Cách thứ nhất là qua tracefs: kprobe dùng `kprobe_events`, uprobe dùng `uprobe_events`, còn `dynamic_events` gom chúng lại thành một giao diện thống nhất[^kprobetrace-dynamic]. Uprobe-tracer cũng nói y như vậy về giao diện đó[^uprobe-dynamic]. Cách thứ hai là `perf_event_open` với PMU động `kprobe`/`uprobe` (từ Linux 4.17)[^pe-kuprobe-pmu]. Cách thứ ba là qua eBPF (mục 4).
+
+Về độ ổn định, man page bpftrace nói tracepoint *thường* có giao diện ổn định hơn kprobe, vì nó không phụ thuộc việc một hàm kernel còn tồn tại[^bt-tracepoint-stable]. Nhưng tài liệu BPF của kernel nói rõ tracepoint gắn với chi tiết cài đặt nội bộ nên có thể vỡ ở kernel mới[^qa-tp-abi]. Cách đọc (suy luận của người soạn): "ổn định" của bpftrace là so sánh tương đối với kprobe, còn khi hai bên lệch nhau thì lấy tài liệu kernel làm chuẩn. Tracepoint ít đổi hơn tên hàm nội bộ, nhưng đừng coi nó là hợp đồng cứng.
 
 <details><summary>Đi sâu: tối ưu bằng lệnh nhảy, blacklist, return probe và phần tử "stable"</summary>
 
-- *Jump optimization.* Nếu kernel build với `CONFIG_OPTPROBES=y` (tự bật trên x86/x86-64 với kernel non-preemptive) và tham số `debug.kprobes_optimization` bằng 1, kprobes cố giảm chi phí mỗi hit bằng cách dùng lệnh nhảy thay vì breakpoint tại điểm móc[^kprobe-optimize]. Khi đăng ký, kprobes luôn đặt kprobe breakpoint thường trước; nếu không tối ưu được thì vẫn có probe ở đó[^kprobe-optinit].
+- *Jump optimization.* Nếu kernel build với `CONFIG_OPTPROBES=y` (tự bật trên x86/x86-64 với kernel non-preemptive) và tham số `debug.kprobes_optimization` bằng 1, kprobes cố giảm chi phí mỗi hit bằng cách dùng lệnh nhảy thay vì breakpoint tại điểm móc[^kprobe-optimize]. Khi đăng ký, kprobes luôn đặt kprobe breakpoint thường trước, nên nếu không tối ưu được thì vẫn có probe ở đó[^kprobe-optinit].
 - *Blacklist.* Kprobes không probe được chính nó: probe vào những hàm đó có thể gây trap đệ quy (ví dụ double fault) hoặc handler lồng không bao giờ được gọi[^kprobe-blacklist-why]. Kprobes kiểm tra địa chỉ với blacklist và từ chối đăng ký nếu trúng[^kprobe-blacklist]. Phiên bản event của kprobe nói rõ: probe được ở đâu kprobes probe được, tức mọi hàm trừ những hàm có chú thích `__kprobes`/`nokprobe_inline` và `NOKPROBE_SYMBOL`[^kprobetrace-where].
-- *`maxactive` của kretprobe.* Số instance của hàm có thể được probe đồng thời; đặt quá thấp thì chỉ mất probe, trường `nmissed` đếm số lần thiếu instance[^kretprobe-nmissed].
-- *Đối số.* Fetcharg `$argN` của kprobe event chỉ cho probe ở đầu hàm (offset 0) và là "best effort" vì tùy kiểu mà đối số có thể nằm trên stack; chỉ hỗ trợ đối số truyền qua thanh ghi[^kprobetrace-arg-best]. Với bpftrace, `arg0`, `arg1`… lấy từ thanh ghi CPU, số đối số trong thanh ghi phụ thuộc kiến trúc[^bt-arg-regs]; bpftrace không nhận ra chữ ký hàm nên không biết số lượng/kiểu đối số, người dùng phải tự ép kiểu[^bt-no-signature]. Bẫy kinh điển: đối số số thực (floating point) thường đi qua thanh ghi riêng nên không đếm vào `argN` — theo ví dụ của man page, trong hàm `func(int a, double d, int x)` thì `x` là `arg1` chứ không phải `arg2`[^bt-float-arg].
-- *Offset uprobe và ASLR.* Trong ví dụ zsh, tài liệu gọi `0x46420` là offset của `zfree` trong object `/bin/zsh`, object được nạp ở `0x00400000`[^uprobe-zsh-ex]; hiệu `0x446420 − 0x400000` trong ví dụ cho đúng giá trị đó, nhưng đó là cách tính của ví dụ này, không phải công thức chung cho mọi binary (suy luận của người soạn). Tài liệu bpftrace nói riêng về việc cache symbol: mặc định chỉ cache kết quả phân giải symbol khi ASLR (ngẫu nhiên hóa bố cục bộ nhớ) tắt[^bt-aslr-cache] — lý do (suy luận của người soạn): địa chỉ symbol có thể đổi giữa các lần chạy khi ASLR bật. Bpftrace cho phép viết `uprobe:binary:func`, và với thư viện chỉ cần tên thư viện, đường dẫn được phân giải qua `/etc/ld.so.cache`[^bt-uprobe-syntax][^bt-uprobe-lib].
+- *`maxactive` của kretprobe.* Đây là số instance của hàm có thể được probe đồng thời; đặt quá thấp thì chỉ mất probe, không phải thảm họa[^kretprobe-nmissed].
+- *Đối số của kprobe.* Fetcharg `$argN` của kprobe event chỉ cho probe ở đầu hàm (offset 0) và là "best effort", vì tùy kiểu mà đối số có thể nằm trên stack; chỉ đối số truyền qua thanh ghi được hỗ trợ[^kprobetrace-arg-best].
+- *Đối số trong bpftrace.* `arg0`, `arg1`… lấy từ thanh ghi CPU[^bt-arg-regs]. bpftrace không nhận ra chữ ký hàm nên không biết số lượng hay kiểu đối số, người dùng phải tự ép kiểu[^bt-no-signature]. Bẫy kinh điển: đối số số thực thường đi qua thanh ghi riêng nên không đếm vào `argN`. Theo ví dụ của man page, trong hàm `func(int a, double d, int x)` thì `x` là `arg1` chứ không phải `arg2`[^bt-float-arg].
+- *Offset uprobe và ASLR.* Trong ví dụ zsh, tài liệu gọi `0x46420` là offset của `zfree` trong object `/bin/zsh`, object được nạp ở `0x00400000`[^uprobe-zsh-ex]. Hiệu `0x446420 − 0x400000` cho đúng giá trị đó, nhưng đó là cách tính của ví dụ này, không phải công thức chung cho mọi binary (suy luận của người soạn). Về cache symbol, bpftrace mặc định chỉ cache kết quả phân giải symbol khi ASLR (ngẫu nhiên hóa bố cục bộ nhớ) tắt[^bt-aslr-cache]; lý do (suy luận của người soạn) là địa chỉ symbol có thể đổi giữa các lần chạy khi ASLR bật. bpftrace cho viết `uprobe:binary:func`[^bt-uprobe-syntax]. Với thư viện, chỉ cần tên thư viện thay vì đường dẫn đầy đủ[^bt-uprobe-lib].
 - *Uretprobe cũng thay địa chỉ trả về.* Để uretprobe hoạt động, kernel chạy một helper đặc biệt ở đầu hàm user space để ghi đè địa chỉ trả về trên stack; tài liệu bpftrace nêu rằng điều này gây vấn đề với các ngôn ngữ có runtime riêng như Go (kèm ví dụ crash)[^bt-uretprobe-go]. Tài liệu không nói gì về Rust ở điểm này, nên chương này không khẳng định.
+- *Ba nguồn nói về "ổn định".* Tutorial bpftrace viết gọn hơn man page: tracepoint "có API ổn định"[^bttut-tp-stable]. Đó là cách nói giản lược; xem đoạn so sánh ngay trước phần Đi sâu này.
 
 </details>
 
-**Quay lại Q3:** tracepoint = điểm móc có sẵn, đặt bởi dev kernel, gần như miễn phí khi tắt; kprobe/uprobe = chèn breakpoint động vào gần như mọi lệnh, linh hoạt nhưng gắn với chi tiết cài đặt và (với uprobe) cần offset do bạn cung cấp.
+**Quay lại Q3:** tracepoint là điểm móc có sẵn do dev kernel đặt, gần như miễn phí khi tắt; kprobe/uprobe chèn breakpoint động vào gần như mọi lệnh, linh hoạt nhưng gắn với chi tiết cài đặt và (với uprobe) cần offset do bạn cung cấp.
 
 ## 4. eBPF: chương trình nhỏ chạy trong kernel (Q4)
 
-> **Trả lời ngắn.** eBPF cho phép user nạp vào kernel một chương trình nhỏ qua syscall `bpf()`; trước khi chạy, *verifier* trong kernel phân tích tĩnh để bảo đảm chương trình kết thúc và an toàn[^bpf-safe]. Chương trình được gắn vào các sự kiện (packet, tracing…)[^bpf-events], chỉ được gọi một tập *helper* cố định của kernel[^bpf-helpers-fixed], và trao đổi dữ liệu với user space hoặc với chương trình khác qua *map*[^bpf-map-exchange]. Kết quả: bạn tracing/lọc/tổng hợp ngay trong kernel mà không phải viết kernel module.
+> **Trả lời ngắn.** eBPF cho phép user nạp vào kernel một chương trình nhỏ qua syscall `bpf()`. Trước khi chạy, *verifier* trong kernel phân tích tĩnh để bảo đảm chương trình kết thúc và an toàn[^bpf-safe]. Chương trình gắn vào các sự kiện như packet đến hay tracing event[^bpf-events]. Nó chỉ được gọi một tập *helper* cố định, tức các hàm có sẵn trong kernel[^bpf-helpers-fixed]. Nó trao đổi dữ liệu với user space hoặc với chương trình khác qua *map*, tức bảng key/value[^bpf-map-exchange]. Nhờ vậy bạn tracing, lọc, tổng hợp ngay trong kernel mà không cần viết kernel module (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): eBPF giống plugin chạy trong sandbox của trình duyệt: bạn viết plugin, trình duyệt kiểm tra kỹ rồi mới cho chạy, và plugin chỉ được gọi các API mà trình duyệt mở cho nó. Khác ở chỗ "trình duyệt" ở đây là kernel, và plugin chạy ở những điểm cực nóng (mỗi packet, mỗi syscall).
+*Với service `orders`.* Ở mục 1, để thấy request nào chậm bạn cần tracing, nghĩa là chạy handler mỗi lần sự kiện xảy ra. Nhưng nếu mỗi lần như vậy bạn đẩy một event ra user space rồi mới tính toán, `orders` sẽ gánh cả chi phí chuyển dữ liệu (nhận xét của người soạn). eBPF giải bài đó: bạn nạp một đoạn code nhỏ vào kernel để nó tự cộng dồn, ví dụ "mỗi lần `orders` gọi `read`, ghi lại mất bao lâu" thành histogram, và user space chỉ đọc kết quả cuối. Vì đoạn code đó chạy trong kernel, kernel phải chắc nó không làm hỏng máy. Mục này kể lại các mảnh ghép làm việc đó.
 
 ```mermaid
 flowchart LR
@@ -171,48 +204,77 @@ flowchart LR
   maps <-->|"bpf(MAP_LOOKUP_ELEM...)"| us["User space đọc/ghi"]
 ```
 
-(Sơ đồ trên là tổng hợp của người soạn từ các mảnh ghép 1–7 bên dưới, mỗi mảnh có nguồn riêng; mũi tên "Verifier → JIT" và thứ tự các bước là cách vẽ của người soạn.)
+(Sơ đồ trên là tổng hợp của người soạn từ các mảnh ghép 4.1–4.7 bên dưới, mỗi mảnh có nguồn riêng; mũi tên "Verifier → JIT" và thứ tự các bước là cách vẽ của người soạn.)
 
-*Các mảnh ghép, từng cái một:*
+### 4.1 Nạp chương trình
 
-1. **Chương trình và syscall.** `bpf()` là syscall thực hiện nhiều thao tác liên quan tới extended BPF[^bpf-syscall]; dùng `BPF_PROG_LOAD` để verify và nạp chương trình, trả về một file descriptor gắn với chương trình[^bpf-progload]. (Về syscall nói chung xem [Phase 1 · Chương 02](../01-linux/02-system-call.md).) Chương trình có thể viết bằng một dạng C bị hạn chế, biên dịch bằng clang thành bytecode eBPF[^bpf-restricted-c]. Mô tả này đến từ man page bản bookworm (khá cũ): nó liệt kê vòng lặp, biến toàn cục, số thực… là các tính năng bị bỏ[^bpf-restricted-c]; để biết bản kernel hiện hành cho phép gì, phải đọc thêm tài liệu kernel — chương này không khẳng định về các giới hạn đó ngoài vòng lặp (xem mục Verifier ngay dưới, nơi có ghi chú về bounded loop).
-2. **Verifier.** Theo tài liệu kernel, an toàn được xác định qua hai bước: bước đầu kiểm tra DAG để cấm vòng lặp và các lỗi đồ thị luồng điều khiển khác (phát hiện cả lệnh không với tới được)[^ver-dag]; bước hai bắt đầu từ lệnh đầu tiên, đi qua mọi đường có thể, mô phỏng thực thi từng lệnh và theo dõi thay đổi của thanh ghi và stack[^ver-simulate]. (Mô tả "cấm vòng lặp" này đã cũ: một nguồn khác nói từ Linux 5.3 verifier đủ thông minh để chấp nhận vòng lặp mà nó chứng minh được là dừng, gọi là *bounded loop*[^ebpfdocs-loops].) Lệnh load/store chỉ cho phép với thanh ghi có kiểu con trỏ hợp lệ (context, map, stack) và bị kiểm tra biên và căn lề[^ver-ptr-types]. Truy cập map trả về loại "con trỏ có thể NULL", chỉ trở thành con trỏ dùng được sau khi kiểm tra khác NULL[^ver-map-null]. Ngoài ra verifier còn có các giới hạn tài nguyên nội bộ, ví dụ số lệnh tối đa được khám phá khi phân tích hiện đặt ở 1 triệu[^qa-verifier-limits], và stack tối đa 512 byte[^qa-stack-512].
-3. **Helper.** Helper là các hàm có sẵn trong kernel mà chương trình gọi, thuộc một danh sách trắng do kernel định nghĩa; mỗi program type chỉ gọi được một tập con[^helpers-whitelist]. Lời gọi helper được biên dịch gọi thẳng vào hàm kernel, không cần FFI, nên tài liệu nói không có overhead của lời gọi[^helpers-no-ffi]. Verifier kiểm tra thanh ghi khớp ràng buộc đối số của helper[^ver-func-args]. Một chương trình không thể gọi hàm kernel tùy ý[^qa-no-arbitrary-call] và không bao giờ đọc/ghi bộ nhớ tùy ý trực tiếp; chương trình tracing đọc bộ nhớ qua các helper `bpf_probe_read*`[^qa-no-arbitrary-mem]. Ví dụ các helper hay gặp khi tracing: đọc bộ nhớ user (`bpf_probe_read_user`)[^helper-read-user], lấy thời gian từ lúc boot theo nano-giây (`bpf_ktime_get_ns`)[^helper-ktime], lấy pid/tgid hiện tại[^helper-pidtgid].
-4. **Map.** Map là cấu trúc dữ liệu chung cho các loại dữ liệu khác nhau; key và value đối xử như blob nhị phân, bạn chỉ khai báo kích thước key/value lúc tạo[^bpf-map-generic]. Một process có thể tạo nhiều map và truy cập qua file descriptor; nhiều chương trình eBPF truy cập song song cùng một map được[^bpf-map-fd]. Có nhiều kiểu (hash, array, bloom filter, radix tree…)[^maps-types]. Chương trình truy cập map qua helper, còn user space qua syscall `bpf` với các lệnh tạo/tra/cập nhật/xóa[^maps-access]. Verifier dùng `key_size`/`value_size` để từ chối chương trình đọc ngoài biên giá trị[^bpf-map-verify].
-5. **Program type.** Kiểu chương trình (`prog_type`) quyết định tập con helper được gọi, và quyết định "đầu vào" (context): chương trình tracing nhận một tập giá trị thanh ghi, còn socket filter nhận packet mạng[^bpf-progtype-ctx]. Man page liệt kê, trong số đó, `BPF_PROG_TYPE_KPROBE` và `BPF_PROG_TYPE_TRACEPOINT`[^bpf-progtype-list].
-6. **Attach point.** Sau khi nạp, chương trình gắn vào một sự kiện tùy hệ con của kernel; với perf event thì gắn bằng `ioctl(event_fd, PERF_EVENT_IOC_SET_BPF, prog_fd)` lên fd do `perf_event_open(2)` tạo (từ Linux 4.1)[^bpf-attach-perf]. libbpf thêm một lớp tiện lợi: tên section ELF mô tả cách tự gắn, ví dụ `kprobe/<function>[+<offset>]`[^libbpf-kprobe], `uprobe/<path>:<function>[+<offset>]`[^libbpf-uprobe], `usdt/<path>:<provider>:<name>`[^libbpf-usdt].
-7. **Vòng đời.** Chương trình thường do process nạp, tự gỡ khi process thoát; có trường hợp (như `tc-bpf`) còn sống trong kernel nhờ subsystem giữ tham chiếu[^bpf-lifetime]. Một object eBPF chỉ bị giải phóng khi mọi file descriptor tham chiếu tới nó đã đóng[^bpf-object-fd].
+`bpf()` là syscall thực hiện nhiều thao tác liên quan tới extended BPF[^bpf-syscall]. Để nạp chương trình, bạn dùng `BPF_PROG_LOAD`: kernel verify rồi nạp chương trình, trả về một file descriptor gắn với chương trình đó[^bpf-progload]. (Về syscall nói chung xem [Phase 1 · Chương 02](../01-linux/02-system-call.md).) Chương trình viết bằng một dạng C bị hạn chế, rồi clang biên dịch thành bytecode eBPF[^bpf-restricted-c]. Mô tả này đến từ man page bản bookworm, khá cũ; muốn biết kernel hiện hành cho phép những gì trong C bị hạn chế thì phải đọc thêm tài liệu kernel, và chương này không khẳng định gì về các giới hạn đó ngoài vòng lặp (xem mục 4.2).
 
-<details><summary>Đi sâu: theo dõi kiểu giá trị, JIT, ABI, license, BTF/CO-RE</summary>
+### 4.2 Verifier: kernel không tin chương trình bạn nạp
 
-- *Theo dõi giá trị thanh ghi.* Verifier theo dõi khoảng giá trị có thể của từng thanh ghi và từng ô stack bằng `struct bpf_reg_state`; mỗi thanh ghi có kiểu: `NOT_INIT`, `SCALAR_VALUE`, hoặc một kiểu con trỏ như `PTR_TO_CTX`, `PTR_TO_STACK`, `PTR_TO_MAP_VALUE`[^ver-regstate]. Thanh ghi chưa từng được ghi thì không đọc được[^ver-unreadable]. Ở đầu chương trình, `R1` chứa con trỏ tới context (kiểu `PTR_TO_CTX`)[^ver-r1-ctx]; sau lời gọi hàm kernel, `R1–R5` bị reset thành không đọc được còn `R0` mang kiểu trả về; `R6–R9` do callee lưu nên giữ nguyên qua lời gọi[^ver-callee].
-- *Gọi helper và quy ước C.* eBPF thiết kế để JIT một-một sang thanh ghi phần cứng: toàn bộ thanh ghi eBPF ánh xạ 1-1 sang thanh ghi phần cứng trên x86_64, aarch64…[^cl-reg-map] Chương trình chỉ có một đối số `ctx` đặt sẵn ở `R1` và gọi hàm kernel với tối đa 5 đối số[^cl-ctx-r1]; helper cũng không thể có quá năm đối số theo quy ước eBPF[^helpers-five-args].
-- *JIT.* Kernel có trình biên dịch JIT dịch bytecode eBPF sang mã máy để chạy nhanh hơn; trước Linux 4.15 JIT tắt mặc định (bật bằng `/proc/sys/net/core/bpf_jit_enable`)[^bpf-jit]. (Mô tả này từ man page bản bookworm; các kernel mới có thể cấu hình khác — ví dụ từ Linux 4.15 tồn tại tùy chọn `CONFIG_BPF_JIT_ALWAYS_ON` bật JIT cố định[^bpf-jit-always].)
-- *Giữ ổn định và ngoại lệ.* Tài liệu BPF Q&A nói lệnh BPF, đối số truyền vào chương trình, tập helper và đối số của chúng, các mã trả về đều thuộc ABI ổn định; ngoại lệ là chương trình tracing dùng `bpf_probe_read()` để duyệt cấu trúc dữ liệu nội bộ kernel và biên dịch với header nội bộ — chúng có thể vỡ khi kernel đổi[^qa-abi-exception]. Chức năng mới thường được thêm qua kfunc chứ không qua helper mới, và kfunc không thuộc API ổn định[^qa-kfunc].
+Verifier xác định chương trình an toàn qua hai bước. Bước đầu kiểm tra DAG để cấm vòng lặp và các lỗi đồ thị luồng điều khiển khác, trong đó có việc phát hiện lệnh không với tới được[^ver-dag]. Bước hai bắt đầu từ lệnh đầu tiên, đi qua mọi đường có thể, mô phỏng thực thi từng lệnh và theo dõi thay đổi của thanh ghi và stack[^ver-simulate]. Mô tả "cấm vòng lặp" này đã cũ: một nguồn khác nói từ Linux 5.3 verifier đủ thông minh để chấp nhận vòng lặp mà nó chứng minh được là dừng, gọi là *bounded loop*[^ebpfdocs-loops].
+
+Hai quy tắc làm verifier hữu ích cho người dùng. Thứ nhất, lệnh load/store chỉ được phép với thanh ghi có kiểu con trỏ hợp lệ (context, map, stack), và bị kiểm tra biên lẫn căn lề[^ver-ptr-types]. Thứ hai, truy cập map trả về một loại "con trỏ có thể NULL", chỉ trở thành con trỏ dùng được sau khi bạn kiểm tra khác NULL[^ver-map-null]. Tức là chương trình tracing của bạn phải tự kiểm tra lúc tra map không ra gì.
+
+### 4.3 Helper: lối duy nhất ra khỏi sandbox
+
+Helper là các hàm có sẵn trong kernel mà chương trình gọi. Chúng thuộc một danh sách trắng do kernel định nghĩa, và mỗi program type chỉ gọi được một tập con[^helpers-whitelist]. Lời gọi helper được biên dịch gọi thẳng vào hàm kernel, không cần FFI, nên tài liệu nói không có overhead của lời gọi[^helpers-no-ffi]. Verifier kiểm tra thanh ghi khớp ràng buộc đối số của helper[^ver-func-args].
+
+Ngoài helper và kfunc, chương trình không gọi được hàm kernel nào khác[^qa-no-arbitrary-call]. Muốn đọc bộ nhớ tùy ý, chương trình tracing phải đi qua các helper `bpf_probe_read()` và `bpf_probe_read_str()`[^qa-no-arbitrary-mem]. Một vài helper hay gặp khi tracing. `bpf_probe_read_user` đọc bộ nhớ user[^helper-read-user]. `bpf_ktime_get_ns` trả thời gian từ lúc boot theo nano-giây[^helper-ktime]. Một helper khác trả về tgid và pid hiện tại[^helper-pidtgid].
+
+### 4.4 Map: nơi chương trình giữ và trao đổi dữ liệu
+
+Map là cấu trúc dữ liệu chung cho nhiều loại dữ liệu khác nhau[^bpf-map-generic]. Key và value đối xử như blob nhị phân, bạn chỉ khai báo kích thước của chúng lúc tạo map. Nhiều chương trình eBPF truy cập song song cùng một map được[^bpf-map-fd]. Có nhiều kiểu map: hash, array, bloom filter, radix tree…[^maps-types]
+
+Chương trình truy cập map qua helper, còn user space truy cập qua syscall `bpf` với các lệnh tạo, tra, cập nhật và xóa[^maps-access]. Verifier dùng `key_size` và `value_size` để từ chối chương trình đọc ngoài biên giá trị[^bpf-map-verify]. Ở ví dụ `orders`, map là chỗ histogram được cộng dồn trong kernel, rồi user space đọc ra.
+
+### 4.5 Program type: quyết định chương trình thấy gì
+
+Kiểu chương trình (`prog_type`) quyết định tập con helper được gọi, và quyết định "đầu vào" (context) của chương trình[^bpf-progtype-ctx]. Ví dụ chương trình tracing nhận một tập giá trị thanh ghi, còn socket filter nhận packet mạng[^bpf-progtype-ctx]. Trong số các kiểu mà man page liệt kê có `BPF_PROG_TYPE_KPROBE` và `BPF_PROG_TYPE_TRACEPOINT`[^bpf-progtype-list].
+
+### 4.6 Attach point: quyết định chương trình chạy khi nào
+
+Sau khi nạp, chương trình phải gắn vào một sự kiện; cách gắn tùy hệ con của kernel. Với perf event, bạn gắn bằng `ioctl(event_fd, PERF_EVENT_IOC_SET_BPF, prog_fd)` lên fd do `perf_event_open(2)` tạo, từ Linux 4.1[^bpf-attach-perf].
+
+libbpf thêm một lớp tiện lợi: tên section ELF mô tả cách tự gắn. Với kprobe, định dạng là `kprobe/<function>[+<offset>]`[^libbpf-kprobe]. Với uprobe là `uprobe/<path>:<function>[+<offset>]`[^libbpf-uprobe]. Với USDT là `usdt/<path>:<provider>:<name>`[^libbpf-usdt].
+
+### 4.7 Vòng đời
+
+Chương trình thường do process nạp và tự gỡ khi process đó thoát; có trường hợp như `tc-bpf` thì nó còn sống trong kernel nhờ subsystem giữ tham chiếu[^bpf-lifetime]. Một object eBPF chỉ bị giải phóng khi mọi file descriptor tham chiếu tới nó đã đóng[^bpf-object-fd].
+
+<details><summary>Đi sâu: giới hạn verifier, theo dõi kiểu giá trị, JIT, ABI, license, BTF/CO-RE</summary>
+
+- *Giới hạn tài nguyên.* Verifier có các giới hạn nội bộ. Số lệnh tối đa được khám phá khi phân tích hiện đặt ở 1 triệu[^qa-verifier-limits]. Mọi program type bị giới hạn 512 byte stack[^qa-stack-512].
+- *Theo dõi giá trị thanh ghi.* Verifier theo dõi khoảng giá trị có thể của từng thanh ghi và từng ô stack bằng `struct bpf_reg_state`[^ver-regstate]. Thanh ghi chưa từng được ghi thì không đọc được[^ver-unreadable]. Ở đầu chương trình, `R1` chứa con trỏ tới context (kiểu `PTR_TO_CTX`)[^ver-r1-ctx]. Sau lời gọi hàm kernel, `R1–R5` bị reset thành không đọc được còn `R0` mang kiểu trả về; `R6–R9` do callee lưu nên giữ nguyên qua lời gọi[^ver-callee].
+- *Gọi helper và quy ước C.* eBPF thiết kế để JIT một-một sang thanh ghi phần cứng: toàn bộ thanh ghi eBPF ánh xạ 1-1 sang thanh ghi phần cứng trên x86_64, aarch64…[^cl-reg-map] Chương trình chỉ có một đối số `ctx` đặt sẵn ở `R1`[^cl-ctx-r1]. Theo quy ước eBPF, một helper cũng không thể có quá năm đối số[^helpers-five-args].
+- *JIT.* Kernel có trình biên dịch JIT dịch bytecode eBPF sang mã máy để chạy nhanh hơn; trước Linux 4.15 JIT tắt mặc định[^bpf-jit]. Đó là mô tả từ man page bản bookworm; kernel mới có thể cấu hình khác, ví dụ từ Linux 4.15 tồn tại tùy chọn `CONFIG_BPF_JIT_ALWAYS_ON`[^bpf-jit-always].
+- *Giữ ổn định và ngoại lệ.* Ngoại lệ với ABI ổn định là chương trình tracing dùng `bpf_probe_read()` để duyệt cấu trúc dữ liệu nội bộ kernel và biên dịch với header nội bộ; loại chương trình này có thể vỡ khi kernel đổi[^qa-abi-exception]. Chức năng mới thường được thêm qua kfunc chứ không qua helper mới, và kfunc không thuộc API ổn định[^qa-kfunc].
 - *License.* Chuỗi license khi nạp phải tương thích GPL thì mới gọi được các helper đánh dấu `gpl_only`[^bpf-license].
-- *Log verifier.* Có thể yêu cầu log để hiểu vì sao chương trình bị coi là không an toàn; định dạng log có thể đổi bất cứ lúc nào khi verifier tiến hóa[^bpf-vlog].
-- *BTF và CO-RE.* BTF là định dạng metadata mã hóa thông tin debug liên quan tới chương trình/map BPF[^btf-def]. libbpf dùng BTF cùng compiler để hỗ trợ CO-RE (Compile Once – Run Everywhere): một binary chạy được trên nhiều phiên bản/cấu hình kernel[^co-re]. Đây là lời giải của cộng đồng BPF cho vấn đề "chương trình tracing đọc cấu trúc nội bộ kernel dễ vỡ" nêu ở trên (suy luận của người soạn: dựa trên sự kết hợp của hai mục trích dẫn).
+- *Log verifier.* Bạn có thể yêu cầu log để hiểu vì sao chương trình bị coi là không an toàn; định dạng log có thể đổi bất cứ lúc nào khi verifier tiến hóa[^bpf-vlog].
+- *BTF và CO-RE.* BTF là định dạng metadata mã hóa thông tin debug liên quan tới chương trình/map BPF[^btf-def]. libbpf dùng BTF cùng compiler để hỗ trợ CO-RE (Compile Once – Run Everywhere): một binary chạy được trên nhiều phiên bản và cấu hình kernel[^co-re]. Đây là lời giải của cộng đồng BPF cho bài toán "chương trình tracing đọc cấu trúc nội bộ kernel dễ vỡ" nêu ở trên (suy luận của người soạn, ghép từ hai nguồn trích).
 
 </details>
 
-**Quay lại Q4:** eBPF = chương trình nạp qua `bpf()`, được verifier duyệt, gắn vào hook, gọi helper có kiểm soát, trao đổi dữ liệu qua map; program type quyết định context + helper, attach point quyết định *khi nào* nó chạy.
+**Quay lại Q4:** eBPF là chương trình nạp qua `bpf()`, được verifier duyệt, gắn vào hook, gọi helper có kiểm soát và trao đổi dữ liệu qua map; program type quyết định context và helper, attach point quyết định *khi nào* nó chạy.
 
 ## 5. Đọc một one-liner bpftrace (Q5)
 
-> **Trả lời ngắn.** bpftrace là ngôn ngữ tracing bậc cao chạy trên BPF, hỗ trợ cả tracing tĩnh lẫn động cho kernel và user space[^bt-desc]. Mỗi chương trình gồm các *action block* có dạng `probe /predicate/ { action }`: probe nói *khi nào* chạy, predicate (tùy chọn) là điều kiện lọc, action là code chạy[^bt-structure]. Đọc one-liner = đọc ba phần đó từ trái sang phải rồi tra xem biến nào là map (`@`), biến nào là builtin (`pid`, `comm`, `args->…`).
+> **Trả lời ngắn.** bpftrace là ngôn ngữ tracing bậc cao chạy trên BPF, hỗ trợ cả tracing tĩnh lẫn động cho kernel và user space[^bt-desc]. Mỗi chương trình gồm các *action block* có dạng `probe /predicate/ { action }`[^bt-structure]: probe nói *khi nào* chạy, predicate (tùy chọn) là điều kiện lọc, action là code chạy. Đọc một one-liner là đọc ba phần đó từ trái sang phải, rồi tra xem biến nào là map (`@`), biến nào là builtin (`pid`, `comm`, `args->…`).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): one-liner bpftrace giống một câu truy vấn SQL cho sự kiện: `WHERE` là predicate, `FROM` là probe, còn phần `SELECT ... GROUP BY` là action ghi vào map. Khác SQL ở chỗ nó chạy *ngay trong kernel*, tại thời điểm sự kiện xảy ra.
+*Với service `orders`.* Bạn cần trả lời nhanh bốn câu hỏi về `orders`: nó mở những file nào, gọi syscall nào nhiều nhất, mỗi lần `vfs_read` mất bao lâu, và CPU đang ở đâu trong kernel. Mỗi câu là một dòng bpftrace. Bốn dòng dưới đây là one-liner của tutorial bpftrace, nên chúng chưa lọc theo process; trên host thật có nhiều process khác ngoài `orders`, và bạn sẽ thêm predicate lọc theo `comm` (nhận xét của người soạn). Trước hết cần biết cách đọc.
 
-*Khung đọc.*
+### 5.1 Khung đọc
 
-1. *Probe.* Mỗi probe bắt đầu bằng một *provider* (ví dụ `kprobe`) rồi tới danh sách option cách nhau bằng dấu `:`[^bt-probe-fmt]. Nhiều probe có thể dùng chung một action, và hỗ trợ wildcard (`kprobe:tcp_*`)[^bt-wildcard]. Muốn biết hệ thống hiện có probe nào thì dùng `bpftrace -l` với pattern[^bt-list]; thêm `-v` để xem các đối số (`args`)[^bt-list-v].
-2. *Predicate.* Điều kiện tùy chọn; chỉ khi thỏa thì action chạy[^bt-predicate].
-3. *Action.* Danh sách câu lệnh ngăn bằng `;` trong `{}`[^bt-action].
-4. *Biến.* Biến `$tên` là scratch, nằm trên BPF stack, chỉ tồn tại trong lúc action block chạy[^bt-scratch]; biến `@tên` là map, tồn tại suốt vòng đời của bpftrace và truy cập được từ mọi action block và user space[^bt-map-var]. Map có thể là mảng kết hợp `@name[key] = expression`[^bt-assoc]. Chương trình dừng khi Ctrl-C hoặc gọi `exit()`; khi thoát, mọi map đã có dữ liệu được in ra[^btref-print-maps].
+1. **Probe.** Mỗi probe bắt đầu bằng một *provider* (ví dụ `kprobe`) rồi tới danh sách option cách nhau bằng dấu `:`[^bt-probe-fmt]. Nhiều probe có thể dùng chung một action, và hỗ trợ wildcard như `kprobe:tcp_*`[^bt-wildcard]. Muốn biết hệ thống hiện có probe nào thì dùng `bpftrace -l` với pattern[^bt-list]. Thêm `-v` để xem các đối số (`args`)[^bt-list-v].
+2. **Predicate.** Đây là điều kiện tùy chọn; chỉ khi thỏa thì action mới chạy[^bt-predicate].
+3. **Action.** Là danh sách câu lệnh ngăn bằng `;`, đặt trong `{}`[^bt-action].
+4. **Biến.** Biến `$tên` là scratch, nằm trên BPF stack và chỉ tồn tại trong lúc action block chạy[^bt-scratch]. Biến `@tên` là map, tồn tại suốt vòng đời của bpftrace và truy cập được từ mọi action block lẫn user space[^bt-map-var]. Map có thể là mảng kết hợp `@name[key] = expression`[^bt-assoc]. Chương trình dừng khi Ctrl-C hoặc gọi `exit()`, và lúc thoát, mọi map đã có dữ liệu được in ra[^btref-print-maps].
 
-*Bốn one-liner (lấy từ tutorial bpftrace v0.17.0), đọc từng cái.*
+### 5.2 Bốn one-liner
+
+Bốn one-liner lấy từ tutorial bpftrace v0.17.0. Ta đọc từng cái.
 
 **(a) Mỗi lần mở file, in tên process và đường dẫn.**
 
@@ -220,9 +282,9 @@ Hình dung (nhận xét của người soạn): one-liner bpftrace giống một
 tracepoint:syscalls:sys_enter_openat { printf("%s %s\n", comm, str(args->filename)); }
 ```
 
-- Probe `tracepoint:syscalls:sys_enter_openat`: tracepoint (tracing tĩnh của kernel) tại lúc syscall `openat()` được *vào*[^bttut-openat]. Tutorial ưu tiên tracepoint hơn kprobe vì nói tracepoint có API ổn định[^bttut-tp-stable]; xem lưu ý ở mục 3: kernel không cam kết ABI cho tracepoint[^qa-tp-abi].
-- `comm` là builtin chứa tên process hiện tại[^bttut-comm]; `args->filename` lấy trường `filename` trong struct `args`, và `str()` đổi con trỏ thành chuỗi nó trỏ tới[^bttut-args-str]. Các trường của `args` xem được bằng `bpftrace -l ... -v`[^bt-tp-args].
-- Vì sao tracepoint tên `openat` chứ không phải `open`? Tutorial lưu ý: trên hệ Linux hiện đại (glibc ≥ 2.26) wrapper `open` luôn gọi syscall `openat`[^bttut-openat]. (Về quan hệ libc wrapper và syscall xem [Phase 1 · Chương 02](../01-linux/02-system-call.md).)
+- Probe `tracepoint:syscalls:sys_enter_openat` là tracepoint (tracing tĩnh của kernel) tại lúc syscall `openat()` được *vào*[^bttut-openat]. Tutorial ưu tiên tracepoint hơn kprobe vì nói tracepoint có API ổn định[^bttut-tp-stable]. Nhưng như mục 3 đã nói, kernel không cam kết ABI cho tracepoint[^qa-tp-abi].
+- `comm` là builtin chứa tên process hiện tại[^bttut-comm]. `args->filename` lấy trường `filename` trong struct `args`, và `str()` đổi con trỏ thành chuỗi nó trỏ tới[^bttut-args-str]. Các trường của `args` xem được bằng `bpftrace -l ... -v`[^bt-tp-args].
+- Vì sao tracepoint tên `openat` chứ không phải `open`? Tutorial lưu ý rằng trên hệ Linux hiện đại (glibc ≥ 2.26), wrapper `open` luôn gọi syscall `openat`[^bttut-openat]. (Về quan hệ giữa libc wrapper và syscall xem [Phase 1 · Chương 02](../01-linux/02-system-call.md).)
 
 **(b) Đếm syscall theo tên process.**
 
@@ -230,7 +292,7 @@ tracepoint:syscalls:sys_enter_openat { printf("%s %s\n", comm, str(args->filenam
 tracepoint:raw_syscalls:sys_enter { @[comm] = count(); }
 ```
 
-- `@` là map; `[comm]` là key (như mảng kết hợp); `count()` là hàm map đếm số lần được gọi, nên kết quả là tần suất syscall theo tên process; map tự in khi bpftrace kết thúc[^bttut-count].
+- `@` là map, `[comm]` là key (như mảng kết hợp), và `count()` là hàm map đếm số lần được gọi. Kết quả là tần suất syscall theo tên process, và map tự in khi bpftrace kết thúc[^bttut-count].
 - `count()` dùng một kiểu map tối ưu (PER_CPU) nên nhanh hơn `@++`; hệ quả là map đó không truy cập được như một số nguyên thường[^bt-count-percpu].
 
 **(c) Đo thời gian mỗi `vfs_read` (kprobe + kretprobe).**
@@ -240,12 +302,12 @@ kprobe:vfs_read { @start[tid] = nsecs; }
 kretprobe:vfs_read /@start[tid]/ { @ns[comm] = hist(nsecs - @start[tid]); delete(@start[tid]); }
 ```
 
-(Trong tutorial đây là một dòng; tách hai dòng cho dễ đọc.) Đọc theo thứ tự thực thi:
+Trong tutorial đây là một dòng; ở đây tách hai dòng cho dễ đọc. Đây là mẫu đo latency kinh điển, nên ta đọc theo thứ tự thực thi:
 
-- `kprobe:vfs_read` chạy lúc *vào* hàm; ghi `nsecs` (nano-giây kể từ boot[^bttut-nsecs]) vào map `@start`, khóa theo thread ID. Khóa theo `tid` được vì một thread kernel chỉ chạy một syscall tại một thời điểm[^bttut-tid-key].
-- `kretprobe:vfs_read` chạy lúc *ra*; predicate `/@start[tid]/` kiểm tra đã thấy lúc vào, tránh trường hợp bpftrace khởi động giữa lúc đang đọc nên chỉ bắt được lúc ra[^bttut-pred].
-- `hist(...)` tạo histogram log2[^bt-hist]; `delete(...)` giải phóng phần tử[^bttut-delete].
-- Vì sao phải lưu qua map? Return probe không có quyền truy cập đối số đầu vào của hàm, chỉ có giá trị trả về (`retval`); cách làm thường dùng là cất đối số vào map lúc vào hàm và lấy lại ở return probe[^bt-kretprobe-args]. Cùng lý do ta cần map để mang `nsecs` từ probe này sang probe kia (suy luận của người soạn).
+- `kprobe:vfs_read` chạy lúc *vào* hàm và ghi `nsecs` (nano-giây kể từ boot[^bttut-nsecs]) vào map `@start`. Khóa theo thread ID, và làm vậy được vì một thread kernel chỉ chạy một syscall tại một thời điểm[^bttut-tid-key].
+- `kretprobe:vfs_read` chạy lúc *ra*. Predicate `/@start[tid]/` kiểm tra đã thấy lúc vào hay chưa, để loại trường hợp bpftrace khởi động giữa lúc đang đọc nên chỉ bắt được lúc ra[^bttut-pred].
+- `hist(...)` tạo histogram log2[^bt-hist]. `delete(...)` giải phóng phần tử[^bttut-delete].
+- Vì sao phải lưu qua map? Return probe không có quyền truy cập đối số đầu vào của hàm, chỉ có giá trị trả về (`retval`); cách làm thường dùng là cất đối số vào map lúc vào hàm rồi lấy lại ở return probe[^bt-kretprobe-args]. Cùng lý do đó ta cần map để mang `nsecs` từ probe này sang probe kia (suy luận của người soạn).
 
 **(d) Sampling stack kernel ở 99 Hz.**
 
@@ -253,7 +315,7 @@ kretprobe:vfs_read /@start[tid]/ { @ns[comm] = hist(nsecs - @start[tid]); delete
 profile:hz:99 { @[kstack] = count(); }
 ```
 
-- `profile:hz:99` bắn trên mọi CPU ở 99 Hz[^bttut-99hz]; `kstack` là builtin trả về stack trace kernel, dùng làm key của map để đếm tần suất; kết quả hợp để vẽ flame graph[^bttut-kstack]. Đây chính là sampling của mục 1 và nối thẳng với [chương 01](01-perf-va-sampling-profiler.md).
+- `profile:hz:99` bắn trên mọi CPU ở 99 Hz[^bttut-99hz]. `kstack` là builtin trả về stack trace kernel, dùng làm key của map để đếm tần suất; kết quả hợp để vẽ flame graph[^bttut-kstack]. Đây chính là sampling của mục 1, nối thẳng với [chương 01](01-perf-va-sampling-profiler.md).
 
 **Một one-liner cho user space.** Từ man page bpftrace:
 
@@ -261,265 +323,296 @@ profile:hz:99 { @[kstack] = count(); }
 bpftrace -e 'uprobe:libc:malloc { printf("Allocated %d bytes\n", arg0); }'
 ```
 
-Với thư viện chỉ cần ghi tên thay vì đường dẫn đầy đủ[^bt-uprobe-lib]; `arg0` là đối số thứ nhất lấy từ thanh ghi[^bt-arg-regs].
+Với thư viện, chỉ cần ghi tên thay vì đường dẫn đầy đủ[^bt-uprobe-lib]. `arg0` là đối số thứ nhất, lấy từ thanh ghi[^bt-arg-regs].
 
 <details><summary>Đi sâu: những chỗ bpftrace âm thầm cho kết quả "lạ"</summary>
 
-- *Lỗi helper bị nuốt.* Mặc định lỗi từ các helper (`bpf-helpers(7)`) bị bỏ qua im lặng, có thể dẫn tới kết quả kỳ lạ; cờ `-k` bật phát hiện lỗi (trừ lỗi từ `probe_read_*`), `-kk` gồm cả `probe_read_*`[^bt-k-flag].
-- *Chuỗi bị cắt.* `str()` cấp sẵn một số byte nhất định trên BPF stack (mặc định `BPFTRACE_STRLEN` là 64) và tài liệu nhắc BPF stack nhỏ (512 byte)[^bt-strlen].
-- *Giới hạn số khóa map.* `BPFTRACE_MAP_KEYS_MAX` mặc định 4096 — số khóa tối đa trong một map[^bt-map-keys]. Nghĩa là một one-liner khóa theo thứ lớn (ví dụ từng địa chỉ) có thể chạm trần.
-- *Mất event.* Nếu thấy nhiều event bị rơi, bpftrace có thể xử lý ring buffer không kịp; tăng `BPFTRACE_PERF_RB_PAGES` (mặc định 64 trang mỗi CPU) cho phép xếp thêm event, đổi lại tốn bộ nhớ[^bt-rb-pages].
+- *Lỗi helper bị nuốt.* Mặc định lỗi từ các helper (`bpf-helpers(7)`) bị bỏ qua im lặng, có thể dẫn tới kết quả kỳ lạ[^bt-k-flag]. Cờ `-k` bật phát hiện lỗi (trừ lỗi từ `probe_read_*`), còn `-kk` gồm cả `probe_read_*`.
+- *Chuỗi bị cắt.* `str()` cấp sẵn một số byte nhất định trên BPF stack (mặc định `BPFTRACE_STRLEN` là 64), và tài liệu nhắc BPF stack nhỏ (512 byte)[^bt-strlen].
+- *Giới hạn số khóa map.* `BPFTRACE_MAP_KEYS_MAX` mặc định 4096, là số khóa tối đa trong một map[^bt-map-keys]. Nghĩa là một one-liner khóa theo thứ lớn (ví dụ từng địa chỉ) có thể chạm trần.
+- *Mất event.* Nếu thấy nhiều event bị rơi, có thể bpftrace xử lý ring buffer không kịp. Tăng `BPFTRACE_PERF_RB_PAGES` (mặc định 64 trang mỗi CPU) cho phép xếp thêm event, đổi lại tốn bộ nhớ[^bt-rb-pages].
 - *Không có số thực.* BPF không hỗ trợ số thực nên bpftrace cũng không[^bt-float].
 - *Biến theo kiểu.* Kiểu của biến được xác định ở lần gán đầu tiên và không đổi sau đó[^bt-var-type].
 - *Đối số uprobe có tên.* Nếu binary có DWARF thì đối số hàm có sẵn trong struct `args`[^bt-uprobe-dwarf]. (Với Rust: xem cấu hình `debug` ở mục 9.)
 
 </details>
 
-**Quay lại Q5:** đọc `probe /predicate/ { action }`, nhận ra `@map`, `$scratch`, builtin; một lần `kprobe` + `kretprobe` + map theo `tid` là mẫu chuẩn để đo latency; `profile:hz:N` là mẫu chuẩn để sampling.
+**Quay lại Q5:** đọc `probe /predicate/ { action }`, nhận ra `@map`, `$scratch` và builtin; `kprobe` + `kretprobe` + map theo `tid` là mẫu chuẩn để đo latency, còn `profile:hz:N` là mẫu chuẩn để sampling.
 
 ## 6. USDT: điểm quan sát tĩnh trong user space (Q6)
 
-> **Trả lời ngắn.** USDT (User Statically-Defined Tracing) là các điểm tracing tĩnh trong phần mềm user-level, do tác giả phần mềm đặt sẵn — đối ứng với tracepoint của kernel nhưng ở ứng dụng[^btref-usdt-def]. Công cụ gắn vào bằng tên `binary:[namespace]:probe`[^btref-usdt-syntax], không cần biết địa chỉ hàm. So với uprobe: uprobe gắn vào *hàm/offset bất kỳ* (động, không có cam kết), còn USDT là điểm do tác giả *công bố*, có thể được ghi tài liệu và ổn định[^btref-static-def].
+> **Trả lời ngắn.** USDT (User Statically-Defined Tracing) là các điểm tracing tĩnh trong phần mềm user-level, do tác giả phần mềm đặt sẵn, giống tracepoint của kernel nhưng nằm trong ứng dụng[^btref-usdt-def]. Công cụ gắn vào bằng tên `binary:[namespace]:probe`[^btref-usdt-syntax], không cần biết địa chỉ hàm. Khác uprobe gắn vào hàm hoặc offset bất kỳ, USDT là điểm do tác giả *công bố*, nên có thể được ghi tài liệu và ổn định[^btref-static-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): uprobe như việc bạn tự mở nắp máy xe người khác và gắn cảm biến vào chỗ bạn đoán là hợp lý. USDT như cổng chẩn đoán OBD trên xe: nhà sản xuất đã dành sẵn, ghi rõ tên và ý nghĩa từng chân, và cam kết (ít nhất là ngầm) giữ ổn định qua các đời xe.
+*Với service `orders`.* Ở mục 3, để móc uprobe vào hàm xử lý request của `orders`, bạn phải tự tìm symbol và offset, và chúng đổi mỗi lần build lại. Nếu tác giả `orders` đặt sẵn hai probe tên "bắt đầu request" và "xong request" thì người vận hành attach theo tên, không cần biết hàm nào nằm ở đâu (nhận xét của người soạn: ví dụ giả định). Đó là ý tưởng của USDT: tracepoint của kernel, nhưng do tác giả ứng dụng đặt.
 
-*Định nghĩa trong bpftrace.* Tài liệu bpftrace phân biệt: *static tracing* là các điểm đo được viết cứng trong code, vì cố định nên có thể là một phần của API ổn định và được ghi tài liệu; *dynamic tracing* là sửa văn bản lệnh lúc chạy để đo bất kỳ sự kiện phần mềm nào, mục tiêu thường không cần hỗ trợ gì đặc biệt ngoài một bảng symbol bpftrace đọc được, và vì đo toàn bộ text nên không được xem là API ổn định, hàm đích có thể không được ghi tài liệu ngoài source[^btref-static-def][^btref-dynamic-def]. USDT thuộc loại đầu.
+### 6.1 Static và dynamic tracing theo cách bpftrace định nghĩa
 
-*Cú pháp.* `usdt:binary_path:probe_name`, hoặc `usdt:binary_path:[probe_namespace]:probe_name`, hoặc với thư viện `usdt:library_path:...`; `probe_namespace` là tùy chọn nếu `probe_name` duy nhất trong binary[^btref-usdt-syntax]. Nếu binary có nhiều probe cùng tên ở hai namespace khác nhau, bpftrace báo lỗi yêu cầu chỉ rõ namespace hoặc dùng `*`[^btref-usdt-ns]. Đối số probe đọc qua `arg0`, `arg1`… như các probe khác (ví dụ trong reference guide bpftrace: `str(arg0)`)[^btref-usdt-args]. libbpf cũng có kiểu section `usdt/<path>:<provider>:<name>`[^libbpf-usdt].
+Tài liệu bpftrace phân biệt hai loại. *Static tracing* là các điểm đo viết cứng trong code; vì cố định nên chúng có thể là một phần của API ổn định và được ghi tài liệu[^btref-static-def]. *Dynamic tracing* là sửa văn bản lệnh lúc chạy để đo bất kỳ sự kiện phần mềm nào. Mục tiêu thường không cần hỗ trợ gì đặc biệt ngoài một bảng symbol bpftrace đọc được, và vì đo toàn bộ text nên nó không được xem là API ổn định[^btref-dynamic-def]. USDT thuộc loại đầu.
 
-*Semaphore.* "Semaphore" ở đây là biến cờ mà probe dùng để bỏ qua việc chuẩn bị đối số tốn kém khi probe chưa có ai theo dõi; theo tài liệu `dtrace(1)` của SystemTap, công cụ tracing tự đặt/xóa cờ khi script liên quan đang chạy[^dtrace-semaphores]. Với bpftrace: nếu môi trường và bpftrace hỗ trợ uprobe refcount thì USDT semaphore được kích hoạt tự động cho mọi process khi attach probe[^btref-usdt-sem]; nếu không, phải truyền `-p PID` hoặc `--usdt-file-activation`; cờ sau tìm trong `/proc` các process đã map binary đó với quyền thực thi và chỉ chạy một lần lúc attach, nên process mới sinh ra sau đó không được kích hoạt[^btref-usdt-actfile]. Cờ `-p`, `-c` giới hạn USDT vào PID/child process đó[^bt-p-usdt][^bt-c-usdt].
+### 6.2 Cú pháp
+
+Có ba dạng: `usdt:binary_path:probe_name`, `usdt:binary_path:[probe_namespace]:probe_name`, hoặc với thư viện `usdt:library_path:...`. `probe_namespace` là tùy chọn nếu `probe_name` duy nhất trong binary[^btref-usdt-syntax]. Nếu binary có nhiều probe cùng tên ở hai namespace khác nhau, bpftrace báo lỗi yêu cầu chỉ rõ namespace hoặc dùng `*`[^btref-usdt-ns]. Đối số probe đọc qua `arg0`, `arg1`… như các probe khác; ví dụ trong reference guide bpftrace dùng `str(arg0)`[^btref-usdt-args]. libbpf cũng có kiểu section `usdt/<path>:<provider>:<name>`[^libbpf-usdt].
+
+### 6.3 Semaphore
+
+"Semaphore" ở đây là biến cờ mà probe dùng để bỏ qua việc chuẩn bị đối số tốn kém khi probe chưa có ai theo dõi. Theo tài liệu `dtrace(1)` của SystemTap, công cụ tracing tự đặt và xóa cờ này khi script liên quan đang chạy[^dtrace-semaphores].
+
+Với bpftrace, nếu môi trường và bpftrace hỗ trợ uprobe refcount thì USDT semaphore được kích hoạt tự động cho mọi process khi attach probe[^btref-usdt-sem]. Nếu không, bạn phải truyền `-p PID` hoặc `--usdt-file-activation`. Cờ sau tìm trong `/proc` các process đã map binary đó với quyền thực thi và chỉ chạy một lần lúc attach, nên process mới sinh ra sau đó không được kích hoạt[^btref-usdt-actfile]. Cờ `-p` giới hạn USDT vào PID đó[^bt-p-usdt]. Cờ `-c` giới hạn vào child process[^bt-c-usdt].
 
 <details><summary>Đi sâu: crate <code>usdt</code> cho Rust</summary>
 
-- Crate `usdt` (phiên bản 0.6.0 khi soạn) phơi các probe USDT từ chương trình Rust; probe được viết bằng ngôn ngữ D hoặc trực tiếp bằng Rust; crate biên dịch chúng thành các macro bắn probe[^usdt-intro][^usdt-overview].
-- Trên Linux: crate ghi rõ hỗ trợ x86-64 Linux qua việc phát ra probe SystemTap v3, ARM chưa được test nhưng "có thể chạy do tình cờ"[^usdt-platform]; các probe thấy được qua `dtrace` hoặc qua bpftrace trên Linux[^usdt-bpftrace].
-- Đối số truyền bằng closure, nên chỉ được đánh giá khi probe thật sự được bật; tài liệu nhấn mạnh vì thế không nên đặt trong đó lời gọi hàm có side-effect mà bạn trông cậy, và việc này cho phép truyền đối số tốn kém để dựng mà chỉ trả giá khi probe được bật[^usdt-closure].
+- Crate `usdt` (phiên bản 0.6.0 khi soạn) phơi các probe USDT từ chương trình Rust[^usdt-intro]. Probe được viết bằng ngôn ngữ D hoặc trực tiếp bằng Rust[^usdt-overview].
+- Trên Linux, crate ghi rõ hỗ trợ x86-64 Linux qua việc phát ra probe SystemTap v3; ARM chưa được test nhưng "có thể chạy do tình cờ"[^usdt-platform]. Các probe thấy được qua `dtrace` hoặc qua bpftrace trên Linux[^usdt-bpftrace].
+- Đối số truyền bằng closure, nên chỉ được đánh giá khi probe thật sự được bật. Việc này cho phép truyền đối số tốn kém để dựng mà chỉ trả giá khi probe được bật[^usdt-closure].
 - Các bản crate cũ dùng feature `asm` để bật inline assembly (từng cần nightly Rust); ở 0.6.0 tài liệu nói mọi phiên bản Rust được hỗ trợ đều có inline assembly nên feature `asm` là no-op[^usdt-asm].
-- Phía code C/SystemTap (để hiểu "probe được đặt ra sao"): tài liệu SystemTap mô tả một probe tĩnh được ứng dụng định nghĩa bằng macro `STAP_PROBE1(PROVIDER,LABEL,arg1)` trong `sys/sdt.h` (`STAP_PROBE2` cho hai đối số…; `DTRACE_PROBE*` là bí danh)[^stap-mark]; công cụ `dtrace` biến file mô tả probe `.d` thành header (`-h`) hoặc object file định nghĩa probe (`-G`)[^dtrace-gen]. Cách probe được lưu trong binary và kernel dò ra nó thế nào (lệnh nào nằm tại điểm probe, metadata ở đâu) không thuộc các nguồn đã đọc nên không được khẳng định ở đây.
+- Phía code C/SystemTap, để hiểu "probe được đặt ra sao": một probe tĩnh được ứng dụng định nghĩa bằng macro `STAP_PROBE1(PROVIDER,LABEL,arg1)` trong `sys/sdt.h`[^stap-mark]. Công cụ `dtrace` biến file mô tả probe `.d` thành header (`-h`) hoặc object file định nghĩa probe (`-G`)[^dtrace-gen]. Cách probe được lưu trong binary và kernel dò ra nó thế nào (lệnh nào nằm tại điểm probe, metadata ở đâu) không thuộc các nguồn đã đọc nên không được khẳng định ở đây.
 
 </details>
 
-**Quay lại Q6:** USDT = tracepoint của ứng dụng: do tác giả đặt, có tên/đối số công bố, attach theo tên chứ không theo địa chỉ; trong Rust có crate `usdt` để tạo chúng.
+**Quay lại Q6:** USDT là tracepoint của ứng dụng: do tác giả đặt, có tên và đối số công bố, attach theo tên chứ không theo địa chỉ; trong Rust có crate `usdt` để tạo chúng.
 
 ## 7. Chi phí (overhead) của tracing (Q7)
 
-> **Trả lời ngắn.** Chi phí = (số lần điểm móc chạy) × (chi phí mỗi lần) + chi phí đưa dữ liệu ra. Tracepoint/ftrace gần như bằng không khi **tắt**[^tp-off][^ftrace-dyn-zero]; khi **bật**, mỗi lần chạy handler tốn cỡ micro-giây (kprobe thường) đến khoảng 0.07–0.1 micro-giây (kprobe đã tối ưu thành lệnh nhảy) theo số đo trong tài liệu kernel[^kprobe-hit-cost][^kprobe-opt-cost]. Phần ra khỏi kernel (in từng event, ring buffer) thường mới là thứ làm nặng (suy luận của người soạn, xem các nguồn về `bpf_trace_printk` và ring buffer ở dưới).
+> **Trả lời ngắn.** Chi phí = (số lần điểm móc chạy) × (chi phí mỗi lần) + chi phí đưa dữ liệu ra (suy luận của người soạn). Tracepoint gần như không tốn gì khi **tắt**[^tp-off]. ftrace cũng vậy[^ftrace-dyn-zero]. Khi **bật**, theo số đo trong tài liệu kernel, mỗi lần chạy handler tốn cỡ micro-giây với kprobe thường[^kprobe-hit-cost]. Với kprobe đã được tối ưu thành lệnh nhảy, con số là khoảng 0.07–0.1 micro-giây[^kprobe-opt-cost]. Phần đưa dữ liệu ra khỏi kernel (in từng event, ring buffer) thường mới là thứ làm nặng (suy luận của người soạn, xem các nguồn về `bpf_trace_printk` và ring buffer bên dưới).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thu ngân đếm tiền mặt cho từng khách hàng: tốn thêm vài giây mỗi giao dịch — nhỏ, nhưng nhân với 10.000 giao dịch/phút thì quầy tắc nghẽn. Giảm chi phí = (1) bớt giao dịch phải ghi (lọc sớm), (2) ghi ngắn gọn hơn (tổng hợp thay vì liệt kê).
+*Với service `orders`.* Giả sử `orders` gọi `read` hàng trăm nghìn lần mỗi giây trên host (nhận xét của người soạn: con số giả định). Nếu bạn móc `vfs_read` để đo độ trễ thì mỗi lần gọi là một lần chạy handler, và chi phí tăng đúng bằng tải của service bạn đang đo. Để biết nên móc kiểu nào, ta tách chi phí làm hai phần: chi phí của chính điểm móc, và chi phí đưa dữ liệu ra.
 
-*Chi phí từng lớp (theo tài liệu):*
+### 7.1 Chi phí của điểm móc
 
 | Lớp | Chi phí khi tắt | Chi phí khi bật |
 |---|---|---|
-| Tracepoint | Chút thời gian kiểm tra điều kiện rẽ nhánh + chút dung lượng[^tp-off]; có thể dùng static key/jump label để tránh rẽ nhánh[^tp-static-key] | Gọi hàm probe mỗi lần chạy[^tp-called] |
-| ftrace function tracer | Với `CONFIG_DYNAMIC_FTRACE`, gần như không tốn gì[^ftrace-dyn-zero] | Nhập `nop` → call; ring buffer; `tracing_on=0` chỉ dừng *ghi*, overhead có thể vẫn còn[^ftrace-tracing-on] |
-| Kprobe thường | Không có điểm móc | 0.5–1.0 µs/hit trên CPU 2005; return probe lâu hơn 50–75%[^kprobe-hit-cost][^kretprobe-cost] |
-| Kprobe tối ưu hóa (jump) | — | Điển hình 0.07–0.1 µs/hit; bảng trong tài liệu: x86-64 Xeon E5410 là 0.99 µs (k) so với 0.06 µs (optimized)[^kprobe-opt-cost][^kprobe-opt-table] |
-| Return probe | — | Chạm trampoline thêm một lần nữa → đắt hơn kprobe[^kretprobe-how][^kretprobe-cost] |
-| Gọi helper trong eBPF | — | Tài liệu: gọi thẳng vào hàm kernel đã biên dịch nên không có overhead lời gọi[^helpers-no-ffi] |
+| Tracepoint | Chút thời gian kiểm tra điều kiện rẽ nhánh và chút dung lượng[^tp-off]. Có thể dùng static key/jump label để tránh rẽ nhánh[^tp-static-key] | Gọi hàm probe mỗi lần chạy[^tp-called] |
+| ftrace function tracer | Với `CONFIG_DYNAMIC_FTRACE`, gần như không tốn gì[^ftrace-dyn-zero] | Đổi `nop` thành call, rồi ghi ring buffer. `tracing_on=0` chỉ dừng *ghi*, overhead có thể vẫn còn[^ftrace-tracing-on] |
+| Kprobe thường | Không có điểm móc | 0.5–1.0 µs/hit trên CPU năm 2005[^kprobe-hit-cost]. Return probe lâu hơn 50–75%[^kretprobe-cost] |
+| Kprobe tối ưu hóa (jump) | — | Điển hình 0.07–0.1 µs/hit[^kprobe-opt-cost]. Trong bảng của tài liệu, x86-64 Xeon E5410 là 0.99 µs (k) so với 0.06 µs (optimized)[^kprobe-opt-table] |
+| Return probe | — | Chạm trampoline thêm một lần nữa nên đắt hơn kprobe[^kretprobe-how] |
+| Gọi helper trong eBPF | — | Gọi thẳng vào hàm kernel đã biên dịch nên không có overhead lời gọi[^helpers-no-ffi] |
 | Uprobe | — | Không nguồn nào trong số đã đọc đưa số đo chi phí uprobe, nên chương này không đưa số; hãy tự đo trên máy của bạn (nhận xét của người soạn). Man page bpftrace chỉ nói uprobe chịu cùng hạn chế như kprobe, không nói về chi phí[^bt-uprobe-same] |
 
-*Đưa dữ liệu ra.* Bốn thứ phổ biến, theo tài liệu:
+### 7.2 Đưa dữ liệu ra
 
-- Helper `bpf_trace_printk()` chậm và chỉ nên dùng để debug[^helper-printk-slow]; `bpf_perf_event_output()` có hiệu năng tốt hơn khi chia sẻ dữ liệu với user space và phù hợp với streaming[^helper-perf-out].
-- Với bpftrace: `count()` dùng map PER_CPU để tăng hiệu năng[^bt-count-percpu]; `BPFTRACE_MAX_PROBES` lớn có thể gây overhead hiệu năng cao thậm chí treo hoặc crash máy[^bt-max-probes]; ring buffer nhỏ có thể làm rơi event[^bt-rb-pages].
-- Với ftrace: `overrun` đếm số event mất do buffer đầy bị ghi đè[^ftrace-overrun].
-- Với eBPF trampoline (kfunc/kretfunc trong bpftrace): theo man page, cho phép kernel gọi vào chương trình BPF với overhead gần như bằng không[^bt-kfunc-overhead]. Đây là một cơ chế khác kprobe (dựa trên thông tin kiểu BTF[^bt-kfunc-btf]).
+Bốn thứ phổ biến, theo tài liệu:
 
-(Nhận xét của người soạn — quy tắc thực hành: (1) lọc bằng predicate/filter ngay tại probe thay vì in rồi grep; (2) tổng hợp bằng map (`count`, `hist`, `stats`) thay vì in từng event; (3) chọn tracepoint thay vì kprobe nếu có, và đừng móc hàm gọi hàng triệu lần mỗi giây nếu chỉ cần một con số thống kê; (4) bật theo `-p PID` hoặc theo cgroup thay vì toàn máy khi có thể. Các quy tắc này là suy luận từ mô hình chi phí ở trên, không phải số đo.)
+- Helper `bpf_trace_printk()` chậm và chỉ nên dùng để debug[^helper-printk-slow]. `bpf_perf_event_output()` có hiệu năng tốt hơn khi chia sẻ dữ liệu với user space, và phù hợp với streaming[^helper-perf-out].
+- Với bpftrace, `count()` dùng map PER_CPU để tăng hiệu năng[^bt-count-percpu]. `BPFTRACE_MAX_PROBES` lớn có thể gây overhead hiệu năng cao, thậm chí treo hoặc crash máy[^bt-max-probes]. Ring buffer nhỏ có thể làm rơi event[^bt-rb-pages].
+- Với ftrace, `overrun` đếm số event mất do buffer đầy bị ghi đè[^ftrace-overrun].
+- Với eBPF trampoline (kfunc/kretfunc trong bpftrace), man page nói kernel gọi vào chương trình BPF với overhead gần như bằng không[^bt-kfunc-overhead]. Đây là một cơ chế khác kprobe, dựa trên thông tin kiểu BTF[^bt-kfunc-btf].
+
+### 7.3 Giảm chi phí khi quan sát `orders`
+
+Bốn quy tắc thực hành (nhận xét của người soạn, suy ra từ mô hình chi phí ở trên, không phải số đo):
+
+1. Lọc bằng predicate ngay tại probe thay vì in rồi `grep`.
+2. Tổng hợp bằng map (`count`, `hist`, `stats`) thay vì in từng event.
+3. Chọn tracepoint thay vì kprobe nếu có, và đừng móc hàm gọi hàng triệu lần mỗi giây nếu chỉ cần một con số thống kê.
+4. Bật theo `-p PID` hoặc theo cgroup thay vì toàn máy khi có thể. Với `orders`, tức là chỉ nhắm vào process của nó.
 
 <details><summary>Đi sâu: vì sao các số "2005" vẫn hữu ích, và thứ gì không có số</summary>
 
-- Tài liệu kprobes ghi con số 0.5–1.0 µs cho kprobe thường trên "CPU điển hình năm 2005"[^kprobe-hit-cost], còn kprobe tối ưu thì có mục riêng ghi "điển hình 0.07–0.1 µs" cùng một bảng đo trên các CPU x86 cụ thể[^kprobe-opt-cost][^kprobe-opt-table]. Hai nhóm số cho thấy thứ tự lớn: kprobe thường cỡ nửa micro-giây đến 1 micro-giây; tối ưu cỡ vài chục đến một trăm nano-giây. Bạn không nên ngoại suy ra số của phần cứng hiện tại (suy luận của người soạn).
-- Điều kiện để kprobe có thể "optimized": các kiểm tra an toàn ở vùng bị thay (nằm trọn trong một hàm, không có lệnh nhảy vào giữa vùng…)[^kprobe-optsafety]; nếu không thỏa thì kprobe breakpoint thường vẫn có hiệu lực[^kprobe-optinit].
-- Cụm "chi phí khi bật" của eBPF còn gồm chính thân chương trình (số lệnh, lời gọi map). Tài liệu kernel nói eBPF được thiết kế để JIT một-một sang mã máy, điều này mở ra khả năng để backend GCC/LLVM sinh mã eBPF tối ưu chạy gần nhanh như mã biên dịch trực tiếp — đây là mô tả thiết kế, không phải số đo[^cl-fast]. Chương này không có số đo cụ thể cho thân chương trình.
+- Tài liệu kprobes ghi con số 0.5–1.0 µs cho kprobe thường trên "CPU điển hình năm 2005"[^kprobe-hit-cost]. Kprobe tối ưu thì có mục riêng ghi "điển hình 0.07–0.1 µs"[^kprobe-opt-cost]. Mục đó kèm một bảng đo trên các CPU x86 cụ thể[^kprobe-opt-table]. Hai nhóm số cho thấy thứ tự lớn: kprobe thường cỡ nửa micro-giây đến 1 micro-giây, còn tối ưu cỡ vài chục đến một trăm nano-giây. Bạn không nên ngoại suy ra số của phần cứng hiện tại (suy luận của người soạn).
+- Điều kiện để kprobe có thể "optimized" là các kiểm tra an toàn ở vùng bị thay (nằm trọn trong một hàm, không có lệnh nhảy vào giữa vùng…)[^kprobe-optsafety]. Nếu không thỏa thì kprobe breakpoint thường vẫn có hiệu lực[^kprobe-optinit].
+- Chi phí "khi bật" của eBPF còn gồm chính thân chương trình (số lệnh, lời gọi map). Tài liệu kernel nói eBPF được thiết kế để JIT một-một sang mã máy, điều này mở ra khả năng để backend GCC/LLVM sinh mã eBPF tối ưu chạy gần nhanh như mã biên dịch trực tiếp[^cl-fast]. Đây là mô tả thiết kế, không phải số đo; chương này không có số đo cụ thể cho thân chương trình.
 - Sampling profile có chi phí tỷ lệ với tần số (suy luận của người soạn); vì thế tutorial bpftrace chọn 99 Hz "không quá cao"[^bttut-99hz].
 
 </details>
 
-**Quay lại Q7:** chi phí tỷ lệ với *tần suất sự kiện* × *chi phí mỗi hit* + *đường ra dữ liệu*; tắt gần như miễn phí, bật tốn từ chục ns tới µs mỗi hit tùy cơ chế; giảm bằng lọc sớm, tổng hợp trong map, chọn điểm móc ít nóng.
+**Quay lại Q7:** chi phí tỷ lệ với *tần suất sự kiện* × *chi phí mỗi hit* + *đường ra dữ liệu*; tắt gần như miễn phí, bật tốn từ chục ns tới µs mỗi hit tùy cơ chế; giảm bằng lọc sớm, tổng hợp trong map và chọn điểm móc ít nóng.
 
 ## 8. Quyền: `CAP_BPF`, `CAP_PERFMON` và container (Q8)
 
-> **Trả lời ngắn.** Từ Linux 5.8 có hai capability tách khỏi `CAP_SYS_ADMIN`: `CAP_BPF` cho các thao tác BPF đặc quyền[^cap-bpf][^cap-bpf-since], `CAP_PERFMON` cho các cơ chế performance monitoring như `perf_event_open(2)` và một số thao tác BPF có ảnh hưởng hiệu năng[^cap-perfmon]. `CAP_SYS_ADMIN` vẫn làm được tất cả nhưng không được khuyến khích[^cap-sysadmin-bpf]. Các container chạy chung một kernel[^docker-shares-kernel]; vì tracepoint/kprobe là cơ chế của kernel nên một container có đủ quyền có thể quan sát cả hoạt động bên ngoài container của nó (suy luận của người soạn, trên Linux). Container mặc định thì **không** có `BPF`, `PERFMON` hay `SYS_ADMIN`[^docker-default-caps][^docker-not-default]; khi thêm `BPF`/`PERFMON` bằng `--cap-add`, seccomp mặc định của Docker (JSON ghim Moby `v28.0.0`) cũng mở `bpf`/`perf_event_open` tương ứng[^moby-bpf][^moby-perfmon].
+> **Trả lời ngắn.** Từ Linux 5.8 có hai capability tách khỏi `CAP_SYS_ADMIN`. `CAP_BPF` cho các thao tác BPF đặc quyền[^cap-bpf-since]. `CAP_PERFMON` cho các cơ chế performance monitoring như `perf_event_open(2)`[^cap-perfmon-since]. `CAP_SYS_ADMIN` vẫn làm được các thao tác BPF đó, nhưng capability nhẹ hơn được ưu tiên[^cap-sysadmin-bpf]. Container mặc định thì **không** có `BPF`, `PERFMON` hay `SYS_ADMIN`[^docker-not-default]. Các container lại chạy chung một kernel[^docker-shares-kernel], nên một container có đủ quyền có thể quan sát cả hoạt động bên ngoài container của nó (suy luận của người soạn, trên Linux).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tracing sâu là quyền "nhìn xuyên tường". Nó không thể giao cho mọi người thuê phòng; các capability là các chìa riêng cho từng loại cửa thay vì chìa chủ.
+*Với service `orders`.* Giả sử `orders` chạy trong một container, và lúc xử lý sự cố bạn muốn chạy bpftrace ngay trong container (hoặc cạnh nó). Câu hỏi là cần cấp quyền gì, và cấp xong thì bpftrace nhìn thấy những gì nằm ngoài container của `orders` (nhận xét của người soạn: ví dụ giả định). Hai câu hỏi này khác nhau, nên ta xét riêng.
 
-*Từng quyền, nói gì:*
+### 8.1 Các capability và sysctl
 
-| Capability / sysctl | Nội dung | Nguồn |
-|---|---|---|
-| `CAP_BPF` (≥ 5.8) | "Employ privileged BPF operations" — thao tác BPF đặc quyền; tách khỏi `CAP_SYS_ADMIN` | [^cap-bpf][^cap-bpf-since] |
-| `CAP_PERFMON` (≥ 5.8) | Cơ chế performance monitoring, gồm `perf_event_open(2)` và thao tác BPF có ảnh hưởng hiệu năng | [^cap-perfmon][^cap-perfmon-since] |
-| `CAP_SYS_ADMIN` | Có thể làm các thao tác BPF mà `CAP_BPF` cho phép; `CAP_BPF` là lựa chọn nhẹ hơn được ưu tiên | [^cap-sysadmin-bpf] |
-| `kernel.unprivileged_bpf_disabled = 1` | Tắt `bpf()` không đặc quyền: không có `CAP_SYS_ADMIN` hay `CAP_BPF` thì trả `-EPERM`; đặt 1 thì không thể bỏ cho tới khi khởi động lại | [^sysctl-unpriv] |
+| Capability / sysctl | Nội dung |
+|---|---|
+| `CAP_BPF` (≥ 5.8) | Thao tác BPF đặc quyền[^cap-bpf]. Tách khỏi `CAP_SYS_ADMIN` từ Linux 5.8[^cap-bpf-since] |
+| `CAP_PERFMON` (≥ 5.8) | Các cơ chế performance monitoring, gồm `perf_event_open(2)` và thao tác BPF có ảnh hưởng hiệu năng[^cap-perfmon]. Cũng tách khỏi `CAP_SYS_ADMIN` từ Linux 5.8[^cap-perfmon-since] |
+| `CAP_SYS_ADMIN` | Có thể làm các thao tác BPF mà `CAP_BPF` cho phép; `CAP_BPF` là lựa chọn nhẹ hơn được ưu tiên[^cap-sysadmin-bpf] |
+| `kernel.unprivileged_bpf_disabled = 1` | Tắt `bpf()` không đặc quyền: không có `CAP_SYS_ADMIN` hay `CAP_BPF` thì trả `-EPERM`; đặt 1 thì không thể bỏ cho tới khi khởi động lại[^sysctl-unpriv] |
 
-*Về perf.* Phần quyền riêng của `perf_event_open(2)`: `perf_event_paranoid`, `CAP_PERFMON` bỏ qua kiểm tra phạm vi, `CAP_SYS_PTRACE` không còn cần từ Linux 5.9, `CAP_SYS_ADMIN` bị khuyến khích bỏ, `CAP_SYSLOG` cho `/proc/kallsyms`, nhóm `perf_users` và `setcap`, đều nằm ở [Chương 01, mục 8](01-perf-va-sampling-profiler.md); chương này không nhắc lại.
+Phần quyền riêng của `perf_event_open(2)` gồm `perf_event_paranoid`, `CAP_PERFMON` bỏ qua kiểm tra phạm vi, `CAP_SYS_PTRACE` không còn cần từ Linux 5.9, `CAP_SYS_ADMIN` bị khuyến khích bỏ, `CAP_SYSLOG` cho `/proc/kallsyms`, nhóm `perf_users` và `setcap`. Tất cả nằm ở [Chương 01, mục 8](01-perf-va-sampling-profiler.md); chương này không nhắc lại.
 
-*Về bpf().* Man page bookworm ghi: trước Linux 4.4 mọi lệnh `bpf()` đều cần `CAP_SYS_ADMIN`[^bpf-pre44]; từ 4.4 user không đặc quyền được tạo các chương trình giới hạn kiểu `BPF_PROG_TYPE_SOCKET_FILTER` và map liên quan[^bpf-unpriv-sf]. (Man page bản này ghi lỗi `EPERM` theo `CAP_SYS_ADMIN`[^bpf-eperm]; man `capabilities(7)` và tài liệu sysctl mới hơn nhắc `CAP_BPF`. Dùng hai nguồn kia khi cần.)
+Về `bpf()`, man page bookworm ghi rằng trước Linux 4.4 mọi lệnh `bpf()` đều cần `CAP_SYS_ADMIN`[^bpf-pre44]. Từ 4.4, user không đặc quyền được tạo các chương trình giới hạn kiểu `BPF_PROG_TYPE_SOCKET_FILTER` và map liên quan[^bpf-unpriv-sf]. Man page bản này ghi lỗi `EPERM` theo `CAP_SYS_ADMIN`[^bpf-eperm]; man `capabilities(7)` và tài liệu sysctl mới hơn nhắc `CAP_BPF`, nên dùng hai nguồn đó khi cần.
 
-*Container.* Hai chuyện khác nhau (nhận xét của người soạn):
+### 8.2 Container, chuyện thứ nhất: quyền để chạy công cụ tracing
 
-1. *Quyền để chạy công cụ tracing bên trong container.* Docker tự cấp một danh sách capability mặc định[^docker-default-caps]; `BPF`, `PERFMON`, `SYS_ADMIN`… nằm trong bảng "không cấp mặc định và có thể thêm"[^docker-not-default]. Mô tả của Docker: `BPF` cho phép tạo BPF map, nạp BTF, lấy code JIT… và nhiều hơn[^docker-bpf]; `PERFMON` cho phép các thao tác đặc quyền về hiệu năng/quan sát qua `perf_events`…[^docker-perfmon]. `--privileged` cấp toàn bộ capability[^docker-privileged]; thêm lẻ bằng `--cap-add`[^docker-capadd]. Trong Kubernetes, thêm/bỏ capability khai báo trong trường `capabilities` của `securityContext` ở manifest container[^k8s-caps]. Về seccomp: trong `default.json` ghim tag Moby `v28.0.0`, `bpf` có một khối `SCMP_ACT_ALLOW` riêng với điều kiện `CAP_BPF`[^moby-bpf] và `perf_event_open` có khối riêng với điều kiện `CAP_PERFMON`[^moby-perfmon] (ngoài khối `CAP_SYS_ADMIN`), nên với profile mặc định chỉ cần `--cap-add BPF`/`PERFMON`, không cần profile seccomp riêng hay `unconfined`; engine khác bản `v28.0.0` có thể dùng JSON khác. Chi tiết cấu trúc profile: [Chương 05 (Container), mục 5](../08-containers/05-bao-mat-container.md).
-2. *Phạm vi những gì nhìn thấy.* Mọi container chạy chung một kernel[^docker-shares-kernel]; tracepoint/kprobe là cơ chế của kernel đó (mục 3). Vì thế một tiến trình tracing có đủ quyền có thể quan sát cả host, không chỉ container của nó (suy luận của người soạn từ hai khẳng định trên; nguồn đã đọc không mô tả cô lập tracing theo namespace nên không khẳng định gì hơn). Docker Desktop (macOS/Windows) có một VM Linux chạy các container[^docker-vmm], nên "kernel chung" ở đó là kernel của VM Linux chứ không phải kernel macOS (suy luận của người soạn từ câu đó; xem [Chương 01 (Container), mục 4](../08-containers/01-container-la-gi.md)) — nên mọi nội dung chương này chỉ áp dụng cho kernel Linux. Về mặt *tên đường dẫn*: bpftrace lưu ý rằng `--usdt-file-activation` so khớp theo đường dẫn file, nên nếu bpftrace chạy ở host mà process `execve` từ mount namespace riêng hoặc thư mục bind-mount thì có thể không hoạt động đúng; cách xử lý là chạy bpftrace trong namespace phù hợp (tức trong container)[^btref-usdt-mntns][^btref-usdt-workaround].
+Docker tự cấp một danh sách capability mặc định[^docker-default-caps]. `BPF`, `PERFMON`, `SYS_ADMIN`… nằm trong bảng "không cấp mặc định và có thể thêm"[^docker-not-default]. Theo mô tả của Docker, `BPF` cho phép tạo BPF map, nạp BTF, lấy code JIT… và nhiều hơn[^docker-bpf]. `PERFMON` cho phép các thao tác đặc quyền về hiệu năng và quan sát qua `perf_events`…[^docker-perfmon]
+
+`--privileged` cấp toàn bộ capability[^docker-privileged]. Muốn cấp lẻ thì dùng `--cap-add`[^docker-capadd]. Trong Kubernetes, bạn thêm hoặc bỏ capability bằng trường `capabilities` trong `securityContext` của manifest container[^k8s-caps].
+
+Còn seccomp thì sao? Trong `default.json` ghim tag Moby `v28.0.0`, `bpf` có một khối `SCMP_ACT_ALLOW` riêng với điều kiện `CAP_BPF`[^moby-bpf]. `perf_event_open` cũng có khối riêng với điều kiện `CAP_PERFMON`[^moby-perfmon], ngoài khối `CAP_SYS_ADMIN`. Vì vậy với profile mặc định, chỉ cần `--cap-add BPF`/`PERFMON`, không cần profile seccomp riêng hay `unconfined` (suy luận của người soạn); engine khác bản `v28.0.0` có thể dùng JSON khác. Chi tiết cấu trúc profile: [Chương 05 (Container), mục 5](../08-containers/05-bao-mat-container.md).
+
+### 8.3 Container, chuyện thứ hai: phạm vi những gì nhìn thấy
+
+Mọi container chạy chung một kernel[^docker-shares-kernel], và tracepoint/kprobe là cơ chế của kernel đó (mục 3). Vì thế một tiến trình tracing có đủ quyền có thể quan sát cả host, không chỉ container của nó. Đây là suy luận của người soạn từ hai khẳng định trên; nguồn đã đọc không mô tả cô lập tracing theo namespace nên chương này không khẳng định gì hơn.
+
+Docker Desktop (macOS/Windows) có một VM Linux chạy các container[^docker-vmm]. Vậy "kernel chung" ở đó là kernel của VM Linux chứ không phải kernel macOS (suy luận của người soạn; xem [Chương 01 (Container), mục 4](../08-containers/01-container-la-gi.md)), và mọi nội dung chương này chỉ áp dụng cho kernel Linux.
+
+Còn một chuyện về *tên đường dẫn*. bpftrace lưu ý rằng `--usdt-file-activation` so khớp theo đường dẫn file, nên nếu bpftrace chạy ở host mà process `execve` từ mount namespace riêng hoặc thư mục bind-mount thì có thể không hoạt động đúng[^btref-usdt-mntns]. Cách xử lý là chạy bpftrace trong namespace phù hợp, tức trong container[^btref-usdt-workaround].
 
 <details><summary>Đi sâu: các điều cần kiểm lại trên máy của bạn</summary>
 
-- Quyền thực tế phụ thuộc kernel/bản phân phối/LSM; chương này chỉ trích tài liệu. Để biết một process đang có capability nào, man `capabilities(7)` cho biết xem `/proc/pid/status` (hoặc `/proc/pid/task/TID/status`) được[^cap-status].
+- Quyền thực tế phụ thuộc kernel, bản phân phối và LSM; chương này chỉ trích tài liệu. Để biết một process đang có capability nào, man `capabilities(7)` cho biết xem `/proc/pid/status` (hoặc `/proc/pid/task/TID/status`) được[^cap-status].
 - `perf_event_paranoid` tồn tại là cách "chính thức" để biết kernel có hỗ trợ `perf_event_open()` hay không[^pe-paranoid-exist].
-- Man page bpftrace: tiến trình con chạy với `-c` có cùng quyền với chính bpftrace (thường là root)[^bt-c-priv]. Tức không nên dùng `-c` để chạy lệnh không tin cậy (suy luận của người soạn).
+- Man page bpftrace nói tiến trình con chạy với `-c` có cùng quyền với chính bpftrace (thường là root)[^bt-c-priv]. Tức không nên dùng `-c` để chạy lệnh không tin cậy (suy luận của người soạn).
 - Docker `--privileged` cũng cho truy cập mọi thiết bị trên host[^docker-privileged].
 
 </details>
 
-**Quay lại Q8:** `CAP_BPF` cho BPF đặc quyền, `CAP_PERFMON` cho perf/quan sát; container mặc định không có (cần `--cap-add` hoặc `securityContext`); vì các container chung một kernel nên quyền tracing mạnh có thể nhìn ra ngoài phạm vi container (suy luận của người soạn).
+**Quay lại Q8:** `CAP_BPF` cho BPF đặc quyền, `CAP_PERFMON` cho perf và quan sát; container mặc định không có (cần `--cap-add` hoặc `securityContext`), và vì các container chung một kernel nên quyền tracing mạnh có thể nhìn ra ngoài phạm vi container (suy luận của người soạn).
 
 ## 9. Liên hệ với Rust
 
 ### 9.1 uprobe/eBPF trên symbol Rust
 
-(Mục này là *ứng dụng* của mục 3–6 vào binary Rust. Mọi bước dưới đây là khái niệm, không chạy.)
+Giả sử bạn muốn móc uprobe vào hàm xử lý request của chính `orders`. Mục này đi qua sáu câu hỏi bạn phải trả lời trước khi móc được. Đây là ứng dụng của mục 3–6 vào binary Rust; mọi bước là khái niệm, không chạy.
 
-*Bước 1 — symbol có tồn tại không?* Uprobe/bpftrace dựa vào bảng symbol của binary: bpftrace nói mục tiêu dynamic tracing thường không cần hỗ trợ gì đặc biệt ngoài một bảng symbol mà bpftrace đọc được[^btref-dynamic-def]. Cargo có tùy chọn `strip` điều khiển cờ `-C strip` của rustc, chỉ định strip symbol hay debuginfo khỏi binary[^cargo-strip]. Docs Cargo ghi profile `release` mặc định có `strip = "none"` và `debug = false`[^cargo-release-defaults] (bảng đầy đủ các khóa mặc định: [Chương 08 (Rust), mục 7](../09-rust-language/08-module-crate-cargo.md)). Từ đó (suy luận của người soạn): binary release mặc định vẫn giữ symbol nên uprobe theo tên hàm dùng được, nhưng nếu bạn đặt `strip = "symbols"` hoặc `strip = true` thì mất cái để móc vào (cargo ghi `strip = true` tương đương `"symbols"`[^cargo-strip-true]).
+**Bước 1: symbol có còn không?** Uprobe và bpftrace dựa vào bảng symbol của binary: mục tiêu dynamic tracing thường không cần hỗ trợ gì đặc biệt ngoài một bảng symbol mà bpftrace đọc được[^btref-dynamic-def]. Cargo có tùy chọn `strip` điều khiển cờ `-C strip` của rustc, chỉ định strip symbol hay debuginfo khỏi binary[^cargo-strip]. Docs Cargo ghi profile `release` mặc định có `strip = "none"` và `debug = false`[^cargo-release-defaults] (bảng đầy đủ các khóa mặc định: [Chương 08 (Rust), mục 7](../09-rust-language/08-module-crate-cargo.md)). Từ đó (suy luận của người soạn) binary release mặc định vẫn giữ symbol nên uprobe theo tên hàm dùng được. Nhưng nếu bạn đặt `strip = "symbols"` hoặc `strip = true` thì `orders` mất thứ để móc vào; cargo ghi `strip = true` tương đương `"symbols"`[^cargo-strip-true].
 
-*Bước 2 — tên symbol là gì?* rustc mã hóa ("mangle") tên để mỗi symbol duy nhất khi sinh code[^rustc-mangle-intro]. Phiên bản mangling chọn bằng `-C symbol-mangling-version`[^rustc-mangle-intro]. Sách rustc cho biết bản "legacy" hiện là mặc định trên beta/stable và không được mô tả ở đó[^rustc-legacy]; bản "v0" bắt đầu bằng `_R`[^rustc-v0-prefix] và mã hóa thông tin tham số generic theo cách đảo ngược được[^rustc-v0-generic]. Sách cũng nói rõ v0 *không* được trình bày như ABI ổn định của Rust[^rustc-v0-unstable]. Vì vậy (suy luận của người soạn): đừng viết script hay dashboard phụ thuộc vào đúng chuỗi mangled; hãy giải mã bằng công cụ. Để giải mã: gdb/lldb bản mới có hỗ trợ demangle sẵn[^rustc-demangle-tools], còn CLI `rustfilt` demangle tên[^rustc-rustfilt]. Man page bpftrace 0.17 chỉ nhắc đến C++ demangling của stack user-space[^bt-cpp-demangle]; nguồn đã đọc không nói bpftrace demangle được symbol Rust hay không, nên chương này không khẳng định.
+**Bước 2: tên symbol là gì?** rustc mã hóa ("mangle") tên để mỗi symbol duy nhất khi sinh code[^rustc-mangle-intro]. Phiên bản mangling chọn bằng `-C symbol-mangling-version`. Bản "legacy" hiện là mặc định trên beta/stable và không được mô tả trong sách rustc[^rustc-legacy]. Bản "v0" bắt đầu bằng `_R`[^rustc-v0-prefix]. Nó mã hóa thông tin tham số generic theo cách đảo ngược được[^rustc-v0-generic]. Sách cũng nói rõ v0 *không* được trình bày như ABI ổn định của Rust[^rustc-v0-unstable]. Vì vậy (suy luận của người soạn) đừng viết script hay dashboard phụ thuộc vào đúng chuỗi mangled; hãy giải mã bằng công cụ. gdb và lldb bản mới có hỗ trợ demangle sẵn[^rustc-demangle-tools]. CLI `rustfilt` cũng demangle tên[^rustc-rustfilt]. Man page bpftrace 0.17 chỉ nhắc đến C++ demangling của stack user-space[^bt-cpp-demangle]; nguồn đã đọc không nói bpftrace demangle được symbol Rust hay không, nên chương này không khẳng định.
 
-*Bước 3 — dùng tên cố định thay vì mangled.* Thuộc tính `no_mangle` tắt mangling chuẩn, symbol của item chính là tên định danh, và item được export công khai[^ref-nomangle]. Reference nói thuộc tính này `unsafe` vì symbol không mangle có thể va chạm với symbol khác cùng tên (kể cả symbol nổi tiếng)[^ref-nomangle-unsafe]. Cú pháp từ edition 2024: `#[unsafe(no_mangle)]`; trước edition 2024 được phép không có `unsafe`[^ref-nomangle-2024]. (Nhận xét của người soạn: nếu dịch vụ có một hàm "mốc" quan trọng — ví dụ điểm bắt đầu xử lý request — đặt hàm đó là `extern "C"` với `#[unsafe(no_mangle)]` cho tên ổn định để uprobe móc vào, đánh đổi: thêm bề mặt `unsafe` và nguy cơ va chạm tên.)
+**Bước 3: dùng tên cố định thay vì tên mangled.** Thuộc tính `no_mangle` tắt mangling chuẩn: symbol của item chính là tên định danh, và item được export công khai[^ref-nomangle]. Reference nói thuộc tính này `unsafe` vì symbol không mangle có thể va chạm với symbol khác cùng tên, kể cả symbol nổi tiếng[^ref-nomangle-unsafe]. Cú pháp từ edition 2024 là `#[unsafe(no_mangle)]`; trước edition 2024 được phép dùng không có `unsafe`[^ref-nomangle-2024]. Nếu `orders` có một hàm "mốc" quan trọng, ví dụ điểm bắt đầu xử lý request, bạn có thể đặt nó là `extern "C"` với `#[unsafe(no_mangle)]` để có tên ổn định cho uprobe móc vào. Đánh đổi là thêm bề mặt `unsafe` và nguy cơ va chạm tên (nhận xét của người soạn).
 
-*Bước 4 — hàm có còn là một hàm không?* Reference: `rustc` tự động inline hàm khi thấy đáng làm[^ref-inline-auto]; thuộc tính `#[inline]` chỉ là gợi ý có chép code của hàm vào chỗ gọi hay không[^ref-inline-hint]. Hàm đã inline hoàn toàn thì không còn một điểm vào riêng để uprobe móc (suy luận của người soạn; tương tự ftrace nói các hàm inline không được trace[^ftrace-notrace]). Generic: monomorphization biến code generic thành code cụ thể bằng cách điền các kiểu đã dùng[^rust-mono]; hệ quả (suy luận): một hàm generic có thể có nhiều symbol, mỗi instance một cái; v0 mã hóa tham số generic vào tên[^rustc-v0-generic]. (Xem [Phase 10 · Chương 04 — Monomorphization](../10-rust-internals/04-monomorphization.md).)
+**Bước 4: hàm có còn là một hàm không?** `rustc` tự động inline hàm khi thấy đáng làm[^ref-inline-auto]. Thuộc tính `#[inline]` chỉ là gợi ý có chép code của hàm vào chỗ gọi hay không[^ref-inline-hint]. Hàm đã inline hoàn toàn thì không còn một điểm vào riêng để uprobe móc (suy luận của người soạn); ftrace cũng nói các hàm inline không được trace[^ftrace-notrace]. Với code generic, monomorphization biến nó thành code cụ thể bằng cách điền các kiểu đã dùng[^rust-mono]. Hệ quả (suy luận của người soạn) là một hàm generic có thể có nhiều symbol, mỗi instance một cái, và v0 mã hóa tham số generic vào tên[^rustc-v0-generic]. (Xem [Phase 10 · Chương 04 — Monomorphization](../10-rust-internals/04-monomorphization.md).)
 
-*Bước 5 — đối số.* bpftrace không biết chữ ký hàm, người dùng phải tự ép kiểu[^bt-no-signature], còn `argN` lấy từ thanh ghi[^bt-arg-regs]. Với binary có DWARF thì `args` có sẵn[^bt-uprobe-dwarf]; mà release mặc định `debug = false`[^cargo-release-defaults] nên cần bật debuginfo nếu muốn đối số có tên (suy luận của người soạn). Cargo mô tả `debug` điều khiển cờ `-C debuginfo`, lượng thông tin debug trong binary[^cargo-debug].
+**Bước 5: đối số.** bpftrace không biết chữ ký hàm nên người dùng phải tự ép kiểu[^bt-no-signature]. Còn `argN` lấy từ thanh ghi[^bt-arg-regs]. Với binary có DWARF thì `args` có sẵn[^bt-uprobe-dwarf]. Nhưng release mặc định có `debug = false`[^cargo-release-defaults], nên cần bật debuginfo nếu muốn đối số có tên (suy luận của người soạn). Cargo mô tả `debug` điều khiển cờ `-C debuginfo`, tức lượng thông tin debug trong binary[^cargo-debug].
 
-*Bước 6 — uretprobe.* Chỉ có ví dụ Go trong nguồn đã đọc (return address bị ghi đè gây lỗi với runtime riêng)[^bt-uretprobe-go]; chương này không có nguồn để nói về Rust, nên coi uretprobe trên Rust là chưa được đảm bảo cho tới khi tự kiểm tra trên binary của bạn (nhận xét của người soạn).
+**Bước 6: uretprobe.** Nguồn đã đọc chỉ có ví dụ Go, nơi địa chỉ trả về bị ghi đè gây lỗi với runtime riêng[^bt-uretprobe-go]. Chương này không có nguồn để nói về Rust, nên hãy coi uretprobe trên Rust là chưa được đảm bảo cho tới khi bạn tự kiểm tra trên binary của mình (nhận xét của người soạn).
 
 ### 9.2 Crate `tracing` khác eBPF tracing thế nào
 
-`tracing` (docs.rs 0.1.41) là framework để *instrument* chương trình Rust, thu thông tin chẩn đoán có cấu trúc dựa trên sự kiện[^tracing-intro]. Tài liệu nêu bối cảnh hệ thống async như Tokio: các task bị ghép trên cùng một thread nên event và dòng log của chúng trộn lẫn, khó theo dõi luồng logic[^tracing-async]. Khái niệm lõi: *span* (có thời điểm bắt đầu và kết thúc, có thể được vào/ra, lồng thành cây) và *event* (một khoảnh khắc, có thể nằm trong span) cùng dữ liệu có kiểu[^tracing-span][^tracing-event]. Span và event được ghi nhận hoặc tổng hợp bởi các *Subscriber*[^tracing-subscribers]; thư viện `tracing` tự nó không chứa Subscriber nào — chúng do các crate khác cung cấp[^tracing-no-sub], và event sinh ra ngoài ngữ cảnh một subscriber thì không được thu thập[^tracing-no-collect].
+`tracing` (docs.rs 0.1.41) là framework để *instrument* chương trình Rust, thu thông tin chẩn đoán có cấu trúc dựa trên sự kiện[^tracing-intro]. Tài liệu nêu bối cảnh hệ thống async như Tokio: các task bị ghép trên cùng một thread nên event và dòng log của chúng trộn lẫn, khó theo dõi luồng logic[^tracing-async].
+
+Khái niệm lõi có hai thứ. *Span* có thời điểm bắt đầu và kết thúc, có thể được vào và ra, và lồng thành cây[^tracing-span]. *Event* là một khoảnh khắc[^tracing-event]. Span và event được ghi nhận hoặc tổng hợp bởi các *Subscriber*[^tracing-subscribers]. Thư viện `tracing` tự nó không chứa Subscriber nào, chúng do các crate khác cung cấp[^tracing-no-sub]. Event sinh ra ngoài ngữ cảnh một subscriber thì không được thu thập[^tracing-no-collect].
 
 | | `tracing` | eBPF tracing (kprobe/uprobe/tracepoint/USDT) |
 |---|---|---|
-| Chạy ở đâu | Trong chính process Rust, ở user space; code do bạn đặt macro vào | Chương trình chạy trong kernel sau khi verifier kiểm tra[^bpf-safe]; được gắn vào sự kiện (tracing, packet…)[^bpf-events] bởi một process nạp nó, không cần sửa process bị quan sát (suy luận của người soạn) |
-| Cần sửa/biên dịch lại chương trình? | Có: phải thêm `span!`/`event!`/`#[instrument]` (feature `attributes`)[^tracing-attributes] | Không với uprobe/kprobe (gắn vào symbol/địa chỉ có sẵn)[^uprobe-similar]; có với USDT (phải đặt probe trong code)[^usdt-intro] |
-| Nhìn thấy gì | Dữ liệu *bạn* chọn ghi: span, field có kiểu, ngữ cảnh nhân quả[^tracing-span] | Hàm/syscall/tracepoint ở bất kỳ process nào + kernel; đối số thô từ thanh ghi/bộ nhớ[^bt-arg-regs][^bt-no-signature] |
-| Chi phí khi không ai nghe | Nếu không subscriber nào quan tâm tới metadata thì span/event không bao giờ được dựng[^tracing-never-built]; có feature chọn mức verbosity tĩnh[^tracing-static-level] | Tracepoint tắt gần như miễn phí[^tp-off]; uprobe chưa gắn: không có điểm móc (suy luận) |
-| Ổn định | Là API Rust do bạn kiểm soát | Tên hàm/offset là chi tiết cài đặt; tracepoint không cam kết ABI[^qa-tp-abi]; mangling v0 không phải ABI[^rustc-v0-unstable] |
-| Ngữ cảnh async | Span có thể vào/ra theo luồng thực thi; `Span::enter` có thể cho trace sai nếu guard bị giữ qua `await`[^tracing-enter-await] | Nhìn theo thread/CPU: khóa `@start[tid]` đúng với syscall vì một thread chỉ chạy một syscall tại một thời điểm[^bttut-tid-key] |
+| Chạy ở đâu | Trong chính process Rust, ở user space; code do bạn đặt macro vào | Chương trình chạy trong kernel sau khi verifier kiểm tra[^bpf-safe]. Một process nạp nó và gắn vào sự kiện[^bpf-events], không cần sửa process bị quan sát (suy luận của người soạn) |
+| Cần sửa/biên dịch lại chương trình? | Có: phải thêm `span!`/`event!`/`#[instrument]` (feature `attributes`)[^tracing-attributes] | Không với uprobe/kprobe, vì gắn vào symbol hay địa chỉ có sẵn[^uprobe-similar]. Có với USDT, vì phải đặt probe trong code[^usdt-intro] |
+| Nhìn thấy gì | Dữ liệu *bạn* chọn ghi: span, field có kiểu, ngữ cảnh nhân quả[^tracing-span] | Hàm, syscall, tracepoint ở bất kỳ process nào cùng kernel; đối số thô từ thanh ghi hoặc bộ nhớ[^bt-arg-regs]. bpftrace không biết chữ ký hàm[^bt-no-signature] |
+| Chi phí khi không ai nghe | Nếu không subscriber nào quan tâm tới metadata thì span/event không bao giờ được dựng[^tracing-never-built]. Có feature chọn mức verbosity tĩnh[^tracing-static-level] | Tracepoint tắt gần như miễn phí[^tp-off]; uprobe chưa gắn thì không có điểm móc (suy luận của người soạn) |
+| Ổn định | Là API Rust do bạn kiểm soát | Tên hàm/offset là chi tiết cài đặt; tracepoint không cam kết ABI[^qa-tp-abi]. Mangling v0 không phải ABI[^rustc-v0-unstable] |
+| Ngữ cảnh async | Span vào/ra theo luồng thực thi[^tracing-span]. `Span::enter` có thể cho trace sai nếu guard bị giữ qua `await`[^tracing-enter-await] | Nhìn theo thread/CPU: khóa `@start[tid]` đúng với syscall vì một thread chỉ chạy một syscall tại một thời điểm[^bttut-tid-key] |
 
-Lưu ý ghép hai công cụ (nhận xét của người soạn): mẹo "khóa theo `tid`" của tutorial bpftrace dựa trên tính chất của *syscall* (một thread một lúc chỉ chạy một syscall[^bttut-tid-key]). Task async của Rust thì khác: nhiều task được ghép trên cùng một thread[^tracing-async], nên đo "một request kéo dài bao lâu" bằng `@start[tid]` ở mức hàm Rust sẽ trộn lẫn các request — đây là lý do `tracing` có span (vào/ra theo luồng thực thi[^tracing-span]; với async, giữ guard `Span::enter` qua `await` có thể cho trace sai[^tracing-enter-await]) còn eBPF thuận lợi hơn ở mức kernel/syscall. Hai công cụ bổ sung nhau; muốn nối chúng bằng một sợi dây thì có thể xuất probe USDT từ chương trình Rust bằng crate `usdt`[^usdt-intro][^usdt-bpftrace] hoặc ghi dấu vào `trace_marker` của ftrace[^ftrace-marker] (đều là hướng đi, chương này không chạy thử).
+Có một chỗ dễ nhầm khi ghép hai công cụ (nhận xét của người soạn). Mẹo "khóa theo `tid`" của tutorial bpftrace dựa trên tính chất của *syscall*: một thread một lúc chỉ chạy một syscall[^bttut-tid-key]. Task async của Rust thì khác, vì nhiều task được ghép trên cùng một thread[^tracing-async]. Nên nếu `orders` là service async và bạn đo "một request kéo dài bao lâu" bằng `@start[tid]` ở mức hàm Rust, các request sẽ bị trộn lẫn. Đó là lý do `tracing` có span, vào/ra theo luồng thực thi[^tracing-span], còn eBPF thuận lợi hơn ở mức kernel/syscall. Hai công cụ bổ sung nhau. Muốn nối chúng, bạn có thể xuất probe USDT từ chương trình Rust bằng crate `usdt`[^usdt-bpftrace]. Hoặc ghi dấu vào `trace_marker` của ftrace[^ftrace-marker]. Cả hai là hướng đi, chương này không chạy thử.
 
 <details><summary>Đi sâu: các feature và giới hạn của <code>tracing</code> có liên quan</summary>
 
-- Feature `log`: phát log record khi chưa có subscriber `tracing`; `log-always`: luôn phát log record cùng với span/event, chỉ nên đặt ở ứng dụng thu trace và log riêng[^tracing-log-features].
-- Feature `attributes` bật `#[instrument]`, mặc định bật, kéo theo `syn` làm tăng thời gian biên dịch với crate chưa dùng nó[^tracing-attributes-feature].
-- Subscriber cài đặt toàn cục bằng `set_global_default`[^tracing-global]; có thể ghi đè theo thread bằng `with_default`, nhưng chỉ áp dụng cho thread hiện tại[^tracing-with-default].
-- Ecosystem có subscriber đẩy trace sang các hệ thống distributed tracing tương thích OpenTelemetry (`tracing-opentelemetry`)[^tracing-otel]. Đó vẫn là đường *trong tiến trình*: dữ liệu do Subscriber chạy trong chính chương trình thu, không dựa vào probe kernel/uprobe (suy luận của người soạn).
+- Feature `log` phát log record khi chưa có subscriber `tracing`. Feature `log-always` luôn phát log record cùng với span/event, và chỉ nên đặt ở ứng dụng thu trace và log riêng[^tracing-log-features].
+- Feature `attributes` bật `#[instrument]`. Nó mặc định bật, nhưng kéo theo `syn` làm tăng thời gian biên dịch với crate chưa dùng `syn`[^tracing-attributes-feature].
+- Subscriber cài đặt toàn cục bằng `set_global_default`[^tracing-global]. Có thể ghi đè theo thread bằng `with_default`, nhưng chỉ áp dụng cho thread hiện tại[^tracing-with-default].
+- Ecosystem có subscriber đẩy trace sang các hệ thống distributed tracing tương thích OpenTelemetry (`tracing-opentelemetry`)[^tracing-otel]. Đó vẫn là đường *trong tiến trình*: dữ liệu do Subscriber chạy trong chính chương trình thu, không dựa vào probe kernel hay uprobe (suy luận của người soạn).
 
 </details>
 
-**Tổng kết mục 9:** uprobe trên Rust phụ thuộc vào việc symbol còn tồn tại, tên mangled (không ổn định), việc inline/monomorphization và cấu hình `strip`/`debug`; `tracing` là instrumentation trong tiến trình có ngữ cảnh nhân quả theo task, eBPF là quan sát từ ngoài ở mức kernel/hàm — dùng chung được nhưng không thay thế nhau.
+**Tổng kết mục 9:** uprobe trên Rust phụ thuộc vào việc symbol còn tồn tại, tên mangled (không ổn định), việc inline/monomorphization và cấu hình `strip`/`debug`; `tracing` là instrumentation trong tiến trình có ngữ cảnh nhân quả theo task, còn eBPF là quan sát từ ngoài ở mức kernel/hàm. Dùng chung được nhưng không thay thế nhau.
 
 ## Tóm tắt
 
-- Tracing chạy handler mỗi sự kiện (chi phí ∝ tần suất sự kiện); sampling chạy theo chu kỳ (chi phí theo tốc độ lấy mẫu bạn đặt — suy luận của người soạn)[^tp-called][^pe-sample-def].
-- ftrace được điều khiển bằng file trong tracefs (`/sys/kernel/tracing`): `current_tracer`, `set_event`, `tracing_on`, `trace` (không tiêu thụ) và `trace_pipe` (tiêu thụ, block)[^ftrace-mount][^ftrace-trace-file][^ftrace-pipe-consume].
-- Dynamic ftrace đổi lời gọi `mcount`/`__fentry__` thành `nop` lúc khởi động, vá lại khi bật → gần như không tốn gì khi tắt[^ftrace-nops][^ftrace-dyn-zero].
-- Tracepoint là điểm móc tĩnh do dev kernel đặt; kprobe là chèn breakpoint động vào lệnh kernel (trừ danh sách cấm), uprobe là phiên bản tương tự cho user space; uprobe cần offset do người dùng cung cấp; chỗ gắn kprobe/tracepoint không phải ABI ổn định[^tp-hook][^kprobe-int3][^uprobe-similar][^uprobe-offset][^qa-tp-abi][^qa-kprobe-abi].
-- eBPF = chương trình nạp bằng `bpf()`, verifier duyệt tĩnh, gọi helper trong danh sách trắng theo program type, trao đổi dữ liệu qua map, gắn vào sự kiện (packet, tracing…; với perf event thì qua `ioctl`)[^bpf-safe][^bpf-events][^helpers-whitelist][^bpf-map-exchange][^bpf-attach-perf].
-- bpftrace: `probe /predicate/ { action }`; `@` là map, `$` là scratch; kprobe+kretprobe+map theo `tid` là mẫu đo latency[^bt-structure][^bt-map-var][^bttut-tid-key].
-- USDT là điểm tĩnh do tác giả ứng dụng đặt; attach theo tên; Rust có crate `usdt`[^btref-usdt-def][^usdt-intro].
-- Chi phí = tần suất × chi phí mỗi hit + đường ra dữ liệu; kprobe tối ưu hóa (jump) rẻ hơn kprobe breakpoint; `bpf_trace_printk` chậm; tổng hợp trong map thay vì in từng event[^kprobe-opt-cost][^helper-printk-slow][^bt-count-percpu].
-- Quyền: `CAP_BPF` + `CAP_PERFMON` (từ Linux 5.8) thay cho `CAP_SYS_ADMIN`; container mặc định không có chúng, và các container chạy chung một kernel[^cap-bpf-since][^cap-perfmon-since][^docker-not-default][^docker-shares-kernel].
-- Rust: uprobe phụ thuộc symbol (strip, mangling legacy/v0, inline, generic); `tracing` là instrumentation trong process, khác eBPF quan sát từ ngoài[^cargo-strip][^rustc-v0-unstable][^ref-inline-auto][^tracing-intro].
+- Tracing chạy handler mỗi sự kiện[^tp-called], nên chi phí tỷ lệ với tần suất sự kiện. Sampling chạy theo chu kỳ[^pe-sample-def], nên chi phí theo tốc độ lấy mẫu bạn đặt (suy luận của người soạn).
+- ftrace được điều khiển bằng file trong tracefs (`/sys/kernel/tracing`)[^ftrace-mount]: `current_tracer`, `set_event`, `tracing_on`. File `trace` không tiêu thụ dữ liệu[^ftrace-trace-file]. `trace_pipe` thì tiêu thụ dữ liệu đã đọc[^ftrace-pipe-consume].
+- Dynamic ftrace đổi lời gọi `mcount`/`__fentry__` thành `nop` lúc khởi động[^ftrace-nops]. Nhờ vậy nó gần như không tốn gì khi tắt[^ftrace-dyn-zero].
+- Tracepoint là điểm móc tĩnh do dev kernel đặt[^tp-hook]. Kprobe chèn breakpoint động vào lệnh kernel (trừ danh sách cấm)[^kprobe-int3]. Uprobe là phiên bản tương tự cho user space[^uprobe-similar]. Nó cần offset do người dùng cung cấp[^uprobe-offset].
+- Chỗ gắn của kprobe không phải ABI ổn định[^qa-kprobe-abi]. Tracepoint cũng vậy[^qa-tp-abi].
+- eBPF là chương trình nạp bằng `bpf()`, được verifier duyệt tĩnh[^bpf-safe]. Nó gắn vào sự kiện như packet hay tracing[^bpf-events]. Với perf event thì gắn qua `ioctl`[^bpf-attach-perf]. Nó chỉ gọi helper trong danh sách trắng theo program type[^helpers-whitelist]. Nó trao đổi dữ liệu qua map[^bpf-map-exchange].
+- bpftrace có dạng `probe /predicate/ { action }`[^bt-structure]. `@` là map[^bt-map-var] và `$` là scratch. `kprobe` + `kretprobe` + map theo `tid` là mẫu đo latency[^bttut-tid-key].
+- USDT là điểm tĩnh do tác giả ứng dụng đặt[^btref-usdt-def], attach theo tên. Rust có crate `usdt` để tạo chúng[^usdt-intro].
+- Chi phí = tần suất × chi phí mỗi hit + đường ra dữ liệu. Kprobe tối ưu hóa (jump) rẻ hơn kprobe breakpoint[^kprobe-opt-cost]. `bpf_trace_printk` chậm[^helper-printk-slow]. Nên tổng hợp trong map thay vì in từng event[^bt-count-percpu].
+- Quyền: `CAP_BPF` có từ Linux 5.8, tách khỏi `CAP_SYS_ADMIN`[^cap-bpf-since]. `CAP_PERFMON` cũng vậy[^cap-perfmon-since]. Container mặc định không có chúng[^docker-not-default]. Các container chạy chung một kernel[^docker-shares-kernel].
+- Với Rust, uprobe phụ thuộc vào symbol. Cấu hình `strip` có thể xóa nó[^cargo-strip]. Mangling v0 không phải ABI ổn định[^rustc-v0-unstable]. rustc còn tự inline hàm[^ref-inline-auto]. `tracing` là instrumentation trong process[^tracing-intro], khác eBPF quan sát từ ngoài.
 
 ## Câu hỏi tự kiểm tra
 
 1. Tracing khác sampling ở đâu, và vì sao chi phí của chúng tăng theo hai quy luật khác nhau?
 <details><summary>Đáp án</summary>
 
-Tracing chạy handler mỗi lần điểm móc được thực thi[^tp-called]; sampling ghi định kỳ theo `sample_period` hoặc `sample_freq`[^pe-sample-def][^pe-sample-freq]. Chi phí tracing tăng theo tần suất sự kiện; chi phí sampling theo tốc độ lấy mẫu bạn đặt (suy luận của người soạn). Tutorial bpftrace chọn 99 Hz vì đủ thấy bức tranh nhưng không nhiễu hiệu năng và tránh đồng pha với hoạt động định kỳ[^bttut-99hz].
+Tracing chạy handler mỗi lần điểm móc được thực thi[^tp-called]. Sampling ghi định kỳ theo `sample_period`[^pe-sample-def]. Hoặc theo `sample_freq`, khi kernel tự chỉnh period[^pe-sample-freq]. Chi phí tracing tăng theo tần suất sự kiện, còn chi phí sampling theo tốc độ lấy mẫu bạn đặt (suy luận của người soạn). Tutorial bpftrace chọn 99 Hz vì đủ thấy bức tranh nhưng không nhiễu hiệu năng, và tránh đồng pha với hoạt động định kỳ[^bttut-99hz].
 
 </details>
 
 2. Vì sao `cat trace` hai lần có thể ra cùng kết quả còn `cat trace_pipe` thì không?
 <details><summary>Đáp án</summary>
 
-`trace` không phải consumer, khi tracing tắt mỗi lần đọc cho cùng kết quả[^ftrace-trace-file]; `trace_pipe` là consumer — đọc xong dữ liệu bị tiêu thụ và đọc sẽ block tới khi có dữ liệu mới[^ftrace-pipe-block][^ftrace-pipe-consume].
+`trace` không phải consumer, nên khi tracing tắt mỗi lần đọc cho cùng kết quả[^ftrace-trace-file]. `trace_pipe` là consumer. Đọc sẽ block tới khi có dữ liệu mới[^ftrace-pipe-block]. Đọc xong thì dữ liệu bị tiêu thụ[^ftrace-pipe-consume].
 
 </details>
 
 3. Vì sao function tracer gần như không tốn gì khi tắt?
 <details><summary>Đáp án</summary>
 
-Với dynamic ftrace, các lời gọi `mcount`/`__fentry__` ở đầu hàm được đổi thành `nop` lúc khởi động[^ftrace-nops], nên gần như không có overhead khi function tracing tắt[^ftrace-dyn-zero]; khi bật thì vá ngược thành lời gọi vào hạ tầng ftrace — cách sửa phụ thuộc kiến trúc; cách mới theo tài liệu là đặt breakpoint, đồng bộ CPU, sửa, đồng bộ lại[^ftrace-patch].
+Với dynamic ftrace, các lời gọi `mcount`/`__fentry__` ở đầu hàm được đổi thành `nop` lúc khởi động[^ftrace-nops]. Nhờ vậy gần như không có overhead khi function tracing tắt[^ftrace-dyn-zero]. Khi bật thì chúng được vá ngược thành lời gọi vào hạ tầng ftrace. Cách sửa phụ thuộc kiến trúc; cách mới theo tài liệu là đặt breakpoint, đồng bộ CPU, sửa, rồi đồng bộ lại[^ftrace-patch].
 
 </details>
 
 4. Mô tả các bước kprobe thực hiện khi CPU chạm điểm móc, và vì sao nó chạy bản sao lệnh thay vì chạy tại chỗ.
 <details><summary>Đáp án</summary>
 
-Thay byte đầu của lệnh bằng breakpoint → trap → `pre_handler` → single-step bản sao lệnh → `post_handler` → tiếp tục[^kprobe-int3][^kprobe-trap][^kprobe-post]. Chạy tại chỗ thì phải gỡ breakpoint tạm thời và mở cửa sổ cho CPU khác chạy lọt qua điểm móc[^kprobe-singlestep].
+Kprobe thay byte đầu của lệnh bằng breakpoint[^kprobe-int3]. CPU chạm breakpoint thì trap và gọi `pre_handler`[^kprobe-trap]. Sau đó kprobes single-step bản sao lệnh, gọi `post_handler` rồi tiếp tục với lệnh kế tiếp[^kprobe-post]. Chạy tại chỗ thì phải gỡ breakpoint tạm thời, và việc đó mở cửa sổ cho CPU khác chạy lọt qua điểm móc[^kprobe-singlestep].
 
 </details>
 
 5. Vì sao ví dụ zsh trong tài liệu uprobe dùng offset `0x46420` dù `objdump` in địa chỉ `0x446420`?
 <details><summary>Đáp án</summary>
 
-Tài liệu gọi `0x46420` là offset của `zfree` trong object `/bin/zsh` nạp ở `0x00400000`; `0x446420 − 0x400000 = 0x46420`, và người dùng phải tự tính offset này[^uprobe-zsh-ex][^uprobe-offset]. (Phép trừ là cách tính của ví dụ, không phải công thức chung — suy luận của người soạn.)
+Tài liệu gọi `0x46420` là offset của `zfree` trong object `/bin/zsh` nạp ở `0x00400000`[^uprobe-zsh-ex]; `0x446420 − 0x400000 = 0x46420`. Người dùng phải tự tính offset này[^uprobe-offset]. (Phép trừ là cách tính của ví dụ, không phải công thức chung: suy luận của người soạn.)
 
 </details>
 
 6. Verifier làm hai bước nào, và "con trỏ có thể NULL" từ map ảnh hưởng chương trình ra sao?
 <details><summary>Đáp án</summary>
 
-Bước 1: kiểm tra DAG, theo tài liệu là để cấm vòng lặp (mô tả cũ: từ Linux 5.3 vòng lặp có chặn được chấp nhận[^ebpfdocs-loops]) và các lỗi CFG như lệnh không với tới được[^ver-dag]. Bước 2: mô phỏng mọi đường từ lệnh đầu, theo dõi thanh ghi và stack[^ver-simulate]. Truy cập map trả về loại con trỏ-có-thể-NULL, chỉ dùng được sau khi kiểm tra khác NULL[^ver-map-null].
+Bước 1 kiểm tra DAG, theo tài liệu là để cấm vòng lặp và các lỗi CFG như lệnh không với tới được[^ver-dag]. (Mô tả đó cũ: từ Linux 5.3 vòng lặp có chặn được chấp nhận[^ebpfdocs-loops].) Bước 2 mô phỏng mọi đường từ lệnh đầu, theo dõi thanh ghi và stack[^ver-simulate]. Truy cập map trả về loại con trỏ-có-thể-NULL, chỉ dùng được sau khi kiểm tra khác NULL[^ver-map-null].
 
 </details>
 
 7. Program type quyết định hai thứ gì? Cho ví dụ khác biệt tracing và socket filter.
 <details><summary>Đáp án</summary>
 
-Quyết định tập con helper được phép gọi và context đầu vào[^bpf-progtype-ctx]. Tracing nhận tập giá trị thanh ghi, socket filter nhận packet mạng[^bpf-progtype-ctx].
+Nó quyết định tập con helper được phép gọi và context đầu vào[^bpf-progtype-ctx]. Tracing nhận tập giá trị thanh ghi, còn socket filter nhận packet mạng[^bpf-progtype-ctx].
 
 </details>
 
 8. Đọc `kprobe:vfs_read { @start[tid] = nsecs; } kretprobe:vfs_read /@start[tid]/ { @ns[comm] = hist(nsecs - @start[tid]); delete(@start[tid]); }`: vì sao cần map và predicate?
 <details><summary>Đáp án</summary>
 
-Return probe không có đối số đầu vào, chỉ có giá trị trả về nên cần lưu thông tin ở lúc vào hàm vào map[^bt-kretprobe-args]; khóa theo `tid` vì một thread chỉ chạy một syscall tại một thời điểm[^bttut-tid-key]; predicate loại trường hợp bpftrace khởi động giữa lúc đang đọc nên chỉ thấy lúc ra[^bttut-pred].
+Return probe không có đối số đầu vào, chỉ có giá trị trả về, nên cần lưu thông tin ở lúc vào hàm vào map[^bt-kretprobe-args]. Khóa theo `tid` vì một thread chỉ chạy một syscall tại một thời điểm[^bttut-tid-key]. Predicate loại trường hợp bpftrace khởi động giữa lúc đang đọc nên chỉ thấy lúc ra[^bttut-pred].
 
 </details>
 
 9. USDT khác uprobe thế nào, và vì sao đối số của macro probe trong crate `usdt` là closure?
 <details><summary>Đáp án</summary>
 
-USDT là điểm tĩnh do tác giả đặt, có thể ổn định/ghi tài liệu; uprobe là động, gắn vào hàm tùy ý, không được xem là API ổn định[^btref-static-def][^btref-dynamic-def]. Closure chỉ được gọi khi probe được bật nên đối số tốn kém chỉ trả giá lúc đó[^usdt-closure].
+USDT là điểm tĩnh do tác giả đặt, có thể ổn định và ghi tài liệu[^btref-static-def]. Uprobe là động, gắn vào hàm tùy ý, không được xem là API ổn định[^btref-dynamic-def]. Closure chỉ được gọi khi probe được bật, nên đối số tốn kém chỉ trả giá lúc đó[^usdt-closure].
 
 </details>
 
 10. Cần quyền gì để chạy bpftrace không dùng root, và container Docker mặc định thiếu gì?
 <details><summary>Đáp án</summary>
 
-`CAP_BPF` và `CAP_PERFMON` (từ Linux 5.8, tách khỏi `CAP_SYS_ADMIN`)[^cap-bpf-since][^cap-perfmon-since]; ngoài ra các sysctl như `perf_event_paranoid` và `unprivileged_bpf_disabled` chặn/mở quyền không đặc quyền[^pe-paranoid-2][^sysctl-unpriv]. Docker mặc định không cấp `BPF`, `PERFMON`, `SYS_ADMIN`[^docker-not-default]. (Cần quyền chính xác cho từng chức năng bpftrace phải xem thêm; chương này chỉ trích tài liệu quyền cơ bản.)
+`CAP_BPF` có từ Linux 5.8, tách khỏi `CAP_SYS_ADMIN`[^cap-bpf-since]. `CAP_PERFMON` cũng vậy[^cap-perfmon-since]. Ngoài ra, sysctl `perf_event_paranoid` chặn hoặc mở quyền đo cho user không đặc quyền[^pe-paranoid-2]. `unprivileged_bpf_disabled` làm điều tương tự cho `bpf()`[^sysctl-unpriv]. Docker mặc định không cấp `BPF`, `PERFMON`, `SYS_ADMIN`[^docker-not-default]. (Quyền chính xác cho từng chức năng bpftrace phải xem thêm; chương này chỉ trích tài liệu quyền cơ bản.)
 
 </details>
 
 11. Vì sao uprobe trên một hàm Rust có thể không gắn được hoặc không ổn định giữa các lần build?
 <details><summary>Đáp án</summary>
 
-Hàm có thể bị inline (rustc tự inline khi đáng làm[^ref-inline-auto]) hoặc bị strip symbol (`strip`[^cargo-strip]); tên mangled không phải ABI ổn định[^rustc-v0-unstable] và với generic có thể có nhiều instance[^rust-mono]. Dùng `#[unsafe(no_mangle)]` cho tên cố định, đổi lại rủi ro va chạm symbol[^ref-nomangle][^ref-nomangle-unsafe].
+Hàm có thể bị inline, vì rustc tự inline khi đáng làm[^ref-inline-auto]. Symbol cũng có thể bị strip[^cargo-strip]. Tên mangled không phải ABI ổn định[^rustc-v0-unstable]. Code generic thì có thể có nhiều instance[^rust-mono]. Dùng `#[unsafe(no_mangle)]` cho tên cố định thì đổi lại rủi ro va chạm symbol[^ref-nomangle-unsafe].
 
 </details>
 
 12. `tracing` và eBPF tracing khác ở đâu về chỗ chạy, về việc cần biên dịch lại, và về ngữ cảnh async?
 <details><summary>Đáp án</summary>
 
-`tracing` chạy trong process, cần thêm macro/attribute vào code[^tracing-intro][^tracing-attributes]; eBPF/uprobe gắn từ ngoài vào symbol có sẵn, chương trình chạy trong kernel[^bpf-safe][^uprobe-similar]. Task async ghép trên cùng thread[^tracing-async] nên khóa `tid` kiểu bpftrace không tách được từng request ở mức hàm Rust (suy luận của người soạn); span của `tracing` đi theo luồng thực thi[^tracing-span].
+`tracing` chạy trong process và cần thêm macro hoặc attribute vào code[^tracing-intro]. eBPF/uprobe gắn từ ngoài vào symbol có sẵn[^uprobe-similar]. Chương trình eBPF chạy trong kernel[^bpf-safe]. Task async ghép trên cùng thread[^tracing-async], nên khóa `tid` kiểu bpftrace không tách được từng request ở mức hàm Rust (suy luận của người soạn). Span của `tracing` thì đi theo luồng thực thi[^tracing-span].
 
 </details>
 

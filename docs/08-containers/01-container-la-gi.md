@@ -13,6 +13,8 @@
 
 ## Kiến thức cần trước
 
+Bạn đã đóng gói một service vào image và chạy bằng `docker run` hoặc deploy lên Kubernetes, nhưng chưa rõ bên dưới kernel làm gì. Chương này lấp chỗ đó. Cần nhớ sẵn:
+
 - [Process](../01-linux/03-process.md): PID, fork/exec, vai trò của PID 1.
 - [Signal](../01-linux/05-signal.md): SIGTERM, SIGKILL, handler.
 - [User, quyền, /proc, /sys](../01-linux/06-user-quyen-proc-sys.md): uid/gid, capabilities, `/proc`.
@@ -21,26 +23,28 @@
 
 ## 1. Vấn đề: chạy nhiều chương trình trên một máy mà không giẫm chân nhau
 
-Một server chạy nhiều dịch vụ gặp bốn loại xung đột:
+Giả sử team bạn có `orders`, một service viết bằng Rust (ví dụ giả định của người soạn, không phải code trong repo). Lúc đầu nó chạy một mình trên một máy Linux và mọi thứ êm. Rồi để tiết kiệm máy, team dồn thêm `payments` và `notify` lên cùng máy đó, và bốn loại rắc rối lần lượt xuất hiện:
 
-1. **Xung đột về tầm nhìn**: hai dịch vụ cùng muốn nghe cổng 8080, cùng muốn `/etc/app.conf` khác nhau, cùng thấy danh sách process của nhau.
-2. **Xung đột về tài nguyên**: một dịch vụ rò rỉ bộ nhớ và kéo cả máy vào OOM; một dịch vụ khác ngốn hết CPU.
-3. **Xung đột về phụ thuộc**: dịch vụ A cần libc/OpenSSL phiên bản này, dịch vụ B cần phiên bản khác.
-4. **Xung đột về quyền**: một dịch vụ bị khai thác không nên chạm được các dịch vụ khác hay chính hệ điều hành.
+1. **Xung đột về tầm nhìn.** `orders` và `payments` cùng muốn nghe cổng 8080. Cả hai cùng đọc `/etc/app.conf` nhưng cần nội dung khác nhau. `ps` của service này còn liệt kê luôn process của service kia.
+2. **Xung đột về tài nguyên.** `payments` rò rỉ bộ nhớ và kéo cả máy vào OOM, `orders` chết theo dù không có lỗi gì. Hoặc `notify` ngốn hết CPU và các handler thread của `orders` bị chậm.
+3. **Xung đột về phụ thuộc.** `orders` cần OpenSSL bản mới, còn `notify` chỉ chạy được với bản cũ.
+4. **Xung đột về quyền.** Nếu `notify` bị khai thác thì kẻ tấn công không nên chạm được vào `orders` hay vào chính hệ điều hành.
 
-Máy ảo (VM) giải quyết cả bốn bằng cách cho mỗi dịch vụ một "máy" riêng. Container giải quyết bằng cách khác: dùng chung một kernel, nhưng kernel được dạy cách **che bớt tầm nhìn** và **đặt trần tài nguyên** cho từng nhóm process. Phần còn lại của chương dựng lại ý này từng bước, kèm các thí nghiệm chạy thật.
+Cách quen thuộc nhất là cho mỗi service một máy ảo (VM): mỗi service có "máy" riêng nên cả bốn rắc rối biến mất, nhưng giá phải trả là mỗi VM mang một kernel riêng (mục 2). Container đi hướng khác. Mọi service dùng chung một kernel, và kernel được dạy **che bớt tầm nhìn** cùng **đặt trần tài nguyên** cho từng nhóm process.
+
+Phần còn lại của chương dựng lại ý này từng bước. Mục 2–4 trả lời container là gì và khác VM ở đâu. Mục 5–8 là bốn cơ chế của kernel, ứng với bốn loại rắc rối trên (nhận xét của người soạn): namespaces lo tầm nhìn, cgroups lo tài nguyên, root filesystem riêng lo phụ thuộc, capabilities và seccomp lo quyền. Mục 10–11 nói về công cụ và sự cố thực tế. Các thí nghiệm đã chạy thật, nhưng thường dùng container `alpine` chạy `sleep` thay cho `orders` cho gọn; kết luận áp dụng y nguyên cho `orders`.
 
 ## 2. Container không phải VM: cùng một kernel (Q1)
 
-> **Trả lời ngắn.** Một VM là cả một hệ điều hành với kernel riêng[^docker-vm]. Container chỉ là một process bị cô lập cùng các file nó cần, và mọi container trên máy dùng chung một kernel[^docker-container]. Vì cgroups là một tính năng của kernel Linux[^cg-def], một VM Linux là cách hợp lý để có container trên Mac (suy luận của người soạn); Docker Desktop nói nó có một Linux VM chạy các container[^docker-vmm] (mục 4).
+> **Trả lời ngắn.** Một VM là cả một hệ điều hành với kernel riêng[^docker-vm]. Container chỉ là một process bị cô lập cùng các file nó cần, và mọi container trên máy dùng chung một kernel[^docker-container]. Vì vậy trên Mac, Docker Desktop chạy container bên trong một VM Linux[^docker-vmm] (mục 4).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): VM như thuê cho mỗi dịch vụ một căn nhà riêng, có móng riêng. Container như nhiều phòng trong cùng một tòa nhà: chung móng và hệ thống điện (kernel), chỉ khác vách ngăn.
+*Với `orders`.* Bạn chạy `orders` bằng `docker run`. Câu hỏi là: process của nó đang chạy trên kernel nào? Trả lời đúng câu này là hiểu được container khác VM ở đâu.
 
-Tài liệu của Docker mô tả sự khác biệt như sau: VM là cả một hệ điều hành với kernel, driver phần cứng, chương trình và ứng dụng riêng[^docker-vm]. Còn container chỉ đơn giản là một process bị cô lập cùng mọi file nó cần để chạy; nếu chạy nhiều container thì chúng dùng chung một kernel[^docker-container].
+Về VM: nó là cả một hệ điều hành, có kernel, driver phần cứng, chương trình và ứng dụng riêng[^docker-vm]. Về container: nó chỉ là một process bị cô lập, kèm mọi file process đó cần để chạy; nếu chạy nhiều container thì tất cả dùng chung một kernel[^docker-container]. Nên nếu `orders`, `payments` và `notify` mỗi service nằm trong một VM thì có ba kernel riêng. Nằm trong ba container thì chỉ có đúng một kernel, của host (suy ra từ hai định nghĩa trên).
 
-Hai câu này chứa toàn bộ điểm mấu chốt:
+Hai câu định nghĩa đó chứa toàn bộ điểm mấu chốt:
 
 | | VM | Container |
 |---|---|---|
@@ -50,23 +54,23 @@ Hai câu này chứa toàn bộ điểm mấu chốt:
 
 <details><summary>Đi sâu: VM cần một lớp ảo hóa riêng</summary>
 
-Về dòng "ranh giới cách ly" của VM (nhận xét của người soạn): tài liệu Docker Desktop nói HyperKit là một hypervisor đời cũ xây trên Hypervisor.framework của macOS[^docker-hyperkit]. Đây là một ví dụ cho thấy VM cần một lớp phần mềm ảo hóa riêng ở dưới; container không cần lớp đó vì không khởi động kernel thứ hai (suy luận của người soạn).
+Về dòng "ranh giới cách ly" của VM (nhận xét của người soạn): tài liệu Docker Desktop nói HyperKit là một hypervisor đời cũ, xây trên Hypervisor.framework của macOS, và các bản Docker Desktop for Mac trước đây dùng nó để chạy VM Linux[^docker-hyperkit]. Ví dụ này cho thấy VM cần một lớp phần mềm ảo hóa riêng ở bên dưới. Container không cần lớp đó vì không khởi động kernel thứ hai (suy luận của người soạn).
 
 </details>
 
-**Quay lại Q1:** khác biệt cốt lõi là kernel: VM có kernel riêng, mọi container dùng chung kernel của host; vì thế trên Mac container phải chạy trong một VM Linux (mục 4).
+**Quay lại Q1:** khác biệt cốt lõi là kernel: VM có kernel riêng, còn mọi container, kể cả container của `orders`, dùng chung kernel của host; vì thế trên Mac container phải chạy trong một VM Linux (mục 4).
 
 ## 3. Container trên Linux thực chất là gì (Q2)
 
-> **Trả lời ngắn.** Không theo nghĩa một đối tượng duy nhất: kernel Linux không có system call `create_container()` hay đối tượng "container" riêng (nhận xét của người soạn). Đặc tả OCI mô tả container Linux được dựng từ nhiều tính năng kernel: namespaces, cgroups, capabilities, LSM, filesystem jails[^oci-linux]. Quan sát cho thấy process của container vẫn hiện trên host, chỉ khác là có thêm một PID ở bên trong[^pidns-layers].
+> **Trả lời ngắn.** Không theo nghĩa một đối tượng duy nhất: kernel Linux không có system call `create_container()` hay đối tượng "container" riêng (nhận xét của người soạn). Đặc tả OCI mô tả container Linux là thứ dựng từ nhiều tính năng kernel: namespaces, cgroups, capabilities, LSM, filesystem jails[^oci-linux]. Quan sát cho thấy process của container vẫn hiện trên host, chỉ khác là có thêm một PID ở bên trong[^pidns-layers].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhìn từ trong phòng kính mờ, bạn tưởng mình ở một tòa nhà riêng; nhìn từ ngoài vẫn thấy từng người đi lại. Container là process được che bớt tầm nhìn, không phải một máy khác.
+*Với `orders`.* Team vẫn nói "`orders` chạy trong container". Nhưng nếu bạn đứng trên máy Linux và hỏi kernel đang chạy gì, câu trả lời là một process Rust bình thường, chỉ bị che bớt tầm nhìn và đặt trần tài nguyên. Container không phải một máy khác.
 
-Một cách nghĩ hữu ích (nhận xét của người soạn): **không có system call `create_container()`**. Thứ ta gọi là "container" là một quy ước phía userspace: một process (hoặc cây process) được đặt vào một tập namespaces, một cgroup và một cây thư mục gốc riêng. Đặc tả runtime của OCI cũng mô tả theo hướng này: container trên Linux được dựng từ nhiều tính năng kernel như namespaces, cgroups, capabilities, LSM và filesystem jails[^oci-linux].
+Lý do là kernel không có system call `create_container()`. Thứ ta gọi là "container" là một quy ước phía userspace: một process (hoặc cả cây process) được đặt vào một tập namespaces, một cgroup và một cây thư mục gốc riêng (nhận xét của người soạn). Đặc tả runtime của OCI mô tả cùng hướng đó: container Linux được dựng từ nhiều tính năng kernel như namespaces, cgroups, capabilities, LSM và filesystem jails[^oci-linux].
 
-Thí nghiệm ở phần Đi sâu cho thấy cùng một process `sleep` có hai PID: 1 trong container và một số khác ngoài host, đúng như man page mô tả: một process có một PID ở mỗi tầng của hệ thống phân cấp PID namespace mà nó nhìn thấy[^pidns-layers]. Không có gì "bên trong" mà host không thấy: cách ly là chuyện che bớt tầm nhìn, không phải tách ra một máy khác (nhận xét của người soạn).
+Hệ quả kiểm chứng được. Thí nghiệm ở phần Đi sâu cho thấy cùng một process `sleep` có hai PID: 1 trong container và một số khác ngoài host. Điều này khớp với man page: một process có một PID ở mỗi tầng của hệ thống phân cấp PID namespace mà nó nhìn thấy[^pidns-layers]. Không có gì "bên trong" mà host không thấy. Cách ly ở đây là che bớt tầm nhìn, không phải tách ra một máy khác (nhận xét của người soạn).
 
 <details><summary>Đi sâu: quan sát PID, inode namespace và <code>--pid=host</code></summary>
 
@@ -90,7 +94,7 @@ PID   USER     TIME  COMMAND
 0::/
 ```
 
-Trong container, `sleep` là PID 1, và `ps` chỉ thấy vài process. Giờ nhìn từ **phía host Linux** — với colima, "host Linux" là VM mà `colima ssh` đưa vào:
+Trong container, `sleep` là PID 1 và `ps` chỉ thấy vài process. Giờ nhìn từ **phía host Linux**. Với colima, "host Linux" là VM mà `colima ssh` đưa vào:
 
 ```bash
 colima ssh -- sh -c 'ps -eo pid,ppid,comm | grep sleep; \
@@ -105,9 +109,9 @@ NSpid:	90443	1
 0::/docker/52a60284ede94f4553e6500eb129ffc5f05f8821ebfc5a7c6f7bd727015e1c5c
 ```
 
-Cùng một process `sleep` có **hai PID**: 1 ở trong container, 90443 ở ngoài; cha của nó (90421) là một process bình thường trên host. Đây đúng là điều man page mô tả: một process có một process ID ở mỗi tầng của hệ thống phân cấp PID namespace mà nó nhìn thấy được[^pidns-layers]; trường `NSpid` ở đây hiện đúng hai số, 90443 và 1 (quan sát). Ngoài ra process nằm trong một cgroup có tên chứa ID container.
+Cùng một process `sleep` có **hai PID**: 1 ở trong container, 90443 ở ngoài; cha của nó (90421) là một process bình thường trên host. Trường `NSpid` hiện đúng hai số, 90443 và 1 (quan sát). Ngoài ra process nằm trong một cgroup có tên chứa ID container.
 
-So sánh các số inode namespace của cùng process nhìn từ trong và từ ngoài:
+Giờ so sánh các số inode namespace của cùng process, nhìn từ trong và từ ngoài:
 
 ```text
 trong container (/proc/self/ns)      host VM (/proc/90443/ns)      host VM (/proc/self/ns)
@@ -118,13 +122,13 @@ uts  -> uts:[4026532454]             uts:[4026532454]              uts:[40265318
 user -> user:[4026531837]            user:[4026531837]             user:[4026531837]
 ```
 
-(Rút gọn từ kết quả thật.) Man page nói: nếu hai process ở cùng một namespace thì device ID và số inode của các symbolic link `/proc/pid/ns/xxx` của chúng sẽ giống nhau[^ns-link]. Vậy:
+(Rút gọn từ kết quả thật.) Man page cho cách đọc bảng này: nếu hai process ở cùng một namespace thì device ID và số inode của các symbolic link `/proc/pid/ns/xxx` của chúng giống nhau[^ns-link]. Vậy:
 
-- `sleep` nhìn từ trong và từ ngoài **cùng namespaces** (cột 1 = cột 2) — nó là một process, chỉ có một tập namespaces.
-- Tập đó **khác** tập của shell trên host (cột 3) ở các dòng được in: mnt, pid, net, uts (bản rút gọn không in các namespace còn lại như ipc, cgroup, time).
-- Namespace `user` **giống** host (4026531837): container mặc định của Docker trong lần chạy này không dùng user namespace riêng (quan sát; cấu hình khác có thể khác).
+- `sleep` nhìn từ trong và từ ngoài **cùng namespaces** (cột 1 = cột 2): nó là một process nên chỉ có một tập namespaces.
+- Tập đó **khác** tập của shell trên host (cột 3) ở các dòng được in: mnt, pid, net, uts. Bản rút gọn không in các namespace còn lại như ipc, cgroup, time.
+- Namespace `user` **giống** host (4026531837): container Docker mặc định trong lần chạy này không dùng user namespace riêng (quan sát; cấu hình khác có thể khác).
 
-Cuối cùng, nếu cho container dùng PID namespace của host (`--pid=host`; tài liệu Docker mô tả chế độ `host` là dùng PID namespace của host bên trong container[^docker-pidhost]), nó thấy các process của VM, kể cả `systemd` ở PID 1 (quan sát):
+Cuối cùng, nếu cho container dùng PID namespace của host bằng `--pid=host` (tài liệu Docker mô tả chế độ `host` là dùng PID namespace của host bên trong container[^docker-pidhost]), nó thấy các process của VM, kể cả `systemd` ở PID 1 (quan sát):
 
 ```bash
 docker run --rm --pid=host alpine ps | head -4
@@ -137,17 +141,15 @@ PID   USER     TIME  COMMAND
 
 </details>
 
-**Quay lại Q2:** container là process Linux thường được che bớt tầm nhìn; kernel không có đối tượng "container".
+**Quay lại Q2:** container là process Linux thường bị che bớt tầm nhìn; kernel không có đối tượng "container". Với `orders`, `ps` trên host vẫn thấy process của nó.
 
 ## 4. Docker trên macOS chạy trong một VM Linux (phần tiếp của Q1)
 
-Mục này trả lời nửa sau của Q1; kết luận đã nằm trong Trả lời ngắn ở mục 2, dưới đây là bằng chứng quan sát.
+Mục này trả lời nửa sau của Q1. Kết luận đã nằm trong Trả lời ngắn ở mục 2; dưới đây là bằng chứng quan sát.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mang một thiết bị chỉ chạy được trên điện Linux sang xứ dùng điện khác: bạn phải mang theo cả bộ đổi nguồn (VM Linux) rồi mới cắm vào.
-
-Trên chính máy macOS đó:
+*Với `orders`.* Dev trong team build và chạy thử `orders` bằng Docker ngay trên MacBook. Nhưng mục 3 vừa nói container là process Linux, trong khi macOS không phải Linux. Vậy process đó chạy ở đâu? Thử kiểm tra trên chính máy macOS đó:
 
 ```text
 $ uname -sm                      # trên macOS
@@ -156,13 +158,13 @@ $ docker run --rm alpine uname -sr
 Linux 6.8.0-117-generic
 ```
 
-Container báo kernel Linux 6.8 trong khi host là Darwin (quan sát). Tài liệu Docker nói: Docker Desktop hỗ trợ nhiều Virtual Machine Manager (VMM) để chạy VM Linux nơi các container chạy[^docker-vmm]. Vì cgroups là một tính năng của kernel Linux[^cg-def], một VM Linux là cách hợp lý để có container trên Mac (suy luận của người soạn).
+Container báo kernel Linux 6.8 trong khi host là Darwin (quan sát). Docker Desktop giải thích điều này: nó hỗ trợ nhiều Virtual Machine Manager (VMM) để chạy một VM Linux, và các container chạy bên trong VM đó[^docker-vmm]. Lý do hợp lý (suy luận của người soạn): cgroups là một tính năng của kernel Linux[^cg-def], nên muốn có container trên Mac thì cần một kernel Linux.
 
-<details><summary>Đi sâu: HyperKit, Colima và hệ quả khi benchmark</summary>
+<details><summary>Đi sâu: Colima và hệ quả khi benchmark</summary>
 
-Tài liệu Docker cũng nói: các bản Docker Desktop for Mac trước đây dùng HyperKit để chạy VM Linux[^docker-hyperkit]. Với Colima, quan sát là `colima ssh` đưa ta vào một Linux có kernel 6.8, trùng với kernel mà container báo — tức cũng có một VM Linux ở giữa (suy luận của người soạn). README của Colima liệt kê hỗ trợ nhiều container runtime[^colima-features].
+Với Colima, quan sát là `colima ssh` đưa ta vào một Linux có kernel 6.8, trùng với kernel mà container báo. Tức là cũng có một VM Linux ở giữa (suy luận của người soạn). HyperKit, hypervisor mà các bản Docker Desktop cũ dùng, đã nói ở phần Đi sâu của mục 2.
 
-Hệ quả thực tế (nhận xét của người soạn): khi benchmark container trên Mac, bạn đang đo VM + container; muốn xem hành vi kernel đúng nghĩa hãy nhìn bên trong VM hoặc trên Linux thật.
+Hệ quả thực tế (nhận xét của người soạn): khi benchmark `orders` trong container trên Mac, bạn đang đo VM cộng container. Muốn thấy hành vi kernel đúng nghĩa, hãy nhìn bên trong VM hoặc trên Linux thật.
 
 </details>
 
@@ -170,48 +172,55 @@ Hệ quả thực tế (nhận xét của người soạn): khi benchmark contai
 
 ## 5. Namespaces: process nhìn thấy gì (Q3)
 
-> **Trả lời ngắn.** Một namespace bọc một tài nguyên toàn cục của hệ thống trong một lớp trừu tượng, để process bên trong thấy như mình có một bản riêng[^ns-def]. Mỗi loại namespace che một loại tài nguyên, ví dụ mount points, process IDs hay network devices[^ns-table-mnt][^ns-table-net]. Kernel vẫn chỉ có một.
+> **Trả lời ngắn.** Một namespace bọc một tài nguyên toàn cục của hệ thống trong một lớp trừu tượng, để process bên trong thấy như mình có một bản riêng, cô lập[^ns-def]. Mỗi loại namespace che một loại tài nguyên, ví dụ mount points hoặc process IDs[^ns-table-mnt]. Kernel vẫn chỉ có một.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cùng một tòa nhà, nhưng mỗi nhóm được phát một tấm bản đồ riêng đánh số phòng lại từ 1 và chỉ vẽ một số phòng; tòa nhà thật vẫn là một.
+*Với `orders`.* Quay lại hai rắc rối đầu tiên của mục 1: `orders` và `payments` cùng đòi cổng 8080, và `ps` của cái này liệt kê process của cái kia. Namespaces chữa đúng nhóm rắc rối này. Mỗi container có network namespace riêng nên cổng 8080 của nó chỉ là của nó (bảng bên dưới ghi network namespace cách ly cả ports). Mỗi container có PID namespace riêng nên `ps` chỉ thấy process cùng container.
 
-Man page `namespaces(7)`: một namespace bọc một tài nguyên toàn cục của hệ thống trong một lớp trừu tượng, khiến các process trong namespace đó thấy như chúng có một bản riêng, cô lập, của tài nguyên toàn cục ấy[^ns-def]. Kernel vẫn là một, tài nguyên toàn cục (bảng process, bảng mount, ngăn xếp mạng…) vẫn có thật; namespace chỉ cho mỗi nhóm process một **góc nhìn** riêng.
+Ý chính cần nắm: kernel vẫn là một và tài nguyên toàn cục vẫn có thật (bảng process, bảng mount, ngăn xếp mạng…). Namespace không tách chúng ra, nó chỉ cho mỗi nhóm process một **góc nhìn** riêng về chúng. Định nghĩa gốc nằm ở man page `namespaces(7)`[^ns-def].
 
-Linux có tám loại namespace trong bảng của man page. Chi tiết từng loại thuộc [Chương 02 — Namespaces](./02-namespaces.md); ở đây chỉ cần bản đồ:
+Linux có tám loại namespace trong bảng của man page. Chi tiết từng loại thuộc [Chương 02 — Namespaces](./02-namespaces.md); ở đây chỉ cần bản đồ, với cột "Cách ly cái gì" trích nguyên văn từ man page:
 
 | Namespace | Cờ clone | Cách ly cái gì |
 |---|---|---|
-| Mount | `CLONE_NEWNS` | Mount points |
+| Mount | `CLONE_NEWNS` | Mount points[^ns-table-mnt] |
 | PID | `CLONE_NEWPID` | Process IDs |
-| Network | `CLONE_NEWNET` | Network devices, stacks, ports, etc. |
-| UTS | `CLONE_NEWUTS` | Hostname and NIS domain name |
-| IPC | `CLONE_NEWIPC` | System V IPC, POSIX message queues |
+| Network | `CLONE_NEWNET` | Network devices, stacks, ports, etc.[^ns-table-net] |
+| UTS | `CLONE_NEWUTS` | Hostname and NIS domain name[^ns-table-uts] |
+| IPC | `CLONE_NEWIPC` | System V IPC, POSIX message queues[^ns-table-ipc] |
 | User | `CLONE_NEWUSER` | User and group IDs |
 | Cgroup | `CLONE_NEWCGROUP` | Cgroup root directory |
 | Time | `CLONE_NEWTIME` | Boot and monotonic clocks |
 
-Cột "Cách ly cái gì" trích nguyên văn từ bảng của man page[^ns-table-mnt][^ns-table-net][^ns-table-uts][^ns-table-ipc]. Namespace mount đến từ rất sớm: `CLONE_NEWNS` có từ Linux 2.4.19[^ns-mount-since].
-
 ### Các API làm việc với namespace
 
-Man page tóm tắt các cách làm việc với namespace: `clone(2)` với cờ `CLONE_NEW*` tạo process con và các namespace mới cho nó[^ns-clone]; `unshare(2)` đưa *chính process gọi* vào namespace mới (process gọi trở thành thành viên của các namespace đó[^ns-unshare]); `setns(2)` cho phép process gọi tham gia một namespace đã có[^ns-setns]; và `/proc/pid/ns/` là nơi mỗi process phơi ra các namespace của nó: mỗi process có một thư mục con `/proc/pid/ns/` chứa một mục cho mỗi namespace có thể thao tác bằng `setns(2)`[^ns-proc].
+Có bốn cách chạm vào namespace, và tên của chúng sẽ gặp lại ở chương sau:
 
-Việc `nsenter` là lệnh bao quanh `setns`, và việc `docker exec`/`docker run` thực chất gọi `setns` và `clone`/`unshare` kèm các cờ trên, là mô hình của người soạn (suy luận của người soạn, không có nguồn trực tiếp; [Chương 06](./06-runtime-oci.md) chỉ dẫn nguồn cho phần containerd–shim–runc).
+- `clone(2)` với cờ `CLONE_NEW*` tạo process con và tạo các namespace mới cho nó[^ns-clone].
+- `unshare(2)` đưa *chính process gọi* vào namespace mới[^ns-unshare].
+- `setns(2)` cho process gọi tham gia một namespace đã có[^ns-setns].
+- `/proc/pid/ns/` là nơi mỗi process phơi ra namespace của nó: mỗi process có một thư mục con này, chứa một mục cho mỗi namespace mà `setns(2)` thao tác được[^ns-proc].
+
+Về cách các công cụ dùng bốn API này: `nsenter` bọc quanh `setns`, còn `docker exec` và `docker run` gọi `setns` và `clone`/`unshare` kèm các cờ trên. Đó là mô hình của người soạn (suy luận của người soạn, không có nguồn trực tiếp; [Chương 06](./06-runtime-oci.md) chỉ dẫn nguồn cho phần containerd–shim–runc).
 
 <details><summary>Đi sâu: quyền tạo namespace, PID namespace và PID 1</summary>
 
-**Quyền tạo namespace (quan sát trong lab).** Container lab của repo (`./labs/linux.sh`) chạy root nhưng **không có `CAP_SYS_ADMIN`**: `unshare --pid --fork --mount-proc --uts --ipc sh -c "ps -e"` và `unshare -u hostname x` đều báo `unshare: unshare failed: Operation not permitted`, còn `unshare -U` tạo được user namespace. Khớp man page: tạo namespace mới bằng `clone`/`unshare` trong đa số trường hợp cần `CAP_SYS_ADMIN`[^ns-priv] (ví dụ `CLONE_NEWUTS`[^unshare-cap]), ngoại lệ là user namespace. Danh sách capability của tiến trình trong lab, giải mã bằng `capsh --decode`, là: `chown, dac_override, fowner, fsetid, kill, setgid, setuid, setpcap, net_bind_service, net_admin, net_raw, sys_chroot, sys_ptrace, mknod, audit_write, setfcap` — không có `sys_admin`. Số `uid_map`, uid overflow 65534 và `unshare -Ur` được ghi đầy đủ ở [Chương 02, mục 3 và mục 6](./02-namespaces.md); điều kiện duy nhất cần nhớ ở đây là user namespace cho process không đặc quyền làm "root" bên trong[^userns-root] — nền của rootless container (nhận xét của người soạn; rootless thuộc [Chương 05](./05-bao-mat-container.md)).
+**Quyền tạo namespace (quan sát trong lab).** Container lab của repo (`./labs/linux.sh`) chạy root nhưng **không có `CAP_SYS_ADMIN`**. `unshare --pid --fork --mount-proc --uts --ipc sh -c "ps -e"` và `unshare -u hostname x` đều báo `unshare: unshare failed: Operation not permitted`, còn `unshare -U` tạo được user namespace. Kết quả này khớp man page: tạo namespace mới bằng `clone`/`unshare` trong đa số trường hợp cần `CAP_SYS_ADMIN`, ngoại lệ là user namespace[^ns-priv]. Riêng `CLONE_NEWUTS` thì man page của `unshare` nói thẳng là cần `CAP_SYS_ADMIN`[^unshare-cap]. Danh sách capability của tiến trình trong lab, giải mã bằng `capsh --decode`, là: `chown, dac_override, fowner, fsetid, kill, setgid, setuid, setpcap, net_bind_service, net_admin, net_raw, sys_chroot, sys_ptrace, mknod, audit_write, setfcap` — không có `sys_admin`.
 
-Lưu ý: lab chạy với `--security-opt seccomp=unconfined`, nên `unshare -U` thành công ở đây là nhờ cả quy tắc kernel *và* việc seccomp bị tắt; trong container Docker mặc định, profile seccomp còn chặn cả `unshare -U` ([Chương 05, mục 5](./05-bao-mat-container.md)).
+Số `uid_map`, uid overflow 65534 và `unshare -Ur` được ghi đầy đủ ở [Chương 02, mục 3 và mục 6](./02-namespaces.md). Điều duy nhất cần nhớ ở đây: user namespace cho phép một process không đặc quyền làm "root" bên trong nó[^userns-root]. Đó là nền của rootless container (nhận xét của người soạn; rootless thuộc [Chương 05](./05-bao-mat-container.md)).
 
-**PID namespace và PID 1.** Process đầu tiên trong namespace là "init" của namespace và là cha của mọi process mồ côi trong đó[^pidns-orphan] — tức (suy luận của người soạn) nó cần `wait()` để thu dọn như init thật. Init còn có luật signal riêng (chỉ nhận signal đã đăng ký handler, trừ `SIGKILL`/`SIGSTOP` từ namespace tổ tiên): luật đầy đủ ở [Chương 02, mục 4](./02-namespaces.md) và [P1 · Chương 05, mục 8](../01-linux/05-signal.md). Hệ quả đã đo: `docker stop -t 3` một container có PID 1 không đăng ký handler mất đúng ~3 giây và kết thúc exit 137 (bảng số đo ở [Chương 08, mục 3](./08-rust-trong-container.md); tài liệu Docker nói process chính nhận SIGTERM rồi SIGKILL sau grace period[^docker-stop]).
+Lưu ý: lab chạy với `--security-opt seccomp=unconfined`, nên `unshare -U` thành công ở đây là nhờ cả quy tắc kernel *và* việc seccomp bị tắt. Trong container Docker mặc định, profile seccomp còn chặn cả `unshare -U` ([Chương 05, mục 5](./05-bao-mat-container.md)).
 
-Một hệ quả nữa: nếu PID 1 của namespace chết, kernel kết thúc mọi process trong namespace đó bằng signal SIGKILL (man page `pid_namespaces(7)`)[^pidns-initdeath] — nên (suy luận của người soạn) container kết thúc theo process chính của nó.
+**PID namespace và PID 1.** Process đầu tiên trong một PID namespace là "init" của namespace đó và là cha của mọi process mồ côi trong đó[^pidns-orphan]. Vì vậy (suy luận của người soạn) nó cần `wait()` để thu dọn như init thật. Init còn có luật signal riêng: chỉ nhận signal đã đăng ký handler, trừ `SIGKILL`/`SIGSTOP` từ namespace tổ tiên. Luật đầy đủ ở [Chương 02, mục 4](./02-namespaces.md) và [P1 · Chương 05, mục 8](../01-linux/05-signal.md).
+
+Hệ quả đã đo: `docker stop -t 3` một container có PID 1 không đăng ký handler mất đúng ~3 giây và kết thúc exit 137 (bảng số đo ở [Chương 08, mục 3](./08-rust-trong-container.md)). Tài liệu Docker nói process chính nhận SIGTERM rồi SIGKILL sau grace period[^docker-stop].
+
+Một hệ quả nữa: nếu PID 1 của namespace chết, kernel kết thúc mọi process trong namespace đó bằng signal SIGKILL (man page `pid_namespaces(7)`)[^pidns-initdeath]. Nên (suy luận của người soạn) container kết thúc theo process chính của nó.
 
 </details>
 
-**Quay lại Q3:** namespace cho mỗi nhóm process một góc nhìn riêng về tài nguyên toàn cục; PID namespace thêm một process init với quy tắc signal riêng.
+**Quay lại Q3:** namespace cho mỗi nhóm process một góc nhìn riêng về tài nguyên toàn cục, nên `orders` có cổng và danh sách process của riêng nó; PID namespace thêm một process init với quy tắc signal riêng.
 
 ## 6. cgroups: process dùng được bao nhiêu (Q4)
 
@@ -219,15 +228,15 @@ Một hệ quả nữa: nếu PID 1 của namespace chết, kernel kết thúc m
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): namespaces là vách ngăn che tầm nhìn, còn cgroup là đồng hồ điện của từng phòng: nó đo và cắt khi vượt mức.
+*Với `orders`.* Namespaces không cứu được rắc rối thứ hai ở mục 1: `payments` rò rỉ RAM và kéo `orders` chết theo. Lý do là namespace chỉ cho mỗi nhóm một góc nhìn riêng[^ns-def] chứ không đặt trần dùng tài nguyên (suy luận của người soạn), nên một process trong namespace riêng vẫn ăn hết RAM của host. Phần đặt trần là việc của **control groups**, thường gọi là cgroups: một tính năng của kernel Linux cho phép tổ chức process thành các nhóm phân cấp, rồi giới hạn và theo dõi mức dùng các loại tài nguyên của từng nhóm[^cg-def].
 
-Namespaces chỉ cho mỗi nhóm một góc nhìn riêng[^ns-def], không đặt trần dùng tài nguyên (suy luận của người soạn): một process trong namespace riêng vẫn có thể ăn hết RAM của host. Phần giới hạn do **control groups** đảm nhận: control groups, thường gọi là cgroups, là một tính năng của kernel Linux cho phép tổ chức process thành các nhóm phân cấp, rồi giới hạn và theo dõi mức dùng các loại tài nguyên của từng nhóm[^cg-def].
+Bên trong kernel, việc gom nhóm nằm ở phần lõi cgroup, còn theo dõi và giới hạn tài nguyên do một tập subsystem làm, mỗi subsystem lo một loại tài nguyên (bộ nhớ, CPU…)[^cg-arch]. Bạn làm việc với chúng qua một pseudo-filesystem tên cgroupfs[^cg-fs], nên một cgroup trông như một thư mục. Cgroup v2 chỉ có một cây phân cấp duy nhất, khác với v1[^cg-v2]. Dòng `0::/` ở thí nghiệm đầu chương khớp với dạng của v2, vì trong v2 trường hierarchy-ID của `/proc/pid/cgroup` mang giá trị 0[^cg-v2proc] (suy luận của người soạn: VM colima dùng cgroup v2). Chi tiết thuộc [Chương 03](./03-cgroups-v2.md); phần này đủ để đọc các con số.
 
-Kiến trúc theo man page `cgroups(7)`: việc nhóm được cài đặt trong phần lõi cgroup của kernel, còn theo dõi và giới hạn tài nguyên được cài đặt trong một tập subsystem theo từng loại tài nguyên (bộ nhớ, CPU, v.v.)[^cg-arch]. Giao diện là một pseudo-filesystem gọi là cgroupfs[^cg-fs]. Cgroup v2 chỉ có một cây phân cấp duy nhất, khác với v1[^cg-v2]; dòng `0::/` ở thí nghiệm đầu chương khớp với dạng của v2, trong đó trường hierarchy-ID của `/proc/pid/cgroup` mang giá trị 0[^cg-v2proc] (suy luận của người soạn: VM colima dùng cgroup v2). Chi tiết thuộc [Chương 03](./03-cgroups-v2.md); phần này đủ để đọc các con số.
-
-Mỗi cgroup là một thư mục: cgroup con được tạo bằng cách tạo một thư mục con[^cg-create]. Trong cgroup v2 mọi process thuộc một và chỉ một cgroup[^cg-one]; file `cgroup.procs` khi đọc sẽ liệt kê PID của mọi process thuộc cgroup, mỗi dòng một PID[^cg-procs].
+Vì mỗi cgroup là một thư mục nên thao tác rất cụ thể: tạo cgroup con bằng cách tạo một thư mục con[^cg-create]. Trong cgroup v2, mọi process thuộc một và chỉ một cgroup[^cg-one]. File `cgroup.procs` khi đọc sẽ liệt kê PID của mọi process thuộc cgroup, mỗi dòng một PID[^cg-procs].
 
 ### `--memory`, `--cpus` thành file gì?
+
+Giả sử bạn deploy `orders` với giới hạn 64 MiB RAM và nửa lõi CPU. Thí nghiệm dưới dùng `sleep` làm process, nhưng các cờ giới hạn là đúng những cờ bạn sẽ đặt cho `orders`:
 
 ```bash
 docker run -d --rm --name lim --memory 64m --cpus 0.5 --pids-limit 100 alpine sleep 300
@@ -240,16 +249,18 @@ docker exec lim sh -c 'cat /sys/fs/cgroup/memory.max /sys/fs/cgroup/cpu.max /sys
 ```
 
 - `--memory 64m` → `memory.max = 67108864` (= 64·1024·1024).
-- `--cpus 0.5` → `cpu.max = 50000 100000`: theo tài liệu kernel, định dạng `$MAX $PERIOD` cho biết nhóm có thể dùng tối đa `$MAX` trong mỗi khoảng `$PERIOD`[^cg-cpumax]. Ở đây 50 000 µs trong mỗi chu kỳ 100 000 µs = nửa lõi.
+- `--cpus 0.5` → `cpu.max = 50000 100000`. Theo tài liệu kernel, định dạng `$MAX $PERIOD` cho biết nhóm có thể dùng tối đa `$MAX` trong mỗi khoảng `$PERIOD`[^cg-cpumax]. Ở đây là 50 000 µs trong mỗi chu kỳ 100 000 µs, tức nửa lõi.
 - `--pids-limit 100` → `pids.max = 100`.
 
-Từ phía host VM, cùng các giá trị đọc được ở `/sys/fs/cgroup/docker/<id>/memory.max` và `cpu.max` (quan sát: trùng nhau). Hay nói cách khác: **`docker run --memory` chỉ là ghi một số vào file của cgroup** (nhận xét của người soạn từ quan sát này; cơ chế ghi file do runtime làm — xem [Chương 06](./06-runtime-oci.md)). Cũng cần lưu ý: trong container, `/sys/fs/cgroup` là cgroup *của chính nó* và `/proc/1/cgroup` hiện `0::/` thay vì đường dẫn dài như host thấy. Tài liệu kernel nói gốc (cgroupns root) của một cgroup namespace là cgroup chứa process gọi `unshare(2)`[^cg-ns]; việc Docker cho container một cgroup namespace riêng là suy luận của người soạn từ quan sát này (xem hàng "Cgroup root directory" ở bảng mục 5).
+Từ phía host VM, cùng các giá trị đó đọc được ở `/sys/fs/cgroup/docker/<id>/memory.max` và `cpu.max` (quan sát: trùng nhau). Nói cách khác, **`docker run --memory` chỉ là ghi một số vào file của cgroup** (nhận xét của người soạn từ quan sát này; việc ghi file do runtime làm, xem [Chương 06](./06-runtime-oci.md)).
+
+Một lưu ý khi đọc trong container: `/sys/fs/cgroup` là cgroup *của chính nó*, và `/proc/1/cgroup` hiện `0::/` thay vì đường dẫn dài như host thấy. Tài liệu kernel nói gốc (cgroupns root) của một cgroup namespace là cgroup chứa process gọi `unshare(2)`[^cg-ns]. Việc Docker cho container một cgroup namespace riêng là suy luận của người soạn từ quan sát này (xem hàng "Cgroup root directory" ở bảng mục 5).
 
 <details><summary>Đi sâu: OOMKilled và CPU throttling ở mức cgroup</summary>
 
 **OOMKilled: cơ chế**
 
-Kernel docs `cgroup-v2` về `memory.max`: là cơ chế chính để giới hạn mức dùng bộ nhớ của một cgroup; khi đạt trần mà không thu hồi được, OOM killer được gọi trong cgroup đó[^cg-oom]. Phạm vi: nó sẽ không giết task nào ngoài cgroup này[^cg-oom-scope]. Kubernetes diễn đạt cùng ý ở mức hành vi: giới hạn bộ nhớ được kernel thực thi bằng các lần giết do hết bộ nhớ (OOM)[^k8s-mem].
+`memory.max` là cơ chế chính để giới hạn mức dùng bộ nhớ của một cgroup. Khi cgroup chạm trần mà kernel không thu hồi được thêm, OOM killer được gọi trong cgroup đó[^cg-oom]. Phạm vi của nó chỉ là cgroup này: nó sẽ không giết task nào ngoài cgroup[^cg-oom-scope]. Kubernetes diễn đạt cùng ý ở mức hành vi: giới hạn bộ nhớ được kernel thực thi bằng các lần giết do hết bộ nhớ (OOM)[^k8s-mem].
 
 Thí nghiệm (quan sát): container 32 MiB, bắt process giữ 100 MB trong bộ nhớ:
 
@@ -263,15 +274,19 @@ rc=137
 oom=true exit=137
 ```
 
-Dòng `echo` không được in (shell chỉ báo `Killed`), process bị SIGKILL (137), và Docker ghi nhận `OOMKilled=true`. Điều đáng chú ý: **ứng dụng không nhận được lỗi `ENOMEM` nào để xử lý** trong trường hợp này (quan sát). Điều này khớp với tài liệu kernel: ở cấu hình mặc định, cấp phát thường (0-order) luôn thành công trừ khi OOM killer chọn chính task hiện tại làm nạn nhân[^cg-0order]. Đừng khái quát thành "không bao giờ có ENOMEM": tài liệu kernel nói chỉ một số kiểu cấp phát "không gọi OOM killer", có thể trả `-ENOMEM` về userspace[^cg-enomem]. Để debug (nhận xét của người soạn): xem `docker inspect` hoặc `kubectl describe pod` (reason `OOMKilled`), và trường `oom_kill` trong `memory.events` của cgroup, đếm số process của cgroup bị OOM killer giết[^cg-events] ([Chương 03](./03-cgroups-v2.md)). Quy trình đọc `State` để phân biệt OOM với hết thời gian dừng: [Chương 06, mục 9](./06-runtime-oci.md).
+Dòng `echo` không được in (shell chỉ báo `Killed`), process bị SIGKILL (137), và Docker ghi nhận `OOMKilled=true`. Điều đáng chú ý: **ứng dụng không nhận được lỗi `ENOMEM` nào để xử lý** trong trường hợp này (quan sát). Điều đó khớp với tài liệu kernel: ở cấu hình mặc định, cấp phát thường (0-order) luôn thành công trừ khi OOM killer chọn chính task hiện tại làm nạn nhân[^cg-0order].
+
+Đừng khái quát thành "không bao giờ có ENOMEM": tài liệu kernel nói một số kiểu cấp phát "không gọi OOM killer", và có thể trả `-ENOMEM` về userspace[^cg-enomem]. Để debug (nhận xét của người soạn): xem `docker inspect` hoặc `kubectl describe pod` (reason `OOMKilled`), và trường `oom_kill` trong `memory.events` của cgroup, đếm số process của cgroup bị OOM killer giết[^cg-events] ([Chương 03](./03-cgroups-v2.md)). Quy trình đọc `State` để phân biệt OOM với hết thời gian dừng: [Chương 06, mục 9](./06-runtime-oci.md).
 
 Lưu ý (nhận xét của người soạn): một runtime tự suy ra kích thước heap từ RAM của host có thể vượt trần cgroup; luôn đối chiếu `memory.max` với cấu hình của runtime.
 
 **CPU throttling: cơ chế**
 
-Giới hạn CPU khác giới hạn bộ nhớ: Kubernetes nói cpu limit được thực thi bằng CPU throttling[^k8s-cpu], tức nó không giết ai mà tạm dừng process (suy luận của người soạn: đến hết chu kỳ, theo định dạng `$MAX $PERIOD` của `cpu.max`). Kernel đếm điều này trong `cpu.stat` (các trường `nr_periods`, `nr_throttled`, `throttled_usec`; tài liệu nói các thống kê băng thông CFS này chỉ tính throttling do giới hạn của chính cgroup)[^cg-cpustat].
+Giới hạn CPU khác giới hạn bộ nhớ ở chỗ nó không giết ai. Kubernetes nói cpu limit được thực thi bằng CPU throttling[^k8s-cpu], tức là process bị tạm dừng đến hết chu kỳ (suy luận của người soạn, theo định dạng `$MAX $PERIOD` của `cpu.max`). Kernel đếm việc này trong `cpu.stat`, với các trường `nr_periods`, `nr_throttled`, `throttled_usec`. Tài liệu nói các thống kê băng thông CFS này chỉ tính throttling do giới hạn của chính cgroup[^cg-cpustat].
 
-Thí nghiệm (quan sát): container giới hạn `--cpus 0.2` chạy một vòng lặp bận 3 giây (một thread), rồi đọc `cpu.stat`: `usage_usec 621536`, `nr_periods 31`, `nr_throttled 31`, `throttled_usec 2408025`. Trong 3 giây có 31 chu kỳ (suy luận của người soạn: mỗi chu kỳ ≈ 100 ms = 100 000 µs; `cpu.max` của container này không được in ra trong thí nghiệm), **cả 31 chu kỳ đều bị throttle**, tổng ~2,4 s bị chặn, và CPU dùng thực ~0,62 s ≈ 0,2 × 3 s. Với một thread, `throttled_usec` xấp xỉ thời gian tường bị chặn; với nhiều thread con số cộng theo từng thread nên có thể vượt thời gian tường (thí nghiệm 4 thread với số đo đầy đủ và cách đọc: [Chương 03, mục 5](./03-cgroups-v2.md)). Đây là điều khiến một service "chỉ dùng 20% CPU trung bình" vẫn có thể có latency đuôi cao: nó bị dừng ở cuối mỗi chu kỳ khi hết quota (suy luận của người soạn từ số liệu trên). Cơ chế chia quota cho run queue và throttle nằm ở [Chương 03, mục 5](./03-cgroups-v2.md); phần `cpu.weight`/`nice` của bộ lập lịch ở [Scheduling](../04-concurrency/02-scheduling.md).
+Thí nghiệm (quan sát): container giới hạn `--cpus 0.2` chạy một vòng lặp bận 3 giây (một thread), rồi đọc `cpu.stat`: `usage_usec 621536`, `nr_periods 31`, `nr_throttled 31`, `throttled_usec 2408025`. Trong 3 giây có 31 chu kỳ (suy luận của người soạn: mỗi chu kỳ ≈ 100 ms = 100 000 µs; `cpu.max` của container này không được in ra trong thí nghiệm). **Cả 31 chu kỳ đều bị throttle**, tổng ~2,4 s bị chặn, và CPU dùng thực ~0,62 s ≈ 0,2 × 3 s. Với một thread, `throttled_usec` xấp xỉ thời gian tường bị chặn; với nhiều thread, con số cộng theo từng thread nên có thể vượt thời gian tường (thí nghiệm 4 thread với số đo đầy đủ và cách đọc: [Chương 03, mục 5](./03-cgroups-v2.md)).
+
+Từ số liệu trên, một service như `orders` "chỉ dùng 20% CPU trung bình" vẫn có thể có latency đuôi cao: nó bị dừng ở cuối mỗi chu kỳ khi hết quota (suy luận của người soạn). Cơ chế chia quota cho run queue và throttle nằm ở [Chương 03, mục 5](./03-cgroups-v2.md); phần `cpu.weight`/`nice` của bộ lập lịch ở [Scheduling](../04-concurrency/02-scheduling.md).
 
 </details>
 
@@ -279,28 +294,28 @@ Thí nghiệm (quan sát): container giới hạn `--cpus 0.2` chạy một vòn
 
 ## 7. Filesystem gốc riêng (Q5)
 
-> **Trả lời ngắn.** Process trong container thấy một cây thư mục `/` khác host nhờ đổi thư mục gốc; `pivot_root(2)` đổi root mount trong mount namespace của process gọi[^pivot], và man page nêu việc dựng root filesystem khi tạo container là một ứng dụng hiện đại của nó[^pivot-notes]. `chroot(2)` thì man page nói không nhằm dùng cho mục đích bảo mật[^chroot-sec].
+> **Trả lời ngắn.** Process trong container thấy một cây thư mục `/` khác host nhờ đổi thư mục gốc. `pivot_root(2)` đổi root mount trong mount namespace của process gọi[^pivot]. Man page của nó nêu việc dựng root filesystem khi tạo container là một ứng dụng hiện đại[^pivot-notes]. Còn `chroot(2)` thì man page nói không nhằm dùng cho mục đích bảo mật[^chroot-sec].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): image là bộ catalog nội thất, container là căn phòng được bày theo catalog đó; cửa chính `/` mở vào căn phòng chứ không mở vào cả tòa nhà.
+*Với `orders`.* Rắc rối thứ ba ở mục 1: `orders` cần OpenSSL bản mới, `notify` cần bản cũ. Nếu mỗi service nhìn thấy một cây `/` riêng, mỗi cây chứa thư viện của chính nó, thì hai bản không còn đụng nhau (nhận xét của người soạn). Container làm đúng điều đó: process của `orders` thấy `/` là cây thư mục của image `orders`, không phải của host. Ví dụ với image `alpine`, `/bin/sh` mà process thấy nằm trong chính cây của image.
 
-Process trong container thấy `/` là một cây thư mục khác với host (ví dụ container chạy image `alpine` thấy `/bin/sh` nằm trong chính cây của image). Có hai lớp cơ chế (nhận xét của người soạn):
+Để có được cây `/` riêng, cần hai lớp cơ chế (nhận xét của người soạn):
 
 1. **Đổi thư mục gốc**: `chroot(2)` hoặc `pivot_root(2)`.
-2. **Nội dung cây đó đến từ đâu**: các lớp (layer) của image, ghép lại (thường bằng overlayfs) — chi tiết và nguồn ở [Chương 04](./04-filesystem-cua-container.md).
+2. **Nội dung cây đó đến từ đâu**: các lớp (layer) của image, ghép lại (thường bằng overlayfs). Chi tiết và nguồn ở [Chương 04](./04-filesystem-cua-container.md).
 
-Image là dữ liệu đầu vào (cây thư mục nhiều layer cùng metadata); container là đối tượng chạy. Một image sinh được nhiều container (nhận xét của người soạn; chi tiết Chương 04).
+Cần phân biệt hai khái niệm hay bị lẫn. Image là dữ liệu đầu vào, gồm cây thư mục nhiều layer cùng metadata. Container là thứ đang chạy. Một image sinh được nhiều container (nhận xét của người soạn; chi tiết Chương 04): từ một image `orders` ta chạy được nhiều replica.
 
 <details><summary>Đi sâu: <code>chroot</code> và <code>pivot_root</code> theo man page</summary>
 
 **chroot không phải cách ly**
 
-`chroot(2)`: đổi thư mục gốc của process gọi; nhưng man page nhấn mạnh: lời gọi này chỉ đổi một thành phần trong quá trình phân giải đường dẫn và không làm gì khác[^chroot-only], và nó không nhằm dùng cho bất kỳ mục đích bảo mật nào, không để sandbox hoàn toàn một process cũng không để hạn chế các system call về filesystem[^chroot-sec]. Man page cũng ghi chroot có mặt trong SVr4, 4.4BSD, SUSv2 (đánh dấu LEGACY) và không thuộc POSIX.1-2001[^chroot-std].
+`chroot(2)` đổi thư mục gốc của process gọi, nhưng man page nhấn mạnh lời gọi này chỉ đổi một thành phần trong quá trình phân giải đường dẫn và không làm gì khác[^chroot-only]. Nó cũng không nhằm dùng cho bất kỳ mục đích bảo mật nào: không để sandbox hoàn toàn một process, cũng không để hạn chế các system call về filesystem[^chroot-sec].
 
 **pivot_root**
 
-`pivot_root(2)`: đổi root mount trong mount namespace của process gọi; chính xác hơn, nó chuyển root mount sang thư mục `put_old` và biến `new_root` thành root mount mới[^pivot]. Khác với chroot, nó thao tác trên **mount namespace**: man page nói nó cho phép chuyển sang root filesystem mới đồng thời đặt root mount cũ vào một vị trí dưới `new_root`, từ đó về sau có thể gỡ mount (unmount)[^pivot-old], và nêu một ứng dụng hiện đại là dựng root filesystem khi tạo container[^pivot-notes]. Nếu root cũ đã được gỡ (umount), cây cũ không còn trong mount namespace đó để quay lại (suy luận của người soạn từ điểm trên; runtime có gỡ hay không là việc của runtime). Nó yêu cầu CAP_SYS_ADMIN trong user namespace sở hữu mount namespace của process gọi[^pivot-cap]. Cách runtime kết hợp mount namespace + pivot_root + layer thuộc [Chương 04](./04-filesystem-cua-container.md) và [Chương 06](./06-runtime-oci.md).
+`pivot_root(2)` đổi root mount trong mount namespace của process gọi. Chính xác hơn, nó chuyển root mount sang thư mục `put_old` và biến `new_root` thành root mount mới[^pivot]. Khác với chroot, nó thao tác trên **mount namespace**. Man page nói nó cho phép chuyển sang root filesystem mới đồng thời đặt root mount cũ vào một vị trí dưới `new_root`, từ đó về sau có thể gỡ mount (unmount)[^pivot-old]. Nếu root cũ đã được gỡ, cây cũ không còn trong mount namespace đó để quay lại (suy luận của người soạn từ điểm trên; runtime có gỡ hay không là việc của runtime). Lời gọi yêu cầu CAP_SYS_ADMIN trong user namespace sở hữu mount namespace của process gọi[^pivot-cap]. Cách runtime kết hợp mount namespace + pivot_root + layer thuộc [Chương 04](./04-filesystem-cua-container.md) và [Chương 06](./06-runtime-oci.md).
 
 </details>
 
@@ -308,23 +323,21 @@ Image là dữ liệu đầu vào (cây thư mục nhiều layer cùng metadata)
 
 ## 8. Lớp bảo mật bổ sung: capabilities, seccomp, LSM (Q6)
 
-> **Trả lời ngắn.** Namespaces và cgroups nói về tầm nhìn và lượng, chưa nói về quyền. Capabilities chia đặc quyền của superuser thành các đơn vị bật/tắt độc lập[^caps]; seccomp lọc system call để thu hẹp bề mặt kernel lộ ra cho ứng dụng[^seccomp-surface]; LSM (Linux Security Modules) được OCI liệt kê cạnh namespaces và cgroups[^oci-linux].
+> **Trả lời ngắn.** Namespaces và cgroups nói về tầm nhìn và lượng, chưa nói về quyền. Capabilities chia đặc quyền của superuser thành các đơn vị bật/tắt độc lập[^caps]. Seccomp lọc system call để thu hẹp bề mặt kernel lộ ra cho ứng dụng[^seccomp-surface]. LSM (Linux Security Modules) được OCI liệt kê cạnh namespaces và cgroups[^oci-linux].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cùng một căn phòng, nhưng nhân viên chỉ được phát vài chìa khóa lẻ chứ không phải chìa chủ.
+*Với `orders`.* Giả sử `orders` có lỗ hổng và kẻ tấn công chiếm được process, đang chạy với quyền root trong container (rắc rối thứ tư ở mục 1). Hỏi: root đó làm được những gì trên kernel dùng chung? Namespaces và cgroups không trả lời được, vì chúng nói về *tầm nhìn* và *lượng*, không nói về *quyền*. Cụ thể, trong lần chạy quan sát ở mục 3, container dùng chung user namespace với host, nên root trong container vẫn là uid 0 như root của host. Nếu không giảm quyền thì nó có quyền rất rộng trên kernel dùng chung (suy luận của người soạn). Ba cơ chế dưới đây là lời đáp:
 
-Namespaces và cgroups nói về *tầm nhìn* và *lượng*, không nói về *quyền*. Ở lần chạy quan sát ở mục 3, container dùng chung user namespace với host, nên root trong container vẫn là uid 0 như root của host; nếu không giảm quyền thì nó có quyền rất rộng trên kernel dùng chung (suy luận của người soạn).
+- **Capabilities.** Từ Linux 2.2, Linux chia các đặc quyền vốn gắn với superuser thành những đơn vị riêng biệt gọi là capabilities, có thể bật/tắt độc lập[^caps]. Capabilities là thuộc tính của từng thread[^caps-thread].
+- **seccomp.** Tài liệu kernel giải thích động cơ: tập system call còn lại sau khi lọc làm giảm tổng bề mặt kernel lộ ra cho ứng dụng[^seccomp-surface]. Bộ lọc là một chương trình BPF, tức chương trình Berkeley Packet Filter[^seccomp-bpf]. Bộ lọc còn được kế thừa: nếu `fork`/`clone` được phép, mọi process con bị ràng buộc bởi cùng các bộ lọc system call như process cha[^seccomp-inherit]. Lab của repo chạy `seccomp=unconfined` nên không phản ánh mặc định của Docker.
+- **LSM** (Linux Security Modules). Đặc tả OCI liệt kê LSM cạnh namespaces và cgroups trong các tính năng kernel mà đặc tả runtime Linux dùng[^oci-linux]. AppArmor và SELinux là hai ví dụ phổ biến (nhận xét của người soạn). Đặc tả runtime có trường `apparmorProfile` cho tên profile AppArmor của process[^oci-apparmor]. Trường `selinuxLabel` thì cho nhãn SELinux[^oci-selinux]. [Chương 05](./05-bao-mat-container.md) mô tả cách cấu hình.
 
-- **Capabilities**: từ Linux 2.2, Linux chia các đặc quyền vốn gắn với superuser thành những đơn vị riêng biệt gọi là capabilities, có thể bật/tắt độc lập[^caps]. Và capabilities là thuộc tính của từng thread[^caps-thread].
-- **seccomp**: lọc system call. Tài liệu kernel giải thích động cơ: tập system call còn lại làm giảm tổng bề mặt kernel lộ ra cho ứng dụng[^seccomp-surface]. Bộ lọc là chương trình BPF, được biểu diễn dưới dạng chương trình Berkeley Packet Filter[^seccomp-bpf], và bộ lọc được kế thừa: nếu `fork`/`clone` được phép, mọi process con sẽ bị ràng buộc bởi cùng các bộ lọc system call như process cha[^seccomp-inherit]. Lab của repo chạy `seccomp=unconfined` nên không phản ánh mặc định của Docker.
-- **LSM** (Linux Security Modules): đặc tả OCI liệt kê LSM cạnh namespaces và cgroups trong các tính năng kernel mà đặc tả runtime Linux dùng[^oci-linux]. AppArmor và SELinux là hai ví dụ phổ biến (nhận xét của người soạn); đặc tả runtime có trường `apparmorProfile` cho tên profile AppArmor của process[^oci-apparmor] và `selinuxLabel` cho nhãn SELinux[^oci-selinux]. [Chương 05](./05-bao-mat-container.md) mô tả cách cấu hình.
-
-Ba lớp này cộng với namespace/cgroup làm container "an toàn hơn chạy trần" (nhận xét của người soạn), nhưng **không** đồng nghĩa với ranh giới kiểu VM: kernel vẫn dùng chung (mục 2)[^docker-container].
+Ba lớp này cộng với namespace và cgroup làm container "an toàn hơn chạy trần" (nhận xét của người soạn). Nhưng chúng **không** biến container thành ranh giới kiểu VM, vì kernel vẫn dùng chung (mục 2)[^docker-container].
 
 <details><summary>Đi sâu: capability của PID 1 trong container Docker mặc định</summary>
 
-Quan sát: PID 1 của một container Docker mặc định có `CapEff = a80425fb`, giải mã bằng `capsh --decode` thành 14 capability: `chown, dac_override, fowner, fsetid, kill, setgid, setuid, setpcap, net_bind_service, net_raw, sys_chroot, mknod, audit_write, setfcap` — không có `sys_admin`, `net_admin`, `sys_ptrace`. (Là kết quả của cấu hình mặc định của Docker trong lần chạy này, không phải bảo đảm của kernel.) Vì không có `sys_admin`, root trong container này không tạo được namespace mới (trừ user namespace) theo quy tắc ở mục 5[^ns-priv] (nhận xét của người soạn; riêng việc seccomp mặc định của Docker cũng chặn `unshare` được bàn ở [Chương 05](./05-bao-mat-container.md)).
+Quan sát: PID 1 của một container Docker mặc định có `CapEff = a80425fb`, giải mã bằng `capsh --decode` thành 14 capability: `chown, dac_override, fowner, fsetid, kill, setgid, setuid, setpcap, net_bind_service, net_raw, sys_chroot, mknod, audit_write, setfcap` — không có `sys_admin`, `net_admin`, `sys_ptrace`. Đây là kết quả của cấu hình mặc định của Docker trong lần chạy này, không phải bảo đảm của kernel. Vì không có `sys_admin`, root trong container này không tạo được namespace mới (trừ user namespace) theo quy tắc ở mục 5[^ns-priv] (nhận xét của người soạn; riêng việc seccomp mặc định của Docker cũng chặn `unshare` được bàn ở [Chương 05](./05-bao-mat-container.md)).
 
 </details>
 
@@ -332,21 +345,19 @@ Quan sát: PID 1 của một container Docker mặc định có `CapEff = a80425
 
 ## 9. Lịch sử ngắn
 
-Chỉ nêu những gì có nguồn:
+Ý tưởng nhốt một process vào một góc riêng, như ta làm với `orders`, không mới. Dưới đây chỉ nêu những gì có nguồn:
 
-- `chroot(2)` có mặt trong SVr4, 4.4BSD và SUSv2[^chroot-std] — ý tưởng đổi thư mục gốc cho một process đã có từ lâu (nhận xét của người soạn); man page nay nhắc rõ nó không phải cơ chế bảo mật (mục 7).
-- FreeBSD có `jail(2)` trong bản 4.0-RELEASE: mục HISTORY của manual ghi lời gọi `jail()` xuất hiện trong FreeBSD 4.0[^freebsd-jail-hist], còn dòng NAME mô tả nó là giam process hiện tại và các hậu duệ của nó[^freebsd-jail]. Man page chroot(2) của Linux ghi rằng FreeBSD có system call `jail()` mạnh hơn[^chroot-jail] — jail là cơ chế của FreeBSD, không phải Linux.
-- Trên Linux, `CLONE_NEWNS` (mount namespace) có từ Linux 2.4.19[^ns-mount-since]; người soạn không kể mốc của các cơ chế khác vì chưa có nguồn.
+- `chroot(2)` có mặt trong SVr4, 4.4BSD và SUSv2[^chroot-std]. Vậy ý tưởng đổi thư mục gốc cho một process đã có từ lâu (nhận xét của người soạn). Man page nay nhắc rõ nó không phải cơ chế bảo mật (mục 7).
+- FreeBSD có `jail(2)` trong bản 4.0-RELEASE: mục HISTORY của manual ghi lời gọi `jail()` xuất hiện trong FreeBSD 4.0[^freebsd-jail-hist]. Dòng NAME mô tả nó là giam process hiện tại và các hậu duệ của nó[^freebsd-jail]. Man page chroot(2) của Linux ghi rằng FreeBSD có system call `jail()` mạnh hơn[^chroot-jail]. Jail là cơ chế của FreeBSD, không phải Linux.
+- Trên Linux, `CLONE_NEWNS` (mount namespace) có từ Linux 2.4.19[^ns-mount-since]. Người soạn không kể mốc của các cơ chế khác vì chưa có nguồn.
 
 ## 10. Bản đồ công cụ: Docker, containerd, runc, OCI (Q7)
 
-> **Trả lời ngắn.** containerd là container runtime quản lý việc chuyển và lưu image, thực thi và giám sát container[^containerd-scope]. runc là CLI tool dựng và chạy container trên Linux theo đặc tả OCI[^runc]. Docker là nền tảng mở để phát triển, đóng gói và chạy ứng dụng[^docker-platform], đứng bên trên các thành phần đó (nhận xét của người soạn, dựa trên quan sát cờ `--containerd` ở [Chương 06](./06-runtime-oci.md); docs chưa dẫn trực tiếp).
+> **Trả lời ngắn.** containerd là container runtime lo việc chuyển và lưu image, thực thi và giám sát container[^containerd-scope]. runc là CLI tool dựng và chạy container trên Linux theo đặc tả OCI[^runc]. Docker là nền tảng mở để phát triển, đóng gói và chạy ứng dụng[^docker-platform], đứng bên trên các thành phần đó (nhận xét của người soạn, dựa trên quan sát cờ `--containerd` ở [Chương 06](./06-runtime-oci.md); docs chưa dẫn trực tiếp).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): Docker là nhà hàng, containerd là bếp trưởng điều phối, runc là người đứng bếp thật sự nấu một món, OCI là công thức chuẩn mà mọi bếp đọc được.
-
-Đến đây ta biết container = process + namespaces + cgroup + root riêng. Ai làm việc dựng chúng? Bản đồ ở mức sơ lược (chi tiết ở [Chương 06 — Runtime và OCI](./06-runtime-oci.md)):
+*Với `orders`.* Bạn gõ `docker run orders:1.4`. Đến đây ta đã biết kết quả cuối là một process cùng namespaces, một cgroup và một root riêng. Câu hỏi còn lại là ai trong chuỗi công cụ làm từng việc đó. Bản đồ ở mức sơ lược như sau (chi tiết ở [Chương 06 — Runtime và OCI](./06-runtime-oci.md)):
 
 ```mermaid
 flowchart LR
@@ -356,14 +367,14 @@ flowchart LR
   R --> K["Linux kernel: clone/unshare, cgroups, pivot_root, seccomp"]
 ```
 
-- **Docker**: nền tảng mở để phát triển, đóng gói và chạy ứng dụng[^docker-platform]; tài liệu nói nó tận dụng nhiều tính năng của kernel Linux và dùng công nghệ namespaces để tạo không gian làm việc cô lập gọi là container[^docker-ns].
-- **containerd**: một container runtime chuẩn công nghiệp, nhấn mạnh sự đơn giản, bền vững và khả chuyển[^containerd], quản lý việc chuyển và lưu image, thực thi và giám sát container, gắn lưu trữ và mạng mức thấp[^containerd-scope].
-- **runc**: là một công cụ CLI để tạo và chạy container trên Linux theo đặc tả OCI[^runc].
-- **OCI** (Open Container Initiative): đặc tả chuẩn; runc tuân theo đặc tả OCI[^runc]. Phần Linux của runtime spec nêu rõ nó dựa trên các tính năng kernel đã nói[^oci-linux]. Nhờ chuẩn này, runtime và công cụ khác nhau đọc cùng một cấu hình (nhận xét của người soạn; [Chương 06](./06-runtime-oci.md) dẫn nguồn đặc tả OCI).
+- **Docker**: nền tảng mở để phát triển, đóng gói và chạy ứng dụng[^docker-platform]. Tài liệu nói nó tận dụng nhiều tính năng của kernel Linux và dùng công nghệ namespaces để tạo không gian làm việc cô lập gọi là container[^docker-ns].
+- **containerd**: một container runtime chuẩn công nghiệp, nhấn mạnh sự đơn giản, bền vững và khả chuyển[^containerd]. Nó quản lý việc chuyển và lưu image, thực thi và giám sát container, gắn lưu trữ và mạng mức thấp[^containerd-scope].
+- **runc**: một công cụ CLI để tạo và chạy container trên Linux theo đặc tả OCI[^runc].
+- **OCI** (Open Container Initiative): đặc tả chuẩn mà runc tuân theo. Phần Linux của runtime spec nêu rõ nó dựa trên các tính năng kernel đã nói ở các mục trước[^oci-linux]. Nhờ chuẩn này, runtime và công cụ khác nhau đọc cùng một cấu hình (nhận xét của người soạn; [Chương 06](./06-runtime-oci.md) dẫn nguồn đặc tả OCI).
 
 <details><summary>Đi sâu: mức chắc chắn của sơ đồ</summary>
 
-Việc dockerd gọi containerd rồi runc là kiến trúc Docker Engine theo quan sát của người soạn — [Chương 06](./06-runtime-oci.md) dẫn nguồn cho đoạn containerd → containerd-shim → runc (sơ đồ trên đã lược shim) còn đoạn dockerd → containerd là quan sát, chưa có nguồn docs; sơ đồ là bản đồ định hướng, chưa phải khẳng định chi tiết từ chương này.
+Việc dockerd gọi containerd rồi runc là kiến trúc Docker Engine theo quan sát của người soạn. [Chương 06](./06-runtime-oci.md) dẫn nguồn cho đoạn containerd → containerd-shim → runc (sơ đồ trên đã lược shim). Đoạn dockerd → containerd là quan sát, chưa có nguồn docs. Sơ đồ là bản đồ định hướng, chưa phải khẳng định chi tiết từ chương này.
 
 </details>
 
@@ -371,21 +382,19 @@ Việc dockerd gọi containerd rồi runc là kiến trúc Docker Engine theo q
 
 ## 11. Liên hệ backend (nhận xét của người soạn) (Q8)
 
-> **Trả lời ngắn.** Vì container = process + giới hạn kernel (nhận xét của người soạn), ba sự cố khó hiểu trở nên dễ đọc: `OOMKilled` thường là cgroup chạm `memory.max`[^cg-oom]; latency đuôi tăng có thể là CPU throttling của `cpu.max`[^k8s-cpu] (suy luận của người soạn); deploy chậm đúng bằng grace period có thể là PID 1 không có handler SIGTERM[^pidns-ancestor][^docker-stop].
+> **Trả lời ngắn.** Vì container = process + giới hạn kernel (nhận xét của người soạn), ba sự cố khó hiểu trở nên dễ đọc. `OOMKilled` thường là cgroup chạm `memory.max`[^cg-oom]. Latency đuôi tăng có thể là CPU throttling của `cpu.max`[^k8s-cpu] (suy luận của người soạn). Deploy chậm đúng bằng grace period có thể là PID 1 không có handler SIGTERM[^pidns-ancestor]. Hết grace period process bị SIGKILL[^docker-stop].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì coi container là hộp đen, hãy coi nó là một process có đồng hồ điện (cgroup) và kính mờ (namespace); mỗi sự cố là một trong hai thứ đó phát tác.
-
-Mô hình "container = process + giới hạn kernel" biến ba loại sự cố khó hiểu thành dễ đọc:
+*Với `orders`.* Lên production, `orders` chạy thành pod và sớm muộn gặp ba tình huống: pod bị restart không rõ lý do, p99 latency nhảy dù CPU trung bình thấp, và mỗi lần deploy pod chết chậm. Nếu coi container là hộp đen, cả ba đều khó đọc. Nếu coi nó là một process có cgroup (đặt trần) và namespace (che tầm nhìn) thì mỗi sự cố là một trong hai thứ đó phát tác, và bảng dưới chỉ ra nên nhìn vào đâu:
 
 | Triệu chứng | Đọc theo mô hình | Dấu vết cần xem |
 |---|---|---|
-| Pod `OOMKilled`, exit 137 | Cgroup chạm `memory.max`, OOM killer chỉ giết trong cgroup đó[^cg-oom][^cg-oom-scope] | `docker inspect` (`OOMKilled`), `memory.events` |
-| Latency đuôi tăng dù CPU trung bình thấp | CPU limit được thực thi bằng throttling[^k8s-cpu]; hết quota trong chu kỳ thì cgroup bị dừng đến chu kỳ sau (suy luận của người soạn từ `cpu.max`[^cg-cpumax]) | `cpu.stat`: `nr_throttled`, `throttled_usec` |
-| Deploy chậm đúng bằng grace period, request cuối bị cắt | SIGTERM gửi từ ngoài namespace (host/runtime là namespace tổ tiên) chỉ tới được PID 1 nếu nó đã đăng ký handler[^pidns-ancestor] → hết grace period thì SIGKILL[^docker-stop] | thời gian `docker stop`, exit code 137, thử `--init`[^docker-init] |
+| Pod `OOMKilled`, exit 137 | Cgroup chạm `memory.max`, OOM killer được gọi trong cgroup đó[^cg-oom]. Nó không giết task nào ngoài cgroup[^cg-oom-scope] | `docker inspect` (`OOMKilled`), `memory.events` |
+| Latency đuôi tăng dù CPU trung bình thấp | CPU limit được thực thi bằng throttling[^k8s-cpu]. Hết quota trong chu kỳ thì cgroup bị dừng đến chu kỳ sau (suy luận của người soạn từ `cpu.max`[^cg-cpumax]) | `cpu.stat`: `nr_throttled`, `throttled_usec` |
+| Deploy chậm đúng bằng grace period, request cuối bị cắt | SIGTERM gửi từ ngoài namespace (host/runtime là namespace tổ tiên) chỉ tới được PID 1 nếu nó đã đăng ký handler[^pidns-ancestor]. Hết grace period thì SIGKILL[^docker-stop] | thời gian `docker stop`, exit code 137, thử `--init`[^docker-init] |
 
-Cũng từ đây: nếu một khẳng định bảo mật dựa trên "cách ly kiểu VM", hãy hỏi lại — kernel là dùng chung[^docker-container]. Cách đọc `docker inspect` để phân biệt OOM với hết thời gian dừng nằm ở [Chương 06, mục 9](./06-runtime-oci.md); số đo `docker stop`/`--init` ở [Chương 08, mục 3](./08-rust-trong-container.md).
+Từ mô hình này còn rút ra một điều về bảo mật: nếu ai đó khẳng định "container cách ly như VM", hãy hỏi lại, vì kernel là dùng chung[^docker-container]. Cách đọc `docker inspect` để phân biệt OOM với hết thời gian dừng nằm ở [Chương 06, mục 9](./06-runtime-oci.md); số đo `docker stop`/`--init` ở [Chương 08, mục 3](./08-rust-trong-container.md).
 
 <details><summary>Đi sâu: hai triệu chứng khác (suy luận của người soạn)</summary>
 
@@ -400,21 +409,21 @@ Cũng từ đây: nếu một khẳng định bảo mật dựa trên "cách ly 
 
 ## 12. Liên hệ với Rust
 
-Rust không có đặc quyền gì trong chương này: một binary Rust trong container là process Linux thường. Vài điểm thực hành (nhận xét của người soạn):
+Rust không có đặc quyền gì trong chương này: `orders` viết bằng Rust và chạy trong container vẫn chỉ là một process Linux thường. Vài điểm thực hành (nhận xét của người soạn):
 
 - Binary Rust làm PID 1 phải tự quyết định xử lý SIGTERM (hoặc dùng `--init`), vì quy tắc ở mục 5 áp dụng cho mọi ngôn ngữ. Việc đăng ký handler và tắt êm trong async runtime được bàn ở [Chương 08 — Rust trong container](./08-rust-trong-container.md).
 - Một binary liên kết tĩnh (ví dụ musl) có thể chạy trong image gần như chỉ chứa chính nó, vì container chỉ cần cây thư mục chứa những gì process cần (mục 7; nhận xét của người soạn, số đo ở [Chương 08](./08-rust-trong-container.md)).
 
 ## Tóm tắt
 
-- Container không phải VM: mọi container chia sẻ kernel của host; VM có kernel riêng[^docker-vm][^docker-container].
+- Container không phải VM. VM có kernel riêng[^docker-vm]. Mọi container chia sẻ kernel của host[^docker-container].
 - Trên Linux, container là process thường được đặt trong namespaces, một cgroup và một cây thư mục gốc riêng; kernel không có đối tượng "container" riêng (nhận xét của người soạn).
-- Namespace quyết định process *nhìn thấy gì*[^ns-def]; quan sát cho thấy cùng một process có hai PID (trong/ngoài) và vẫn hiện trên host.
-- Cgroup quyết định *dùng được bao nhiêu*[^cg-def]: `--memory` → `memory.max`, `--cpus` → `cpu.max` (quan sát); vượt bộ nhớ → OOM kill trong cgroup (137)[^cg-oom], vượt CPU → throttling[^k8s-cpu].
+- Namespace quyết định process *nhìn thấy gì*[^ns-def]. Quan sát cho thấy cùng một process có hai PID (trong/ngoài) và vẫn hiện trên host.
+- Cgroup quyết định *dùng được bao nhiêu*[^cg-def]. `--memory` → `memory.max`, `--cpus` → `cpu.max` (quan sát). Vượt bộ nhớ thì OOM kill trong cgroup (137)[^cg-oom]. Vượt CPU thì throttling[^k8s-cpu].
 - Filesystem gốc riêng nhờ `pivot_root`/mount namespace; `chroot` không phải cơ chế bảo mật[^chroot-sec].
-- Capabilities, seccomp, LSM bổ sung lớp quyền: chia nhỏ đặc quyền của root[^caps], lọc system call[^seccomp-surface]; chúng không biến container thành ranh giới kiểu VM (nhận xét của người soạn).
-- PID 1 trong PID namespace có quy tắc signal riêng và phải reap process mồ côi[^pidns-orphan][^pidns-sig].
-- Docker Desktop chạy container trong một VM Linux[^docker-vmm]; colima theo cùng mô hình (quan sát); `uname` trong container báo Linux dù host là Darwin.
+- Capabilities, seccomp, LSM bổ sung lớp quyền. Capabilities chia nhỏ đặc quyền của root[^caps]. Seccomp lọc system call[^seccomp-surface]. Chúng không biến container thành ranh giới kiểu VM (nhận xét của người soạn).
+- PID 1 trong PID namespace phải thu dọn process mồ côi[^pidns-orphan]. Nó cũng có quy tắc signal riêng[^pidns-sig].
+- Docker Desktop chạy container trong một VM Linux[^docker-vmm]. Colima theo cùng mô hình (quan sát). `uname` trong container báo Linux dù host là Darwin.
 - Docker → containerd → runc → kernel là bản đồ; OCI là đặc tả chung.
 
 ## Câu hỏi tự kiểm tra
@@ -422,14 +431,14 @@ Rust không có đặc quyền gì trong chương này: một binary Rust trong 
 1. Hai khác biệt cốt lõi giữa container và VM về kernel là gì?
 <details><summary>Đáp án</summary>
 
-VM có kernel riêng, container chia sẻ kernel của host[^docker-vm][^docker-container].
+VM có kernel riêng[^docker-vm]. Container chia sẻ kernel của host[^docker-container].
 
 </details>
 
 2. Vì sao cùng một process `sleep` có PID 1 trong container nhưng PID 90443 trên host?
 <details><summary>Đáp án</summary>
 
-Process có một PID ở mỗi tầng của PID namespace mà nó nhìn thấy được[^pidns-layers]: 1 trong namespace của container, 90443 trong namespace của host VM; `NSpid` trong `/proc/pid/status` hiện cả hai (mục 3).
+Process có một PID ở mỗi tầng của PID namespace mà nó nhìn thấy[^pidns-layers]: 1 trong namespace của container, 90443 trong namespace của host VM. `NSpid` trong `/proc/pid/status` hiện cả hai (mục 3).
 
 </details>
 
@@ -443,7 +452,7 @@ So sánh device/inode của symlink `/proc/pid/ns/<loại>`[^ns-link].
 4. Namespace giới hạn tài nguyên không? Cgroup che tầm nhìn không?
 <details><summary>Đáp án</summary>
 
-Không cả hai: namespace chỉ cho góc nhìn riêng[^ns-def]; cgroup giới hạn và đo tài nguyên theo nhóm[^cg-def]. (Ngoại lệ liên quan: cgroup namespace che gốc cgroup.)
+Không cả hai. Namespace chỉ cho góc nhìn riêng[^ns-def]. Cgroup giới hạn và đo tài nguyên theo nhóm[^cg-def]. (Ngoại lệ liên quan: cgroup namespace che gốc cgroup.)
 
 </details>
 
@@ -457,49 +466,49 @@ Không cả hai: namespace chỉ cho góc nhìn riêng[^ns-def]; cgroup giới h
 6. Container exit code 137 và `OOMKilled=true` nói lên điều gì?
 <details><summary>Đáp án</summary>
 
-Cgroup chạm `memory.max`, OOM killer kích hoạt trong cgroup đó[^cg-oom]; 137 = 128+9 (SIGKILL) theo quy ước 128+N của bash (nguồn và cách phân biệt với hết thời gian dừng ở [Chương 06, mục 9](./06-runtime-oci.md)). Trong thí nghiệm ở mục 6 ứng dụng không nhận `ENOMEM` mà bị SIGKILL, khớp với tài liệu kernel nói cấp phát thường thành công trừ khi OOM killer chọn chính task đó[^cg-0order]; tài liệu cũng lưu ý một số kiểu cấp phát vẫn có thể trả `-ENOMEM`[^cg-enomem].
+Cgroup chạm `memory.max`, OOM killer kích hoạt trong cgroup đó[^cg-oom]. 137 = 128+9 (SIGKILL) theo quy ước 128+N của bash (nguồn và cách phân biệt với hết thời gian dừng ở [Chương 06, mục 9](./06-runtime-oci.md)). Trong thí nghiệm ở mục 6 ứng dụng không nhận `ENOMEM` mà bị SIGKILL, khớp với tài liệu kernel nói cấp phát thường thành công trừ khi OOM killer chọn chính task đó[^cg-0order]. Tài liệu cũng lưu ý một số kiểu cấp phát vẫn có thể trả `-ENOMEM`[^cg-enomem].
 
 </details>
 
 7. Vì sao một service có CPU trung bình thấp vẫn bị throttle?
 <details><summary>Đáp án</summary>
 
-Giới hạn CPU được thực thi bằng throttling theo chu kỳ[^k8s-cpu]: hết quota là bị dừng đến chu kỳ sau; `nr_throttled` đếm điều đó[^cg-cpustat].
+Giới hạn CPU được thực thi bằng throttling theo chu kỳ[^k8s-cpu]: hết quota là bị dừng đến chu kỳ sau. `nr_throttled` đếm điều đó[^cg-cpustat].
 
 </details>
 
 8. Vì sao `docker stop` có thể mất đúng thời gian grace period và kết thúc bằng 137?
 <details><summary>Đáp án</summary>
 
-SIGTERM do `docker stop` gửi từ ngoài namespace của container (namespace tổ tiên); PID 1 chỉ nhận signal nó đã đăng ký handler[^pidns-ancestor], nên SIGTERM không có tác dụng, sau grace period Docker gửi SIGKILL[^docker-stop].
+SIGTERM do `docker stop` gửi từ ngoài namespace của container (namespace tổ tiên), mà PID 1 chỉ nhận signal nó đã đăng ký handler[^pidns-ancestor]. Nên SIGTERM không có tác dụng, và sau grace period Docker gửi SIGKILL[^docker-stop].
 
 </details>
 
 9. `chroot` có đủ để cách ly một process không?
 <details><summary>Đáp án</summary>
 
-Không; man page nói rõ nó không dành cho mục đích bảo mật[^chroot-sec]. Man page `pivot_root` nêu một ứng dụng hiện đại của nó là dựng root filesystem khi tạo container[^pivot-notes], và nó thao tác trên mount namespace của process gọi[^pivot].
+Không; man page nói rõ nó không dành cho mục đích bảo mật[^chroot-sec]. Man page `pivot_root` nêu một ứng dụng hiện đại của nó là dựng root filesystem khi tạo container[^pivot-notes]. Nó thao tác trên mount namespace của process gọi[^pivot].
 
 </details>
 
 10. Trong lab của repo, vì sao `unshare -u` bị chặn nhưng `unshare -U` thì không?
 <details><summary>Đáp án</summary>
 
-Lab không có `CAP_SYS_ADMIN`; tạo namespace mới bằng `clone`/`unshare` trong đa số trường hợp cần nó, riêng user namespace thì từ Linux 3.8 không cần đặc quyền[^ns-priv]. User namespace cho phép process không đặc quyền làm "root" bên trong[^userns-root] (quan sát ở mục 5). Thêm một yếu tố: lab chạy `--security-opt seccomp=unconfined`; trong container Docker mặc định, seccomp còn chặn cả `unshare -U` ([Chương 05, mục 5](./05-bao-mat-container.md)).
+Lab không có `CAP_SYS_ADMIN`. Tạo namespace mới bằng `clone`/`unshare` trong đa số trường hợp cần nó, riêng user namespace thì từ Linux 3.8 không cần đặc quyền[^ns-priv]. User namespace cho phép process không đặc quyền làm "root" bên trong[^userns-root] (quan sát ở mục 5). Thêm một yếu tố: lab chạy `--security-opt seccomp=unconfined`; trong container Docker mặc định, seccomp còn chặn cả `unshare -U` ([Chương 05, mục 5](./05-bao-mat-container.md)).
 
 </details>
 
 11. Vì sao `uname -s` trong container trên Mac in `Linux`?
 <details><summary>Đáp án</summary>
 
-Docker Desktop chạy container trong một VM Linux[^docker-vmm]; với colima, quan sát cũng cho thấy một VM Linux ở giữa (mục 4).
+Docker Desktop chạy container trong một VM Linux[^docker-vmm]. Với colima, quan sát cũng cho thấy một VM Linux ở giữa (mục 4).
 
 </details>
 
 12. Tại sao root trong container "yếu" hơn root trên host?
 <details><summary>Đáp án</summary>
 
-Trong quan sát ở mục 8 (cấu hình Docker mặc định), container có 14 capability và không có `sys_admin`; capability là các đơn vị đặc quyền bật/tắt độc lập[^caps], còn seccomp lọc syscall để thu hẹp bề mặt kernel[^seccomp-surface]. Đó là cấu hình mặc định của Docker, không phải bảo đảm của kernel.
+Trong quan sát ở mục 8 (cấu hình Docker mặc định), container có 14 capability và không có `sys_admin`. Capability là các đơn vị đặc quyền bật/tắt độc lập[^caps]. Seccomp thì lọc syscall để thu hẹp bề mặt kernel[^seccomp-surface]. Đó là cấu hình mặc định của Docker, không phải bảo đảm của kernel.
 
 </details>
 
@@ -517,7 +526,6 @@ Trong quan sát ở mục 8 (cấu hình Docker mặc định), container có 14
 [^docker-container]: Docker Docs, What is a container — <https://docs.docker.com/get-started/docker-concepts/the-basics/what-is-a-container/> — "A container is simply an isolated process with all of the files it needs to run. If you run multiple containers, they all share the same kernel"
 [^docker-hyperkit]: Docker Docs, Mac FAQs, What is HyperKit — <https://docs.docker.com/desktop/troubleshoot-and-support/faqs/macfaqs/> — "HyperKit is a legacy hypervisor built on top of Hypervisor.framework in macOS. Previous versions of Docker Desktop for Mac used HyperKit to run the Linux VM."
 [^docker-vmm]: Docker Docs, Virtual Machine Manager — <https://docs.docker.com/desktop/features/vmm/> — "Docker Desktop supports multiple Virtual Machine Managers (VMMs) to power the Linux VM that runs containers."
-[^colima-features]: Colima README v0.8.1, Features — <https://raw.githubusercontent.com/abiosoft/colima/v0.8.1/README.md> — "Support for multiple container runtimes"
 [^oci-linux]: OCI runtime-spec v1.2.0, config-linux.md — <https://raw.githubusercontent.com/opencontainers/runtime-spec/v1.2.0/config-linux.md> — "The Linux container specification uses various kernel features like namespaces, cgroups, capabilities, LSM, and filesystem jails to fulfill the spec."
 [^pidns-layers]: pid_namespaces(7), Debian bookworm — <https://manpages.debian.org/bookworm/manpages/pid_namespaces.7.en.html> — "A process has one process ID in each of the layers of the PID namespace hierarchy in which is visible"
 [^ns-link]: namespaces(7), Debian bookworm — <https://manpages.debian.org/bookworm/manpages/namespaces.7.en.html> — "If two processes are in the same namespace, then the device IDs and inode numbers of their /proc/pid/ns/xxx symbolic links will be the same"

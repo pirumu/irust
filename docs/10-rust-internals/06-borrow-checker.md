@@ -3,47 +3,68 @@
 ## Bạn sẽ hiểu được gì
 
 1. **Q1.** Borrow checker chạy ở đâu trong pipeline, trên biểu diễn nào, và chạy trước hay sau tối ưu hóa? → mục 1
-2. **Q2.** MIR là gì: basic block, statement, terminator, place, local `_0.._n` — và đọc một dump `--emit=mir` thế nào? → mục 2
-3. **Q3.** "Lexical lifetime" cũ khác NLL ở đâu; vì sao borrow "sống đến lần dùng cuối"? → mục 3
-4. **Q4.** Region inference và ràng buộc outlives/liveness là gì ở mức khái niệm? → mục 4
-5. **Q5.** Loan là gì, khi nào một hành động xung đột với loan còn sống, và điều đó sinh ra E0499, E0502, E0505, E0506 thế nào? → mục 5
+2. **Q2.** MIR là gì (basic block, statement, terminator, place, local `_0.._n`), và đọc một dump `--emit=mir` thế nào? → mục 2
+3. **Q3.** "Lexical lifetime" cũ khác NLL ở đâu, và vì sao một borrow "sống đến lần dùng cuối"? → mục 3
+4. **Q4.** Region inference và ràng buộc outlives, liveness là gì ở mức khái niệm? → mục 4
+5. **Q5.** Loan là gì, khi nào một hành động xung đột với loan còn sống, và từ đó E0499, E0502, E0505, E0506 sinh ra thế nào? → mục 5
 6. **Q6.** Two-phase borrow cho phép `vec.push(vec.len())` bằng cơ chế gì? → mục 6
-7. **Q7.** Vì sao một chương trình đúng về ngữ nghĩa vẫn bị từ chối ("problem case #3")? Polonius nằm ở đâu? → mục 7
+7. **Q7.** Vì sao một chương trình đúng về ngữ nghĩa vẫn bị từ chối ("problem case #3"), và Polonius nằm ở đâu? → mục 7
 8. **Q8.** Vì sao raw pointer nằm ngoài tầm theo dõi của borrowck, và khối `unsafe` có tắt borrowck không? → mục 8
 
 ## Kiến thức cần trước
 
-- [P9 · Chương 01 — Ownership, borrowing và lifetime nhìn sâu](../09-rust-language/01-ownership-borrowing-lifetime.md): chương đó nói *luật* ở mức người dùng; chương này nói *cơ chế* compiler thực thi luật đó.
-- [P10 · Chương 01 — Pipeline của rustc](01-pipeline-rustc.md): thứ tự AST → HIR → THIR → MIR và vì sao MIR là nơi đặt borrow check (mục 4); chương này chỉ nhắc cái cần dùng, và mục 1 đi sâu thêm thứ tự chạy của borrowck so với tối ưu MIR.
-- [P10 · Chương 07 — unsafe, undefined behavior và Miri](07-unsafe-ub-miri.md): `unsafe`, aliasing (mục 4) và Miri (mục 7); mục 8 của chương này chỉ chạm tới.
+Bạn đã biết luật ở mức người dùng: một chỗ chỉ có một `&mut` hoặc nhiều `&`, reference không được sống lâu hơn dữ liệu nó trỏ tới. Chương này không dạy lại luật đó mà hỏi ngược lại: compiler thực thi nó bằng cơ chế nào. Nếu cần ôn luật thì xem [P9 · Chương 01 — Ownership, borrowing và lifetime nhìn sâu](../09-rust-language/01-ownership-borrowing-lifetime.md).
 
-Mọi đoạn mã lỗi dưới đây đã được biên dịch thật bằng `rustc 1.95.0 (59807616e 2026-04-14)`, edition 2024, và thông điệp được dán từ output thật (có rút gọn ghi rõ). Các ví dụ này là *quan sát* một lần chạy; phần cơ chế lấy từ nguồn có chú thích.
+Ba chương liên quan:
+
+- [P10 · Chương 01 — Pipeline của rustc](01-pipeline-rustc.md) cho thứ tự AST → HIR → THIR → MIR và lý do borrow check đặt ở MIR (mục 4). Chương này chỉ nhắc phần cần dùng, rồi đi sâu thêm thứ tự chạy của borrowck so với tối ưu MIR ở mục 1.
+- [P10 · Chương 07 — unsafe, undefined behavior và Miri](07-unsafe-ub-miri.md) nói về `unsafe`, aliasing (mục 4) và Miri (mục 7). Mục 8 của chương này chỉ chạm tới.
+
+Ví dụ xuyên suốt là `orders`, một service Rust giả định (nhận xét của người soạn: đây là tình huống để minh họa, không phải code trong repo). Mỗi request, handler của `orders` đọc đơn hàng trong một `Vec` hoặc một cache `HashMap`, cầm tham chiếu vào đó một lúc rồi sửa chính nó. Đó là đúng loại code mà borrow checker soi kỹ nhất. Các đoạn mã bên dưới là bản rút gọn của những tình huống này, dùng `Vec<i32>` hay `HashMap<u32, String>` cho gọn.
+
+Mọi đoạn mã lỗi dưới đây đã được biên dịch thật bằng `rustc 1.95.0 (59807616e 2026-04-14)`, edition 2024, và thông điệp lỗi được dán từ output thật (chỗ nào rút gọn đều ghi rõ). Chúng chỉ là *quan sát* của một lần chạy; phần cơ chế lấy từ nguồn có chú thích.
 
 ---
 
 ## 1. Borrowck chạy ở đâu (Q1)
 
-> **Trả lời ngắn.** Borrow checker là một bước bắt buộc của compiler, chạy trên MIR — dạng biểu diễn trung gian đơn giản hóa của hàm — chứ không phải trên source[^dev-bc-mir]. Nó chạy cho mọi hàm, kể cả hàm không bao giờ được gọi[^dev-bc-dead]. Về thứ tự: trong chuỗi query dựng MIR, borrow checking nằm ở `mir_drops_elaborated_and_const_checked`, còn các tối ưu nằm ở bước `optimized_mir` đứng sau nó[^dev-mir-passes-drops][^dev-mir-passes-opt]; nên borrowck chạy *trước* các pass tối ưu MIR và trước khi sinh mã[^dev-bc-first][^dev-bc-order].
+> **Trả lời ngắn.** Borrow checker là một bước bắt buộc của compiler và chạy trên MIR, dạng biểu diễn trung gian đã đơn giản hóa của hàm, chứ không chạy trên source[^dev-bc-mir]. Nó kiểm mọi hàm, kể cả hàm không bao giờ được gọi[^dev-bc-dead]. Trong chuỗi query dựng MIR, borrow checking nằm ở `mir_drops_elaborated_and_const_checked`[^dev-mir-passes-drops]. Các pass tối ưu nằm ở `optimized_mir` đứng sau nó[^dev-mir-passes-opt]. Vì vậy borrowck chạy *trước* tối ưu MIR và trước khi sinh mã[^dev-bc-order].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): borrowck giống một bước type/lint trong CI chặn merge ngay cả khi endpoint chưa ai gọi — kết quả không phụ thuộc runtime.
+*Với `orders`.* Bạn thêm vào `orders` một hàm `drain_pending` cho tính năng chưa bật, không chỗ nào gọi tới, và `cargo build` vẫn báo lỗi mượn ngay trong hàm đó. Mục này trả lời ba câu hỏi nảy ra từ chuyện ấy: borrowck đọc cái gì (source hay thứ khác), chạy vào lúc nào so với tối ưu, và vì sao hàm chết cũng bị kiểm.
 
-rustc-dev-guide liệt kê các tính chất mà borrow check ép buộc, trong đó có: không move một giá trị khi đang bị borrow, không truy cập place khi nó đang bị mượn `&mut`, không mutate place khi nó đang bị mượn `&`[^dev-bc-rules]. (Place là một vị trí bộ nhớ như biến hay field; xem mục 2.)
+### 1.1 Chạy trên MIR, không chạy trên source
 
-Điểm then chốt: nó chạy trên MIR[^dev-bc-mir]. Dev-guide ghi rằng có một bản cài đặt cũ chạy trên HIR[^dev-bc-hir]. Dev-guide nêu các lợi ích của việc chạy trên MIR, trong đó có hai ý: MIR đơn giản hơn nhiều nên giúp tránh lỗi trong borrow checker[^dev-bc-simpler], và quan trọng hơn là cho phép "non-lexical lifetimes" — region suy ra từ đồ thị luồng điều khiển (CFG)[^dev-nll]; hệ cũ thì gắn lifetime với khối `{}` (mục 3).
+Borrowck làm việc trên MIR[^dev-bc-mir]. Compiler từng có một bản cài đặt chạy trên HIR[^dev-bc-hir], và việc chuyển sang MIR mang lại hai lợi ích. Thứ nhất, MIR đơn giản hơn HIR nhiều, nhờ khử đường (desugar) triệt để nên đỡ sinh lỗi trong chính borrow checker[^dev-bc-simpler]. Thứ hai, MIR cho phép có "non-lexical lifetimes", tức region suy ra từ đồ thị luồng điều khiển (CFG) thay vì từ khối `{}`[^dev-nll]. Hệ cũ gắn lifetime với khối `{}` nên hạn chế hơn (mục 3).
 
-*Trước hay sau tối ưu?* Dev-guide có một trang riêng về các query dựng MIR. Theo trang đó, MIR của một hàm đi qua các query theo thứ tự: `mir_built` (MIR ngay sau khi dựng), `mir_const` (áp vài pass biến đổi đơn giản để MIR sẵn sàng cho const qualification)[^dev-mir-passes-const], `mir_promoted` (tách các temporary "promote" được ra body riêng và làm MIR sẵn sàng cho borrow checking)[^dev-mir-passes-promoted], `mir_drops_elaborated_and_const_checked` (thực hiện borrow checking, chạy các pass biến đổi lớn như drop elaboration, rồi làm MIR sẵn sàng cho tối ưu)[^dev-mir-passes-drops] và cuối cùng `optimized_mir` (thực hiện mọi tối ưu được bật rồi ra bản cuối)[^dev-mir-passes-opt]. Nghĩa là borrow check đứng *trước* các pass tối ưu. Trang Overview mô tả cùng thứ tự theo cách khác: query `optimized_mir` của một hàm kéo theo `mir_borrowck` cho hàm đó, rồi mới tạo codegen unit[^dev-bc-order]; `mir_borrowck` còn được chạy trước trên mọi hàm của crate[^dev-bc-first]; và có những phần compiler phải chạy cho mọi code vì tính đúng đắn, kể cả code chết, ví dụ borrow checker[^dev-bc-dead].
+Việc borrowck ép buộc gồm ba luật: không move một giá trị khi nó đang bị mượn, không truy cập một place khi nó đang bị mượn `&mut` (trừ qua chính reference đó), và không mutate một place khi nó đang bị mượn `&`[^dev-bc-rules]. Place là một vị trí trong bộ nhớ, như một biến hay một field; mục 2 sẽ nói kỹ.
 
-Đối chiếu với source `rust-lang/rust` tag 1.95.0 (tên hàm trong source là chi tiết cài đặt, có thể đổi):
+### 1.2 Trước hay sau tối ưu MIR?
+
+Điều này quan trọng vì nó quyết định bạn nên đọc loại MIR nào khi muốn hiểu một lỗi mượn. Trang rustc-dev-guide về các query dựng MIR liệt kê thứ tự MIR của một hàm đi qua:
+
+- `mir_built`: MIR ngay sau khi dựng xong[^s2-dev-mir-passes-built].
+- `mir_const`: áp vài pass biến đổi đơn giản để MIR sẵn sàng cho const qualification[^dev-mir-passes-const].
+- `mir_promoted`: tách các temporary "promote" được ra body riêng, và làm MIR sẵn sàng cho borrow checking[^dev-mir-passes-promoted].
+- `mir_drops_elaborated_and_const_checked`: thực hiện borrow checking, chạy các pass biến đổi lớn như drop elaboration, rồi làm MIR sẵn sàng cho tối ưu[^dev-mir-passes-drops].
+- `optimized_mir`: thực hiện mọi tối ưu được bật rồi ra bản cuối[^dev-mir-passes-opt].
+
+Như vậy borrow check đứng trước các pass tối ưu. Trang Overview của dev-guide nói cùng thứ tự theo cách khác: query `optimized_mir` của một hàm kéo theo `mir_borrowck` cho hàm đó, rồi mới tạo codegen unit[^dev-bc-order]. Ngoài ra `mir_borrowck` còn được chạy trước trên mọi hàm của crate[^dev-bc-first]. Lý do là có những phần compiler phải chạy cho mọi code vì tính đúng đắn, kể cả code chết, và borrow checker là ví dụ[^dev-bc-dead].
+
+Ta đối chiếu thêm với source `rust-lang/rust` tag 1.95.0 (tên hàm trong source là chi tiết cài đặt, có thể đổi):
 
 - Provider `mir_borrowck` lấy MIR đầu vào từ query `mir_promoted`[^src-bc-input].
-- `mir_drops_elaborated_and_const_checked` gọi `mir_borrowck`[^src-mdec-borrowck], rồi mới lấy (*steal*) MIR từ `mir_promoted` để chạy tiếp các pass biến đổi[^dev-mir-steal-part0]; comment của hàm ghi rằng nó chạy borrowck *trước* để borrowck không bị thiếu MIR nguồn do MIR đã bị steal[^src-mdec-doc]. ("Steal" là cách query trao MIR cho query sau mà không sao chép; đọc kết quả đã bị steal làm compiler panic, nên ai cần đọc MIR ở một giai đoạn phải đọc xong trước khi nó bị steal[^dev-mir-steal][^dev-mir-steal-order].)
-- `inner_optimized_mir` (hàm cài đặt của `optimized_mir`) lấy body từ `mir_drops_elaborated_and_const_checked(did).steal()`[^src-optimized-steal] rồi mới gọi `run_optimization_passes`[^src-opt-call].
+- `mir_drops_elaborated_and_const_checked` gọi `mir_borrowck` trước[^src-mdec-borrowck]. Chỉ sau đó nó mới lấy (*steal*) MIR từ `mir_promoted` để chạy tiếp các pass biến đổi[^dev-mir-steal-part0]. Comment của hàm giải thích thứ tự này: chạy borrowck *trước* để borrowck không bị thiếu MIR nguồn do MIR đã bị steal[^src-mdec-doc].
+- `inner_optimized_mir`, hàm cài đặt của `optimized_mir`, lấy body từ `mir_drops_elaborated_and_const_checked(did).steal()`[^src-optimized-steal]. Sau đó nó mới gọi `run_optimization_passes`[^src-opt-call].
 
-Ghép lại (suy luận của người soạn từ các đoạn code trên, không phải câu nguyên văn của nguồn): với mỗi body, `run_optimization_passes` chỉ chạy trên MIR sau khi `mir_borrowck` của body đó đã chạy xong, còn borrowck đọc MIR từ `mir_promoted` — tức MIR *trước* các pass tối ưu. Kết luận này khớp với mô tả của dev-guide ở trên.
+"Steal" là cách một query trao MIR cho query sau mà không phải sao chép. Đọc kết quả đã bị steal sẽ làm compiler panic[^dev-mir-steal]. Vì vậy ai cần đọc MIR ở một giai đoạn phải đọc xong trước khi nó bị steal[^dev-mir-steal-order].
 
-Kiểm chứng rằng borrowck chạy cho cả hàm không được gọi: hàm `never_called` có `#[allow(dead_code)]`, không bao giờ được gọi, vẫn bị từ chối:
+Ghép các đoạn code trên lại (suy luận của người soạn, không phải câu nguyên văn của nguồn): với mỗi body, `run_optimization_passes` chỉ chạy sau khi `mir_borrowck` của body đó đã xong, và borrowck đọc MIR từ `mir_promoted`, tức MIR *trước* các pass tối ưu. Kết luận này khớp với mô tả của dev-guide.
+
+### 1.3 Hàm không ai gọi vẫn bị kiểm
+
+Hàm `never_called` dưới đây có `#[allow(dead_code)]` và không bao giờ được gọi, nhưng vẫn bị từ chối:
 
 ```rust
 #[allow(dead_code)]
@@ -64,14 +85,16 @@ error[E0499]: cannot borrow `s` as mutable more than once at a time
 6 |     a.push('x'); b.push('y');   first borrow later used here
 ```
 
-(Rút gọn: bỏ phần vẽ gạch dưới; thông điệp thật có đủ.) Nghĩa là borrowck là kiểm tra *tĩnh theo từng hàm* (dev-guide: các bước đã query-fy được làm cho từng item riêng[^dev-per-item]).
+(Rút gọn: bỏ phần vẽ gạch dưới; thông điệp thật có đủ.) Vậy borrowck là kiểm tra *tĩnh, theo từng hàm*: dev-guide ghi các bước đã query-fy được làm cho từng item riêng[^dev-per-item]. Với `orders`, lỗi mượn trong `drain_pending` hiện ra ngay lúc build, không đợi tới khi có request đầu tiên chạm vào nó.
 
-Các pha chính theo dev-guide (entry point là query `mir_borrowck` trong crate `rustc_borrowck`[^dev-phases]) như sau:
+### 1.4 Sáu pha bên trong borrowck
 
-1. Tạo bản sao cục bộ của MIR[^dev-bc-copy], rồi gọi `replace_regions_in_mir` để thay mọi region trong MIR bằng *biến suy luận* mới[^dev-bc-replace].
+Entry point của borrowck là query `mir_borrowck` trong crate `rustc_borrowck`[^dev-phases]. Dev-guide chia công việc thành sáu pha:
+
+1. Tạo bản sao cục bộ của MIR, rồi gọi `replace_regions_in_mir` để thay mọi region trong đó bằng *biến suy luận* mới[^dev-bc-replace].
 2. Chạy các phân tích dataflow tính dữ liệu nào bị move và khi nào[^dev-bc-dataflow].
 3. Type check lần hai trên MIR, mục đích là thu mọi ràng buộc giữa các region[^dev-bc-typeck].
-4. Region inference: tính giá trị mỗi region — các điểm trong CFG mà lifetime đó phải hợp lệ[^dev-bc-region].
+4. Region inference: tính giá trị mỗi region, tức các điểm trong CFG mà lifetime đó phải hợp lệ[^dev-bc-region].
 5. Tính "borrows in scope" tại mỗi điểm[^dev-bc-scope].
 6. Đi qua MIR lần nữa, xét từng hành động và báo lỗi[^dev-bc-walk].
 
@@ -84,33 +107,46 @@ flowchart LR
   W -->|ổn| OK["chấp nhận"]
 ```
 
-(Sơ đồ vẽ lại sáu pha ở trên theo dev-guide.)
+(Sơ đồ vẽ lại sáu pha ở trên theo dev-guide. Các mục 3–5 giải thích pha 4–6.)
 
 <details><summary>Đi sâu: "chưa tối ưu" nghĩa là gì, mọi hàm được kiểm thế nào, và vì sao dump <code>--emit=mir</code> không phải thứ borrowck đã duyệt</summary>
 
 Thứ tự các pha là thứ tự dev-guide liệt kê; tên hàm trong source là chi tiết cài đặt và có thể đổi (dev-guide là trang sống, không có phiên bản 1.95.0).
 
-- **"Chưa tối ưu" không có nghĩa là MIR thô.** `mir_promoted` chạy `PromoteTemps`, `SimplifyCfg::PromoteConsts` và `InstrumentCoverage` trên MIR lấy từ `mir_built`; comment trong source ghi các pass này là để chuẩn bị cho borrowck[^src-promoted-passes]. "Chưa tối ưu" ở đây chỉ nghĩa là chưa qua `run_optimization_passes`. Trang dev-guide còn liệt kê `mir_const` giữa `mir_built` và `mir_promoted`; trong source 1.95.0, `mir_promoted` lấy thẳng kết quả của `mir_built`[^src-promoted-built] (suy luận của người soạn: dev-guide có thể chưa theo kịp source).
-- **Mọi hàm được kiểm thế nào.** Ở source 1.95.0, `run_required_analyses` (crate `rustc_interface`) có một đoạn tên `MIR_borrow_checking` duyệt mọi *body owner* của crate và gọi `mir_borrowck` cho từng cái, trừ các hằng *trivial* (`is_trivial_const`, bị bỏ qua) và các body con (`is_typeck_child`) được kiểm cùng body cha[^src-all-bodies] — khớp với mô tả "chạy trước trên mọi hàm" của dev-guide.
-- **Hệ quả cho việc đọc dump.** Theo source 1.95.0, `--emit=mir` đi qua hàm `emit_mir`[^src-emit-fn]; hàm in MIR của một hàm thường gọi `tcx.instance_mir(Item(def_id))`[^src-emit-mir], và `instance_mir` trả `optimized_mir` cho hàm (nhánh mặc định; comment ghi `const fn` cũng được coi là muốn bản optimized)[^src-instance-mir]. Nên dump `--emit=mir` là MIR *sau* tối ưu, không phải thứ borrowck đã duyệt. Cùng ý với dev-guide: MIR trên Playground là bản tối ưu[^dev-mir-optimized], và muốn xem bản chưa tối ưu thì dùng `-Z mir-opt-level=0 --emit mir`, cần toolchain nightly[^dev-mir-opt]. Chương này không chạy bản nightly nên không có dump chưa tối ưu.
+- **"Chưa tối ưu" không có nghĩa là MIR thô.** `mir_promoted` chạy `PromoteTemps`, `SimplifyCfg::PromoteConsts` và `InstrumentCoverage` trên MIR lấy từ `mir_built`; comment trong source ghi các pass này là để chuẩn bị cho borrowck[^src-promoted-passes]. "Chưa tối ưu" ở đây chỉ nghĩa là chưa qua `run_optimization_passes`. Trang dev-guide còn liệt kê `mir_const` giữa `mir_built` và `mir_promoted`, nhưng trong source 1.95.0 `mir_promoted` lấy thẳng kết quả của `mir_built`[^src-promoted-built]. Suy luận của người soạn: dev-guide có thể chưa theo kịp source.
+- **Mọi hàm được kiểm thế nào.** Ở source 1.95.0, `run_required_analyses` (crate `rustc_interface`) có một đoạn tên `MIR_borrow_checking`. Đoạn này duyệt mọi *body owner* của crate và gọi `mir_borrowck` cho từng cái, trừ các hằng *trivial* (`is_trivial_const`, bị bỏ qua) và các body con (`is_typeck_child`) vì chúng được kiểm cùng body cha[^src-all-bodies]. Cách làm khớp với mô tả "chạy trước trên mọi hàm" của dev-guide.
+- **Hệ quả cho việc đọc dump.** Ở source 1.95.0, `--emit=mir` đi qua hàm `emit_mir`[^src-emit-fn]. Hàm in MIR của một hàm thường gọi `tcx.instance_mir(Item(def_id))`[^src-emit-mir]. Còn `instance_mir` trả `optimized_mir` cho hàm (nhánh mặc định; comment ghi `const fn` cũng được coi là muốn bản optimized)[^src-instance-mir]. Nên dump `--emit=mir` là MIR *sau* tối ưu, không phải thứ borrowck đã duyệt. Dev-guide nói cùng ý: MIR trên Playground là bản tối ưu[^dev-mir-optimized]. Muốn xem bản chưa tối ưu thì dùng `-Z mir-opt-level=0 --emit mir`, và cần toolchain nightly[^dev-mir-opt]. Chương này không chạy bản nightly nên không có dump chưa tối ưu.
 
 </details>
 
-**Quay lại Q1:** borrowck chạy trên MIR, bắt buộc, cho mọi hàm, trước các pass tối ưu MIR và trước khi sinh mã; mục 2 cho biết MIR trông thế nào.
+**Quay lại Q1:** borrowck chạy trên MIR, bắt buộc, cho mọi hàm, trước các pass tối ưu MIR và trước khi sinh mã; với `orders`, lỗi mượn ở hàm chưa ai gọi vẫn chặn build. Mục 2 cho biết MIR trông thế nào.
 
 ---
 
 ## 2. MIR trong năm phút (Q2)
 
-> **Trả lời ngắn.** MIR là đồ thị (CFG) các "basic block": mỗi block là vài lệnh đơn giản rồi một lệnh rẽ nhánh/gọi hàm ở cuối[^dev-mir-chars][^dev-mir-bb]. Biến được đánh số `_1`, `_2`…, riêng `_0` giữ giá trị trả về[^dev-mir-locals]. Một lần mượn như `&mut x` hiện ra trong MIR thành một phép gán rõ ràng[^dev-mir-assign].
+> **Trả lời ngắn.** MIR là một đồ thị (CFG) các "basic block": mỗi block gồm vài lệnh đơn giản, kết thúc bằng một lệnh rẽ nhánh hoặc gọi hàm[^dev-mir-chars]. Biến được đánh số `_1`, `_2`…, riêng `_0` giữ giá trị trả về[^dev-mir-locals]. Một lần mượn như `&mut x` hiện ra trong MIR thành một phép gán tường minh[^dev-mir-assign].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): MIR giống bytecode có cấu trúc — hàm Rust được khử đường (desugar) thành các bước nhỏ, mỗi bước một thao tác, nên dễ phân tích hơn source.
+*Với `orders`.* Trước khi tới borrowck, mỗi hàm trong `orders` đã bị viết lại thành MIR, và các khái niệm ở những mục sau (loan, region, điểm xung đột) đều gắn với từng điểm trong MIR chứ không với từng dòng source. Vì thế ta cần biết MIR trông thế nào. Mục này là bản tóm tắt vừa đủ để đọc một dump của hàm nhỏ trong `orders`.
 
-Basic block là chuỗi statement cộng một terminator ở cuối[^dev-mir-bb]. Terminator khác statement ở chỗ có thể có nhiều successor[^dev-mir-term]; lời gọi hàm luôn là terminator vì có thể unwind[^dev-mir-call]. Place là biểu thức chỉ một vị trí bộ nhớ như `_3`, `_3.f` hay `*_3`[^dev-mir-place]. Rvalue không lồng nhau: chỉ tham chiếu place và hằng[^dev-mir-nest]. Dạng gán là `<Place> = <Rvalue>`[^dev-mir-assign-form], trong đó rvalue có thể là biểu thức borrow `&mut <Place>`[^dev-mir-assign] — đây chính là chỗ *một borrow ra đời*[^rfc-loan-gen]. (Các khái niệm này cũng được giới thiệu ở [Chương 01, mục 4](01-pipeline-rustc.md#4-mir-nơi-borrow-check-và-tối-ưu-sống-q4); ở đây nhắc lại vừa đủ để đọc dump.)
+### 2.1 Các thành phần của MIR
 
-Dump thật của một hàm nhỏ có borrow (lưu thành `mir1.rs`, chạy `rustc --crate-type=lib --emit=mir -C panic=abort mir1.rs`; `-C panic=abort` để đỡ nhánh `unwind`):
+Cách ngắn nhất để nhớ MIR: hàm Rust bị khử đường thành những bước nhỏ, mỗi bước một thao tác, không có biểu thức lồng nhau, và mọi kiểu đều ghi tường minh[^dev-mir-chars]. Các thành phần chính:
+
+- **Basic block**: một chuỗi statement kèm một terminator ở cuối[^dev-mir-bb].
+- **Terminator**: khác statement ở chỗ có thể có nhiều successor, tức luồng điều khiển có thể rẽ sang nhiều nơi[^dev-mir-term]. Lời gọi hàm luôn là terminator vì có thể unwind[^dev-mir-call].
+- **Local**: định danh bằng chỉ số, viết `_1`, `_2`…; `_0` là local đặc biệt giữ giá trị trả về[^dev-mir-locals].
+- **Place**: biểu thức chỉ một vị trí bộ nhớ, như `_3`, `_3.f` hay `*_3`[^dev-mir-place].
+- **Rvalue**: không lồng nhau, chỉ tham chiếu place và hằng[^dev-mir-nest].
+- **Phép gán**: có dạng `<Place> = <Rvalue>`[^dev-mir-assign-form]. Rvalue có thể là biểu thức borrow `&mut <Place>`[^dev-mir-assign]. Đây chính là chỗ một borrow ra đời[^rfc-loan-gen].
+
+(Các khái niệm này cũng được giới thiệu ở [Chương 01, mục 4](01-pipeline-rustc.md#4-mir-nơi-borrow-check-và-tối-ưu-sống-q4); ở đây nhắc lại vừa đủ để đọc dump.)
+
+### 2.2 Đọc một dump thật
+
+Hàm dưới đây là bản thu nhỏ của một thao tác trong `orders`: lấy phần tử đầu của hàng đợi rồi nối thêm một giá trị vào cuối. Dump thật của nó lưu thành `mir1.rs`, chạy bằng `rustc --crate-type=lib --emit=mir -C panic=abort mir1.rs` (`-C panic=abort` để đỡ nhánh `unwind`):
 
 ```rust
 pub fn first_plus(v: &mut Vec<i32>) -> i32 {
@@ -153,32 +189,34 @@ fn first_plus(_1: &mut Vec<i32>) -> i32 {
 }
 ```
 
-Đọc cùng nhau:
+Đọc từ trên xuống:
 
-- `_1` là tham số `v` (dòng `debug v => _1` nối tên người dùng với local[^dev-mir-debuginfo]). `_0` là chỗ trả về. `_2` là `r`, `_3` là temporary, `_4: ()` là kết quả của `push`.
-- `bb0`: statement `_3 = &(*_1)` là một **shared reborrow** của `*v`. `v[0]` bị desugar thành lời gọi `Index::index` (terminator, rẽ sang `bb1`).
-- `bb1`: `_0 = copy (*_2)` đọc qua `r`; sau đó `Vec::push(copy _1, copy _0)` là terminator gọi `push`, truyền `_1` (`&mut Vec`) và giá trị `x`.
-- `debug x => _0`: biến `x` và giá trị trả về dùng chung local `_0`. Dev-guide nói tối ưu hóa có thể làm place của biến người dùng phức tạp hơn ánh xạ tầm thường, hoặc khiến nhiều biến người dùng dùng chung một place[^dev-mir-debuginfo-opt]; (suy luận của người soạn: `debug x => _0` là dấu vết của tối ưu hóa MIR.)
+- `_1` là tham số `v`; dòng `debug v => _1` nối tên người dùng đặt với local[^dev-mir-debuginfo]. `_0` là chỗ trả về, `_2` là `r`, `_3` là temporary, và `_4: ()` là kết quả của `push`.
+- Ở `bb0`, statement `_3 = &(*_1)` là một **shared reborrow** của `*v`. Còn `v[0]` bị desugar thành lời gọi `Index::index`, một terminator rẽ sang `bb1`.
+- Ở `bb1`, `_0 = copy (*_2)` đọc qua `r`. Sau đó `Vec::push(copy _1, copy _0)` là terminator gọi `push`, truyền `_1` (kiểu `&mut Vec`) và giá trị `x`.
+- Dòng `debug x => _0` cho thấy biến `x` và giá trị trả về dùng chung local `_0`. Dev-guide nói tối ưu hóa có thể làm place của biến người dùng phức tạp hơn so với ánh xạ tầm thường, hoặc khiến nhiều biến người dùng dùng chung một place[^dev-mir-debuginfo-opt]. Suy luận của người soạn: `debug x => _0` là dấu vết của tối ưu hóa MIR.
 
 <details><summary>Đi sâu: vì sao đừng đếm từng statement trong dump</summary>
 
-File do `--emit=mir` tạo ra là MIR *tối ưu* (đối chiếu source 1.95.0 ở mục 1). Dòng đầu file in ra nói rõ định dạng chỉ dành cho người đọc và có thể đổi không báo trước (quan sát từ output của lần chạy trên; hàm ghi file trong source 1.95.0 cũng in dòng cảnh báo đó[^src-mir-warning]). Vì borrowck chạy trước các pass tối ưu (mục 1), dump bạn thấy *không phải* chính xác thứ borrowck đã duyệt; nó đủ để học cấu trúc basic block/terminator/place, nhưng đừng đếm từng statement.
+File do `--emit=mir` tạo ra là MIR *tối ưu* (đối chiếu source 1.95.0 ở mục 1). Dòng đầu file nói rõ định dạng chỉ dành cho người đọc và có thể đổi không báo trước; ta thấy điều này trong output của lần chạy trên, và hàm ghi file trong source 1.95.0 cũng in dòng cảnh báo đó[^src-mir-warning]. Vì borrowck chạy trước các pass tối ưu (mục 1), dump bạn thấy *không phải* chính xác thứ borrowck đã duyệt. Nó đủ để học cấu trúc basic block, terminator, place, nhưng đừng đếm từng statement.
 
 </details>
 
-**Quay lại Q2:** MIR là CFG các basic block; local `_0` là giá trị trả về, `&place` là rvalue sinh borrow, và dump `--emit=mir` là bản tối ưu.
+**Quay lại Q2:** MIR là CFG các basic block; local `_0` giữ giá trị trả về, `&place` là rvalue sinh ra borrow, và dump `--emit=mir` là bản đã tối ưu, nên chỉ để đọc cấu trúc.
 
 ---
 
 ## 3. Từ lexical lifetime đến NLL (Q3)
 
-> **Trả lời ngắn.** Hệ cũ gắn lifetime của một reference với *khối `{}`* chứa biến giữ nó, nên có những chương trình hợp lý vẫn bị từ chối[^rfc-pc1]. NLL (non-lexical lifetimes) tính lifetime theo *các điểm còn dùng đến reference trên đồ thị luồng điều khiển*[^dev-nll][^dev-bc-live], nên borrow kết thúc ở lần dùng cuối[^rfc-lifetime].
+> **Trả lời ngắn.** Hệ cũ gắn lifetime của một reference với *khối `{}`* chứa biến giữ nó, nên có những chương trình hợp lý vẫn bị từ chối[^rfc-pc1]. NLL (non-lexical lifetimes) thì tính lifetime theo *các điểm còn dùng đến reference trên đồ thị luồng điều khiển*[^dev-nll]. Cách tính dựa trên khái niệm liveness[^dev-bc-live]. Nhờ vậy một borrow kết thúc ở lần dùng cuối[^rfc-lifetime].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hệ cũ như khóa file đến hết hàm; NLL như thả khóa ngay sau lệnh cuối cần file.
+*Với `orders`.* Thao tác này quen thuộc trong handler: lấy `&mut` vào danh sách đơn, đưa cho một hàm chuẩn hóa dữ liệu, rồi `push` thêm đơn mới vào cùng danh sách. Ngày nay nó biên dịch được. Trước NLL thì không, vì reference vẫn nằm trong một biến và biến đó chưa hết khối. Mục này giải thích sự khác nhau đó và vì sao lỗi mượn hiện nay luôn chỉ tới *lần dùng cuối* của reference.
 
-RFC 2094 mô tả: mỗi khi tạo borrow, compiler gán cho reference một lifetime — compiler suy ra lifetime nhỏ nhất vẫn bao trùm mọi chỗ dùng reference[^rfc-lifetime]. Vấn đề của hệ cũ là "problem case #1": khi gán reference vào một biến, lifetime phải lớn bằng toàn bộ scope của biến đó[^rfc-pc1]. Ví dụ từ RFC (hệ cũ báo lỗi ở các `push`):
+### 3.1 Hệ cũ: lifetime bằng scope của biến
+
+Theo RFC 2094, mỗi khi bạn tạo một borrow, compiler gán cho reference một lifetime, và nó suy ra lifetime nhỏ nhất vẫn bao trùm mọi chỗ dùng reference[^rfc-lifetime]. Hệ cũ vướng ở "problem case #1": khi gán một reference vào một biến, lifetime của nó phải lớn bằng toàn bộ scope của biến đó[^rfc-pc1]. Ví dụ trong RFC (hệ cũ báo lỗi ở các `push`):
 
 ```rust
 fn bar() {
@@ -190,7 +228,7 @@ fn bar() {
 } // <------------------------------+
 ```
 
-Cách chữa tạm xưa là đặt `slice` vào một khối riêng cho scope nhỏ lại, nhưng RFC gọi cách này là nhân tạo và không hiển nhiên[^rfc-pc1-fix]. NLL xóa nhu cầu đó. Biến thể đầy đủ của ví dụ trên, chạy trên 1.95.0:
+Cách chữa tạm ngày xưa là đặt `slice` vào một khối riêng cho scope nhỏ lại, nhưng RFC nhận xét cách này nhân tạo và không hiển nhiên[^rfc-pc1-fix]. NLL xóa nhu cầu đó. Đây là biến thể đầy đủ của ví dụ trên, chạy trên 1.95.0:
 
 ```rust
 fn capitalize(data: &mut [char]) { for c in data.iter_mut() { *c = c.to_ascii_uppercase(); } }
@@ -204,9 +242,13 @@ fn main() {
 }
 ```
 
-Kết quả: biên dịch thành công (exit 0). Khẳng định "hệ cũ báo lỗi" lấy từ RFC, không phải từ lần chạy này (chương này không chạy compiler cũ).
+Kết quả: biên dịch thành công (exit 0). Lưu ý khẳng định "hệ cũ báo lỗi" lấy từ RFC, không phải từ lần chạy này, vì chương này không chạy compiler cũ.
 
-Ý tưởng cốt lõi là *liveness*: RFC nói một biến live nếu giá trị hiện tại của nó có thể còn được dùng sau đó[^rfc-live-var]; dev-guide dùng cùng khái niệm cho region — mỗi region phải live tại những điểm nó có thể được dùng[^dev-bc-live]. Nên region của một reference trải trên các điểm CFG từ chỗ tạo đến chỗ dùng cuối — *theo từng đường đi*, không theo khối `{}` (suy luận của người soạn từ hai nguồn trên). Ví dụ biên dịch được vì `r` chỉ được dùng ở nhánh `then`, còn nhánh `else` (nơi `push`) không có lần dùng nào tiếp theo của `r`:
+### 3.2 NLL: tính theo liveness
+
+Ý cốt lõi của NLL là *liveness*. RFC định nghĩa một biến là live nếu giá trị hiện tại của nó có thể còn được dùng sau đó[^rfc-live-var]. Dev-guide dùng cùng khái niệm cho region: mỗi region phải live tại những điểm nó có thể được dùng[^dev-bc-live]. Từ hai câu này suy ra (suy luận của người soạn) rằng region của một reference trải trên các điểm CFG từ chỗ tạo đến chỗ dùng cuối, *theo từng đường đi*, chứ không theo khối `{}`.
+
+Ví dụ dưới biên dịch được vì `r` chỉ được dùng ở nhánh `then`, còn nhánh `else` (nơi `push`) không có lần dùng nào tiếp theo của `r`:
 
 ```rust
 fn main() {
@@ -217,7 +259,7 @@ fn main() {
 }
 ```
 
-Exit 0. Còn khi `r` được dùng *sau* `push`, bị từ chối:
+Exit 0. Còn khi `r` được dùng *sau* `push` thì bị từ chối:
 
 ```rust
 fn main() {
@@ -236,7 +278,7 @@ error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immuta
 5 |     println!("{}", first);   ----- immutable borrow later used here
 ```
 
-Ba nhãn của thông điệp khớp với cơ chế: *borrow xảy ra ở đâu*, *hành động xung đột ở đâu*, *chỗ dùng sau cùng khiến borrow còn sống*. Nhãn thứ ba khớp với ý liveness (suy luận của người soạn).
+Ba nhãn của thông điệp ứng với ba điểm của cơ chế: *borrow xảy ra ở đâu*, *hành động xung đột ở đâu*, và *chỗ dùng sau cùng khiến borrow còn sống*. Nhãn thứ ba chính là ý liveness (suy luận của người soạn). Trong `orders`, khi handler lỡ giữ `first` rồi `push`, đây là thông điệp bạn sẽ đọc.
 
 <details><summary>Đi sâu: reborrow qua <code>&mut</code> và phạm vi của khẳng định</summary>
 
@@ -254,24 +296,30 @@ println!("{:?}", v);
 
 </details>
 
-**Quay lại Q3:** hệ cũ ép lifetime bằng scope của biến; NLL cho borrow sống đến lần dùng cuối trên mỗi đường đi.
+**Quay lại Q3:** hệ cũ ép lifetime bằng scope của biến; NLL cho borrow sống đến lần dùng cuối trên mỗi đường đi, nên handler của `orders` được dùng lại danh sách ngay khi hết cần reference.
 
 ---
 
 ## 4. Region inference và ràng buộc outlives (Q4)
 
-> **Trả lời ngắn.** Compiler coi mỗi lifetime là một *tập điểm* trong chương trình mà nó phải hợp lệ[^dev-region-set]. Nó thu hai loại ràng buộc — "lifetime này phải sống ít nhất bằng lifetime kia" (outlives) và "lifetime phải sống ở mọi chỗ còn được dùng" (liveness)[^dev-outlives][^dev-bc-live] — rồi lan truyền các ràng buộc outlives để mở rộng tập điểm của từng region[^dev-propagate].
+> **Trả lời ngắn.** Compiler coi mỗi lifetime là một *tập điểm* trong chương trình mà nó phải hợp lệ[^dev-region-set]. Nó thu hai loại ràng buộc. Loại thứ nhất là outlives, tức "lifetime này phải sống ít nhất bằng lifetime kia"[^dev-outlives]. Loại thứ hai là liveness, tức "lifetime phải sống ở mọi chỗ còn được dùng"[^dev-bc-live]. Sau đó nó lan truyền các ràng buộc outlives để mở rộng tập điểm của từng region[^dev-propagate].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như xếp lịch phòng họp — mỗi region là một danh sách khung giờ cần giữ; "A outlives B" nghĩa là giờ của B cũng phải nằm trong lịch của A.
+*Với `orders`.* Giả sử `orders` có hàm nhận `&Order` và trả `&str` trỏ vào bên trong đơn hàng đó. Chữ ký hàm quyết định caller được giữ kết quả bao lâu, và compiler phải biến quyết định ấy thành điều kiện kiểm tra được. Region inference là bước làm việc đó. Mục này giải thích ở mức khái niệm: region là gì, ràng buộc nào đi vào, và lỗi lifetime trên chữ ký hàm ra từ đâu.
 
-Giá trị của một region là một tập hợp chứa các điểm MIR mà region hợp lệ, cùng các region mà nó outlive: nếu `'a: 'b` thì `end('b)` nằm trong tập của `'a`[^dev-region-set]. Phần tử `end('a)` ứng với mỗi region *universal* — region xuất hiện trong chữ ký hàm, như `'a` trong `fn foo<'a>(&'a u32)`[^dev-universal-def] — và tương ứng với một phần control-flow graph của caller[^dev-region-end]. Hai loại ràng buộc phổ biến nhất:
+### 4.1 Region là một tập hợp
 
-- **Outlives constraint**: một region outlive region khác (`'a: 'b`), do MIR type checker sinh ra[^dev-outlives].
+Giá trị của một region là một tập hợp. Tập này chứa các điểm MIR mà region hợp lệ, cùng các region mà nó outlive: nếu `'a: 'b` thì `end('b)` nằm trong tập của `'a`[^dev-region-set]. Phần tử `end('a)` có mặt với mỗi region *universal*, tức region xuất hiện trong chữ ký hàm, như `'a` trong `fn foo<'a>(&'a u32)`[^dev-universal-def]. Nó ứng với một phần control-flow graph của caller[^dev-region-end].
+
+Hai loại ràng buộc phổ biến nhất:
+
+- **Outlives constraint**: một region outlive region khác (`'a: 'b`). Do MIR type checker sinh ra[^dev-outlives].
 - **Liveness constraint**: mỗi region phải live ở các điểm nó có thể được dùng[^dev-bc-live].
 
-Thuật toán ý tưởng cấp cao: bắt đầu mỗi region với các vị trí MIR biết chắc từ liveness, rồi lan truyền: với mỗi `'a: 'b`, thêm mọi phần tử của `'b` vào `'a`, kể cả `end('b)`[^dev-propagate]. Sau đó kiểm tra lỗi, trong đó có kiểm tra các region universal không quá lớn[^dev-universal].
+### 4.2 Thuật toán ở mức ý tưởng
+
+Mỗi region bắt đầu với các vị trí MIR mà ta biết chắc phải nằm trong nó nhờ liveness[^dev-propagate]. Sau đó ta lan truyền: với mỗi `'a: 'b`, thêm mọi phần tử của `'b` vào `'a`, kể cả `end('b)`[^dev-propagate]. Cuối cùng là kiểm tra lỗi, trong đó có kiểm tra các region universal không quá lớn[^dev-universal].
 
 ```mermaid
 flowchart TD
@@ -282,27 +330,33 @@ flowchart TD
   C --> B["borrows in scope tại mỗi điểm"]
 ```
 
-Dev-guide có ví dụ nhỏ: `fn foo<'a, 'b>(x: &'a usize) -> &'b usize { x }`. Nó đánh số `'#1` cho tham số, `'#2` cho biểu thức `x`, `'#3` cho kiểu trả về; sau lan truyền, `'#1` chứa `end('#3)` nhưng không có where clause hay implied bound nào nói `'a: 'b`, nên là lỗi[^dev-region-example]. Tức là lỗi lifetime trên chữ ký hàm sinh ra từ một phép kiểm tra tập hợp, không phải từ "so sánh scope" (suy luận của người soạn).
+Dev-guide có một ví dụ nhỏ: `fn foo<'a, 'b>(x: &'a usize) -> &'b usize { x }`. Nó đánh số `'#1` cho tham số, `'#2` cho biểu thức `x`, `'#3` cho kiểu trả về. Sau lan truyền, `'#1` chứa `end('#3)`, nhưng không có where clause hay implied bound nào nói `'a: 'b`, nên đó là lỗi[^dev-region-example]. Nói cách khác, lỗi lifetime trên chữ ký hàm ra từ một phép kiểm tra tập hợp chứ không phải từ việc "so sánh scope" (suy luận của người soạn).
 
 <details><summary>Đi sâu: phần nằm ngoài chương này</summary>
 
-Dev-guide còn nhắc placeholder và universe[^dev-region-placeholder] cùng xử lý riêng cho closure[^dev-region-closure]; trang Region inference tại thời điểm đọc còn hai mục `TODO` (cách tính các universal region[^dev-region-todo], và câu hỏi có nên bàn tới SCC không[^dev-region-scc]). Chương này không đi vào các chi tiết đó.
+Dev-guide còn nhắc placeholder và universe[^dev-region-placeholder]. Closure cũng có cách xử lý riêng[^dev-region-closure]. Trang Region inference tại thời điểm đọc còn hai mục `TODO`. Mục thứ nhất là cách tính các universal region[^dev-region-todo]. Mục thứ hai là câu hỏi có nên bàn tới SCC không[^dev-region-scc]. Chương này không đi vào các chi tiết đó.
 
 </details>
 
-**Quay lại Q4:** region là tập điểm; liveness cho tập ban đầu, outlives lan truyền, rồi kiểm tra universal region không quá lớn.
+**Quay lại Q4:** region là tập điểm; liveness cho tập ban đầu, outlives lan truyền, rồi kiểm tra universal region không quá lớn. Với `orders`, đó là cách chữ ký hàm trả reference trở thành điều kiện compiler kiểm được.
 
 ---
 
 ## 5. Loan và xung đột (Q5)
 
-> **Trả lời ngắn.** Mỗi biểu thức borrow tạo một "loan" (khoản vay), và loan chỉ còn "trong scope" ở những điểm nằm trong vùng region của nó[^rfc-loan-gen][^rfc-loan-kill]. Một hành động xung đột nếu nó đụng vào dữ liệu đang có loan sống: move khi đang bị mượn, truy cập khi đang bị `&mut`, ghi khi đang bị `&`[^dev-bc-rules]. Bốn mã lỗi E0499/E0502/E0505/E0506 là các tổ hợp khác nhau của quy tắc đó (khung gộp này là suy luận của người soạn; nghĩa từng mã theo bảng lỗi của Rust nằm ngay dưới bảng ở mục này).
+> **Trả lời ngắn.** Mỗi biểu thức borrow tạo một "loan" (khoản vay), và loan chỉ còn "trong scope" ở những điểm nằm trong region của nó[^rfc-loan-gen]. Một hành động xung đột nếu nó đụng vào dữ liệu đang có loan sống: move khi đang bị mượn, truy cập khi đang bị `&mut`, ghi khi đang bị `&`[^dev-bc-rules]. Bốn mã lỗi E0499, E0502, E0505, E0506 là các tổ hợp khác nhau của quy tắc đó (khung gộp này là suy luận của người soạn; nghĩa từng mã theo bảng lỗi của Rust nằm ngay dưới bảng ở mục này).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như mượn sách thư viện — còn sổ mượn chưa trả (loan sống) thì không ai được bán cuốn sách đó (move), hay sửa nó (mutate) trong khi người kia còn đọc.
+*Với `orders`.* Hầu hết lỗi mượn bạn gặp ở `orders` đều cùng một kiểu: handler cầm một reference vào dữ liệu chung (đơn hàng đầu danh sách, một entry của cache), rồi giữa chừng lại sửa hay move chính dữ liệu đó, trong khi reference vẫn còn được dùng ở dòng sau. Mục này đặt tên cho những thứ nằm sau thông điệp lỗi, để bạn đọc được nó và biết sửa ở đâu.
 
-Mô hình (theo RFC NLL): mỗi biểu thức borrow trong MIR tạo một loan[^rfc-loan-gen]; loan chỉ còn "trong scope" ở những điểm mà region của nó còn chứa điểm đó, loan nào có region không chứa điểm đang xét thì bị loại[^rfc-loan-kill]. Dev-guide có bước "borrows in scope" tại mỗi điểm rồi bước duyệt MIR kiểm từng hành động[^dev-bc-scope][^dev-bc-walk]. Ví dụ dev-guide: gặp `*a + 1`, kiểm `a` đã khởi tạo và không bị mượn mutable, vì một trong hai sẽ phải báo lỗi[^dev-bc-walk-ex]. (Thuật ngữ "loan" là của RFC/NLL[^rfc-loans]; khung "hành động nào xung đột với loan nào đang sống" là suy luận của người soạn, chuẩn hóa từ các quy tắc của dev-guide[^dev-bc-rules].)
+### 5.1 Mô hình loan
+
+Mỗi biểu thức borrow trong MIR tạo ra một loan[^rfc-loan-gen]. Đây là mô hình của RFC NLL. Loan chỉ còn "trong scope" ở những điểm mà region của nó còn chứa điểm đó; loan nào có region không chứa điểm đang xét thì bị loại[^rfc-loan-kill]. Thuật ngữ "loan" là của RFC/NLL[^rfc-loans].
+
+Phía dev-guide, borrowck có bước tính "borrows in scope" tại mỗi điểm[^dev-bc-scope]. Sau đó là bước duyệt MIR để kiểm từng hành động[^dev-bc-walk]. Ví dụ dev-guide đưa ra: gặp `*a + 1`, compiler kiểm `a` đã khởi tạo và không bị mượn mutable, vì một trong hai sẽ phải báo lỗi[^dev-bc-walk-ex].
+
+Khung "hành động nào xung đột với loan nào đang sống" là suy luận của người soạn, chuẩn hóa từ các quy tắc của dev-guide ở mục 1[^dev-bc-rules]. Bốn mã lỗi quen thuộc ứng với bốn tổ hợp:
 
 | Mã | Hành động xung đột | Loan còn sống | Ví dụ |
 |---|---|---|---|
@@ -311,15 +365,17 @@ Mô hình (theo RFC NLL): mỗi biểu thức borrow trong MIR tạo một loan[
 | E0505 | move `s` | `&s` | `let r=&s; drop(s); use(r)` |
 | E0506 | gán `x = 6` | `&x` | `let r=&x; x=6; use(r)` |
 
-(Bảng và các output dưới đây là quan sát của các lần chạy 1.95.0; mục E0502 chiều ngược lại được thấy ở mục 6. Nghĩa của từng mã theo bảng lỗi của Rust: E0499 — mượn `&mut` nhiều hơn một lần[^err-e0499]; E0502 — mượn lại một biến đã được mượn với mutability khác[^err-e0502]; E0505 — move khi giá trị còn đang bị mượn[^err-e0505]; E0506 — gán vào giá trị đang bị mượn[^err-e0506].)
+Bảng và các output dưới đây là quan sát của các lần chạy 1.95.0; mục E0502 chiều ngược lại được thấy ở mục 6. Nghĩa của từng mã theo bảng lỗi của Rust như sau. E0499 là mượn `&mut` nhiều hơn một lần[^err-e0499]. E0502 là mượn lại một biến đã được mượn với mutability khác[^err-e0502]. E0505 là move khi giá trị còn đang bị mượn[^err-e0505]. E0506 là gán vào giá trị đang bị mượn[^err-e0506].
 
-Cả bốn đều có cấu trúc "ba nhãn": tạo loan → hành động xung đột → chỗ dùng khiến loan còn sống. Đọc lỗi bằng khung này (nhận xét của người soạn, không phải fact có nguồn):
+### 5.2 Đọc lỗi bằng ba điểm
 
-1. *Điểm sinh*: nơi loan được tạo (`&v[0]`).
+Cả bốn lỗi đều có cấu trúc "ba nhãn": tạo loan, rồi hành động xung đột, rồi chỗ dùng khiến loan còn sống. Khi đọc một thông điệp lỗi, hãy tìm ba điểm này (nhận xét của người soạn, không phải fact có nguồn):
+
+1. *Điểm sinh*: nơi loan được tạo (ví dụ `&v[0]`).
 2. *Điểm dùng cuối*: nơi region còn cần loan ("later used here").
 3. *Điểm xung đột*: hành động nằm giữa hai điểm trên một đường đi.
 
-Muốn sửa (nhận xét của người soạn): (a) rút ngắn khoảng giữa — chuyển chỗ dùng cuối lên trước hành động; (b) tách đường đi (như workaround ở mục 7); (c) đổi dữ liệu để loan không cần tồn tại (clone, `entry`, index).
+Muốn sửa, bạn có ba hướng (nhận xét của người soạn). Hướng (a) là rút ngắn khoảng giữa, bằng cách chuyển chỗ dùng cuối lên trước hành động. Hướng (b) là tách đường đi, như workaround ở mục 7. Hướng (c) là đổi dữ liệu để loan không cần tồn tại, chẳng hạn clone, dùng `entry`, hoặc dùng index.
 
 <details><summary>Đi sâu: output thật của E0499, E0505, E0506</summary>
 
@@ -354,21 +410,23 @@ error[E0506]: cannot assign to `x` because it is borrowed
 
 </details>
 
-**Quay lại Q5:** lỗi borrowck là "hành động xung đột với loan đang sống", và thông điệp ba nhãn chỉ đúng ba điểm đó.
+**Quay lại Q5:** lỗi borrowck là "hành động xung đột với loan đang sống", và thông điệp ba nhãn chỉ đúng ba điểm đó; với `orders`, sửa lỗi nghĩa là dời một trong ba điểm.
 
 ---
 
 ## 6. Two-phase borrows (Q6)
 
-> **Trả lời ngắn.** Trong `vec.push(vec.len())`, borrow `&mut vec` của `push` ban đầu chỉ "đặt chỗ" và hoạt động như một borrow chia sẻ, nên `vec.len()` đọc `vec` được; tới lúc gọi `push` nó mới được "kích hoạt" thành mutable borrow đầy đủ[^dev-twophase]. Cơ chế này chỉ áp dụng cho borrow ngầm do compiler sinh, không áp dụng cho `&mut` bạn viết tay[^dev-twophase-only].
+> **Trả lời ngắn.** Trong `vec.push(vec.len())`, borrow `&mut vec` của `push` ban đầu chỉ "đặt chỗ" và hoạt động như một borrow chia sẻ, nên `vec.len()` đọc được `vec`. Tới lúc gọi `push`, nó mới được "kích hoạt" thành mutable borrow đầy đủ[^dev-twophase]. Cơ chế này chỉ áp dụng cho borrow ngầm do compiler sinh ra, không áp dụng cho `&mut` bạn viết tay[^dev-twophase-only].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như đặt bàn nhà hàng — lúc đặt (reservation) người khác vẫn được ngồi tạm xem thực đơn, đến khi bạn tới (activation) bàn mới thuộc riêng bạn.
+*Với `orders`.* Giả sử handler gán số thứ tự cho đơn mới bằng độ dài hàng đợi hiện tại, tức `pending.push(pending.len())`. Đọc theo thứ tự thì `&mut pending` được tạo trước rồi `pending.len()` mới chạy, và theo luật ở mục 5 thì đó là đọc một `Vec` đang bị mượn mutable. Vậy mà dòng này biên dịch được. Mục này giải thích cơ chế cho phép điều đó, và vì sao nó không cứu được `&mut` bạn tự viết.
 
-Vấn đề: dev-guide mở `vec.push(vec.len())` thành `let temp1 = &two_phase v; let temp2 = v.len(); Vec::push(temp1, temp2);` (`&two_phase` là ký hiệu minh họa của dev-guide)[^dev-twophase-expand]. Nếu `&mut vec` hoạt động ngay, `vec.len()` đọc `vec` khi đang bị mượn mutable → E0502 (suy luận của người soạn từ quy tắc ở mục 5). Two-phase borrow giải quyết đúng điều đó[^dev-twophase].
+### 6.1 Reservation và activation
 
-Mỗi two-phase borrow được gán vào một temporary chỉ dùng một lần. Điểm gán gọi là reservation point, điểm temporary được dùng (hầu như luôn là lời gọi hàm) gọi là activation point[^dev-twophase-points]. Giữa hai điểm, nó đóng vai shared borrow[^dev-twophase-between]; sau activation, nó là mutable borrow[^dev-twophase-after].
+Dev-guide mở `vec.push(vec.len())` thành `let temp1 = &two_phase v; let temp2 = v.len(); Vec::push(temp1, temp2);`, trong đó `&two_phase` là ký hiệu minh họa của dev-guide[^dev-twophase-expand]. Nếu `&mut vec` hoạt động ngay, `vec.len()` sẽ đọc `vec` khi nó đang bị mượn mutable và gây E0502 (suy luận của người soạn từ quy tắc ở mục 5). Two-phase borrow giải quyết đúng điều đó[^dev-twophase].
+
+Mỗi two-phase borrow được gán vào một temporary chỉ dùng một lần. Điểm gán gọi là reservation point, còn điểm temporary được dùng (hầu như luôn là một lời gọi hàm) gọi là activation point[^dev-twophase-points]. Giữa hai điểm, borrow đóng vai shared borrow[^dev-twophase-between]. Sau activation, nó là mutable borrow[^dev-twophase-after].
 
 ```mermaid
 stateDiagram-v2
@@ -378,9 +436,9 @@ stateDiagram-v2
   Activation --> [*]: sau đó là mutable borrow đầy đủ
 ```
 
-Các trường hợp sinh ra two-phase theo dev-guide: autoref khi gọi method có receiver `&mut`, reborrow mutable ở đối số hàm, và borrow ngầm của toán tử gán phức hợp bị overload[^dev-twophase-cases].
+Theo dev-guide, two-phase borrow xuất hiện ở ba chỗ: autoref khi gọi method có receiver `&mut`, reborrow mutable ở đối số hàm, và borrow ngầm của toán tử gán phức hợp bị overload[^dev-twophase-cases].
 
-Chạy thật:
+### 6.2 Chạy thật, và khi nào không áp dụng
 
 ```rust
 fn main() {
@@ -401,27 +459,33 @@ m.push(v.len());     // lỗi
 m.push(1);
 ```
 
-Thật (rút gọn): `error[E0502]: cannot borrow `v` as immutable because it is also borrowed as mutable` tại `m.push(v.len())`, với `m.push(1)` là "mutable borrow later used here". Lưu ý: `r.push(r.len())` (reborrow ngầm của `r`) được chấp nhận; còn `v.len()` đọc `v` trong khi `m` vẫn được dùng sau đó thì không — `m` là `&mut` viết trong source, hoạt động ngay, không có reservation[^dev-twophase-only].
+Thật (rút gọn): `error[E0502]: cannot borrow `v` as immutable because it is also borrowed as mutable` tại `m.push(v.len())`, với `m.push(1)` là "mutable borrow later used here". Chú ý hai dòng khác nhau: `r.push(r.len())` (reborrow ngầm của `r`) được chấp nhận. Còn `v.len()` đọc `v` trong khi `m` vẫn được dùng sau đó thì bị từ chối, vì `m` là `&mut` viết trong source, hoạt động ngay, không có reservation[^dev-twophase-only].
 
 <details><summary>Đi sâu: hai kiểm tra bổ sung của two-phase borrow</summary>
 
-Dev-guide ghi two-phase borrow được xử lý như mutable borrow, trừ các ngoại lệ[^dev-twophase-treated]. Tại điểm activation phải không có borrow nào xung đột đang sống[^dev-twophase-check]. Tại điểm reservation, báo lỗi nếu có mutable borrow xung đột đang live, và chỉ lint nếu có shared borrow xung đột[^dev-twophase-reserve]. Dev-guide cũng nói activation point được tìm bằng visitor `GatherBorrows`[^dev-twophase-gather]; đây là tên cài đặt, có thể đổi.
+Dev-guide ghi two-phase borrow được xử lý như mutable borrow, trừ các ngoại lệ[^dev-twophase-treated]. Tại điểm activation phải không có borrow nào xung đột đang sống[^dev-twophase-check]. Tại điểm reservation, compiler báo lỗi nếu có mutable borrow xung đột đang live, và chỉ lint nếu có shared borrow xung đột[^dev-twophase-reserve]. Dev-guide cũng nói activation point được tìm bằng visitor `GatherBorrows`[^dev-twophase-gather]; đây là tên cài đặt, có thể đổi.
 
 </details>
 
-**Quay lại Q6:** two-phase borrow = reservation (như shared) rồi activation (mutable), chỉ cho borrow ngầm — nên `vec.push(vec.len())` biên dịch được.
+**Quay lại Q6:** two-phase borrow gồm reservation (hoạt động như shared) rồi activation (thành mutable), chỉ cho borrow ngầm; vì vậy `pending.push(pending.len())` của `orders` biên dịch được, còn `m.push(v.len())` với `m = &mut v` viết tay thì không.
 
 ---
 
 ## 7. Chương trình đúng nhưng vẫn bị từ chối (Q7)
 
-> **Trả lời ngắn.** Borrow checker chỉ chấp nhận chương trình mà mô hình region của nó *chứng minh được* an toàn, nên có chương trình thực ra an toàn vẫn bị từ chối[^nomicon-limits]. Ví dụ kinh điển: hàm trả về tham chiếu vào map ở nhánh `Some` rồi chèn vào map ở nhánh `None` ("problem case #3" của RFC NLL[^rfc-pc3-text]), trên 1.95.0 vẫn bị E0499. Polonius là dự án nhằm thay thế borrow checker hiện tại[^pol-roadmap], nhưng nguồn ghim cho thấy nó chưa sẵn sàng[^pol-status].
+> **Trả lời ngắn.** Borrow checker chỉ chấp nhận chương trình mà mô hình region của nó *chứng minh được* là an toàn, nên có chương trình thực ra an toàn vẫn bị từ chối[^nomicon-limits]. Ví dụ kinh điển là hàm trả về tham chiếu vào map ở nhánh `Some` rồi chèn vào map ở nhánh `None` ("problem case #3" của RFC NLL[^rfc-pc3-text]); trên 1.95.0 nó vẫn bị E0499. Polonius là dự án nhằm thay thế borrow checker hiện tại[^pol-roadmap]. Nhưng nguồn ghim cho thấy nó chưa sẵn sàng[^pol-status].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như kiểm tra an ninh sân bay — thà chặn nhầm vài người vô tội còn hơn lọt một người nguy hiểm; "chặn đúng mọi vi phạm, nhưng chặn nhầm một số hợp lệ" là tính chất của phân tích tĩnh bảo thủ (suy luận của người soạn, nhận định chung).
+*Với `orders`.* Bạn có cache `HashMap` theo mã đơn: có entry thì trả tham chiếu vào đó, chưa có thì chèn một entry rỗng rồi trả tham chiếu. Logic này an toàn, và rất tự nhiên là viết bằng `match` trên `get_mut`. Nhưng compiler từ chối. Mục này cho thấy lý do, vì sao đây không phải bug trong code của bạn, và cách viết lại.
 
-**Problem case #3.** RFC 2094 trình bày: hàm trả về `&'r mut V` của map, nhánh `Some` trả `value` ra ngoài, nhánh `None` chèn rồi lấy lại. Vì `value` là tham chiếu vào map và được trả ra, map "vẫn bị mượn tới một điểm nào đó ở caller"[^rfc-pc3-text]. Phần thiết kế của RFC (Layer 4) nói borrow đầu `'m1` phải mở rộng tới hết `'r` nhưng chỉ nếu rẽ sang `SOME`[^rfc-pc3-key]; chính RFC cũng ghi phần "named lifetimes" ở prototype mới cài đặt một phần[^rfc-partial]. Bản chạy thật trên 1.95.0 (dùng `HashMap<u32, String>`):
+Cần nói trước một chuyện nền: phân tích tĩnh phải bảo thủ. Nó chặn đúng mọi vi phạm, đổi lại có lúc chặn nhầm cả chương trình hợp lệ (nhận xét của người soạn).
+
+### 7.1 Problem case #3
+
+RFC 2094 trình bày bài toán này như sau. Hàm trả về `&'r mut V` của một map; nhánh `Some` trả `value` ra ngoài, nhánh `None` chèn rồi lấy lại. Vì `value` là tham chiếu vào map và được trả ra ngoài, map "vẫn bị mượn tới một điểm nào đó ở caller"[^rfc-pc3-text]. Phần thiết kế của RFC (Layer 4) nói borrow đầu `'m1` phải mở rộng tới hết `'r`, nhưng chỉ nếu rẽ sang `SOME`[^rfc-pc3-key]. Chính RFC cũng ghi rằng phần "named lifetimes" ở prototype mới cài đặt một phần[^rfc-partial].
+
+Bản chạy thật trên 1.95.0 (dùng `HashMap<u32, String>`):
 
 ```rust
 use std::collections::HashMap;
@@ -454,13 +518,20 @@ error[E0499]: ... pc3.rs:7:13   (map.get_mut(&key) thứ hai, cùng nhãn)
 
 (Rút gọn khung vẽ nhiều dòng; hai chỗ lỗi ở dòng 6 và 7, và nhãn "returning this value requires that `*map` is borrowed for `'1`" là nguyên văn.)
 
-Biến thể dùng `get` (nhánh `Some(v)` trả `v`, nhánh còn lại `insert`) — ví dụ cache `get_or_load` ở [P9·01, mục 6](../09-rust-language/01-ownership-borrowing-lifetime.md) — bị `E0502` thay vì `E0499`, với cùng nhãn "returning this value requires that `*c` is borrowed for `'1`". Nhận xét của người soạn: cùng cấu trúc, chỉ khác loại borrow đầu (`&` thay vì `&mut`).
+Biến thể dùng `get` (nhánh `Some(v)` trả `v`, nhánh còn lại `insert`) bị `E0502` thay vì `E0499`, với cùng nhãn "returning this value requires that `*c` is borrowed for `'1`". Đó chính là ví dụ cache `get_or_load` ở [P9·01, mục 6](../09-rust-language/01-ownership-borrowing-lifetime.md). Nhận xét của người soạn: hai trường hợp cùng cấu trúc, chỉ khác loại borrow đầu (`&` thay vì `&mut`).
 
-Nhận xét: chương trình này an toàn về ngữ nghĩa — ở nhánh `None` không còn reference nào sống (RFC cũng viết rằng borrow đầu nên kết thúc ngay khi vào nhánh `NONE`[^rfc-pc3-key]). Nhưng khi borrow chảy vào giá trị trả về (lifetime `'1` của tham số), region của nó chứa `end('1)` — phần của caller[^dev-region-end]. Suy luận của người soạn: tập region này không phân biệt nhánh, nên loan còn "sống" cả ở nhánh `None`; thông điệp "borrowed for `'1`" khớp với suy luận đó, nhưng chương này không đối chiếu source `rustc_borrowck` nên đây là suy luận, không phải khẳng định về cài đặt.
+### 7.2 Vì sao compiler từ chối
 
-**Cùng loại: "hệ lifetime quá thô".** Nomicon, mục *Limits of Lifetimes*, có hai ví dụ. Thứ nhất: `mutate_and_share(&mut self) -> &Self` trả về tham chiếu chia sẻ, nhưng lifetime của `&mut foo` bị kéo dài theo `loan` do chữ ký hàm, nên `foo.share()` tiếp theo bị `E0502`[^nomicon-e0502]; Nomicon nhận xét chương trình đúng theo ngữ nghĩa tham chiếu ta quan tâm nhưng hệ lifetime quá thô để xử lý[^nomicon-limits]. Thứ hai: `get_default` với `HashMap` ở trên — Nomicon nói lỗi do Rust bảo thủ dùng cả scope cho borrow đầu[^nomicon-improper].
+Chương trình này an toàn về ngữ nghĩa: ở nhánh `None` không còn reference nào sống. RFC cũng viết rằng borrow đầu nên kết thúc ngay khi vào nhánh `NONE`[^rfc-pc3-key]. Nhưng khi borrow chảy vào giá trị trả về (lifetime `'1` của tham số), region của nó chứa `end('1)`, phần thuộc caller[^dev-region-end]. Suy luận của người soạn: tập region này không phân biệt nhánh, nên loan còn "sống" cả ở nhánh `None`; thông điệp "borrowed for `'1`" khớp với suy luận đó. Chương này không đối chiếu source `rustc_borrowck`, nên đây là suy luận chứ không phải khẳng định về cài đặt.
 
-**Workaround.** Hai cách viết lại, đã chạy thật và đều biên dịch được:
+Đây cũng là loại "hệ lifetime quá thô" mà Nomicon nêu trong mục *Limits of Lifetimes*, với hai ví dụ:
+
+- `mutate_and_share(&mut self) -> &Self` trả về tham chiếu chia sẻ, nhưng lifetime của `&mut foo` bị kéo dài theo `loan` do chữ ký hàm, nên `foo.share()` tiếp theo bị `E0502`[^nomicon-e0502]. Nomicon nhận xét chương trình đúng theo ngữ nghĩa tham chiếu ta quan tâm, nhưng hệ lifetime quá thô để xử lý[^nomicon-limits].
+- `get_default` với `HashMap` ở trên. Nomicon nói lỗi do Rust bảo thủ dùng cả scope cho borrow đầu[^nomicon-improper].
+
+### 7.3 Cách viết lại
+
+Hai cách viết lại sau đã chạy thật và đều biên dịch được:
 
 ```rust
 // (a) tránh giữ loan qua nhánh: kiểm tra trước
@@ -481,30 +552,30 @@ fn get_default(map: &mut HashMap<u32, String>, key: u32) -> &mut String {
 }
 ```
 
-Cách (a) theo đúng ý workaround của RFC: đưa `get_mut` vào trong nhánh `if` luôn return, để borrow checker thấy borrow *chưa hề bắt đầu* ở ngoài nhánh đó[^rfc-pc3-workaround]. RFC cũng nhắc API `entry` có thể dùng để cài đặt hàm này[^rfc-pc3-entry]. (Nhận xét của người soạn: trong code backend, `map.entry(key).or_insert_with(...)` là cách thực tế; case này đáng nhớ như một *mẫu hình lỗi*, không phải vì bạn cần viết lại `get_default`.)
+Cách (a) theo đúng ý workaround của RFC: đưa `get_mut` vào trong nhánh `if` luôn return, để borrow checker thấy borrow *chưa hề bắt đầu* ở ngoài nhánh đó[^rfc-pc3-workaround]. RFC cũng nhắc API `entry` có thể dùng để cài đặt hàm này[^rfc-pc3-entry]. Trong code backend, `map.entry(key).or_insert_with(...)` mới là cách thực tế; case này đáng nhớ như một *mẫu hình lỗi*, không phải vì bạn cần viết lại `get_default` (nhận xét của người soạn).
 
 <details><summary>Đi sâu: Polonius — chỉ điều nguồn nói</summary>
 
-Nguồn truy cập được: repo `rust-lang/polonius`, ghim commit `41ae30d2cb66d82098a8b8abd2cbccf1c1a2a96f`. README/book ở commit đó nói Polonius là thư viện lõi mô hình hóa borrow check[^pol-what]. Trang "Current status" ở commit đó viết rằng Polonius đã được tích hợp tạm thời vào rustc, chạy được với nightly rustc và cờ `-Zpolonius`, nhưng chưa sẵn sàng cho dùng rộng rãi[^pol-status]; lộ trình nêu hai bước rồi — "nếu mọi thứ suôn sẻ" — thay borrow checker hiện tại[^pol-roadmap]. Quan trọng:
+Nguồn truy cập được là repo `rust-lang/polonius`, ghim commit `41ae30d2cb66d82098a8b8abd2cbccf1c1a2a96f`. README và book ở commit đó nói Polonius là thư viện lõi mô hình hóa borrow check[^pol-what]. Trang "Current status" ở commit đó viết rằng Polonius đã được tích hợp tạm thời vào rustc, chạy được với nightly rustc và cờ `-Zpolonius`, nhưng chưa sẵn sàng cho dùng rộng rãi[^pol-status]. Lộ trình nêu hai bước rồi, "nếu mọi thứ suôn sẻ", thay borrow checker hiện tại[^pol-roadmap]. Hai điều cần nhớ:
 
-- Đây là trạng thái *tại commit ghim*; chương này không có nguồn khẳng định nó còn đúng hôm nay, hay Polonius đã nằm trong stable 1.95.0 hay chưa. Đừng suy ra từ chương này.
-- Chương này **không** có nguồn nói Polonius chấp nhận "problem case #3" cụ thể; vì vậy không khẳng định điều đó. (Trang dev-guide về Polonius, `borrow-check/polonius.html`, trả về lỗi 404 khi tải để soạn chương này, nên không dùng.)
+- Đây là trạng thái *tại commit ghim*. Chương này không có nguồn khẳng định nó còn đúng hôm nay, hay Polonius đã nằm trong stable 1.95.0 hay chưa. Đừng suy ra từ chương này.
+- Chương này **không** có nguồn nói Polonius chấp nhận "problem case #3" cụ thể, nên không khẳng định điều đó. (Trang dev-guide về Polonius, `borrow-check/polonius.html`, trả về lỗi 404 khi tải để soạn chương này, nên không dùng.)
 
 </details>
 
-**Quay lại Q7:** borrowck bảo thủ — chương trình an toàn nhưng chưa chứng minh được (như problem case #3) bị từ chối; workaround là tách đường đi hoặc dùng `entry`, còn Polonius chỉ có trạng thái ở commit ghim.
+**Quay lại Q7:** borrowck bảo thủ, nên chương trình an toàn mà chưa chứng minh được (như problem case #3, cũng là cache `get_or_load` của `orders`) bị từ chối. Cách vượt qua là tách đường đi hoặc dùng `entry`; còn Polonius thì ta chỉ biết trạng thái ở commit ghim.
 
 ---
 
 ## 8. Raw pointer nằm ngoài tầm borrowck, còn `unsafe` thì không tắt nó (Q8)
 
-> **Trả lời ngắn.** Các quy tắc mượn mà borrowck thực thi áp dụng cho *reference* (`&`, `&mut`); raw pointer thì không có bảo đảm an toàn hay liveness[^ref-raw] và được phép phớt lờ các quy tắc mượn[^book-raw-borrowrules], nên ghi qua raw pointer không bị borrowck bắt — nhưng vi phạm quy tắc aliasing vẫn là hành vi không xác định[^ref-ub-alias]. Khối `unsafe` tự nó không tắt borrowck: reference dùng trong code `unsafe` vẫn được kiểm tra[^book-unsafe-checks].
+> **Trả lời ngắn.** Các quy tắc mượn mà borrowck thực thi áp dụng cho *reference* (`&`, `&mut`). Raw pointer thì không có bảo đảm an toàn hay liveness[^ref-raw]. Nó cũng được phép phớt lờ các quy tắc mượn[^book-raw-borrowrules]. Vì vậy ghi qua raw pointer không bị borrowck bắt. Nhưng vi phạm quy tắc aliasing vẫn là hành vi không xác định[^ref-ub-alias]. Còn khối `unsafe` tự nó không tắt borrowck: reference dùng trong code `unsafe` vẫn được kiểm tra[^book-unsafe-checks].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): borrowck là bảo vệ chỉ kiểm thẻ ở cổng chính; raw pointer là cửa sau không có ai gác — chương trình vẫn có thể vào, nhưng nếu gây hại thì lỗi thuộc người viết `unsafe`.
+*Với `orders`.* Giả sử `orders` có một đoạn `unsafe`, chẳng hạn để gọi thư viện C, và đoạn đó giữ con trỏ thô trỏ vào dữ liệu mà phần safe cũng đang mượn. Hai câu hỏi thực tế: borrowck có chặn được lỗi ở chỗ đó không, và liệu bọc code vào `unsafe` có làm các reference quanh đó thoát khỏi kiểm tra không.
 
-Thử thật:
+Ta thử thật:
 
 ```rust
 fn main() {
@@ -516,77 +587,81 @@ fn main() {
 }
 ```
 
-Biên dịch được (exit 0): ghi qua `p` trong khi `r` còn sống không bị borrowck bắt. Điều này **không** có nghĩa là hợp lệ: Reference nêu `&T` phải trỏ vào bộ nhớ không bị mutate trong khi nó live (trừ `UnsafeCell`)[^ref-ub-alias]; vi phạm là hành vi không xác định, dù chính Reference lưu ý quy tắc aliasing chính xác chưa được xác định và đây chỉ là phác thảo nguyên tắc chung[^ref-ub-alias-open]. Vì vậy phần kiểm tra thuộc về lập trình viên và công cụ như Miri — xem [P10 · Chương 07 — unsafe, undefined behavior và Miri](07-unsafe-ub-miri.md) (aliasing: mục 4; Miri: mục 7). Chương này không chạy Miri.
+Biên dịch được (exit 0): ghi qua `p` trong khi `r` còn sống không bị borrowck bắt. Điều này **không** có nghĩa là hợp lệ. Reference nêu rằng `&T` phải trỏ vào bộ nhớ không bị mutate trong khi nó live (trừ dữ liệu trong `UnsafeCell`)[^ref-ub-alias]; vi phạm là hành vi không xác định. Chính Reference cũng lưu ý quy tắc aliasing chính xác chưa được xác định, và đây chỉ là phác thảo nguyên tắc chung[^ref-ub-alias-open]. Vì vậy phần kiểm tra thuộc về lập trình viên và các công cụ như Miri; xem [P10 · Chương 07 — unsafe, undefined behavior và Miri](07-unsafe-ub-miri.md) (aliasing: mục 4; Miri: mục 7). Chương này không chạy Miri.
 
 <details><summary>Đi sâu: giới hạn của khẳng định</summary>
 
-Chương này chỉ chứng minh hai điều: ví dụ trên biên dịch được (quan sát), và Reference phác thảo nguyên tắc aliasing cho `&T`[^ref-ub-alias]. Ví dụ không chứng minh chương trình trên *gây* ra UB hay không trong từng chi tiết; muốn kết luận cụ thể cần chạy Miri hoặc đọc model aliasing — việc của [Chương 07](07-unsafe-ub-miri.md).
+Chương này chỉ chứng minh hai điều: ví dụ trên biên dịch được (quan sát), và Reference phác thảo nguyên tắc aliasing cho `&T`[^ref-ub-alias]. Ví dụ không chứng minh chương trình trên *gây* ra UB hay không trong từng chi tiết. Muốn kết luận cụ thể thì cần chạy Miri hoặc đọc model aliasing, đó là việc của [Chương 07](07-unsafe-ub-miri.md).
 
 </details>
 
-**Quay lại Q8:** borrowck không theo dõi raw pointer nên không chặn được; trách nhiệm giữ quy tắc aliasing chuyển sang người viết `unsafe` — nhưng khối `unsafe` không tắt borrowck với reference.
+**Quay lại Q8:** borrowck không theo dõi raw pointer nên không chặn được; trách nhiệm giữ quy tắc aliasing chuyển sang người viết `unsafe` của `orders`. Nhưng khối `unsafe` không tắt borrowck với reference.
 
 ---
 
 ## Liên hệ với Rust
 
-- Borrowck là bước bắt buộc, chạy trên MIR trước các pass tối ưu (theo dev-guide và source 1.95.0, mục 1) và với mọi hàm kể cả không được gọi.
-- Luật ở mức người dùng — ownership, `&`/`&mut`, lifetime annotation — nằm ở [P9 · 01](../09-rust-language/01-ownership-borrowing-lifetime.md); chương này chỉ giải thích compiler thực thi chúng bằng liveness + outlives + loan.
-- Muốn xem MIR của chính code bạn: `rustc --crate-type=lib --emit=mir file.rs` (ra MIR đã tối ưu — theo source 1.95.0, mục 1; chạy được trên 1.95.0 như ví dụ mục 2); MIR chưa tối ưu cần nightly và `-Z mir-opt-level=0`[^dev-mir-opt].
+Chương này nói về chính Rust, nên phần liên hệ gọn: nó cho bạn ba điều để mang theo khi viết `orders`.
+
+- **Lỗi mượn xuất hiện lúc build, ở mọi hàm.** Borrowck chạy trên MIR trước các pass tối ưu (dev-guide và source 1.95.0, mục 1) và với mọi hàm, kể cả hàm chưa ai gọi.
+- **Luật và cơ chế là hai tầng.** Luật ở mức người dùng (ownership, `&`/`&mut`, lifetime annotation) nằm ở [P9 · 01](../09-rust-language/01-ownership-borrowing-lifetime.md). Chương này giải thích compiler thực thi chúng bằng liveness, outlives và loan.
+- **Xem MIR của code của bạn.** Chạy `rustc --crate-type=lib --emit=mir file.rs`; kết quả là MIR đã tối ưu (theo source 1.95.0, mục 1), và lệnh chạy được trên 1.95.0 như ví dụ ở mục 2. MIR chưa tối ưu cần nightly và `-Z mir-opt-level=0`[^dev-mir-opt].
 
 ## Tóm tắt
 
-- Borrowck chạy trên MIR; entry point là query `mir_borrowck`[^dev-phases]; `mir_drops_elaborated_and_const_checked` thực hiện borrow checking trước các pass tối ưu của `optimized_mir`[^dev-mir-passes-drops][^dev-mir-passes-opt]; chạy cả với dead code[^dev-bc-dead].
-- MIR là CFG gồm basic block (statement + terminator), local `_0` cho giá trị trả về, place và rvalue không lồng nhau[^dev-mir-bb][^dev-mir-locals][^dev-mir-nest]; `--emit=mir` cho MIR tối ưu (theo source 1.95.0)[^src-instance-mir], định dạng có thể đổi[^src-mir-warning].
+- Borrowck chạy trên MIR, entry point là query `mir_borrowck`[^dev-phases]. Nó chạy cả với dead code[^dev-bc-dead].
+- `mir_drops_elaborated_and_const_checked` thực hiện borrow checking[^dev-mir-passes-drops]. Việc đó nằm trước các pass tối ưu của `optimized_mir`[^dev-mir-passes-opt].
+- MIR là CFG gồm basic block (statement cộng terminator)[^dev-mir-bb]. Local `_0` giữ giá trị trả về[^dev-mir-locals]. Rvalue không lồng nhau[^dev-mir-nest].
+- `--emit=mir` cho MIR tối ưu (theo source 1.95.0)[^src-instance-mir]. Định dạng của nó có thể đổi[^src-mir-warning].
 - NLL: region suy ra từ CFG[^dev-nll]; borrow sống đến lần dùng cuối trên mọi đường đi (suy luận từ RFC và dev-guide, mục 3). Lexical cũ ép lifetime bằng scope của biến[^rfc-pc1].
-- Region inference: liveness tạo tập ban đầu, outlives lan truyền, rồi kiểm tra universal region[^dev-propagate][^dev-universal].
-- Lỗi E0499/E0502/E0505/E0506 đều là "hành động xung đột với loan đang sống" (khung gộp của người soạn), thông điệp có ba nhãn khớp mô hình đó.
-- Two-phase borrow: reservation như shared borrow, rồi activation thành mutable; chỉ áp dụng cho borrow ngầm[^dev-twophase][^dev-twophase-only].
-- Có chương trình đúng bị từ chối (problem case #3 trên 1.95.0 → E0499; Nomicon có ví dụ cùng loại[^nomicon-limits]); workaround: tách đường đi, `entry`[^rfc-pc3-workaround][^rfc-pc3-entry].
+- Region inference: liveness tạo tập ban đầu, outlives lan truyền[^dev-propagate]. Sau đó kiểm tra universal region[^dev-universal].
+- Lỗi E0499, E0502, E0505, E0506 đều là "hành động xung đột với loan đang sống" (khung gộp của người soạn), và thông điệp có ba nhãn khớp mô hình đó.
+- Two-phase borrow: reservation như shared borrow, rồi activation thành mutable[^dev-twophase]. Nó chỉ áp dụng cho borrow ngầm[^dev-twophase-only].
+- Có chương trình đúng bị từ chối: problem case #3 trên 1.95.0 cho E0499, và Nomicon có ví dụ cùng loại[^nomicon-limits]. Workaround là tách đường đi[^rfc-pc3-workaround]. Cũng có thể dùng `entry`[^rfc-pc3-entry].
 - Polonius: theo repo ở commit ghim, chưa sẵn sàng rộng rãi[^pol-status]; chương này không khẳng định thêm.
-- Raw pointer nằm ngoài các quy tắc mượn của borrowck[^book-raw-borrowrules], nhưng vi phạm aliasing vẫn là UB[^ref-ub-alias]; khối `unsafe` không tắt borrowck với reference[^book-unsafe-checks].
+- Raw pointer nằm ngoài các quy tắc mượn của borrowck[^book-raw-borrowrules]. Nhưng vi phạm aliasing vẫn là UB[^ref-ub-alias]. Khối `unsafe` không tắt borrowck với reference[^book-unsafe-checks].
 
 ## Câu hỏi tự kiểm tra
 
 1. Borrow checker chạy trên biểu diễn nào, và trước hay sau tối ưu MIR?
    <details><summary>Đáp án</summary>
 
-   Trên MIR[^dev-bc-mir]; trước các pass tối ưu: `mir_drops_elaborated_and_const_checked` thực hiện borrow checking rồi làm MIR sẵn sàng cho tối ưu, còn `optimized_mir` mới thực hiện các tối ưu[^dev-mir-passes-drops][^dev-mir-passes-opt]. Source 1.95.0 khớp: `mir_borrowck` đọc `mir_promoted`[^src-bc-input], và `inner_optimized_mir` chỉ gọi `run_optimization_passes` sau khi lấy body từ `mir_drops_elaborated_and_const_checked`[^src-optimized-steal][^src-opt-call].
+   Chạy trên MIR[^dev-bc-mir], và trước các pass tối ưu. `mir_drops_elaborated_and_const_checked` thực hiện borrow checking rồi làm MIR sẵn sàng cho tối ưu[^dev-mir-passes-drops]. Còn `optimized_mir` mới thực hiện các tối ưu[^dev-mir-passes-opt]. Source 1.95.0 khớp: `mir_borrowck` đọc `mir_promoted`[^src-bc-input]. Còn `inner_optimized_mir` chỉ gọi `run_optimization_passes` sau khi lấy body từ `mir_drops_elaborated_and_const_checked`[^src-optimized-steal].
 
    </details>
 
 2. Hàm không bao giờ được gọi có bị borrowck kiểm tra không?
    <details><summary>Đáp án</summary>
 
-   Có[^dev-bc-dead]; ví dụ `never_called` ở mục 1 vẫn gây E0499.
+   Có[^dev-bc-dead]. Ví dụ `never_called` ở mục 1 vẫn gây E0499; với `orders`, hàm `drain_pending` chưa ai gọi vẫn chặn build nếu nó có lỗi mượn.
 
    </details>
 
 3. `_0` trong MIR là gì? Terminator khác statement ở đâu?
    <details><summary>Đáp án</summary>
 
-   Local dành cho giá trị trả về[^dev-mir-locals]; terminator có thể có nhiều successor[^dev-mir-term], và lời gọi hàm luôn là terminator vì có thể unwind[^dev-mir-call].
+   `_0` là local dành cho giá trị trả về[^dev-mir-locals]. Terminator có thể có nhiều successor[^dev-mir-term]. Lời gọi hàm luôn là terminator vì có thể unwind[^dev-mir-call].
 
    </details>
 
 4. Vì sao dump `--emit=mir` không phải đúng thứ borrowck đã duyệt?
    <details><summary>Đáp án</summary>
 
-   Dump `--emit=mir` là MIR tối ưu (source 1.95.0: hàm ghi file lấy MIR qua `instance_mir`, nhánh mặc định trả `optimized_mir`[^src-emit-mir][^src-instance-mir]; muốn xem bản chưa tối ưu cần nightly[^dev-mir-opt]), còn borrowck chạy trước các pass tối ưu[^dev-mir-passes-drops][^src-optimized-steal].
+   Dump `--emit=mir` là MIR tối ưu. Ở source 1.95.0, hàm ghi file lấy MIR qua `instance_mir`[^src-emit-mir]. Nhánh mặc định của nó trả `optimized_mir`[^src-instance-mir]. Muốn xem bản chưa tối ưu cần nightly[^dev-mir-opt]. Còn borrowck chạy trước các pass tối ưu[^src-optimized-steal].
 
    </details>
 
 5. Lexical lifetime cũ làm gì ở "problem case #1"?
    <details><summary>Đáp án</summary>
 
-   Gán reference vào biến khiến lifetime lớn bằng scope của biến[^rfc-pc1]; NLL chấp nhận ví dụ đó (đã chạy).
+   Gán reference vào biến khiến lifetime lớn bằng scope của biến[^rfc-pc1]. NLL chấp nhận ví dụ đó (đã chạy).
 
    </details>
 
 6. Hai loại ràng buộc chính trong region inference?
    <details><summary>Đáp án</summary>
 
-   Outlives và liveness[^dev-outlives][^dev-bc-live].
+   Một loại là outlives[^dev-outlives]. Loại kia là liveness[^dev-bc-live].
 
    </details>
 
@@ -607,7 +682,7 @@ Chương này chỉ chứng minh hai điều: ví dụ trên biên dịch đư�
 9. Chương trình "problem case #3" trên 1.95.0 cho kết quả gì, và hai cách viết lại?
    <details><summary>Đáp án</summary>
 
-   Hai lỗi E0499; viết lại bằng `contains_key` + return sớm[^rfc-pc3-workaround], hoặc `match` kết thúc loan rồi `get_mut` sau (mục 7); RFC cũng nhắc `entry`[^rfc-pc3-entry].
+   Hai lỗi E0499. Viết lại bằng `contains_key` rồi return sớm[^rfc-pc3-workaround], hoặc dùng `match` kết thúc loan rồi `get_mut` sau (mục 7). RFC cũng nhắc `entry`[^rfc-pc3-entry].
 
    </details>
 
@@ -621,14 +696,14 @@ Chương này chỉ chứng minh hai điều: ví dụ trên biên dịch đư�
 11. Vì sao ghi qua raw pointer khi `&x` còn sống biên dịch được nhưng vẫn sai, và khối `unsafe` có tắt borrowck không?
     <details><summary>Đáp án</summary>
 
-    Raw pointer không có bảo đảm liveness[^ref-raw] và được phép phớt lờ quy tắc mượn[^book-raw-borrowrules], nên borrowck không chặn; nhưng vi phạm quy tắc aliasing của `&T` là UB[^ref-ub-alias]. Khối `unsafe` không tắt borrowck: reference dùng trong đó vẫn được kiểm tra[^book-unsafe-checks].
+    Raw pointer không có bảo đảm liveness[^ref-raw]. Nó cũng được phép phớt lờ quy tắc mượn[^book-raw-borrowrules]. Vì vậy borrowck không chặn. Nhưng vi phạm quy tắc aliasing của `&T` là UB[^ref-ub-alias]. Khối `unsafe` không tắt borrowck: reference dùng trong đó vẫn được kiểm tra[^book-unsafe-checks].
 
     </details>
 
 12. Vì sao Nomicon nói `mutate_and_share` đúng nhưng vẫn bị từ chối?
     <details><summary>Đáp án</summary>
 
-    Chương trình đúng theo ngữ nghĩa tham chiếu, nhưng hệ lifetime quá thô[^nomicon-limits]; ví dụ `get_default` do Rust bảo thủ dùng cả scope cho borrow đầu[^nomicon-improper].
+    Chương trình đúng theo ngữ nghĩa tham chiếu, nhưng hệ lifetime quá thô[^nomicon-limits]. Ví dụ `get_default` lỗi do Rust bảo thủ dùng cả scope cho borrow đầu[^nomicon-improper].
 
     </details>
 
@@ -716,12 +791,12 @@ Ghi chú nguồn: các trang rustc-dev-guide là trang sống, không ghim phiê
 [^ref-raw]: The Rust Reference, Pointer types — <https://doc.rust-lang.org/1.95.0/reference/types/pointer.html> — "Raw pointers are pointers without safety or liveness guarantees."
 [^ref-ub-alias]: The Rust Reference, Behavior considered undefined — <https://doc.rust-lang.org/1.95.0/reference/behavior-considered-undefined.html> — "&T must point to memory that is not mutated while they are live (except for data inside an UnsafeCell\<U>), and &mut T must point to memory that is not read or written by any pointer not derived from the reference and that no other reference points to while they are live."
 [^dev-mir-passes-const]: rustc-dev-guide, MIR queries and passes — <https://rustc-dev-guide.rust-lang.org/mir/passes.html> — "mir_const(D) – it applies some simple transformation passes to make MIR ready for const qualification;"
+[^s2-dev-mir-passes-built]: rustc-dev-guide, MIR queries and passes — <https://rustc-dev-guide.rust-lang.org/mir/passes.html> — "mir_built(D) – it gives the initial MIR just after it’s built;"
 [^dev-mir-passes-promoted]: rustc-dev-guide, MIR queries and passes — <https://rustc-dev-guide.rust-lang.org/mir/passes.html> — "mir_promoted(D) - it extracts promotable temps into separate MIR bodies, and also makes MIR ready for borrow checking;"
 [^dev-mir-passes-drops]: rustc-dev-guide, MIR queries and passes — <https://rustc-dev-guide.rust-lang.org/mir/passes.html> — "mir_drops_elaborated_and_const_checked(D) - it performs borrow checking, runs major transformation passes (such as drop elaboration) and makes MIR ready for optimization;"
 [^dev-mir-passes-opt]: rustc-dev-guide, MIR queries and passes — <https://rustc-dev-guide.rust-lang.org/mir/passes.html> — "optimized_mir(D) – it performs all enabled optimizations and reaches the final state."
 [^dev-mir-steal]: rustc-dev-guide, MIR queries and passes — <https://rustc-dev-guide.rust-lang.org/mir/passes.html> — "This indicates that the result may be stolen by a subsequent query – this is an optimization to avoid cloning the MIR. Attempting to use a stolen result will cause a panic in the compiler."
 [^dev-mir-steal-order]: rustc-dev-guide, MIR queries and passes — <https://rustc-dev-guide.rust-lang.org/mir/passes.html> — "Because of this stealing mechanism, some care must be taken to ensure that, before the MIR at a particular phase in the processing pipeline is stolen, anyone who may want to read from it has already done so."
-[^dev-bc-copy]: rustc-dev-guide, MIR borrow check — <https://rustc-dev-guide.rust-lang.org/borrow-check.html> — "We first create a local copy of the MIR."
 [^dev-per-item]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "In principle, for the query-fied steps, we do each of the above for each item individually."
 [^dev-mir-chars]: rustc-dev-guide, MIR — <https://rustc-dev-guide.rust-lang.org/mir/index.html> — "It is based on a control-flow graph. It does not have nested expressions. All types in MIR are fully explicit."
 [^dev-mir-call]: rustc-dev-guide, MIR — <https://rustc-dev-guide.rust-lang.org/mir/index.html> — "Function calls like the call to Vec::new are always terminators because of the possibility of unwinding"

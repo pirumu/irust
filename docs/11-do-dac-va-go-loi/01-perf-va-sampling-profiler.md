@@ -1,6 +1,6 @@
 # P11 · Chương 01 — perf và sampling profiler
 
-> Mọi khẳng định về `perf`, kernel và `perf_event_open` là về **Linux** (man page Debian bookworm, kernel docs). Chương này **không có thí nghiệm**: các dòng lệnh chỉ để minh họa cách dùng, không kèm output giả định; mọi con số trong thân bài đều đến từ nguồn trích dẫn. Trang kernel docs được đọc là bản "latest" (tiêu đề trang ghi `7.3.0-rc6`), không ghim phiên bản; man page `perf` là của gói `linux-perf` trên Debian bookworm.
+> Phạm vi: mọi khẳng định về `perf`, kernel và `perf_event_open` trong chương này là về **Linux** (man page Debian bookworm và kernel docs). Chương **không có thí nghiệm**: các dòng lệnh chỉ để minh họa cách dùng và không kèm output giả định, còn mọi con số trong thân bài đều lấy từ nguồn trích dẫn. Trang kernel docs là bản "latest" (tiêu đề ghi `7.3.0-rc6`), không ghim phiên bản; man page `perf` là của gói `linux-perf` trên Debian bookworm.
 
 ## Bạn sẽ hiểu được gì
 
@@ -15,25 +15,37 @@
 
 ## Kiến thức cần trước
 
-- [Chương 04 (CPU) — Calling convention và stack frame](../02-cpu/04-calling-convention-va-stack-frame.md): stack frame, frame pointer, `.eh_frame`; mục 5 và 6 của chương này dựa trực tiếp vào đó.
-- [Chương 05 (CPU) — Pipeline và speculation](../02-cpu/05-pipeline-va-speculation.md): lệnh chạy gối đầu, đoán nhánh; cần để hiểu `branch-misses`, IPC và skid.
-- [Chương 02 (Linux) — System call](../01-linux/02-system-call.md) và [Chương 04 (Linux) — File descriptor và VFS](../01-linux/04-file-descriptor-va-vfs.md): `perf_event_open` là syscall trả về fd.
+Chương này dựa vào ba chỗ ở các phase trước:
+
+- [Chương 04 (CPU) — Calling convention và stack frame](../02-cpu/04-calling-convention-va-stack-frame.md): stack frame, frame pointer, `.eh_frame`. Mục 5 và 6 dựa trực tiếp vào đó.
+- [Chương 05 (CPU) — Pipeline và speculation](../02-cpu/05-pipeline-va-speculation.md): lệnh chạy gối đầu, đoán nhánh. Bạn cần nó để hiểu `branch-misses`, IPC và skid.
+- [Chương 02 (Linux) — System call](../01-linux/02-system-call.md) và [Chương 04 (Linux) — File descriptor và VFS](../01-linux/04-file-descriptor-va-vfs.md): `perf_event_open` là một syscall trả về fd.
 
 ## 1. Đo trước khi tối ưu; `perf` là gì (Q1)
 
-> **Trả lời ngắn.** Muốn biết đoạn code nào đáng sửa thì phải có số đo: profiler cho biết phần nào của chương trình "nóng", tức chạy đủ thường xuyên để ảnh hưởng thời gian chạy[^pb-hot]. `perf` là công cụ profiling của Linux, dựng trên một hệ con của kernel bao phủ cả bộ đếm phần cứng của CPU lẫn bộ đếm phần mềm của kernel[^perf-desc].
+> **Trả lời ngắn.** Muốn biết đoạn code nào đáng sửa thì phải có số đo. Profiler cho biết phần nào của chương trình "nóng", tức chạy đủ thường xuyên để ảnh hưởng thời gian chạy[^pb-hot]. `perf` là công cụ profiling của Linux, dựng trên một hệ con của kernel đếm được cả bộ đếm phần cứng của CPU lẫn bộ đếm phần mềm của kernel[^perf-desc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): p99 của một endpoint tăng. Bạn đoán "do serialize JSON", sửa một tuần, p99 không đổi — vì thời gian thật sự nằm ở chỗ chờ khóa hoặc chờ I/O. Profiler là cái cân đặt đúng chỗ, thay cho cảm giác.
+*Với service `quote`.* Hãy hình dung `quote`, một service Rust chạy trên Linux, nhận request tính giá đơn hàng rồi trả JSON. Sau lần release gần nhất, p99 của `POST /quote` tăng. Cả đội đoán nguyên nhân là serialize JSON, mất một tuần tối ưu mà p99 không nhúc nhích, vì thời gian thật sự nằm ở chỗ chờ khóa. Ta sẽ bám theo tình huống này suốt chương (ví dụ giả định của người soạn, không phải code trong repo và không có số đo nào đi kèm). Câu hỏi của mục này: vì sao phải đo trước, và `perf` đo được gì cho `quote`?
 
-*Công cụ.* Rust Performance Book liệt kê `perf` là profiler đa dụng dùng bộ đếm phần cứng, chạy trên Linux[^pb-perf]; trên macOS thì dùng Instruments đi kèm Xcode[^pb-instruments]. Chương này chỉ nói `perf` (Linux), nên phần thực hành cần máy hoặc VM Linux (nhận xét của người soạn).
+### 1.1 Đoán thì dễ sai
 
-*Ba lệnh chính, ba việc khác nhau.*
+Chuyện của `quote` là kịch bản quen thuộc: cảm giác mách một nghi phạm, nhưng nghi phạm đó không phải thủ phạm. Profiler tồn tại để thay cảm giác bằng số đo: nó chỉ ra hàm nào chiếm nhiều thời gian chạy nhất, và bạn chỉ sửa những chỗ đó (nhận xét của người soạn).
+
+### 1.2 Công cụ
+
+Rust Performance Book liệt kê `perf` là profiler đa dụng, dùng bộ đếm phần cứng và chạy trên Linux[^pb-perf]. Trên macOS thì công cụ tương đương là Instruments, đi kèm Xcode[^pb-instruments]. Chương này chỉ nói về `perf`, nên phần thực hành cần một máy hoặc VM Linux (nhận xét của người soạn).
+
+### 1.3 Ba lệnh, ba việc
+
+`perf` có ba lệnh bạn sẽ dùng liên tục, và mỗi lệnh trả lời một câu hỏi khác nhau:
 
 - `perf stat` chạy một lệnh và thu thống kê bộ đếm của nó[^stat-desc].
 - `perf record` chạy một lệnh và ghi profile vào file `perf.data`, không hiển thị gì[^record-desc].
-- `perf report` đọc `perf.data` và hiển thị profile[^report-desc].
+- `perf report` đọc `perf.data` rồi hiển thị profile[^report-desc].
+
+Với `quote`, trình tự thường là: `stat` để biết tổng quan, `record` để biết thời gian đi vào hàm nào, `report` để đọc kết quả, rồi sửa và đo lại bằng đúng quy trình đó.
 
 ```mermaid
 flowchart LR
@@ -45,67 +57,88 @@ flowchart LR
   M --> S
 ```
 
-*Điều profiler không trả lời.* Sampling cài bằng ngắt timer theo từng CPU chỉ cho profile on-CPU (mục 7)[^off-timer]: thread đang ngủ chờ I/O hay khóa không xuất hiện. Suy luận của người soạn: `perf record` với event dựa trên chu kỳ/đồng hồ CPU cũng chỉ lấy mẫu lúc thread chạy trên CPU (man page không nói thẳng). Vì vậy "hàm nào nóng" chỉ là một nửa câu chuyện về latency (nhận xét của người soạn).
+### 1.4 Điều profiler này không trả lời
+
+Quay lại p99 của `quote`. Sampling bằng ngắt timer theo từng CPU chỉ cho ra profile *on-CPU* (mục 7)[^off-timer], nên thread đang ngủ chờ I/O hay chờ khóa không xuất hiện trong đó. Ngoài ra, `perf record` với event dựa trên chu kỳ hoặc đồng hồ CPU cũng chỉ lấy mẫu lúc thread đang chạy trên CPU (suy luận của người soạn; man page không nói thẳng). Hệ quả là nếu p99 của `quote` đến từ chỗ chờ khóa, profile on-CPU sẽ chỉ cho bạn những hàm đang chạy, không chỉ cho bạn chỗ chờ. "Hàm nào nóng" chỉ là một nửa câu chuyện về latency (nhận xét của người soạn).
 
 <details><summary>Đi sâu: các profiler khác trong hệ sinh thái Rust, và cargo flamegraph</summary>
 
-- Rust Performance Book liệt kê nhiều công cụ đã được dùng thành công trên chương trình Rust, trong đó có `samply` (sampling profiler, xem kết quả bằng Firefox Profiler)[^pb-samply] và lệnh Cargo `flamegraph` dùng perf/DTrace rồi vẽ flame graph[^pb-list].
-- Sách cũng nhắc Cachegrind/Callgrind (đếm lệnh và mô phỏng cache/branch predictor)[^pb-list-cg] và DHAT (tìm chỗ cấp phát nhiều)[^pb-dhat]. Đó là cách đo *khác* (mô phỏng/instrument), không phải sampling bằng PMU; chương này không đi sâu.
-- Cùng một câu hỏi "chậm ở đâu" có thể cần công cụ khác nhau; chọn theo triệu chứng (CPU cao → sampling on-CPU; latency cao CPU thấp → off-CPU, mục 7) là nhận xét của người soạn.
+- Rust Performance Book liệt kê nhiều công cụ đã dùng thành công trên chương trình Rust. Trong đó có `samply`, một sampling profiler cho kết quả xem được bằng Firefox Profiler[^pb-samply].
+- Lệnh Cargo `flamegraph` dùng perf hoặc DTrace để profile rồi vẽ flame graph[^pb-list].
+- Cachegrind và Callgrind đếm lệnh theo từng hàm và từng dòng nguồn, kèm dữ liệu mô phỏng cache và branch prediction[^pb-list-cg].
+- DHAT giúp tìm phần code gây nhiều cấp phát bộ nhớ[^pb-dhat]. Nhóm công cụ này đo theo kiểu *khác* (mô phỏng hoặc instrument), không phải sampling bằng PMU, nên chương này không đi sâu.
+- Cùng một câu hỏi "chậm ở đâu" có thể cần công cụ khác nhau. Chọn theo triệu chứng: CPU cao thì sampling on-CPU, latency cao mà CPU thấp thì off-CPU (mục 7). Đây là nhận xét của người soạn.
 
 </details>
 
-**Quay lại Q1:** tối ưu cần số đo; `perf` là bộ công cụ Linux dựa trên bộ đếm của CPU và kernel, với `stat` để đếm, `record` để lấy mẫu, `report` để đọc.
+**Quay lại Q1:** tối ưu cần số đo; `perf` là bộ công cụ Linux dựa trên bộ đếm của CPU và kernel, với `stat` để đếm, `record` để lấy mẫu, `report` để đọc. Với `quote`, nó cho biết hàm nào ăn CPU nhưng chưa nói được `quote` chờ ở đâu.
 
 ## 2. Event, PMU, hardware và software event (Q2)
 
-> **Trả lời ngắn.** *Event* là một loại sự kiện mà kernel hoặc CPU đếm được: chu kỳ CPU, lệnh đã hoàn tất, đoán sai nhánh, page fault, context switch… Hardware event do bộ đếm trong CPU (PMU, Performance Monitoring Unit) đếm[^perf-desc]; software event do kernel tự đếm, kể cả khi không có hỗ trợ phần cứng[^peo-sw]. Số bộ đếm phần cứng có hạn: đòi đo nhiều event hơn số bộ đếm thì kernel phải luân phiên (multiplexing), và giá trị cuối chỉ là ước lượng (chương trình đọc `time_enabled`/`time_running` để tự hiệu chỉnh)[^peo-mux].
+> **Trả lời ngắn.** *Event* là một loại sự kiện mà kernel hoặc CPU đếm được: chu kỳ CPU, lệnh đã hoàn tất, đoán sai nhánh, page fault, context switch… Hardware event do bộ đếm nằm trong CPU (PMU, Performance Monitoring Unit) đếm[^perf-desc]. Software event do kernel tự đếm, kể cả khi máy không có hỗ trợ phần cứng[^peo-sw]. Số bộ đếm phần cứng có hạn: nếu bạn đòi đo nhiều event hơn số bộ đếm thì kernel phải luân phiên (multiplexing), và giá trị cuối chỉ là ước lượng; chương trình đọc `time_enabled`/`time_running` để tự hiệu chỉnh[^peo-mux].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): PMU là vài chiếc công tơ gắn sẵn trong CPU, mỗi công tơ được "cài" đếm một loại sự kiện. Kernel có thêm sổ sách riêng cho những thứ nó tự biết (đã chuyển ngữ cảnh bao nhiêu lần). Công tơ phần cứng ít, sổ sách phần mềm thì rẻ.
+*Với service `quote`.* Chạy `perf stat` lên `quote` là nhờ kernel đếm giùm vài thứ: bao nhiêu chu kỳ CPU, bao nhiêu lệnh, bao nhiêu page fault. Mỗi thứ đó là một *event*. Hai nguồn đếm khác nhau (CPU và kernel) dẫn tới hai độ tin cậy khác nhau, và mục này giải thích chỗ khác đó để bạn khỏi đọc nhầm con số.
 
-*Hardware event "tổng quát".* `perf_event_open` định nghĩa kiểu `PERF_TYPE_HARDWARE` gồm các event phần cứng "tổng quát hóa" do kernel cung cấp[^peo-hwtype]; không phải event nào cũng có trên mọi nền tảng[^peo-hw-avail]. Một số event hay gặp, kèm mô tả của man page:
+### 2.1 Hardware event: CPU đếm
 
-| Event | Man page nói gì | Cần cẩn thận |
+PMU là phần cứng trong CPU, gồm một số bộ đếm, mỗi bộ được cài để đếm một loại sự kiện phần cứng (nhận xét của người soạn). `perf_event_open` định nghĩa kiểu `PERF_TYPE_HARDWARE` gồm các event phần cứng "tổng quát hóa" do kernel cung cấp[^peo-hwtype]. Không phải event nào cũng có trên mọi nền tảng[^peo-hw-avail]. Dưới đây là vài event hay gặp, kèm điều man page nói về chúng:
+
+| Event | Man page mô tả | Cần cẩn thận |
 |---|---|---|
-| `cpu-cycles` | tổng số chu kỳ[^peo-cycles] | cẩn thận khi CPU đổi tần số (frequency scaling)[^peo-cycles] |
-| `instructions` | số lệnh đã retire (hoàn tất)[^peo-instr] | có thể bị ảnh hưởng, nhất là bởi số ngắt phần cứng[^peo-instr] |
+| `cpu-cycles` | tổng số chu kỳ[^peo-cycles] | khi CPU đổi tần số (frequency scaling) |
+| `instructions` | số lệnh đã retire (hoàn tất)[^peo-instr] | có thể bị ảnh hưởng, nhất là bởi số ngắt phần cứng |
 | `branch-misses` | số lệnh nhánh bị đoán sai[^peo-brmiss] | liên hệ chương [pipeline](../02-cpu/05-pipeline-va-speculation.md) |
-| `cache-misses` | thường là LLC miss[^peo-cm] (LLC = last-level cache, tầng cache cuối trước RAM; giải thích của người soạn) | dùng cùng `cache-references` để tính tỉ lệ miss[^peo-cm] |
-| `cache-references` | thường là truy cập LLC, có thể gồm prefetch và tin nhắn coherency[^peo-cr] | tùy thiết kế CPU[^peo-cr] |
+| `cache-misses` | thường là LLC miss[^peo-cm] (LLC = last-level cache, tầng cache cuối trước RAM; giải thích của người soạn) | dùng cùng `cache-references` để tính tỉ lệ miss |
+| `cache-references` | thường là truy cập LLC, có thể gồm prefetch và tin nhắn coherency[^peo-cr] | tùy thiết kế CPU |
 | `ref-cycles` | tổng chu kỳ, không bị ảnh hưởng bởi frequency scaling[^peo-refcycles] | so với `cpu-cycles` |
 
-*IPC.* Chia số lệnh cho số chu kỳ ra "lệnh mỗi chu kỳ" (IPC). `perf stat` in con số này bên cạnh dòng `instructions` với nhãn `insn per cycle`[^stat-ipc]. IPC thấp gợi ý CPU hay bị đứng (chờ bộ nhớ, đoán sai nhánh — chương [pipeline](../02-cpu/05-pipeline-va-speculation.md)); đó là diễn giải của người soạn, chứ không phải khẳng định của man page.
+Hai event ở đầu bảng cho ra một chỉ số rất hay dùng. Chia số lệnh cho số chu kỳ ta được "lệnh mỗi chu kỳ", gọi là IPC, và `perf stat` in con số này cạnh dòng `instructions` với nhãn `insn per cycle`[^stat-ipc]. IPC thấp gợi ý CPU hay bị đứng, chẳng hạn chờ bộ nhớ hoặc đoán sai nhánh (chương [pipeline](../02-cpu/05-pipeline-va-speculation.md)). Đó là diễn giải của người soạn chứ không phải khẳng định của man page.
 
-*Software event.* Kiểu `PERF_TYPE_SOFTWARE` là các event do kernel định nghĩa, có cả khi không có hỗ trợ phần cứng[^peo-sw]. Ví dụ: `cpu-clock` (đồng hồ CPU độ phân giải cao theo từng CPU)[^peo-cpuclock], `task-clock` (đồng hồ riêng của task đang chạy)[^peo-taskclock], `page-faults`[^peo-pf], `context-switches`[^peo-cs]. Page fault được tách `minor` (không cần I/O đĩa) và `major` (cần I/O đĩa)[^peo-pfmin][^peo-pfmaj].
+### 2.2 Software event: kernel đếm
 
-*Multiplexing.* Khi số event lớn hơn số "khe" bộ đếm PMU, các event chỉ chạy một phần thời gian; kernel báo `time_enabled` và `time_running` để chương trình tự suy ra giá trị ước lượng[^peo-mux]. Hệ quả thực tế (suy luận của người soạn): hỏi `perf stat -e` quá nhiều event hardware một lúc thì con số không còn là đếm chính xác, chỉ là ước lượng nội suy.
+Kiểu `PERF_TYPE_SOFTWARE` gồm các event do chính kernel định nghĩa, có sẵn cả khi không có hỗ trợ phần cứng[^peo-sw]. Với `quote`, các event này trả lời những câu như "thread của tôi có hay bị chuyển CPU không?":
 
-*Máy ảo/container.* Event cần tính năng phần cứng mà CPU không có sẽ trả lỗi: `ENODEV` khi event dùng tính năng CPU hiện tại không hỗ trợ[^peo-enodev]; `EOPNOTSUPP` khi đòi tính năng không có hỗ trợ phần cứng, gồm lấy mẫu mà không có ngắt PMU[^peo-eopnotsupp]. (Suy luận của người soạn: đó là lý do trên một số VM không đo được hardware event mà software event như `cpu-clock` vẫn chạy; man page không nói riêng về VM.)
+- `cpu-clock`: đồng hồ CPU độ phân giải cao, theo từng CPU[^peo-cpuclock].
+- `task-clock`: đồng hồ riêng của task đang chạy[^peo-taskclock].
+- `page-faults`: số page fault[^peo-pf].
+- `context-switches`: số lần chuyển context[^peo-cs].
+
+Page fault còn được tách làm hai. `minor` là loại không cần I/O đĩa để xử lý[^peo-pfmin]. `major` là loại phải có I/O đĩa[^peo-pfmaj].
+
+### 2.3 Khi bộ đếm không đủ: multiplexing
+
+PMU chỉ có một số "khe" bộ đếm cố định. Nếu `perf stat -e` xin nhiều event hơn số khe thì mỗi event chỉ chạy một phần thời gian, và kernel báo `time_enabled` cùng `time_running` để chương trình tự suy ra giá trị ước lượng[^peo-mux]. Hệ quả thực tế với `quote` (suy luận của người soạn): hỏi quá nhiều event phần cứng một lúc thì con số bạn nhận không còn là đếm chính xác, mà là ước lượng nội suy.
+
+### 2.4 Trong VM và container
+
+Giả sử bạn chạy `perf stat` cho `quote` ngay trong một VM. Event nào đòi tính năng phần cứng mà CPU không có thì syscall trả lỗi. `ENODEV` là lỗi khi event dùng tính năng mà CPU hiện tại không hỗ trợ[^peo-enodev]. `EOPNOTSUPP` là lỗi khi event đòi tính năng không có hỗ trợ phần cứng, trong đó có việc lấy mẫu mà không có ngắt PMU[^peo-eopnotsupp]. Có lẽ đó là lý do trên một số VM không đo được hardware event mà software event như `cpu-clock` vẫn chạy; man page không nói riêng về VM (suy luận của người soạn).
 
 <details><summary>Đi sâu: các kiểu event, PMU động, group, pinned</summary>
 
-- Ngoài `PERF_TYPE_HARDWARE` và `PERF_TYPE_SOFTWARE`, man page liệt kê tracepoint của kernel (điểm đo đặt sẵn trong code kernel; giải thích của người soạn), event cache phần cứng (`PERF_TYPE_HW_CACHE`), event thô theo từng CPU (`PERF_TYPE_RAW`) và breakpoint phần cứng[^peo-types].
-- Từ Linux 2.6.38 `perf_event_open()` hỗ trợ nhiều PMU: giá trị dùng cho trường `type` lấy từ `/sys/bus/event_source/devices/<pmu>/type`[^peo-dynpmu].
+- Ngoài `PERF_TYPE_HARDWARE` và `PERF_TYPE_SOFTWARE`, man page còn liệt kê tracepoint của kernel (điểm đo đặt sẵn trong code kernel; giải thích của người soạn), event cache phần cứng (`PERF_TYPE_HW_CACHE`), event thô theo từng CPU (`PERF_TYPE_RAW`) và breakpoint phần cứng[^peo-types].
+- Từ Linux 2.6.38, `perf_event_open()` hỗ trợ nhiều PMU: giá trị cho trường `type` lấy từ `/sys/bus/event_source/devices/<pmu>/type`[^peo-dynpmu].
 - Một fd tương ứng một event, nhưng có thể gom nhóm để đo nhiều event cùng lúc[^peo-fd-group].
-- Cờ `pinned` yêu cầu bộ đếm luôn nằm trên CPU nếu có thể; nếu không đặt được (không đủ bộ đếm hoặc xung đột) thì bộ đếm vào trạng thái lỗi và `read(2)` trả 0 cho tới khi bật/tắt lại[^peo-pinned].
+- Cờ `pinned` yêu cầu bộ đếm luôn nằm trên CPU nếu có thể. Nếu không đặt được (không đủ bộ đếm hoặc xung đột) thì bộ đếm vào trạng thái lỗi và `read(2)` trả 0 cho tới khi bật/tắt lại[^peo-pinned].
 - Các event `stalled-cycles-frontend/backend` ("stalled cycles during issue/retirement") có từ Linux 3.0[^peo-stalled].
 - `perf stat -d` (lặp tối đa 3 lần) in thêm event chi tiết về cache dữ liệu L1/LLC, rồi dTLB/iTLB, rồi prefetch[^stat-detailed].
 
 </details>
 
-**Quay lại Q2:** event là thứ đếm được; hardware event đếm bằng PMU trong CPU, software event do kernel đếm; vì bộ đếm phần cứng ít nên đo quá nhiều event thì bị multiplexing và chỉ nhận số ước lượng.
+**Quay lại Q2:** event là thứ đếm được; hardware event do PMU trong CPU đếm, software event do kernel đếm; vì bộ đếm phần cứng ít nên đo quá nhiều event một lúc thì bị multiplexing và chỉ nhận số ước lượng.
 
 ## 3. `perf_event_open(2)`: cổng vào của kernel (Q3)
 
-> **Trả lời ngắn.** `perf_event_open` là syscall tạo một file descriptor đại diện cho **một** event cần đo[^peo-fd]. Với event *đếm*, bạn `read(2)` fd để lấy con số; với event *lấy mẫu*, kernel ghi liên tục các mẫu vào một buffer mà bạn `mmap(2)` ra[^peo-flavors]. glibc không có wrapper nên phải gọi qua `syscall(2)`[^peo-nowrap]. Công cụ `perf` là chương trình userspace dựa trên syscall này (nhận xét của người soạn; man page `perf_event_open` không mô tả công cụ `perf`).
+> **Trả lời ngắn.** `perf_event_open` là syscall tạo một file descriptor đại diện cho **một** event cần đo[^peo-fd]. Với event *đếm*, bạn `read(2)` fd để lấy con số; với event *lấy mẫu*, kernel ghi liên tục các mẫu vào một buffer mà bạn `mmap(2)` ra[^peo-flavors]. glibc không có wrapper nên phải gọi qua `syscall(2)`[^peo-nowrap]. Công cụ `perf` là một chương trình userspace dựa trên syscall này (nhận xét của người soạn; man page `perf_event_open` không mô tả công cụ `perf`).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): giống mở một socket. Bạn "mở một kênh đo" bằng cách khai báo cái gì cần đo (event), đo ai (process nào), trên CPU nào; kernel trả về fd. Đọc fd để nhận số, hoặc mmap để nhận dòng mẫu.
+*Với service `quote`.* `perf` là một chương trình thường, chạy ở user space như `quote`. Vậy làm sao nó biết CPU đang chạy hàm nào của `quote`? Nó phải nhờ kernel, và cổng để nhờ là `perf_event_open`. Cách dùng giống `socket()` ở chỗ bạn khai báo mình muốn gì rồi nhận về một fd (nhận xét của người soạn): ở đây là cái gì cần đo (event), đo ai (process nào) và trên CPU nào.
 
-*Chữ ký.* Man page ghi `syscall(SYS_perf_event_open, struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags)`[^peo-nowrap]. Hai tham số `pid` và `cpu` chọn phạm vi đo[^peo-pidcpu]:
+### 3.1 Chữ ký và phạm vi đo
+
+Man page ghi chữ ký `syscall(SYS_perf_event_open, struct perf_event_attr *attr, pid_t pid, int cpu, int group_fd, unsigned long flags)`[^peo-nowrap]. Trong đó `pid` và `cpu` chọn phạm vi đo[^peo-pidcpu]:
 
 | `pid` | `cpu` | Đo gì |
 |---|---|---|
@@ -114,9 +147,17 @@ Hình dung (nhận xét của người soạn): giống mở một socket. Bạn
 | `-1` | `>= 0` | mọi process/thread trên CPU đó; đòi `CAP_PERFMON` (capability: một quyền đặc biệt tách riêng khỏi root, xem mục 8; từ Linux 5.8) hoặc `CAP_SYS_ADMIN`, hoặc `perf_event_paranoid` nhỏ hơn 1[^peo-sysw] |
 | `-1` | `-1` | không hợp lệ, trả lỗi[^peo-invalid] |
 
-*Hai loại event.* Event *đếm* dùng để lấy tổng số lần xảy ra, thường thu bằng `read(2)`; event *lấy mẫu* định kỳ ghi số đo vào buffer truy cập qua `mmap(2)`[^peo-flavors]. Event có thể bật/tắt bằng `ioctl(2)` hoặc `prctl(2)`; khi tắt, nó không đếm và không sinh tràn (overflow) nhưng vẫn tồn tại và giữ giá trị đếm[^peo-enable].
+Để đo riêng `quote` đang chạy, bạn nhắm vào pid của nó như ở dòng thứ hai. Đo mọi thứ trên một CPU (dòng thứ ba) thì đòi quyền cao hơn, và chuyện đó dẫn sang mục 8.
 
-*Luồng lấy mẫu.* Event lấy mẫu có `sample_period > 0`: cứ khi bộ đếm tràn thì dữ liệu yêu cầu được ghi vào buffer `mmap`; trường `sample_type` quyết định ghi những gì[^peo-sampling]. Tràn có thể phát hiện bằng `poll(2)`/`select(2)`/`epoll(7)` trên fd, hoặc bằng signal handler[^peo-overflow]. Tức là fd của perf dùng được với đúng các cơ chế chờ I/O quen thuộc (chương [Linux 04](../01-linux/04-file-descriptor-va-vfs.md)).
+### 3.2 Đếm và lấy mẫu
+
+Event có hai kiểu dùng. Event *đếm* cho tổng số lần sự kiện xảy ra, thường lấy bằng `read(2)`. Event *lấy mẫu* thì định kỳ ghi số đo vào một buffer, và bạn truy cập buffer đó qua `mmap(2)`[^peo-flavors]. Với `perf stat` thì đếm là đủ, còn `perf record` cần lấy mẫu.
+
+Event bật tắt được bằng `ioctl(2)` hoặc `prctl(2)`. Khi tắt, nó không đếm và không sinh tràn (overflow), nhưng vẫn tồn tại và giữ nguyên giá trị đếm[^peo-enable].
+
+### 3.3 Luồng lấy mẫu
+
+Event lấy mẫu có `sample_period > 0`. Cứ khi bộ đếm tràn, dữ liệu được yêu cầu sẽ ghi vào buffer `mmap`, còn trường `sample_type` quyết định ghi những gì[^peo-sampling]. Muốn biết lúc nào có tràn, bạn theo dõi fd bằng `poll(2)`, `select(2)` hoặc `epoll(7)`, hoặc bắt bằng signal handler[^peo-overflow]. Nói cách khác fd của perf chờ được bằng đúng các cơ chế chờ I/O quen thuộc (chương [Linux 04](../01-linux/04-file-descriptor-va-vfs.md)).
 
 ```mermaid
 sequenceDiagram
@@ -134,65 +175,99 @@ sequenceDiagram
 
 (Sơ đồ là tóm tắt của người soạn từ các mô tả trong man page; chi tiết ngắt PMU phụ thuộc phần cứng.)
 
-*Tài nguyên.* Mỗi event cấu hình là một fd, tính vào `RLIMIT_NOFILE`; một phiên `perf record` cần ít nhất (số event) × (số CPU được theo dõi) fd[^ksec-fd]. Buffer `mmap` bị giới hạn bởi `perf_event_mlock_kb` (mặc định 516 kB mỗi người dùng không đặc quyền)[^peo-mlock]. Hai điều này là lý do `perf record -a` trên máy nhiều core có thể vấp `EMFILE`/lỗi bộ nhớ (suy luận của người soạn, từ hai nguồn trên).
+### 3.4 Tài nguyên
+
+Mỗi event đã cấu hình là một fd, và fd tính vào `RLIMIT_NOFILE`. Một phiên `perf record` thường cần ít nhất (số event) × (số CPU được theo dõi) fd[^ksec-fd]. Buffer `mmap` thì bị giới hạn bởi `perf_event_mlock_kb`, mặc định 516 kB cho người dùng không đặc quyền[^peo-mlock]. Hai giới hạn này là lý do `perf record -a` trên máy nhiều core có thể vấp `EMFILE` hoặc lỗi bộ nhớ (suy luận của người soạn, từ hai nguồn trên).
 
 <details><summary>Đi sâu: trường <code>sample_type</code>, <code>exclude_kernel</code>, <code>precise_ip</code>, đọc <code>read_format</code></summary>
 
-- `sample_type` chọn các trường ghi vào mỗi mẫu: ví dụ `PERF_SAMPLE_IP` (con trỏ lệnh)[^peo-sampleip], `PERF_SAMPLE_CALLCHAIN` (stack backtrace)[^peo-callchain], `PERF_SAMPLE_BRANCH_STACK`, `PERF_SAMPLE_REGS_USER`, `PERF_SAMPLE_STACK_USER` (mục 5).
-- `exclude_kernel` loại các event xảy ra trong kernel space[^peo-exkernel]; man page nêu trường hợp thường gặp gây `EACCES` cho process không đặc quyền gồm: gắn vào process của user khác, theo dõi mọi process trên một CPU (`pid = -1`), và không đặt `exclude_kernel` khi `paranoid` đòi hỏi[^peo-eacces].
-- `read_format` quy định dữ liệu `read(2)` trả về, kể cả `time_enabled`/`time_running` cho việc hiệu chỉnh multiplexing[^peo-timerun].
-- Man page nhấn mạnh glibc không có wrapper và syscall là đặc thù Linux, không nên dùng trong chương trình cần portable[^peo-notportable].
+- `sample_type` chọn các trường ghi vào mỗi mẫu. `PERF_SAMPLE_IP` ghi con trỏ lệnh[^peo-sampleip]. `PERF_SAMPLE_CALLCHAIN` ghi stack backtrace[^peo-callchain]. Ngoài ra còn `PERF_SAMPLE_BRANCH_STACK`, `PERF_SAMPLE_REGS_USER` và `PERF_SAMPLE_STACK_USER` (mục 5).
+- `exclude_kernel` loại các event xảy ra trong kernel space[^peo-exkernel].
+- Man page nêu các trường hợp thường gây `EACCES` cho process không đặc quyền: gắn vào process của user khác, theo dõi mọi process trên một CPU (`pid = -1`), và không đặt `exclude_kernel` khi `paranoid` đòi hỏi[^peo-eacces].
+- `read_format` quy định dữ liệu `read(2)` trả về, kể cả `time_enabled`/`time_running` để hiệu chỉnh multiplexing[^peo-timerun].
+- Man page nhấn mạnh syscall này là đặc thù Linux, không nên dùng trong chương trình cần portable[^peo-notportable].
 - Cách "chính thức" kiểm tra kernel có hỗ trợ `perf_event_open` là xem file `/proc/sys/kernel/perf_event_paranoid` có tồn tại không[^peo-exist].
 
 </details>
 
-**Quay lại Q3:** `perf_event_open` cấp một fd cho mỗi event; đọc fd để đếm, `mmap` fd để lấy mẫu; `perf` chỉ là chương trình dùng syscall đó.
+**Quay lại Q3:** `perf_event_open` cấp một fd cho mỗi event; đọc fd để đếm, `mmap` fd để lấy mẫu; `perf` chỉ là chương trình dùng syscall đó để lấy số cho `quote`.
 
 ## 4. `perf stat` vs `perf record`: lấy mẫu, tần số và skid (Q4)
 
-> **Trả lời ngắn.** `perf stat` trả về **tổng** từng bộ đếm cho cả lần chạy nhưng không nói đoạn code nào gây ra. `perf record` **lấy mẫu**: cứ sau mỗi N event (hoặc theo một tần số) kernel chụp lại "đang chạy lệnh ở đâu", rồi `perf report` gộp các mẫu lại thành bảng hàm nào chiếm nhiều mẫu nhất. Vì lúc chụp, CPU đã chạy tiếp vài lệnh, địa chỉ ghi được có thể lệch khỏi lệnh gây event: đó là *skid*[^peo-skid].
+> **Trả lời ngắn.** `perf stat` trả về **tổng** từng bộ đếm cho cả lần chạy, nhưng không nói đoạn code nào gây ra. `perf record` thì **lấy mẫu**: cứ sau mỗi N event (hoặc theo một tần số), kernel chụp lại "đang chạy lệnh ở đâu", rồi `perf report` gộp các mẫu thành bảng cho thấy hàm nào chiếm nhiều mẫu nhất. Vì lúc chụp CPU đã chạy tiếp vài lệnh, địa chỉ ghi được có thể lệch khỏi lệnh gây ra event. Đó là *skid*[^peo-skid].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `perf stat` là đồng hồ km của xe; `perf record` là cảnh sát ảnh chụp tốc độ — cứ mỗi vài giây chụp một tấm xem xe đang ở đoạn đường nào; chụp đủ nhiều thì đoạn nào nhiều ảnh nhất là đoạn xe lưu lại lâu nhất.
+*Với service `quote`.* Bạn muốn trả lời hai câu về `quote`: một lần chạy tốn tổng cộng bao nhiêu, và tốn vào hàm nào. Câu đầu là việc của `perf stat`, câu sau là việc của `perf record`. Chạy theo đúng thứ tự đó, vì `stat` rẻ và cho bạn biết có đáng đào sâu hay không.
 
-*`perf stat` (đếm).* Nó chạy lệnh và thu thống kê bộ đếm[^stat-desc]. Theo ví dụ output trong man page, kết quả gồm dòng `task-clock` kèm "CPUs utilized"[^stat-taskclock] và `instructions` kèm `insn per cycle`[^stat-ipc]. Dùng nó đầu tiên để trả lời câu hỏi lớn: CPU-bound hay không (task-clock gần số core đã dùng), IPC thế nào, page fault/context switch nhiều không — rồi mới đào sâu (nhận xét của người soạn). Man page cho phép lặp lệnh nhiều lần bằng `--repeat`[^stat-repeat], in theo khoảng thời gian bằng `-I`[^stat-interval] và đo toàn hệ thống bằng `-a`[^stat-all].
+### 4.1 `perf stat`: tổng số
 
-*`perf record` (lấy mẫu).* Cấu hình theo hai cách. **Chu kỳ**: `-c N` — "event period to sample"[^rec-count], tức cứ N event thì một mẫu. **Tần số**: `-F f` — profile ở tần số đó; `max` dùng trần của sysctl `kernel.perf_event_max_sample_rate`[^rec-freq] (sysctl: tham số kernel chỉnh được lúc chạy, nằm dưới `/proc/sys/`; giải thích của người soạn). Ở mức syscall, cách thứ hai là đặt `sample_freq` cùng cờ `freq`; kernel tự điều chỉnh chu kỳ để cố đạt tần số mong muốn, nhịp điều chỉnh là một timer tick[^peo-freq]. Trần mặc định là 100000 mẫu/giây; đặt quá cao có thể làm máy nghẽn hoặc treo[^peo-maxrate]. (Ví dụ lệnh: `perf record -F 99 -g -- ./app`; con số 99 chỉ là ví dụ phổ biến, man page không quy định.)
+`perf stat` chạy lệnh và thu thống kê bộ đếm[^stat-desc]. Output mẫu trong man page có dòng `task-clock` kèm "CPUs utilized"[^stat-taskclock]. Cũng trong output đó, dòng `instructions` đi kèm `insn per cycle`[^stat-ipc]. Với `quote`, hãy dùng nó đầu tiên để trả lời các câu lớn: `quote` có bị CPU-bound không (task-clock gần số core đã dùng thì có), IPC ra sao, page fault và context switch có nhiều không. Chỉ khi đó mới đào sâu hơn (nhận xét của người soạn). Man page cho `perf stat` thêm ba tùy chọn hay dùng:
 
-*`perf report` (đọc).* Mặc định gộp theo ba khóa `comm` (tên process), `dso` (binary/thư viện) và `symbol` (hàm)[^rep-default-sort]. Man page có cột `overhead`: "tỷ lệ phần trăm của mẫu"[^rep-overhead]; ta đọc đó là phần mẫu thuộc hàm của dòng (diễn giải của người soạn). Vì là *thống kê*, số mẫu ít thì nhiễu lớn; số mẫu thu được xấp xỉ tần số nhân thời gian đo trên mỗi CPU (cả hai là suy luận của người soạn).
+- `--repeat` lặp lệnh nhiều lần[^stat-repeat].
+- `-I` in theo từng khoảng thời gian[^stat-interval].
+- `-a` đo toàn hệ thống[^stat-all].
 
-*Loại bỏ giai đoạn khởi động.* `-D msecs` trì hoãn bật event; man page ghi hữu ích để lọc giai đoạn khởi động của chương trình vì thường rất khác phần còn lại[^rec-delay].
+### 4.2 `perf record`: lấy mẫu
 
-*Skid.* Man page định nghĩa: skid là số lệnh thực thi giữa lúc event xảy ra và lúc kernel kịp dừng và ghi lại event; skid càng nhỏ thì quy event về đúng lệnh càng chính xác, nhưng phần cứng thường hạn chế mức nhỏ nhất đạt được[^peo-skid]. Trường `precise_ip` điều khiển mức này: `0` skid tùy ý, `1` skid hằng số, `2` yêu cầu skid 0, `3` bắt buộc skid 0[^peo-prec]. Vì sao có skid? Suy luận của người soạn: CPU chạy nhiều lệnh gối đầu và không theo thứ tự (chương [pipeline](../02-cpu/05-pipeline-va-speculation.md)), nên khi ngắt đến, "lệnh hiện tại" không đồng nhất với lệnh đã gây event. Hệ quả thực hành (nhận xét của người soạn): đọc kết quả ở mức *hàm* thì ổn; đọc ở mức *từng dòng/lệnh* thì phải nhớ rằng mẫu có thể lệch sang lệnh sau.
+`perf record` cho bạn chọn mật độ lấy mẫu theo hai cách:
+
+- **Theo chu kỳ**: `-c N` là "event period to sample"[^rec-count], tức cứ N event thì ghi một mẫu.
+- **Theo tần số**: `-F f` là profile ở tần số `f`, còn `max` dùng trần của sysctl `kernel.perf_event_max_sample_rate`[^rec-freq]. (Sysctl là tham số kernel chỉnh được lúc chạy, nằm dưới `/proc/sys/`; giải thích của người soạn.)
+
+Ở mức syscall, cách thứ hai là đặt `sample_freq` cùng cờ `freq`. Kernel tự điều chỉnh chu kỳ để cố đạt tần số mong muốn, và nhịp điều chỉnh là một timer tick[^peo-freq]. Trần mặc định là 100000 mẫu/giây, và đặt quá cao có thể làm máy nghẽn hoặc treo[^peo-maxrate]. Ví dụ lệnh cho `quote`: `perf record -F 99 -g -- ./quote`. Con số 99 chỉ là ví dụ phổ biến, man page không quy định.
+
+Một chi tiết hữu ích khi đo service: `-D msecs` trì hoãn việc bật event. Man page ghi rằng việc này giúp lọc giai đoạn khởi động của chương trình, vì giai đoạn đó thường rất khác phần còn lại[^rec-delay]. Với `quote` đó là lúc nạp config và dựng connection pool (ví dụ của người soạn).
+
+### 4.3 `perf report`: đọc kết quả
+
+Mặc định `perf report` gộp mẫu theo ba khóa `comm` (tên process), `dso` (binary hoặc thư viện) và `symbol` (hàm)[^rep-default-sort]. Cột `overhead` được man page định nghĩa là "tỷ lệ phần trăm của mẫu"[^rep-overhead], và ta đọc đó là phần mẫu thuộc hàm của dòng (diễn giải của người soạn). Vì đây là thống kê nên số mẫu ít thì nhiễu lớn. Số mẫu thu được xấp xỉ tần số nhân thời gian đo trên mỗi CPU (cả hai ý này là suy luận của người soạn).
+
+### 4.4 Skid
+
+Man page định nghĩa skid là số lệnh thực thi giữa lúc event xảy ra và lúc kernel kịp dừng để ghi lại event. Skid càng nhỏ thì quy event về đúng lệnh càng chính xác, nhưng phần cứng thường hạn chế mức nhỏ nhất đạt được[^peo-skid]. Trường `precise_ip` điều khiển mức này: `0` là skid tùy ý, `1` là skid hằng số, `2` là yêu cầu skid 0, `3` là bắt buộc skid 0[^peo-prec].
+
+Vì sao có skid? Nguyên nhân có lẽ là CPU chạy nhiều lệnh gối đầu và không theo thứ tự (chương [pipeline](../02-cpu/05-pipeline-va-speculation.md)), nên khi ngắt đến, "lệnh hiện tại" không trùng với lệnh đã gây ra event (suy luận của người soạn). Hệ quả thực hành cho `quote` (nhận xét của người soạn): đọc kết quả ở mức *hàm* thì ổn, còn đọc ở mức *từng dòng hay từng lệnh* thì phải nhớ rằng mẫu có thể lệch sang lệnh phía sau.
 
 <details><summary>Đi sâu: <code>-F max</code>, <code>--strict-freq</code>, <code>-c</code> vs <code>-F</code>, tùy chọn khác của <code>perf record</code></summary>
 
 - `perf record -F max` dùng giá trị hiện hành của sysctl `kernel.perf_event_max_sample_rate` và "sẽ giảm dần (throttle) xuống tần số tối đa hiện hành" nếu cần; có thêm `--strict-freq`[^rec-freq].
-- Sysctl `perf_event_max_sample_rate` đặt trần tần số lấy mẫu; đặt quá cao cho phép người dùng lấy mẫu ở tốc độ ảnh hưởng toàn máy[^peo-maxrate].
-- `--switch-events` ghi event chuyển ngữ cảnh (`PERF_RECORD_SWITCH`)[^rec-switch]; man page không nhắc off-CPU, việc nó hữu ích cho phân tích off-CPU (mục 7) là nhận xét của người soạn.
-- `-s/--sort` của `perf report` còn có `srcline` (tên file + số dòng, cần DWARF)[^rep-srcline] và nhiều khóa khác như `pid`, `cpu`, `dso`.
+- Sysctl `perf_event_max_sample_rate` đặt trần tần số lấy mẫu. Đặt quá cao thì người dùng có thể lấy mẫu ở tốc độ ảnh hưởng toàn máy[^peo-maxrate].
+- `--switch-events` ghi event chuyển ngữ cảnh (`PERF_RECORD_SWITCH`)[^rec-switch]. Man page không nhắc off-CPU; việc nó hữu ích cho phân tích off-CPU (mục 7) là nhận xét của người soạn.
+- `-s/--sort` của `perf report` còn có `srcline` (tên file và số dòng, cần DWARF)[^rep-srcline] và nhiều khóa khác như `pid`, `cpu`, `dso`.
 - Man page `perf stat` có mục phân tích "top-down" (frontend bound, backend bound, bad speculation) ở các tùy chọn nâng cao[^stat-topdown]; chương này không đi sâu.
 
 </details>
 
-**Quay lại Q4:** `stat` = tổng số đếm; `record` = lấy mẫu theo chu kỳ hoặc tần số rồi `report` gộp theo hàm; skid là độ lệch giữa lệnh thật sự gây event và lệnh được ghi lại.
+**Quay lại Q4:** `stat` cho tổng số đếm; `record` lấy mẫu theo chu kỳ hoặc tần số rồi `report` gộp theo hàm; skid là độ lệch giữa lệnh thật sự gây event và lệnh được ghi lại.
 
 ## 5. Stack unwinding: frame pointer, DWARF, LBR (Q5)
 
-> **Trả lời ngắn.** Một mẫu chỉ có địa chỉ lệnh đang chạy (hàm lá). Muốn biết *ai gọi nó* thì phải lần ngược stack (unwinding) để có callchain[^peo-callchain]. `perf record --call-graph` có ba cách: `fp` (đi theo chuỗi frame pointer, mặc định cho user space)[^rec-cg-default], `dwarf` (kernel chép một đoạn stack[^rec-dwarf], perf giải bằng bảng CFI của DWARF — định dạng thông tin debug chuẩn; xem mục 6)[^rec-cg-valid] và `lbr` (đọc thanh ghi nhánh gần nhất của phần cứng Intel)[^rec-lbr]. Nếu binary không giữ frame pointer mà dùng `fp` thì call graph sai[^rec-fomit].
+> **Trả lời ngắn.** Một mẫu chỉ có địa chỉ lệnh đang chạy, tức hàm lá. Muốn biết *ai gọi nó* thì phải lần ngược stack (unwinding) để có callchain[^peo-callchain]. `perf record --call-graph` có ba cách: `fp` (đi theo chuỗi frame pointer), `dwarf` (giải bằng bảng CFI của DWARF, định dạng thông tin debug chuẩn; xem mục 6) và `lbr` (đọc thanh ghi ghi nhánh nhảy gần nhất của phần cứng)[^rec-cg-valid]. Mặc định cho user space là `fp`[^rec-cg-default]. Nếu binary không giữ frame pointer mà bạn vẫn dùng `fp` thì call graph sẽ sai[^rec-fomit].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn thấy ai đó đang đứng ở sảnh khách sạn, muốn biết họ đi từ đâu tới. `fp` là sợi dây buộc nối từng người đi qua; `dwarf` là sơ đồ tòa nhà cho biết cầu thang nằm ở đâu ở từng tầng; `lbr` là camera ghi lại vài bước rẽ cuối cùng của người đó.
+*Với service `quote`.* Giả sử `perf report` cho thấy `memcpy` chiếm phần lớn số mẫu của `quote`. Khi đó sửa chính `memcpy` là vô ích; câu hỏi đúng là hàm nào của `quote` gọi nó nhiều đến thế (ví dụ và nhận xét của người soạn). Để trả lời, mỗi mẫu phải mang theo cả chuỗi hàm đang gọi nhau, và mục này nói cách lấy chuỗi đó ra.
 
-*Vì sao cần callchain.* Ví dụ (nhận xét của người soạn): nếu `memcpy` chiếm 30% mẫu thì sửa `memcpy` vô ích; câu hỏi đúng là *ai gọi* `memcpy` nhiều. Man page `perf_event_open` có `PERF_SAMPLE_CALLCHAIN`: "ghi callchain (stack backtrace)"[^peo-callchain]. `perf record -g` bật ghi call graph cho cả kernel space và user space[^rec-g].
+### 5.1 Callchain là gì và bật bằng gì
 
-*Ba cách (chỉ cho user space).* Cách giải stack của **kernel space** phụ thuộc bộ unwinder trong cấu hình kernel (`CONFIG_UNWINDER_FRAME_POINTER` hoặc `CONFIG_UNWINDER_ORC`); tùy chọn bạn đặt chỉ điều khiển user space[^rec-cg-kernel].
+Ở mức syscall, `PERF_SAMPLE_CALLCHAIN` ghi lại callchain, tức stack backtrace của mẫu[^peo-callchain]. Ở mức công cụ, `perf record -g` bật ghi call graph cho cả kernel space lẫn user space[^rec-g]. Cách giải stack của **kernel space** phụ thuộc bộ unwinder trong cấu hình kernel (`CONFIG_UNWINDER_FRAME_POINTER` hoặc `CONFIG_UNWINDER_ORC`), còn tùy chọn bạn đặt chỉ điều khiển user space[^rec-cg-kernel]. Vì `quote` là code user space nên từ đây ta chỉ bàn ba cách cho user space.
 
-1. **`fp` (frame pointer).** Mặc định cho user space[^rec-cg-default]. Mỗi frame lưu con trỏ tới frame của caller, nên chỉ việc đi theo chuỗi — cách này rẻ (nhận xét của người soạn), đã được giải thích ở chương [calling convention](../02-cpu/04-calling-convention-va-stack-frame.md) mục 6. Hạn chế: nếu code biên dịch với `-fomit-frame-pointer` (không giữ frame pointer) thì `fp` cho call graph "giả"; man page khuyên dùng `dwarf` nếu perf được link với libunwind hoặc libdw[^rec-fomit]. Số frame tối đa lấy theo sysctl `kernel.perf_event_max_stack` (có thể đổi bằng `--call-graph fp,32`)[^rec-fpmax]; mặc định của sysctl là 127 (theo kernel docs bản "latest")[^ksys-maxstack].
-2. **`dwarf`.** Khi bật, perf ghi thêm một **bản chép stack người dùng** vào mỗi mẫu; kích thước mặc định 8192 byte, đổi được bằng `--call-graph dwarf,4096`[^rec-dwarf]. Ở mức syscall đó là `PERF_SAMPLE_STACK_USER`: "ghi stack user level, cho phép unwind stack"[^peo-stackuser]. Số byte thực sự chép (`dyn_size`) có thể nhỏ hơn yêu cầu[^peo-dynsize]. Việc giải ngược dùng thông tin CFI (Call Frame Information) của DWARF[^rec-cg-valid] — cùng họ với bảng `.eh_frame` trong chương [calling convention](../02-cpu/04-calling-convention-va-stack-frame.md). Hệ quả (suy luận của người soạn): file `perf.data` phình theo kích thước chép mỗi mẫu, và stack sâu hơn lượng chép bị cụt.
-3. **`lbr` (Last Branch Record).** Phần cứng ghi lại các nhánh nhảy gần nhất; `perf` dựng call graph từ các thanh ghi LBR, không cần tùy chọn biên dịch, nhưng chỉ có trên nền tảng Intel mới (như Haswell), chỉ lấy được call chain của user, và không dùng cùng lúc với branch stack sampling[^rec-lbr]. Ở mức syscall là `PERF_SAMPLE_BRANCH_STACK`: bản ghi các nhánh gần đây từ phần cứng lấy mẫu nhánh (như Intel LBR); không phải phần cứng nào cũng hỗ trợ[^peo-branch].
+### 5.2 `fp`: đi theo frame pointer
+
+`fp` là cách mặc định cho user space[^rec-cg-default]. Mỗi frame lưu con trỏ tới frame của caller, nên perf chỉ việc đi theo chuỗi con trỏ đó, và cách này rẻ (nhận xét của người soạn). Cơ chế frame pointer đã giải thích ở chương [calling convention](../02-cpu/04-calling-convention-va-stack-frame.md) mục 6.
+
+Hạn chế của `fp` là nó cần binary giữ frame pointer. Nếu code biên dịch với `-fomit-frame-pointer` (bỏ frame pointer) thì `fp` cho call graph "giả"; man page khuyên dùng `dwarf` nếu perf được link với libunwind hoặc libdw[^rec-fomit]. Số frame tối đa lấy theo sysctl `kernel.perf_event_max_stack`, và bạn đổi được bằng `--call-graph fp,32`[^rec-fpmax]. Mặc định của sysctl này là 127, theo kernel docs bản "latest"[^ksys-maxstack].
+
+### 5.3 `dwarf`: chép stack rồi giải
+
+Khi bật `dwarf`, perf ghi thêm một **bản chép stack người dùng** vào mỗi mẫu. Kích thước mặc định là 8192 byte, đổi được bằng `--call-graph dwarf,4096`[^rec-dwarf]. Ở mức syscall đó là `PERF_SAMPLE_STACK_USER`: "ghi stack user level, cho phép unwind stack"[^peo-stackuser]. Số byte thực sự chép (`dyn_size`) có thể nhỏ hơn số yêu cầu[^peo-dynsize].
+
+Việc giải ngược dùng thông tin CFI (Call Frame Information) của DWARF[^rec-cg-valid], cùng họ với bảng `.eh_frame` trong chương [calling convention](../02-cpu/04-calling-convention-va-stack-frame.md). Cái giá (suy luận của người soạn): file `perf.data` phình theo kích thước chép mỗi mẫu, và stack sâu hơn lượng chép thì bị cụt.
+
+### 5.4 `lbr`: đọc thanh ghi nhánh
+
+LBR là Last Branch Record. Phần cứng ghi lại các nhánh nhảy gần nhất, và `perf` dựng call graph từ các thanh ghi LBR. Cách này không cần tùy chọn biên dịch, nhưng chỉ có trên nền tảng Intel mới (như Haswell), chỉ lấy được call chain của user, và không dùng cùng lúc với branch stack sampling[^rec-lbr]. Ở mức syscall, nó ứng với `PERF_SAMPLE_BRANCH_STACK`: bản ghi các nhánh gần đây từ phần cứng lấy mẫu nhánh (như Intel LBR), và không phải phần cứng nào cũng hỗ trợ[^peo-branch].
 
 ```mermaid
 flowchart TB
@@ -205,71 +280,111 @@ flowchart TB
   LB --> C
 ```
 
-*Children và Self.* Khi có callchain, `perf report` có hai cột. **Self** là tổng chu kỳ/mẫu mà *chính* hàm đó chạy (giá trị truyền thống, cộng mọi self cho 100%)[^rep-self]. **Children** cộng thêm mọi mẫu rơi vào các hàm con để thấy tổng chi phí của hàm cha ngay cả khi chính nó chạy ít[^rep-children]. Tổng cột Children có thể vượt 100% vì mỗi giá trị đã gồm self của các con[^rep-sum]; bật mặc định, tắt bằng `--no-children`[^rep-nochildren]. Dùng Children để hỏi "nhánh nào của chương trình tốn nhất", dùng Self để hỏi "hàm nào tự nó tốn nhất" (nhận xét của người soạn).
+### 5.5 `Self` và `Children`
+
+Khi đã có callchain, `perf report` có hai cột. **Self** là tổng chu kỳ hoặc mẫu mà *chính* hàm đó chạy[^rep-self]. **Children** cộng thêm mọi mẫu rơi vào các hàm con, để bạn thấy tổng chi phí của hàm cha ngay cả khi bản thân nó chạy ít[^rep-children]. Vì mỗi giá trị Children đã gồm self của các con, tổng cột này có thể vượt 100%[^rep-sum]. Cột Children bật mặc định, tắt bằng `--no-children`[^rep-nochildren].
+
+Với `quote`, dùng Children để hỏi "nhánh nào của chương trình tốn nhất" (ví dụ cả đường xử lý request), và dùng Self để hỏi "hàm nào tự nó tốn nhất" (nhận xét của người soạn).
 
 <details><summary>Đi sâu: stack depth, <code>--stitch-lbr</code>, vì sao frame pointer hay bị bỏ, JIT</summary>
 
-- Số frame của callchain báo về được giới hạn bởi trường `sample_max_stack` (từ Linux 4.8)[^peo-maxstack-field]; thêm sysctl `perf_event_max_contexts_per_stack` (mặc định 8)[^ksys-maxctx].
-- `perf report --stitch-lbr` ghép các LBR để có call graph đầy đủ hơn; man page nói không hoàn hảo và có thể dựng sai (ví dụ với `setjmp`/`longjmp`)[^rep-stitch].
-- Gregg (người tạo ra flame graph[^flame-origin]) viết rằng nhiều ứng dụng biên dịch với `-fomit-frame-pointer` của gcc, làm hỏng việc đi stack bằng frame pointer; runtime có JIT (biên dịch lúc chạy) thì còn thiếu symbol[^off-fp].
-- Với Rust: compiler có thể bỏ frame pointer, ảnh hưởng chất lượng stack trace khi profiling; Rust Performance Book chỉ ra dùng cờ `-C force-frame-pointers=yes`[^pb-fp]. Mặc định của rustc khi không ép bật là "phụ thuộc target"[^cg-fp-default]; xem chương [calling convention](../02-cpu/04-calling-convention-va-stack-frame.md) mục 6 cho bằng chứng theo từng target.
+- Số frame của callchain báo về bị giới hạn bởi trường `sample_max_stack` (từ Linux 4.8)[^peo-maxstack-field]. Ngoài ra còn sysctl `perf_event_max_contexts_per_stack`, mặc định 8[^ksys-maxctx].
+- `perf report --stitch-lbr` ghép các LBR để có call graph đầy đủ hơn. Man page nói cách này không hoàn hảo và có thể dựng sai (ví dụ với `setjmp`/`longjmp`)[^rep-stitch].
+- Gregg, người tạo ra flame graph[^flame-origin], viết rằng nhiều ứng dụng biên dịch với `-fomit-frame-pointer` của gcc, và điều đó làm hỏng việc đi stack bằng frame pointer. Runtime có JIT (biên dịch lúc chạy) thì còn thiếu symbol[^off-fp].
+- Với Rust: compiler có thể bỏ frame pointer, ảnh hưởng chất lượng stack trace khi profiling[^pb-fp]. Mặc định của rustc khi không ép bật là "phụ thuộc target"[^cg-fp-default]. Bằng chứng theo từng target nằm ở chương [calling convention](../02-cpu/04-calling-convention-va-stack-frame.md) mục 6.
 
 </details>
 
-**Quay lại Q5:** callchain lấy bằng một trong ba cách — `fp` (rẻ nhưng cần frame pointer), `dwarf` (chép stack, giải bằng CFI) hay `lbr` (phần cứng Intel) — rồi `Self` đo chi phí của chính hàm còn `Children` đo chi phí cả nhánh.
+**Quay lại Q5:** callchain lấy bằng một trong ba cách: `fp` (rẻ nhưng cần frame pointer), `dwarf` (chép stack, giải bằng CFI) hay `lbr` (phần cứng Intel). Sau đó `Self` đo chi phí của chính hàm còn `Children` đo chi phí cả nhánh, nên với `quote` ta biết được ai gọi `memcpy`.
 
 ## 6. Symbol, debuginfo và demangle: từ địa chỉ ra tên hàm (Q6)
 
-> **Trả lời ngắn.** Mẫu chỉ chứa địa chỉ; tên hàm lấy từ *symbol table* của binary, còn tên file/số dòng cần *debuginfo* (DWARF)[^rep-srcline]. Cargo mặc định cho profile `release` là không có debuginfo[^prof-debug]; strip mạnh (`symbols`) có thể làm trace "không đọc nổi"[^cg-strip-sym]. Tên hàm Rust bị mangle (dạng `_ZN…` hoặc `_R…`) nên cần demangle[^pb-mangle].
+> **Trả lời ngắn.** Mẫu chỉ chứa địa chỉ. Tên hàm lấy từ *symbol table* của binary, còn tên file và số dòng cần *debuginfo* (DWARF)[^rep-srcline]. Cargo mặc định cho profile `release` là không có debuginfo[^prof-debug]. Strip mạnh (`symbols`) có thể làm trace "không đọc nổi"[^cg-strip-sym]. Tên hàm Rust bị mangle (dạng `_ZN…` hoặc `_R…`) nên cần demangle[^pb-mangle].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): địa chỉ là số nhà, symbol table là danh bạ cho biết số nhà nào là nhà ai, còn debuginfo là bản đồ chi tiết đến từng phòng. Không có danh bạ bạn chỉ thấy số hex; không có bản đồ bạn biết nhà nhưng không biết phòng.
+*Với service `quote`.* Bạn build `quote` bằng `cargo build --release` rồi `perf record`. Kết quả có thể đủ để thấy tên hàm nhưng không có số dòng, hoặc tệ hơn là chỉ có số hex hay những cái tên như `_ZN…`. Cả ba triệu chứng đều xuất phát từ cùng một khoảng cách: mẫu chỉ có địa chỉ, còn thứ bạn cần là tên hàm và dòng code. Mục này nói khoảng cách đó được lấp bằng gì, và cấu hình Rust nào quyết định có lấp được hay không.
 
-*Mẫu → tên.* Mẫu ghi `ip` (con trỏ lệnh)[^peo-sampleip]. `perf report` ánh xạ về `dso` và `symbol`[^rep-default-sort]; riêng khóa `srcline` (file + dòng) đòi thông tin DWARF[^rep-srcline]. Symbol và debuginfo là hai thứ khác nhau; rustc điều khiển riêng từng thứ.
+### 6.1 Từ địa chỉ ra tên và dòng
 
-*Debuginfo trong rustc/Cargo.* Cờ `-C debuginfo` nhận `0/none` (không có gì, mặc định), `line-tables-only`, `1/limited`, `2/full`[^cg-debuginfo] (rustc còn có `line-directives-only`, dành cho target nvptx[^cg-linedirectives]); `-g` là bí danh của `-C debuginfo=2`[^cg-g]. `line-tables-only` sinh lượng debuginfo tối thiểu đủ cho backtrace có tên file/số dòng, không có thông tin biến hay tham số[^cg-ltonly]. Phía Cargo, khóa `debug` của profile điều khiển cờ `-C debuginfo`[^prof-debugdesc]; `0`/`false`/`"none"` là mặc định của `release`[^prof-debug] (bảng đầy đủ các khóa mặc định của `dev`/`release`: [Chương 08 (Rust), mục 7](../09-rust-language/08-module-crate-cargo.md)). Rust Performance Book khuyên: để profile build release hiệu quả có thể cần bật debuginfo dòng nguồn[^pb-debug], bằng `debug = "line-tables-only"` trong `[profile.release]`[^pb-debugline].
+Mẫu ghi `ip`, tức con trỏ lệnh[^peo-sampleip]. `perf report` ánh xạ nó về `dso` và `symbol`[^rep-default-sort]. Riêng khóa `srcline` (file và dòng) thì đòi thông tin DWARF[^rep-srcline]. Symbol và debuginfo là hai thứ khác nhau, và rustc điều khiển riêng từng thứ.
 
-*Symbol table và `strip`.* `-C strip` điều khiển việc lược bỏ debuginfo và dữ liệu phụ trợ lúc link: `none` thì debuginfo và symbol giữ nguyên[^cg-strip-none]; `debuginfo` bỏ các section debuginfo (backtrace "gần như còn nguyên" nhưng debugger như gdb/lldb khó dùng)[^cg-strip-di]; `symbols` bỏ cả phần còn lại của symbol table, và trên nền tảng dựa vào symbol table cho backtrace/profiling điều đó có thể gây hại tới mức trace không đọc nổi[^cg-strip-sym]. Cargo: khóa `strip`, mặc định `"none"`[^prof-strip]. Kết luận (suy luận của người soạn từ các mục trên): profile `release` mặc định giữ symbol (có tên hàm) nhưng không có debuginfo (không có số dòng); nếu dự án đặt `strip = "symbols"` để giảm kích thước binary, `perf` sẽ chỉ thấy địa chỉ — hãy build riêng cho profiling.
+### 6.2 Debuginfo trong rustc và Cargo
 
-*Thư viện chuẩn.* Rust Performance Book cảnh báo: dù đã bật debuginfo cho code của bạn, bạn vẫn không có thông tin chi tiết cho code thư viện chuẩn vì bản std phát hành không build kèm debuginfo[^pb-std].
+Cờ `-C debuginfo` của rustc nhận bốn giá trị: `0`/`none` (không có gì, mặc định), `line-tables-only`, `1`/`limited` và `2`/`full`[^cg-debuginfo]. `-g` là bí danh của `-C debuginfo=2`[^cg-g]. Giá trị cần nhớ cho profiling là `line-tables-only`: nó sinh lượng debuginfo tối thiểu đủ để backtrace có tên file và số dòng, không có thông tin biến hay tham số[^cg-ltonly].
 
-*Mangling.* Rust mã hóa tên hàm trong object code; profiler không biết sẽ in ra tên bắt đầu bằng `_ZN` hoặc `_R`[^pb-mangle]. `perf report` có tùy chọn demangle, bật mặc định, tắt bằng `--no-demangle`[^rep-demangle]. Phía Rust, rustc có hai định dạng; định dạng *legacy* là mặc định hiện thời trên beta/stable[^mang-legacy], còn `-C symbol-mangling-version=v0` chọn lược đồ v0[^cg-mangling]. Nếu profiler hiển thị tên khó đọc, Rust Performance Book gợi ý thử chuyển sang v0[^pb-v0]. Công cụ giải mã tên: `rustfilt` (CLI)[^mang-rustfilt]; gdb và lldb bản mới có sẵn hỗ trợ demangle Rust[^mang-gdb].
+Phía Cargo, khóa `debug` của profile điều khiển cờ `-C debuginfo`[^prof-debugdesc]. Giá trị `0`, `false` hoặc `"none"` là mặc định của `release`[^prof-debug]. (Bảng đầy đủ các khóa mặc định của `dev` và `release` nằm ở [Chương 08 (Rust), mục 7](../09-rust-language/08-module-crate-cargo.md).) Vì vậy Rust Performance Book khuyên: để profile build release hiệu quả, bạn có thể cần bật debuginfo dòng nguồn[^pb-debug]. Cách bật là đặt `debug = "line-tables-only"` trong `[profile.release]`[^pb-debugline].
 
-<details><summary>Đi sâu: <code>split-debuginfo</code>, <code>--demangle-kernel</code>, hai cách Cargo xử lý debuginfo</summary>
+### 6.3 Symbol table và `strip`
 
-- `split-debuginfo` điều khiển debuginfo nằm trong file thực thi hay cạnh nó; mặc định của Cargo là `unpacked` trên macOS cho profile có debuginfo[^prof-split], trong khi mặc định của rustc trên macOS là `packed`[^cg-split].
-- `perf report --demangle-kernel` giải mã tên symbol kernel (cho kernel C++), tách khỏi `--demangle`[^rep-demangle-kernel]; không liên quan Rust.
-- Man page `perf report` có `--symfs=<directory>`: tìm các file chứa symbol theo đường dẫn tương đối so với thư mục đó[^rep-symfs]; hữu ích khi binary build ở nơi khác (nhận xét của người soạn).
-- Quy ước đặt `debug = "line-tables-only"` thay vì `true` là lựa chọn của người soạn để giảm kích thước; sách Performance Book dùng đúng giá trị này[^pb-debugline]. Mức `line-tables-only` sinh debuginfo tối thiểu cho backtrace có tên file/số dòng, không có thông tin biến/tham số[^cg-ltonly]; việc mức đó đủ cho `perf report -s srcline` là suy luận của người soạn (man page chỉ đòi phải có thông tin gỡ lỗi DWARF[^rep-srcline]).
+`-C strip` điều khiển việc lược bỏ debuginfo và dữ liệu phụ trợ lúc link, với ba mức:
+
+- `none`: debuginfo và symbol giữ nguyên[^cg-strip-none].
+- `debuginfo`: bỏ các section debuginfo. Backtrace "gần như còn nguyên" nhưng debugger như gdb hay lldb khó dùng[^cg-strip-di].
+- `symbols`: bỏ cả phần còn lại của symbol table. Trên nền tảng dựa vào symbol table cho backtrace và profiling, điều này có thể gây hại tới mức trace không đọc nổi[^cg-strip-sym].
+
+Phía Cargo, khóa `strip` có mặc định `"none"`[^prof-strip]. Ghép với mục 6.2 ta rút ra (suy luận của người soạn từ các mục trên): profile `release` mặc định giữ symbol, nên có tên hàm, nhưng không có debuginfo, nên không có số dòng. Nếu `quote` đặt `strip = "symbols"` để giảm kích thước binary thì `perf` chỉ thấy địa chỉ, và bạn nên build riêng một bản cho profiling.
+
+Còn một giới hạn nữa: dù đã bật debuginfo cho code của `quote`, bạn vẫn không có thông tin chi tiết cho code thư viện chuẩn, vì bản std phát hành không build kèm debuginfo[^pb-std].
+
+### 6.4 Mangling
+
+Rust mã hóa tên hàm trong object code. Profiler không biết điều đó sẽ in ra những tên bắt đầu bằng `_ZN` hoặc `_R`[^pb-mangle]. `perf report` có tùy chọn demangle, bật mặc định và tắt bằng `--no-demangle`[^rep-demangle].
+
+Phía Rust, rustc có hai định dạng mangling. Định dạng *legacy* là mặc định hiện thời trên beta/stable[^mang-legacy]. Cờ `-C symbol-mangling-version=v0` chọn lược đồ v0[^cg-mangling]. Nếu profiler hiển thị tên khó đọc, Rust Performance Book gợi ý thử chuyển sang v0[^pb-v0]. Để giải mã tên, bạn có `rustfilt`, một CLI[^mang-rustfilt]. Các bản mới của gdb và lldb cũng đã có sẵn hỗ trợ demangle Rust[^mang-gdb].
+
+<details><summary>Đi sâu: <code>split-debuginfo</code>, <code>--demangle-kernel</code>, <code>--symfs</code>, <code>line-directives-only</code>, vì sao chọn <code>line-tables-only</code></summary>
+
+- `split-debuginfo` điều khiển debuginfo nằm trong file thực thi hay cạnh nó. Mặc định của Cargo là `unpacked` trên macOS cho profile có debuginfo[^prof-split]. Mặc định của rustc trên macOS lại là `packed`[^cg-split].
+- Ngoài bốn giá trị ở mục 6.2, rustc còn có `line-directives-only`, dành cho target nvptx[^cg-linedirectives].
+- `perf report --demangle-kernel` giải mã tên symbol kernel (cho kernel C++), tách khỏi `--demangle`[^rep-demangle-kernel]. Nó không liên quan Rust.
+- Man page `perf report` có `--symfs=<directory>`, tìm các file chứa symbol theo đường dẫn tương đối so với thư mục đó[^rep-symfs]. Tùy chọn này hữu ích khi binary build ở nơi khác (nhận xét của người soạn).
+- Chọn `debug = "line-tables-only"` thay vì `true` là lựa chọn của người soạn để giảm kích thước; Performance Book dùng đúng giá trị này[^pb-debugline]. Mức đó sinh debuginfo tối thiểu cho backtrace có tên file và số dòng[^cg-ltonly]. Việc nó đủ cho `perf report -s srcline` là suy luận của người soạn, vì man page chỉ đòi phải có thông tin gỡ lỗi DWARF[^rep-srcline].
 
 </details>
 
-**Quay lại Q6:** tên hàm cần symbol table, số dòng cần debuginfo, tên Rust còn phải demangle; build profiling nên giữ symbol, bật `line-tables-only` và (nếu dùng `fp`) giữ frame pointer.
+**Quay lại Q6:** tên hàm cần symbol table, số dòng cần debuginfo, tên Rust còn phải demangle. Với `quote`, build để profiling nên giữ symbol, bật `line-tables-only` và (nếu dùng `fp`) giữ frame pointer.
 
 ## 7. On-CPU vs off-CPU; flame graph (Q7)
 
-> **Trả lời ngắn.** *On-CPU* là thời gian thread đang chạy trên CPU; *off-CPU* là thời gian nó chờ vì bị chặn — I/O, khóa, timer, paging/swapping[^off-def]. Sampling cài bằng ngắt timer theo từng CPU (cách cài đặt thường gặp) chỉ cho profile on-CPU[^off-timer], nên một service mà thread chủ yếu đang chờ sẽ không lộ nguyên nhân trong profile on-CPU (suy luận của người soạn); Gregg mô tả off-CPU analysis là bổ sung cho phân tích CPU[^off-comp]. *Flame graph* là cách vẽ tập hợp stack đã lấy mẫu: chiều rộng một ô = tần suất xuất hiện của frame, chiều cao = độ sâu stack, trục ngang **không** phải thời gian[^flame-sum].
+> **Trả lời ngắn.** *On-CPU* là thời gian thread đang chạy trên CPU. *Off-CPU* là thời gian nó chờ vì bị chặn: I/O, khóa, timer, paging/swapping[^off-def]. Sampling cài bằng ngắt timer theo từng CPU (cách cài đặt thường gặp) chỉ cho profile on-CPU[^off-timer], nên với một service mà thread chủ yếu đang chờ, nguyên nhân sẽ không lộ ra trong profile on-CPU (suy luận của người soạn). Vì vậy cần thêm off-CPU analysis, phần bổ sung cho phân tích CPU[^off-comp]. *Flame graph* là cách vẽ một tập stack đã lấy mẫu: chiều rộng một ô là tần suất frame xuất hiện, chiều cao là độ sâu stack, và trục ngang **không** phải thời gian[^flame-sum].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhà hàng chậm. On-CPU là "đầu bếp đang nấu bao nhiêu phần trăm thời gian"; off-CPU là "khách ngồi chờ món — chờ nguyên liệu (I/O), chờ bếp (khóa), chờ gọi tên (timer)". Camera chỉ quay đầu bếp thì bạn kết luận bếp ổn trong khi khách vẫn chờ.
+*Với service `quote`.* Quay lại p99 của `POST /quote`. Có hai kịch bản khác hẳn nhau. Nếu CPU của `quote` cao thì thời gian đang đốt trên CPU, và profile on-CPU là công cụ đúng. Nếu p99 cao mà CPU thấp thì các handler thread phần lớn đang chờ, ví dụ chờ khóa hay chờ database, và profile on-CPU gần như không thấy gì. Case của đội `quote` ở mục 1 thuộc kịch bản thứ hai. Mục này nói cách nhìn cả hai nửa, rồi cách đọc flame graph, là hình vẽ bạn sẽ gặp nhiều nhất khi xem profile.
 
-*On-CPU.* Sampling thường được cài đặt bằng ngắt timer theo từng CPU; mỗi lần ngắt xem process nào đang bị ngắt, và vì vậy chỉ tạo ra profile on-CPU[^off-timer]. Đây cũng là cách `perf record` đã mô tả ở mục 4 hoạt động với các event dựa trên chu kỳ/đồng hồ CPU (suy luận của người soạn).
+### 7.1 On-CPU
 
-*Off-CPU.* Off-CPU analysis đo và nghiên cứu thời gian off-CPU kèm ngữ cảnh như stack trace; nó bổ sung cho phân tích CPU để hiểu được 100% thời gian của thread[^off-comp]. Có hai cách: **tracing** — chỉ trace các hàm kernel chuyển thread ra khỏi CPU, cùng timestamp và stack user-land[^off-trace] — và **sampling** — lấy mẫu stack của thread đang bị chặn, hoặc dùng wall-time profiler lấy mẫu mọi thread mọi lúc rồi lọc phần off-CPU[^off-wall]. Sampling off-CPU hiếm vì ngắt timer theo CPU chỉ thấy cái đang chạy; muốn thấy thread bị chặn phải đặt timer trong từng thread hoặc để kernel duyệt mọi thread[^off-sampling-hard]. Tracing off-CPU là cách tác giả dùng chính, nhưng sự kiện scheduler có thể lên tới hàng triệu mỗi giây nên overhead đáng kể[^off-warn]; công cụ phổ biến cho việc này đang tới nhờ eBPF và kernel 4.8+[^off-ebpf]. Phía `perf`, có thể ghi event chuyển ngữ cảnh bằng `--switch-events`[^rec-switch] và có software event `context-switches`[^peo-cs]. Cách ghi off-CPU hoàn chỉnh (tracepoint scheduler, eBPF) nằm ngoài phạm vi chương này.
+Sampling thường được cài bằng ngắt timer theo từng CPU. Mỗi lần ngắt, nó xem process nào đang bị ngắt, và vì thế chỉ tạo ra profile on-CPU[^off-timer]. Ta suy ra `perf record` với event dựa trên chu kỳ hoặc đồng hồ CPU (mục 4) cũng hoạt động như vậy (suy luận của người soạn).
 
-*Lọc thời gian chờ không đồng bộ.* Với off-CPU, thread chờ việc (ví dụ worker rảnh trong thread pool) là chờ không đồng bộ, không phải latency của request; Gregg dùng instrumentation mức ứng dụng để lọc, xác định đoạn mã nhạy thời gian (như trong một query MySQL) để thời gian chờ là đồng bộ với workload[^off-filter]. (Suy luận của người soạn: với runtime async như tokio, worker rảnh đang park sẽ chiếm phần lớn off-CPU nếu không lọc.)
+### 7.2 Off-CPU
 
-*Flame graph.* Gregg tóm tắt: trục x là quần thể stack đã lấy mẫu, sắp theo bảng chữ cái, **không phải** dòng thời gian; trục y là độ sâu stack, từ 0 ở dưới; mỗi hình chữ nhật là một stack frame; frame càng rộng càng xuất hiện nhiều trong các stack; cạnh trên cho thấy cái gì đang on-CPU, bên dưới là tổ tiên; màu gốc là ngẫu nhiên để phân biệt các ô kề nhau[^flame-sum]. Cách đọc (nhận xét của người soạn dựa trên định nghĩa trên):
+Off-CPU analysis đo và nghiên cứu thời gian off-CPU kèm ngữ cảnh như stack trace. Nó bổ sung cho phân tích CPU để hiểu được 100% thời gian của thread[^off-comp]. Có hai cách làm:
 
-1. Đọc từ dưới lên: ô dưới cùng là điểm vào (ví dụ `main`/thread entry), mỗi tầng trên là một hàm con được gọi.
-2. Tìm ô **rộng ở trên cùng** (cao nguyên): đó là hàm tự nó tốn nhiều mẫu, vì cạnh trên là cái đang chạy. Gregg nhắc thói quen "quét từ trên xuống để tìm cao nguyên"[^flame-plateau].
-3. Ô rộng ở giữa mà phía trên hẹp nghĩa là chi phí nằm ở các con của nó, không ở chính nó.
-4. Vị trí ngang vô nghĩa về thời gian: thứ tự trái phải chỉ là bảng chữ cái, mục đích để gộp frame tối đa[^flame-chart].
-5. Màu (nếu ngẫu nhiên) không mang ý nghĩa[^flame-sum].
+- **Tracing**: chỉ trace các hàm kernel chuyển thread ra khỏi CPU, cùng timestamp và stack user-land[^off-trace].
+- **Sampling**: lấy mẫu stack của thread đang bị chặn. Hoặc dùng wall-time profiler, loại lấy mẫu mọi thread mọi lúc rồi lọc ra phần off-CPU[^off-wall].
 
-Một flame graph minh họa (số liệu bịa cho dễ nhìn, **không phải** output thật):
+Sampling off-CPU hiếm gặp vì ngắt timer theo CPU chỉ thấy cái đang chạy. Muốn thấy thread bị chặn thì phải đặt timer trong từng thread, hoặc để kernel duyệt mọi thread theo chu kỳ[^off-sampling-hard]. Tracing là cách tác giả (Gregg) dùng chính, nhưng sự kiện scheduler có thể lên tới hàng triệu mỗi giây nên overhead đáng kể[^off-warn]. Công cụ phổ biến cho việc này đang tới nhờ eBPF và kernel 4.8+[^off-ebpf].
+
+Phía `perf`, bạn ghi event chuyển ngữ cảnh được bằng `--switch-events`[^rec-switch]. Ngoài ra còn có software event `context-switches`[^peo-cs]. Cách ghi off-CPU hoàn chỉnh (tracepoint scheduler, eBPF) nằm ngoài phạm vi chương này.
+
+### 7.3 Lọc thời gian chờ không đồng bộ
+
+Với off-CPU còn một bẫy nữa. Một thread chờ việc, như worker rảnh trong thread pool, là đang chờ không đồng bộ, và đó không phải latency của request. Gregg lọc bằng instrumentation mức ứng dụng: ông xác định đoạn mã nhạy thời gian (như trong một query MySQL), để thời gian chờ trong đó là đồng bộ với workload[^off-filter]. Với `quote` chạy trên tokio, worker rảnh đang park sẽ chiếm phần lớn thời gian off-CPU nếu bạn không lọc (suy luận của người soạn).
+
+### 7.4 Flame graph
+
+Gregg tóm tắt flame graph như sau. Trục x là quần thể stack đã lấy mẫu, sắp theo bảng chữ cái, **không phải** dòng thời gian. Trục y là độ sâu stack, tính từ 0 ở dưới. Mỗi hình chữ nhật là một stack frame, và frame càng rộng thì càng xuất hiện nhiều trong các stack. Cạnh trên cho thấy cái gì đang on-CPU, còn bên dưới là tổ tiên của nó. Màu gốc là ngẫu nhiên, để phân biệt các ô kề nhau[^flame-sum].
+
+Từ định nghĩa đó, cách đọc là (nhận xét của người soạn):
+
+1. Đọc từ dưới lên. Ô dưới cùng là điểm vào (ví dụ `main` hoặc thread entry), mỗi tầng trên là một hàm con được gọi.
+2. Tìm ô **rộng ở trên cùng** (cao nguyên). Đó là hàm tự nó tốn nhiều mẫu, vì cạnh trên là cái đang chạy. Gregg cũng có thói quen "quét từ trên xuống để tìm cao nguyên"[^flame-plateau].
+3. Ô rộng ở giữa mà phía trên hẹp nghĩa là chi phí nằm ở các con của nó, không phải ở chính nó.
+4. Vị trí ngang vô nghĩa về thời gian. Thứ tự trái phải chỉ là bảng chữ cái, mục đích để gộp frame tối đa[^flame-chart].
+5. Màu, nếu ngẫu nhiên, không mang ý nghĩa.
+
+Một flame graph minh họa cho `quote` (số liệu bịa cho dễ nhìn, **không phải** output thật):
 
 ```
                                   [ serde::to_vec      ]
@@ -278,34 +393,42 @@ Một flame graph minh họa (số liệu bịa cho dễ nhìn, **không phải*
    [ worker_thread main loop                           ]
 ```
 
-Ở ví dụ này `handler::run` rộng và các con của nó chia nhau chi phí; `serde::to_vec` có cạnh trên rộng, là ứng viên "tự nó tốn".
+Ở ví dụ này `handler::run` rộng và các con của nó chia nhau chi phí, còn `serde::to_vec` có cạnh trên rộng nên là ứng viên "tự nó tốn".
 
-*Công cụ.* Flame graph vẽ được từ mọi dữ liệu profile có stack trace[^flame-any]; với Linux có chức năng `perf script report flamegraph`[^flame-perf], và lệnh Cargo `flamegraph` dùng perf/DTrace để profile rồi hiển thị flame graph[^pb-list].
+### 7.5 Công cụ
+
+Flame graph vẽ được từ mọi dữ liệu profile có stack trace[^flame-any]. Trên Linux có sẵn chức năng `perf script report flamegraph`[^flame-perf]. Với Rust, lệnh Cargo `flamegraph` dùng perf hoặc DTrace để profile rồi hiển thị flame graph[^pb-list].
 
 <details><summary>Đi sâu: icicle graph, flame chart, sunburst; nguồn gốc</summary>
 
 - *Icicle graph* là flame graph đảo ngược trục y; `flamegraph.pl` tạo được bằng `--inverted`[^flame-icicle].
-- *Flame chart* đặt thời gian lên trục x thay vì bảng chữ cái, nên thấy được quy luật theo thời gian nhưng không hợp với đa luồng; flame graph sắp theo bảng chữ cái để gộp frame và thấy bức tranh tổng thể[^flame-chart-def].
-- Gregg kể ông tạo flame graph khi phân tích vấn đề hiệu năng MySQL[^flame-origin]; ông chuyển từ trace hàm sang lấy mẫu có thời gian để tránh overhead của function tracing làm nhiễu mục tiêu[^flame-switch].
-- Off-CPU analysis cần stack trace dùng được; ứng dụng biên dịch với `-fomit-frame-pointer` hoặc VM runtime JIT làm stack thiếu/chỉ có hex[^off-fp]. Nó cũng khớp mục 5 và 6 của chương này.
+- *Flame chart* đặt thời gian lên trục x thay vì bảng chữ cái, nên thấy được quy luật theo thời gian nhưng không hợp với đa luồng[^flame-chart-def]. Flame graph sắp theo bảng chữ cái để gộp frame tối đa và thấy bức tranh tổng thể[^flame-chart].
+- Gregg kể ông tạo flame graph khi phân tích vấn đề hiệu năng MySQL[^flame-origin]. Ông chuyển từ trace hàm sang lấy mẫu có thời gian để tránh overhead của function tracing làm nhiễu mục tiêu[^flame-switch].
+- Off-CPU analysis cần stack trace dùng được. Ứng dụng biên dịch với `-fomit-frame-pointer` hoặc VM runtime JIT làm stack thiếu hoặc chỉ có hex[^off-fp]. Điều này khớp với mục 5 và 6 của chương.
 
 </details>
 
-**Quay lại Q7:** on-CPU = đang chạy, off-CPU = đang chờ; sampling theo timer chỉ thấy on-CPU nên cần off-CPU analysis cho latency do chờ; flame graph vẽ stack đã lấy mẫu, rộng = hay xuất hiện, trục ngang không phải thời gian.
+**Quay lại Q7:** on-CPU là đang chạy, off-CPU là đang chờ; sampling theo timer chỉ thấy on-CPU nên cần off-CPU analysis cho latency do chờ (như case `quote`); flame graph vẽ stack đã lấy mẫu, rộng là hay xuất hiện, trục ngang không phải thời gian.
 
 ## 8. `perf_event_paranoid`, capability và container (Q8)
 
-> **Trả lời ngắn.** Dữ liệu perf có thể làm lộ thông tin nhạy cảm của process bị theo dõi[^ksec-risk], nên Linux giới hạn quyền dùng nó. Với process không đặc quyền, mức giới hạn do sysctl `kernel.perf_event_paranoid` quyết định (mặc định 2, chỉ đo user space của chính process)[^ksys-default][^ksec-level2]; `CAP_PERFMON` (từ Linux 5.8[^peo-sysw]) cho process được xử lý như đặc quyền với các thao tác perf[^ksec-perfmon]. Trong container, seccomp profile mặc định của Docker chặn `perf_event_open`[^dock-block] trừ khi container được cấp `CAP_PERFMON`: JSON ghim Moby `v28.0.0` có khối `ALLOW` riêng cho syscall này theo capability đó[^moby-perfmon].
+> **Trả lời ngắn.** Dữ liệu perf có thể làm lộ thông tin nhạy cảm của process bị theo dõi[^ksec-risk], nên Linux giới hạn quyền dùng nó. Với process không đặc quyền, mức giới hạn do sysctl `kernel.perf_event_paranoid` quyết định và mặc định là 2[^ksys-default]. Ở mức 2, process chỉ đo được chính nó, và chỉ phần xảy ra ở user space[^ksec-level2]. `CAP_PERFMON` làm process không đặc quyền được xử lý như đặc quyền với các thao tác perf[^ksec-perfmon]. Trong container, seccomp profile mặc định của Docker chặn `perf_event_open`[^dock-block], trừ khi container có `CAP_PERFMON`: JSON ghim Moby `v28.0.0` có khối `ALLOW` riêng cho syscall này theo capability đó[^moby-perfmon].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `perf` giống camera giám sát đặt vào phòng người khác: nó thấy địa chỉ bộ nhớ, thanh ghi, tên process; nên mỗi tòa nhà (kernel) đặt quy tắc ai được lắp.
+*Với service `quote`.* `quote` được đóng gói thành container Docker và chạy trên một máy chủ. Khi p99 tăng, bạn vào container, gõ `perf record` và nhận lỗi quyền, hoặc `perf` chạy được nhưng không thấy kernel stack. Hai chuyện đó đều là chủ ý của Linux, không phải lỗi cài đặt. Mục này nói Linux chặn những gì, và cần cấp đúng quyền gì cho `quote`.
 
-*Vì sao hạn chế.* Tài liệu kernel nói rằng dùng perf_events có thể gây rủi ro đáng kể làm lộ dữ liệu nhạy cảm mà process bị theo dõi truy cập[^ksec-risk]; dữ liệu thu được gồm cả giá trị thanh ghi ngữ cảnh thực thi (như RIP, RSP, RBP trên x86_64)[^ksec-regs].
+### 8.1 Vì sao phải hạn chế
 
-*Hai tầng kiểm soát.* Process đặc quyền (root) bỏ qua mọi kiểm tra[^ksec-priv]; process không đặc quyền chịu kiểm tra theo credential[^ksec-unpriv]. Process không đặc quyền có `CAP_PERFMON` thì được coi như đặc quyền cho thao tác perf[^ksec-perfmon]. `CAP_SYS_ADMIN` vẫn mở vì tương thích ngược nhưng không khuyến khích cho mục đích monitoring[^ksec-sysadmin]. Trước Linux 5.9, process không đặc quyền còn phải qua kiểm tra ptrace (`PTRACE_MODE_READ_REALCREDS`), nên `CAP_SYS_PTRACE` có thể thay; từ 5.9 chỉ cần `CAP_PERFMON`[^ksec-ptrace].
+Kernel docs nói rằng dùng perf_events có thể gây rủi ro đáng kể là làm lộ dữ liệu nhạy cảm mà process bị theo dõi truy cập[^ksec-risk]. Dữ liệu thu được gồm cả giá trị thanh ghi ngữ cảnh thực thi (như RIP, RSP, RBP trên x86_64)[^ksec-regs]. Với `quote`, chuyện này nghĩa là một người đo được `quote` cũng có thể nhìn vào bên trong nó.
 
-*Các mức `perf_event_paranoid`* (tài liệu kernel, đọc "latest"):
+### 8.2 Hai tầng kiểm soát
+
+Process đặc quyền (root) bỏ qua mọi kiểm tra[^ksec-priv]. Process không đặc quyền thì chịu kiểm tra theo credential[^ksec-unpriv]. Nếu process không đặc quyền có `CAP_PERFMON` thì nó được coi như đặc quyền cho thao tác perf[^ksec-perfmon]. `CAP_SYS_ADMIN` vẫn mở vì tương thích ngược, nhưng không được khuyến khích cho mục đích monitoring[^ksec-sysadmin]. Trước Linux 5.9, process không đặc quyền còn phải qua kiểm tra ptrace (`PTRACE_MODE_READ_REALCREDS`), nên `CAP_SYS_PTRACE` có thể thay thế. Từ 5.9 chỉ cần `CAP_PERFMON`[^ksec-ptrace].
+
+### 8.3 Các mức `perf_event_paranoid`
+
+Bảng dưới lấy từ kernel docs (bản "latest"), cho phạm vi của process không đặc quyền:
 
 | Giá trị | Phạm vi cho process không đặc quyền |
 |---|---|
@@ -314,29 +437,43 @@ Hình dung (nhận xét của người soạn): `perf` giống camera giám sát
 | `>= 1` | chỉ đo theo process, loại đo toàn hệ thống; có cả user và kernel[^ksec-1] |
 | `>= 2` | chỉ đo theo process, và chỉ event xảy ra ở user space[^ksec-level2] |
 
-Man page `perf_event_open` liệt kê các mức tương tự: `2` "chỉ cho đo user space (mặc định từ Linux 4.6)", `1` cho cả kernel và user (mặc định trước 4.6)[^peo-paranoid-levels]. Sysctl này điều khiển việc dùng hệ thống performance events bởi người dùng không có `CAP_PERFMON`; mặc định là 2[^ksys-default]. Hệ quả thực hành (suy luận của người soạn): ở mặc định, một user thường chỉ `perf record` được chương trình của chính mình và chỉ thấy phần user-space; muốn thấy kernel stack (ví dụ chi phí syscall) hoặc đo toàn máy thì cần quyền.
+Man page `perf_event_open` liệt kê các mức tương tự: `2` là "chỉ cho đo user space (mặc định từ Linux 4.6)", còn `1` cho cả kernel và user (mặc định trước 4.6)[^peo-paranoid-levels]. Sysctl này điều khiển việc dùng hệ thống performance events của người dùng không có `CAP_PERFMON`, và mặc định là 2[^ksys-default].
 
-*Lỗi hay gặp.* `EACCES` khi event đòi `CAP_PERFMON`/`CAP_SYS_ADMIN` hoặc mức `paranoid` thoáng hơn; trường hợp thường gặp: gắn vào process của user khác, đo mọi process trên một CPU, hoặc không đặt `exclude_kernel` khi `paranoid` đòi hỏi[^peo-eacces].
+Hệ quả cho `quote` (suy luận của người soạn): ở mặc định, một user thường chỉ `perf record` được chương trình của chính mình và chỉ thấy phần user-space. Muốn thấy kernel stack, như chi phí syscall, hoặc đo toàn máy thì cần thêm quyền.
 
-*Trong container.* Docker mô tả seccomp profile mặc định là *allowlist*; bảng các syscall đáng kể bị chặn gồm `perf_event_open`, lý do "tracing/profiling syscall có thể làm lộ nhiều thông tin trên host"[^dock-block]. Docker cho phép chạy không dùng profile mặc định bằng `unconfined`[^dock-unconf]. Bảng đó chỉ mô tả trường hợp container không có capability thêm. Trong file `default.json` ghim tag Moby `v28.0.0`, `perf_event_open` có một khối `SCMP_ACT_ALLOW` riêng với điều kiện `CAP_PERFMON`[^moby-perfmon] (ngoài khối `CAP_SYS_ADMIN` đã nêu ở [Chương 05 (Container), mục 5](../08-containers/05-bao-mat-container.md)); nên với profile mặc định, chỉ cần `--cap-add PERFMON` là seccomp đã cho qua, không cần profile riêng hay `unconfined`. Đây là đọc trực tiếp từ JSON của tag đó; engine khác bản `v28.0.0` có thể dùng JSON khác. Quyền kernel (`perf_event_paranoid`, `CAP_PERFMON`) vẫn áp dụng sau seccomp. Hướng chung (nhận xét của người soạn) là cấp đúng `CAP_PERFMON` thay vì `CAP_SYS_ADMIN`, `--privileged` hay `unconfined`, theo đúng khuyến nghị "least privilege" của kernel[^ksec-perfmon-lp]. Lưu ý: container dùng chung kernel với host, nên perf trong container đo bằng chính cơ chế kernel đó (nhận xét của người soạn); chương này không khẳng định `perf_event_paranoid` có tách riêng theo namespace hay không.
+### 8.4 Lỗi hay gặp
 
-*Docker Desktop trên macOS.* Container chạy trong một VM Linux (xem chương [Container là gì](../08-containers/01-container-la-gi.md)); nếu VM không lộ PMU thì hardware event trả lỗi như mục 2 (suy luận của người soạn).
+Lỗi hay gặp nhất là `EACCES`, xảy ra khi event đòi `CAP_PERFMON` hoặc `CAP_SYS_ADMIN`, hoặc đòi mức `paranoid` thoáng hơn mức hiện tại. Man page nêu ba trường hợp thường gặp: gắn vào process của user khác, đo mọi process trên một CPU, và không đặt `exclude_kernel` khi `paranoid` đòi hỏi[^peo-eacces].
+
+### 8.5 Trong container
+
+Docker mô tả seccomp profile mặc định là một *allowlist*. Bảng các syscall đáng kể bị chặn có `perf_event_open`, với lý do "tracing/profiling syscall có thể làm lộ nhiều thông tin trên host"[^dock-block]. Docker cho phép chạy không dùng profile mặc định bằng `unconfined`[^dock-unconf].
+
+Bảng đó chỉ mô tả trường hợp container không có capability thêm. Trong file `default.json` ghim tag Moby `v28.0.0`, `perf_event_open` có một khối `SCMP_ACT_ALLOW` riêng với điều kiện `CAP_PERFMON`[^moby-perfmon]. Khối này nằm ngoài khối `CAP_SYS_ADMIN` đã nêu ở [Chương 05 (Container), mục 5](../08-containers/05-bao-mat-container.md). Vì vậy với profile mặc định, chỉ cần `--cap-add PERFMON` là seccomp đã cho qua, không cần profile riêng hay `unconfined`. Đây là đọc trực tiếp từ JSON của tag đó, và engine khác bản `v28.0.0` có thể dùng JSON khác. Quyền kernel (`perf_event_paranoid`, `CAP_PERFMON`) vẫn áp dụng sau seccomp.
+
+Hướng chung (nhận xét của người soạn) là cấp đúng `CAP_PERFMON` cho container của `quote` thay vì `CAP_SYS_ADMIN`, `--privileged` hay `unconfined`, đúng với khuyến nghị "least privilege" của kernel[^ksec-perfmon-lp]. Lưu ý thêm: container dùng chung kernel với host, nên perf trong container đo bằng chính cơ chế kernel đó (nhận xét của người soạn). Chương này không khẳng định `perf_event_paranoid` có tách riêng theo namespace hay không.
+
+### 8.6 Docker Desktop trên macOS
+
+Container ở đây chạy trong một VM Linux (xem chương [Container là gì](../08-containers/01-container-la-gi.md)). Nếu VM không lộ PMU thì hardware event trả lỗi như mục 2.4 (suy luận của người soạn).
 
 <details><summary>Đi sâu: nhóm "perf_users", <code>setcap</code>, <code>perf_event_mlock_kb</code>, CAP_SYSLOG</summary>
 
-- Tài liệu kernel hướng dẫn tạo nhóm người dùng perf đặc quyền: gán nhóm cho binary `perf` rồi `setcap "cap_perfmon,cap_sys_ptrace,cap_syslog=ep" perf`[^ksec-setcap].
-- `CAP_SYSLOG` cho phép đọc địa chỉ bộ nhớ kernel từ `/proc/kallsyms`[^ksec-syslog]. Nếu libcap không hỗ trợ `cap_perfmon`, event mặc định thành `cycles:u`, và workaround là chỉ định rõ `-e cycles`[^ksec-libcap].
-- Bộ nhớ: `perf_event_mlock_kb` đặt giới hạn bộ nhớ theo từng CPU cho mapping buffer perf, mở rộng `RLIMIT_MEMLOCK` chỉ cho vùng nhớ dùng để thu event[^ksec-mlock]; mặc định 516 kB cho user không đặc quyền[^peo-mlock]. Ví dụ trong tài liệu kernel: máy 8 core, mlock 516 KiB thì được 4128 KiB dùng chung cho các phiên đo, nên chạy nhiều phiên đo song song phải chia bằng `--mmap-pages`[^ksec-mmappages].
+- Kernel docs hướng dẫn tạo nhóm người dùng perf đặc quyền: gán nhóm cho binary `perf` rồi chạy `setcap "cap_perfmon,cap_sys_ptrace,cap_syslog=ep" perf`[^ksec-setcap].
+- `CAP_SYSLOG` cho phép đọc địa chỉ bộ nhớ kernel từ `/proc/kallsyms`[^ksec-syslog].
+- Nếu libcap không hỗ trợ `cap_perfmon`, event mặc định thành `cycles:u`, và cách xử lý là chỉ định rõ `-e cycles`[^ksec-libcap].
+- `perf_event_mlock_kb` đặt giới hạn bộ nhớ theo từng CPU cho mapping buffer perf. Nó mở rộng `RLIMIT_MEMLOCK` chỉ cho vùng nhớ dùng để thu event[^ksec-mlock]. Mặc định là 516 kB cho user không đặc quyền[^peo-mlock].
+- Ví dụ trong kernel docs: máy 8 core với mlock 516 KiB thì có 4128 KiB dùng chung cho các phiên đo, nên chạy nhiều phiên đo song song phải chia bằng `--mmap-pages`[^ksec-mmappages].
 - Process có `CAP_IPC_LOCK` được bỏ qua `RLIMIT_MEMLOCK` và `perf_event_mlock_kb`[^ksec-ipclock].
-- Số fd: một phiên `perf record` cần ít nhất (số event) × (số CPU) fd, nên dễ chạm `RLIMIT_NOFILE` trên máy lớn[^ksec-fd].
+- Về số fd: một phiên `perf record` cần ít nhất (số event) × (số CPU) fd, nên dễ chạm `RLIMIT_NOFILE` trên máy lớn[^ksec-fd].
 
 </details>
 
-**Quay lại Q8:** perf bị giới hạn vì làm lộ dữ liệu; mặc định user thường chỉ đo user-space của chính mình (`paranoid = 2`), `CAP_PERFMON` mở rộng quyền đó, và seccomp mặc định của Docker chặn `perf_event_open` cho tới khi container được thêm `CAP_PERFMON`.
+**Quay lại Q8:** perf bị giới hạn vì làm lộ dữ liệu; mặc định user thường chỉ đo user-space của chính mình (`paranoid = 2`), `CAP_PERFMON` mở rộng quyền đó, và seccomp mặc định của Docker chặn `perf_event_open` cho tới khi container của `quote` được thêm `CAP_PERFMON`.
 
 ## Liên hệ với Rust
 
-Phần này gom lại những gì chương nói riêng cho Rust 1.95.0. Mọi mục dưới đây là cấu hình *build*; cách đo là phần còn lại của chương.
+Với `quote` viết bằng Rust, chương này không đòi bạn đổi dòng code nào. Nó chỉ đòi bạn đổi cách *build*, để `perf` đọc được kết quả. Bảng dưới gom các cấu hình đó cho Rust 1.95.0; còn cách đo là phần còn lại của chương.
 
 | Mục đích | Cấu hình | Nguồn |
 |---|---|---|
@@ -346,7 +483,7 @@ Phần này gom lại những gì chương nói riêng cho Rust 1.95.0. Mọi m�
 | Không strip symbol | giữ `strip = "none"` (mặc định) | Cargo[^prof-strip]; rustc[^cg-strip-sym] |
 | Cấu hình riêng cho profiling, không đụng release | profile tùy biến với `inherits` | Cargo[^prof-custom] |
 
-*Profile riêng để profiling* (ví dụ minh họa, không chạy):
+Để `quote` có profile riêng cho việc đo mà không đụng bản release, bạn có thể thêm một profile tùy biến (ví dụ minh họa, không chạy):
 
 ```toml
 [profile.profiling]
@@ -354,24 +491,24 @@ inherits = "release"
 debug = "line-tables-only"
 ```
 
-Cargo yêu cầu profile tùy biến có `inherits` để biết kế thừa từ profile nào khi một khóa không được đặt[^prof-custom]; chọn profile bằng `--profile`, và kết quả build nằm trong thư mục có tên của profile (ví dụ `target/release-lto` cho profile `release-lto`)[^prof-outdir]. Vậy build bằng `cargo build --profile profiling` sẽ ra `target/profiling/` (suy luận từ quy tắc đặt tên thư mục theo profile). Có thể ghi đè từng khóa bằng biến môi trường `CARGO_PROFILE_<name>_DEBUG`[^env-debug] (ví dụ cho CI).
+Cargo yêu cầu profile tùy biến phải có `inherits`, để biết kế thừa từ profile nào khi một khóa không được đặt[^prof-custom]. Bạn chọn profile bằng `--profile`, và kết quả build nằm trong thư mục mang tên profile đó trong `target`[^prof-outdir]. Vậy `cargo build --profile profiling` sẽ ra `target/profiling/` (suy luận từ quy tắc đặt tên thư mục theo profile). Bạn cũng ghi đè được từng khóa bằng biến môi trường `CARGO_PROFILE_<name>_DEBUG`, tiện cho CI[^env-debug].
 
 Hai lưu ý (nhận xét của người soạn):
 
-- `force-frame-pointers` làm đổi code sinh ra (nó ép dùng một thanh ghi làm frame pointer — xem [chương calling convention](../02-cpu/04-calling-convention-va-stack-frame.md)), nên profile build này không giống hệt production; còn `line-tables-only` chỉ thêm thông tin tra cứu. Nếu không muốn đổi code, dùng `--call-graph dwarf` (mục 5) với giá phình `perf.data`.
-- Với service async (tokio) callchain của on-CPU thường kết thúc ở các hàm `poll` của task, không phải "request"; để biết request nào chậm vì chờ thì cần off-CPU hoặc tracing (mục 7). Đây là suy luận của người soạn, chưa dẫn nguồn riêng.
+- `force-frame-pointers` làm đổi code sinh ra, vì nó ép dùng một thanh ghi làm frame pointer (xem [chương calling convention](../02-cpu/04-calling-convention-va-stack-frame.md)). Do đó bản build này không giống hệt production. Còn `line-tables-only` chỉ thêm thông tin tra cứu. Nếu không muốn đổi code, hãy dùng `--call-graph dwarf` (mục 5) và chấp nhận `perf.data` phình to.
+- Với service async dùng tokio, callchain on-CPU thường kết thúc ở các hàm `poll` của task, không phải "request". Muốn biết request nào chậm vì chờ thì cần off-CPU hoặc tracing (mục 7). Đây là suy luận của người soạn, chưa dẫn nguồn riêng.
 
 ## Tóm tắt
 
-- Đo trước, sửa sau: profiler tìm đoạn "nóng" thay cho trực giác[^pb-hot]; `perf` là công cụ Linux cho việc này[^pb-perf].
-- `perf stat` đếm tổng, `perf record` lấy mẫu vào `perf.data`, `perf report` đọc[^stat-desc][^record-desc][^report-desc].
-- Hardware event do PMU đếm, software event do kernel đếm; bộ đếm phần cứng có hạn nên quá nhiều event gây multiplexing và chỉ nhận số ước lượng[^peo-mux].
-- `perf_event_open` cấp một fd cho mỗi event: `read` để đếm, `mmap` để nhận mẫu[^peo-flavors]; glibc không có wrapper[^peo-nowrap].
-- Lấy mẫu theo chu kỳ (`-c`) hoặc tần số (`-F`)[^rec-count][^rec-freq]; skid làm địa chỉ ghi được có thể lệch vài lệnh[^peo-skid].
-- Callchain: `fp` (mặc định, cần frame pointer)[^rec-cg-default], `dwarf` (chép stack), `lbr` (Intel)[^rec-cg-valid]; `Self` là chi phí riêng, `Children` gồm cả con[^rep-self][^rep-children].
-- Tên hàm cần symbol, dòng nguồn cần debuginfo[^rep-srcline]; release mặc định không có debuginfo[^prof-debug]; `strip = "symbols"` có thể làm trace không đọc nổi[^cg-strip-sym]; tên Rust bị mangle[^pb-mangle].
-- Profile on-CPU không thấy thời gian chờ; off-CPU bổ sung phần còn lại[^off-comp]. Flame graph: rộng = hay xuất hiện, trục ngang không phải thời gian[^flame-sum].
-- Quyền: `perf_event_paranoid` (mặc định 2) và `CAP_PERFMON`[^ksys-default][^ksec-perfmon]; seccomp mặc định của Docker chặn `perf_event_open` trừ khi có `CAP_PERFMON`[^dock-block][^moby-perfmon].
+- Đo trước, sửa sau: profiler tìm đoạn "nóng" thay cho trực giác[^pb-hot]. `perf` là công cụ Linux cho việc này[^pb-perf].
+- `perf stat` chạy lệnh và đếm tổng bộ đếm[^stat-desc]. `perf record` lấy mẫu rồi ghi vào `perf.data`[^record-desc]. `perf report` đọc file đó và hiển thị[^report-desc].
+- Hardware event do PMU đếm, software event do kernel đếm. Bộ đếm phần cứng có hạn nên quá nhiều event gây multiplexing và chỉ nhận số ước lượng[^peo-mux].
+- `perf_event_open` cấp một fd cho mỗi event: `read` để đếm, `mmap` để nhận mẫu[^peo-flavors]. glibc không có wrapper cho nó[^peo-nowrap].
+- Lấy mẫu theo chu kỳ bằng `-c`[^rec-count]. Lấy mẫu theo tần số bằng `-F`[^rec-freq]. Skid làm địa chỉ ghi được có thể lệch vài lệnh[^peo-skid].
+- Callchain có ba cách: `fp`, `dwarf` (chép stack) và `lbr` (Intel)[^rec-cg-valid]. `fp` là mặc định và cần frame pointer[^rec-cg-default]. `Self` là chi phí riêng của hàm[^rep-self]. `Children` gồm cả các con[^rep-children].
+- Tên hàm cần symbol, dòng nguồn cần debuginfo[^rep-srcline]. Release mặc định không có debuginfo[^prof-debug]. `strip = "symbols"` có thể làm trace không đọc nổi[^cg-strip-sym]. Tên Rust bị mangle[^pb-mangle].
+- Profile on-CPU không thấy thời gian chờ, và off-CPU bổ sung phần còn lại[^off-comp]. Flame graph có chiều rộng là mức hay xuất hiện, còn trục ngang không phải thời gian[^flame-sum].
+- Quyền dùng perf phụ thuộc `perf_event_paranoid`, mặc định 2[^ksys-default]. `CAP_PERFMON` mở rộng quyền đó[^ksec-perfmon]. Seccomp mặc định của Docker chặn `perf_event_open`[^dock-block]. Container có `CAP_PERFMON` thì được mở lại[^moby-perfmon].
 
 ## Câu hỏi tự kiểm tra
 
@@ -392,20 +529,20 @@ Hai lưu ý (nhận xét của người soạn):
 
 <details><summary>Đáp án</summary>
 
-1. `stat` chạy lệnh và thu thống kê bộ đếm[^stat-desc]; `record` chạy lệnh và ghi profile vào `perf.data` mà không hiển thị[^record-desc]; `report` đọc và hiển thị profile[^report-desc].
-2. Hardware event do CPU/PMU đếm[^perf-desc] (ví dụ `cpu-cycles`, `instructions`, `branch-misses`[^peo-cycles][^peo-instr][^peo-brmiss]); software event do kernel đếm kể cả khi không có hỗ trợ phần cứng[^peo-sw] (ví dụ `context-switches`, `page-faults`[^peo-cs][^peo-pf]).
-3. Khi số event vượt số khe bộ đếm PMU, các event chỉ chạy một phần thời gian; `time_enabled`/`time_running` dùng để ước lượng giá trị cuối[^peo-mux].
-4. Một fd cho một event[^peo-fd]; event đếm lấy bằng `read(2)`, event lấy mẫu ghi vào buffer `mmap(2)`[^peo-flavors].
-5. `-c` đặt chu kỳ mẫu (mỗi N event)[^rec-count]; `-F` đặt tần số, `max` dùng trần sysctl[^rec-freq]; trần mặc định 100000 mẫu/giây; đặt quá cao có thể làm máy nghẽn/treo[^peo-maxrate].
-6. Skid là số lệnh chạy giữa lúc event xảy ra và lúc kernel ghi lại event; `precise_ip` điều khiển mức skid từ 0 (tùy ý) đến 3 (bắt buộc 0)[^peo-skid][^peo-prec].
-7. `fp` cần frame pointer, mặc định cho user space, sai nếu build bỏ frame pointer[^rec-cg-default][^rec-fomit]; `dwarf` chép stack (mặc định 8192 byte) và giải bằng CFI[^rec-dwarf][^rec-cg-valid]; `lbr` dùng thanh ghi nhánh phần cứng, không cần tùy chọn biên dịch nhưng chỉ Intel mới, chỉ call chain user[^rec-lbr].
-8. `Self` là tổng chu kỳ/mẫu của chính hàm đó; `Children` cộng cả hàm con[^rep-self][^rep-children]; tổng `Children` vượt 100% vì mỗi giá trị đã gồm self của các con[^rep-sum].
-9. Không: mặc định `release` là không có debuginfo[^prof-debug]; đặt `debug = "line-tables-only"` trong `[profile.release]`[^pb-debugline] (hoặc profile tùy biến kế thừa `release`[^prof-custom]).
-10. Vì nó bỏ cả phần symbol table còn lại; trên nền tảng dựa vào symbol table để profiling, trace có thể không đọc nổi[^cg-strip-sym]. Đó là tên Rust đã bị mangle[^pb-mangle].
-11. On-CPU là thread đang chạy, off-CPU là đang chờ I/O/khóa/timer…[^off-def]; sampling bằng ngắt timer theo CPU (cách thường gặp) chỉ thấy on-CPU[^off-timer]; off-CPU analysis bổ sung cho phân tích CPU để hiểu 100% thời gian thread[^off-comp]. Tình huống latency cao nhưng CPU thấp (thread chủ yếu chờ) là ví dụ cần nó (suy luận của người soạn).
-12. Trục x là quần thể stack sắp theo bảng chữ cái, không phải thời gian; trục y là độ sâu stack; ô càng rộng càng hay xuất hiện trong các stack[^flame-sum].
-13. Chỉ đo theo process, chỉ event ở user space[^ksec-level2]; `CAP_PERFMON` làm process không đặc quyền được coi như đặc quyền với thao tác perf[^ksec-perfmon].
-14. Seccomp profile mặc định của Docker là allowlist không có `perf_event_open` cho container thường[^dock-block]; JSON ghim `v28.0.0` mở nó khi container có `CAP_PERFMON`[^moby-perfmon], nên `--cap-add PERFMON` là đủ ở tầng seccomp. Cũng có thể chạy `unconfined`[^dock-unconf] nhưng quá rộng (nhận xét của người soạn).
+1. `stat` chạy lệnh và thu thống kê bộ đếm[^stat-desc]. `record` chạy lệnh và ghi profile vào `perf.data` mà không hiển thị gì[^record-desc]. `report` đọc profile đó và hiển thị[^report-desc].
+2. Hardware event do CPU/PMU đếm[^perf-desc]. `cpu-cycles` đếm tổng chu kỳ[^peo-cycles]. `instructions` đếm lệnh đã retire[^peo-instr]. `branch-misses` đếm lệnh nhánh bị đoán sai[^peo-brmiss]. Software event do kernel đếm, kể cả khi không có hỗ trợ phần cứng[^peo-sw]. `context-switches` đếm số lần chuyển context[^peo-cs]. `page-faults` đếm số page fault[^peo-pf].
+3. Khi số event vượt số khe bộ đếm PMU, các event chỉ chạy một phần thời gian. Chương trình dùng `time_enabled`/`time_running` để ước lượng giá trị cuối[^peo-mux].
+4. Một fd cho một event[^peo-fd]. Event đếm lấy bằng `read(2)`, còn event lấy mẫu ghi vào buffer `mmap(2)`[^peo-flavors].
+5. `-c` đặt chu kỳ mẫu, mỗi N event một mẫu[^rec-count]. `-F` đặt tần số, và `max` dùng trần sysctl[^rec-freq]. Trần mặc định là 100000 mẫu/giây, và đặt quá cao có thể làm máy nghẽn hoặc treo[^peo-maxrate].
+6. Skid là số lệnh chạy giữa lúc event xảy ra và lúc kernel ghi lại event[^peo-skid]. `precise_ip` điều khiển mức skid từ 0 (tùy ý) đến 3 (bắt buộc 0)[^peo-prec].
+7. `fp` cần frame pointer, mặc định cho user space, và sai nếu build bỏ frame pointer[^rec-fomit]. `dwarf` chép stack (mặc định 8192 byte) rồi giải bằng CFI[^rec-dwarf]. `lbr` dùng thanh ghi nhánh phần cứng, không cần tùy chọn biên dịch nhưng chỉ có trên Intel mới và chỉ lấy call chain user[^rec-lbr].
+8. `Self` là tổng chu kỳ hoặc mẫu của chính hàm đó[^rep-self]. `Children` cộng cả các hàm con[^rep-children]. Tổng `Children` vượt 100% vì mỗi giá trị đã gồm self của các con[^rep-sum].
+9. Không: mặc định `release` là không có debuginfo[^prof-debug]. Bạn đặt `debug = "line-tables-only"` trong `[profile.release]`[^pb-debugline]. Hoặc dùng profile tùy biến kế thừa `release`[^prof-custom].
+10. Vì nó bỏ cả phần symbol table còn lại, và trên nền tảng dựa vào symbol table để profiling, trace có thể không đọc nổi[^cg-strip-sym]. Còn `_ZN…`/`_R…` là tên Rust đã bị mangle[^pb-mangle].
+11. On-CPU là thread đang chạy, off-CPU là đang chờ I/O, khóa, timer…[^off-def] Sampling bằng ngắt timer theo CPU (cách thường gặp) chỉ thấy on-CPU[^off-timer]. Off-CPU analysis bổ sung cho phân tích CPU để hiểu 100% thời gian thread[^off-comp]. Tình huống latency cao nhưng CPU thấp, tức thread chủ yếu chờ, là ví dụ cần off-CPU (suy luận của người soạn).
+12. Trục x là quần thể stack sắp theo bảng chữ cái, không phải thời gian. Trục y là độ sâu stack. Ô càng rộng thì càng hay xuất hiện trong các stack[^flame-sum].
+13. Ở mức 2, user thường chỉ đo theo process và chỉ event ở user space[^ksec-level2]. `CAP_PERFMON` làm process không đặc quyền được coi như đặc quyền với thao tác perf[^ksec-perfmon].
+14. Seccomp profile mặc định của Docker là allowlist không có `perf_event_open` cho container thường[^dock-block]. JSON ghim `v28.0.0` mở nó khi container có `CAP_PERFMON`[^moby-perfmon], nên `--cap-add PERFMON` là đủ ở tầng seccomp. Cũng có thể chạy `unconfined`[^dock-unconf], nhưng làm vậy quá rộng (nhận xét của người soạn).
 
 </details>
 
