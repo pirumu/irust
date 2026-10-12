@@ -29,6 +29,7 @@ Phase này **dùng khung chương của *Designing Data-Intensive Applications* 
 | [15 — PostgreSQL bên trong](15-postgresql-ben-trong.md) | Không có chương DDIA tương ứng — **case study của người soạn** | Một hệ thống cụ thể (PostgreSQL 16) *thực sự chạy* thế nào: process, bộ nhớ, VACUUM, lock, planner. Dùng lại khái niệm của 03, 05, 07 chứ không dạy lại. |
 | [16 — Redis bên trong](16-redis-ben-trong.md) | Không có chương DDIA tương ứng — **case study của người soạn** | Một hệ thống cụ thể (Redis) *thực sự chạy* thế nào: event loop, cấu trúc dữ liệu, persistence, replication, cluster, lock/cache. Dùng lại khái niệm của 05, 06, 08, 11. |
 | [17 — Redis trong thực chiến](17-redis-patterns.md) | Không có chương DDIA tương ứng — **case study của người soạn** | Ghép primitive của Redis (chương 16) thành pattern cho backend — cache, rate limiter, lock/idempotency, job queue, leaderboard, thống kê, session — và chỉ ra chỗ mỗi pattern hỏng. |
+| [18 — Thuật toán đồng thuận](18-thuat-toan-dong-thuan.md) | Không có chương DDIA tương ứng — **chương chuyên sâu của người soạn** | Đi sâu hơn mục 6–7 của chương 09: vì sao Paxos và Raft an toàn (chứng minh, vết chạy), quorum, Multi-Paxos, snapshot và đổi thành viên, PreVote/CheckQuorum, các họ hàng (VR, Zab, EPaxos, PBFT), hiệu năng và lỗi ngoài đời. |
 
 ## Bản đồ chương
 
@@ -69,6 +70,7 @@ flowchart LR
     C15["15 PostgreSQL bên trong"]
     C16["16 Redis bên trong"]
     C17["17 Redis trong thực chiến"]
+    C18["18 Thuật toán đồng thuận"]
   end
   C01 --> C02
   C02 --> C03
@@ -111,6 +113,8 @@ flowchart LR
   C08 --> C17
   C11 --> C17
   C12 --> C17
+  C09 --> C18
+  C08 --> C18
   P1 --> C15
   P5 --> C15
   P7 --> C16
@@ -146,10 +150,11 @@ flowchart LR
 | [15 — PostgreSQL bên trong: process, bộ nhớ, VACUUM, lock, planner](15-postgresql-ben-trong.md) | Connection = process (postmaster, backend, process nền); vì sao connection đắt và PgBouncer ở ba chế độ; `shared_buffers`, `work_mem`, `maintenance_work_mem`, `effective_cache_size` và double buffering; đường đi của một `UPDATE` tới WAL và checkpoint; VACUUM, autovacuum, XID wraparound và transaction mở lâu; table/row lock, hàng đợi lock, deadlock và migration; đọc `EXPLAIN`/`EXPLAIN ANALYZE`; `pg_stat_activity`, `pg_stat_statements`, `pg_locks`, wait event và các cấu hình hay gây sự cố. |
 | [16 — Redis bên trong: event loop, cấu trúc dữ liệu, persistence, replication, cluster](16-redis-ben-trong.md) | Một thread, event loop `ae`, `io-threads` và lệnh O(N); encoding (SDS, listpack, quicklist, intset, skiplist + dict) và ngưỡng đổi encoding; `maxmemory`, `maxmemory-policy`, LRU/LFU xấp xỉ và expire; RDB (fork + COW) và AOF (`appendfsync`, rewrite); replication bất đồng bộ, PSYNC, backlog, `WAIT`, Sentinel; Redis Cluster và vì sao không strong consistency; `MULTI`/`EXEC`, `WATCH`, Lua/Functions, Pub/Sub và Streams; `SET NX PX`, Redlock, cache-aside, rate limiter. |
 | [17 — Redis trong thực chiến: kết hợp primitive thành pattern](17-redis-patterns.md) | Cache-aside, write-through/behind, negative caching và ba cách chặn stampede; rate limiter (fixed window, sliding window log, token bucket); lock và idempotency key (và vì sao vẫn cần fencing, DB unique); job queue bằng List `BLMOVE` hay Stream consumer group; leaderboard bằng ZSET; counter, HyperLogLog, bitmap; session, feature flag, `CLIENT TRACKING`; pipeline vs `MULTI`/`WATCH`/Lua, thiết kế key, hash tag, TTL và các anti-pattern (`KEYS`, big key, hot key). |
+| [18 — Thuật toán đồng thuận: chứng minh, biến thể và vận hành](18-thuat-toan-dong-thuan.md) | Đặc tả bài toán, mô hình lỗi, vì sao 2f+1 và 3f+1, Flexible Paxos; chứng minh an toàn của Paxos đơn quyết định và vết chạy tranh chấp; Multi-Paxos và bài học của Paxos Made Live; Leader Completeness và Hình 8 của Raft từng bước; snapshot, đổi thành viên, chuyển giao leader; PreVote, CheckQuorum, ReadIndex và lease read; Viewstamped Replication, Zab, EPaxos, PBFT; cái giá của một commit, batching, pipelining, cụm nhiều vùng; lỗi đã được tìm ra (Jepsen) và cách kiểm thử; các nút cấu hình tương ứng trong crate Rust. |
 
 ## Thứ tự đọc
 
-Đọc 01 → 17 theo số là ổn: thứ tự này đi theo khung chương của DDIA, và mỗi chương nhắc ở mục "Kiến thức cần trước" những chương đứng trước nó. Gợi ý của người soạn:
+Đọc 01 → 18 theo số là ổn: thứ tự này đi theo khung chương của DDIA, và mỗi chương nhắc ở mục "Kiến thức cần trước" những chương đứng trước nó. Gợi ý của người soạn:
 
 - 01 là cổng vào của cả phase (fault, percentile, tail latency xuất hiện lại ở 05, 08, 11). 02 → 03 đi cùng nhau; 04 đọc sau 02 là đủ.
 - 05 → 06 là cặp (sao chép rồi chia dữ liệu); 07 chỉ xét transaction trên **một** node, nên có thể đọc ngay sau 03.
@@ -157,6 +162,7 @@ flowchart LR
 - 10 → 11 → 12 đọc liền một mạch; 12 dùng lại log, offset và CDC của 11 mà không giải thích lại.
 - 13 và 14 là phần mở rộng. 13 đọc lướt được sau 03 và 07; 14 dùng lại MVCC (07), replica (05), log bất biến (11), dữ liệu dẫn xuất (12) và warehouse (13) làm chỗ dữ liệu nằm.
 - 15, 16 và 17 là **case study**, không có chương DDIA tương ứng: mỗi chương mở một hệ thống cụ thể ra xem. 15 đọc sau 03, 05 và 07 (WAL, MVCC, isolation, replication đã nói ở đó; 15 chỉ nói cách PostgreSQL hiện thực). 16 đọc sau 05, 06 và 08 (replication, partitioning, lease/fencing), nên đọc thêm 11 khi tới Streams. 17 đọc ngay sau 16 (ghép primitive của 16 thành pattern; cần thêm 07, 08, 11, 12 khi tới lock, idempotency và queue). 15 độc lập với 16 và 17, đọc theo hệ thống bạn đang vận hành; nếu dùng Redis làm cache phía trước PostgreSQL thì đọc 15 trước, rồi mục 8 của 16 (cache-aside, stampede, stale).
+- 18 là chương **chuyên sâu** về consensus, đọc ngay sau 09 khi bạn cần vận hành hoặc chọn một hệ dùng Raft/Paxos (như etcd ở chương 09). Chương giả định đã đọc mục 6–8 của 09 và không giảng lại.
 - Nếu chỉ có thời gian cho vài chương, [roadmap](../00-roadmap.md) mục 5 chọn 05, 07, 08 và 09; chương 12 là ứng viên kế tiếp (cần thêm 11).
 
 ## Nguồn gốc và lộ trình đọc
@@ -208,8 +214,8 @@ Các nguồn dưới đây đều là nguồn mà chương của phase đã dùn
 - [Herlihy và Wing — Linearizability (1990)](https://cs.brown.edu/~mph/HerlihyW90/p463-herlihy.pdf) — chương 09.
 - [Gilbert và Lynch — Brewer's Conjecture (2002)](https://www.comp.nus.edu.sg/~gilbert/pubs/BrewersConjecture-SigAct.pdf) — chương 09.
 - [Fischer, Lynch, Paterson — Impossibility of Distributed Consensus with One Faulty Process](https://groups.csail.mit.edu/tds/papers/Lynch/jacm85.pdf) — chương 09.
-- [Lamport — Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf) — chương 09.
-- [Ongaro và Ousterhout — In Search of an Understandable Consensus Algorithm (Raft)](https://raft.github.io/raft.pdf) — chương 09.
+- [Lamport — Paxos Made Simple](https://lamport.azurewebsites.net/pubs/paxos-simple.pdf) — chương 09, 18.
+- [Ongaro và Ousterhout — In Search of an Understandable Consensus Algorithm (Raft)](https://raft.github.io/raft.pdf) — chương 09, 18.
 - [Hunt và cộng sự — ZooKeeper (USENIX ATC 2010)](https://www.usenix.org/legacy/event/atc10/tech/full_papers/Hunt.pdf) — chương 09.
 - [etcd v3.5 — API guarantees](https://etcd.io/docs/v3.5/learning/api_guarantees/) — chương 09.
 

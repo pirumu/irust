@@ -155,6 +155,7 @@
   - [15. PostgreSQL bên trong: process, bộ nhớ, VACUUM, lock, planner](12-he-thong-du-lieu/15-postgresql-ben-trong.md)
   - [16. Redis bên trong: event loop, cấu trúc dữ liệu, persistence, replication, cluster](12-he-thong-du-lieu/16-redis-ben-trong.md)
   - [17. Redis trong thực chiến: kết hợp primitive thành pattern](12-he-thong-du-lieu/17-redis-patterns.md)
+  - [18. Thuật toán đồng thuận: chứng minh, biến thể và vận hành](12-he-thong-du-lieu/18-thuat-toan-dong-thuan.md)
 
 # P13 — Đặc tả hình thức với TLA+
 

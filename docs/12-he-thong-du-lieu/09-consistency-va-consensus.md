@@ -595,6 +595,7 @@ Không. `Instant` chỉ có nghĩa trên một máy[^rust-instant][^cam-mono-not
 
 ## Đọc thêm
 
+- [Chương 18 — Thuật toán đồng thuận](18-thuat-toan-dong-thuan.md): phần tiếp theo của mục 6–8, gồm chứng minh an toàn của Paxos và Raft, snapshot, đổi thành viên, PreVote/CheckQuorum, VR/Zab/EPaxos/PBFT, hiệu năng và lỗi ngoài đời.
 - Kleppmann, *Distributed Systems* (Cambridge, 2021–22), §3–§7 <https://www.cl.cam.ac.uk/teaching/2122/ConcDisSys/dist-sys-notes.pdf>: đọc §3.3 (happens-before), §4 (broadcast, Lamport/vector clock), §6 (consensus, Raft), §7 (2PC, linearizability, CAP) cùng các bài tập; nguồn chính của chương.
 - Herlihy & Wing, *Linearizability: A Correctness Condition for Concurrent Objects* <https://cs.brown.edu/~mph/HerlihyW90/p463-herlihy.pdf>: định nghĩa hình thức, locality, so sánh với serializability (§3.3).
 - Gilbert & Lynch, *Brewer's Conjecture and the Feasibility of Consistent, Available, Partition-Tolerant Web Services* <https://www.comp.nus.edu.sg/~gilbert/pubs/BrewersConjecture-SigAct.pdf>: các định nghĩa chính xác và chứng minh; đọc cùng Kleppmann, *A Critique of the CAP Theorem* <https://arxiv.org/pdf/1509.05393> để thấy giới hạn.

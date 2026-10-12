@@ -2,7 +2,7 @@
 
 Giáo trình tự học bằng tiếng Việt về những gì nằm bên dưới một service Rust: kernel và system call, CPU, bộ nhớ, concurrency, lưu trữ, networking, async I/O, container, ngôn ngữ và trình biên dịch Rust, đo đạc và gỡ lỗi, hệ thống dữ liệu, và đặc tả hình thức với TLA+.
 
-Giáo trình gồm **13 phase, 115 chương lý thuyết và 15 bài lab** có code chạy được. Mọi khẳng định sự thật đều có chú thích kèm câu trích nguyên văn từ nguồn, và có script tự động kiểm tra lại các câu trích đó.
+Giáo trình gồm **13 phase, 116 chương lý thuyết và 15 bài lab** có code chạy được. Mọi khẳng định sự thật đều có chú thích kèm câu trích nguyên văn từ nguồn, và có script tự động kiểm tra lại các câu trích đó.
 
 **Đọc online:** <https://pirumu.github.io/irust/>
 
@@ -36,7 +36,7 @@ Giáo trình không giả định bạn đã học hệ điều hành hay mạng
 | [P9](docs/09-rust-language/00-tong-quan.md) | Ngôn ngữ Rust: ownership, trait, generics, smart pointer, lỗi, closure, macro, Cargo | [Lab P9](docs/labs/09-rust-language-lab.md) (`lab-language`) |
 | [P10](docs/10-rust-internals/00-tong-quan.md) | Rust internals: pipeline rustc, layout, vtable, monomorphization, borrow checker, unsafe/UB, FFI | [Lab P10](docs/labs/10-rust-internals-lab.md) (`lab-internals`) |
 | [P11](docs/11-do-dac-va-go-loi/00-tong-quan.md) | Đo đạc và gỡ lỗi: perf, eBPF, hiệu năng service, debugger/DWARF, core dump, ELF/linker/loader | [Lab P11](docs/labs/11-do-dac-va-go-loi-lab.md) (`lab-observability`) |
-| [P12](docs/12-he-thong-du-lieu/00-tong-quan.md) | Hệ thống dữ liệu: storage engine, encoding, replication, partitioning, transaction, consensus, stream; case study PostgreSQL và Redis | [P12a](docs/labs/12a-du-lieu-mot-node-lab.md) (`lab-data`), [P12b](docs/labs/12b-du-lieu-phan-tan-lab.md) (`lab-distributed`) |
+| [P12](docs/12-he-thong-du-lieu/00-tong-quan.md) | Hệ thống dữ liệu: storage engine, encoding, replication, partitioning, transaction, consensus, stream; case study PostgreSQL và Redis; chương chuyên sâu về thuật toán đồng thuận | [P12a](docs/labs/12a-du-lieu-mot-node-lab.md) (`lab-data`), [P12b](docs/labs/12b-du-lieu-phan-tan-lab.md) (`lab-distributed`) |
 | [P13](docs/13-tla-plus/00-tong-quan.md) | TLA+: state/action, invariant và TLC, liveness, PlusCal, refinement, 2PC/Paxos/Raft, từ spec đến code Rust | [Lab P13](docs/labs/13-tla-plus-lab.md) (`lab-tla`) |
 | — | [Capstone](docs/labs/capstone.md): HTTP server trên epoll, rồi tự viết mini async runtime | `lab-capstone` |
 

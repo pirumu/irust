@@ -64,7 +64,7 @@ Mũi tên là thứ tự học do người soạn đề xuất, không phải r�
 
 ## 4. Mười ba phase
 
-Mỗi phase có một trang tổng quan `00-tong-quan.md` (mục tiêu, bản đồ chương, thứ tự đọc, sách gốc, câu hỏi tổng hợp) và 6–17 chương. Cột "Thời lượng" là gợi ý của người soạn cho 8–10 giờ/tuần.
+Mỗi phase có một trang tổng quan `00-tong-quan.md` (mục tiêu, bản đồ chương, thứ tự đọc, sách gốc, câu hỏi tổng hợp) và 6–18 chương. Cột "Thời lượng" là gợi ý của người soạn cho 8–10 giờ/tuần.
 
 | Phase | Thời lượng (gợi ý) | Chủ đề | Tổng quan | Lab (làm sau) |
 |---|---|---|---|---|
@@ -79,7 +79,7 @@ Mỗi phase có một trang tổng quan `00-tong-quan.md` (mục tiêu, bản đ
 | P9 | 3 tuần | Ownership/lifetime, trait, generics, smart pointer, lỗi, iterator/closure, macro, Cargo | [09-rust-language](09-rust-language/00-tong-quan.md) | [09-rust-language-lab](labs/09-rust-language-lab.md) |
 | P10 | 3 tuần | Pipeline rustc, layout, vtable, monomorphization, variance/dropck, borrowck, unsafe/Miri, panic/FFI, collection của std | [10-rust-internals](10-rust-internals/00-tong-quan.md) | [10-rust-internals-lab](labs/10-rust-internals-lab.md) |
 | P11 | 3 tuần | `perf`/flame graph, eBPF/ftrace/uprobe, đo và cải thiện hiệu năng service Rust, debugger và DWARF, core dump/backtrace, ELF/linker/loader | [11-do-dac-va-go-loi](11-do-dac-va-go-loi/00-tong-quan.md) | — |
-| P12 | 6 tuần | Độ tin cậy và hiệu năng của hệ thống dữ liệu, mô hình dữ liệu, storage engine, encoding, replication, partitioning, transaction/isolation, sự cố hệ phân tán, consistency/consensus, batch và stream, đúng đắn và tích hợp dữ liệu, kiến trúc hệ dữ liệu, trách nhiệm với dữ liệu, rồi hai case study: PostgreSQL bên trong (process, VACUUM, lock, planner) Redis bên trong (event loop, persistence, replication, cluster) và Redis trong thực chiến (pattern cache, rate limiter, lock, queue) | [12-he-thong-du-lieu](12-he-thong-du-lieu/00-tong-quan.md) | — |
+| P12 | 6 tuần | Độ tin cậy và hiệu năng của hệ thống dữ liệu, mô hình dữ liệu, storage engine, encoding, replication, partitioning, transaction/isolation, sự cố hệ phân tán, consistency/consensus, batch và stream, đúng đắn và tích hợp dữ liệu, kiến trúc hệ dữ liệu, trách nhiệm với dữ liệu, ba case study: PostgreSQL bên trong (process, VACUUM, lock, planner), Redis bên trong (event loop, persistence, replication, cluster) và Redis trong thực chiến (pattern cache, rate limiter, lock, queue), rồi chương chuyên sâu về thuật toán đồng thuận (Paxos, Raft, VR, Zab, EPaxos, PBFT) | [12-he-thong-du-lieu](12-he-thong-du-lieu/00-tong-quan.md) | — |
 | P13 | 4 tuần | Vì sao đặc tả hình thức; toán nền tảng; state, behavior, action; invariant và model checker TLC; liveness và fairness; PlusCal; refinement; đặc tả 2PC, Paxos, Raft; mô hình hóa lock có lease, hàng đợi, cache-aside, outbox, retry; nối spec với code Rust (trace validation, Stateright, loom, shuttle, proptest) | [13-tla-plus](13-tla-plus/00-tong-quan.md) | — |
 | Capstone | sau lý thuyết | HTTP server trên epoll, rồi mini async runtime | — | [capstone](labs/capstone.md) |
 
