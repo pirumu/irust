@@ -1268,7 +1268,13 @@ Backoff tăng gấp đôi tới khi chạm cap 5 giây và `attempt = 40` không
 
 ## Bài tập
 
-**Bài 1 (Dễ).** Service time $S$ của một replica `kvmeta` có phân phối mũ với trung bình 20 ms. (a) Tính $\Pr[S > 50 \text{ ms}]$ và median của $S$. (b) Một request đã chạy 30 ms mà chưa xong; xác suất nó cần thêm ít nhất 50 ms nữa là bao nhiêu? (c) Client gửi cùng request tới hai replica độc lập, cùng phân phối, và dùng kết quả về trước (hedged request[^tail-hedge]). Tính trung bình và $\Pr[\text{chờ} > 50 \text{ ms}]$.
+**Bài 1 (Dễ).** Service time $S$ của một replica `kvmeta` có phân phối mũ với trung bình 20 ms.
+
+(a) Tính $\Pr[S > 50 \text{ ms}]$ và median của $S$.
+
+(b) Một request đã chạy 30 ms mà chưa xong; xác suất nó cần thêm ít nhất 50 ms nữa là bao nhiêu?
+
+(c) Client gửi cùng request tới hai replica độc lập, cùng phân phối, và dùng kết quả về trước (hedged request[^tail-hedge]). Tính trung bình và $\Pr[\text{chờ} > 50 \text{ ms}]$.
 
 <details><summary>Gợi ý</summary>
 
@@ -1278,19 +1284,41 @@ Backoff tăng gấp đôi tới khi chạm cap 5 giây và `attempt = 40` không
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) $\Pr[S > 50] = e^{-50/20} = e^{-2{,}5} \approx 0{,}0821$ và median là $20 \ln 2 \approx 13{,}86$ ms (mục 1.2). (b) Theo Định lý 1.2, phần còn lại của $S$ sau khi đã chạy 30 ms lại là $\mathrm{Exp}(\mu)$, nên xác suất cần thêm ít nhất 50 ms là $e^{-2{,}5} \approx 0{,}0821$, đúng bằng (a): 30 ms đã qua không ảnh hưởng. (c) Thời gian chờ là $\min(S_1, S_2) \sim \mathrm{Exp}(2\mu)$ (Định lý 1.3), trung bình $1/(2\mu) = 10$ ms (một nửa) và $\Pr[> 50] = e^{-2\mu \cdot 50} = e^{-5} \approx 0{,}0067$, tức 0,67% so với 8,2%, giảm khoảng 12 lần. Cái giá là tải gấp đôi vì mỗi request chạy hai lần; nguồn nói phiên bản ngây thơ của kỹ thuật này thường thêm tải không chấp nhận được và chỉ các biến thể hoãn bản thứ hai mới giữ tải ở mức vừa phải[^tail-hedge-load]. Giả thiết độc lập cũng mạnh: nếu hai replica cùng chậm vì cùng nguyên nhân thì lợi ích nhỏ hơn nhiều.
+(lời giải của người soạn) (a) $\Pr[S > 50] = e^{-50/20} = e^{-2{,}5} \approx 0{,}0821$ và median là $20 \ln 2 \approx 13{,}86$ ms (mục 1.2).
+
+(b) Theo Định lý 1.2, phần còn lại của $S$ sau khi đã chạy 30 ms lại là $\mathrm{Exp}(\mu)$, nên xác suất cần thêm ít nhất 50 ms là $e^{-2{,}5} \approx 0{,}0821$, đúng bằng (a): 30 ms đã qua không ảnh hưởng.
+
+(c) Thời gian chờ là $\min(S_1, S_2) \sim \mathrm{Exp}(2\mu)$ (Định lý 1.3), trung bình $1/(2\mu) = 10$ ms (một nửa) và $\Pr[> 50] = e^{-2\mu \cdot 50} = e^{-5} \approx 0{,}0067$, tức 0,67% so với 8,2%, giảm khoảng 12 lần. Cái giá là tải gấp đôi vì mỗi request chạy hai lần; nguồn nói phiên bản ngây thơ của kỹ thuật này thường thêm tải không chấp nhận được và chỉ các biến thể hoãn bản thứ hai mới giữ tải ở mức vừa phải[^tail-hedge-load]. Giả thiết độc lập cũng mạnh: nếu hai replica cùng chậm vì cùng nguyên nhân thì lợi ích nhỏ hơn nhiều.
 
 </details>
 
-**Bài 2 (Dễ).** Ba service A, B, C gọi một shard theo ba quá trình Poisson độc lập có tốc độ 50, 30 và 20 request mỗi giây. (a) Request kế tiếp của shard là của B với xác suất bao nhiêu, và thời gian chờ tới request kế tiếp có phân phối nào? (b) Số request trong 2 giây có trung bình, phương sai bao nhiêu, và xác suất không có request nào trong 10 ms? (c) Mỗi request độc lập có xác suất 2% là lỗi xung đột ghi. Trung bình bao nhiêu request lỗi mỗi phút, xác suất không có lỗi nào trong 1 giây, và biết 1 giây vừa rồi có đúng 3 request lỗi thì điều đó nói gì về số request thành công trong giây đó?
+**Bài 2 (Dễ).** Ba service A, B, C gọi một shard theo ba quá trình Poisson độc lập có tốc độ 50, 30 và 20 request mỗi giây.
+
+(a) Request kế tiếp của shard là của B với xác suất bao nhiêu, và thời gian chờ tới request kế tiếp có phân phối nào?
+
+(b) Số request trong 2 giây có trung bình, phương sai bao nhiêu, và xác suất không có request nào trong 10 ms?
+
+(c) Mỗi request độc lập có xác suất 2% là lỗi xung đột ghi. Trung bình bao nhiêu request lỗi mỗi phút, xác suất không có lỗi nào trong 1 giây, và biết 1 giây vừa rồi có đúng 3 request lỗi thì điều đó nói gì về số request thành công trong giây đó?
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) Gộp ba dòng cho dòng Poisson tốc độ 100 mỗi giây (Định lý 2.3), nên thời gian chờ là $\mathrm{Exp}(100)$ với trung bình 10 ms. Request kế tiếp thuộc dòng $i$ với xác suất tỉ lệ với tốc độ (Định lý 1.3), nên của B với xác suất $30/100 = 0{,}3$. (b) $N(2) \sim \mathrm{Poisson}(200)$ có trung bình và phương sai cùng bằng 200 (độ lệch chuẩn khoảng 14,1); xác suất không có request nào trong 10 ms là $e^{-100 \cdot 0{,}01} = e^{-1} \approx 0{,}368$. (c) Chia dòng (Định lý 2.4): các request lỗi là dòng Poisson tốc độ $0{,}02 \cdot 100 = 2$ mỗi giây, tức 120 mỗi phút; xác suất không có lỗi nào trong 1 giây là $e^{-2} \approx 0{,}135$. Dòng lỗi độc lập với dòng thành công (Poisson tốc độ 98), nên biết có 3 lỗi không cho biết gì về số request thành công: nó vẫn là $\mathrm{Poisson}(98)$ với trung bình 98[^ar-split].
+(lời giải của người soạn) (a) Gộp ba dòng cho dòng Poisson tốc độ 100 mỗi giây (Định lý 2.3), nên thời gian chờ là $\mathrm{Exp}(100)$ với trung bình 10 ms. Request kế tiếp thuộc dòng $i$ với xác suất tỉ lệ với tốc độ (Định lý 1.3), nên của B với xác suất $30/100 = 0{,}3$.
+
+(b) $N(2) \sim \mathrm{Poisson}(200)$ có trung bình và phương sai cùng bằng 200 (độ lệch chuẩn khoảng 14,1); xác suất không có request nào trong 10 ms là $e^{-100 \cdot 0{,}01} = e^{-1} \approx 0{,}368$.
+
+(c) Chia dòng (Định lý 2.4): các request lỗi là dòng Poisson tốc độ $0{,}02 \cdot 100 = 2$ mỗi giây, tức 120 mỗi phút; xác suất không có lỗi nào trong 1 giây là $e^{-2} \approx 0{,}135$. Dòng lỗi độc lập với dòng thành công (Poisson tốc độ 98), nên biết có 3 lỗi không cho biết gì về số request thành công: nó vẫn là $\mathrm{Poisson}(98)$ với trung bình 98[^ar-split].
 
 </details>
 
-**Bài 3 (Dễ).** Circuit breaker của client có ba trạng thái và mỗi giây một bước. Từ `Closed`: ở lại với xác suất 0,98, sang `Open` với 0,02. Từ `Open`: ở lại 0,75, sang `HalfOpen` 0,25. Từ `HalfOpen`: về `Closed` 0,8, sang `Open` 0,2. (a) Chuỗi có bất khả quy và không tuần hoàn không? (b) Tìm phân phối dừng. (c) Nếu bây giờ `Closed`, xác suất `Open` sau 2 giây? (d) Mỗi lần mở, breaker ở `Open` trung bình bao nhiêu giây?
+**Bài 3 (Dễ).** Circuit breaker của client có ba trạng thái và mỗi giây một bước. Từ `Closed`: ở lại với xác suất 0,98, sang `Open` với 0,02. Từ `Open`: ở lại 0,75, sang `HalfOpen` 0,25. Từ `HalfOpen`: về `Closed` 0,8, sang `Open` 0,2.
+
+(a) Chuỗi có bất khả quy và không tuần hoàn không?
+
+(b) Tìm phân phối dừng.
+
+(c) Nếu bây giờ `Closed`, xác suất `Open` sau 2 giây?
+
+(d) Mỗi lần mở, breaker ở `Open` trung bình bao nhiêu giây?
 
 <details><summary>Gợi ý</summary>
 
@@ -1300,7 +1328,13 @@ Viết $\pi = \pi P$ cho từng trạng thái; chỉ cần hai phương trình �
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) Có vòng $\mathrm{Closed} \to \mathrm{Open} \to \mathrm{HalfOpen} \to \mathrm{Closed}$ đi qua cả ba trạng thái (xác suất $0{,}02$, $0{,}25$, $0{,}8$ đều dương), nên chuỗi bất khả quy. `Closed` có vòng tự quay về với xác suất $0{,}98$ nên chu kỳ bằng 1, và chu kỳ chung cho cả chuỗi bất khả quy[^lpw-lemma16]: không tuần hoàn. (b) Phương trình cho `Closed`: $\pi_C = 0{,}98\pi_C + 0{,}8\pi_H$, nên $0{,}02\pi_C = 0{,}8\pi_H$ và $\pi_H = 0{,}025\pi_C$. Phương trình cho `HalfOpen`: $\pi_H = 0{,}25\pi_O$, nên $\pi_O = 4\pi_H = 0{,}1\pi_C$. Kiểm phương trình cho `Open`: $\pi_O = 0{,}02\pi_C + 0{,}75\pi_O + 0{,}2\pi_H$ cho $0{,}25\pi_O = 0{,}02\pi_C + 0{,}005\pi_C = 0{,}025\pi_C$, tức $\pi_O = 0{,}1\pi_C$, khớp. Chuẩn hóa: $\pi_C(1 + 0{,}1 + 0{,}025) = 1$, vậy $\pi = (8/9,\ 4/45,\ 1/45) \approx (0{,}889;\ 0{,}089;\ 0{,}022)$: breaker chặn request 8,9% số giây. (c) $\Pr[X_2 = \mathrm{Open}] = 0{,}98 \cdot 0{,}02 + 0{,}02 \cdot 0{,}75 + 0 \cdot 0{,}2 = 0{,}0196 + 0{,}015 = 0{,}0346$ (đi qua $C$, $O$ hoặc $H$ ở bước giữa). (d) Mỗi lần ở lại `Open` là biến hình học với xác suất rời mỗi giây $0{,}25$, nên trung bình $1/0{,}25 = 4$ giây[^mcs-mttf].
+(lời giải của người soạn) (a) Có vòng $\mathrm{Closed} \to \mathrm{Open} \to \mathrm{HalfOpen} \to \mathrm{Closed}$ đi qua cả ba trạng thái (xác suất $0{,}02$, $0{,}25$, $0{,}8$ đều dương), nên chuỗi bất khả quy. `Closed` có vòng tự quay về với xác suất $0{,}98$ nên chu kỳ bằng 1, và chu kỳ chung cho cả chuỗi bất khả quy[^lpw-lemma16]: không tuần hoàn.
+
+(b) Phương trình cho `Closed`: $\pi_C = 0{,}98\pi_C + 0{,}8\pi_H$, nên $0{,}02\pi_C = 0{,}8\pi_H$ và $\pi_H = 0{,}025\pi_C$. Phương trình cho `HalfOpen`: $\pi_H = 0{,}25\pi_O$, nên $\pi_O = 4\pi_H = 0{,}1\pi_C$. Kiểm phương trình cho `Open`: $\pi_O = 0{,}02\pi_C + 0{,}75\pi_O + 0{,}2\pi_H$ cho $0{,}25\pi_O = 0{,}02\pi_C + 0{,}005\pi_C = 0{,}025\pi_C$, tức $\pi_O = 0{,}1\pi_C$, khớp. Chuẩn hóa: $\pi_C(1 + 0{,}1 + 0{,}025) = 1$, vậy $\pi = (8/9,\ 4/45,\ 1/45) \approx (0{,}889;\ 0{,}089;\ 0{,}022)$: breaker chặn request 8,9% số giây.
+
+(c) $\Pr[X_2 = \mathrm{Open}] = 0{,}98 \cdot 0{,}02 + 0{,}02 \cdot 0{,}75 + 0 \cdot 0{,}2 = 0{,}0196 + 0{,}015 = 0{,}0346$ (đi qua $C$, $O$ hoặc $H$ ở bước giữa).
+
+(d) Mỗi lần ở lại `Open` là biến hình học với xác suất rời mỗi giây $0{,}25$, nên trung bình $1/0{,}25 = 4$ giây[^mcs-mttf].
 
 </details>
 
@@ -1330,7 +1364,13 @@ Với thời gian rời rạc, cùng lập luận cho phân phối hình học l
 
 </details>
 
-**Bài 5 (Vừa).** Một lệnh multi-get của `kvmeta` gửi tới $n = 100$ shard song song; latency mỗi shard là $\mathrm{Exp}(\mu)$ độc lập với trung bình 10 ms, và lệnh xong khi *mọi* shard đã trả lời: $L = \max(S_1, \dots, S_n)$. (a) Chứng minh $E[L] = H_n/\mu$ và $\mathrm{Var}[L] = \frac{1}{\mu^2} \sum_{j=1}^{n} \frac{1}{j^2}$. (b) Tính cho $n = 100$. (c) Tìm median và phân vị thứ 99 của $L$ và so với một shard đơn.
+**Bài 5 (Vừa).** Một lệnh multi-get của `kvmeta` gửi tới $n = 100$ shard song song; latency mỗi shard là $\mathrm{Exp}(\mu)$ độc lập với trung bình 10 ms, và lệnh xong khi *mọi* shard đã trả lời: $L = \max(S_1, \dots, S_n)$.
+
+(a) Chứng minh $E[L] = H_n/\mu$ và $\mathrm{Var}[L] = \frac{1}{\mu^2} \sum_{j=1}^{n} \frac{1}{j^2}$.
+
+(b) Tính cho $n = 100$.
+
+(c) Tìm median và phân vị thứ 99 của $L$ và so với một shard đơn.
 
 <details><summary>Gợi ý</summary>
 
@@ -1340,11 +1380,25 @@ Sắp thứ tự $S_{(1)} \le \dots \le S_{(n)}$. Min của $n$ biến là $\mat
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) Đặt $S_{(0)} = 0$ và $E_k = S_{(k)} - S_{(k-1)}$. Khẳng định: $E_1, \dots, E_n$ độc lập và $E_k \sim \mathrm{Exp}((n - k + 1)\mu)$. Thật vậy, $E_1 = \min_j S_j \sim \mathrm{Exp}(n\mu)$ và shard nào về nhất độc lập với thời điểm đó (Định lý 1.3). Điều kiện hóa theo $S_{(1)} = t$ và theo shard về nhất: mỗi shard còn lại có $S_j > t$, nên theo Định lý 1.2 phần còn lại $S_j - t$ độc lập và cùng $\mathrm{Exp}(\mu)$, độc lập với $t$. Vậy $n - 1$ shard còn lại là $n - 1$ đồng hồ $\mathrm{Exp}(\mu)$ mới, và $E_2$ là min của chúng, $\mathrm{Exp}((n-1)\mu)$ độc lập với $E_1$; quy nạp cho phần còn lại. Do $L = S_{(n)} = \sum_{k=1}^n E_k$, ta có $E[L] = \sum_{k=1}^n \frac{1}{(n-k+1)\mu} = H_n/\mu$ và, vì phương sai của tổng biến độc lập là tổng phương sai (mục 1.2), $\mathrm{Var}[L] = \sum_k \frac{1}{(n-k+1)^2\mu^2} = \frac{1}{\mu^2}\sum_{j=1}^n \frac1{j^2}$. (b) $H_{100} \approx 5{,}187$ và $\sum_{j \le 100} 1/j^2 \approx 1{,}635$ nên $E[L] \approx 51{,}9$ ms (gấp 5,19 lần một shard) và độ lệch chuẩn $\approx 12{,}8$ ms. (c) $\Pr[L \le x] = (1 - e^{-\mu x})^n$. Median: $(1 - e^{-x/10})^{100} = 1/2$ cho $x \approx 49{,}75$ ms, đúng phân vị thứ $99{,}3$ của một shard đơn. Phân vị thứ 99: $(1 - e^{-x/10})^{100} = 0{,}99$ cho $x \approx 92{,}05$ ms, gấp đôi p99 của một shard đơn ($10 \ln 100 \approx 46{,}05$ ms). Cùng hiện tượng với nguồn nói về fan-out: nếu một request phải thu phản hồi từ 100 server song song mà mỗi server chậm quá 1 giây với xác suất 1% thì 63% request sẽ mất hơn 1 giây[^tail-fanout]; con số 63% là $1 - 0{,}99^{100}$.
+(lời giải của người soạn) (a) Đặt $S_{(0)} = 0$ và $E_k = S_{(k)} - S_{(k-1)}$. Khẳng định: $E_1, \dots, E_n$ độc lập và $E_k \sim \mathrm{Exp}((n - k + 1)\mu)$. Thật vậy, $E_1 = \min_j S_j \sim \mathrm{Exp}(n\mu)$ và shard nào về nhất độc lập với thời điểm đó (Định lý 1.3). Điều kiện hóa theo $S_{(1)} = t$ và theo shard về nhất: mỗi shard còn lại có $S_j > t$, nên theo Định lý 1.2 phần còn lại $S_j - t$ độc lập và cùng $\mathrm{Exp}(\mu)$, độc lập với $t$. Vậy $n - 1$ shard còn lại là $n - 1$ đồng hồ $\mathrm{Exp}(\mu)$ mới, và $E_2$ là min của chúng, $\mathrm{Exp}((n-1)\mu)$ độc lập với $E_1$; quy nạp cho phần còn lại. Do $L = S_{(n)} = \sum_{k=1}^n E_k$, ta có $E[L] = \sum_{k=1}^n \frac{1}{(n-k+1)\mu} = H_n/\mu$ và, vì phương sai của tổng biến độc lập là tổng phương sai (mục 1.2), $\mathrm{Var}[L] = \sum_k \frac{1}{(n-k+1)^2\mu^2} = \frac{1}{\mu^2}\sum_{j=1}^n \frac1{j^2}$.
+
+(b) $H_{100} \approx 5{,}187$ và $\sum_{j \le 100} 1/j^2 \approx 1{,}635$ nên $E[L] \approx 51{,}9$ ms (gấp 5,19 lần một shard) và độ lệch chuẩn $\approx 12{,}8$ ms.
+
+(c) $\Pr[L \le x] = (1 - e^{-\mu x})^n$. Median: $(1 - e^{-x/10})^{100} = 1/2$ cho $x \approx 49{,}75$ ms, đúng phân vị thứ $99{,}3$ của một shard đơn. Phân vị thứ 99: $(1 - e^{-x/10})^{100} = 0{,}99$ cho $x \approx 92{,}05$ ms, gấp đôi p99 của một shard đơn ($10 \ln 100 \approx 46{,}05$ ms). Cùng hiện tượng với nguồn nói về fan-out: nếu một request phải thu phản hồi từ 100 server song song mà mỗi server chậm quá 1 giây với xác suất 1% thì 63% request sẽ mất hơn 1 giây[^tail-fanout]; con số 63% là $1 - 0{,}99^{100}$.
 
 </details>
 
-**Bài 6 (Vừa).** Pool kết nối của một client `kvmeta` có $c = 3$ kết nối và *không có hàng chờ*: request đến khi cả 3 đang bận bị từ chối ngay. Request đến theo Poisson tốc độ $\lambda = 2$ mỗi giây, mỗi request giữ một kết nối trong thời gian mũ với trung bình 1 giây ($\mu = 1$ mỗi giây). (a) Mô hình hóa bằng chuỗi liên tục trên số kết nối bận. (b) Tìm phân phối dừng bằng cân bằng qua lát cắt. (c) Phần request bị từ chối là bao nhiêu? (d) Số kết nối bận trung bình? (e) Cần ít nhất bao nhiêu kết nối để từ chối dưới 1%?
+**Bài 6 (Vừa).** Pool kết nối của một client `kvmeta` có $c = 3$ kết nối và *không có hàng chờ*: request đến khi cả 3 đang bận bị từ chối ngay. Request đến theo Poisson tốc độ $\lambda = 2$ mỗi giây, mỗi request giữ một kết nối trong thời gian mũ với trung bình 1 giây ($\mu = 1$ mỗi giây).
+
+(a) Mô hình hóa bằng chuỗi liên tục trên số kết nối bận.
+
+(b) Tìm phân phối dừng bằng cân bằng qua lát cắt.
+
+(c) Phần request bị từ chối là bao nhiêu?
+
+(d) Số kết nối bận trung bình?
+
+(e) Cần ít nhất bao nhiêu kết nối để từ chối dưới 1%?
 
 <details><summary>Gợi ý</summary>
 
@@ -1354,11 +1408,25 @@ Sắp thứ tự $S_{(1)} \le \dots \le S_{(n)}$. Min của $n$ biến là $\mat
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) Trạng thái $k \in \{0, 1, 2, 3\}$ là số kết nối bận. Lên $k \to k+1$ với tốc độ $\lambda$ khi $k < 3$ (một request đến và được nhận). Xuống $k \to k-1$ với tốc độ $k\mu$: có $k$ đồng hồ giữ kết nối, mỗi cái $\mathrm{Exp}(\mu)$, nên cái kêu đầu tiên có tốc độ $k\mu$ (Định lý 1.3). (b) Lát cắt giữa $\{0, \dots, k-1\}$ và $\{k, \dots, 3\}$ cho $\lambda \pi_{k-1} = k\mu \pi_k$ (mục 5.2), nên $\pi_k = \pi_{k-1} a/k$ với $a = \lambda/\mu = 2$, tức $\pi_k = \pi_0 a^k/k!$. Các trọng số $1, 2, 2, 4/3$ cộng thành $19/3$, vậy $\pi = (3, 6, 6, 4)/19$. (c) Request đến theo Poisson nên theo PASTA[^ar-pasta] phần request đến thấy pool đầy bằng phần thời gian pool đầy: $\pi_3 = 4/19 \approx 0{,}2105$, tức 21,05%. (d) Trung bình $\sum_k k\pi_k = (6 + 12 + 12)/19 = 30/19 \approx 1{,}579$, bằng $a(1 - \pi_3) = 2 \cdot 15/19$: tải chào $a = 2$ trừ phần bị từ chối. (e) Xác suất từ chối $B(c) = \frac{2^c/c!}{\sum_{j \le c} 2^j/j!}$ cho $B(4) = 0{,}0952$, $B(5) = 0{,}0367$, $B(6) = 0{,}0121$ và $B(7) = 0{,}00344$. Cần ít nhất $c = 7$ kết nối (với $c = 6$ vẫn từ chối 1,21%). Đây là công thức Erlang B; nếu request thật đến thành cụm chứ không Poisson thì PASTA không còn đúng và con số thật sẽ khác (nhận xét của người soạn).
+(lời giải của người soạn) (a) Trạng thái $k \in \{0, 1, 2, 3\}$ là số kết nối bận. Lên $k \to k+1$ với tốc độ $\lambda$ khi $k < 3$ (một request đến và được nhận). Xuống $k \to k-1$ với tốc độ $k\mu$: có $k$ đồng hồ giữ kết nối, mỗi cái $\mathrm{Exp}(\mu)$, nên cái kêu đầu tiên có tốc độ $k\mu$ (Định lý 1.3).
+
+(b) Lát cắt giữa $\{0, \dots, k-1\}$ và $\{k, \dots, 3\}$ cho $\lambda \pi_{k-1} = k\mu \pi_k$ (mục 5.2), nên $\pi_k = \pi_{k-1} a/k$ với $a = \lambda/\mu = 2$, tức $\pi_k = \pi_0 a^k/k!$. Các trọng số $1, 2, 2, 4/3$ cộng thành $19/3$, vậy $\pi = (3, 6, 6, 4)/19$.
+
+(c) Request đến theo Poisson nên theo PASTA[^ar-pasta] phần request đến thấy pool đầy bằng phần thời gian pool đầy: $\pi_3 = 4/19 \approx 0{,}2105$, tức 21,05%.
+
+(d) Trung bình $\sum_k k\pi_k = (6 + 12 + 12)/19 = 30/19 \approx 1{,}579$, bằng $a(1 - \pi_3) = 2 \cdot 15/19$: tải chào $a = 2$ trừ phần bị từ chối.
+
+(e) Xác suất từ chối $B(c) = \frac{2^c/c!}{\sum_{j \le c} 2^j/j!}$ cho $B(4) = 0{,}0952$, $B(5) = 0{,}0367$, $B(6) = 0{,}0121$ và $B(7) = 0{,}00344$. Cần ít nhất $c = 7$ kết nối (với $c = 6$ vẫn từ chối 1,21%). Đây là công thức Erlang B; nếu request thật đến thành cụm chứ không Poisson thì PASTA không còn đúng và con số thật sẽ khác (nhận xét của người soạn).
 
 </details>
 
-**Bài 7 (Vừa).** Trong mô hình gossip của mục 7 ($n$ node, đồng hồ Poisson tốc độ $\lambda$, đối tác chọn đều trong $n - 1$ node khác, tin tức thời), xét hai biến thể. *Pull*: mỗi node *chưa* biết tin có đồng hồ tốc độ $\lambda$; khi kêu, nó hỏi một node khác và nhận tin nếu node đó đã biết. *Push–pull*: *mọi* node có đồng hồ tốc độ $\lambda$; khi kêu, node chọn một node khác và hai bên trao đổi, nên cả hai biết tin nếu một trong hai biết. (a) Với $i$ node biết tin, tìm tốc độ $i \to i + 1$ của mỗi biến thể. (b) Suy ra $E[T]$. (c) Tính cho $n = 1000$, $\lambda = 1$ mỗi giây.
+**Bài 7 (Vừa).** Trong mô hình gossip của mục 7 ($n$ node, đồng hồ Poisson tốc độ $\lambda$, đối tác chọn đều trong $n - 1$ node khác, tin tức thời), xét hai biến thể. *Pull*: mỗi node *chưa* biết tin có đồng hồ tốc độ $\lambda$; khi kêu, nó hỏi một node khác và nhận tin nếu node đó đã biết. *Push–pull*: *mọi* node có đồng hồ tốc độ $\lambda$; khi kêu, node chọn một node khác và hai bên trao đổi, nên cả hai biết tin nếu một trong hai biết.
+
+(a) Với $i$ node biết tin, tìm tốc độ $i \to i + 1$ của mỗi biến thể.
+
+(b) Suy ra $E[T]$.
+
+(c) Tính cho $n = 1000$, $\lambda = 1$ mỗi giây.
 
 <details><summary>Gợi ý</summary>
 
@@ -1368,11 +1436,23 @@ Gộp các đồng hồ liên quan (Định lý 2.3), rồi chia theo xác suấ
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) *Pull.* Có $n - i$ node chưa biết tin, đồng hồ của chúng gộp thành dòng Poisson tốc độ $(n - i)\lambda$. Mỗi lần kêu, node hỏi chọn trong $n - 1$ node khác, trong đó có đúng $i$ node đã biết (người hỏi chưa biết nên không nằm trong số đó), nên lần hỏi có ích với xác suất $i/(n - 1)$. Chia dòng cho tốc độ $r_i^{\mathrm{pull}} = \lambda (n - i) i/(n - 1)$, *bằng đúng* tốc độ của push. *Push–pull.* Cả $n$ đồng hồ gộp thành dòng tốc độ $n\lambda$. Một lần kêu có ích khi người kêu biết và đối tác chưa, hoặc ngược lại: xác suất $\frac{i}{n} \cdot \frac{n-i}{n-1} + \frac{n-i}{n} \cdot \frac{i}{n-1} = \frac{2i(n-i)}{n(n-1)}$. Chia dòng cho $r_i^{\mathrm{pp}} = n\lambda \cdot \frac{2i(n-i)}{n(n-1)} = 2\lambda i (n-i)/(n-1)$, gấp đôi push. (b) Cả hai là chuỗi sinh thuần như ở mục 7.2 chỉ khác tốc độ. Pull có cùng $E[T]$ với push: $\frac{2(n-1)}{\lambda n} H_{n-1}$. Push–pull có tốc độ gấp đôi nên mỗi $\mathrm{Exp}(r_i)$ có trung bình giảm một nửa: $E[T] = \frac{(n-1)}{\lambda n} H_{n-1}$ (cùng cách tính tổng $\sum 1/r_i$ như Định lý 7.1). (c) Với $n = 1000$, $\lambda = 1$: push và pull cùng $14{,}954$ giây, push–pull $7{,}477$ giây. Lưu ý (nhận xét của người soạn): trong mô hình đồng hồ Poisson này pull không nhanh hơn push, khác với mô hình vòng đồng bộ của P15 · Chương 07, vì ở giai đoạn cuối node cuối cùng phải chờ đồng hồ riêng của nó kêu; push–pull thắng vì mỗi lần kêu có hai cơ hội lan tin.
+(lời giải của người soạn) (a) *Pull.* Có $n - i$ node chưa biết tin, đồng hồ của chúng gộp thành dòng Poisson tốc độ $(n - i)\lambda$. Mỗi lần kêu, node hỏi chọn trong $n - 1$ node khác, trong đó có đúng $i$ node đã biết (người hỏi chưa biết nên không nằm trong số đó), nên lần hỏi có ích với xác suất $i/(n - 1)$. Chia dòng cho tốc độ $r_i^{\mathrm{pull}} = \lambda (n - i) i/(n - 1)$, *bằng đúng* tốc độ của push. *Push–pull.* Cả $n$ đồng hồ gộp thành dòng tốc độ $n\lambda$. Một lần kêu có ích khi người kêu biết và đối tác chưa, hoặc ngược lại: xác suất $\frac{i}{n} \cdot \frac{n-i}{n-1} + \frac{n-i}{n} \cdot \frac{i}{n-1} = \frac{2i(n-i)}{n(n-1)}$. Chia dòng cho $r_i^{\mathrm{pp}} = n\lambda \cdot \frac{2i(n-i)}{n(n-1)} = 2\lambda i (n-i)/(n-1)$, gấp đôi push.
+
+(b) Cả hai là chuỗi sinh thuần như ở mục 7.2 chỉ khác tốc độ. Pull có cùng $E[T]$ với push: $\frac{2(n-1)}{\lambda n} H_{n-1}$. Push–pull có tốc độ gấp đôi nên mỗi $\mathrm{Exp}(r_i)$ có trung bình giảm một nửa: $E[T] = \frac{(n-1)}{\lambda n} H_{n-1}$ (cùng cách tính tổng $\sum 1/r_i$ như Định lý 7.1).
+
+(c) Với $n = 1000$, $\lambda = 1$: push và pull cùng $14{,}954$ giây, push–pull $7{,}477$ giây. Lưu ý (nhận xét của người soạn): trong mô hình đồng hồ Poisson này pull không nhanh hơn push, khác với mô hình vòng đồng bộ của P15 · Chương 07, vì ở giai đoạn cuối node cuối cùng phải chờ đồng hồ riêng của nó kêu; push–pull thắng vì mỗi lần kêu có hai cơ hội lan tin.
 
 </details>
 
-**Bài 8 (Khó).** Một shard `kvmeta` dùng 5 replica và mất đa số khi có từ 3 replica hỏng trở lên; mỗi replica hỏng với tốc độ $\lambda = 1/720$ mỗi giờ, mỗi replica hỏng được sửa độc lập với tốc độ $\mu = 1$ mỗi giờ. Gọi $k$ là số replica đang hỏng. (a) Gọi $m_k$ là thời gian trung bình để lần đầu tiên chuyển từ $k$ sang $k + 1$ hỏng. Chứng minh $m_0 = 1/(5\lambda)$, $m_k = (1 + k\mu m_{k-1})/((5 - k)\lambda)$ với $k = 1, 2$, và $\mathrm{MTTF} = m_0 + m_1 + m_2$. (b) Tính MTTF và so với 87 000 giờ của nhóm 3 replica. (c) Chứng minh khi $\mu \gg \lambda$ thì $\mathrm{MTTF} \approx \mu^2/(30\lambda^3)$ và tính sai số tương đối. (d) Nếu có thêm nguyên nhân chung với tốc độ $\nu = 1/87660$ mỗi giờ (một lần mỗi 10 năm) làm cả nhóm mất đa số, MTTF tối đa là bao nhiêu và điều đó nói gì về việc thêm replica?
+**Bài 8 (Khó).** Một shard `kvmeta` dùng 5 replica và mất đa số khi có từ 3 replica hỏng trở lên; mỗi replica hỏng với tốc độ $\lambda = 1/720$ mỗi giờ, mỗi replica hỏng được sửa độc lập với tốc độ $\mu = 1$ mỗi giờ. Gọi $k$ là số replica đang hỏng.
+
+(a) Gọi $m_k$ là thời gian trung bình để lần đầu tiên chuyển từ $k$ sang $k + 1$ hỏng. Chứng minh $m_0 = 1/(5\lambda)$, $m_k = (1 + k\mu m_{k-1})/((5 - k)\lambda)$ với $k = 1, 2$, và $\mathrm{MTTF} = m_0 + m_1 + m_2$.
+
+(b) Tính MTTF và so với 87 000 giờ của nhóm 3 replica.
+
+(c) Chứng minh khi $\mu \gg \lambda$ thì $\mathrm{MTTF} \approx \mu^2/(30\lambda^3)$ và tính sai số tương đối.
+
+(d) Nếu có thêm nguyên nhân chung với tốc độ $\nu = 1/87660$ mỗi giờ (một lần mỗi 10 năm) làm cả nhóm mất đa số, MTTF tối đa là bao nhiêu và điều đó nói gì về việc thêm replica?
 
 <details><summary>Gợi ý</summary>
 
@@ -1382,11 +1462,23 @@ Với (a), dùng first-step analysis liên tục (mục 5.4) cho $m_k$: từ tr�
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) Từ trạng thái $k$ (có $k$ replica hỏng), tốc độ thêm một replica hỏng là $u_k = (5 - k)\lambda$ và tốc độ một replica được sửa xong là $d_k = k\mu$. Từ $k = 0$ chỉ có thể lên: $m_0 = 1/(5\lambda)$. Với $k \ge 1$, thời gian giữ có trung bình $1/(u_k + d_k)$; với xác suất $u_k/(u_k + d_k)$ ta lên $k + 1$ (xong), với xác suất $d_k/(u_k + d_k)$ ta xuống $k - 1$, và khi đó phải *quay lại* $k$ (trung bình $m_{k-1}$) rồi từ $k$ vẫn cần $m_k$ nữa (tính chất Markov: chuỗi bắt đầu mới). Do đó $m_k = \frac{1}{u_k + d_k} + \frac{d_k}{u_k + d_k}(m_{k-1} + m_k)$. Nhân với $u_k + d_k$: $u_k m_k = 1 + d_k m_{k-1}$, tức $m_k = (1 + k\mu m_{k-1})/((5-k)\lambda)$. Để tới 3 hỏng từ 0, chuỗi phải lần lượt đi từ 0 tới 1, từ 1 tới 2, từ 2 tới 3; mỗi chặng bắt đầu mới tại trạng thái vừa tới nên kỳ vọng của nó là $m_0, m_1, m_2$, và kỳ vọng của tổng bằng tổng các kỳ vọng. (b) $m_0 = 144$ giờ; $m_1 = (1 + 144)/(4/720) = 145 \cdot 180 = 26100$ giờ; $m_2 = (1 + 2 \cdot 26100)/(3/720) = 52201 \cdot 240 = 12528240$ giờ. Tổng $12554484$ giờ, khoảng 1432 năm, gấp khoảng 144 lần nhóm 3 replica. (c) Khi $\mu \gg \lambda$, số 1 trong tử số là nhỏ so với $k\mu m_{k-1}$: $m_1 \approx \mu m_0/(4\lambda) = \mu/(20\lambda^2)$ và $m_2 \approx 2\mu m_1/(3\lambda) = \mu^2/(30\lambda^3)$; $m_2$ áp đảo $m_0 + m_1$. Với số trên, $\mu^2/(30\lambda^3) = 720^3/30 = 12441600$ giờ, thấp hơn giá trị đúng 0,9%. (d) Đồng hồ nguyên nhân chung một mình đã đưa nhóm tới mất đa số sau $\mathrm{Exp}(\nu)$, nên $\mathrm{MTTF} \le 1/\nu = 87660$ giờ, khoảng 10 năm, bất kể số replica. Giải hệ tuyến tính ba ẩn của chuỗi 5 replica có thêm tốc độ $\nu$ ở mọi trạng thái (cùng cách làm như mục 6.5) bằng một chương trình Rust nhỏ cho MTTF khoảng 87052 giờ (9,93 năm), dưới cận $1/\nu$ đúng như dự đoán: nâng từ 3 lên 5 replica chỉ còn gấp khoảng 2 lần so với 43665 giờ ở mục 6.5, thay vì gấp 144 lần. Dự phòng nhiều hơn không cứu được cái chết chung (nhận xét của người soạn). Quy luật gấp khoảng $\mu/\lambda$ lần mỗi lần thêm một cặp replica khớp với nguồn nói về hệ lưu trữ thật[^ford-scale].
+(lời giải của người soạn) (a) Từ trạng thái $k$ (có $k$ replica hỏng), tốc độ thêm một replica hỏng là $u_k = (5 - k)\lambda$ và tốc độ một replica được sửa xong là $d_k = k\mu$. Từ $k = 0$ chỉ có thể lên: $m_0 = 1/(5\lambda)$. Với $k \ge 1$, thời gian giữ có trung bình $1/(u_k + d_k)$; với xác suất $u_k/(u_k + d_k)$ ta lên $k + 1$ (xong), với xác suất $d_k/(u_k + d_k)$ ta xuống $k - 1$, và khi đó phải *quay lại* $k$ (trung bình $m_{k-1}$) rồi từ $k$ vẫn cần $m_k$ nữa (tính chất Markov: chuỗi bắt đầu mới). Do đó $m_k = \frac{1}{u_k + d_k} + \frac{d_k}{u_k + d_k}(m_{k-1} + m_k)$. Nhân với $u_k + d_k$: $u_k m_k = 1 + d_k m_{k-1}$, tức $m_k = (1 + k\mu m_{k-1})/((5-k)\lambda)$. Để tới 3 hỏng từ 0, chuỗi phải lần lượt đi từ 0 tới 1, từ 1 tới 2, từ 2 tới 3; mỗi chặng bắt đầu mới tại trạng thái vừa tới nên kỳ vọng của nó là $m_0, m_1, m_2$, và kỳ vọng của tổng bằng tổng các kỳ vọng.
+
+(b) $m_0 = 144$ giờ; $m_1 = (1 + 144)/(4/720) = 145 \cdot 180 = 26100$ giờ; $m_2 = (1 + 2 \cdot 26100)/(3/720) = 52201 \cdot 240 = 12528240$ giờ. Tổng $12554484$ giờ, khoảng 1432 năm, gấp khoảng 144 lần nhóm 3 replica.
+
+(c) Khi $\mu \gg \lambda$, số 1 trong tử số là nhỏ so với $k\mu m_{k-1}$: $m_1 \approx \mu m_0/(4\lambda) = \mu/(20\lambda^2)$ và $m_2 \approx 2\mu m_1/(3\lambda) = \mu^2/(30\lambda^3)$; $m_2$ áp đảo $m_0 + m_1$. Với số trên, $\mu^2/(30\lambda^3) = 720^3/30 = 12441600$ giờ, thấp hơn giá trị đúng 0,9%.
+
+(d) Đồng hồ nguyên nhân chung một mình đã đưa nhóm tới mất đa số sau $\mathrm{Exp}(\nu)$, nên $\mathrm{MTTF} \le 1/\nu = 87660$ giờ, khoảng 10 năm, bất kể số replica. Giải hệ tuyến tính ba ẩn của chuỗi 5 replica có thêm tốc độ $\nu$ ở mọi trạng thái (cùng cách làm như mục 6.5) bằng một chương trình Rust nhỏ cho MTTF khoảng 87052 giờ (9,93 năm), dưới cận $1/\nu$ đúng như dự đoán: nâng từ 3 lên 5 replica chỉ còn gấp khoảng 2 lần so với 43665 giờ ở mục 6.5, thay vì gấp 144 lần. Dự phòng nhiều hơn không cứu được cái chết chung (nhận xét của người soạn). Quy luật gấp khoảng $\mu/\lambda$ lần mỗi lần thêm một cặp replica khớp với nguồn nói về hệ lưu trữ thật[^ford-scale].
 
 </details>
 
-**Bài 9 (Khó).** Heartbeat của một agent tới monitor là quá trình Poisson tốc độ $\lambda$. Monitor chọn một thời điểm cố định $t > 0$ và ghi lại khoảng giữa heartbeat cuối cùng trước $t$ (hoặc thời điểm 0 nếu chưa có) và heartbeat đầu tiên sau $t$. Gọi $A_t$ là thời gian từ heartbeat cuối trước $t$ tới $t$ (bằng $t$ nếu chưa có heartbeat nào) và $R_t$ là thời gian từ $t$ tới heartbeat kế tiếp. (a) Chứng minh $R_t \sim \mathrm{Exp}(\lambda)$, $\Pr[A_t > a] = e^{-\lambda a}$ với $0 \le a < t$, và $A_t$, $R_t$ độc lập. (b) Tính $E[A_t + R_t]$ và so với khoảng cách trung bình $1/\lambda$ giữa hai heartbeat. (c) Giải thích hệ quả khi lấy mẫu theo thời gian.
+**Bài 9 (Khó).** Heartbeat của một agent tới monitor là quá trình Poisson tốc độ $\lambda$. Monitor chọn một thời điểm cố định $t > 0$ và ghi lại khoảng giữa heartbeat cuối cùng trước $t$ (hoặc thời điểm 0 nếu chưa có) và heartbeat đầu tiên sau $t$. Gọi $A_t$ là thời gian từ heartbeat cuối trước $t$ tới $t$ (bằng $t$ nếu chưa có heartbeat nào) và $R_t$ là thời gian từ $t$ tới heartbeat kế tiếp.
+
+(a) Chứng minh $R_t \sim \mathrm{Exp}(\lambda)$, $\Pr[A_t > a] = e^{-\lambda a}$ với $0 \le a < t$, và $A_t$, $R_t$ độc lập.
+
+(b) Tính $E[A_t + R_t]$ và so với khoảng cách trung bình $1/\lambda$ giữa hai heartbeat.
+
+(c) Giải thích hệ quả khi lấy mẫu theo thời gian.
 
 <details><summary>Gợi ý</summary>
 
@@ -1396,11 +1488,21 @@ Biến cố "$R_t > r$" nói về $(t, t + r]$ và biến cố "$A_t > a$" nói 
 
 <details><summary>Lời giải</summary>
 
-(lời giải của người soạn) (a) $R_t > r$ khi và chỉ khi không có heartbeat nào trong $(t, t + r]$, xác suất $e^{-\lambda r}$ (số điểm trong khoảng dài $r$ là $\mathrm{Poisson}(\lambda r)$, Định lý 2.1). Với $0 \le a < t$: $A_t > a$ khi và chỉ khi không có heartbeat nào trong $(t - a, t]$, xác suất $e^{-\lambda a}$; còn $A_t \le t$ nên $\Pr[A_t > a] = 0$ khi $a \ge t$. Hai biến cố $\{A_t > a\}$ và $\{R_t > r\}$ phụ thuộc số điểm trong hai khoảng rời nhau, nên độc lập (số gia độc lập[^g-indep-inc]): $\Pr[A_t > a, R_t > r] = e^{-\lambda a} e^{-\lambda r}$, một tích hàm của $a$ và của $r$, nên $A_t$ và $R_t$ độc lập. (b) $A_t \ge 0$ nên $E[A_t] = \int_0^t e^{-\lambda a} da = (1 - e^{-\lambda t})/\lambda$ (chứng minh của Mệnh đề 1.1 áp dụng cho mọi biến không âm), và $E[R_t] = 1/\lambda$. Vậy $E[A_t + R_t] = (2 - e^{-\lambda t})/\lambda$, tiến về $2/\lambda$ khi $t \to \infty$: *gấp đôi* khoảng cách trung bình $1/\lambda$. (c) Khoảng bao trùm một thời điểm cố định dài trung bình gấp đôi khoảng điển hình vì khoảng dài có xác suất trùm thời điểm tỉ lệ với độ dài (lấy mẫu thiên lệch theo độ dài). Với $\lambda = 10$ mỗi giây, khoảng giữa hai heartbeat trung bình 100 ms nhưng khoảng mà một lần kiểm tra ở thời điểm ngẫu nhiên nhìn thấy trung bình 200 ms. Hệ quả (nhận xét của người soạn): mọi cách đo "theo thời gian" (profiler lấy mẫu theo chu kỳ, chụp thread dump, đọc "request gần nhất quanh dấu thời gian") đều thiên về các khoảng và các request *dài*; muốn trung bình của khoảng thì phải lấy mẫu theo khoảng, không theo thời điểm.
+(lời giải của người soạn) (a) $R_t > r$ khi và chỉ khi không có heartbeat nào trong $(t, t + r]$, xác suất $e^{-\lambda r}$ (số điểm trong khoảng dài $r$ là $\mathrm{Poisson}(\lambda r)$, Định lý 2.1). Với $0 \le a < t$: $A_t > a$ khi và chỉ khi không có heartbeat nào trong $(t - a, t]$, xác suất $e^{-\lambda a}$; còn $A_t \le t$ nên $\Pr[A_t > a] = 0$ khi $a \ge t$. Hai biến cố $\{A_t > a\}$ và $\{R_t > r\}$ phụ thuộc số điểm trong hai khoảng rời nhau, nên độc lập (số gia độc lập[^g-indep-inc]): $\Pr[A_t > a, R_t > r] = e^{-\lambda a} e^{-\lambda r}$, một tích hàm của $a$ và của $r$, nên $A_t$ và $R_t$ độc lập.
+
+(b) $A_t \ge 0$ nên $E[A_t] = \int_0^t e^{-\lambda a} da = (1 - e^{-\lambda t})/\lambda$ (chứng minh của Mệnh đề 1.1 áp dụng cho mọi biến không âm), và $E[R_t] = 1/\lambda$. Vậy $E[A_t + R_t] = (2 - e^{-\lambda t})/\lambda$, tiến về $2/\lambda$ khi $t \to \infty$: *gấp đôi* khoảng cách trung bình $1/\lambda$.
+
+(c) Khoảng bao trùm một thời điểm cố định dài trung bình gấp đôi khoảng điển hình vì khoảng dài có xác suất trùm thời điểm tỉ lệ với độ dài (lấy mẫu thiên lệch theo độ dài). Với $\lambda = 10$ mỗi giây, khoảng giữa hai heartbeat trung bình 100 ms nhưng khoảng mà một lần kiểm tra ở thời điểm ngẫu nhiên nhìn thấy trung bình 200 ms. Hệ quả (nhận xét của người soạn): mọi cách đo "theo thời gian" (profiler lấy mẫu theo chu kỳ, chụp thread dump, đọc "request gần nhất quanh dấu thời gian") đều thiên về các khoảng và các request *dài*; muốn trung bình của khoảng thì phải lấy mẫu theo khoảng, không theo thời điểm.
 
 </details>
 
-**Bài 10 (Khó).** Cho $P$ là ma trận chuyển $n \times n$ với mọi phần tử $p_{ij} \ge \delta > 0$. Với hai phân phối $\mu, \nu$ đặt khoảng cách $\|\mu - \nu\| = \frac12 \sum_j |\mu_j - \nu_j|$. (a) Chứng minh $\|\mu P - \nu P\| \le (1 - n\delta)\|\mu - \nu\|$. (b) Suy ra $P$ có đúng một phân phối dừng $\pi$ và $\|\mu P^t - \pi\| \le (1 - n\delta)^t$ với mọi $\mu$ và $t$. (c) Áp dụng cho chuỗi sức khỏe ở mục 3 ($a = 0{,}02$, $b = 0{,}5$) và cho circuit breaker ở Bài 3, rồi so với tốc độ hội tụ thật.
+**Bài 10 (Khó).** Cho $P$ là ma trận chuyển $n \times n$ với mọi phần tử $p_{ij} \ge \delta > 0$. Với hai phân phối $\mu, \nu$ đặt khoảng cách $\|\mu - \nu\| = \frac12 \sum_j |\mu_j - \nu_j|$.
+
+(a) Chứng minh $\|\mu P - \nu P\| \le (1 - n\delta)\|\mu - \nu\|$.
+
+(b) Suy ra $P$ có đúng một phân phối dừng $\pi$ và $\|\mu P^t - \pi\| \le (1 - n\delta)^t$ với mọi $\mu$ và $t$.
+
+(c) Áp dụng cho chuỗi sức khỏe ở mục 3 ($a = 0{,}02$, $b = 0{,}5$) và cho circuit breaker ở Bài 3, rồi so với tốc độ hội tụ thật.
 
 <details><summary>Gợi ý</summary>
 

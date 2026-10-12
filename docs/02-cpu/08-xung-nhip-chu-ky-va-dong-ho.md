@@ -985,6 +985,7 @@ Hai điểm Rust-cụ thể nên nhớ. Thứ nhất, `Instant + Duration` có t
 ## Câu hỏi tự kiểm tra
 
 1. Một CPU chạy 2,5 GHz. Một chu kỳ dài bao nhiêu, và timeout 5 ms ứng với bao nhiêu chu kỳ? Tần số lõi khác tần số tinh thể ở chỗ nào?
+
 <details><summary>Đáp án</summary>
 
 Tần số là nghịch đảo của cycle time[^dis-period], nên chu kỳ là $1/(2{,}5 \times 10^9) = 0{,}4$ ns và 5 ms là $5 \times 10^{-3} \times 2{,}5 \times 10^9 = 12.500.000$ chu kỳ. Tần số tinh thể danh định có thể khác tần số lõi[^sdm-crystal]; ví dụ tần số TSC là tinh thể nhân một tỉ số[^sdm-tscfreq].
@@ -992,6 +993,7 @@ Tần số là nghịch đảo của cycle time[^dis-period], nên chu kỳ là 
 </details>
 
 2. Phát biểu iron law và nói CPI, IPC là gì. Vì sao CPI cộng được theo từng nguồn chờ còn IPC thì không?
+
 <details><summary>Đáp án</summary>
 
 $t = I \times \mathrm{CPI} \times T$[^cs61c-iron]. CPI là trung bình số chu kỳ mỗi lệnh[^cs61c-cpi-avg], IPC là nghịch đảo của nó[^cs61c-ipc]. Tổng chu kỳ là chu kỳ làm việc cộng chu kỳ chờ; chia cho $I$ thì mỗi khoản chờ thành một số hạng của CPI. IPC là nghịch đảo của một tổng nên không cộng được (mục 2.3).
@@ -999,6 +1001,7 @@ $t = I \times \mathrm{CPI} \times T$[^cs61c-iron]. CPI là trung bình số chu 
 </details>
 
 3. Vì sao node 3,6 GHz có thể chậm hơn node 3,0 GHz cho cùng binary? Cho một ví dụ có số.
+
 <details><summary>Đáp án</summary>
 
 Vì thời gian phụ thuộc cả CPI, và clock rate riêng nó không đủ để so hai bộ xử lý[^dis-fewer-stages]. Với $I = 300.000$: node 3,0 GHz, CPI 1,2 cho 120 µs; node 3,6 GHz, CPI 1,6 cho 133,3 µs (mục 2.2). Hòa vốn khi CPI của node B là $c_B = 1{,}44$.
@@ -1006,6 +1009,7 @@ Vì thời gian phụ thuộc cả CPI, và clock rate riêng nó không đủ �
 </details>
 
 4. Cùng một CPU, CPI có thể đổi từ khoảng 1 đến hơn 20. Nguồn nào cho thấy và vì sao?
+
 <details><summary>Đáp án</summary>
 
 Drepper đo trên Core 2: tập dữ liệu nhỏ cho CPI quanh 1,0[^drep-cpi-core2]; vượt L1d thì dưới 3,0 một chút[^drep-cpi-l1]; vượt cả L2 thì hơn 20[^drep-cpi-l2]. Lý do là mỗi lần chờ bộ nhớ thêm hàng chục đến hàng trăm chu kỳ stall vào CPI[^drep-pm].
@@ -1013,6 +1017,7 @@ Drepper đo trên Core 2: tập dữ liệu nhỏ cho CPI quanh 1,0[^drep-cpi-co
 </details>
 
 5. Vì sao tăng xung 50% có thể chỉ giảm thời gian 6,7% với `quote` ở mục 3?
+
 <details><summary>Đáp án</summary>
 
 80% số chu kỳ là chờ DRAM. Nếu độ trễ DRAM gần như cố định theo ns (suy luận của người soạn; chip DRAM có timing riêng[^drep-cas]), phần chờ giữ nguyên 200 µs và chỉ phần tính toán co lại, từ 50 µs còn 33,3 µs: tổng 233,3 µs so với 250 µs.
@@ -1020,6 +1025,7 @@ Drepper đo trên Core 2: tập dữ liệu nhỏ cho CPI quanh 1,0[^drep-cpi-co
 </details>
 
 6. Invariant TSC là gì, và `constant_tsc`, `nonstop_tsc` nghĩa là gì?
+
 <details><summary>Đáp án</summary>
 
 Invariant TSC chạy ở tốc độ không đổi trong mọi P-, C- và T-state[^sdm-invtsc]. `constant_tsc`: tốc độ TSC không đổi theo P-state; `nonstop_tsc`: TSC không dừng ở C-state[^kvm-tsc-flags]. Các cờ này chỉ có nghĩa cho máy một node[^kvm-tsc-flags-scope], và TSC là đồng hồ cục bộ theo CPU trong đa số cài đặt[^kvm-tsc-local].
@@ -1027,6 +1033,7 @@ Invariant TSC chạy ở tốc độ không đổi trong mọi P-, C- và T-stat
 </details>
 
 7. System counter của Arm khác TSC ở đâu, và `CNTFRQ_EL0` do ai điền?
+
 <details><summary>Đáp án</summary>
 
 System counter là thiết bị luôn bật, tần số cố định, phát giá trị tới mọi lõi[^arm-sysctr] và không bị DVFS ảnh hưởng[^arm-realtime]. `CNTFRQ_EL0` không do phần cứng điền mà do firmware, thường ở EL3[^arm-cntfrq]. Đọc có thể bị suy đoán nên cần `isb` khi thứ tự quan trọng[^arm-spec].
@@ -1034,6 +1041,7 @@ System counter là thiết bị luôn bật, tần số cố định, phát giá
 </details>
 
 8. `cycles` và `ref-cycles` của `perf` khác nhau thế nào, và tính tần số trung bình ra sao?
+
 <details><summary>Đáp án</summary>
 
 `cycles` đếm chu kỳ lõi và man page cảnh báo khi tần số đổi[^peo-cycles]; `ref-cycles` không bị ảnh hưởng bởi đổi tần số[^peo-refcycles]. Tần số trung bình bằng chu kỳ lõi chia cho thời gian[^sdm-tsc-avgfreq]; với 6,0 tỉ chu kỳ trong 2,0 s là 3,0 GHz (mục 4.4).
@@ -1041,6 +1049,7 @@ System counter là thiết bị luôn bật, tần số cố định, phát giá
 </details>
 
 9. Phân biệt clocksource và clockevent, và nói tick, NO_HZ, hrtimer đứng ở đâu.
+
 <details><summary>Đáp án</summary>
 
 Clocksource cấp trục thời gian[^kt-source]; clockevent phát ngắt tại các điểm trên trục đó[^kt-events]. Tick là một chức năng được giao cho clock event device[^hl-tick-duties]; NO_HZ bỏ tick trên CPU rảnh[^nohz-idle]; hrtimer cho hẹn giờ ở độ phân giải nano-giây, độc lập với tick[^hrt-ns].
@@ -1048,6 +1057,7 @@ Clocksource cấp trục thời gian[^kt-source]; clockevent phát ngắt tại 
 </details>
 
 10. Kể các đồng hồ của `clock_gettime`, cái nào nhảy khi chỉnh giờ, cái nào đếm suspend, cái nào vào vDSO.
+
 <details><summary>Đáp án</summary>
 
 REALTIME chịu bước nhảy[^cg-realtime]; MONOTONIC không[^cg-mono-nojump] và không đếm suspend[^cg-mono-susp]; BOOTTIME đếm suspend[^cg-boot]. vDSO phục vụ REALTIME, MONOTONIC, BOOTTIME, TAI, hai bản COARSE và MONOTONIC_RAW[^vd-hres-mask]; còn lại quay về syscall[^vd-common].
@@ -1055,6 +1065,7 @@ REALTIME chịu bước nhảy[^cg-realtime]; MONOTONIC không[^cg-mono-nojump] 
 </details>
 
 11. Vì sao `thread::sleep(10 µs)` có thể mất lâu hơn nhiều?
+
 <details><summary>Đáp án</summary>
 
 Rust chỉ hứa không ngủ *ít hơn*[^sleep-least]. Kernel có timer slack mặc định 50 µs cho `nanosleep` và `epoll_wait`[^slack-default][^slack-affected], và sau khi sleep xong còn có thể phải đợi CPU rảnh[^ns-after].
@@ -1062,6 +1073,7 @@ Rust chỉ hứa không ngủ *ít hơn*[^sleep-least]. Kernel có timer slack m
 </details>
 
 12. Vì sao đồng hồ treo tường nhảy lùi làm hỏng rate limiter cửa sổ cố định, và đơn điệu có đủ cho lease không?
+
 <details><summary>Đáp án</summary>
 
 Cửa sổ chỉ reset khi $\text{now} - s \ge W$, nên bước nhảy lùi $\delta$ làm limiter từ chối $\delta + (s + W - \tau)$ (mục 8.2). Đơn điệu chưa đủ cho lease: nó không đếm suspend[^cg-mono-susp], không thấy process pause[^kb-check], và Kubernetes tự nêu giới hạn về tốc độ đồng hồ lệch[^k8s-skew].
@@ -1074,11 +1086,21 @@ Cửa sổ chỉ reset khi $\text{now} - s \ge W$, nên bước nhảy lùi $\de
 
 Số liệu trong đề là số liệu giả định của người soạn, trừ chỗ ghi quan sát trên máy Apple M3 Pro ở các mục trước. Đáp số đã được tính lại bằng một chương trình Rust nhỏ (`rustc 1.95.0`, macOS arm64, không đưa vào chương).
 
-**Bài 1 (Dễ).** CPU chạy 2,5 GHz. (a) Một chu kỳ dài bao nhiêu ns? (b) 1 µs là bao nhiêu chu kỳ? (c) Một timeout 5 ms là bao nhiêu chu kỳ?
+**Bài 1 (Dễ).** CPU chạy 2,5 GHz.
+
+(a) Một chu kỳ dài bao nhiêu ns?
+
+(b) 1 µs là bao nhiêu chu kỳ?
+
+(c) Một timeout 5 ms là bao nhiêu chu kỳ?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn.)* (a) $T = 1/f = 1/(2{,}5 \times 10^9) = 0{,}4$ ns. (b) $10^{-6} \times 2{,}5 \times 10^9 = 2.500$ chu kỳ. (c) $5 \times 10^{-3} \times 2{,}5 \times 10^9 = 12.500.000$ chu kỳ.
+*(Lời giải của người soạn.)* (a) $T = 1/f = 1/(2{,}5 \times 10^9) = 0{,}4$ ns.
+
+(b) $10^{-6} \times 2{,}5 \times 10^9 = 2.500$ chu kỳ.
+
+(c) $5 \times 10^{-3} \times 2{,}5 \times 10^9 = 12.500.000$ chu kỳ.
 
 </details>
 
@@ -1094,7 +1116,15 @@ Số liệu trong đề là số liệu giả định của người soạn, tr�
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn, dựa trên các nguồn ở mục 6 đến 8.)* (a) `Instant`: đơn điệu, không bị bước nhảy của giờ treo tường[^cg-mono-nojump]. (b) `SystemTime`: cần một mốc có nghĩa với bên ngoài[^st-purpose]. (c) `Instant`, vì chỉ cần khoảng. (d) Cần đồng hồ đếm cả suspend: `CLOCK_BOOTTIME`[^cg-boot], gọi qua `libc`; `Instant` không hứa điều đó[^inst-suspend]; và vẫn cần fencing cho pause. (e) `SystemTime`, hoặc `CLOCK_REALTIME_COARSE` nếu chỉ cần độ phân giải một tick[^cg-coarse].
+*(Lời giải của người soạn, dựa trên các nguồn ở mục 6 đến 8.)* (a) `Instant`: đơn điệu, không bị bước nhảy của giờ treo tường[^cg-mono-nojump].
+
+(b) `SystemTime`: cần một mốc có nghĩa với bên ngoài[^st-purpose].
+
+(c) `Instant`, vì chỉ cần khoảng.
+
+(d) Cần đồng hồ đếm cả suspend: `CLOCK_BOOTTIME`[^cg-boot], gọi qua `libc`; `Instant` không hứa điều đó[^inst-suspend]; và vẫn cần fencing cho pause.
+
+(e) `SystemTime`, hoặc `CLOCK_REALTIME_COARSE` nếu chỉ cần độ phân giải một tick[^cg-coarse].
 
 </details>
 
@@ -1106,67 +1136,135 @@ Số liệu trong đề là số liệu giả định của người soạn, tr�
 
 </details>
 
-**Bài 5 (Vừa).** Node A: 3,0 GHz, CPI 1,2. Node B: 3,6 GHz. (a) CPI của B bằng bao nhiêu thì hai node hòa nhau? (b) Nếu CPI của B là 1,3, B nhanh hơn A bao nhiêu phần trăm?
+**Bài 5 (Vừa).** Node A: 3,0 GHz, CPI 1,2. Node B: 3,6 GHz.
+
+(a) CPI của B bằng bao nhiêu thì hai node hòa nhau?
+
+(b) Nếu CPI của B là 1,3, B nhanh hơn A bao nhiêu phần trăm?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn.)* (a) Thời gian mỗi lệnh $\mathrm{CPI}/f$ bằng nhau: $c_B = 1{,}2 \times 3{,}6/3{,}0 = 1{,}44$ (CPI của B). (b) A: $1{,}2/3{,}0 = 0{,}4$ ns mỗi lệnh. B: $1{,}3/3{,}6 \approx 0{,}3611$ ns mỗi lệnh. Tốc độ B/A $= 0{,}4/0{,}3611 \approx 1{,}108$: B nhanh hơn 10,8% (thời gian giảm 9,7%).
+*(Lời giải của người soạn.)* (a) Thời gian mỗi lệnh $\mathrm{CPI}/f$ bằng nhau: $c_B = 1{,}2 \times 3{,}6/3{,}0 = 1{,}44$ (CPI của B).
+
+(b) A: $1{,}2/3{,}0 = 0{,}4$ ns mỗi lệnh. B: $1{,}3/3{,}6 \approx 0{,}3611$ ns mỗi lệnh. Tốc độ B/A $= 0{,}4/0{,}3611 \approx 1{,}108$: B nhanh hơn 10,8% (thời gian giảm 9,7%).
 
 </details>
 
-**Bài 6 (Vừa).** Một request của `quote` chạy 400.000 lệnh, CPI cơ sở 0,75; 0,5% số lệnh phải xuống DRAM, mỗi lần 300 chu kỳ ở 3 GHz. (a) Tính CPI, thời gian và tỉ lệ chu kỳ chờ. (b) Chuyển sang node 4,5 GHz, giả sử độ trễ DRAM không đổi theo ns: thời gian mới và mức nhanh hơn?
+**Bài 6 (Vừa).** Một request của `quote` chạy 400.000 lệnh, CPI cơ sở 0,75; 0,5% số lệnh phải xuống DRAM, mỗi lần 300 chu kỳ ở 3 GHz.
+
+(a) Tính CPI, thời gian và tỉ lệ chu kỳ chờ.
+
+(b) Chuyển sang node 4,5 GHz, giả sử độ trễ DRAM không đổi theo ns: thời gian mới và mức nhanh hơn?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn.)* (a) $\mathrm{CPI} = 0{,}75 + 0{,}005 \times 300 = 2{,}25$; chu kỳ $= 400.000 \times 2{,}25 = 900.000$; thời gian $= 900.000/(3 \times 10^9) = 300$ µs. Chu kỳ chờ $= 2.000 \times 300 = 600.000$, chiếm $66{,}7\%$. (b) Mỗi lần chờ là $300/3 = 100$ ns, nên 2.000 lần là 200 µs ở xung nào cũng vậy. Phần tính toán $= 300.000/(4{,}5 \times 10^9) = 66{,}7$ µs. Tổng $266{,}7$ µs: nhanh hơn $300/266{,}7 = 1{,}125$ lần (12,5%; thời gian giảm 11,1%) dù xung tăng 50%.
+*(Lời giải của người soạn.)* (a) $\mathrm{CPI} = 0{,}75 + 0{,}005 \times 300 = 2{,}25$; chu kỳ $= 400.000 \times 2{,}25 = 900.000$; thời gian $= 900.000/(3 \times 10^9) = 300$ µs. Chu kỳ chờ $= 2.000 \times 300 = 600.000$, chiếm $66{,}7\%$.
+
+(b) Mỗi lần chờ là $300/3 = 100$ ns, nên 2.000 lần là 200 µs ở xung nào cũng vậy. Phần tính toán $= 300.000/(4{,}5 \times 10^9) = 66{,}7$ µs. Tổng $266{,}7$ µs: nhanh hơn $300/266{,}7 = 1{,}125$ lần (12,5%; thời gian giảm 11,1%) dù xung tăng 50%.
 
 </details>
 
-**Bài 7 (Vừa).** Bộ đếm 24 MHz, kernel dùng `shift` = 24. (a) Tính `mult` (làm tròn). (b) Đổi 4.812.585 tick ra ns. (c) Sau bao lâu thì tích `cycles × mult` tràn số 64 bit, nếu dùng số tick tuyệt đối?
+**Bài 7 (Vừa).** Bộ đếm 24 MHz, kernel dùng `shift` = 24.
+
+(a) Tính `mult` (làm tròn).
+
+(b) Đổi 4.812.585 tick ra ns.
+
+(c) Sau bao lâu thì tích `cycles × mult` tràn số 64 bit, nếu dùng số tick tuyệt đối?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn; kernel thật chọn cặp khác.)* (a) Một tick là $10^9/(24 \times 10^6) = 41{,}6667$ ns, nên $\mathrm{mult} = \mathrm{round}(41{,}6667 \times 2^{24}) = 699.050.667$. (b) $(4.812.585 \times 699.050.667) \gg 24 = 200.524.375$ ns, khớp giá trị chính xác $4.812.585 \times 41{,}6667 = 200.524.375$ ns. (c) Tràn khi $\mathrm{cycles} > 2^{64}/699.050.667 \approx 2{,}639 \times 10^{10}$ tick, tức $2{,}639 \times 10^{10}/(24 \times 10^6) \approx 1.099{,}5$ s, khoảng 18,3 phút. Vì vậy kernel chỉ nhân-dịch hiệu số tick so với một mốc gần[^cs-cyc2ns].
+*(Lời giải của người soạn; kernel thật chọn cặp khác.)* (a) Một tick là $10^9/(24 \times 10^6) = 41{,}6667$ ns, nên $\mathrm{mult} = \mathrm{round}(41{,}6667 \times 2^{24}) = 699.050.667$.
+
+(b) $(4.812.585 \times 699.050.667) \gg 24 = 200.524.375$ ns, khớp giá trị chính xác $4.812.585 \times 41{,}6667 = 200.524.375$ ns.
+
+(c) Tràn khi $\mathrm{cycles} > 2^{64}/699.050.667 \approx 2{,}639 \times 10^{10}$ tick, tức $2{,}639 \times 10^{10}/(24 \times 10^6) \approx 1.099{,}5$ s, khoảng 18,3 phút. Vì vậy kernel chỉ nhân-dịch hiệu số tick so với một mốc gần[^cs-cyc2ns].
 
 </details>
 
-**Bài 8 (Vừa).** Trên máy có `Instant` phân giải $r = 41{,}67$ ns và chi phí một lần đọc $c = 15$ ns, bạn đo một thao tác thật mất $w = 10$ ns bằng cách bọc từng lần. (a) Xác suất kết quả khác 0 xấp xỉ bao nhiêu và trung bình đo được xấp xỉ bao nhiêu? (b) Cần bao nhiêu lần lặp trong một lô để sai số do làm tròn không quá 0,1%?
+**Bài 8 (Vừa).** Trên máy có `Instant` phân giải $r = 41{,}67$ ns và chi phí một lần đọc $c = 15$ ns, bạn đo một thao tác thật mất $w = 10$ ns bằng cách bọc từng lần.
+
+(a) Xác suất kết quả khác 0 xấp xỉ bao nhiêu và trung bình đo được xấp xỉ bao nhiêu?
+
+(b) Cần bao nhiêu lần lặp trong một lô để sai số do làm tròn không quá 0,1%?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn, theo mô hình thô ở mục 7.4.)* (a) Khoảng giữa hai lần lấy mẫu chứa chừng $c + w = 25$ ns, nên xác suất vắt qua một ranh tick xấp xỉ $25/41{,}67 = 60\%$; mỗi lần đó kết quả là một tick 41–42 ns, còn lại là 0. Trung bình $\approx c + w = 25$ ns chứ không phải 10 ns: sai số chủ yếu là chi phí đọc đồng hồ. (b) Tổng thời gian cả lô $N w$ phải lớn hơn $1000\, r$: $N \ge 1000 \times 41{,}67 / 10 \approx 4.167$ lần lặp. Làm tròn lên 5.000 là gọn.
+*(Lời giải của người soạn, theo mô hình thô ở mục 7.4.)* (a) Khoảng giữa hai lần lấy mẫu chứa chừng $c + w = 25$ ns, nên xác suất vắt qua một ranh tick xấp xỉ $25/41{,}67 = 60\%$; mỗi lần đó kết quả là một tick 41–42 ns, còn lại là 0. Trung bình $\approx c + w = 25$ ns chứ không phải 10 ns: sai số chủ yếu là chi phí đọc đồng hồ.
+
+(b) Tổng thời gian cả lô $N w$ phải lớn hơn $1000\, r$: $N \ge 1000 \times 41{,}67 / 10 \approx 4.167$ lần lặp. Làm tròn lên 5.000 là gọn.
 
 </details>
 
-**Bài 9 (Vừa).** Server 16 vCPU chạy kernel `HZ = 250`; kernel khác `HZ = 1000`. Giả sử mỗi tick tốn 2 µs. (a) Số ngắt tick mỗi giây của cả máy? (b) Tỉ lệ thời gian của *mỗi* lõi dành cho tick? (c) Một `thread::sleep(Duration::from_micros(20))` có thể mất tối đa khoảng bao lâu do timer slack mặc định, chưa tính lập lịch?
+**Bài 9 (Vừa).** Server 16 vCPU chạy kernel `HZ = 250`; kernel khác `HZ = 1000`. Giả sử mỗi tick tốn 2 µs.
+
+(a) Số ngắt tick mỗi giây của cả máy?
+
+(b) Tỉ lệ thời gian của *mỗi* lõi dành cho tick?
+
+(c) Một `thread::sleep(Duration::from_micros(20))` có thể mất tối đa khoảng bao lâu do timer slack mặc định, chưa tính lập lịch?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn.)* (a) Mỗi CPU nhận $HZ$ ngắt mỗi giây[^kz-percpu]: $16 \times 250 = 4.000$ và $16 \times 1000 = 16.000$. (b) Mỗi lõi: $250 \times 2$ µs $= 0{,}5$ ms mỗi giây $= 0{,}05\%$; với HZ 1000 là $2$ ms mỗi giây $= 0{,}2\%$ (không phụ thuộc số lõi). (c) Slack mặc định 50 µs và timer có thể trễ tới số đó nhưng không sớm[^slack-def][^slack-default]; vậy $20 + 50 = 70$ µs, chưa tính lập lịch[^ns-after].
+*(Lời giải của người soạn.)* (a) Mỗi CPU nhận $HZ$ ngắt mỗi giây[^kz-percpu]: $16 \times 250 = 4.000$ và $16 \times 1000 = 16.000$.
+
+(b) Mỗi lõi: $250 \times 2$ µs $= 0{,}5$ ms mỗi giây $= 0{,}05\%$; với HZ 1000 là $2$ ms mỗi giây $= 0{,}2\%$ (không phụ thuộc số lõi).
+
+(c) Slack mặc định 50 µs và timer có thể trễ tới số đó nhưng không sớm[^slack-def][^slack-default]; vậy $20 + 50 = 70$ µs, chưa tính lập lịch[^ns-after].
 
 </details>
 
-**Bài 10 (Khó, backend).** Limiter cửa sổ cố định của mục 8.2: cửa sổ mở ở $s$, dài $W$, đếm đến $L$, rồi reset khi $\text{now} - s \ge W$ (lúc đó $s$ đặt bằng $\text{now}$). (a) Chứng minh với đồng hồ đơn điệu, mọi khoảng thời gian dài $W$ chứa nhiều nhất $2L$ request được qua. (b) Với wall clock nhảy lùi $\delta$ tại $\tau$, tính khoảng thời gian từ chối nếu cửa sổ lúc đó đã hết hạn mức. (c) Đề xuất sửa.
+**Bài 10 (Khó, backend).** Limiter cửa sổ cố định của mục 8.2: cửa sổ mở ở $s$, dài $W$, đếm đến $L$, rồi reset khi $\text{now} - s \ge W$ (lúc đó $s$ đặt bằng $\text{now}$).
+
+(a) Chứng minh với đồng hồ đơn điệu, mọi khoảng thời gian dài $W$ chứa nhiều nhất $2L$ request được qua.
+
+(b) Với wall clock nhảy lùi $\delta$ tại $\tau$, tính khoảng thời gian từ chối nếu cửa sổ lúc đó đã hết hạn mức.
+
+(c) Đề xuất sửa.
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn.)* (a) Gọi các mốc mở cửa sổ là $s_1 < s_2 < \dots$. Reset chỉ xảy ra khi $\text{now} - s_k \ge W$ nên $s_{k+1} \ge s_k + W$. Mọi request được qua trong cửa sổ $k$ có thời điểm trong $[s_k, s_k + W)$. Giả sử một khoảng $I$ dài $W$ chứa request từ ba cửa sổ $i < j < k$: request của $i$ ở $t_i < s_i + W$, của $k$ ở $t_k \ge s_k \ge s_j + W \ge s_i + 2W$. Khi đó $t_k - t_i > 2W - W = W$, mâu thuẫn với việc cả hai cùng nằm trong $I$. Vậy $I$ chạm nhiều nhất hai cửa sổ, mỗi cửa sổ qua tối đa $L$, tổng $\le 2L$. (b) Sau bước nhảy, $\text{wall} = \text{mono} - \delta$. Reset xảy ra khi $\text{mono} - \delta - s \ge W$, tức $\text{mono} \ge s + W + \delta$. Khoảng từ chối là $(s + W + \delta) - \tau = \delta + (s + W - \tau)$. Với số của mô phỏng $s = 3000$, $W = 1000$, $\tau = 3500$, $\delta = 5000$ ms: $5500$ ms. (c) Đưa `Instant` (hoặc một đồng hồ đơn điệu bất kỳ) vào, như `governor::MonotonicClock`[^gov-clocks]; nếu bắt buộc dùng giờ treo tường thì phải phát hiện $\text{now} < s$ và reset cửa sổ khi đó, nhưng khi đó bước nhảy tiến vẫn cho qua một đợt dư (như mô phỏng).
+*(Lời giải của người soạn.)* (a) Gọi các mốc mở cửa sổ là $s_1 < s_2 < \dots$. Reset chỉ xảy ra khi $\text{now} - s_k \ge W$ nên $s_{k+1} \ge s_k + W$. Mọi request được qua trong cửa sổ $k$ có thời điểm trong $[s_k, s_k + W)$. Giả sử một khoảng $I$ dài $W$ chứa request từ ba cửa sổ $i < j < k$: request của $i$ ở $t_i < s_i + W$, của $k$ ở $t_k \ge s_k \ge s_j + W \ge s_i + 2W$. Khi đó $t_k - t_i > 2W - W = W$, mâu thuẫn với việc cả hai cùng nằm trong $I$. Vậy $I$ chạm nhiều nhất hai cửa sổ, mỗi cửa sổ qua tối đa $L$, tổng $\le 2L$.
+
+(b) Sau bước nhảy, $\text{wall} = \text{mono} - \delta$. Reset xảy ra khi $\text{mono} - \delta - s \ge W$, tức $\text{mono} \ge s + W + \delta$. Khoảng từ chối là $(s + W + \delta) - \tau = \delta + (s + W - \tau)$. Với số của mô phỏng $s = 3000$, $W = 1000$, $\tau = 3500$, $\delta = 5000$ ms: $5500$ ms.
+
+(c) Đưa `Instant` (hoặc một đồng hồ đơn điệu bất kỳ) vào, như `governor::MonotonicClock`[^gov-clocks]; nếu bắt buộc dùng giờ treo tường thì phải phát hiện $\text{now} < s$ và reset cửa sổ khi đó, nhưng khi đó bước nhảy tiến vẫn cho qua một đợt dư (như mô phỏng).
 
 </details>
 
-**Bài 11 (Khó, hệ phân tán).** `quote` giữ lease 10 s và gia hạn mỗi 3 s. Máy bị suspend 25 s ngay sau một lần gia hạn thành công. (a) Chủ lease dùng `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME` hoặc giờ treo tường: ai nhận ra lease đã hết khi thức dậy? (b) Vì sao vẫn cần fencing token? (c) Kubernetes cấu hình `LeaseDuration` 15 s, `RenewDeadline` 10 s: chịu được tỉ số tốc độ đồng hồ bao nhiêu, và 200 ppm có là vấn đề không?
+**Bài 11 (Khó, hệ phân tán).** `quote` giữ lease 10 s và gia hạn mỗi 3 s. Máy bị suspend 25 s ngay sau một lần gia hạn thành công.
+
+(a) Chủ lease dùng `CLOCK_MONOTONIC`, `CLOCK_BOOTTIME` hoặc giờ treo tường: ai nhận ra lease đã hết khi thức dậy?
+
+(b) Vì sao vẫn cần fencing token?
+
+(c) Kubernetes cấu hình `LeaseDuration` 15 s, `RenewDeadline` 10 s: chịu được tỉ số tốc độ đồng hồ bao nhiêu, và 200 ppm có là vấn đề không?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn.)* (a) `CLOCK_MONOTONIC` không đếm lúc suspend[^cg-mono-susp], nên chủ lease chỉ thấy trôi qua vài giây trước khi suspend (chưa tới 10 s) và tin lease còn hạn, trong khi dịch vụ khóa đã hết hạn sau 10 s và có thể đã cấp cho người khác. `CLOCK_BOOTTIME` có đếm suspend[^cg-boot], nên thấy trôi qua khoảng 25 s hay hơn và nhận ra hạn đã hết. Giờ treo tường có thể cũng thấy, nếu máy kịp đồng bộ lại giờ sau khi thức, nhưng nó còn chịu cả bước nhảy (mục 8.3). (b) Ngay cả chủ lease dùng `BOOTTIME` có thể bị pause *giữa* lần kiểm hạn và lần ghi (GC, SIGSTOP, throttle); kiểm hạn ngay trước khi ghi không cứu được[^kb-check]. Cần tài nguyên đích từ chối token cũ: fencing ([P12 · Chương 08, mục 8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md#8-lease-và-fencing-token-q8)). (c) Tỉ số $15/10 = 1{,}5$: chịu được khoảng việc nhanh nhất trôi nhanh gấp rưỡi chậm nhất[^k8s-ratio]. Drift 200 ppm[^tt-drift] làm sai $10 \times 200 \times 10^{-6} = 2$ ms trên 10 s, nên không phải vấn đề; suspend 25 s và pause mới là vấn đề.
+*(Lời giải của người soạn.)* (a) `CLOCK_MONOTONIC` không đếm lúc suspend[^cg-mono-susp], nên chủ lease chỉ thấy trôi qua vài giây trước khi suspend (chưa tới 10 s) và tin lease còn hạn, trong khi dịch vụ khóa đã hết hạn sau 10 s và có thể đã cấp cho người khác. `CLOCK_BOOTTIME` có đếm suspend[^cg-boot], nên thấy trôi qua khoảng 25 s hay hơn và nhận ra hạn đã hết. Giờ treo tường có thể cũng thấy, nếu máy kịp đồng bộ lại giờ sau khi thức, nhưng nó còn chịu cả bước nhảy (mục 8.3).
+
+(b) Ngay cả chủ lease dùng `BOOTTIME` có thể bị pause *giữa* lần kiểm hạn và lần ghi (GC, SIGSTOP, throttle); kiểm hạn ngay trước khi ghi không cứu được[^kb-check]. Cần tài nguyên đích từ chối token cũ: fencing ([P12 · Chương 08, mục 8](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md#8-lease-và-fencing-token-q8)).
+
+(c) Tỉ số $15/10 = 1{,}5$: chịu được khoảng việc nhanh nhất trôi nhanh gấp rưỡi chậm nhất[^k8s-ratio]. Drift 200 ppm[^tt-drift] làm sai $10 \times 200 \times 10^{-6} = 2$ ms trên 10 s, nên không phải vấn đề; suspend 25 s và pause mới là vấn đề.
 
 </details>
 
-**Bài 12 (Khó).** Muốn hiệu chuẩn tần số một bộ đếm bằng một đồng hồ tham chiếu có độ phân giải $r$: đọc cả hai ở đầu và cuối một khoảng dài $\Delta$, rồi lấy $\hat f = \Delta C / \Delta t$. (a) Chứng minh sai số tương đối của $\hat f$ không vượt $2r/\Delta$ nếu bộ đếm chính xác và mỗi lần đọc đồng hồ tham chiếu sai không quá $r$. (b) Cần $\Delta$ bao nhiêu để sai số không vượt 1 ppm khi $r = 41{,}67$ ns (như `Instant` trên Mac) và khi $r = 1$ ns? (c) Vì sao kernel chạy 5 vòng và lấy giá trị thấp nhất?
+**Bài 12 (Khó).** Muốn hiệu chuẩn tần số một bộ đếm bằng một đồng hồ tham chiếu có độ phân giải $r$: đọc cả hai ở đầu và cuối một khoảng dài $\Delta$, rồi lấy $\hat f = \Delta C / \Delta t$.
+
+(a) Chứng minh sai số tương đối của $\hat f$ không vượt $2r/\Delta$ nếu bộ đếm chính xác và mỗi lần đọc đồng hồ tham chiếu sai không quá $r$.
+
+(b) Cần $\Delta$ bao nhiêu để sai số không vượt 1 ppm khi $r = 41{,}67$ ns (như `Instant` trên Mac) và khi $r = 1$ ns?
+
+(c) Vì sao kernel chạy 5 vòng và lấy giá trị thấp nhất?
 
 <details><summary>Lời giải</summary>
 
-*(Lời giải của người soạn.)* (a) Gọi khoảng thật là $\Delta$ và số tick thật là $\Delta C = f\,\Delta$. Mỗi đầu mút của đồng hồ tham chiếu sai không quá $r$, nên khoảng đo được $\Delta t \in [\Delta - 2r,\ \Delta + 2r]$. Khi đó $\hat f = f\,\Delta/\Delta t$, và sai số tương đối $|\hat f - f|/f = |\Delta - \Delta t|/\Delta t \le 2r/\Delta t \approx 2r/\Delta$ khi $2r \ll \Delta$. (b) Cần $2r/\Delta \le 10^{-6}$, nên $\Delta \ge 2r \times 10^{6}$: với $r = 41{,}67$ ns là $\Delta \ge 83{,}3$ ms; với $r = 1$ ns là $\Delta \ge 2$ ms. Độ phân giải thô buộc phải đo lâu hơn nhiều. (c) Mỗi vòng có thể bị nhiễu (ngắt, bus bận) làm khoảng đo dài ra; các nhiễu đó làm $\Delta t$ lớn hơn thật, nên $\hat f$ nhỏ hơn thật. Lấy giá trị thấp nhất hay lấy vòng ít nhiễu nhất tùy chiều của nhiễu; kernel viết rằng nó chạy 5 vòng để lấy giá trị thấp nhất, coi đó là ước lượng tốt nhất[^lx-tsc-cal]. Chiều của thiên lệch trong thực tế phụ thuộc cách đo của từng vòng (suy luận của người soạn).
+*(Lời giải của người soạn.)* (a) Gọi khoảng thật là $\Delta$ và số tick thật là $\Delta C = f\,\Delta$. Mỗi đầu mút của đồng hồ tham chiếu sai không quá $r$, nên khoảng đo được $\Delta t \in [\Delta - 2r,\ \Delta + 2r]$. Khi đó $\hat f = f\,\Delta/\Delta t$, và sai số tương đối $|\hat f - f|/f = |\Delta - \Delta t|/\Delta t \le 2r/\Delta t \approx 2r/\Delta$ khi $2r \ll \Delta$.
+
+(b) Cần $2r/\Delta \le 10^{-6}$, nên $\Delta \ge 2r \times 10^{6}$: với $r = 41{,}67$ ns là $\Delta \ge 83{,}3$ ms; với $r = 1$ ns là $\Delta \ge 2$ ms. Độ phân giải thô buộc phải đo lâu hơn nhiều.
+
+(c) Mỗi vòng có thể bị nhiễu (ngắt, bus bận) làm khoảng đo dài ra; các nhiễu đó làm $\Delta t$ lớn hơn thật, nên $\hat f$ nhỏ hơn thật. Lấy giá trị thấp nhất hay lấy vòng ít nhiễu nhất tùy chiều của nhiễu; kernel viết rằng nó chạy 5 vòng để lấy giá trị thấp nhất, coi đó là ước lượng tốt nhất[^lx-tsc-cal]. Chiều của thiên lệch trong thực tế phụ thuộc cách đo của từng vòng (suy luận của người soạn).
 
 </details>
 

@@ -1175,7 +1175,9 @@ Mười một bài dưới đây dùng đúng công cụ của chương: chọn 
 
 <details><summary>Gợi ý</summary>
 
-(a) Nhân hai vế với 2 hoặc 4 để bỏ phân số, rồi đưa về một tam thức bậc hai theo `n`; với cận dưới, thử viết nó dưới dạng bình phương cộng một số dương. (b) Chặn `lg n` bằng một căn của `n`: đặt `k = ⌈√n⌉` rồi dùng `k < 2ᵏ` ở Mệnh đề 2.
+(a) Nhân hai vế với 2 hoặc 4 để bỏ phân số, rồi đưa về một tam thức bậc hai theo `n`; với cận dưới, thử viết nó dưới dạng bình phương cộng một số dương.
+
+(b) Chặn `lg n` bằng một căn của `n`: đặt `k = ⌈√n⌉` rồi dùng `k < 2ᵏ` ở Mệnh đề 2.
 
 </details>
 
@@ -1243,7 +1245,9 @@ Vậy `T(n) = Θ(n)` với `c = 1` và `c = 4`, `n₀ = 1`.
 
 <details><summary>Gợi ý</summary>
 
-(a) Cận dưới: `n!` là tích của `n` thừa số; chỉ giữ lại nửa lớn nhất của chúng. (b) Mỗi phép so sánh có hai kết quả; hỏi xem `k` phép so sánh phân biệt được tối đa bao nhiêu thứ tự ban đầu.
+(a) Cận dưới: `n!` là tích của `n` thừa số; chỉ giữ lại nửa lớn nhất của chúng.
+
+(b) Mỗi phép so sánh có hai kết quả; hỏi xem `k` phép so sánh phân biệt được tối đa bao nhiêu thứ tự ban đầu.
 
 </details>
 

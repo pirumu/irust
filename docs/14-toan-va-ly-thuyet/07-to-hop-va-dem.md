@@ -941,11 +941,17 @@ Mười một bài, xếp từ dễ đến khó, đều dùng công cụ của c
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) Chọn leader: 5 cách. Với mỗi leader, chọn tập hai follower ưu tiên trong 4 node còn lại: $\binom42=6$ cách. Quy tắc nhân cho $5\cdot6=30$[^mcs-product]. (b) Số bộ có thứ tự (leader, ưu tiên 1, ưu tiên 2) là $5\cdot4\cdot3=60$ theo quy tắc nhân tổng quát[^mcs-genprod]. Hàm gửi bộ $(l,f_1,f_2)$ tới cấu hình $(l,\lbrace f_1,f_2\rbrace)$ là 2-to-1: đổi chỗ $f_1$ và $f_2$ cho cùng một cấu hình, và chỉ có hai thứ tự. Quy tắc chia cho $60/2=30$[^mcs-division]. Hai cách cùng cho 30. Nhận xét: 30 cũng bằng $3\binom53$, số cách chọn một tập 3 node rồi đánh dấu một leader trong đó; Bài 4 chứng minh sự trùng này.
+*(lời giải của người soạn)* (a) Chọn leader: 5 cách. Với mỗi leader, chọn tập hai follower ưu tiên trong 4 node còn lại: $\binom42=6$ cách. Quy tắc nhân cho $5\cdot6=30$[^mcs-product].
+
+(b) Số bộ có thứ tự (leader, ưu tiên 1, ưu tiên 2) là $5\cdot4\cdot3=60$ theo quy tắc nhân tổng quát[^mcs-genprod]. Hàm gửi bộ $(l,f_1,f_2)$ tới cấu hình $(l,\lbrace f_1,f_2\rbrace)$ là 2-to-1: đổi chỗ $f_1$ và $f_2$ cho cùng một cấu hình, và chỉ có hai thứ tự. Quy tắc chia cho $60/2=30$[^mcs-division]. Hai cách cùng cho 30. Nhận xét: 30 cũng bằng $3\binom53$, số cách chọn một tập 3 node rồi đánh dấu một leader trong đó; Bài 4 chứng minh sự trùng này.
 
 </details>
 
-**Bài 2 (Dễ). Kẻ tấn công và 64 shard.** Một cụm cache có 64 shard; shard của một khóa là $h(\text{khóa})\bmod64$, với $h$ là hàm băm công khai. (a) Kẻ tấn công thử $M$ khóa phân biệt bất kỳ. Chứng minh rằng nếu $M\ge1217$ thì chắc chắn có ít nhất 20 khóa rơi vào cùng một shard, *bất kể $h$ là hàm gì*. (b) Chứng minh 1217 là giá trị nhỏ nhất có tính chất đó: với mọi $M\le1216$ có một hàm $h$ không cho 20 khóa nào cùng shard.
+**Bài 2 (Dễ). Kẻ tấn công và 64 shard.** Một cụm cache có 64 shard; shard của một khóa là $h(\text{khóa})\bmod64$, với $h$ là hàm băm công khai.
+
+(a) Kẻ tấn công thử $M$ khóa phân biệt bất kỳ. Chứng minh rằng nếu $M\ge1217$ thì chắc chắn có ít nhất 20 khóa rơi vào cùng một shard, *bất kể $h$ là hàm gì*.
+
+(b) Chứng minh 1217 là giá trị nhỏ nhất có tính chất đó: với mọi $M\le1216$ có một hàm $h$ không cho 20 khóa nào cùng shard.
 
 <details><summary>Gợi ý</summary>
 
@@ -955,11 +961,21 @@ Xác định ba thứ: bồ câu, chuồng và luật xếp bồ câu vào chu�
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) Bồ câu là $M$ khóa, chuồng là 64 shard, luật xếp là $f(\text{khóa})=h(\text{khóa})\bmod64$. Vì $19\cdot64=1216<1217\le M$, dạng tổng quát của chuồng bồ câu với $c=19$ cho một shard nhận ít nhất $19+1=20$ khóa[^mcs-gpp]. (b) Với $M\le1216$, xếp khóa thứ $i$ ($i=0,\dots,M-1$) vào shard $i\bmod64$. Mỗi shard nhận nhiều nhất $\lceil M/64\rceil\le19$ khóa vì $M\le19\cdot64$, nên không shard nào có 20 khóa. Vậy 1217 là ngưỡng nhỏ nhất mà phép đếm một mình bảo đảm cho *mọi* hàm $h$. Nhận xét: kẻ tấn công biết $h$ không cần thử bừa, nó *chọn* khóa để dồn vào một shard; con số 1217 chỉ nói điều chắc chắn xảy ra mà không cần biết $h$.
+*(lời giải của người soạn)* (a) Bồ câu là $M$ khóa, chuồng là 64 shard, luật xếp là $f(\text{khóa})=h(\text{khóa})\bmod64$. Vì $19\cdot64=1216<1217\le M$, dạng tổng quát của chuồng bồ câu với $c=19$ cho một shard nhận ít nhất $19+1=20$ khóa[^mcs-gpp].
+
+(b) Với $M\le1216$, xếp khóa thứ $i$ ($i=0,\dots,M-1$) vào shard $i\bmod64$. Mỗi shard nhận nhiều nhất $\lceil M/64\rceil\le19$ khóa vì $M\le19\cdot64$, nên không shard nào có 20 khóa. Vậy 1217 là ngưỡng nhỏ nhất mà phép đếm một mình bảo đảm cho *mọi* hàm $h$. Nhận xét: kẻ tấn công biết $h$ không cần thử bừa, nó *chọn* khóa để dồn vào một shard; con số 1217 chỉ nói điều chắc chắn xảy ra mà không cần biết $h$.
 
 </details>
 
-**Bài 3 (Dễ). Lost update.** Hai thread cùng chạy `counter += 1`, tách thành hai bước nguyên tử: `r = load(counter)` rồi `store(counter, r + 1)`; `counter` ban đầu bằng 0. (a) Có bao nhiêu xen kẽ của 4 bước? (b) Liệt kê chúng và cho biết trong bao nhiêu xen kẽ kết quả cuối là 1 (mất một lần cập nhật). (c) Nếu mỗi thread bọc cả hai bước trong một mutex thì còn bao nhiêu xen kẽ? (d) Với ba thread: có bao nhiêu xen kẽ, và bao nhiêu xen kẽ cho `counter = 3`?
+**Bài 3 (Dễ). Lost update.** Hai thread cùng chạy `counter += 1`, tách thành hai bước nguyên tử: `r = load(counter)` rồi `store(counter, r + 1)`; `counter` ban đầu bằng 0.
+
+(a) Có bao nhiêu xen kẽ của 4 bước?
+
+(b) Liệt kê chúng và cho biết trong bao nhiêu xen kẽ kết quả cuối là 1 (mất một lần cập nhật).
+
+(c) Nếu mỗi thread bọc cả hai bước trong một mutex thì còn bao nhiêu xen kẽ?
+
+(d) Với ba thread: có bao nhiêu xen kẽ, và bao nhiêu xen kẽ cho `counter = 3`?
 
 <details><summary>Gợi ý</summary>
 
@@ -969,7 +985,9 @@ Gọi $A_1,A_2$ là hai bước của thread A và $B_1,B_2$ của thread B. V�
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) $\binom42=6$ theo Định lý 7.1 với $k_1=k_2=2$. (b) Sáu xen kẽ và kết quả:
+*(lời giải của người soạn)* (a) $\binom42=6$ theo Định lý 7.1 với $k_1=k_2=2$.
+
+(b) Sáu xen kẽ và kết quả:
 
 | Xen kẽ | Diễn biến | `counter` cuối |
 |---|---|---|
@@ -980,11 +998,19 @@ Gọi $A_1,A_2$ là hai bước của thread A và $B_1,B_2$ của thread B. V�
 | $B_1A_1B_2A_2$ | B và A cùng đọc 0; B ghi 1; A ghi 1 | 1 |
 | $B_1B_2A_1A_2$ | B đọc 0, ghi 1; A đọc 1, ghi 2 | 2 |
 
-Bốn trong sáu xen kẽ mất một lần cập nhật. (c) Mutex buộc hai bước của mỗi thread đứng liền nhau, nên chỉ còn $A_1A_2B_1B_2$ và $B_1B_2A_1A_2$: 2 xen kẽ, cùng cho kết quả 2. (d) Có $\dfrac{6!}{(2!)^3}=90$ xen kẽ. Gọi ba lần `store` theo thời gian là $s_1,s_2,s_3$ và $v_t$ là giá trị $s_t$ ghi, bằng giá trị thread đó đọc cộng 1. Lần `store` đầu tiên chỉ có thể đứng sau lần `load` thấy 0, nên $v_1=1$. `counter = 3` nghĩa là $v_3=3$, tức thread của $s_3$ đã đọc giá trị 2; giá trị 2 chỉ do $s_2$ ghi (vì $s_1$ ghi 1), nên `load` đó đứng sau $s_2$. Tương tự $v_2=2$ đòi thread của $s_2$ đã đọc giá trị 1 do $s_1$ ghi, nên `load` của nó đứng sau $s_1$. Vậy cặp (load, store) của thread thứ nhất kết thúc trước khi cặp của thread thứ hai bắt đầu, và cặp thứ hai kết thúc trước cặp thứ ba: ba cặp không chồng nhau, tức xen kẽ tuần tự. Có $3!=6$ xen kẽ tuần tự và mỗi cái cho 3. Nếu mọi xen kẽ khả năng như nhau (một mô hình đếm, scheduler thật không đều), xác suất đúng là $6/90\approx6{,}7$%.
+Bốn trong sáu xen kẽ mất một lần cập nhật.
+
+(c) Mutex buộc hai bước của mỗi thread đứng liền nhau, nên chỉ còn $A_1A_2B_1B_2$ và $B_1B_2A_1A_2$: 2 xen kẽ, cùng cho kết quả 2.
+
+(d) Có $\dfrac{6!}{(2!)^3}=90$ xen kẽ. Gọi ba lần `store` theo thời gian là $s_1,s_2,s_3$ và $v_t$ là giá trị $s_t$ ghi, bằng giá trị thread đó đọc cộng 1. Lần `store` đầu tiên chỉ có thể đứng sau lần `load` thấy 0, nên $v_1=1$. `counter = 3` nghĩa là $v_3=3$, tức thread của $s_3$ đã đọc giá trị 2; giá trị 2 chỉ do $s_2$ ghi (vì $s_1$ ghi 1), nên `load` đó đứng sau $s_2$. Tương tự $v_2=2$ đòi thread của $s_2$ đã đọc giá trị 1 do $s_1$ ghi, nên `load` của nó đứng sau $s_1$. Vậy cặp (load, store) của thread thứ nhất kết thúc trước khi cặp của thread thứ hai bắt đầu, và cặp thứ hai kết thúc trước cặp thứ ba: ba cặp không chồng nhau, tức xen kẽ tuần tự. Có $3!=6$ xen kẽ tuần tự và mỗi cái cho 3. Nếu mọi xen kẽ khả năng như nhau (một mô hình đếm, scheduler thật không đều), xác suất đúng là $6/90\approx6{,}7$%.
 
 </details>
 
-**Bài 4 (Vừa). Đếm theo cặp.** (a) Chứng minh $k\binom nk=n\binom{n-1}{k-1}$ bằng cách đếm một tập theo hai cách. (b) Suy ra $\sum_{k=0}^{n}k\binom nk=n\cdot2^{n-1}$, và nói con số này nghĩa là gì với 32 tập node hỏng của cụm 5 node. (c) Giải thích vì sao đáp số 30 của Bài 1 bằng $3\binom53$.
+**Bài 4 (Vừa). Đếm theo cặp.** (a) Chứng minh $k\binom nk=n\binom{n-1}{k-1}$ bằng cách đếm một tập theo hai cách.
+
+(b) Suy ra $\sum_{k=0}^{n}k\binom nk=n\cdot2^{n-1}$, và nói con số này nghĩa là gì với 32 tập node hỏng của cụm 5 node.
+
+(c) Giải thích vì sao đáp số 30 của Bài 1 bằng $3\binom53$.
 
 <details><summary>Gợi ý</summary>
 
@@ -994,11 +1020,19 @@ Bốn trong sáu xen kẽ mất một lần cập nhật. (c) Mutex buộc hai b
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) Gọi $\mathcal P$ là tập các cặp $(S,v)$ với $S\subseteq V$, $|S|=k$ và $v\in S$. Đếm theo $S$ trước: $\binom nk$ cách chọn $S$, rồi $k$ cách chọn $v$ trong $S$, nên $|\mathcal P|=k\binom nk$. Đếm theo $v$ trước: $n$ cách chọn $v$, rồi chọn $k-1$ node còn lại của $S$ trong $n-1$ node, nên $|\mathcal P|=n\binom{n-1}{k-1}$. Hai cách đếm cùng một tập nên bằng nhau. (b) $\sum_{k=0}^{n}k\binom nk=\sum_{k=1}^{n}n\binom{n-1}{k-1}=n\sum_{j=0}^{n-1}\binom{n-1}{j}=n\cdot2^{n-1}$ theo Hệ quả 2.4(i). Với $n=5$ tổng là $5\cdot16=80$: cộng số node hỏng của cả 32 tập hỏng được 80. Mỗi node hỏng trong đúng $2^4=16$ trong 32 tập (một nửa), nên trung bình một tập có $80/32=2{,}5$ node hỏng. (c) Cấu hình (leader, tập hai follower ưu tiên) ứng một–một với cặp (tập 3 node gồm leader và hai follower ưu tiên, node được đánh dấu là leader): đó chính là các cặp $(S,v)$ với $k=3$, $n=5$. Số cấu hình là $3\binom53=30$ theo cách đếm thứ nhất và $5\binom42=30$ theo cách thứ hai. Cách (a) của Bài 1 chính là cách đếm thứ hai; cách đếm thứ nhất cho cùng con số 30 từ một hướng khác.
+*(lời giải của người soạn)* (a) Gọi $\mathcal P$ là tập các cặp $(S,v)$ với $S\subseteq V$, $|S|=k$ và $v\in S$. Đếm theo $S$ trước: $\binom nk$ cách chọn $S$, rồi $k$ cách chọn $v$ trong $S$, nên $|\mathcal P|=k\binom nk$. Đếm theo $v$ trước: $n$ cách chọn $v$, rồi chọn $k-1$ node còn lại của $S$ trong $n-1$ node, nên $|\mathcal P|=n\binom{n-1}{k-1}$. Hai cách đếm cùng một tập nên bằng nhau.
+
+(b) $\sum_{k=0}^{n}k\binom nk=\sum_{k=1}^{n}n\binom{n-1}{k-1}=n\sum_{j=0}^{n-1}\binom{n-1}{j}=n\cdot2^{n-1}$ theo Hệ quả 2.4(i). Với $n=5$ tổng là $5\cdot16=80$: cộng số node hỏng của cả 32 tập hỏng được 80. Mỗi node hỏng trong đúng $2^4=16$ trong 32 tập (một nửa), nên trung bình một tập có $80/32=2{,}5$ node hỏng.
+
+(c) Cấu hình (leader, tập hai follower ưu tiên) ứng một–một với cặp (tập 3 node gồm leader và hai follower ưu tiên, node được đánh dấu là leader): đó chính là các cặp $(S,v)$ với $k=3$, $n=5$. Số cấu hình là $3\binom53=30$ theo cách đếm thứ nhất và $5\binom42=30$ theo cách thứ hai. Cách (a) của Bài 1 chính là cách đếm thứ hai; cách đếm thứ nhất cho cùng con số 30 từ một hướng khác.
 
 </details>
 
-**Bài 5 (Vừa). Toàn ánh từ $k+1$ phần tử lên $k$ phần tử.** $k+1$ request đồng thời tới $k$ replica, mỗi request đến đúng một replica. (a) Chứng minh bằng đếm trực tiếp rằng số cách để *mọi* replica nhận ít nhất một request là $k!\binom{k+1}{2}$. (b) Kiểm bằng công thức bù trừ (Hệ quả 4.2) cho $k=3$ và $k=4$.
+**Bài 5 (Vừa). Toàn ánh từ $k+1$ phần tử lên $k$ phần tử.** $k+1$ request đồng thời tới $k$ replica, mỗi request đến đúng một replica.
+
+(a) Chứng minh bằng đếm trực tiếp rằng số cách để *mọi* replica nhận ít nhất một request là $k!\binom{k+1}{2}$.
+
+(b) Kiểm bằng công thức bù trừ (Hệ quả 4.2) cho $k=3$ và $k=4$.
 
 <details><summary>Gợi ý</summary>
 
@@ -1008,11 +1042,17 @@ Trong một toàn ánh từ $k+1$ phần tử lên $k$ phần tử, có đúng m
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) Số request vượt số replica đúng 1 và mỗi replica nhận ít nhất 1, nên đúng một replica nhận 2 request và các replica còn lại nhận đúng 1. Chọn cặp request chung replica: $\binom{k+1}2$ cách. Gộp cặp đó thành một "request kép": ta có $k$ đối tượng (request kép và $k-1$ request lẻ) và $k$ replica. Mỗi cách gán một–một $k$ đối tượng cho $k$ replica cho đúng một toàn ánh, và có $k!$ cách gán như vậy. Mỗi toàn ánh sinh ra từ đúng một lựa chọn, vì cặp request chung replica được xác định duy nhất bởi toàn ánh, nên có $k!\binom{k+1}2$ toàn ánh. (b) Với $k=3$: $\sum_j(-1)^j\binom3j(3-j)^4=81-3\cdot16+3\cdot1-0=36$, và $3!\binom42=6\cdot6=36$. Với $k=4$: $4^5-4\cdot3^5+6\cdot2^5-4\cdot1^5=1024-972+192-4=240$, và $4!\binom52=24\cdot10=240$. Hai cách khớp.
+*(lời giải của người soạn)* (a) Số request vượt số replica đúng 1 và mỗi replica nhận ít nhất 1, nên đúng một replica nhận 2 request và các replica còn lại nhận đúng 1. Chọn cặp request chung replica: $\binom{k+1}2$ cách. Gộp cặp đó thành một "request kép": ta có $k$ đối tượng (request kép và $k-1$ request lẻ) và $k$ replica. Mỗi cách gán một–một $k$ đối tượng cho $k$ replica cho đúng một toàn ánh, và có $k!$ cách gán như vậy. Mỗi toàn ánh sinh ra từ đúng một lựa chọn, vì cặp request chung replica được xác định duy nhất bởi toàn ánh, nên có $k!\binom{k+1}2$ toàn ánh.
+
+(b) Với $k=3$: $\sum_j(-1)^j\binom3j(3-j)^4=81-3\cdot16+3\cdot1-0=36$, và $3!\binom42=6\cdot6=36$. Với $k=4$: $4^5-4\cdot3^5+6\cdot2^5-4\cdot1^5=1024-972+192-4=240$, và $4!\binom52=24\cdot10=240$. Hai cách khớp.
 
 </details>
 
-**Bài 6 (Vừa). Stars and bars có giới hạn dung lượng.** 12 shard giống nhau chia cho 5 node, mỗi node giữ tối đa 4 shard. (a) Có bao nhiêu hình dạng tải $(x_1,\dots,x_5)$ hợp lệ? (b) Kiểm lại bằng hàm sinh: hệ số của $x^{12}$ trong $(1+x+x^2+x^3+x^4)^5$.
+**Bài 6 (Vừa). Stars and bars có giới hạn dung lượng.** 12 shard giống nhau chia cho 5 node, mỗi node giữ tối đa 4 shard.
+
+(a) Có bao nhiêu hình dạng tải $(x_1,\dots,x_5)$ hợp lệ?
+
+(b) Kiểm lại bằng hàm sinh: hệ số của $x^{12}$ trong $(1+x+x^2+x^3+x^4)^5$.
 
 <details><summary>Gợi ý</summary>
 
@@ -1022,11 +1062,17 @@ Gọi $A_i$ là các hình dạng tải mà node $i$ có từ 5 shard trở lên
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) Không giới hạn có $\binom{16}4=1820$ hình dạng. Với $A_i$: đặt $x_i'=x_i-5\ge0$, tổng còn $12-5=7$ chia cho 5 node, nên $|A_i|=\binom{7+4}4=\binom{11}4=330$. Với $A_i\cap A_j$: tổng còn $12-10=2$, nên $|A_i\cap A_j|=\binom{2+4}4=\binom64=15$. Ba node cùng có từ 5 shard cần ít nhất 15 shard, nhiều hơn 12, nên mọi giao ba là rỗng. Dạng bù của Định lý 4.1 cho số hình dạng hợp lệ $=1820-5\cdot330+\binom52\cdot15=1820-1650+150=320$. (b) $1+x+\dots+x^4$ là hàm sinh của một node (nhận 0 đến 4 shard), và tích 5 node theo quy tắc tích chập có hệ số $x^{12}$ là số hình dạng hợp lệ. Vì $1+x+\dots+x^4=(1-x^5)/(1-x)$, ta có $(1+\dots+x^4)^5=(1-x^5)^5(1-x)^{-5}$. Khai triển $(1-x^5)^5=\sum_j(-1)^j\binom5jx^{5j}$ và dùng $[x^m]\bigl(1-x\bigr)^{-5}=\binom{m+4}4$ (hàm sinh thứ ba ở mục 6.2) cho $[x^{12}]=\sum_j(-1)^j\binom5j\binom{12-5j+4}4$, tức đúng tổng bù trừ ở trên: $1820-1650+150=320$. Người soạn cũng đối chiếu 320 bằng vét cạn.
+*(lời giải của người soạn)* (a) Không giới hạn có $\binom{16}4=1820$ hình dạng. Với $A_i$: đặt $x_i'=x_i-5\ge0$, tổng còn $12-5=7$ chia cho 5 node, nên $|A_i|=\binom{7+4}4=\binom{11}4=330$. Với $A_i\cap A_j$: tổng còn $12-10=2$, nên $|A_i\cap A_j|=\binom{2+4}4=\binom64=15$. Ba node cùng có từ 5 shard cần ít nhất 15 shard, nhiều hơn 12, nên mọi giao ba là rỗng. Dạng bù của Định lý 4.1 cho số hình dạng hợp lệ $=1820-5\cdot330+\binom52\cdot15=1820-1650+150=320$.
+
+(b) $1+x+\dots+x^4$ là hàm sinh của một node (nhận 0 đến 4 shard), và tích 5 node theo quy tắc tích chập có hệ số $x^{12}$ là số hình dạng hợp lệ. Vì $1+x+\dots+x^4=(1-x^5)/(1-x)$, ta có $(1+\dots+x^4)^5=(1-x^5)^5(1-x)^{-5}$. Khai triển $(1-x^5)^5=\sum_j(-1)^j\binom5jx^{5j}$ và dùng $[x^m]\bigl(1-x\bigr)^{-5}=\binom{m+4}4$ (hàm sinh thứ ba ở mục 6.2) cho $[x^{12}]=\sum_j(-1)^j\binom5j\binom{12-5j+4}4$, tức đúng tổng bù trừ ở trên: $1820-1650+150=320$. Người soạn cũng đối chiếu 320 bằng vét cạn.
 
 </details>
 
-**Bài 7 (Vừa). Đặt node lên rack.** Đặt 5 node phân biệt $N1,\dots,N5$ vào 3 rack có nhãn A, B, C; mỗi node vào đúng một rack, rack nào chứa mấy node cũng được. Ta muốn mất bất kỳ một rack nào cũng còn quorum (3 trong 5), tức mỗi rack chứa tối đa 2 node. (a) Chứng minh bằng chuồng bồ câu rằng không thể làm được nếu chỉ có 2 rack. (b) Với 3 rack, có bao nhiêu cách đặt thỏa yêu cầu, trong tổng số $3^5$? Giải bằng hai cách: đếm trực tiếp theo cỡ rack, và bù trừ.
+**Bài 7 (Vừa). Đặt node lên rack.** Đặt 5 node phân biệt $N1,\dots,N5$ vào 3 rack có nhãn A, B, C; mỗi node vào đúng một rack, rack nào chứa mấy node cũng được. Ta muốn mất bất kỳ một rack nào cũng còn quorum (3 trong 5), tức mỗi rack chứa tối đa 2 node.
+
+(a) Chứng minh bằng chuồng bồ câu rằng không thể làm được nếu chỉ có 2 rack.
+
+(b) Với 3 rack, có bao nhiêu cách đặt thỏa yêu cầu, trong tổng số $3^5$? Giải bằng hai cách: đếm trực tiếp theo cỡ rack, và bù trừ.
 
 <details><summary>Gợi ý</summary>
 
@@ -1036,11 +1082,19 @@ Với (b), ba cỡ rack cộng lại bằng 5 và mỗi cỡ $\le2$. Khi bù tr�
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) 5 node vào 2 rack: $5>2\cdot2$, nên theo Định lý 3.2 với $c=2$ có một rack chứa ít nhất 3 node[^mcs-gpp]. Mất rack đó chỉ còn tối đa 2 node, dưới quorum. (b) *Trực tiếp.* Ba cỡ rack $(a,b,c)$ đều $\le2$ và cộng lại bằng 5, nên là hoán vị của $(2,2,1)$: có 3 vector cỡ. Với mỗi vector cỡ, số cách chia 5 node phân biệt vào ba rack có cỡ đó là hệ số đa thức $\frac{5!}{2!\cdot2!\cdot1!}=30$ (Định lý 7.1), nên tổng là $3\cdot30=90$. *Bù trừ.* $|A_r|$ là số cách chọn $j\ge3$ node vào rack $r$, rồi $5-j$ node còn lại tự do vào hai rack kia: $\sum_{j=3}^{5}\binom5j2^{5-j}=10\cdot4+5\cdot2+1=51$. Hai rack không thể cùng có từ 3 node (cần 6 node), nên các $A_r$ rời nhau, và số cách đặt hợp lệ là $243-3\cdot51=90$. Vậy 90 trong 243 cách, tức $10/27\approx37$% cách đặt đều ngẫu nhiên là an toàn trước việc mất một rack (mô hình đếm của người soạn).
+*(lời giải của người soạn)* (a) 5 node vào 2 rack: $5>2\cdot2$, nên theo Định lý 3.2 với $c=2$ có một rack chứa ít nhất 3 node[^mcs-gpp]. Mất rack đó chỉ còn tối đa 2 node, dưới quorum.
+
+(b) *Trực tiếp.* Ba cỡ rack $(a,b,c)$ đều $\le2$ và cộng lại bằng 5, nên là hoán vị của $(2,2,1)$: có 3 vector cỡ. Với mỗi vector cỡ, số cách chia 5 node phân biệt vào ba rack có cỡ đó là hệ số đa thức $\frac{5!}{2!\cdot2!\cdot1!}=30$ (Định lý 7.1), nên tổng là $3\cdot30=90$. *Bù trừ.* $|A_r|$ là số cách chọn $j\ge3$ node vào rack $r$, rồi $5-j$ node còn lại tự do vào hai rack kia: $\sum_{j=3}^{5}\binom5j2^{5-j}=10\cdot4+5\cdot2+1=51$. Hai rack không thể cùng có từ 3 node (cần 6 node), nên các $A_r$ rời nhau, và số cách đặt hợp lệ là $243-3\cdot51=90$. Vậy 90 trong 243 cách, tức $10/27\approx37$% cách đặt đều ngẫu nhiên là an toàn trước việc mất một rack (mô hình đếm của người soạn).
 
 </details>
 
-**Bài 8 (Vừa). Lịch tiêm lỗi không ba khe liền nhau.** Bộ test cho phép tiêm lỗi ở các khe, nhưng cấm tiêm ở *ba* khe liên tiếp (hai khe liền nhau vẫn được). Gọi $a_n$ là số lịch hợp lệ cho $n$ khe, tức số xâu $n$ bit không chứa `111`. (a) Chứng minh $a_n=a_{n-1}+a_{n-2}+a_{n-3}$ với $n\ge3$ và cho các điều kiện đầu. (b) Tính $a_{10}$ và so với $2^{10}$. (c) Tìm hàm sinh $A(x)$.
+**Bài 8 (Vừa). Lịch tiêm lỗi không ba khe liền nhau.** Bộ test cho phép tiêm lỗi ở các khe, nhưng cấm tiêm ở *ba* khe liên tiếp (hai khe liền nhau vẫn được). Gọi $a_n$ là số lịch hợp lệ cho $n$ khe, tức số xâu $n$ bit không chứa `111`.
+
+(a) Chứng minh $a_n=a_{n-1}+a_{n-2}+a_{n-3}$ với $n\ge3$ và cho các điều kiện đầu.
+
+(b) Tính $a_{10}$ và so với $2^{10}$.
+
+(c) Tìm hàm sinh $A(x)$.
 
 <details><summary>Gợi ý</summary>
 
@@ -1050,11 +1104,23 @@ Chia các xâu hợp lệ theo hậu tố: kết thúc bằng `0`, bằng `01` h
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) $a_0=1$, $a_1=2$, $a_2=4$ (xâu ngắn hơn 3 bit không thể chứa `111`). Với $n\ge3$, xâu hợp lệ không kết thúc bằng `111`, nên trong ba bit cuối có một bit 0. Xét bit 0 cuối cùng của xâu: nó là bit cuối (xâu kết thúc bằng `0`), hoặc cách bit cuối một vị trí (kết thúc bằng `01`), hoặc cách hai vị trí (kết thúc bằng `011`); ba trường hợp rời nhau và phủ mọi xâu hợp lệ. Bỏ hậu tố `0`, `01` hoặc `011` còn một xâu hợp lệ độ dài $n-1$, $n-2$ hoặc $n-3$. Ngược lại thêm hậu tố nào vào xâu hợp lệ cũng vẫn hợp lệ, vì mỗi hậu tố chứa một bit 0 chặn chuỗi 1. Quy tắc cộng cho $a_n=a_{n-1}+a_{n-2}+a_{n-3}$. (b) $a_3=4+2+1=7$, rồi $13,24,44,81,149,274,504$: $a_{10}=504$, gần một nửa của $2^{10}=1024$. (c) $A(x)(1-x-x^2-x^3)=a_0+(a_1-a_0)x+(a_2-a_1-a_0)x^2=1+x+x^2$, nên $A(x)=\dfrac{1+x+x^2}{1-x-x^2-x^3}$. Tỉ số $a_{10}/a_9=504/274\approx1{,}839$ cho thấy cơ số tăng thấp hơn 2 nhưng vẫn là hàm mũ, như ở mục 6. Người soạn đã đối chiếu dãy này bằng vét cạn bitmask.
+*(lời giải của người soạn)* (a) $a_0=1$, $a_1=2$, $a_2=4$ (xâu ngắn hơn 3 bit không thể chứa `111`). Với $n\ge3$, xâu hợp lệ không kết thúc bằng `111`, nên trong ba bit cuối có một bit 0. Xét bit 0 cuối cùng của xâu: nó là bit cuối (xâu kết thúc bằng `0`), hoặc cách bit cuối một vị trí (kết thúc bằng `01`), hoặc cách hai vị trí (kết thúc bằng `011`); ba trường hợp rời nhau và phủ mọi xâu hợp lệ. Bỏ hậu tố `0`, `01` hoặc `011` còn một xâu hợp lệ độ dài $n-1$, $n-2$ hoặc $n-3$. Ngược lại thêm hậu tố nào vào xâu hợp lệ cũng vẫn hợp lệ, vì mỗi hậu tố chứa một bit 0 chặn chuỗi 1. Quy tắc cộng cho $a_n=a_{n-1}+a_{n-2}+a_{n-3}$.
+
+(b) $a_3=4+2+1=7$, rồi $13,24,44,81,149,274,504$: $a_{10}=504$, gần một nửa của $2^{10}=1024$.
+
+(c) $A(x)(1-x-x^2-x^3)=a_0+(a_1-a_0)x+(a_2-a_1-a_0)x^2=1+x+x^2$, nên $A(x)=\dfrac{1+x+x^2}{1-x-x^2-x^3}$. Tỉ số $a_{10}/a_9=504/274\approx1{,}839$ cho thấy cơ số tăng thấp hơn 2 nhưng vẫn là hàm mũ, như ở mục 6. Người soạn đã đối chiếu dãy này bằng vét cạn bitmask.
 
 </details>
 
-**Bài 9 (Khó). Hệ quorum giao nhau có tối đa $2^{n-1}$ quorum.** Một *hệ quorum giao nhau* trên tập $V$ gồm $n$ node là một họ $\mathcal F$ các tập con khác rỗng của $V$ mà hai tập bất kỳ trong họ giao nhau[^nw-def]. (a) Chứng minh $|\mathcal F|\le2^{n-1}$. (b) Với $n=5$, họ quorum đa số đạt đúng cận này. (c) Với $n=4$, họ quorum đa số (cỡ $\ge3$) chỉ có 5 tập. Xây một họ giao nhau có $2^3=8$ tập chứa mọi quorum đa số, và nói nó hơn quorum đa số ở chỗ nào. (d) Họ $\mathcal D$ gồm mọi tập con chứa $N1$ cũng có $2^{n-1}$ tập. So availability của nó với availability của quorum đa số 5 node khi mỗi node hỏng độc lập với xác suất $p=1$%[^nw-avail].
+**Bài 9 (Khó). Hệ quorum giao nhau có tối đa $2^{n-1}$ quorum.** Một *hệ quorum giao nhau* trên tập $V$ gồm $n$ node là một họ $\mathcal F$ các tập con khác rỗng của $V$ mà hai tập bất kỳ trong họ giao nhau[^nw-def].
+
+(a) Chứng minh $|\mathcal F|\le2^{n-1}$.
+
+(b) Với $n=5$, họ quorum đa số đạt đúng cận này.
+
+(c) Với $n=4$, họ quorum đa số (cỡ $\ge3$) chỉ có 5 tập. Xây một họ giao nhau có $2^3=8$ tập chứa mọi quorum đa số, và nói nó hơn quorum đa số ở chỗ nào.
+
+(d) Họ $\mathcal D$ gồm mọi tập con chứa $N1$ cũng có $2^{n-1}$ tập. So availability của nó với availability của quorum đa số 5 node khi mỗi node hỏng độc lập với xác suất $p=1$%[^nw-avail].
 
 <details><summary>Gợi ý</summary>
 
@@ -1064,11 +1130,25 @@ Ghép mỗi tập với phần bù của nó, rồi dùng chuồng bồ câu.
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) Các tập con của $V$ chia thành $2^{n-1}$ cặp $\lbrace S,S^c\rbrace$, vì một tập không bao giờ bằng phần bù của chính nó khi $n\ge1$. Hai tập cùng một cặp rời nhau, nên $\mathcal F$ chứa nhiều nhất một tập từ mỗi cặp: nếu $|\mathcal F|>2^{n-1}$ thì theo chuồng bồ câu có hai tập thuộc cùng một cặp, chúng rời nhau, mâu thuẫn. (b) Họ quorum đa số của 5 node có $2^4=16$ tập (Định lý 2.1) và giao nhau theo Định lý 3.3 vì $3+3>5$, nên đạt cận. (c) Lấy $\mathcal F=\lbrace S:|S|\ge3\rbrace\cup\lbrace S:|S|=2,\ N1\in S\rbrace$. Số tập là $5+\binom31=8=2^3$. Giao nhau: hai tập cỡ $\ge3$ có $3+3>4$; một tập cỡ $\ge3$ và một tập cỡ 2 có $3+2>4$; hai tập cỡ 2 cùng chứa $N1$ thì chung $N1$. Họ này hơn quorum đa số ở chỗ mọi tập sống từng đủ quorum vẫn đủ, và có thêm các tập sống 2 node chứa $N1$: khi mạng chia 2–2, nửa chứa $N1$ vẫn có quorum thay vì cả hai nửa cùng dừng (nhận xét của người soạn: đây là dạng tie-breaker). Vì cỡ họ đã bằng $2^{n-1}$, theo (a) không thể thêm quorum nào nữa mà vẫn giao nhau. (d) $\mathcal D$ giao nhau vì mọi tập đều chứa $N1$, và có $2^{n-1}$ tập. Nhưng nó chỉ còn một quorum sống khi $N1$ còn sống, nên availability bằng $1-p=0{,}99$. Quorum đa số 5 node còn sống khi có ít nhất 3 node sống, nên availability bằng $1-9{,}85\cdot10^{-6}\approx0{,}99999015$ (mục 4.5). Xác suất mất availability là $10^{-2}$ so với $9{,}85\cdot10^{-6}$, tức hơn một nghìn lần. Hai họ có cùng số quorum mà chất lượng khác xa: số quorum không đo chất lượng, availability mới đo.
+*(lời giải của người soạn)* (a) Các tập con của $V$ chia thành $2^{n-1}$ cặp $\lbrace S,S^c\rbrace$, vì một tập không bao giờ bằng phần bù của chính nó khi $n\ge1$. Hai tập cùng một cặp rời nhau, nên $\mathcal F$ chứa nhiều nhất một tập từ mỗi cặp: nếu $|\mathcal F|>2^{n-1}$ thì theo chuồng bồ câu có hai tập thuộc cùng một cặp, chúng rời nhau, mâu thuẫn.
+
+(b) Họ quorum đa số của 5 node có $2^4=16$ tập (Định lý 2.1) và giao nhau theo Định lý 3.3 vì $3+3>5$, nên đạt cận.
+
+(c) Lấy $\mathcal F=\lbrace S:|S|\ge3\rbrace\cup\lbrace S:|S|=2,\ N1\in S\rbrace$. Số tập là $5+\binom31=8=2^3$. Giao nhau: hai tập cỡ $\ge3$ có $3+3>4$; một tập cỡ $\ge3$ và một tập cỡ 2 có $3+2>4$; hai tập cỡ 2 cùng chứa $N1$ thì chung $N1$. Họ này hơn quorum đa số ở chỗ mọi tập sống từng đủ quorum vẫn đủ, và có thêm các tập sống 2 node chứa $N1$: khi mạng chia 2–2, nửa chứa $N1$ vẫn có quorum thay vì cả hai nửa cùng dừng (nhận xét của người soạn: đây là dạng tie-breaker). Vì cỡ họ đã bằng $2^{n-1}$, theo (a) không thể thêm quorum nào nữa mà vẫn giao nhau.
+
+(d) $\mathcal D$ giao nhau vì mọi tập đều chứa $N1$, và có $2^{n-1}$ tập. Nhưng nó chỉ còn một quorum sống khi $N1$ còn sống, nên availability bằng $1-p=0{,}99$. Quorum đa số 5 node còn sống khi có ít nhất 3 node sống, nên availability bằng $1-9{,}85\cdot10^{-6}\approx0{,}99999015$ (mục 4.5). Xác suất mất availability là $10^{-2}$ so với $9{,}85\cdot10^{-6}$, tức hơn một nghìn lần. Hai họ có cùng số quorum mà chất lượng khác xa: số quorum không đo chất lượng, availability mới đo.
 
 </details>
 
-**Bài 10 (Khó). Ba quorum.** Hệ quả 3.4 cho $|A_1\cap A_2\cap A_3|\ge|A_1|+|A_2|+|A_3|-2n$. (a) Chứng minh cận này chặt theo nghĩa: nếu $1\le a,b,c\le n$ và $a+b+c\le2n$ thì tồn tại $A,B,C\subseteq V$ có $|A|=a$, $|B|=b$, $|C|=c$ mà $A\cap B\cap C=\varnothing$. (b) Với $n=5$: tìm ba quorum đa số (cỡ 3) không có node chung, và tìm cỡ $s$ nhỏ nhất sao cho ba tập cỡ $s$ bất kỳ đều có node chung. (c) Với $n=3f+1$ và quorum cỡ $2f+1$ (cỡ quorum của PBFT), ba quorum bất kỳ có node chung không? (d) Chứng minh Leader Completeness của Raft ở [P12 · Chương 18, mục 4](../12-he-thong-du-lieu/18-thuat-toan-dong-thuan.md) dùng giao của *hai* đa số. Vì sao nó không thể dựa vào "ba đa số có node chung"?
+**Bài 10 (Khó). Ba quorum.** Hệ quả 3.4 cho $|A_1\cap A_2\cap A_3|\ge|A_1|+|A_2|+|A_3|-2n$.
+
+(a) Chứng minh cận này chặt theo nghĩa: nếu $1\le a,b,c\le n$ và $a+b+c\le2n$ thì tồn tại $A,B,C\subseteq V$ có $|A|=a$, $|B|=b$, $|C|=c$ mà $A\cap B\cap C=\varnothing$.
+
+(b) Với $n=5$: tìm ba quorum đa số (cỡ 3) không có node chung, và tìm cỡ $s$ nhỏ nhất sao cho ba tập cỡ $s$ bất kỳ đều có node chung.
+
+(c) Với $n=3f+1$ và quorum cỡ $2f+1$ (cỡ quorum của PBFT), ba quorum bất kỳ có node chung không?
+
+(d) Chứng minh Leader Completeness của Raft ở [P12 · Chương 18, mục 4](../12-he-thong-du-lieu/18-thuat-toan-dong-thuan.md) dùng giao của *hai* đa số. Vì sao nó không thể dựa vào "ba đa số có node chung"?
 
 <details><summary>Gợi ý</summary>
 
@@ -1078,11 +1158,25 @@ Với (a), lấy phần bù: cần ba tập $A^c,B^c,C^c$ có cỡ $n-a$, $n-b$,
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) $A\cap B\cap C=\varnothing$ khi và chỉ khi $A^c\cup B^c\cup C^c=V$. Ba cỡ $n-a$, $n-b$, $n-c$ cộng lại bằng $3n-(a+b+c)\ge n$. Xếp các node $v_1,\dots,v_n$ quanh một vòng tròn; lấy $A^c$ là $n-a$ node liên tiếp bắt đầu từ $v_1$, $B^c$ là $n-b$ node liên tiếp ngay sau đó (đi vòng nếu cần), rồi $C^c$ là $n-c$ node liên tiếp tiếp theo. Ba đoạn nối tiếp nhau trên vòng, tổng độ dài $\ge n$ và mỗi đoạn dài nhiều nhất $n$, nên chúng phủ kín cả vòng, tức $A^c\cup B^c\cup C^c=V$. (b) Lấy $A=\lbrace N1,N2,N3\rbrace$, $B=\lbrace N3,N4,N5\rbrace$, $C=\lbrace N1,N2,N4\rbrace$. Mỗi node vắng mặt ở ít nhất một tập: $N1,N2\notin B$; $N3\notin C$; $N4,N5\notin A$; nên $A\cap B\cap C=\varnothing$. Với $s=4$: ba tập cỡ 4 có $|A\cap B\cap C|\ge12-10=2$ theo Hệ quả 3.4; với $s=3$ thì phản ví dụ vừa dựng. Vậy $s=4$ nhỏ nhất. (c) $3(2f+1)-2(3f+1)=1\ge1$, nên có: ba quorum bất kỳ cỡ $2f+1$ trong $3f+1$ node có ít nhất một node chung. (d) Chứng minh trong P12 chọn $U$ là term nhỏ nhất có leader thiếu entry $e$, rồi chỉ dùng giao của hai nhóm: đa số đã chép $e$ và đa số đã bầu leader của term $U$. Các term ở giữa được xử lý bằng việc chọn $U$ nhỏ nhất, chứ không bằng một node chung của nhiều đa số. Nếu muốn một node chung của ba đa số (đa số đã commit, đa số của một term trung gian, đa số bầu leader $U$) thì (b) cho thấy cận $3\cdot3-10=-1$ không bảo đảm gì: ba đa số của cụm 5 node có thể không có node chung (nhận xét của người soạn).
+*(lời giải của người soạn)* (a) $A\cap B\cap C=\varnothing$ khi và chỉ khi $A^c\cup B^c\cup C^c=V$. Ba cỡ $n-a$, $n-b$, $n-c$ cộng lại bằng $3n-(a+b+c)\ge n$. Xếp các node $v_1,\dots,v_n$ quanh một vòng tròn; lấy $A^c$ là $n-a$ node liên tiếp bắt đầu từ $v_1$, $B^c$ là $n-b$ node liên tiếp ngay sau đó (đi vòng nếu cần), rồi $C^c$ là $n-c$ node liên tiếp tiếp theo. Ba đoạn nối tiếp nhau trên vòng, tổng độ dài $\ge n$ và mỗi đoạn dài nhiều nhất $n$, nên chúng phủ kín cả vòng, tức $A^c\cup B^c\cup C^c=V$.
+
+(b) Lấy $A=\lbrace N1,N2,N3\rbrace$, $B=\lbrace N3,N4,N5\rbrace$, $C=\lbrace N1,N2,N4\rbrace$. Mỗi node vắng mặt ở ít nhất một tập: $N1,N2\notin B$; $N3\notin C$; $N4,N5\notin A$; nên $A\cap B\cap C=\varnothing$. Với $s=4$: ba tập cỡ 4 có $|A\cap B\cap C|\ge12-10=2$ theo Hệ quả 3.4; với $s=3$ thì phản ví dụ vừa dựng. Vậy $s=4$ nhỏ nhất.
+
+(c) $3(2f+1)-2(3f+1)=1\ge1$, nên có: ba quorum bất kỳ cỡ $2f+1$ trong $3f+1$ node có ít nhất một node chung.
+
+(d) Chứng minh trong P12 chọn $U$ là term nhỏ nhất có leader thiếu entry $e$, rồi chỉ dùng giao của hai nhóm: đa số đã chép $e$ và đa số đã bầu leader của term $U$. Các term ở giữa được xử lý bằng việc chọn $U$ nhỏ nhất, chứ không bằng một node chung của nhiều đa số. Nếu muốn một node chung của ba đa số (đa số đã commit, đa số của một term trung gian, đa số bầu leader $U$) thì (b) cho thấy cận $3\cdot3-10=-1$ không bảo đảm gì: ba đa số của cụm 5 node có thể không có node chung (nhận xét của người soạn).
 
 </details>
 
-**Bài 11 (Khó). Replica set xếp vòng.** Năm shard của `kvmeta-store` dùng replica set $R_i=\lbrace N_i,N_{i+1},N_{i+2}\rbrace$ với $i=1,\dots,5$, chỉ số tính theo modulo 5 (tức $R_4=\lbrace N4,N5,N1\rbrace$ và $R_5=\lbrace N5,N1,N2\rbrace$). Mỗi máy hỏng độc lập với xác suất $p$. (a) Tính xác suất $P$ để ít nhất một replica set mất trọn, bằng bù trừ. (b) Kiểm lại bằng cách đếm theo tập máy hỏng. (c) Với $p=1$%, so $P$ với union bound, với ba replica set xếp chuỗi (mục 4.5) và với "mọi bộ ba". (d) Nhận xét về mối quan hệ giữa $P$ và số replica set phân biệt.
+**Bài 11 (Khó). Replica set xếp vòng.** Năm shard của `kvmeta-store` dùng replica set $R_i=\lbrace N_i,N_{i+1},N_{i+2}\rbrace$ với $i=1,\dots,5$, chỉ số tính theo modulo 5 (tức $R_4=\lbrace N4,N5,N1\rbrace$ và $R_5=\lbrace N5,N1,N2\rbrace$). Mỗi máy hỏng độc lập với xác suất $p$.
+
+(a) Tính xác suất $P$ để ít nhất một replica set mất trọn, bằng bù trừ.
+
+(b) Kiểm lại bằng cách đếm theo tập máy hỏng.
+
+(c) Với $p=1$%, so $P$ với union bound, với ba replica set xếp chuỗi (mục 4.5) và với "mọi bộ ba".
+
+(d) Nhận xét về mối quan hệ giữa $P$ và số replica set phân biệt.
 
 <details><summary>Gợi ý</summary>
 
@@ -1092,7 +1186,13 @@ Tính cỡ hợp của hai replica set liền kề và của hai replica set kh�
 
 <details><summary>Lời giải</summary>
 
-*(lời giải của người soạn)* (a) Có $2^5-1=31$ họ con khác rỗng; ta nhóm theo cỡ họ. Họ một replica set: 5 họ, hợp cỡ 3, cho $+5p^3$. Họ hai replica set: $\binom52=10$ cặp. Năm cặp liền kề $(R_i,R_{i+1})$ có hợp $\lbrace N_i,\dots,N_{i+3}\rbrace$ cỡ 4, cho $-5p^4$. Năm cặp không liền kề $(R_i,R_{i+2})$ có hợp $\lbrace N_i,N_{i+1},N_{i+2}\rbrace\cup\lbrace N_{i+2},N_{i+3},N_{i+4}\rbrace$ là cả 5 máy, cho $-5p^5$. Từ ba replica set trở lên: 5 replica set xếp vòng như các đỉnh của một vòng 5 cạnh, và vòng 5 cạnh không có ba đỉnh đôi một liền kề, nên mọi họ ba replica set trở lên chứa một cặp không liền kề, tức hợp là cả 5 máy. Họ ba: $\binom53=10$ họ, cho $+10p^5$; họ bốn: 5 họ, cho $-5p^5$; họ năm: 1 họ, cho $+p^5$. Cộng lại: $5p^3-5p^4+(-5+10-5+1)p^5=5p^3-5p^4+p^5$. (b) Tập máy hỏng $X$ chứa ít nhất một replica set khi: $|X|=3$ và $X$ là ba máy liên tiếp (5 tập); $|X|=4$, luôn đúng, vì máy vắng mặt nằm trong đúng 3 trong 5 replica set nên có 2 replica set tránh nó (5 tập); và $|X|=5$ (1 tập). Vậy $P=5p^3(1-p)^2+5p^4(1-p)+p^5=5p^3-10p^4+5p^5+5p^4-5p^5+p^5=5p^3-5p^4+p^5$, khớp (a). (c) Với $p=1$%: $P=5\cdot10^{-6}-5\cdot10^{-8}+10^{-10}=4{,}9501\cdot10^{-6}$. Union bound $5p^3=5\cdot10^{-6}$ lệch khoảng 1%. Ba replica set xếp chuỗi cho $2{,}98\cdot10^{-6}$, và mọi bộ ba máy cho $9{,}85\cdot10^{-6}$. (d) Xác suất tăng theo số replica set phân biệt: $2{,}98$, $4{,}95$ rồi $9{,}85$ (đơn vị $10^{-6}$) cho 3, 5 và 10 replica set, nhất quán với nhận xét của bài Copysets rằng nhiều copyset hơn thì xác suất mất dữ liệu khi sự cố tương quan cao hơn[^cs-freq]. Nhưng đây là đánh đổi chứ không phải quy tắc "càng ít càng tốt": kỳ vọng lượng dữ liệu mất không đổi, nên ít replica set hơn chỉ làm mỗi lần mất lớn hơn[^cs-tradeoff].
+*(lời giải của người soạn)* (a) Có $2^5-1=31$ họ con khác rỗng; ta nhóm theo cỡ họ. Họ một replica set: 5 họ, hợp cỡ 3, cho $+5p^3$. Họ hai replica set: $\binom52=10$ cặp. Năm cặp liền kề $(R_i,R_{i+1})$ có hợp $\lbrace N_i,\dots,N_{i+3}\rbrace$ cỡ 4, cho $-5p^4$. Năm cặp không liền kề $(R_i,R_{i+2})$ có hợp $\lbrace N_i,N_{i+1},N_{i+2}\rbrace\cup\lbrace N_{i+2},N_{i+3},N_{i+4}\rbrace$ là cả 5 máy, cho $-5p^5$. Từ ba replica set trở lên: 5 replica set xếp vòng như các đỉnh của một vòng 5 cạnh, và vòng 5 cạnh không có ba đỉnh đôi một liền kề, nên mọi họ ba replica set trở lên chứa một cặp không liền kề, tức hợp là cả 5 máy. Họ ba: $\binom53=10$ họ, cho $+10p^5$; họ bốn: 5 họ, cho $-5p^5$; họ năm: 1 họ, cho $+p^5$. Cộng lại: $5p^3-5p^4+(-5+10-5+1)p^5=5p^3-5p^4+p^5$.
+
+(b) Tập máy hỏng $X$ chứa ít nhất một replica set khi: $|X|=3$ và $X$ là ba máy liên tiếp (5 tập); $|X|=4$, luôn đúng, vì máy vắng mặt nằm trong đúng 3 trong 5 replica set nên có 2 replica set tránh nó (5 tập); và $|X|=5$ (1 tập). Vậy $P=5p^3(1-p)^2+5p^4(1-p)+p^5=5p^3-10p^4+5p^5+5p^4-5p^5+p^5=5p^3-5p^4+p^5$, khớp (a).
+
+(c) Với $p=1$%: $P=5\cdot10^{-6}-5\cdot10^{-8}+10^{-10}=4{,}9501\cdot10^{-6}$. Union bound $5p^3=5\cdot10^{-6}$ lệch khoảng 1%. Ba replica set xếp chuỗi cho $2{,}98\cdot10^{-6}$, và mọi bộ ba máy cho $9{,}85\cdot10^{-6}$.
+
+(d) Xác suất tăng theo số replica set phân biệt: $2{,}98$, $4{,}95$ rồi $9{,}85$ (đơn vị $10^{-6}$) cho 3, 5 và 10 replica set, nhất quán với nhận xét của bài Copysets rằng nhiều copyset hơn thì xác suất mất dữ liệu khi sự cố tương quan cao hơn[^cs-freq]. Nhưng đây là đánh đổi chứ không phải quy tắc "càng ít càng tốt": kỳ vọng lượng dữ liệu mất không đổi, nên ít replica set hơn chỉ làm mỗi lần mất lớn hơn[^cs-tradeoff].
 
 </details>
 

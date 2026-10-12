@@ -1038,6 +1038,7 @@ Ba con số đầu khớp công thức $10 \times (1 - \rho)/(1 + \rho)$ với $
 ## Câu hỏi tự kiểm tra
 
 1. Hai đồng hồ trôi ngược chiều, mỗi cái 25 ppm. Skew tối đa sau 1 giờ là bao nhiêu, và cần đồng bộ lại ít nhất bao lâu một lần để skew không vượt 2 ms?
+
 <details><summary>Đáp án</summary>
 
 $2\rho T = 2 \times 25\times 10^{-6} \times 3600 = 0{,}18$ s. Chu kỳ $T \le \delta/(2\rho) = 2\times 10^{-3} / (5 \times 10^{-5}) = 40$ s, theo công thức $\delta/(2\rho)$[^resync-period] và Mệnh đề 1 (với $\sigma_0 = 0$).
@@ -1045,6 +1046,7 @@ $2\rho T = 2 \times 25\times 10^{-6} \times 3600 = 0{,}18$ s. Chu kỳ $T \le \d
 </details>
 
 2. Vì sao Cristian cần biết độ trễ một chiều tối thiểu $m$? Nếu $m = 0$ thì cận là bao nhiêu?
+
 <details><summary>Đáp án</summary>
 
 Vì server đọc đồng hồ ở một thời điểm bất kỳ trong khoảng $[t_0 + m,\ t_1 - m]$; $m$ càng lớn thì khoảng càng hẹp. Với $m = 0$ cận là $\mathrm{RTT}/2$, và đó cũng là cận khi ta không biết gì thêm về mạng[^cristian-range].
@@ -1052,6 +1054,7 @@ Vì server đọc đồng hồ ở một thời điểm bất kỳ trong khoản
 </details>
 
 3. Berkeley khác Cristian ở hai điểm nào? Vì sao master gửi độ chỉnh thay vì giờ?
+
 <details><summary>Đáp án</summary>
 
 Berkeley không cần máy nào có giờ chuẩn mà lấy trung bình[^berk-avg]; nó loại outlier trước khi lấy trung bình[^berk-cmu]. Gửi giờ tuyệt đối thêm một nguồn bất định nữa[^berk-whyoffset]; độ chỉnh là hiệu nên không phụ thuộc thời gian bản tin đi (nhận xét của người soạn).
@@ -1059,6 +1062,7 @@ Berkeley không cần máy nào có giờ chuẩn mà lấy trung bình[^berk-av
 </details>
 
 4. Viết $\hat\theta$ và $\delta$ theo $t_1, \ldots, t_4$, rồi chứng minh $\lvert \hat\theta - \theta^\ast\rvert \le \delta/2$.
+
 <details><summary>Đáp án</summary>
 
 Công thức ở RFC 5905[^ntp-formula]. Từ $t_2 - t_1 = d_1 + \theta^\ast$ và $t_3 - t_4 = \theta^\ast - d_2$ có $\hat\theta - \theta^\ast = (d_1 - d_2)/2$; $\delta = d_1 + d_2$; vì $d_1, d_2 \ge 0$ nên $\lvert d_1 - d_2\rvert \le d_1 + d_2$.
@@ -1066,6 +1070,7 @@ Công thức ở RFC 5905[^ntp-formula]. Từ $t_2 - t_1 = d_1 + \theta^\ast$ v�
 </details>
 
 5. Vì sao bộ lọc của NTP chọn mẫu có $\delta$ nhỏ nhất, và vì sao nó không sửa được bất đối xứng cố định?
+
 <details><summary>Đáp án</summary>
 
 Mẫu $\delta$ nhỏ nhất có cận $\delta/2$ nhỏ nhất (Mệnh đề 4), và RFC coi mẫu đầu danh sách xếp theo $\delta$ là mẫu tốt nhất[^ntp-filter-best]. Bất đối xứng cố định làm *mọi* mẫu lệch cùng một chiều đúng bằng nửa chênh lệch (công thức (3)), nên chọn mẫu nào cũng không đổi độ chệch; mô phỏng ở mục 3.5 cho +10,001 ms với chênh lệch 20 ms.
@@ -1073,6 +1078,7 @@ Mẫu $\delta$ nhỏ nhất có cận $\delta/2$ nhỏ nhất (Mệnh đề 4), 
 </details>
 
 6. Với ba nguồn NTP, một nguồn sai: thuật toán chọn làm gì? Với hai nguồn mâu thuẫn thì sao?
+
 <details><summary>Đáp án</summary>
 
 Với ba nguồn và $f = 1$, giao của hai khoảng đúng cho một khoảng chung và nguồn thứ ba bị loại vì midpoint của nó nằm ngoài; thuật toán thử $f = 0, 1, \ldots$ chừng nào $f < m/2$[^ntp-falsef]. Với hai nguồn mâu thuẫn không có đa số nên khó biết nguồn nào đúng[^r8633-two].
@@ -1080,6 +1086,7 @@ Với ba nguồn và $f = 1$, giao của hai khoảng đúng cho một khoảng 
 </details>
 
 7. Slew khác step ở đâu, và vì sao slew vẫn làm hỏng timer monotonic?
+
 <details><summary>Đáp án</summary>
 
 Step đặt thẳng đồng hồ (có thể lùi); slew đổi tốc độ nên đồng hồ liền mạch nhưng mất $x/r$ giây. `CLOCK_MONOTONIC` không bị bước nhảy nhưng bị các điều chỉnh từng bước nhỏ của `adjtime` và NTP[^mono-slewed], nên một timer 10 s kéo dài từ $10/(1+r)$ đến $10/(1-r)$ giây thật.
@@ -1087,6 +1094,7 @@ Step đặt thẳng đồng hồ (có thể lùi); slew đổi tốc độ nên 
 </details>
 
 8. Kernel xử lý leap second chèn thế nào, và smear thay đổi điều gì? Vì sao không trộn hai loại nguồn?
+
 <details><summary>Đáp án</summary>
 
 Kernel lùi đồng hồ một giây ở cuối ngày[^kernel-leap]. Smear dàn giây thừa trong 24 giờ ở 11,6 ppm và đồng hồ lệch UTC tới gần 0,5 giây[^smear-half]. Trộn thì client thấy hai nhóm giờ khác nhau; năm 2015 hai nguồn UTC và hai nguồn smear làm nhiều client không chọn được nguồn[^r8633-2015].
@@ -1094,6 +1102,7 @@ Kernel lùi đồng hồ một giây ở cuối ngày[^kernel-leap]. Smear dàn 
 </details>
 
 9. Hardware timestamping của PTP bỏ phần sai số nào của NTP, và phần nào còn lại?
+
 <details><summary>Đáp án</summary>
 
 Bỏ độ trễ xử lý và xếp hàng ở kernel, driver và phần cứng trong $d_1, d_2$[^chrony-hwts]. Còn lại bất đối xứng của đường truyền, mà `ptp4l` chỉ cho khai báo bằng `delayAsymmetry`[^ptp4l-asym].
@@ -1101,6 +1110,7 @@ Bỏ độ trễ xử lý và xếp hàng ở kernel, driver và phần cứng t
 </details>
 
 10. Cho $u = 12$ ms. Cận Lundelius–Lynch với $n = 2$ và $n = 4$? Thêm node có làm cận tốt lên không?
+
 <details><summary>Đáp án</summary>
 
 $u(1 - 1/n)$: $n = 2$ cho 6 ms, $n = 4$ cho 9 ms[^ll-theorem]. Không: cận *tăng* theo $n$ và tiến dần tới $u$.
@@ -1108,6 +1118,7 @@ $u(1 - 1/n)$: $n = 2$ cho 6 ms, $n = 4$ cho 9 ms[^ll-theorem]. Không: cận *t�
 </details>
 
 11. Viết luật nhận tin của HLC, và nêu hai tính chất chính.
+
 <details><summary>Đáp án</summary>
 
 $l := \max(l', l_m, pt)$, rồi $c$ theo bốn trường hợp ở mục 7.3[^hlc-alg]. Tính chất: $e \to f$ kéo theo $(l_e, c_e) < (l_f, c_f)$[^hlc-th1], và $0 \le l - pt \le \varepsilon$ khi đồng hồ lệch nhau không quá $\varepsilon$[^hlc-cor1].
@@ -1115,6 +1126,7 @@ $l := \max(l', l_m, pt)$, rồi $c$ theo bốn trường hợp ở mục 7.3[^hl
 </details>
 
 12. Với TTL 10 s và $\rho = 100$ ppm, holder cách B được dùng bao lâu? Cách A cần margin bao nhiêu nếu đồng bộ mỗi 64 s sau lần đồng bộ để lại 4 ms?
+
 <details><summary>Đáp án</summary>
 
 Cách B: $10 \times (1 - 10^{-4})/(1 + 10^{-4}) \approx 9{,}998$ s (Mệnh đề 9). Cách A: $\varepsilon = \sigma_0 + 2\rho T = 4 + 2 \times 10^{-4} \times 64\,000 = 16{,}8$ ms (Mệnh đề 1 và 8). Cách B lấy đi của holder chừng 2 ms, cách A chừng 16,8 ms, và cách A hỏng ngay khi skew thật vượt ước lượng.
@@ -1127,14 +1139,22 @@ Cách B: $10 \times (1 - 10^{-4})/(1 + 10^{-4}) \approx 9{,}998$ s (Mệnh đề
 
 Các lời giải là của người soạn; số đã tính tay (và chương trình trong chương đã kiểm các công thức).
 
-**Bài 1 (Dễ).** Hai đồng hồ trôi ngược chiều với $\rho = 20$ ppm. (a) Skew tối đa sau 1 ngày? (b) Phải đồng bộ lại mỗi bao lâu để skew không vượt 5 ms?
+**Bài 1 (Dễ).** Hai đồng hồ trôi ngược chiều với $\rho = 20$ ppm.
+
+(a) Skew tối đa sau 1 ngày?
+
+(b) Phải đồng bộ lại mỗi bao lâu để skew không vượt 5 ms?
+
 <details><summary>Lời giải</summary>
 
-(a) $2\rho T = 2 \times 20 \times 10^{-6} \times 86\,400 = 3{,}456$ s. (b) $T \le \delta/(2\rho) = 5 \times 10^{-3}/(4 \times 10^{-5}) = 125$ s.
+(a) $2\rho T = 2 \times 20 \times 10^{-6} \times 86\,400 = 3{,}456$ s.
+
+(b) $T \le \delta/(2\rho) = 5 \times 10^{-3}/(4 \times 10^{-5}) = 125$ s.
 
 </details>
 
 **Bài 2 (Dễ).** Cristian với $T_0 = 5{,}000$ s, $T_1 = 5{,}060$ s, $T_S = 7{,}120$ s, độ trễ một chiều tối thiểu $m = 20$ ms. Tính giờ client đặt, cận sai số và khoảng chứa giờ thật; nếu không biết $m$ thì cận là bao nhiêu?
+
 <details><summary>Lời giải</summary>
 
 $D = 60$ ms; đặt $7{,}120 + 0{,}030 = 7{,}150$ s. Cận $D/2 - m = 30 - 20 = 10$ ms; giờ thật trong $[T_S + m,\ T_S + D - m] = [7{,}140;\ 7{,}160]$ s. Nếu $m = 0$: $\pm 30$ ms.
@@ -1142,6 +1162,7 @@ $D = 60$ ms; đặt $7{,}120 + 0{,}030 = 7{,}150$ s. Cận $D/2 - m = 30 - 20 = 
 </details>
 
 **Bài 3 (Dễ, backend).** `sg-1` hỏi một nguồn NTP và ghi (ms) $t_1 = 0$, $t_2 = 301$, $t_3 = 303$, $t_4 = 100$. Tính $\hat\theta$, $\delta$, cận sai số; nếu mỗi chiều mất ít nhất 30 ms thì sao? `lockd` đang giả định $\varepsilon = 100$ ms: node này có nằm trong giả định không, và sau khi chỉnh thì sao?
+
 <details><summary>Lời giải</summary>
 
 $\hat\theta = \frac{301 + (303 - 100)}{2} = 252$ ms; $\delta = 100 - 2 = 98$ ms; cận $\delta/2 = 49$ ms, tức giờ thật của server trong $[203, 301]$ ms so với client. Với $m = 30$: $49 - 30 = 19$ ms, khoảng $[233, 271]$. Offset 252 ms vượt giả định 100 ms nên node đang vi phạm và phải được chỉnh trước khi phục vụ; sau khi chỉnh, sai số còn lại tối đa 49 ms (hoặc 19 ms), nằm trong 100 ms.
@@ -1149,6 +1170,7 @@ $\hat\theta = \frac{301 + (303 - 100)}{2} = 252$ ms; $\delta = 100 - 2 = 98$ ms;
 </details>
 
 **Bài 4 (Vừa, backend).** Master Berkeley trong cụm 5 máy nhận số đọc đã bù RTT (ms so với master): master 0; M1 +35; M2 −25; M3 +180; M4 +10. Ngưỡng $\Theta = 100$ ms quanh trung vị. Tính độ chỉnh gửi cho từng máy.
+
 <details><summary>Lời giải</summary>
 
 Sắp xếp $-25, 0, 10, 35, 180$, trung vị 10, cửa sổ $[-90, 110]$: loại M3. Trung bình của bốn số còn lại $= (0 + 35 - 25 + 10)/4 = 5$ ms. Độ chỉnh: master $+5$, M1 $5 - 35 = -30$, M2 $5 + 25 = +30$, M4 $5 - 10 = -5$; M3 (bị loại khỏi trung bình) cũng nhận $5 - 180 = -175$ ms kèm cảnh báo. Sau khi áp, bốn máy còn lại cùng đọc $+5$ ms so với số đọc cũ của master.
@@ -1156,6 +1178,7 @@ Sắp xếp $-25, 0, 10, 35, 180$, trung vị 10, cửa sổ $[-90, 110]$: loạ
 </details>
 
 **Bài 5 (Vừa).** Chứng minh nếu $d_1 = k\,d_2$ ($k > 0$) thì sai số của $\hat\theta$ bằng $\frac{k - 1}{k + 1}\cdot\frac{\delta}{2}$. Tính với $k = 4$, $\delta = 100$ ms.
+
 <details><summary>Lời giải</summary>
 
 $e = (d_1 - d_2)/2 = (k - 1)d_2/2$ và $\delta = d_1 + d_2 = (k + 1)d_2$, nên $e/(\delta/2) = (k - 1)/(k + 1)$. Với $k = 4$: $d_2 = 20$, $d_1 = 80$, $e = 30$ ms $= 0{,}6 \times 50$. Khi $k \to \infty$ tỉ số tiến tới 1, tức cận $\delta/2$.
@@ -1163,6 +1186,7 @@ $e = (d_1 - d_2)/2 = (k - 1)d_2/2$ và $\delta = d_1 + d_2 = (k + 1)d_2$, nên $
 </details>
 
 **Bài 6 (Vừa, backend).** `lockd` có $\rho = 100$ ppm, đồng bộ mỗi 64 s với sai số còn lại 4 ms, TTL 10 s. Tính margin cần cho cách A (so `expires_at`) và cho cách B (đo khoảng cục bộ). Điều gì xảy ra với mỗi cách nếu NTP hỏng và skew thật thành 500 ms?
+
 <details><summary>Lời giải</summary>
 
 Cách A: $\varepsilon = \sigma_0 + 2\rho T = 4 + 2 \times 10^{-4} \times 64\,000 = 16{,}8$ ms, nên margin $m \ge 16{,}8$ ms (Mệnh đề 8). Cách B: $\tau' = 10 \times (1 - 10^{-4})/(1 + 10^{-4}) \approx 9{,}998$ s, margin chừng 2 ms (Mệnh đề 9), nhỏ hơn cách A khoảng 8 lần. Nếu skew thật thành 500 ms: cách A chồng lấn $500 - 16{,}8 \approx 483$ ms vì margin không đủ; cách B không đổi, chỉ cận tốc độ mới ảnh hưởng. Nếu chrony slew ở $1/12$ thì margin của cách B là $10 - 8{,}46 = 1{,}54$ s.
@@ -1170,6 +1194,7 @@ Cách A: $\varepsilon = \sigma_0 + 2\rho T = 4 + 2 \times 10^{-4} \times 64\,000
 </details>
 
 **Bài 7 (Vừa).** Ba node A, B, C chạy HLC. Chuỗi sự kiện, kèm pt (ms): a1: A gửi m1, pt 1020; b1: B nhận m1, pt 1004; b2: B gửi m2 cho C, pt 1006; c1: C sự kiện cục bộ, pt 977; c2: C nhận m2, pt 980; c3: C gửi m3 cho A, pt 981; a2: A nhận m3, pt 1035; a3: A gửi m4 cho B, pt 1036; b3: B nhận m4, pt 1018. Tính $(l, c)$ từng sự kiện, nêu các cạnh gửi-nhận mà pt đảo thứ tự, và $\max(l - pt)$.
+
 <details><summary>Lời giải</summary>
 
 a1 $(1020, 0)$; b1: $l = \max(0, 1020, 1004) = 1020 = l_m$ nên $c = 0 + 1 = 1$, được $(1020, 1)$; b2: $l = 1020 = l'$ nên $c = 2$, được $(1020, 2)$; c1 $(977, 0)$; c2: $l = 1020 = l_m$ nên $c = 2 + 1 = 3$, được $(1020, 3)$; c3: $l = l'$ nên $c = 4$, được $(1020, 4)$; a2: $l = \max(1020, 1020, 1035) = 1035$ khác cả hai nên $c = 0$, được $(1035, 0)$; a3 $(1036, 0)$; b3: $l = \max(1020, 1036, 1018) = 1036 = l_m$ nên $c = 0 + 1 = 1$, được $(1036, 1)$. Cạnh có pt đảo: a1→b1 ($1004 < 1020$), b2→c2 ($980 < 1006$), a3→b3 ($1018 < 1036$); nhãn HLC tăng ngặt trên cả ba. $\max(l - pt) = 1020 - 980 = 40$ ms tại c2.
@@ -1177,6 +1202,7 @@ a1 $(1020, 0)$; b1: $l = \max(0, 1020, 1004) = 1020 = l_m$ nên $c = 0 + 1 = 1$,
 </details>
 
 **Bài 8 (Khó).** Chứng minh: nếu hai sự kiện có cùng nhãn $(l, c)$ thì chúng đồng thời (không xảy ra trước nhau). Từ đó chứng minh snapshot "mỗi node lấy trạng thái sau sự kiện cuối cùng có nhãn $\le (l^\ast, c^\ast)$" là một lát cắt nhất quán (không có tin nhận mà thiếu tin gửi).
+
 <details><summary>Lời giải</summary>
 
 Nếu $e$ xảy ra trước $f$ thì theo Định lý 1 $(l_e, c_e) < (l_f, c_f)$, nên nhãn không bằng nhau; tương tự nếu $f$ trước $e$. Vậy bằng nhau kéo theo đồng thời. Với lát cắt: giả sử lát cắt chứa sự kiện nhận $r$ (nhãn $\le (l^\ast, c^\ast)$) của tin gửi ở $s$. Vì $s$ xảy ra trước $r$ nên nhãn của $s$ nhỏ hơn nhãn của $r$ nên cũng $\le (l^\ast, c^\ast)$, do đó $s$ nằm trong lát cắt. Vậy lát cắt nhất quán, và nó không cần tin marker hay phối hợp trước (cùng ý với snapshot dựa trên HLC của bài báo[^hlc-nowait]).
@@ -1184,6 +1210,7 @@ Nếu $e$ xảy ra trước $f$ thì theo Định lý 1 $(l_e, c_e) < (l_f, c_f)
 </details>
 
 **Bài 9 (Khó).** Với $n = 4$ và $u = 8$ ms, dựng các bất đẳng thức của chứng minh cận dưới và rút ra cận. So với $n = 8$.
+
 <details><summary>Lời giải</summary>
 
 Bốn thực thi với $s^{(1)} = (0, u, u, u)$, $s^{(2)} = (0, 0, u, u)$, $s^{(3)} = (0, 0, 0, u)$, $s^{(0)} = 0$ cho $x_2 - x_1 + u \le \varepsilon$, $x_3 - x_2 + u \le \varepsilon$, $x_4 - x_3 + u \le \varepsilon$, $x_1 - x_4 \le \varepsilon$. Cộng lại: $3u = 24 \le 4\varepsilon$, nên $\varepsilon \ge 6$ ms $= 3u/4$. Với $n = 8$: $7u/8 = 7$ ms. Cận tăng từ 6 lên 7 ms khi thêm node.
@@ -1191,16 +1218,28 @@ Bốn thực thi với $s^{(1)} = (0, u, u, u)$, $s^{(2)} = (0, 0, u, u)$, $s^{(
 </details>
 
 **Bài 10 (Khó, backend).** Một node CockroachDB mất daemon NTP; đồng hồ nó lệch dần so với phần còn lại với tốc độ tương đối 80 ppm. Max-offset mặc định 500 ms. Sau bao lâu node tự tắt, sau bao lâu cận 500 ms bị vi phạm, và nên đặt cảnh báo ở đâu? Nếu tốc độ tương đối là 200 ppm thì sao?
+
 <details><summary>Lời giải</summary>
 
 Node tự tắt khi lệch tới 80% max-offset, tức 400 ms[^crdb-80]: $0{,}4/(80 \times 10^{-6}) = 5000$ s $\approx 83$ phút. Cận 500 ms bị vượt sau $0{,}5/(80 \times 10^{-6}) = 6250$ s $\approx 104$ phút nếu node *chưa* tự tắt (vì chỉ tắt khi lệch so với ít nhất một nửa các node khác). Cảnh báo nên đặt dưới 80%[^crdb-monitor], ví dụ 50% $= 250$ ms ở $3125$ s $\approx 52$ phút. Với 200 ppm mọi mốc nhỏ đi 2,5 lần: tự tắt sau 2000 s $\approx 33$ phút. Mọi phép tính là của người soạn và giả định tốc độ trôi tương đối không đổi.
 
 </details>
 
-**Bài 11 (Vừa, backend).** Cụm 6 node: 3 node dùng nguồn smear, 3 node dùng nguồn không smear. (a) Độ chệch tần số của smear 24 giờ? (b) Skew giữa hai nhóm ở các thời điểm đáng chú ý quanh leap second? (c) Với CockroachDB mặc định, hậu quả?
+**Bài 11 (Vừa, backend).** Cụm 6 node: 3 node dùng nguồn smear, 3 node dùng nguồn không smear.
+
+(a) Độ chệch tần số của smear 24 giờ?
+
+(b) Skew giữa hai nhóm ở các thời điểm đáng chú ý quanh leap second?
+
+(c) Với CockroachDB mặc định, hậu quả?
+
 <details><summary>Lời giải</summary>
 
-(a) $1/86\,400 = 11{,}57$ ppm. (b) Ngay trước giây nhuận, nhóm smear chậm hơn UTC gần 0,5 s trong khi nhóm không smear còn đúng; khi giây nhuận kết thúc, nhóm smear nhanh hơn UTC gần 0,5 s[^smear-half] trong khi nhóm không smear đã lùi một giây về lại UTC (chế độ `system` của chrony[^chrony-system]). Vậy skew giữa hai nhóm đi từ cỡ $-0{,}5$ s tới $+0{,}5$ s, cực đại tuyệt đối cỡ 0,5 s. (c) Với max-offset 500 ms, node tự tắt từ 400 ms (80%)[^crdb-80]: cực đại 0,5 s vượt ngưỡng đó, nên nhiều node có thể tự tắt đúng lúc leap second. Bài học: cả đội phải smear cùng cách hoặc không ai smear.
+(a) $1/86\,400 = 11{,}57$ ppm.
+
+(b) Ngay trước giây nhuận, nhóm smear chậm hơn UTC gần 0,5 s trong khi nhóm không smear còn đúng; khi giây nhuận kết thúc, nhóm smear nhanh hơn UTC gần 0,5 s[^smear-half] trong khi nhóm không smear đã lùi một giây về lại UTC (chế độ `system` của chrony[^chrony-system]). Vậy skew giữa hai nhóm đi từ cỡ $-0{,}5$ s tới $+0{,}5$ s, cực đại tuyệt đối cỡ 0,5 s.
+
+(c) Với max-offset 500 ms, node tự tắt từ 400 ms (80%)[^crdb-80]: cực đại 0,5 s vượt ngưỡng đó, nên nhiều node có thể tự tắt đúng lúc leap second. Bài học: cả đội phải smear cùng cách hoặc không ai smear.
 
 </details>
 

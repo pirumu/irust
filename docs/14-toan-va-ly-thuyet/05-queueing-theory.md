@@ -16,7 +16,8 @@ Cả chương dùng một ví dụ giả định là `orders-api`, một service
 
 ## Kiến thức cần trước
 
-- [Chương 03 — Xác suất cho hệ thống](03-xac-suat.md): phân phối mũ (exponential), tính không nhớ (memoryless), quá trình Poisson, kỳ vọng. Chương này dùng chúng mà không dựng lại.
+- [Chương 03 — Xác suất cho hệ thống](03-xac-suat.md): kỳ vọng, phương sai, xác suất có điều kiện.
+- [Chương 09 — Chuỗi Markov và quá trình Poisson](09-chuoi-markov-va-qua-trinh-poisson.md): phân phối mũ (exponential), tính không nhớ (memoryless), quá trình Poisson, chuỗi Markov liên tục. Chương này dùng chúng mà không dựng lại.
 - [Chương 01 — Logic và chứng minh](01-logic-va-chung-minh.md): quy nạp, vì các chứng minh dưới đây dùng quy nạp đơn giản.
 - [P12 · Chương 01 — Reliability, scalability, maintainability](../12-he-thong-du-lieu/01-reliability-scalability-maintainability.md), mục 4–5: percentile và tail latency amplification. Chương này cho bạn *cơ chế* đứng sau những quan sát ở đó.
 - [P11 · Chương 03 — Hiệu năng service Rust](../11-do-dac-va-go-loi/03-hieu-nang-service-rust.md): cách đo p50/p99 bằng histogram.
@@ -660,7 +661,7 @@ Bảng 2 áp cho pool 10 kết nối ở mục 2.3: khi $h$ tăng từ 4 ms lên
 
 ### 6.1 Chứng minh của người soạn
 
-**Hệ tách.** Chia ngẫu nhiên đều một dòng Poisson tốc độ λ thành hai dòng thì mỗi dòng vẫn là Poisson tốc độ $\lambda/2$ (tính chất chia dòng Poisson, đã dùng ở [Chương 03](03-xac-suat.md)). Mỗi hàng là M/M/1 với $\rho = (\lambda/2)/\mu = \lambda/(2\mu)$. Theo mục 3.3,
+**Hệ tách.** Chia ngẫu nhiên đều một dòng Poisson tốc độ λ thành hai dòng thì mỗi dòng vẫn là Poisson tốc độ $\lambda/2$ (tính chất chia dòng Poisson, chứng minh ở [Chương 09](09-chuoi-markov-va-qua-trinh-poisson.md)). Mỗi hàng là M/M/1 với $\rho = (\lambda/2)/\mu = \lambda/(2\mu)$. Theo mục 3.3,
 
 $$E[T_{\text{tách}}] = \frac{1}{\mu - \lambda/2} = \frac{1}{\mu(1-\rho)}.$$
 
@@ -937,7 +938,13 @@ $$E\!\left[e^{-sW_q}\right] = (1-\rho)\cdot 1 + \rho\cdot\frac{\delta}{\delta + 
 
 **Bài 5 (Vừa).** `orders-api` có 20 worker, mỗi request chạy $E[S] = 20$ ms (công suất tối đa $20/0.02 = 1000$ request/s). Lưu lượng chào là 1200 request/s; hàng chờ có biên, khi đầy thì request mới bị trả 503 ngay lập tức, và 240 request/s bị từ chối như vậy. Gauge cho thấy trung bình 30 request nằm trong hệ (đang chạy cộng đang chờ). Một đồng nghiệp tính: "Little cho $W = L/\lambda = 30/1200 = 25$ ms, nên latency trung bình là 25 ms, đạt SLO 30 ms."
 
-(a) Chỉ ra chỗ sai. (b) Latency trung bình thật của các request *được nhận* là bao nhiêu, và SLO có đạt không? (c) Con số 25 ms đo đại lượng gì? (d) Tính số worker bận trung bình và ρ thật, rồi thời gian chờ trung bình trong hàng.
+(a) Chỉ ra chỗ sai.
+
+(b) Latency trung bình thật của các request *được nhận* là bao nhiêu, và SLO có đạt không?
+
+(c) Con số 25 ms đo đại lượng gì?
+
+(d) Tính số worker bận trung bình và ρ thật, rồi thời gian chờ trung bình trong hàng.
 
 <details><summary>Lời giải</summary>
 

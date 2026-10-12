@@ -866,7 +866,13 @@ Mười một bài dưới đây bắt bạn tự chứng minh hoặc tự tính
 
 **Bài 1 (Dễ). Chọn bước nhảy cho vòng 20 shard**
 
-Worker của `settle` rải lô thứ $i$ lên shard $(i \cdot s) \bmod 20$ với bước nhảy $s$ cố định. (a) Những bước $s \in [1, 19]$ nào thăm đủ cả 20 shard, và có bao nhiêu bước như vậy? (b) Với $s = 12$, những shard nào được dùng? (c) Với $s = 7$, lô nhỏ nhất ($i \ge 0$) nào vào shard 13?
+Worker của `settle` rải lô thứ $i$ lên shard $(i \cdot s) \bmod 20$ với bước nhảy $s$ cố định.
+
+(a) Những bước $s \in [1, 19]$ nào thăm đủ cả 20 shard, và có bao nhiêu bước như vậy?
+
+(b) Với $s = 12$, những shard nào được dùng?
+
+(c) Với $s = 7$, lô nhỏ nhất ($i \ge 0$) nào vào shard 13?
 
 <details><summary>Gợi ý</summary>
 
@@ -886,7 +892,13 @@ Dùng Định lý 1.6 cho (a) và (b), và nghịch đảo modulo 20 cho (c).
 
 **Bài 2 (Dễ). Lũy thừa modulo bằng tay**
 
-(a) Tính $3^{45} \bmod 17$ bằng bình phương liên tiếp, ghi từng bước. (b) Kiểm lại bằng định lý Fermat. (c) Tính $7^{1000} \bmod 40$ bằng định lý Euler. (d) Tính $2^{100} \bmod 13$.
+(a) Tính $3^{45} \bmod 17$ bằng bình phương liên tiếp, ghi từng bước.
+
+(b) Kiểm lại bằng định lý Fermat.
+
+(c) Tính $7^{1000} \bmod 40$ bằng định lý Euler.
+
+(d) Tính $2^{100} \bmod 13$.
 
 <details><summary>Lời giải</summary>
 
@@ -902,7 +914,15 @@ Dùng Định lý 1.6 cho (a) và (b), và nghịch đảo modulo 20 cho (c).
 
 **Bài 3 (Dễ). RSA đồ chơi với $n = 143$ và cách phá nó**
 
-Một validator đồ chơi chọn $p = 11$, $q = 13$ và $e = 7$. (a) Tính $\varphi(n)$ và khóa riêng $d$. (b) Mã hóa $m = 9$. (c) Kẻ tấn công chỉ biết khóa công khai $(143, 7)$ lấy được $d$ như thế nào? (d) Bản rõ $m = 11$ có giải mã đúng không?
+Một validator đồ chơi chọn $p = 11$, $q = 13$ và $e = 7$.
+
+(a) Tính $\varphi(n)$ và khóa riêng $d$.
+
+(b) Mã hóa $m = 9$.
+
+(c) Kẻ tấn công chỉ biết khóa công khai $(143, 7)$ lấy được $d$ như thế nào?
+
+(d) Bản rõ $m = 11$ có giải mã đúng không?
 
 <details><summary>Lời giải</summary>
 
@@ -918,7 +938,13 @@ Một validator đồ chơi chọn $p = 11$, $q = 13$ và $e = 7$. (a) Tính $\v
 
 **Bài 4 (Vừa). Đổi từ $n$ sang $m$ shard: tỉ lệ khóa giữ nguyên**
 
-Shard của khóa là $h \bmod n$; cụm đổi sang $m$ shard và shard mới là $h \bmod m$. Giả sử $h$ phân bố đều trên các lớp dư modulo $L = \operatorname{lcm}(n, m)$. (a) Chứng minh tỉ lệ khóa giữ nguyên shard là $\min(n, m) / L$. (b) Tính tỉ lệ đó cho $4 \to 6$, $10 \to 12$, $8 \to 16$ và $7 \to 8$. (c) Khi tăng từ $n$ lên $m > n$ shard, mức tối thiểu khóa phải đổi chỗ để mỗi shard giữ $1/m$ số khóa là bao nhiêu, và so với `mod` thì sao?
+Shard của khóa là $h \bmod n$; cụm đổi sang $m$ shard và shard mới là $h \bmod m$. Giả sử $h$ phân bố đều trên các lớp dư modulo $L = \operatorname{lcm}(n, m)$.
+
+(a) Chứng minh tỉ lệ khóa giữ nguyên shard là $\min(n, m) / L$.
+
+(b) Tính tỉ lệ đó cho $4 \to 6$, $10 \to 12$, $8 \to 16$ và $7 \to 8$.
+
+(c) Khi tăng từ $n$ lên $m > n$ shard, mức tối thiểu khóa phải đổi chỗ để mỗi shard giữ $1/m$ số khóa là bao nhiêu, và so với `mod` thì sao?
 
 <details><summary>Gợi ý</summary>
 
@@ -938,7 +964,11 @@ Với (a), đặt $r = h \bmod L$ và dùng việc mọi bội chung của $n$ v
 
 **Bài 5 (Vừa). RSA với $\lambda(n)$ thay cho $(p-1)(q-1)$**
 
-RFC 8017 chọn $d$ theo $\lambda(n) = \operatorname{lcm}(p - 1, q - 1)$[^rfc8017-pub]. (a) Chứng minh rằng nếu $e \cdot d \equiv 1 \pmod{\lambda(n)}$ thì $m^{e d} \equiv m \pmod n$ với mọi $m$. (b) Với $p = 61$, $q = 53$, $e = 17$ tính $\lambda(n)$ và $d'$.
+RFC 8017 chọn $d$ theo $\lambda(n) = \operatorname{lcm}(p - 1, q - 1)$[^rfc8017-pub].
+
+(a) Chứng minh rằng nếu $e \cdot d \equiv 1 \pmod{\lambda(n)}$ thì $m^{e d} \equiv m \pmod n$ với mọi $m$.
+
+(b) Với $p = 61$, $q = 53$, $e = 17$ tính $\lambda(n)$ và $d'$.
 
 <details><summary>Lời giải</summary>
 
@@ -950,7 +980,13 @@ RFC 8017 chọn $d$ theo $\lambda(n) = \operatorname{lcm}(p - 1, q - 1)$[^rfc801
 
 **Bài 6 (Vừa). Block có số giao dịch lẻ và quy tắc "nhân đôi lá cuối"**
 
-Một cài đặt cây Merkle cho block của `settle` xử lý số lá lẻ bằng cách nhân đôi lá cuối (coi $(a, b, c)$ như $(a, b, c, c)$); băm lá và băm nút vẫn dùng tiền tố `0x00`, `0x01` như RFC 6962. (a) Chứng minh hai block khác nhau $(a, b, c)$ và $(a, b, c, c)$ có cùng gốc. (b) Hệ quả cho `settle`? (c) Chứng minh rằng với quy tắc của RFC 6962 hai gốc đó khác nhau, trừ khi hàm băm có va chạm.
+Một cài đặt cây Merkle cho block của `settle` xử lý số lá lẻ bằng cách nhân đôi lá cuối (coi $(a, b, c)$ như $(a, b, c, c)$); băm lá và băm nút vẫn dùng tiền tố `0x00`, `0x01` như RFC 6962.
+
+(a) Chứng minh hai block khác nhau $(a, b, c)$ và $(a, b, c, c)$ có cùng gốc.
+
+(b) Hệ quả cho `settle`?
+
+(c) Chứng minh rằng với quy tắc của RFC 6962 hai gốc đó khác nhau, trừ khi hàm băm có va chạm.
 
 <details><summary>Lời giải</summary>
 
@@ -964,7 +1000,13 @@ Một cài đặt cây Merkle cho block của `settle` xử lý số lá lẻ b�
 
 **Bài 7 (Vừa). Shamir $(3, 4)$ với bí mật khác, và một mảnh hỏng**
 
-Trên các số dư modulo $p = 97$, cụm `settle` chia bí mật $s = 10$ bằng $q(x) = 10 + 3x + 8x^2$; validator thứ $i$ ($i = 1, \ldots, 4$) giữ $(i, q(i))$. (a) Tính bốn mảnh. (b) Khôi phục bí mật từ ba mảnh $x = 2, 3, 4$ bằng công thức Lagrange. (c) Giả sử mảnh của $x = 2$ bị gửi sai thành 49. Chứng minh rằng với cả bốn mảnh, người ghép *luôn phát hiện* có mảnh sai, và nói vì sao với đúng bốn mảnh chưa chỉ ra được mảnh nào sai.
+Trên các số dư modulo $p = 97$, cụm `settle` chia bí mật $s = 10$ bằng $q(x) = 10 + 3x + 8x^2$; validator thứ $i$ ($i = 1, \ldots, 4$) giữ $(i, q(i))$.
+
+(a) Tính bốn mảnh.
+
+(b) Khôi phục bí mật từ ba mảnh $x = 2, 3, 4$ bằng công thức Lagrange.
+
+(c) Giả sử mảnh của $x = 2$ bị gửi sai thành 49. Chứng minh rằng với cả bốn mảnh, người ghép *luôn phát hiện* có mảnh sai, và nói vì sao với đúng bốn mảnh chưa chỉ ra được mảnh nào sai.
 
 <details><summary>Lời giải</summary>
 
@@ -978,7 +1020,13 @@ Trên các số dư modulo $p = 97$, cụm `settle` chia bí mật $s = 10$ bằ
 
 **Bài 8 (Vừa). Authenticator hay chữ ký trong cụm $n = 3f + 1$**
 
-(a) Cụm $n = 4$ replica ($f = 1$): để gửi một thông điệp đồng thuận tới ba replica còn lại, người gửi cần bao nhiêu phép tạo MAC nếu dùng authenticator, và mỗi người nhận cần kiểm bao nhiêu MAC? Nếu dùng chữ ký thì cần bao nhiêu phép ký và kiểm? (b) Giả sử một MAC rẻ hơn một chữ ký 1000 lần, như bài báo PBFT đo trên phần cứng năm 1999[^pbft-mac-fast]. Cụm lớn cỡ nào thì chi phí tạo một authenticator bằng chi phí một chữ ký? (c) Giải thích vì sao `R2` không dùng được thẻ $t_{02}$ để thuyết phục `R3`. (d) Một `R0` Byzantine gửi authenticator có ô hợp lệ cho `R1` nhưng ô sai cho `R2`. Điều gì xảy ra và vì sao giao thức không thể dựa vào lời khai của một replica đơn lẻ?
+(a) Cụm $n = 4$ replica ($f = 1$): để gửi một thông điệp đồng thuận tới ba replica còn lại, người gửi cần bao nhiêu phép tạo MAC nếu dùng authenticator, và mỗi người nhận cần kiểm bao nhiêu MAC? Nếu dùng chữ ký thì cần bao nhiêu phép ký và kiểm?
+
+(b) Giả sử một MAC rẻ hơn một chữ ký 1000 lần, như bài báo PBFT đo trên phần cứng năm 1999[^pbft-mac-fast]. Cụm lớn cỡ nào thì chi phí tạo một authenticator bằng chi phí một chữ ký?
+
+(c) Giải thích vì sao `R2` không dùng được thẻ $t_{02}$ để thuyết phục `R3`.
+
+(d) Một `R0` Byzantine gửi authenticator có ô hợp lệ cho `R1` nhưng ô sai cho `R2`. Điều gì xảy ra và vì sao giao thức không thể dựa vào lời khai của một replica đơn lẻ?
 
 <details><summary>Lời giải</summary>
 
@@ -994,7 +1042,13 @@ Trên các số dư modulo $p = 97$, cụm `settle` chia bí mật $s = 10$ bằ
 
 **Bài 9 (Khó). RSA-CRT: ghép đúng, và một lỗi ở một nửa phép tính làm lộ khóa**
 
-Một service ký của `settle` dùng RSA-CRT với khóa $(p, q, dP, dQ, qInv)$ (Đi sâu mục 4): $x_p = H^{dP} \bmod p$, $x_q = H^{dQ} \bmod q$, $h = (x_p - x_q) \cdot qInv \bmod p$, chữ ký $\sigma = x_q + q \cdot h$. (a) Chứng minh $\sigma$ là chữ ký đúng $H^d \bmod n$. (b) Giả sử một bit lật làm $x_p$ sai (nhưng $x_q$ đúng). Chứng minh $\gcd(\hat\sigma^e - H, n) = q$ với $\hat\sigma$ là chữ ký sai. (c) Kiểm trên $p = 61$, $q = 53$, $e = 17$, $H = 1000$.
+Một service ký của `settle` dùng RSA-CRT với khóa $(p, q, dP, dQ, qInv)$ (Đi sâu mục 4): $x_p = H^{dP} \bmod p$, $x_q = H^{dQ} \bmod q$, $h = (x_p - x_q) \cdot qInv \bmod p$, chữ ký $\sigma = x_q + q \cdot h$.
+
+(a) Chứng minh $\sigma$ là chữ ký đúng $H^d \bmod n$.
+
+(b) Giả sử một bit lật làm $x_p$ sai (nhưng $x_q$ đúng). Chứng minh $\gcd(\hat\sigma^e - H, n) = q$ với $\hat\sigma$ là chữ ký sai.
+
+(c) Kiểm trên $p = 61$, $q = 53$, $e = 17$, $H = 1000$.
 
 <details><summary>Gợi ý</summary>
 
@@ -1014,7 +1068,11 @@ Cho (a), kiểm $\sigma \bmod q$, $\sigma \bmod p$ và $0 \le \sigma < n$ rồi 
 
 **Bài 10 (Khó). Hàm $\varphi$ nhân tính và công thức $\varphi(n) = n \prod (1 - 1/p)$**
 
-(a) Chứng minh: nếu $\gcd(m, n) = 1$ thì $\varphi(m n) = \varphi(m) \cdot \varphi(n)$. (b) Chứng minh $\varphi(p^k) = p^k - p^{k-1}$ với $p$ nguyên tố. (c) Suy ra $\varphi(n) = n \prod_{p \mid n} (1 - 1/p)$ và tính $\varphi(105)$ và $\varphi(2^{10} \cdot 3^4 \cdot 5)$.
+(a) Chứng minh: nếu $\gcd(m, n) = 1$ thì $\varphi(m n) = \varphi(m) \cdot \varphi(n)$.
+
+(b) Chứng minh $\varphi(p^k) = p^k - p^{k-1}$ với $p$ nguyên tố.
+
+(c) Suy ra $\varphi(n) = n \prod_{p \mid n} (1 - 1/p)$ và tính $\varphi(105)$ và $\varphi(2^{10} \cdot 3^4 \cdot 5)$.
 
 <details><summary>Gợi ý</summary>
 
@@ -1034,7 +1092,13 @@ Với (a), dùng song ánh của phần dư Trung Hoa (Định lý 3.6) và ch�
 
 **Bài 11 (Khó). Ký trên digest 64 bit**
 
-Một thiết kế của `settle` ký trên digest 64 bit của lệnh thay vì trên chính lệnh. (a) Điểm 50% của birthday bound cho digest 64 bit là bao nhiêu lần băm? (b) Mô tả một cuộc tấn công không phá sơ đồ ký mà vẫn khiến chữ ký của ngân hàng trên lệnh lương thiện hợp lệ cho một lệnh gian lận, và ước lượng chi phí. (c) Cần digest tối thiểu bao nhiêu bit để với $10^{12}$ thông điệp xác suất có va chạm không quá $2^{-40}$?
+Một thiết kế của `settle` ký trên digest 64 bit của lệnh thay vì trên chính lệnh.
+
+(a) Điểm 50% của birthday bound cho digest 64 bit là bao nhiêu lần băm?
+
+(b) Mô tả một cuộc tấn công không phá sơ đồ ký mà vẫn khiến chữ ký của ngân hàng trên lệnh lương thiện hợp lệ cho một lệnh gian lận, và ước lượng chi phí.
+
+(c) Cần digest tối thiểu bao nhiêu bit để với $10^{12}$ thông điệp xác suất có va chạm không quá $2^{-40}$?
 
 <details><summary>Gợi ý</summary>
 
