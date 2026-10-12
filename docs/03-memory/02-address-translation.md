@@ -14,51 +14,82 @@
 
 - [Chương 01 — Address space](01-address-space.md): process thấy bộ nhớ riêng, liên tục, bắt đầu từ 0 (virtual address); ba mục tiêu transparency / efficiency / protection.
 
+Các ví dụ số trong chương (address space 16 KB, 64 byte, các bảng base/size) lấy từ sách OSTEP. Chúng nhỏ hơn máy thật rất nhiều, nhưng nhỏ thì mới tính tay được từng bước. Ta gắn chúng vào một service giả định tên `orders` để thấy chuyện này liên quan gì đến process bạn deploy hằng ngày.
+
 ## 1. Hardware-based address translation: ảo giác cần một cơ chế (Q1)
 
-> **Trả lời ngắn.** Với mỗi truy cập bộ nhớ (lấy lệnh, load, store), phần cứng biến virtual address thành physical address nơi dữ liệu thực sự nằm[^ostep-translation]. Phần cứng chỉ cung cấp cơ chế mức thấp; OS phải cấu hình nó cho đúng và quản lý bộ nhớ nào đang rảnh, đang dùng[^m-track]. Khi mọi thứ bình thường, phần cứng tự dịch mà không cần OS chen vào[^m-nohw].
+> **Trả lời ngắn.** Mỗi lần CPU lấy lệnh, load hay store, phần cứng đổi virtual address mà lệnh đưa ra thành physical address, tức chỗ dữ liệu thật sự nằm trong RAM[^ostep-translation]. Phần cứng chỉ làm được phép đổi ở mức thấp, nên OS phải cài đặt nó cho đúng và theo dõi chỗ nào của RAM còn trống, chỗ nào đang dùng[^m-track]. Khi mọi thứ bình thường, phần cứng tự dịch và OS không phải chen vào[^m-nohw].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mỗi lá thư (truy cập bộ nhớ) đi qua một máy phân loại ở bưu điện, máy tra sổ và dán địa chỉ thật lên phong bì; con người (OS) chỉ lập và cập nhật cuốn sổ, không tự tay xử lý từng lá thư.
+*Với service `orders`.* Hãy hình dung `orders`, một service viết bằng Rust, chạy thành vài worker process giống hệt nhau trên cùng một máy (kiểu prefork). Worker nào cũng cho rằng biến đếm request của nó nằm ở cùng một địa chỉ, chẳng hạn 15 KB, thế mà các worker không ghi đè lên nhau. Ta sẽ bám theo `orders` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này: ai biến "15 KB của worker này" thành một chỗ cụ thể trong RAM, và làm sao việc đó không làm chậm từng lệnh?
 
-OSTEP nhắc lại *limited direct execution*: cho chương trình chạy thẳng trên phần cứng, chỉ chen vào ở vài thời điểm then chốt. Với bộ nhớ: hiệu quả đòi hỏi hỗ trợ phần cứng[^m-eff], còn kiểm soát nghĩa là không ứng dụng nào truy cập bộ nhớ ngoài phần của mình[^m-ctrl].
+### 1.1 Phần cứng dịch, OS cài đặt
 
-Cơ chế chạy theo ba bước. (1) Lúc boot, OS đang ở kernel mode cài các exception handler bằng lệnh đặc quyền, trong đó có handler cho truy cập ngoài giới hạn[^m-handlers]. (2) Khi process chạy, với *từng* lần lấy lệnh, load, store, phần cứng đổi virtual address do lệnh đưa ra thành physical address nơi dữ liệu thực sự nằm[^ostep-translation]; việc lặp ở mọi truy cập nên phải do phần cứng làm. (3) Phần cứng một mình không ảo hóa được bộ nhớ vì nó chỉ cung cấp cơ chế mức thấp; OS phải chen vào ở các thời điểm then chốt để cấu hình phần cứng cho đúng, đồng thời quản lý bộ nhớ nào đang rảnh, đang dùng[^m-os][^m-track].
+Phase 1 đã nói về *limited direct execution* ([Phase 1 · Chương 01](../01-linux/01-os-va-kernel.md), mục 2): cho chương trình chạy thẳng trên phần cứng, OS chỉ chen vào ở vài thời điểm then chốt. Với bộ nhớ cũng vậy. Hiệu quả đòi hỏi phần cứng hỗ trợ[^m-eff]. Còn kiểm soát nghĩa là không ứng dụng nào đụng được vào bộ nhớ ngoài phần của mình[^m-ctrl]. Quy vào `orders`: một worker phải đọc ghi biến của nó ở tốc độ bình thường, và không có cách nào chạm vào biến của worker khác.
 
-Ba thế hệ cơ chế, mỗi thế hệ sửa nhược điểm của thế hệ trước: base/bounds → segmentation → paging.
+Cơ chế chạy theo ba bước:
 
-Phần của bộ xử lý lo việc dịch này đôi khi được gọi là **memory management unit (MMU)**; OSTEP nói các kỹ thuật phức tạp hơn về sau sẽ thêm mạch vào MMU[^m-mmu]. Khi bình thường, phần cứng tự dịch mà không cần OS; OS chỉ chen vào khi process vi phạm hoặc khi timer buộc đổi process[^m-nohw][^m-lde].
+1. **Lúc boot,** OS đang ở kernel mode nên dùng lệnh đặc quyền để cài các exception handler, trong đó có handler cho truy cập ngoài giới hạn[^m-handlers].
+2. **Khi worker chạy,** với *từng* lần lấy lệnh, load, store, phần cứng đổi virtual address thành physical address[^ostep-translation]. Việc này lặp ở mọi truy cập nên chỉ phần cứng mới theo kịp (suy luận của người soạn).
+3. **Trong suốt thời gian đó,** OS vẫn phải làm phần của mình. Phần cứng một mình không ảo hóa được bộ nhớ, vì nó chỉ cung cấp cơ chế mức thấp; OS phải chen vào ở các thời điểm then chốt để cấu hình đúng bản dịch[^m-os]. Nó cũng phải theo dõi vùng nhớ nào còn rảnh, vùng nào đang dùng[^m-track].
+
+```mermaid
+flowchart LR
+  W["Worker orders<br/>phát virtual address"]
+  H["Phần cứng (MMU)<br/>dịch ở mọi truy cập"]
+  R["RAM<br/>physical address"]
+  O["OS<br/>cấu hình phần cứng, xử lý vi phạm"]
+  W -- "lấy lệnh / load / store" --> H
+  H -- "địa chỉ vật lý" --> R
+  O -. "cài đặt lúc boot và khi đổi process" .-> H
+  H -. "vi phạm: exception" .-> O
+```
+
+(Sơ đồ minh họa của người soạn.)
+
+Phần của bộ xử lý lo việc dịch này đôi khi được gọi là *memory management unit* (MMU)[^m-mmu]. Khi worker chạy bình thường, bản dịch do phần cứng lo, không có OS chen vào[^m-nohw]. OS chỉ phải can thiệp khi worker vi phạm[^m-lde].
+
+Có ba thế hệ cơ chế để làm việc này, mỗi thế hệ sửa nhược điểm của thế hệ trước: base/bounds, rồi segmentation, rồi paging. Các mục 2 đến 7 đi lần lượt qua chúng.
 
 <details><summary>Đi sâu: phần cứng cần có (theo OSTEP, trong bối cảnh base/bounds)</summary>
 
-OSTEP tổng kết yêu cầu phần cứng: hai chế độ CPU (kernel mode toàn quyền, user mode bị giới hạn)[^m-modes]; cặp base/bounds và mạch dịch + kiểm tra giới hạn; lệnh *đặc quyền* để sửa base/bounds[^m-priv]; khả năng phát exception, kể cả khi process user thử đổi các thanh ghi đó[^m-exc].
+Để base/bounds chạy được, phần cứng phải có bốn thứ:
+
+- Hai chế độ CPU: kernel mode toàn quyền, user mode bị giới hạn[^m-modes].
+- Cặp thanh ghi base/bounds, cùng mạch dịch và kiểm tra giới hạn.
+- Lệnh *đặc quyền* để sửa base/bounds, chỉ chạy được ở kernel mode[^m-priv].
+- Khả năng phát exception, kể cả khi process user thử đổi chính các thanh ghi đó[^m-exc].
 
 </details>
 
-**Quay lại Q1:** địa chỉ ảo được phần cứng dịch cho *từng* truy cập; OS không dịch từng lần mà cấu hình phần cứng và xử lý khi có vi phạm hoặc đổi process.
+**Quay lại Q1:** phần cứng dịch địa chỉ ảo cho *từng* truy cập của worker; OS không dịch từng lần mà cấu hình phần cứng, rồi xử lý khi có vi phạm hoặc đổi process.
 
 ## 2. Base and bounds (dynamic relocation) (Q2)
 
-> **Trả lời ngắn.** Mỗi CPU có hai thanh ghi base và bounds[^m-two-regs]; địa chỉ vật lý bằng địa chỉ ảo cộng base[^m-formula], sau khi kiểm tra địa chỉ ảo nằm trong giới hạn, nếu không CPU phát exception[^ostep-bounds-exc]. Vì chỉ có một cặp thanh ghi mà giá trị khác nhau theo process, OS phải lưu cặp này vào cấu trúc dữ liệu riêng của process (gọi là PCB) khi dừng process và nạp lại khi chạy tiếp[^m-ctx][^m-ctx2].
+> **Trả lời ngắn.** Mỗi CPU có hai thanh ghi, base và bounds[^m-two-regs]. Địa chỉ vật lý bằng địa chỉ ảo cộng base[^m-formula]. Trước khi cộng, phần cứng kiểm tra địa chỉ ảo có nằm trong giới hạn không; nếu không, CPU phát exception[^ostep-bounds-exc]. Vì mỗi CPU chỉ có một cặp thanh ghi mà mỗi process cần giá trị riêng, nên khi đổi process OS cất cặp này vào PCB (cấu trúc dữ liệu riêng của process) và nạp lại khi process chạy tiếp[^m-ctx2].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thuê một dãy phòng khách sạn; bạn tưởng phòng của mình đánh số từ 0, lễ tân cộng thêm số tầng bạn thuê (base), và số phòng vượt quá số phòng bạn thuê (bounds) bị từ chối.
+*Với service `orders`.* Worker `orders` đồ chơi của ta có address space 16 KB, bắt đầu ở địa chỉ 0. Trong một handler có dòng `count += 3` (sách viết `x = x + 3` bằng C; việc gán nó vào `orders` là của người soạn). Compiler dịch dòng này thành ba lệnh x86 đặt ở địa chỉ 128, 132 và 135: một lệnh load từ địa chỉ của biến (ở 15 KB, trong stack, giá trị ban đầu 3000), một lệnh cộng, một lệnh store trở lại cùng địa chỉ. Nhìn từ worker, đầu tiên nó lấy lệnh ở 128 rồi load từ 15 KB[^m-example-seq]. Lệnh cộng ở 132 không chạm bộ nhớ, nên bước kế tiếp là lấy lệnh ở 135 rồi store vào 15 KB[^m-example-seq2].
 
-*Ví dụ chạy xuyên suốt.* Hãy tưởng tượng một process có address space 16 KB, bắt đầu ở địa chỉ 0. Đoạn code C `x = x + 3` được compiler dịch thành ba lệnh x86 đặt tại địa chỉ 128, 132, 135: một lệnh load từ địa chỉ của biến `x` (ở 15 KB, trong stack, giá trị ban đầu 3000), một lệnh cộng, một lệnh store trở lại cùng địa chỉ. Theo quan điểm của process, các truy cập bộ nhớ là: lấy lệnh ở 128, load từ 15 KB, lấy lệnh ở 132, (lệnh cộng không chạm bộ nhớ), lấy lệnh ở 135, store vào 15 KB[^m-example-seq][^m-example-seq2]. Đây toàn là virtual address. Vấn đề: OS muốn đặt process ở chỗ khác trong RAM, không nhất thiết từ địa chỉ 0, mà process không được biết[^m-problem].
+Tất cả những địa chỉ đó là virtual address. Vấn đề là OS muốn đặt worker ở một chỗ khác trong RAM, không nhất thiết từ địa chỉ 0, mà worker không được biết[^m-problem]. Máy có nhiều worker `orders` thì chắc chắn không thể đặt hết từ địa chỉ vật lý 0 (suy luận của người soạn).
 
-*Cơ chế.* Ý tưởng được giới thiệu từ các máy time-sharing đầu tiên cuối thập niên 1950, gọi là *base and bounds*, hay *dynamic relocation*[^ostep-bb]. Mỗi CPU có hai thanh ghi: *base* và *bounds* (đôi khi gọi là *limit*)[^m-two-regs]. Mỗi chương trình được viết và biên dịch như thể được nạp ở địa chỉ 0; khi chương trình bắt đầu chạy, OS quyết định đặt nó ở đâu trong RAM và nạp giá trị đó vào thanh ghi base[^m-load0]. Từ đó mọi tham chiếu được dịch theo công thức[^m-formula]:
+### 2.1 Cơ chế: một phép cộng
+
+Giải pháp đầu tiên tên là *base and bounds*, còn gọi là *dynamic relocation*, có từ các máy time-sharing đầu tiên cuối thập niên 1950[^ostep-bb]. Mỗi CPU có hai thanh ghi: *base* và *bounds* (đôi khi gọi là *limit*)[^m-two-regs]. Mỗi chương trình được viết và biên dịch như thể nó nạp ở địa chỉ 0; khi chương trình bắt đầu chạy, OS chọn chỗ đặt nó trong RAM rồi nạp địa chỉ đó vào base[^m-load0]. Từ đó mọi tham chiếu được dịch theo công thức[^m-formula]:
 
 ```
 physical address = virtual address + base
 ```
 
-Với process 16 KB được OS đặt tại 32 KB (32768): khi PC = 128, phần cứng cộng 128 + 32768 = 32896 và lấy lệnh từ địa chỉ vật lý đó[^m-trace128]. Khi lệnh load phát địa chỉ ảo 15 KB, phần cứng cộng base 32 KB và ra địa chỉ vật lý 47 KB[^m-trace15k].
+Giả sử OS đặt worker 16 KB tại 32 KB (32768). Khi PC = 128, phần cứng lấy 128 + 32768 = 32896 và lấy lệnh từ địa chỉ vật lý đó[^m-trace128]. Khi lệnh load phát địa chỉ ảo 15 KB, phần cứng cộng base 32 KB và ra địa chỉ vật lý 47 KB[^m-trace15k]. Worker không hề biết nó nằm ở 32 KB; đó là điều ta muốn.
 
-Thanh ghi **bounds** phục vụ protection[^ostep-bounds] — trước khi cộng base, bộ xử lý kiểm tra tham chiếu có nằm trong giới hạn không. Nếu virtual address lớn hơn hoặc bằng bounds, hoặc âm, CPU phát exception và process nhiều khả năng bị kết thúc[^ostep-bounds-exc].
+### 2.2 Bounds: chặn địa chỉ ngoài vùng
 
-Bảng dưới là ví dụ của OSTEP (address space 4 KB nạp tại 16 KB: base = 16384, bounds = 4096); tôi đã chạy lại bằng công thức trên ở mục Liên hệ với Rust; các giá trị 16 KB, 17 KB, 19384 và fault nằm trong bảng của sách, còn 16384 và 17408 là đổi KB sang byte của người soạn[^m-example-table][^m-table-fault].
+Thanh ghi **bounds** lo phần protection[^ostep-bounds]. Trước khi cộng base, phần cứng kiểm tra tham chiếu có nằm trong giới hạn không. Nếu địa chỉ ảo lớn hơn hoặc bằng bounds, hoặc âm, CPU phát exception và process nhiều khả năng bị kết thúc[^ostep-bounds-exc]. Với `orders`, một worker có bug đọc ra ngoài vùng của mình sẽ dừng ngay ở đây, chưa chạm tới RAM của worker nào khác (nhận xét của người soạn).
+
+Bảng dưới là ví dụ của sách: address space 4 KB nạp tại 16 KB, tức base = 16384, bounds = 4096. Các giá trị 16 KB, 17 KB, 19384 và fault đều có trong sách; 16384 và 17408 là người soạn đổi KB ra byte. Người soạn đã kiểm lại bằng chương trình ở mục Liên hệ với Rust[^m-example-table].
 
 | Virtual address | Kiểm tra `va < 4096` | Physical address |
 |---|---|---|
@@ -67,18 +98,22 @@ Bảng dưới là ví dụ của OSTEP (address space 4 KB nạp tại 16 KB: b
 | 3000 | đúng | 19384 |
 | 4400 | sai | Fault (out of bounds) |
 
-Cặp base/bounds là cấu trúc phần cứng nằm trên chip, mỗi CPU một cặp[^m-onchip].
+Địa chỉ 4400 vượt bounds nên ra fault. Theo sách, chỉ khi địa chỉ "quá lớn" hoặc âm thì mới có fault và exception[^m-table-fault].
 
-*Việc của OS.* Về phía OS có bốn việc:
+Một chi tiết phần cứng: cặp base/bounds nằm ngay trên chip, mỗi CPU một cặp[^m-onchip].
 
-1. **Khi tạo process**: tìm chỗ cho address space. Với giả định mọi address space nhỏ hơn bộ nhớ vật lý và cùng kích thước, OS xem RAM là mảng các "khe" và theo dõi khe nào trống[^m-slots]; nó duyệt một *free list* để tìm khe trống rồi đánh dấu đã dùng[^m-free]. Khi process kết thúc, OS trả bộ nhớ của nó về free list[^m-reclaim].
-2. **Khi context switch**: mỗi CPU chỉ có *một* cặp base/bounds mà giá trị khác nhau cho mỗi process[^m-ctx]. Chuyển từ process A sang B nghĩa là ghi giá trị hiện có của cặp thanh ghi vào PCB của A, rồi nạp giá trị đã lưu của B vào thanh ghi[^m-ctx2]; nếu bỏ bước này, B sẽ bị dịch bằng base của A (suy luận của người soạn).
-3. **Có thể di chuyển address space** khi process đang bị dừng: deschedule, copy sang vị trí mới, cập nhật base đã lưu; khi chạy lại process không hay biết gì[^m-move].
-4. **Cài exception handler** lúc boot qua lệnh đặc quyền[^m-handlers]; phản ứng thường gặp với truy cập ngoài bounds là kết thúc process vi phạm.
+### 2.3 Bốn việc của OS
+
+Phần cứng chỉ cộng và so sánh. Mọi việc còn lại thuộc về OS, và với `orders` có bốn việc:
+
+1. **Khi tạo worker: tìm chỗ cho address space.** Với giả định mọi address space đều nhỏ hơn bộ nhớ vật lý và cùng kích thước, việc này dễ: OS coi RAM là một mảng các "khe" và theo dõi khe nào trống[^m-slots]. Nó duyệt một *free list* để tìm khe trống rồi đánh dấu là đã dùng[^m-free]. Khi worker kết thúc, OS trả bộ nhớ của nó về free list[^m-reclaim].
+2. **Khi context switch: đổi cặp thanh ghi.** Mỗi CPU chỉ có *một* cặp base/bounds mà giá trị mỗi process mỗi khác, nên OS phải lưu rồi khôi phục cặp này mỗi lần đổi process[^m-ctx]. Chuyển từ worker A sang worker B nghĩa là ghi giá trị hiện có của cặp thanh ghi vào PCB của A, rồi nạp giá trị đã lưu của B[^m-ctx2]. Bỏ bước này thì B bị dịch bằng base của A (suy luận của người soạn).
+3. **Có thể di chuyển address space.** Khi worker đang bị dừng, OS có thể copy address space sang chỗ mới rồi cập nhật base đã lưu; lúc chạy lại worker không hay biết gì[^m-move].
+4. **Cài exception handler lúc boot** bằng lệnh đặc quyền[^m-handlers]. Phản ứng thường gặp với truy cập ngoài bounds là kết thúc worker vi phạm.
 
 <details><summary>Đi sâu: hai cách định nghĩa bounds</summary>
 
-Có hai cách định nghĩa bounds: giữ *kích thước* address space (kiểm tra trước, rồi mới cộng base) hoặc giữ *địa chỉ vật lý cuối* (cộng base trước rồi kiểm tra); OSTEP nói hai cách tương đương về logic[^m-bound-two].
+Có hai cách định nghĩa bounds. Cách thứ nhất giữ *kích thước* address space: kiểm tra trước, rồi mới cộng base. Cách thứ hai giữ *địa chỉ vật lý cuối*: cộng base trước rồi mới kiểm tra. Hai cách tương đương về mặt logic[^m-bound-two].
 
 </details>
 
@@ -86,17 +121,21 @@ Có hai cách định nghĩa bounds: giữ *kích thước* address space (kiể
 
 ## 3. Segmentation (Q3)
 
-> **Trả lời ngắn.** Base/bounds lãng phí vùng trống giữa stack và heap nằm trong khối đã cấp (internal fragmentation)[^ostep-bb-waste]; segmentation đặt một cặp base/bounds cho mỗi segment logic[^ostep-seg] nên chỉ phần dùng mới chiếm RAM[^ostep-seg-sparse]. Stack tăng ngược nên cần bit chiều tăng[^ostep-seg-bit], còn protection bits cho phép chia sẻ code[^ostep-seg-prot]. Đổi lại, RAM đầy lỗ hổng rải rác giữa các khối đã cấp (external fragmentation), mà dồn khối lại (compaction) hay thuật toán chọn chỗ trống khôn hơn chỉ giảm chứ không chữa dứt điểm[^ostep-seg-ext-always].
+> **Trả lời ngắn.** Base/bounds lãng phí vùng trống giữa stack và heap nằm trong khối đã cấp (internal fragmentation)[^ostep-bb-waste]. Segmentation sửa bằng cách cho mỗi segment logic một cặp base/bounds riêng, nên chỉ phần dùng thật mới chiếm RAM và address space lớn mà thưa vẫn dùng được[^ostep-seg-sparse]. Để chạy đúng, phần cứng cần thêm bit chiều tăng cho stack, vốn tăng ngược về địa chỉ thấp[^ostep-seg-bit], và protection bits để chia sẻ code giữa các process. Đổi lại, RAM đầy lỗ hổng rải rác giữa các khối đã cấp (external fragmentation); dồn khối lại (compaction) hay chọn chỗ trống khôn hơn chỉ giảm chứ không chữa dứt điểm[^ostep-seg-ext-always].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì thuê nguyên một căn hộ lớn cho cả đồ đạc lẫn khoảng trống (base/bounds), bạn thuê ba phòng nhỏ đúng cỡ cho code, heap, stack; nhưng kho ngày càng nhiều phòng lẻ khó ghép lại.
+*Với service `orders`.* Quay lại worker 16 KB. Heap của nó chứa cache đơn hàng, stack chứa biến local của handler (trong đó có `count`), code là binary `orders`. Với base/bounds, worker chiếm trọn khe 32–48 KB dù heap và stack còn nhỏ, và khoảng trống ở giữa vẫn chiếm RAM. Máy chạy càng nhiều worker thì chỗ phí đó càng nhân lên. Mục này xem segmentation tách ba phần ấy ra thế nào, và nó mua được gì, trả giá gì.
 
-*Lỗi của base/bounds.* Base/bounds nhanh (nhận xét của người soạn: một phép cộng, một phép so sánh), nhưng process 16 KB trong ví dụ chiếm trọn khe 32–48 KB dù stack và heap chưa lớn: khoảng trống giữa chúng bị lãng phí. OSTEP gọi đó là *internal fragmentation*, vì chỗ lãng phí nằm *bên trong* đơn vị đã cấp phát[^ostep-bb-waste]. Với address space 32-bit, chương trình thường chỉ dùng vài MB nhưng vẫn đòi cả address space nằm trong bộ nhớ[^s-32bit].
+### 3.1 Lỗi của base/bounds
 
-*Ý tưởng: generalized base/bounds.* Segmentation là ý tưởng cũ, ít nhất từ đầu thập niên 1960[^s-old]. Thay vì một cặp base/bounds cho cả address space, hãy có một cặp *cho mỗi segment logic*[^ostep-seg]. Segment là một phần liên tục của address space có độ dài xác định[^s-def]; trong address space chuẩn có ba segment khác nhau về mặt logic: code, stack, heap. OS đặt mỗi segment ở một chỗ riêng trong RAM vật lý, nhờ vậy không phải lấp đầy RAM bằng phần address space không dùng.
+Base/bounds nhanh: một phép cộng và một phép so sánh (nhận xét của người soạn). Nhưng vì heap và stack của worker chưa lớn, toàn bộ vùng giữa chúng bị bỏ phí. Sách gọi chỗ phí đó là *internal fragmentation*, vì nó nằm *bên trong* đơn vị đã cấp phát[^ostep-bb-waste]. Với address space 32-bit, chương trình thường chỉ dùng vài MB nhưng vẫn đòi cả address space nằm trong bộ nhớ[^s-32bit].
 
-Phần cứng cần một tập ba cặp thanh ghi base/bounds[^s-regs]. Ví dụ của OSTEP (address space 16 KB, RAM 64 KB, 16 KB đầu dành cho OS; giá trị bảng lấy từ Hình 16.3 của sách, phần text của sách xác nhận code 32 KB/2 KB, heap 34 KB/3 KB và stack 28 KB, size 2 KB)[^s-table][^s-stack-base].
+### 3.2 Một cặp base/bounds cho mỗi segment
+
+Ý tưởng sửa lỗi này đã có từ lâu, ít nhất từ đầu thập niên 1960[^s-old]. Thay vì một cặp base/bounds cho cả address space, ta đặt một cặp *cho mỗi segment logic*[^ostep-seg]. Segment là một phần liên tục của address space, có độ dài xác định[^s-def]. Address space chuẩn gồm ba segment khác nhau về mặt logic: code, stack, heap. OS đặt mỗi segment ở một chỗ riêng trong RAM vật lý, nên không phải lấp RAM bằng phần address space không dùng.
+
+Muốn vậy phần cứng cần một bộ ba cặp thanh ghi base/bounds[^s-regs]. Thanh ghi size ở đây chính là bounds ta đã gặp: nó cho phần cứng biết segment có đúng bao nhiêu byte hợp lệ[^s-size]. Ví dụ của sách dùng address space 16 KB trong RAM 64 KB, với 16 KB đầu dành cho OS. Theo phần giải thích của sách, code đặt ở 32 KB với cỡ 2 KB, còn heap đặt ở 34 KB với cỡ 3 KB[^s-table]. Stack đã được dời tới 28 KB[^s-stack-base]; cỡ stack là 2 KB theo hình 16.3 của sách.
 
 | Segment | Base | Size |
 |---|---|---|
@@ -104,36 +143,44 @@ Phần cứng cần một tập ba cặp thanh ghi base/bounds[^s-regs]. Ví d�
 | Heap | 34K | 3K |
 | Stack | 28K | 2K |
 
-Thanh ghi size chính là bounds đã gặp[^s-size]. Chỉ phần bộ nhớ thực sự dùng mới chiếm RAM, nên address space lớn mà thưa dùng được[^ostep-seg-sparse].
+Chỉ phần bộ nhớ thực sự dùng mới chiếm RAM, nên address space lớn mà thưa vẫn dùng được[^ostep-seg-sparse].
 
-*Dịch địa chỉ: phải trừ đi điểm bắt đầu segment.*
+### 3.3 Dịch địa chỉ: phải trừ điểm bắt đầu của segment
 
-Ví dụ 1 — virtual address 100 (lấy lệnh, thuộc code): cộng base với offset trong segment (100) ra 100 + 32 KB = 32868, rồi kiểm tra 100 < 2 KB (đúng) và phát truy cập tới 32868[^s-trans100].
+Có ba ví dụ, lần lượt là code, heap và địa chỉ hỏng.
 
-Ví dụ 2 — virtual address 4200 (heap): không thể cộng thẳng với base heap, vì ra 39016 là sai. Heap bắt đầu ở virtual address 4 KB (4096) nên offset là 4200 − 4096 = 104; cộng với base 34 KB ra 34920[^s-heap].
+**Địa chỉ 100 (lấy lệnh, thuộc code).** Ta cộng base với offset trong segment, tức 100 + 32 KB = 32868; rồi kiểm tra 100 < 2 KB (đúng) và phát truy cập tới 32868[^s-trans100].
 
-Ví dụ 3 — địa chỉ từ 7 KB trở lên nằm sau cuối heap: phần cứng thấy ngoài bounds, trap vào OS, process nhiều khả năng bị kết thúc[^s-oob].
+**Địa chỉ 4200 (heap).** Không thể cộng thẳng với base của heap, vì ra 39016 là sai. Heap bắt đầu ở virtual address 4 KB (4096), nên offset là 4200 − 4096 = 104; cộng với base 34 KB ra 34920[^s-heap].
 
-*Chiều tăng của stack.* Stack khác code/heap ở một điểm: nó tăng ngược về phía địa chỉ thấp[^ostep-seg-stack]. Trong ví dụ, stack nằm ở 28 KB vật lý và tăng ngược về 26 KB, tương ứng virtual 16 KB về 14 KB; phép dịch phải làm khác đi. Phần cứng cần thêm thông tin về chiều tăng của segment, ví dụ một bit đặt 1 nếu tăng theo chiều dương, 0 nếu âm[^ostep-seg-bit].
+**Địa chỉ từ 7 KB trở lên.** Chúng nằm sau cuối heap. Phần cứng thấy ngoài bounds, trap vào OS, và process nhiều khả năng bị kết thúc[^s-oob].
 
-Ví dụ: virtual address 15 KB (0x3C00 = `11 1100 0000 0000`). Hai bit trên `11` chọn stack, còn lại offset 3 KB. Để có offset âm đúng ta lấy 3 KB − 4 KB (kích thước tối đa của segment) = −1 KB, rồi cộng offset âm vào base 28 KB ra 27 KB[^s-negative]. Kiểm tra bounds lúc này là trị tuyệt đối của offset âm không vượt kích thước hiện tại của segment (2 KB ở ví dụ)[^s-negbound].
+**Chiều tăng của stack.** Stack khác code và heap ở chỗ nó tăng ngược về phía địa chỉ thấp[^ostep-seg-stack]. Trong ví dụ, stack nằm ở 28 KB vật lý và tăng ngược về 26 KB, tương ứng với virtual 16 KB về 14 KB, nên phép dịch phải làm khác đi. Vì vậy phần cứng cần biết thêm chiều tăng của từng segment, chẳng hạn một bit đặt 1 nếu segment tăng theo chiều dương, 0 nếu theo chiều âm[^ostep-seg-bit].
 
-*Protection bits và chia sẻ.* Khi segmentation phát triển, các nhà thiết kế thấy có thể tiết kiệm bộ nhớ bằng cách chia sẻ một số segment giữa các address space. Để làm được, phần cứng cần *protection bits*: vài bit mỗi segment cho biết chương trình có được đọc, ghi hoặc thực thi code trong segment đó không[^s-protbits]. Đặt segment code là read-only thì cùng một đoạn code có thể được chia sẻ giữa nhiều process mà không phá cô lập[^ostep-seg-prot]. Phần cứng lúc này kiểm tra thêm quyền truy cập: ghi vào segment read-only hoặc thực thi từ segment không-executable sẽ phát exception cho OS xử lý[^s-protcheck].
+Đây là chỗ biến `count` của ta rơi vào. Địa chỉ ảo 15 KB (0x3C00 = `11 1100 0000 0000`) có hai bit cao là `11`, chọn stack; phần còn lại là offset 3 KB. Để có offset âm đúng, ta lấy 3 KB − 4 KB (kích thước tối đa của segment) = −1 KB, rồi cộng offset âm đó vào base 28 KB ra 27 KB[^s-negative]. Lúc này kiểm tra bounds là trị tuyệt đối của offset âm không vượt cỡ hiện tại của segment (2 KB trong ví dụ)[^s-negbound]. Kết quả 27 KB khác 47 KB ở mục 2 chỉ vì hai mục bố trí RAM khác nhau.
 
-*External fragmentation.* Mỗi process có nhiều segment kích thước khác nhau, nên RAM nhanh chóng đầy "lỗ hổng" nhỏ rải rác. Đó là **external fragmentation** — chỗ trống nằm *bên ngoài* các khối đã cấp[^ostep-seg-ext].
+### 3.4 Protection bits: chia sẻ code giữa các worker
 
-Ví dụ của OSTEP: xin segment 20 KB khi tổng cộng có 24 KB trống nhưng ở ba mảnh không liên tục thì OS không đáp ứng được[^s-20kb].
+Khi segmentation phát triển, các nhà thiết kế thấy có thể tiết kiệm bộ nhớ bằng cách cho nhiều address space dùng chung một số segment[^s-share]. Muốn vậy phần cứng cần *protection bits*: vài bit mỗi segment cho biết chương trình được đọc, ghi hay thực thi code trong segment đó không[^s-protbits]. Nếu đặt segment code là read-only thì cùng một đoạn code chia sẻ được giữa nhiều process mà không phá cô lập[^ostep-seg-prot]. Ghi vào segment read-only, hay thực thi từ segment không-executable, sẽ làm phần cứng phát exception cho OS xử lý[^s-protcheck].
 
-Hai hướng xử lý:
+Với `orders` chạy nhiều worker từ cùng một binary, đây là lợi ích trực tiếp: một bản code trong RAM phục vụ mọi worker (nhận xét của người soạn).
 
-- **Compaction**: dừng các process, copy segment về một vùng liên tục, cập nhật thanh ghi segment. Tốn kém, vì copy segment là việc ngốn bộ nhớ và tốn nhiều thời gian CPU[^s-compact]; nó còn làm khó việc đáp ứng các yêu cầu nới segment về sau[^s-compact-grow].
-- **Thuật toán free-list thông minh** (best-fit, worst-fit, first-fit, buddy…). Nhưng dù thuật toán khôn đến đâu, external fragmentation vẫn tồn tại; thuật toán tốt chỉ giảm nó[^ostep-seg-ext-always]. OSTEP kết luận: giải pháp thật sự là tránh vấn đề bằng cách không bao giờ cấp phát bộ nhớ theo khối kích thước thay đổi[^s-onlyreal].
+### 3.5 External fragmentation: cái giá phải trả
 
-Segmentation nhanh vì phép tính đơn giản[^s-fast] và cho chia sẻ code[^s-share]. Nhưng còn external fragmentation (xem ở trên), và chưa đủ linh hoạt cho address space thưa tổng quát: một heap lớn dùng thưa nằm trọn trong một segment thì cả heap vẫn phải nằm trong RAM[^s-notflex].
+Mỗi worker có nhiều segment cỡ khác nhau, nên RAM nhanh chóng đầy những lỗ hổng nhỏ rải rác. Đó là **external fragmentation**: chỗ trống nằm *bên ngoài* các khối đã cấp[^ostep-seg-ext]. Chẳng hạn một worker mới xin segment 20 KB khi tổng cộng còn 24 KB trống, nhưng nằm ở ba mảnh không liên tục: OS không đáp ứng được[^s-20kb].
+
+Có hai hướng xử lý, và không hướng nào dứt điểm:
+
+- **Compaction:** dừng các process, copy segment về một vùng liên tục, rồi cập nhật thanh ghi segment. Cách này tốn kém, vì copy segment ngốn bộ nhớ và tốn nhiều thời gian CPU[^s-compact]. Nó còn làm khó việc đáp ứng các yêu cầu nới segment về sau[^s-compact-grow].
+- **Thuật toán free-list khôn hơn** (best-fit, worst-fit, first-fit, buddy…). Nhưng dù thuật toán khôn đến đâu, external fragmentation vẫn còn; thuật toán tốt chỉ giảm nó[^ostep-seg-ext-always].
+
+Kết luận của sách là lời giải thật sự phải tránh hẳn vấn đề, bằng cách không bao giờ cấp phát bộ nhớ theo khối kích thước thay đổi[^s-onlyreal].
+
+Tóm lại, segmentation nhanh vì phép tính đơn giản và hợp với phần cứng[^s-fast]. Nhưng nó còn external fragmentation, và chưa đủ linh hoạt cho address space thưa tổng quát: một heap lớn dùng thưa mà nằm trọn trong một segment thì cả heap vẫn phải nằm trong RAM[^s-notflex]. Với cache đơn hàng của `orders`, nếu nó phình ra nhưng chỉ dùng thưa thớt, segmentation không giúp được gì.
 
 <details><summary>Đi sâu: cách phần cứng biết segment nào, và việc của OS với segmentation</summary>
 
-*Chọn segment.* Cách *explicit* (dùng trong VAX/VMS): cắt address space theo vài bit cao của virtual address[^s-explicit]. Với địa chỉ 14 bit và ba segment, cần 2 bit: `00` = code, `01` = heap, `11` = stack; 12 bit còn lại là offset trong segment. Địa chỉ 4200 là `01 0000 0110 1000`: 2 bit trên là `01` (heap) và 12 bit dưới là 0x068 = 104, đúng kết quả ở trên. Có thể diễn tả bằng giả mã của sách:
+**Chọn segment: cách explicit.** VAX/VMS cắt address space theo vài bit cao của virtual address[^s-explicit]. Với địa chỉ 14 bit và ba segment, cần 2 bit: `00` là code, `01` là heap, `11` là stack; 12 bit còn lại là offset trong segment. Địa chỉ 4200 là `01 0000 0110 1000`: 2 bit trên là `01` (heap) và 12 bit dưới là 0x068 = 104, đúng kết quả ở trên. Giả mã của sách diễn tả như sau:
 
 ```
 Segment = (VirtualAddress & SEG_MASK) >> SEG_SHIFT   // SEG_MASK=0x3000, SEG_SHIFT=12
@@ -142,29 +189,33 @@ if (Offset >= Bounds[Segment]) RaiseException(PROTECTION_FAULT)
 else PhysAddr = Base[Segment] + Offset
 ```
 
-Offset giúp việc kiểm tra bounds gọn: chỉ cần xem offset có nhỏ hơn bounds không[^s-bounds-off]. Nhược điểm của cách chia bit cao: mỗi segment bị giới hạn kích thước tối đa (ở ví dụ là 4 KB vì 16 KB chia làm 4 phần); chương trình muốn segment lớn hơn thì "hết cách"[^s-maxsize], và dùng 2 bit cho 3 segment thì một phần tư address space bỏ không[^s-unused]. Cách *implicit*: phần cứng suy ra segment từ *cách địa chỉ được tạo ra* (địa chỉ từ PC là code, từ stack/base pointer là stack, còn lại là heap)[^s-implicit].
+Có offset thì kiểm tra bounds gọn hẳn: chỉ cần xem offset có nhỏ hơn bounds không[^s-bounds-off]. Cách chia bit cao có hai nhược điểm. Một là mỗi segment bị giới hạn kích thước tối đa, ở ví dụ là 4 KB vì 16 KB chia làm 4 phần[^s-maxsize]. Hai là dùng 2 bit cho 3 segment thì một phần tư address space bỏ không[^s-unused].
 
-*Việc của OS.* Context switch: các thanh ghi segment phải được lưu và khôi phục, vì mỗi process có address space riêng[^s-ctx]. Khi segment lớn lên: ví dụ `malloc()` thấy heap hiện tại hết chỗ, thư viện cấp phát thực hiện một system call để nới heap (kiểu `sbrk()` cổ điển); OS thường cấp thêm và cập nhật thanh ghi size, nhưng nó *có thể từ chối* nếu hết bộ nhớ vật lý hoặc nếu cho rằng process đã dùng quá nhiều[^s-sbrk][^s-reject]. (Xem tiếp: [chương 06](06-heap-allocator.md) đi sâu vào `brk`/`mmap` của allocator hiện đại.)
+**Chọn segment: cách implicit.** Phần cứng suy ra segment từ *cách địa chỉ được tạo ra*: địa chỉ từ PC là code, từ stack/base pointer là stack, còn lại là heap[^s-implicit].
+
+**Việc của OS.** Mỗi lần context switch, các thanh ghi segment phải được lưu và khôi phục, vì mỗi process có address space riêng[^s-ctx]. Khi segment lớn lên thì có thêm một việc. Giả sử `malloc()` thấy heap hiện tại hết chỗ; thư viện cấp phát sẽ thực hiện một system call để nới heap (kiểu `sbrk()` cổ điển)[^s-sbrk]. OS thường cấp thêm và cập nhật thanh ghi size, nhưng nó *có thể từ chối* nếu hết bộ nhớ vật lý hoặc nếu cho rằng process đã dùng quá nhiều[^s-reject]. (Xem tiếp: [chương 06](06-heap-allocator.md) đi sâu vào `brk`/`mmap` của allocator hiện đại.)
 
 </details>
 
-**Quay lại Q3:** segmentation sửa lãng phí giữa heap và stack bằng một cặp base/bounds mỗi segment (cần bit chiều tăng và protection bits), nhưng đẻ ra external fragmentation mà chỉ giảm được, không chữa dứt điểm.
+**Quay lại Q3:** segmentation sửa lãng phí giữa heap và stack bằng một cặp base/bounds mỗi segment (cần bit chiều tăng và protection bits), nhưng sinh ra external fragmentation mà chỉ giảm được, không chữa dứt điểm.
 
 ## 4. Vì sao vẫn gọi là "segmentation fault" (Q4)
 
-> **Trả lời ngắn.** Thuật ngữ sinh ra từ truy cập địa chỉ bất hợp pháp trên máy có segmentation, và vẫn tồn tại ngay cả trên máy không hỗ trợ segmentation[^ostep-segfault]. Trên máy dùng paging, lỗi tương ứng nằm ở mức page, nên cái tên chỉ còn là di sản (suy luận của người soạn).
+> **Trả lời ngắn.** Tên này sinh ra từ truy cập địa chỉ bất hợp pháp trên máy có segmentation, và vẫn còn dù máy không hỗ trợ segmentation nữa[^ostep-segfault]. Trên máy dùng paging, lỗi tương ứng nằm ở mức page, nên cái tên chỉ còn là di sản (suy luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): biển "cổng bảo vệ" vẫn treo ở tòa nhà dù cổng đã đổi sang thẻ từ; tên là di sản, cơ chế đã khác.
+*Với service `orders`.* Giả sử một đoạn `unsafe` trong `orders` dereference con trỏ hỏng và worker chết với lỗi quen thuộc "segmentation fault". Máy của bạn gần như chắc chắn dùng paging chứ không phải segmentation (nhận xét của người soạn), vậy tên lỗi từ đâu ra? Câu trả lời là lịch sử.
 
 Đi theo từng thế hệ cơ chế. Trên máy có segmentation, phần cứng so offset với bounds của segment; ngoài bounds thì trap vào OS, và process nhiều khả năng bị kết thúc[^s-oob]. Truy cập bất hợp pháp kiểu này chính là nguồn gốc của tên *segmentation fault* (hay *violation*)[^ostep-segfault].
 
-Sang paging, kiểm tra chuyển vào PTE: giả mã của OSTEP cho paging (mục 7, phần Đi sâu) vẫn gọi `RaiseException(SEGMENTATION_FAULT)` khi PTE không valid[^p-segv-pte]. Tên cũ được giữ cho lỗi mới; OSTEP nhận xét nó tồn tại ngay cả trên máy không hỗ trợ segmentation[^ostep-segfault].
+Sang paging, việc kiểm tra chuyển vào PTE. Giả mã tra PTE trong sách (xem phần Đi sâu của mục 7) vẫn ghi `RaiseException(SEGMENTATION_FAULT)` khi PTE không valid[^p-segv-pte]. Nói cách khác, tên cũ được giữ cho lỗi mới; sách nhận xét nó còn tồn tại ngay cả trên máy không có segmentation[^ostep-segfault].
 
 <details><summary>Đi sâu: Linux báo hai nguyên nhân cho SIGSEGV</summary>
 
-Linux báo hai nguyên nhân cho SIGSEGV là địa chỉ không ánh xạ tới đối tượng nào (`SEGV_MAPERR`) hoặc ánh xạ có nhưng sai quyền (`SEGV_ACCERR`)[^l-maperr][^l-accerr]. (Suy luận của người soạn: vì vậy ngày nay "segmentation fault" thường là lỗi mức page — thiếu mapping hoặc sai quyền — còn cái tên chỉ là di sản; man page không nói trực tiếp câu này.)
+Linux phân biệt hai nguyên nhân khi báo SIGSEGV. Nguyên nhân thứ nhất là địa chỉ không ánh xạ tới đối tượng nào (`SEGV_MAPERR`)[^l-maperr]. Nguyên nhân thứ hai là địa chỉ có ánh xạ nhưng sai quyền (`SEGV_ACCERR`)[^l-accerr].
+
+Suy luận của người soạn: vì vậy ngày nay "segmentation fault" thường là lỗi mức page, thiếu mapping hoặc sai quyền, còn cái tên chỉ là di sản. Man page không nói trực tiếp câu này.
 
 </details>
 
@@ -172,27 +223,33 @@ Linux báo hai nguyên nhân cho SIGSEGV là địa chỉ không ánh xạ tới
 
 ## 5. Paging: VPN, offset, PTE và PFN (Q5)
 
-> **Trả lời ngắn.** Paging chia address space thành các page cố định và RAM thành các page frame cùng cỡ[^ostep-paging][^ostep-frame]. Virtual address được tách thành số thứ tự page (VPN) và offset[^ostep-vpn]; page table tra VPN ra số thứ tự frame (PFN), PFN ghép với offset thành physical address, còn offset giữ nguyên vì nó chỉ cho biết byte nào bên trong page[^p-offset].
+> **Trả lời ngắn.** Paging chia address space thành các page kích thước cố định[^ostep-paging]. Tương ứng, RAM chia thành các page frame cùng cỡ[^ostep-frame]. Virtual address được tách thành số thứ tự page (VPN) và offset; page table tra VPN ra số thứ tự frame (PFN), PFN ghép với offset thành physical address, còn offset giữ nguyên vì nó chỉ cho biết byte nào bên trong page[^p-offset].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): địa chỉ như "trang 1, dòng 5" của một cuốn sách; mục lục (page table) cho biết trang 1 thực sự nằm ở kệ số 7, còn "dòng 5" thì giữ nguyên.
+*Với service `orders`.* Ta thu worker `orders` xuống còn 64 byte, đủ nhỏ để tính tay trọn vẹn một page table. Mục này theo dõi chuyện gì xảy ra khi worker đọc một địa chỉ ảo: chia địa chỉ làm đôi, tra bảng, ghép lại. Cách này không còn cần giả định gì về việc heap và stack của worker tăng về phía nào.
 
-Thay vì tách address space thành vài segment logic, ta chia nó thành các đơn vị cố định gọi là **page**[^ostep-paging]. Tương ứng, RAM vật lý được xem là một mảng các khe kích thước cố định gọi là **page frame**; mỗi frame chứa đúng một virtual page[^ostep-frame].
+### 5.1 Page, frame và page table
 
-Ví dụ nhỏ trong sách: address space 64 byte với bốn page 16 byte (virtual page 0–3), và RAM vật lý 128 byte gồm tám frame[^p-example]. OS đặt: VP0 → frame 3, VP1 → frame 7, VP2 → frame 5, VP3 → frame 2; frame 1, 4, 6 còn trống[^p-placement].
+Thay vì tách address space thành vài segment logic, ta chia nó thành các đơn vị cố định gọi là **page**[^ostep-paging]. RAM vật lý được coi là một mảng các khe cỡ cố định gọi là **page frame**, mỗi frame chứa đúng một virtual page[^ostep-frame].
 
-Lợi ích: **linh hoạt** — không cần giả định stack/heap tăng hướng nào[^p-flex]; và **quản lý chỗ trống đơn giản** — đặt address space 64 byte chỉ cần lấy bốn frame trống từ free list[^ostep-page-simple][^p-freelist].
+Ví dụ nhỏ của sách: address space 64 byte gồm bốn page 16 byte (virtual page 0 đến 3), còn RAM vật lý 128 byte gồm tám frame[^p-example]. OS đặt VP0 ở frame 3, VP1 ở frame 7, VP2 ở frame 5, VP3 ở frame 2; các frame 1, 4, 6 còn trống[^p-placement].
 
-Để ghi virtual page nằm ở frame nào, OS thường giữ một cấu trúc *theo từng process* gọi là **page table**[^ostep-pt]. Vai trò chính của nó là lưu bản dịch cho từng virtual page của address space, nên nó cho ta biết mỗi page đang ở đâu trong RAM vật lý. Với ví dụ, page table có bốn entry: (VP0 → PF3), (VP1 → PF7), (VP2 → PF5), (VP3 → PF2)[^p-pt4]. Vì page table là cấu trúc per-process nên khi chạy process khác, OS dùng page table khác (các process có thể chia sẻ vài frame, nhưng ánh xạ của mỗi process vẫn riêng)[^p-perproc]. Cấu trúc cụ thể của page table hoặc do phần cứng quy định (hệ cũ) hoặc được OS quản lý linh hoạt hơn (hệ hiện đại)[^p-pt-variants].
+Cách chia này có hai lợi ích. Thứ nhất, nó **linh hoạt**: không cần giả định heap và stack tăng về hướng nào[^p-flex]. Thứ hai, việc **quản lý chỗ trống đơn giản** hơn nhiều[^ostep-page-simple]. Đặt address space 64 byte chỉ cần lấy bốn frame trống từ free list[^p-freelist].
+
+Để ghi virtual page nằm ở frame nào, OS thường giữ một cấu trúc *theo từng process* gọi là **page table**[^ostep-pt]. Vai trò chính của nó là lưu bản dịch cho từng virtual page của address space, nên nhìn vào đó ta biết mỗi page đang ở đâu trong RAM vật lý. Với ví dụ trên, page table có bốn entry: (VP0 → PF3), (VP1 → PF7), (VP2 → PF5), (VP3 → PF2)[^p-pt4]. Vì page table là cấu trúc per-process, khi chạy process khác OS dùng page table khác. Các process có thể chia sẻ vài frame, nhưng ánh xạ của mỗi process vẫn riêng[^p-perproc]. Cấu trúc cụ thể của page table hoặc do phần cứng quy định (hệ cũ), hoặc được OS quản lý linh hoạt hơn (hệ hiện đại)[^p-pt-variants].
+
+### 5.2 Tách địa chỉ thành VPN và offset
 
 Để dịch một virtual address, trước hết phải tách nó thành hai phần: **virtual page number (VPN)** và **offset trong page**[^ostep-vpn].
 
-Với address space 64 byte, cần 6 bit cho virtual address (2⁶ = 64)[^p-bits]. Page size là 16 byte, nên cần chọn một trong bốn page — hai bit cao làm việc đó: đó là VPN 2 bit, 4 bit còn lại là offset[^p-vpn-bits].
+Address space 64 byte cần 6 bit cho virtual address (2⁶ = 64)[^p-bits]. Page size là 16 byte, nên cần chọn một trong bốn page; hai bit cao làm việc đó. Vậy VPN là 2 bit, còn 4 bit thấp là offset[^p-vpn-bits].
 
-Ví dụ `movl 21, %eax` (bỏ qua việc lấy lệnh). 21 = `010101`; tách: VPN = `01` (= 1), offset = `0101` (= 5), tức byte thứ 5 của virtual page 1. Tra page table: VPN 1 → physical frame number (PFN, đôi khi gọi là physical page number, PPN) = 7 = `111`[^p-pfn]. Thay VPN bằng PFN, giữ nguyên offset: `111` `0101` = `1110101` = 117[^p-result]. Offset không được dịch, vì nó chỉ cho biết byte nào bên trong page[^p-offset].
+### 5.3 Tính tay một ví dụ
 
-Thêm ví dụ do tôi tự tính từ page table này (đã kiểm bằng chương trình ở phần Liên hệ với Rust; không trích từ sách):
+Giả sử worker chạy `movl 21, %eax` (bỏ qua việc lấy lệnh). Ta có 21 = `010101`. Tách ra: VPN = `01` (= 1), offset = `0101` (= 5), tức byte thứ 5 của virtual page 1. Tra page table: VPN 1 ứng với physical frame number (PFN, đôi khi gọi là physical page number, PPN) là 7 = `111`[^p-pfn]. Thay VPN bằng PFN và giữ nguyên offset: `111` `0101` = `1110101` = 117[^p-result]. Offset không phải dịch, vì nó chỉ cho biết byte nào bên trong page[^p-offset].
+
+Người soạn tự tính thêm vài ví dụ từ page table này, và đã kiểm bằng chương trình ở phần Liên hệ với Rust (không trích từ sách):
 
 | VA (thập phân) | Nhị phân | VPN | offset | PFN | PA = PFN×16 + offset |
 |---|---|---|---|---|---|
@@ -203,9 +260,9 @@ Thêm ví dụ do tôi tự tính từ page table này (đã kiểm bằng chư�
 
 <details><summary>Đi sâu: vì sao paging có từ Atlas, và phép tách bằng mask/shift</summary>
 
-Với hầu hết bài toán quản lý không gian, OS có hai cách: chia thành mảnh kích thước thay đổi (như segmentation) hoặc chia thành mảnh *kích thước cố định*[^p-two-ways]. Cách sau, trong virtual memory, gọi là *paging*, có từ hệ thống Atlas[^p-atlas].
+Với hầu hết bài toán quản lý không gian, OS có hai cách: chia thành mảnh kích thước thay đổi (như segmentation), hoặc chia thành mảnh *kích thước cố định*[^p-two-ways]. Cách sau, khi dùng trong virtual memory, gọi là *paging*, và có từ hệ thống Atlas[^p-atlas].
 
-Với address space 32-bit và page 4 KB, địa chỉ tách thành VPN 20 bit và offset 12 bit[^p-32bit]. Phép tách là mask và shift: `VPN = (VirtualAddress & VPN_MASK) >> SHIFT`, địa chỉ vật lý là `(PFN << SHIFT) | offset`[^p-mask].
+Với address space 32-bit và page 4 KB, địa chỉ tách thành VPN 20 bit và offset 12 bit[^p-32bit]. Phép tách làm bằng mask và shift: `VPN = (VirtualAddress & VPN_MASK) >> SHIFT`. Địa chỉ vật lý ghép lại bằng `(PFN << SHIFT) | offset`[^p-mask].
 
 </details>
 
@@ -213,11 +270,11 @@ Với address space 32-bit và page 4 KB, địa chỉ tách thành VPN 20 bit v
 
 ## 6. Bên trong một PTE (Q6)
 
-> **Trả lời ngắn.** Ngoài PFN (số thứ tự frame), mỗi PTE — một dòng của page table — mang các bit điều khiển: valid (bản dịch có hợp lệ không), protection (đọc/ghi/thực thi), present (page ở RAM hay đĩa), dirty (đã bị sửa chưa) và accessed (đã được truy cập chưa)[^p-valid][^p-prot][^p-present][^p-dirty][^p-ref].
+> **Trả lời ngắn.** Ngoài PFN, mỗi PTE (một dòng của page table) còn mang vài bit điều khiển. Bit valid cho biết bản dịch có hợp lệ không[^p-valid]. Bit protection cho biết page được đọc, ghi hay thực thi không[^p-prot]. Ba bit còn lại, present, dirty và accessed, cho biết page đang ở RAM hay trên đĩa, đã bị sửa chưa, và đã được truy cập chưa; bảng ở phần Giải thích có nguồn cho từng bit.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mỗi trang trong mục lục có thêm vài ô đánh dấu — "trang này có thật không", "ai được đọc/ghi", "đang ở kệ hay trong kho", "có bị sửa chưa", "có ai dùng gần đây không".
+*Với service `orders`.* Mỗi lần worker chạm vào một page, phần cứng nhìn PTE của page đó trước khi cho qua. Page chưa từng dùng thì PTE đánh dấu không hợp lệ, và chạm vào nó là trap tới OS. Page của code thì đánh dấu không cho ghi, nên một lỗi ghi nhầm vào vùng code cũng trap (nhận xét của người soạn). Mục này đọc từng bit.
 
 Page table đơn giản nhất là *linear page table*, chỉ là một mảng: OS lập chỉ mục theo VPN và đọc **page-table entry (PTE)** tại chỉ mục đó để lấy PFN[^p-linear]. Ngoài PFN, PTE mang các bit sau (theo OSTEP):
 
@@ -231,9 +288,9 @@ Page table đơn giản nhất là *linear page table*, chỉ là một mảng: 
 
 <details><summary>Đi sâu: PTE x86 và bit present/valid</summary>
 
-PTE x86 trong sách (Hình 18.5, sơ đồ 32 bit) có: present bit (P), read/write (R/W) quyết định có được ghi vào page không, user/supervisor (U/S) quyết định process ở user mode có truy cập được không, một vài bit (PWT, PCD, PAT, G) điều khiển cách hardware caching hoạt động cho page, bit accessed (A), bit dirty (D) và cuối cùng là PFN[^ostep-pte-bits].
+PTE x86 trong sách (Hình 18.5, sơ đồ 32 bit) có các trường sau: present bit (P); read/write (R/W), quyết định có được ghi vào page không; user/supervisor (U/S), quyết định process ở user mode có truy cập được không; một vài bit (PWT, PCD, PAT, G) điều khiển cách hardware caching hoạt động cho page; bit accessed (A); bit dirty (D); và cuối cùng là PFN[^ostep-pte-bits].
 
-Chi tiết hay gây nhầm: trong ví dụ PTE x86 của sách chỉ có present, không có valid riêng. P = 1: vừa present vừa valid; P = 0: có thể hợp lệ nhưng không ở RAM, hoặc không hợp lệ, và OS dùng cấu trúc phụ để phân biệt[^p-nobit]. Xem tiếp ở [chương 04](04-page-fault-va-swapping.md).
+Chi tiết hay gây nhầm: PTE x86 của sách chỉ có present, không có valid riêng. Khi P = 1, page vừa present vừa valid[^p-nobit]. Khi P = 0, page có thể hợp lệ nhưng không ở RAM, hoặc không hợp lệ, và OS phải dùng cấu trúc phụ để phân biệt. Xem tiếp ở [chương 04](04-page-fault-va-swapping.md).
 
 </details>
 
@@ -241,20 +298,25 @@ Chi tiết hay gây nhầm: trong ví dụ PTE x86 của sách chỉ có present
 
 ## 7. Vì sao paging thắng segmentation, và hai vấn đề cho chương 03 (Q7)
 
-> **Trả lời ngắn.** Paging không gây external fragmentation vì đơn vị cố định, và cho dùng thưa address space[^ostep-page-noext]; quản lý chỗ trống thành việc lấy frame từ free list[^ostep-page-simple]. Cái giá là hai vấn đề: page table quá lớn (ví dụ 4 MB mỗi process ở 32-bit/4 KB)[^ostep-pt-size] và mỗi truy cập tốn thêm một lần đọc RAM[^p-extra].
+> **Trả lời ngắn.** Paging không gây external fragmentation vì chia bộ nhớ thành đơn vị cố định, và cho dùng thưa address space[^ostep-page-noext]. Việc quản lý chỗ trống cũng đơn giản lại: chỉ cần lấy frame từ free list[^ostep-page-simple]. Cái giá là hai vấn đề, page table quá lớn và truy cập chậm đi, nên nếu thiết kế không cẩn thận cả phần cứng lẫn phần mềm thì hệ thống vừa chậm vừa tốn bộ nhớ[^p-two-prob].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ghép tủ bằng ô vuông cùng cỡ thì ô nào trống cũng dùng được (không còn "lỗ hổng không vừa"), nhưng cuốn sổ ghi ô nào ở đâu có thể dày bằng cả kho, và mỗi lần lấy đồ phải mở sổ trước.
+*Với service `orders`.* Giả sử máy chạy 100 worker `orders`, mỗi worker một page table riêng. Cái được của paging dễ thấy: không còn "20 KB xin mà có 24 KB trống ở ba mảnh" nữa, vì frame nào trống cũng dùng được. Nhưng cuốn sổ ghi "page nào nằm ở frame nào" đang nhân lên theo số worker, và mỗi truy cập bộ nhớ của worker còn phải mở sổ trước. Mục này tính hai cái giá đó ra số.
 
-Page table có thể lớn hơn nhiều so với bảng segment hoặc cặp base/bounds[^p-big]. Tính với address space 32-bit, page 4 KB: VPN 20 bit nghĩa là 2²⁰ (khoảng một triệu) bản dịch cho mỗi process; với 4 byte mỗi PTE ta cần 4 MB cho *mỗi* page table[^ostep-pt-size]. Với 100 process, OS cần 400 MB chỉ để chứa các bản dịch[^p-100]. Và chưa tính address space 64-bit.
+### 7.1 Vấn đề 1: bảng quá lớn
 
-Vì quá lớn, MMU không có phần cứng đặc biệt trên chip để chứa page table của process đang chạy; thay vào đó page table của từng process nằm trong bộ nhớ[^p-inmem].
+Page table có thể lớn hơn nhiều so với bảng segment hay cặp base/bounds[^p-big]. Hãy tính với address space 32-bit và page 4 KB. VPN 20 bit nghĩa là 2²⁰ (khoảng một triệu) bản dịch cho mỗi process. Với 4 byte mỗi PTE, ta cần 4 MB cho *mỗi* page table[^ostep-pt-size]. Với 100 process, OS cần 400 MB chỉ để chứa các bản dịch[^p-100]. Và đó chưa phải address space 64-bit.
 
-Hệ quả: với *mỗi* tham chiếu bộ nhớ (lấy lệnh, load, store), paging đòi thêm một lần tham chiếu RAM để lấy bản dịch từ page table trước[^p-extra]. Như OSTEP nói, điều đó nhiều khả năng làm chậm process "một hệ số hai hoặc hơn"[^p-slow2].
+Vì quá lớn, MMU không có phần cứng đặc biệt trên chip để chứa page table của process đang chạy. Thay vào đó, page table của từng process nằm trong bộ nhớ[^p-inmem].
 
-OSTEP tóm lại: không thiết kế cẩn thận cả phần cứng lẫn phần mềm thì page table làm hệ thống chạy quá chậm và tốn quá nhiều bộ nhớ[^p-two-prob]. Hai vấn đề: (1) **bảng quá lớn**; (2) **mỗi truy cập tốn thêm một lần đọc RAM**.
-[Chương 03](03-page-table-va-tlb.md) giải cả hai: page table nhiều cấp cho vấn đề kích thước, TLB (cache phần cứng các bản dịch gần đây) cho vấn đề tốc độ.
+### 7.2 Vấn đề 2: mỗi truy cập tốn thêm một lần đọc RAM
+
+Hệ quả của việc page table nằm trong RAM: với *mỗi* tham chiếu bộ nhớ của worker (lấy lệnh, load, store), paging đòi thêm một lần tham chiếu RAM để lấy bản dịch từ page table trước[^p-extra]. Điều đó nhiều khả năng làm chậm process "một hệ số hai hoặc hơn"[^p-slow2].
+
+Hai vấn đề đó, bảng quá lớn và mỗi truy cập tốn thêm một lần đọc RAM, là việc của [chương 03](03-page-table-va-tlb.md). Page table nhiều cấp giải vấn đề kích thước; TLB, một cache phần cứng giữ các bản dịch gần đây, giải vấn đề tốc độ.
+
+### 7.3 So sánh ba cách
 
 | Tiêu chí | Base and bounds | Segmentation | Paging |
 |---|---|---|---|
@@ -265,25 +327,23 @@ OSTEP tóm lại: không thiết kế cẩn thận cả phần cứng lẫn ph�
 | Address space thưa | không: vùng trống giữa heap và stack vẫn chiếm RAM[^ostep-bb-waste] | một phần; segment lớn thưa vẫn phải nằm trọn trong RAM[^s-notflex] | có, nhờ bit valid[^p-valid] |
 | Giả định về stack/heap | không áp dụng (cả address space là một khối) | phần cứng phải biết chiều tăng của từng segment[^ostep-seg-bit] | không giả định hướng tăng[^p-flex] |
 
-Khớp với kết luận ở mục 3: cách thật sự tránh external fragmentation là không cấp phát khối kích thước thay đổi[^s-onlyreal]; paging làm đúng điều đó vì chia bộ nhớ thành đơn vị cố định[^ostep-page-noext].
+Bảng này khớp với kết luận ở mục 3: cách thật sự tránh external fragmentation là không cấp phát khối kích thước thay đổi[^s-onlyreal]. Paging làm đúng điều đó vì chia bộ nhớ thành đơn vị cố định[^ostep-page-noext].
 
 <details><summary>Đi sâu: công thức tra PTE, dấu vết bộ nhớ, và internal fragmentation trong page</summary>
 
-Giả sử có một **page-table base register (PTBR)** chứa địa chỉ vật lý của đầu page table của process đang chạy[^p-ptbr]. Để tìm PTE cần đọc, phần cứng tính: `VPN = (VirtualAddress & VPN_MASK) >> SHIFT`, rồi `PTEAddr = PageTableBaseRegister + (VPN * sizeof(PTE))`[^p-formula]. Sau đó nó đọc PTE từ RAM, kiểm tra valid và protection (invalid thì phát exception; sai quyền thì phát protection fault, theo giả mã Hình 18.6 của sách[^p-fig186]), ghép PFN với offset rồi mới truy cập dữ liệu thật.
+**Công thức tra PTE.** Giả sử có một **page-table base register (PTBR)** chứa địa chỉ vật lý của đầu page table của process đang chạy[^p-ptbr]. Để tìm PTE cần đọc, phần cứng tính `VPN = (VirtualAddress & VPN_MASK) >> SHIFT`, rồi `PTEAddr = PageTableBaseRegister + (VPN * sizeof(PTE))`[^p-formula]. Sau đó nó đọc PTE từ RAM và kiểm tra valid và protection: invalid thì phát exception, sai quyền thì phát protection fault (theo giả mã Hình 18.6 của sách[^p-fig186]). Cuối cùng nó ghép PFN với offset rồi mới truy cập dữ liệu thật.
 
-*Dấu vết bộ nhớ.* OSTEP minh họa bằng vòng lặp khởi tạo mảng 1000 số nguyên, với giả định: address space 64 KB, page 1 KB, page table tuyến tính ở địa chỉ vật lý 1 KB.
+**Dấu vết bộ nhớ.** Sách minh họa bằng vòng lặp khởi tạo mảng 1000 số nguyên, với giả định address space 64 KB, page 1 KB và page table tuyến tính ở địa chỉ vật lý 1 KB. Kết quả của sách: mỗi lần lặp có **10** truy cập bộ nhớ, gồm bốn lần lấy lệnh, một lần cập nhật mảng và năm lần truy cập page table để dịch chúng[^p-trace]. Như vậy một nửa số truy cập RAM chỉ để tra bản dịch (tính toán của sách cho cấu hình giả định, không phải đo trên máy thật).
 
-Kết quả của sách: mỗi lần lặp có **10** truy cập bộ nhớ — bốn lần lấy lệnh, một lần cập nhật mảng, và năm lần truy cập page table để dịch chúng[^p-trace]. Một nửa số truy cập RAM chỉ để tra bản dịch (tính toán của sách cho cấu hình giả định, không phải đo trên máy thật).
-
-Cái giá: page table to và truy cập chậm (như trên). Ngoài ra internal fragmentation vẫn còn *trong page*: OSTEP (ch.20) nói page lớn gây lãng phí bên trong mỗi page[^p-internal], nên hầu hết hệ thống dùng page nhỏ, thường 4 KB[^p-smallpg]. Mức lãng phí cụ thể (trung bình bao nhiêu) sách không đo; chương này không đưa số.
+**Internal fragmentation trong page.** Page table to và truy cập chậm là cái giá chính. Ngoài ra internal fragmentation vẫn còn *trong page*: sách (ch.20) nói page lớn gây lãng phí bên trong mỗi page[^p-internal]. Vì vậy hầu hết hệ thống dùng page nhỏ, thường 4 KB[^p-smallpg]. Mức lãng phí cụ thể (trung bình bao nhiêu) sách không đo; chương này không đưa số.
 
 </details>
 
-**Quay lại Q7:** paging thắng vì hết external fragmentation và cho address space thưa; nó để lại hai việc cho chương 03 — bảng quá lớn và mỗi truy cập chậm hơn.
+**Quay lại Q7:** paging thắng vì hết external fragmentation và cho address space thưa; nó để lại hai việc cho chương 03, bảng quá lớn và mỗi truy cập chậm hơn.
 
 ## Liên hệ với Rust: mô phỏng ba cơ chế bằng vài dòng
 
-Rust không có API "dịch địa chỉ" (việc của phần cứng và kernel), nhưng viết lại các phép toán trên là cách rẻ nhất để kiểm chứng số học. Chương trình dưới được biên dịch bằng `rustc -O` (1.95.0) và chạy; nó chỉ mô phỏng các ví dụ số ở trên.
+Rust không có API "dịch địa chỉ", vì đó là việc của phần cứng và kernel; code `orders` của bạn không bao giờ nhìn thấy physical address (nhận xét của người soạn). Nhưng viết lại các phép toán ở trên bằng Rust là cách rẻ nhất để kiểm chứng số học. Chương trình dưới được biên dịch bằng `rustc -O` (1.95.0) và chạy; nó chỉ mô phỏng các ví dụ số ở trên.
 
 ```rust
 fn bb(va: u32, base: u32, bounds: u32) -> Option<u32> {
@@ -344,65 +404,77 @@ page 63 -> 47
 4194304 bytes
 ```
 
-Đối chiếu: 19384 và fault cho 4400 khớp bảng base/bounds[^m-example-table]; 32868, 34920 khớp ví dụ segmentation[^s-trans100][^s-heap]; 27648 = 27 KB khớp ví dụ stack[^s-negative]; 7168 bị từ chối như sách mô tả[^s-oob]; 117 khớp ví dụ paging[^p-result]; 4194304 byte = 4 MB khớp phép tính page table[^ostep-pt-size]. Đây là mô hình tối giản của sách, không phải một CPU cụ thể.
+Đối chiếu kết quả với các ví dụ trong chương:
+
+- 19384 khớp bảng base/bounds, và 4400 bị từ chối như bảng ấy[^m-example-table].
+- 32868 khớp ví dụ segmentation cho địa chỉ 100[^s-trans100].
+- 34920 khớp ví dụ segmentation cho địa chỉ 4200[^s-heap].
+- 27648 = 27 KB khớp ví dụ stack[^s-negative].
+- 7168 bị từ chối như sách mô tả[^s-oob].
+- 117 khớp ví dụ paging[^p-result].
+- 4194304 byte = 4 MB khớp phép tính page table[^ostep-pt-size].
+
+Đây là mô hình tối giản của sách, không phải một CPU cụ thể.
 
 ## Tóm tắt
 
-- Hardware-based address translation: phần cứng đổi virtual address thành physical address cho *mỗi* truy cập; OS chỉ cấu hình phần cứng và can thiệp ở các thời điểm then chốt[^ostep-translation][^m-os].
-- Base and bounds: `PA = VA + base`, kiểm tra `VA < bounds`; cặp thanh ghi là per-CPU nên OS lưu/khôi phục khi context switch; lệnh sửa chúng là đặc quyền[^m-formula][^m-ctx][^m-priv].
+- Hardware-based address translation: phần cứng đổi virtual address thành physical address cho *mỗi* truy cập[^ostep-translation]. OS chỉ cấu hình phần cứng và can thiệp ở các thời điểm then chốt[^m-os].
+- Base and bounds: `PA = VA + base`, kiểm tra `VA < bounds`[^m-formula]. Cặp thanh ghi là per-CPU nên OS lưu/khôi phục khi context switch[^m-ctx]. Lệnh sửa chúng là đặc quyền[^m-priv].
 - Base/bounds lãng phí vùng trống giữa stack và heap (internal fragmentation)[^ostep-bb-waste].
-- Segmentation: một cặp base/bounds mỗi segment, stack cần bit chiều tăng, protection bits cho phép chia sẻ code; đổi lại là external fragmentation mà compaction và thuật toán free-list chỉ giảm chứ không chữa dứt điểm[^ostep-seg][^ostep-seg-bit][^ostep-seg-prot][^ostep-seg-ext-always].
-- Paging: page/frame cố định, page table per-process ánh xạ VPN → PFN, offset giữ nguyên; PTE mang thêm bit valid/present, protection, dirty, accessed[^ostep-paging][^ostep-pt][^p-offset][^ostep-pte-bits].
-- Paging không gây external fragmentation và cho phép address space thưa, nhưng bảng lớn (4 MB mỗi process ở 32-bit/4 KB) và mỗi truy cập tốn thêm một lần đọc RAM — đề bài của [chương 03](03-page-table-va-tlb.md)[^ostep-page-noext][^ostep-pt-size][^p-extra].
+- Segmentation: một cặp base/bounds mỗi segment[^ostep-seg]; stack cần bit chiều tăng[^ostep-seg-bit]; protection bits cho phép chia sẻ code[^ostep-seg-prot].
+- Đổi lại segmentation có external fragmentation, mà compaction và thuật toán free-list chỉ giảm chứ không chữa dứt điểm[^ostep-seg-ext-always].
+- Paging: page/frame cố định, page table per-process ánh xạ VPN → PFN[^ostep-pt]. Offset giữ nguyên[^p-offset]. PTE mang thêm bit valid/present, protection, dirty, accessed[^ostep-pte-bits].
+- Paging không gây external fragmentation và cho phép address space thưa[^ostep-page-noext].
+- Cái giá của paging là bảng lớn (4 MB mỗi process ở 32-bit/4 KB)[^ostep-pt-size]. Mỗi truy cập còn tốn thêm một lần đọc RAM[^p-extra]. Đó là đề bài của [chương 03](03-page-table-va-tlb.md).
 
 ## Câu hỏi tự kiểm tra
 
-1. Process 4 KB nạp tại 16 KB: địa chỉ ảo 3000 và 4400 cho kết quả gì?
+1. Worker `orders` 4 KB nạp tại 16 KB: địa chỉ ảo 3000 và 4400 cho kết quả gì?
 <details><summary>Đáp án</summary>
 
-3000 → 19384; 4400 ≥ 4096 nên fault[^m-formula][^m-example-table].
+3000 cộng base 16384 ra 19384[^m-formula]. 4400 ≥ 4096 nên là fault[^m-example-table].
 
 </details>
 
 2. Vì sao OS phải lưu/khôi phục base/bounds khi context switch?
 <details><summary>Đáp án</summary>
 
-Mỗi CPU chỉ có một cặp thanh ghi mà giá trị khác nhau cho mỗi process; OS lưu vào PCB khi dừng và nạp lại khi chạy tiếp[^m-ctx][^m-ctx2].
+Mỗi CPU chỉ có một cặp thanh ghi mà giá trị mỗi process mỗi khác[^m-ctx]. Vì vậy OS lưu cặp này vào PCB khi dừng process, và nạp lại khi chạy tiếp[^m-ctx2].
 
 </details>
 
 3. Dịch virtual address 4200 trong ví dụ segmentation; vì sao không cộng thẳng với base?
 <details><summary>Đáp án</summary>
 
-Offset = 4200 − 4096 = 104, cộng base 34 KB ra 34920; cộng thẳng ra 39016 là sai[^s-heap].
+Heap bắt đầu ở virtual address 4096 nên offset là 4200 − 4096 = 104. Cộng với base 34 KB ra 34920; cộng thẳng 4200 với base ra 39016 là sai[^s-heap].
 
 </details>
 
 4. Vì sao stack cần bit chiều tăng, và 15 KB dịch ra đâu?
 <details><summary>Đáp án</summary>
 
-Stack tăng về địa chỉ thấp nên dùng offset âm: 3 KB − 4 KB = −1 KB, cộng base 28 KB ra 27 KB[^ostep-seg-stack][^ostep-seg-bit][^s-negative].
+Stack tăng về địa chỉ thấp nên dùng offset âm[^ostep-seg-stack]. Phần cứng cần bit chiều tăng để biết segment nào tính offset kiểu đó[^ostep-seg-bit]. Với 15 KB, lấy 3 KB − 4 KB = −1 KB rồi cộng base 28 KB ra 27 KB[^s-negative].
 
 </details>
 
 5. External fragmentation là gì và vì sao compaction không phải lời giải tốt?
 <details><summary>Đáp án</summary>
 
-RAM đầy lỗ hổng nhỏ nên khó cấp/nới segment (24 KB trống ở ba mảnh không thỏa yêu cầu 20 KB); compaction tốn nhiều CPU và bộ nhớ để copy[^ostep-seg-ext][^s-20kb][^s-compact].
+RAM đầy lỗ hổng nhỏ nên khó cấp hay nới segment[^ostep-seg-ext]. Ví dụ 24 KB trống ở ba mảnh không thỏa yêu cầu 20 KB[^s-20kb]. Compaction tốn nhiều CPU và bộ nhớ để copy[^s-compact].
 
 </details>
 
 6. Dịch VA = 50 với page 16 byte và page table VP0→3, VP1→7, VP2→5, VP3→2.
 <details><summary>Đáp án</summary>
 
-50 = `110010`: VPN = 3, offset = 2, VP3 → frame 2, nên PA = 2×16 + 2 = 34 (cách tính theo ví dụ 21 → 117[^p-result]; đã chạy trong mô phỏng ở phần Liên hệ với Rust).
+50 = `110010`, nên VPN = 3 và offset = 2. VP3 nằm ở frame 2, vậy PA = 2×16 + 2 = 34. Cách tính này theo ví dụ 21 → 117 của sách[^p-result]; kết quả đã chạy trong mô phỏng ở phần Liên hệ với Rust.
 
 </details>
 
 7. Page table 32-bit, page 4 KB, PTE 4 byte lớn bao nhiêu và hai vấn đề nào dẫn tới chương 03?
 <details><summary>Đáp án</summary>
 
-2²⁰ PTE × 4 byte = 4 MB mỗi process; bảng quá lớn và mỗi tham chiếu tốn thêm một lần đọc PTE từ RAM[^p-32bit][^ostep-pt-size][^p-extra].
+VPN 20 bit[^p-32bit] nên có 2²⁰ PTE. Mỗi PTE 4 byte, tức 4 MB mỗi process[^ostep-pt-size]. Hai vấn đề là bảng quá lớn, và mỗi tham chiếu tốn thêm một lần đọc PTE từ RAM[^p-extra].
 
 </details>
 
@@ -452,7 +524,6 @@ Thuật ngữ sinh ra trên máy có segmentation và vẫn tồn tại trên m�
 [^m-lde]: OSTEP, ch.15 Mechanism: Address Translation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-mechanism.pdf> — "only when the process misbehaves does the OS have to become involved."
 [^ostep-bb-waste]: OSTEP, ch.15 Mechanism: Address Translation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-mechanism.pdf> — "because the process stack and heap are not too big, all of the space between the two is simply wasted. This type of waste is usually called internal fragmentation"
 [^s-32bit]: OSTEP, ch.16 Segmentation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-segmentation.pdf> — "a typical program will only use megabytes of memory, but still would demand that the entire address space be resident in memory."
-[^s-old]: OSTEP, ch.16 Segmentation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-segmentation.pdf> — "going at least as far back as the very early 1960’s"
 [^ostep-seg]: OSTEP, ch.16 Segmentation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-segmentation.pdf> — "why not have a base and bounds pair per logical segment of the address space?"
 [^s-def]: OSTEP, ch.16 Segmentation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-segmentation.pdf> — "A segment is just a contiguous portion of the address space of a particular length"
 [^s-regs]: OSTEP, ch.16 Segmentation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-segmentation.pdf> — "a set of three base and bounds register pairs"
@@ -538,3 +609,4 @@ Thuật ngữ sinh ra trên máy có segmentation và vẫn tồn tại trên m�
 [^l-accerr]: sigaction(2), Debian bookworm — <https://manpages.debian.org/bookworm/manpages-dev/sigaction.2.en.html> — "Invalid permissions for mapped object."
 [^p-internal]: OSTEP, ch.20 Paging: Smaller Tables — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-smalltables.pdf> — "big pages lead to waste within each page, a problem known as internal fragmentation"
 [^p-smallpg]: OSTEP, ch.20 Paging: Smaller Tables — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-smalltables.pdf> — "most systems use relatively small page sizes in the common case: 4KB (as in x86)"
+[^s-old]: OSTEP, ch.16 Segmentation — <https://pages.cs.wisc.edu/~remzi/OSTEP/vm-segmentation.pdf> — "going at least as far back as the very early 1960’s"

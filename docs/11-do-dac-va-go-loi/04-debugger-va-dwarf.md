@@ -24,27 +24,31 @@ Mục 9 gom phần **liên hệ với Rust** (`rust-gdb`, `rust-lldb`, pretty pr
 
 ## 1. Debugger là một process dùng `ptrace(2)` (Q1)
 
-> **Trả lời ngắn.** Debugger không có đặc quyền ma thuật: nó là một process bình thường, nhờ syscall `ptrace(2)` để quan sát và điều khiển process khác (gọi là *tracee*), kể cả đọc/sửa bộ nhớ và thanh ghi của tracee[^ptrace-def]. Tracee dừng lại mỗi khi có signal đến, debugger biết qua `waitpid`, rồi đọc/sửa trạng thái và cho chạy tiếp[^ptrace-stop][^ptrace-wait][^ptrace-inspect].
+> **Trả lời ngắn.** Debugger không có đặc quyền gì ma thuật: nó là một process bình thường, nhờ syscall `ptrace(2)` mà quan sát và điều khiển được process khác (gọi là *tracee*), kể cả đọc và sửa bộ nhớ lẫn thanh ghi của nó[^ptrace-def]. Tracee dừng lại mỗi khi nhận một signal[^ptrace-stop]. Debugger biết điều đó qua `waitpid`[^ptrace-wait]. Trong lúc tracee đứng yên, debugger đọc hoặc sửa trạng thái của nó rồi cho chạy tiếp[^ptrace-inspect].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ptrace giống thẻ vào phòng máy chỉ mở khi máy đã *tạm dừng*. Kỹ thuật viên (debugger) không can thiệp được lúc máy đang chạy; họ bấm dừng, vào đọc/sửa bộ nhớ và thanh ghi, rồi bấm chạy tiếp.
+*Với service `checkout`.* Hãy hình dung `checkout`, một service Rust xử lý thanh toán, chạy trong một pod Kubernetes với vài handler thread, image production build bằng `--release`. Hôm nay có vài request nhận về tổng tiền sai, và thỉnh thoảng một handler thread đứng im không trả lời. Bạn muốn nhìn vào bên trong process đang chạy mà không sửa code, không build lại. Ta sẽ bám theo `checkout` suốt chương (đây là ví dụ giả định của người soạn, không phải code trong repo). Câu hỏi của mục này: gdb làm cách nào mà nhìn vào được một process khác?
 
-*Bước 1 — thiết lập quan hệ tracer/tracee.* Hai cách bắt đầu (con gọi `PTRACE_TRACEME` rồi `execve`, hoặc gắn vào process có sẵn bằng `PTRACE_ATTACH`/`PTRACE_SEIZE`) đã giải thích ở [Chương 02 (Linux), mục 6.2](../01-linux/02-system-call.md). Điều cần nhớ cho debugger: quan hệ này là **theo từng thread**, "tracee" luôn nghĩa là một thread chứ không phải cả process đa luồng[^ptrace-perthread]. (Nhận xét của người soạn: `gdb -p PID` thuộc kiểu attach — xem mục 8; còn khi bạn nhờ gdb tự khởi chạy chương trình thì `PTRACE_TRACEME` là cách tự nhiên, nhưng chương này không kiểm mã nguồn GDB để biết nó dùng request nào.)
+Câu trả lời là gdb không có đường tắt nào. Nó chỉ là một process thường, nên mọi thứ nó làm với `checkout` đều phải xin kernel qua `ptrace`. Từ đó có một hệ quả dễ vấp: hầu hết request của `ptrace` chỉ chạy khi tracee đang dừng[^ptrace-stopped-only], nên bạn không đọc được `checkout` lúc nó đang chạy mà phải dừng nó trước. Dưới đây là các bước, theo đúng thứ tự gdb làm.
 
-*Bước 2 — tracee dừng, tracer được báo.* Cơ chế tracee dừng mỗi lần nhận signal và tracer biết qua `waitpid(2)` đã nói ở [Chương 02 (Linux), mục 6.2](../01-linux/02-system-call.md). Debugger "dừng ở breakpoint" thực chất là chuyện đó: breakpoint sinh ra một signal `SIGTRAP` (mục 2).
+*Bước 1: lập quan hệ tracer/tracee.* Quan hệ này bắt đầu theo một trong hai cách: process con gọi `PTRACE_TRACEME` rồi `execve`, hoặc một process gắn vào process có sẵn bằng `PTRACE_ATTACH` hay `PTRACE_SEIZE`[^ptrace-traceme]. Cả hai đã được giải thích ở [Chương 02 (Linux), mục 6.2](../01-linux/02-system-call.md). Điều cần nhớ thêm cho debugger là quan hệ này tính theo từng thread, nên "tracee" luôn là một thread chứ không phải cả process đa luồng[^ptrace-perthread]. Với `checkout`, mỗi handler thread là một tracee riêng. (Nhận xét của người soạn: `gdb -p PID` thuộc kiểu attach, xem mục 8; còn khi bạn nhờ gdb tự khởi chạy chương trình thì `PTRACE_TRACEME` là cách tự nhiên, nhưng chương này không kiểm mã nguồn GDB để biết nó dùng request nào.)
 
-*Bước 3 — đọc/ghi khi tracee đang dừng.* Hầu hết request chỉ dùng được khi tracee đang ở trạng thái dừng[^ptrace-stopped-only]. Các request debugger dùng nhiều nhất:
+*Bước 2: dừng và được báo.* Tracee dừng mỗi lần nhận signal và tracer biết qua `waitpid(2)`; cơ chế này đã nói ở [Chương 02 (Linux), mục 6.2](../01-linux/02-system-call.md). "Dừng ở breakpoint" của debugger thực chất chính là chuyện đó: breakpoint làm phát sinh signal `SIGTRAP` (mục 2).
+
+*Bước 3: đọc và ghi khi tracee đang dừng.* Bảng dưới là các request debugger dùng nhiều nhất:
 
 | Việc debugger cần | Request | Ý nghĩa (theo man page) |
 |---|---|---|
 | Đọc một từ nhớ của tracee | `PTRACE_PEEKTEXT`/`PEEKDATA` | đọc một "word" tại địa chỉ `addr` trong bộ nhớ tracee[^ptrace-peek] |
 | Ghi một từ nhớ | `PTRACE_POKETEXT`/`POKEDATA` | chép word vào địa chỉ `addr` của tracee[^ptrace-poke] |
-| Đọc thanh ghi | `PTRACE_GETREGS`, `PTRACE_GETFPREGS` (không có trên mọi kiến trúc[^ptrace-notall]; mini-strace aarch64 ở [Chương 02 (Linux), mục 6.2](../01-linux/02-system-call.md) dùng `PTRACE_GETREGSET`) | chép thanh ghi đa dụng/dấu phẩy động của tracee về tracer[^ptrace-getregs] |
+| Đọc thanh ghi | `PTRACE_GETREGS`, `PTRACE_GETFPREGS` | chép thanh ghi đa dụng/dấu phẩy động của tracee về tracer[^ptrace-getregs] |
 | Chạy tiếp | `PTRACE_CONT` | khởi động lại tracee, có thể kèm số signal để chuyển cho nó[^ptrace-cont] |
 | Chạy đúng một lệnh | `PTRACE_SINGLESTEP` | dừng lại sau khi thực thi một lệnh máy[^ptrace-step] |
 
-*Bước 4 — nhả ra.* Khi xong, `PTRACE_DETACH` cho tracee chạy tiếp ở chế độ bình thường, không bị trace[^ptrace-detach].
+`PTRACE_GETREGS` và `PTRACE_GETFPREGS` không có trên mọi kiến trúc[^ptrace-notall]. Vì vậy mini-strace aarch64 ở [Chương 02 (Linux), mục 6.2](../01-linux/02-system-call.md) dùng `PTRACE_GETREGSET` thay cho chúng.
+
+*Bước 4: nhả ra.* Xong việc thì `PTRACE_DETACH` cho tracee chạy tiếp như bình thường, không còn bị trace[^ptrace-detach].
 
 ```mermaid
 sequenceDiagram
@@ -63,38 +67,38 @@ sequenceDiagram
 
 <details><summary>Đi sâu: ATTACH vs SEIZE, EXITKILL, giới hạn của "word", macOS</summary>
 
-- `PTRACE_ATTACH` gửi `SIGSTOP` cho tracee và tracee chưa chắc đã dừng khi lời gọi trả về — phải `waitpid` để chờ[^ptrace-attach]. `PTRACE_SEIZE` (từ Linux 3.4) khác ở chỗ không dừng process khi gắn[^ptrace-seize].
-- `PTRACE_O_EXITKILL` (từ Linux 3.8) gửi `SIGKILL` cho tracee nếu tracer thoát; man page nói hữu ích cho các "ptrace jailer" muốn tracee không thoát khỏi tầm kiểm soát[^ptrace-exitkill].
-- Mỗi lần `PEEK`/`POKE` chỉ chuyển một word[^ptrace-peek][^ptrace-poke]. (Suy luận của người soạn: đọc một vùng lớn bằng nhiều lần PEEK tốn nhiều syscall; đó là lý do tồn tại các đường khác như `process_vm_readv(2)`, nhưng chương này không đi vào chúng.)
-- Trên Linux không có không gian địa chỉ code/data tách biệt nên `PEEKTEXT` và `PEEKDATA` hiện tương đương[^ptrace-peek].
-- macOS: `ptrace` bị System Integrity Protection hạn chế — process muốn dùng nó phải được code-sign với chứng chỉ máy tin cậy, theo ghi chú trong rustc-dev-guide (trang này là ghi chú bài giảng, có thể lỗi thời)[^rdg-sip]. Chi tiết ký (signing) nằm ngoài phạm vi chương.
+- `PTRACE_ATTACH` gửi `SIGSTOP` cho tracee, nhưng tracee chưa chắc đã dừng khi lời gọi trả về, nên phải `waitpid` để chờ[^ptrace-attach]. `PTRACE_SEIZE` (từ Linux 3.4) khác ở chỗ không dừng process khi gắn[^ptrace-seize].
+- `PTRACE_O_EXITKILL` (từ Linux 3.8) gửi `SIGKILL` cho tracee nếu tracer thoát. Man page nói nó hữu ích cho các "ptrace jailer" muốn tracee không bao giờ thoát khỏi tầm kiểm soát[^ptrace-exitkill].
+- Mỗi lần `PEEK`/`POKE` chỉ chuyển một word[^ptrace-peek]. (Suy luận của người soạn: đọc một vùng lớn bằng nhiều lần PEEK tốn nhiều syscall; đó là lý do tồn tại các đường khác như `process_vm_readv(2)`, nhưng chương này không đi vào chúng.)
+- Trên Linux không có không gian địa chỉ code/data tách biệt, nên `PEEKTEXT` và `PEEKDATA` hiện tương đương[^ptrace-peek].
+- macOS: `ptrace` bị System Integrity Protection hạn chế, process muốn dùng nó phải được code-sign với chứng chỉ máy tin cậy; đây là ghi chú trong rustc-dev-guide (trang ghi chú bài giảng, có thể lỗi thời)[^rdg-sip]. Chi tiết ký (signing) nằm ngoài phạm vi chương.
 
 </details>
 
-**Quay lại Q1:** debugger điều khiển process khác bằng `ptrace(2)`: tracee dừng khi có signal, tracer đợi bằng `waitpid`, đọc/ghi bộ nhớ-thanh ghi lúc đang dừng rồi cho chạy tiếp.
+**Quay lại Q1:** debugger điều khiển process khác bằng `ptrace(2)`: tracee dừng khi có signal, tracer đợi bằng `waitpid`, đọc/ghi bộ nhớ và thanh ghi lúc tracee đang dừng rồi cho chạy tiếp. Với `checkout`, gdb vẫn chỉ là một process thường xin kernel làm hộ.
 
 ## 2. Software breakpoint: `int3` và `brk` (Q2)
 
-> **Trả lời ngắn.** Để dừng tại một địa chỉ, debugger thay lệnh máy ở đó bằng một lệnh "bẫy" đặc biệt; khi CPU chạy tới, bẫy kích hoạt và chương trình trao quyền lại cho debugger[^gdb-bp-replace][^gdb-z0]. Trên x86-64 lệnh đó là `int3` (một byte, `0xCC`), trên AArch64 là `brk`; kernel chuyển bẫy thành `SIGTRAP` gửi cho tracee[^k-int3][^k-brk][^k-do-int3][^k-arm-traps]. Khi dừng, GDB gỡ breakpoint ra để bộ nhớ trông như ban đầu[^gdb-restore].
+> **Trả lời ngắn.** Để dừng tại một địa chỉ, debugger thay lệnh máy ở đó bằng một lệnh "bẫy" đặc biệt; CPU chạy tới thì bẫy kích hoạt và chương trình trao quyền lại cho debugger[^gdb-bp-replace]. Trên x86-64 lệnh bẫy là `int3` (một byte, `0xCC`)[^k-int3]. Trên AArch64 là `brk`[^k-brk]. Kernel x86 xử lý `int3` bằng cách gửi `SIGTRAP` cho tracee[^k-do-int3]. AArch64 cũng nối handler `BRK` với `SIGTRAP`[^k-arm-traps]. Khi dừng, GDB gỡ breakpoint ra để bộ nhớ trông như ban đầu[^gdb-restore].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đọc công thức nấu ăn cho đầu bếp. Muốn họ dừng đúng bước 7, bạn dán một mẩu giấy "GỌI TÔI" đè lên bước 7. Đầu bếp đọc tới mẩu giấy thì dừng và gọi. Muốn họ làm tiếp bước 7 thật, bạn bóc mẩu giấy, để họ làm đúng một bước, rồi dán lại.
+*Với `checkout`.* Bạn gõ `break apply_discount` (hàm tính giảm giá của `checkout`, tên giả định) rồi cho service chạy tiếp. Request kế tiếp gọi tới hàm đó thì gdb hiện ra đúng tại đây. Nhưng gdb không đứng canh từng lệnh của `checkout`: CPU vẫn chạy thẳng code của nó. Vậy cái gì kéo CPU dừng lại đúng chỗ ấy? Câu trả lời là debugger sửa chính code của `checkout` ngay trong bộ nhớ, như các bước dưới đây.
 
-*Bước 1 — tìm địa chỉ.* Người dùng gõ `break file.rs:42` hoặc `break tên_hàm`. Debugger đổi dòng nguồn thành địa chỉ lệnh nhờ bảng dòng của DWARF (mục 5)[^dw-line-intro]: bảng này gắn cờ "recommended breakpoint location" cho những lệnh nên đặt breakpoint[^dw-isstmt].
+*Bước 1: tìm địa chỉ.* Bạn gõ `break file.rs:42` hoặc `break tên_hàm`, còn CPU chỉ hiểu địa chỉ. Debugger đổi dòng nguồn thành địa chỉ lệnh nhờ bảng dòng của DWARF (mục 5)[^dw-line-intro]. Bảng này gắn cờ "recommended breakpoint location" cho những lệnh nên đặt breakpoint[^dw-isstmt].
 
-*Bước 2 — chèn bẫy.* GDB mô tả cơ chế: nó thay mã chương trình tại địa chỉ breakpoint bằng một lệnh đặc biệt, khi thực thi thì trao quyền lại cho debugger[^gdb-bp-replace]. Giao thức từ xa của GDB nói cùng ý: software breakpoint là thay lệnh tại `addr` bằng lệnh breakpoint hoặc lệnh trap[^gdb-z0]. (Suy luận của người soạn: với `ptrace`, đó là một `PTRACE_PEEKTEXT` để cất lệnh gốc rồi `PTRACE_POKETEXT` để ghi bẫy (mục 1); vì mỗi lần chỉ chuyển một word, debugger phải đọc cả word, đổi đúng byte đầu rồi ghi lại.)
+*Bước 2: chèn bẫy.* GDB mô tả cơ chế khá thẳng: nó thay mã chương trình tại địa chỉ breakpoint bằng một lệnh đặc biệt, và khi CPU thực thi lệnh đó thì quyền điều khiển chuyển về debugger[^gdb-bp-replace]. Giao thức từ xa của GDB nói cùng ý: software breakpoint là thay lệnh tại `addr` bằng lệnh breakpoint hoặc lệnh trap[^gdb-z0]. (Suy luận của người soạn: với `ptrace`, đó là một `PTRACE_PEEKTEXT` để cất lệnh gốc rồi `PTRACE_POKETEXT` để ghi bẫy (mục 1); vì mỗi lần chỉ chuyển một word, debugger phải đọc cả word, đổi đúng byte đầu rồi ghi lại.) Lệnh bẫy thì mỗi kiến trúc một kiểu:
 
-- **x86-64:** lệnh bẫy là `int3`, dài một byte, opcode `0xCC` — nguồn là định nghĩa `INT3_INSN_SIZE`/`INT3_INSN_OPCODE` trong source kernel[^k-int3]; phần uprobes của kernel cũng định nghĩa breakpoint phần mềm là `0xcc`, dài 1 byte[^k-uprobe-x86].
-- **AArch64:** lệnh bẫy là `brk` với một immediate 16 bit đặt ở bit [20:5] của lệnh, nên cùng một lệnh `brk` có nhiều biến thể; kernel dùng các giá trị immediate khác nhau để phân biệt người dùng (`kprobes`, `uprobes`, `kgdb`…)[^k-brk]. Mỗi lệnh A64 dài 4 byte, nên bẫy `brk` cũng 4 byte[^k-brk-enc][^k-arm-size].
+- **x86-64:** lệnh bẫy là `int3`, dài một byte, opcode `0xCC`. Con số này lấy từ định nghĩa `INT3_INSN_SIZE`/`INT3_INSN_OPCODE` trong source kernel[^k-int3]. Phần uprobes của kernel cũng định nghĩa breakpoint phần mềm là `0xcc`, dài 1 byte[^k-uprobe-x86].
+- **AArch64:** lệnh bẫy là `brk` với một immediate 16 bit đặt ở bit [20:5] của lệnh, nên cùng một lệnh `brk` có nhiều biến thể[^k-brk-enc]. Kernel dùng các immediate khác nhau để phân biệt người dùng bẫy (`kprobes`, `uprobes`, `kgdb`…)[^k-brk]. Mỗi lệnh A64 dài 4 byte[^k-brk-enc]. `BREAK_INSTR_SIZE` của kernel cũng đúng bằng kích thước một lệnh[^k-arm-size].
 
-*Bước 3 — chạy tới bẫy.* Debugger gọi `PTRACE_CONT`. Khi CPU thực thi lệnh bẫy, nó gây exception; kernel x86 xử lý `int3` bằng cách gửi `SIGTRAP` cho process[^k-do-int3], còn AArch64 gắn handler `BRK` với `SIGTRAP`/`TRAP_BRKPT`[^k-arm-traps]. Tracee ở trạng thái traced nên dừng khi nhận signal và tracer được báo qua `waitpid`[^ptrace-stop][^ptrace-wait].
+*Bước 3: chạy tới bẫy.* Debugger gọi `PTRACE_CONT`. Khi CPU thực thi lệnh bẫy thì sinh ra exception. Kernel x86 xử lý `int3` bằng cách gửi `SIGTRAP` cho process[^k-do-int3]. Trên AArch64, handler `BRK` được gắn với `SIGTRAP`/`TRAP_BRKPT`[^k-arm-traps]. Tracee đang ở trạng thái traced nên dừng khi nhận signal[^ptrace-stop]. Tracer được báo qua `waitpid`[^ptrace-wait].
 
-*Bước 4 — debugger "dọn" trước khi cho người dùng xem.* Mặc định GDB chỉ chèn breakpoint khi chương trình được resume, và ngay khi chương trình dừng thì khôi phục lệnh gốc; mục đích là tránh để lại bẫy trong target nếu GDB đột ngột mất kết nối[^gdb-restore]. (Suy luận của người soạn: vì vậy lệnh `x/i` hay `disassemble` lúc dừng thường không thấy `0xCC` lạ.)
+*Bước 4: dọn trước khi cho bạn xem.* Mặc định GDB chỉ chèn breakpoint khi chương trình được resume, và ngay khi chương trình dừng thì khôi phục lệnh gốc, nhằm tránh để lại bẫy trong target nếu GDB đột ngột mất kết nối[^gdb-restore]. (Suy luận của người soạn: vì vậy `x/i` hay `disassemble` lúc dừng thường không thấy `0xCC` lạ.)
 
-*Bước 5 — đi tiếp qua breakpoint.* Nếu cứ `CONT` ngay khi PC đang nằm đúng lệnh vừa bị thay, bẫy sẽ nổ lại ngay. GDB có một chế độ gọi là *displaced stepping*: single-step qua breakpoint mà không gỡ breakpoint khỏi tiến trình, bằng cách chạy một bản sao lệnh gốc ở chỗ khác[^gdb-displaced]; ngụ ý của câu đó là cách thông thường phải gỡ breakpoint rồi mới single-step. (Suy luận của người soạn từ câu đó, không có trích dẫn trực tiếp cho từng bước: debugger khôi phục lệnh gốc, `PTRACE_SINGLESTEP` đúng một lệnh, chèn lại bẫy rồi `CONT`.)
+*Bước 5: đi tiếp qua breakpoint.* Nếu cứ `CONT` ngay khi PC còn nằm đúng lệnh vừa bị thay, bẫy sẽ nổ lại lập tức. GDB có chế độ *displaced stepping*: single-step qua breakpoint mà không gỡ breakpoint khỏi tiến trình, bằng cách chạy một bản sao lệnh gốc ở chỗ khác[^gdb-displaced]. Ngụ ý của câu đó là cách thông thường phải gỡ breakpoint rồi mới single-step. (Suy luận của người soạn từ câu đó, không có trích dẫn trực tiếp cho từng bước: debugger khôi phục lệnh gốc, `PTRACE_SINGLESTEP` đúng một lệnh, chèn lại bẫy rồi `CONT`.)
 
-*PC khi dừng.* Trên x86-64, code uprobes của kernel (cũng dựa trên bẫy này) tính địa chỉ của lệnh breakpoint từ các thanh ghi đã lưu sau khi gặp bẫy bằng `instruction_pointer(regs) - UPROBE_SWBP_INSN_SIZE`, với `UPROBE_SWBP_INSN` là `0xcc` và kích thước 1[^k-uprobe-swbp][^k-uprobe-x86]; hàm `int3_emulate_call` cũng lấy `regs->ip - INT3_INSN_SIZE` làm địa chỉ của lệnh bị vá[^k-ip]. Nghĩa là trên x86-64 `ip` đã lưu nằm *sau* byte `int3` một byte. Trên AArch64, bản cài đặt `uprobe_get_swbp_addr` trả thẳng `instruction_pointer(regs)` không trừ gì[^k-uprobe-arm64], tức PC vẫn chỉ vào chính lệnh `brk`. (Suy luận của người soạn: `PTRACE_GETREGS` (hoặc `PTRACE_GETREGSET` trên kiến trúc không có nó, xem bảng ở mục 1) cho debugger thấy cùng giá trị `ip` đã lưu đó, nên trên x86-64 debugger phải trừ 1 rồi ghi lại bằng `PTRACE_SETREGS`[^ptrace-setregs] trước khi chạy lệnh gốc; trên AArch64 thì không phải trừ.)
+*PC khi dừng.* Bước 5 còn vướng một chuyện: khi tracee dừng ở bẫy, PC chỉ vào đâu? Hai kiến trúc trả lời khác nhau. Trên x86-64, code uprobes của kernel (cũng dựa trên bẫy này) tính địa chỉ của lệnh breakpoint từ các thanh ghi đã lưu bằng `instruction_pointer(regs) - UPROBE_SWBP_INSN_SIZE`[^k-uprobe-swbp]. Ở đó `UPROBE_SWBP_INSN` là `0xcc` và kích thước là 1[^k-uprobe-x86]. Hàm `int3_emulate_call` cũng lấy `regs->ip - INT3_INSN_SIZE` làm địa chỉ của lệnh bị vá[^k-ip]. Nghĩa là trên x86-64, `ip` đã lưu nằm *sau* byte `int3` một byte. Trên AArch64, `uprobe_get_swbp_addr` trả thẳng `instruction_pointer(regs)` không trừ gì[^k-uprobe-arm64], tức PC vẫn chỉ vào chính lệnh `brk`. (Suy luận của người soạn: `PTRACE_GETREGS` (hoặc `PTRACE_GETREGSET` trên kiến trúc không có nó, xem mục 1) cho debugger thấy cùng giá trị `ip` đã lưu đó, nên trên x86-64 debugger phải trừ 1 rồi ghi lại bằng `PTRACE_SETREGS`[^ptrace-setregs] trước khi chạy lệnh gốc; trên AArch64 thì không phải trừ.)
 
 ```mermaid
 sequenceDiagram
@@ -115,97 +119,100 @@ sequenceDiagram
 
 <details><summary>Đi sâu: breakpoint có điều kiện, always-inserted, tự chọn hardware, uprobes</summary>
 
-- **Breakpoint có điều kiện** do GDB tự đánh giá: mỗi lần bẫy nổ, GDB kiểm tra điều kiện; đúng thì dừng, sai thì cho chạy tiếp[^gdb-cond]. (Suy luận của người soạn: mỗi lần "nổ nhưng không dừng" vẫn tốn một vòng dừng–`waitpid`–đọc–resume qua ptrace, nên điều kiện trên đường nóng làm chương trình chậm đáng kể. Với lời gọi 10⁶ lần/giây nên đặt điều kiện ở chính code hoặc dùng breakpoint khác.)
-- **`set breakpoint always-inserted on`** giữ breakpoint trong target liên tục thay vì chèn lúc resume và gỡ lúc dừng; chế độ mặc định là `off`[^gdb-always].
-- **Tự chọn phần cứng/phần mềm:** với một số target GDB tự quyết định dùng hardware hay software breakpoint tùy địa chỉ là read-only hay read-write; `hbreak` luôn dùng hardware[^gdb-autohw].
-- **Cùng một mánh, nơi khác:** kernel tự dùng bẫy này cho `uprobes` — chú thích trong `brk-imm.h` ghi immediate `0x005` dành cho cài đặt uprobes[^k-brk]; trên x86 header `text-patching.h` của kernel còn định nghĩa `INT3_INSN_OPCODE` cạnh các hàm `text_poke_bp` và `int3_emulate_*`, tức int3 cũng được dùng khi vá code đang chạy[^k-int3]. (Suy luận của người soạn: vì kernel tự xử lý bẫy nên uprobe của `perf`/eBPF không cần một tracer dừng tracee qua `ptrace`, do đó nhẹ hơn debugger đầy đủ.)
+- **Breakpoint có điều kiện** do GDB tự đánh giá: mỗi lần bẫy nổ, GDB kiểm tra điều kiện; đúng thì dừng, sai thì cho chạy tiếp[^gdb-cond]. (Suy luận của người soạn: mỗi lần "nổ nhưng không dừng" vẫn tốn một vòng dừng–`waitpid`–đọc–resume qua ptrace, nên điều kiện trên đường nóng làm chương trình chậm đáng kể. Với hàm được gọi 10⁶ lần/giây, như hàm tính giá của `checkout` dưới tải cao, nên đặt điều kiện ngay trong code hoặc dùng breakpoint khác.)
+- **`set breakpoint always-inserted on`** giữ breakpoint trong target liên tục, thay vì chèn lúc resume và gỡ lúc dừng; chế độ mặc định là `off`[^gdb-always].
+- **Tự chọn phần cứng/phần mềm:** với một số target, GDB tự quyết định dùng hardware hay software breakpoint tùy địa chỉ là read-only hay read-write; `hbreak` luôn dùng hardware[^gdb-autohw].
+- **Cùng một mánh, nơi khác:** kernel tự dùng bẫy này cho `uprobes`; chú thích trong `brk-imm.h` ghi immediate `0x005` dành cho cài đặt uprobes[^k-brk]. Trên x86, header `text-patching.h` của kernel định nghĩa `INT3_INSN_OPCODE` cạnh các hàm `text_poke_bp` và `int3_emulate_*`, tức int3 cũng được dùng khi vá code đang chạy[^k-int3]. (Suy luận của người soạn: vì kernel tự xử lý bẫy nên uprobe của `perf`/eBPF không cần một tracer dừng tracee qua `ptrace`, do đó nhẹ hơn debugger đầy đủ.)
 - Tên các lệnh tương ứng giữa gdb và lldb: `break test.c:12` trong GDB ứng với `breakpoint set --file test.c --line 12` trong LLDB[^lldb-map-bp].
 
 </details>
 
-**Quay lại Q2:** software breakpoint là thay lệnh tại địa chỉ đích bằng lệnh bẫy (`int3`/`brk`); CPU chạy tới thì kernel gửi `SIGTRAP`, debugger nhận qua `waitpid`, và gỡ bẫy ra khi dừng.
+**Quay lại Q2:** software breakpoint là thay lệnh tại địa chỉ đích bằng lệnh bẫy (`int3`/`brk`); CPU chạy tới thì kernel gửi `SIGTRAP`, debugger nhận qua `waitpid`, và gỡ bẫy ra khi dừng. Với `checkout`, `break apply_discount` nghĩa là gdb ghi một byte `0xCC` (trên x86-64) vào code của hàm đó.
 
 ## 3. Single-step, hardware breakpoint và watchpoint (Q3)
 
-> **Trả lời ngắn.** *Single-step* bắt CPU dừng sau đúng một lệnh (`PTRACE_SINGLESTEP`)[^ptrace-step]. *Hardware breakpoint/watchpoint* dùng thanh ghi debug của CPU để dừng khi chạy tới một địa chỉ hoặc khi có truy cập vào một vùng nhớ (ghi, hoặc đọc), mà không phải sửa code[^gdb-z1][^k-uapi-rw]; số lượng rất ít — trên x86 chỉ có bốn thanh ghi địa chỉ[^k-uapi-dr]. Watchpoint phần mềm thì phải single-step toàn bộ chương trình nên chậm hàng trăm lần[^gdb-watch-sw].
+> **Trả lời ngắn.** *Single-step* bắt CPU dừng sau đúng một lệnh (`PTRACE_SINGLESTEP`)[^ptrace-step]. *Hardware breakpoint* và *watchpoint* dùng thanh ghi debug của CPU để dừng khi chạy tới một địa chỉ, hoặc khi có truy cập vào một vùng nhớ, mà không phải sửa code[^gdb-z1]. Số thanh ghi đó rất ít: trên x86 chỉ có bốn thanh ghi địa chỉ[^k-uapi-dr]. Còn watchpoint phần mềm phải single-step cả chương trình nên chậm hàng trăm lần[^gdb-watch-sw].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): muốn biết ai động vào két sắt. *Watchpoint phần mềm* là cử một người đứng cạnh két và soi từng người đi ngang — chắc chắn nhưng rất chậm. *Watchpoint phần cứng* là gắn cảm biến vào két — nhanh, nhưng ngân sách chỉ đủ cho bốn cảm biến.
+*Với `checkout`.* Giả sử `cart.total` bị ghi sai ở đâu đó trong hàng trăm nghìn dòng code, và bạn không biết chỗ nào. Đặt breakpoint ở mọi chỗ ghi thì không xuể. Bạn cần debugger tự dừng đúng lúc có ai ghi vào biến này, tức watchpoint. Nó nhanh hay chậm tùy CPU có hỗ trợ sẵn hay không, và để hiểu vì sao thì phải bắt đầu từ cách bước từng lệnh.
 
-*Single-step.* Man page ghi: `PTRACE_SINGLESTEP` khởi động lại tracee như `PTRACE_CONT` nhưng sắp đặt để nó dừng sau khi thực thi một lệnh; với tracer, tracee trông như bị dừng vì nhận `SIGTRAP`[^ptrace-step][^ptrace-sigtrap-step]. Cơ chế phần cứng bên dưới do kiến trúc quy định:
+*Single-step.* `PTRACE_SINGLESTEP` khởi động lại tracee như `PTRACE_CONT`, nhưng sắp đặt để nó dừng sau khi thực thi một lệnh[^ptrace-step]. Với tracer, tracee trông như vừa nhận `SIGTRAP`[^ptrace-sigtrap-step]. Cơ chế phần cứng bên dưới do kiến trúc quy định:
 
-- **x86-64:** kernel bật cờ `TF` (trap flag) trong thanh ghi cờ của tracee[^k-step] (nhận xét của người soạn: theo thiết kế x86, CPU gây exception debug sau mỗi lệnh khi `TF` bật); khi exception debug báo bước đơn (`DR_STEP`) hoặc trúng thanh ghi debug (`DR_TRAP_BITS`), kernel gửi `SIGTRAP`[^k-do-debug].
-- **AArch64:** kernel đặt bit `SS` trong `pstate` của tracee[^k-arm-ss]; sự kiện hardware single-step được nối với `SIGTRAP`/`TRAP_TRACE`[^k-arm-traps].
+- **x86-64:** kernel bật cờ `TF` (trap flag) trong thanh ghi cờ của tracee khi quay về user mode[^k-step]. (Nhận xét của người soạn: theo thiết kế x86, CPU gây exception debug sau mỗi lệnh khi `TF` bật.) Khi exception debug báo bước đơn (`DR_STEP`) hoặc trúng thanh ghi debug (`DR_TRAP_BITS`), kernel gửi `SIGTRAP`[^k-do-debug].
+- **AArch64:** kernel đặt bit `SS` trong `pstate` của tracee[^k-arm-ss]. Sự kiện hardware single-step được nối với `SIGTRAP`/`TRAP_TRACE`[^k-arm-traps].
 
-Các lệnh GDB dựa trên cơ chế này: `stepi` thực thi đúng một lệnh máy rồi trả quyền cho GDB[^gdb-stepi]; `step` chạy tới khi gặp dòng nguồn khác[^gdb-step] và chỉ dừng ở lệnh đầu của một dòng[^gdb-step-line]. Muốn biết "dòng" ở đâu thì GDB cần bảng dòng DWARF (mục 5)[^dw-line-step]. Hệ quả: hàm không có thông tin dòng thì `step` không chui vào, chạy cho đến khi tới hàm có debug info[^gdb-step-nodebug]; muốn đi từng lệnh trong hàm đó phải dùng `stepi`.
+Các lệnh GDB dựa trên cơ chế này. `stepi` thực thi đúng một lệnh máy rồi trả quyền cho GDB[^gdb-stepi]. `step` chạy tới khi gặp dòng nguồn khác[^gdb-step]. Nó chỉ dừng ở lệnh đầu của một dòng[^gdb-step-line]. Muốn biết "dòng" ở đâu thì GDB cần bảng dòng DWARF (mục 5)[^dw-line-step]. Vì vậy hàm không có thông tin dòng thì `step` không chui vào, mà chạy cho tới khi gặp hàm có debug info[^gdb-step-nodebug]. Muốn đi từng lệnh trong hàm đó thì phải dùng `stepi`.
 
-*Hardware breakpoint và watchpoint.* CPU có vài thanh ghi debug. Trên x86, header kernel mô tả: các thanh ghi 0–3 chứa địa chỉ muốn bẫy[^k-uapi-dr]; thanh ghi điều khiển chọn kiểu truy cập (các hằng `DR_RW_EXECUTE`, `DR_RW_WRITE`, `DR_RW_READ`) và độ dài 1/2/4/8 byte[^k-uapi-rw]. (Nhận xét của người soạn: theo thiết kế phần cứng x86, mã `DR_RW_READ` bẫy cả đọc lẫn ghi; header không nói điều này.) Trên AArch64, kernel phân biệt ba sự kiện debug phần cứng: breakpoint, single-step và watchpoint[^k-arm-esr].
+*Hardware breakpoint và watchpoint.* Bước từng lệnh để canh một biến thì quá chậm, nên CPU có sẵn vài thanh ghi debug làm việc đó thay. Trên x86, header kernel mô tả các thanh ghi 0–3 chứa địa chỉ muốn bẫy[^k-uapi-dr]. Thanh ghi điều khiển chọn kiểu truy cập (các hằng `DR_RW_EXECUTE`, `DR_RW_WRITE`, `DR_RW_READ`) và độ dài 1/2/4/8 byte[^k-uapi-rw]. (Nhận xét của người soạn: theo thiết kế phần cứng x86, mã `DR_RW_READ` bẫy cả đọc lẫn ghi; header không nói điều này.) Trên AArch64, kernel phân biệt ba sự kiện debug phần cứng: breakpoint, single-step và watchpoint[^k-arm-esr].
 
-GDB có hai lệnh phía người dùng:
+GDB có hai lệnh phía người dùng cho các thanh ghi này:
 
-- `hbreak` đặt breakpoint phần cứng, tức dừng tại lệnh mà *không đổi lệnh*[^gdb-hbreak]; vì thanh ghi có hạn nên số breakpoint tối đa bị giới hạn[^gdb-hbreak-limit]. Giao thức từ xa mô tả nó là cơ chế "không phụ thuộc vào việc sửa bộ nhớ target"[^gdb-z1] — hữu ích khi code nằm trong vùng không ghi được.
-- `watch expr` dừng khi chương trình *ghi* vào biểu thức và giá trị đổi[^gdb-watch-simple]. GDB đặt watchpoint phần cứng nếu có thể, báo thay đổi đúng tại lệnh gây ra; nếu không thì rơi về watchpoint phần mềm, chạy chậm hơn và báo ở dòng tiếp theo, không phải đúng lệnh[^gdb-watch-prefer].
+- `hbreak` đặt breakpoint phần cứng, tức dừng tại lệnh mà *không đổi lệnh*[^gdb-hbreak]. Vì thanh ghi có hạn nên số breakpoint phần cứng tối đa cũng bị giới hạn[^gdb-hbreak-limit]. Giao thức từ xa mô tả nó là cơ chế "không phụ thuộc vào việc sửa bộ nhớ target"[^gdb-z1], hữu ích khi code nằm trong vùng không ghi được.
+- `watch expr` dừng khi chương trình *ghi* vào biểu thức và giá trị đổi[^gdb-watch-simple]. GDB đặt watchpoint phần cứng nếu có thể, báo thay đổi đúng tại lệnh gây ra; nếu không thì rơi về watchpoint phần mềm, chạy chậm hơn và báo ở dòng tiếp theo chứ không phải đúng lệnh[^gdb-watch-prefer].
+
+Với `checkout`, `watch cart.total` nhiều khả năng đặt được watchpoint phần cứng, vì biến chỉ chiếm 4 hoặc 8 byte (nhận xét của người soạn).
 
 <details><summary>Đi sâu: vì sao watchpoint phần mềm chậm, DR6/DR7, watch theo thread, LLDB</summary>
 
-- GDB nói thẳng cơ chế phần mềm: single-step chương trình và kiểm tra giá trị biến sau mỗi bước, chậm "hàng trăm lần" so với chạy bình thường[^gdb-watch-sw]; watchpoint phần cứng thì không làm chương trình chậm đi[^gdb-watch-hw]. Mỗi bước trong chế độ phần mềm là một vòng `SINGLESTEP`→`waitpid`→đọc bộ nhớ (suy luận của người soạn).
+- GDB nói thẳng cơ chế phần mềm: single-step chương trình và kiểm tra giá trị biến sau mỗi bước, chậm "hàng trăm lần" so với chạy bình thường[^gdb-watch-sw]. Watchpoint phần cứng thì không làm chương trình chậm đi[^gdb-watch-hw]. Mỗi bước trong chế độ phần mềm là một vòng `SINGLESTEP`→`waitpid`→đọc bộ nhớ (suy luận của người soạn).
 - `set can-use-hw-watchpoints 0` ép GDB chỉ dùng watchpoint phần mềm[^gdb-watch-prefer]. Watchpoint giới hạn theo thread (`watch expr thread N`) chỉ chạy được với watchpoint phần cứng[^gdb-watch-thread].
-- Header uapi x86 của kernel còn định nghĩa thanh ghi trạng thái `DR_STATUS` (số 6) để biết thanh ghi nào gây bẫy và thanh ghi điều khiển `DR_CONTROL` (số 7)[^k-uapi-dr]; các cờ `DR_TRAP0…3` cho biết `db0…db3` nào kích hoạt[^k-uapi-trap].
-- Giao thức remote của GDB có gói `Z2` để chèn write watchpoint tại một địa chỉ[^gdb-z2], còn `Z1` là hardware breakpoint[^gdb-z1].
+- Header uapi x86 của kernel còn định nghĩa thanh ghi trạng thái `DR_STATUS` (số 6) để biết thanh ghi nào gây bẫy, và thanh ghi điều khiển `DR_CONTROL` (số 7)[^k-uapi-dr]. Các cờ `DR_TRAP0…3` cho biết `db0…db3` nào kích hoạt[^k-uapi-trap].
+- Giao thức remote của GDB có gói `Z2` để chèn write watchpoint tại một địa chỉ[^gdb-z2]. Còn `Z1` là hardware breakpoint[^gdb-z1].
 - LLDB: `watch global_var` của GDB tương ứng `watchpoint set variable global_var`[^lldb-map-watch].
-- (Nhận xét của người soạn.) Với backend engineer: chỉ bốn watchpoint phần cứng nghĩa là "watch cả struct lớn" sẽ rơi về phần mềm và rất chậm; thay vì vậy hãy watch đúng một trường (4 hoặc 8 byte) hoặc đặt breakpoint có điều kiện.
+- (Nhận xét của người soạn.) Chỉ có bốn watchpoint phần cứng, nên "watch cả struct lớn" sẽ rơi về phần mềm và rất chậm. Với `checkout`, thay vì `watch cart` hãy watch đúng một trường (4 hoặc 8 byte) như `cart.total`, hoặc đặt breakpoint có điều kiện.
 
 </details>
 
-**Quay lại Q3:** single-step dùng cờ của CPU để dừng sau mỗi lệnh; hardware breakpoint/watchpoint dùng vài thanh ghi debug (x86: bốn) nên nhanh nhưng ít, còn watchpoint phần mềm phải single-step cả chương trình.
+**Quay lại Q3:** single-step dùng cờ của CPU để dừng sau mỗi lệnh; hardware breakpoint/watchpoint dùng vài thanh ghi debug (x86: bốn) nên nhanh nhưng ít; còn watchpoint phần mềm phải single-step cả chương trình. Muốn bắt chỗ ghi sai `cart.total`, hãy watch đúng biến đó.
 
 ## 4. Symbol table và debug info khác nhau thế nào (Q4)
 
-> **Trả lời ngắn.** *Symbol table* (`.symtab`, `.dynsym`) là bảng symbol của file ELF: mỗi mục có tên, giá trị, kích thước và loại, và ELF dùng bảng này để định vị và relocate các định nghĩa/tham chiếu symbol[^elf-symdef][^elf-sym64]. Nói gọn (nhận xét của người soạn): nó cho biết hàm/biến toàn cục tên gì, nằm ở đâu. *Debug info* (DWARF) mới chứa kiểu dữ liệu, biến cục bộ, dòng nguồn, thông tin inline[^dw-die][^dw-line-intro]. GDB phân biệt hai loại: symbol "không có debug info" chỉ đến từ symbol table của executable[^gdb-nondebug], và với biến loại này GDB không biết kiểu[^gdb-nodebuginfo].
+> **Trả lời ngắn.** *Symbol table* (`.symtab`, `.dynsym`) là bảng symbol của file ELF; ELF dùng nó để định vị và relocate các định nghĩa và tham chiếu symbol[^elf-symdef]. Mỗi mục trong bảng có tên, giá trị, kích thước và loại[^elf-sym64]. Nói gọn (nhận xét của người soạn): nó cho biết hàm và biến toàn cục tên gì, nằm ở đâu. *Debug info* (DWARF) mới chứa kiểu dữ liệu, biến cục bộ, dòng nguồn và thông tin inline[^dw-die]. GDB phân biệt hai loại: symbol "không có debug info" chỉ đến từ symbol table của executable[^gdb-nondebug]. Với biến loại này, GDB không biết kiểu[^gdb-nodebuginfo].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): symbol table là *danh bạ điện thoại* — tên và số, không hơn. Debug info là *hồ sơ chi tiết từng nhân viên*: phòng ban nào, đang cầm việc gì, cầm ở bàn nào. Danh bạ đủ để "gọi đúng số" (đặt breakpoint theo tên hàm), không đủ để biết hôm nay người đó đang làm gì (giá trị biến cục bộ).
+*Với `checkout`.* Image production của `checkout` thường được `strip` cho nhỏ. Bạn attach gdb vào một process chạy từ image đó thì còn debug được tới đâu? Để trả lời, phải tách hai thứ hay bị gộp làm một: symbol table và debug info. Cái đầu chỉ cho tên và địa chỉ, cái sau mới cho kiểu, biến cục bộ và dòng nguồn.
 
-*Symbol table.* Trong ELF, `.symtab` giữ một symbol table[^elf-symtab] còn `.dynsym` giữ symbol table cho dynamic linking[^elf-dynsym]. Section có cờ `SHF_ALLOC` thì chiếm bộ nhớ lúc chạy[^elf-alloc]; `.dynsym` được ghi nhận với cờ này[^elf-dynsym]. Không phải mọi symbol đều còn: `-C strip=symbols` của rustc bỏ phần còn lại của symbol table (mục 9)[^rustc-strip-symbols].
+*Symbol table.* Trong ELF, `.symtab` giữ một symbol table[^elf-symtab]. `.dynsym` giữ symbol table cho dynamic linking[^elf-dynsym]. Không phải symbol nào cũng còn mãi: `-C strip=symbols` của rustc bỏ phần còn lại của symbol table (mục 9)[^rustc-strip-symbols].
 
-*Debug info.* DWARF chuẩn hóa thứ nằm ngoài symbol table: mô tả từng thực thể trong chương trình bằng các "debugging information entry" (mục 5)[^dw-die]. Trong ELF, bảng dòng nằm ở section `.debug_line` do đặc tả DWARF đặt tên[^dw-line-sect]; còn man page `elf(5)` chỉ liệt kê một section `.debug` chung với ghi chú rằng nội dung của nó không được đặc tả[^elf-debug], nên đừng tìm `.debug` khi muốn đọc DWARF mà hãy tìm các section `.debug_*`.
+*Debug info.* DWARF chuẩn hóa thứ nằm ngoài symbol table. Nó mô tả từng thực thể trong chương trình bằng các "debugging information entry" (mục 5)[^dw-die]. Trong ELF, bảng dòng nằm ở section `.debug_line` do đặc tả DWARF đặt tên[^dw-line-sect]. Man page `elf(5)` thì chỉ liệt kê một section `.debug` chung, kèm ghi chú rằng nội dung của nó không được đặc tả[^elf-debug]. Vì vậy khi muốn đọc DWARF, đừng tìm `.debug` mà hãy tìm các section `.debug_*`.
 
-Bảng so sánh (ô có chú thích là đối chiếu từ nguồn; ô không có chú thích là suy luận/nhận xét của người soạn):
+Hai thứ này khác nhau ở những điểm sau (ô có chú thích là đối chiếu từ nguồn; ô không có chú thích là suy luận hoặc nhận xét của người soạn):
 
 | | Symbol table | Debug info (DWARF) |
 |---|---|---|
-| Nội dung | mỗi symbol có tên, giá trị, kích thước, loại[^elf-sym64] | cây DIE: kiểu, biến cục bộ, tham số, inline, vị trí biến[^dw-die][^dw-loclist] |
+| Nội dung | mỗi symbol có tên, giá trị, kích thước, loại[^elf-sym64] | cây DIE: kiểu, biến cục bộ, tham số, inline, vị trí biến[^dw-die] |
 | Dòng nguồn ↔ địa chỉ | không có (suy luận: nguồn chỉ gắn thông tin này với `.debug_line` của DWARF) | có (`.debug_line`)[^dw-line-intro] |
 | Ai đọc | linker, dynamic loader, debugger (nhận xét của người soạn) | debugger, công cụ backtrace có dòng (nhận xét của người soạn) |
 | `bt` có tên hàm? | có (suy luận từ khái niệm non-debugging symbol[^gdb-nondebug]) | có, kèm dòng nguồn khi có `.debug_line` |
 | `print var` có kiểu? | không: GDB báo thiếu kiểu[^gdb-nodebuginfo] | có |
 
-*Hệ quả khi chỉ có symbol.* GDB vẫn thấy biến tồn tại nhờ symbol table của linker/loader (ví dụ ELF dynamic symbol table) nhưng symbol đó không chứa kiểu[^gdb-nodebuginfo]; GDB phân loại chúng là "non-debugging symbol", tức symbol đến từ symbol table của executable chứ không phải từ debug info như DWARF[^gdb-nondebug].
+*Hệ quả khi chỉ có symbol.* GDB vẫn biết một biến tồn tại nhờ symbol table của linker/loader, ví dụ ELF dynamic symbol table, nhưng symbol đó không chứa kiểu[^gdb-nodebuginfo]. GDB gọi chúng là "non-debugging symbol", tức symbol đến từ symbol table của executable chứ không phải từ debug info như DWARF[^gdb-nondebug]. Quay lại `checkout`: nếu image chỉ còn symbol, bạn nhìn được tên và địa chỉ, còn `print` một biến thì thiếu kiểu. Muốn đủ kiểu, biến cục bộ và dòng nguồn thì phải mang debug info về cho gdb, và mục 7 nói cách làm.
 
-<details><summary>Đi sâu: gdbserver không cần symbol, strip trên máy đích</summary>
+<details><summary>Đi sâu: <code>.dynsym</code>, gdbserver không cần symbol, strip trên máy đích</summary>
 
-- `gdbserver` (chương trình nhỏ chạy trên máy đích, nói chuyện với GDB từ xa) không cần symbol table của chương trình; có thể `strip` để tiết kiệm chỗ, vì GDB trên máy host làm toàn bộ việc xử lý symbol[^gdbserver-strip]. Đây là mô hình "binary mỏng trên production, debug info ở máy dev" (nhận xét của người soạn) — xem mục 7 để biết cách ghép lại.
-- Nếu muốn backtrace có dòng/tệp mà không mang theo toàn bộ debug info thì cần mức "chỉ bảng dòng": rustc có `line-tables-only` đúng cho mục đích này[^rustc-lines] (mục 9).
+- `.dynsym` mang cờ `SHF_ALLOC`[^elf-dynsym]. Section có cờ này thì chiếm bộ nhớ lúc process chạy[^elf-alloc].
+- `gdbserver` (chương trình nhỏ chạy trên máy đích, nói chuyện với GDB từ xa) không cần symbol table của chương trình, nên có thể `strip` để tiết kiệm chỗ; GDB trên máy host làm toàn bộ việc xử lý symbol[^gdbserver-strip]. Đây là mô hình "binary mỏng trên production, debug info ở máy dev" (nhận xét của người soạn); mục 7 nói cách ghép lại.
+- Nếu muốn backtrace có dòng/tệp mà không mang theo toàn bộ debug info thì cần mức "chỉ bảng dòng". rustc có `line-tables-only` đúng cho mục đích này[^rustc-lines] (mục 9).
 
 </details>
 
-**Quay lại Q4:** symbol table là bảng tên/giá trị của symbol cho linker và dynamic linking; debug info DWARF mới có kiểu, biến cục bộ, dòng nguồn. Với binary chỉ có symbol, GDB coi chúng là non-debugging symbol và không có kiểu[^gdb-nondebug][^gdb-nodebuginfo]; việc đặt breakpoint theo tên hàm và backtrace có tên là suy luận của người soạn từ khái niệm đó.
+**Quay lại Q4:** symbol table là bảng tên/giá trị của symbol cho linker và dynamic linking; debug info DWARF mới có kiểu, biến cục bộ, dòng nguồn. Với binary chỉ có symbol, GDB coi chúng là non-debugging symbol và không biết kiểu; việc đặt breakpoint theo tên hàm và backtrace có tên là suy luận của người soạn từ khái niệm đó. Với `checkout` đã strip, hãy trông đợi tên hàm chứ đừng trông đợi biến cục bộ.
 
 ## 5. DWARF chứa gì và vì sao biến bị "optimized out" (Q5)
 
-> **Trả lời ngắn.** DWARF mô tả chương trình bằng một **cây** các *debugging information entry* (DIE), mỗi DIE có một tag và các attribute[^dw-die][^dw-tree]. Bảng dòng trong `.debug_line` cho biết lệnh máy nào ứng với dòng nào[^dw-line-intro][^dw-line-sect]. Vị trí một biến được mô tả bằng biểu thức DWARF hoặc *location list* khi nó đổi chỗ trong đời nó[^dw-loclist]. Khi trình tối ưu bỏ hay dời một biến, debugger không còn nơi nào để đọc và hiện `<optimized out>`[^gdb-optout-args][^gdb-optout].
+> **Trả lời ngắn.** DWARF mô tả chương trình bằng một **cây** các *debugging information entry* (DIE), mỗi DIE có một tag và các attribute[^dw-die]. Bảng dòng trong `.debug_line` cho biết lệnh máy nào ứng với dòng nguồn nào[^dw-line-sect]. Vị trí một biến được mô tả bằng biểu thức DWARF, hoặc bằng *location list* khi biến đổi chỗ trong đời nó[^dw-loclist]. Khi trình tối ưu bỏ hay dời một biến, debugger không còn nơi nào để đọc và hiện `<optimized out>`[^gdb-optout-args].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): DWARF như tòa nhà có ba loại bảng. Một *sơ đồ cây* (`.debug_info`): công ty → phòng → nhân viên. Một *bảng tra* (`.debug_line`): "ở lệnh này, bạn đang ở dòng 42". Và *lịch làm việc* của từng biến (location list): "từ lệnh A tới B biến `x` ở thanh ghi `rbx`, sau B nằm ở `[rsp+8]`".
+*Với `checkout`.* Bản `--release` của `checkout` dừng ở `apply_discount`, bạn gõ `print discount` và nhận `<optimized out>`. Một hàm helper nhỏ thì không thấy `call` đâu, vậy mà gdb vẫn liệt nó ra trong backtrace. Hai hiện tượng này đều đến từ cách DWARF mô tả code đã tối ưu. Mỗi lần dừng ở một địa chỉ, debugger phải hỏi DWARF ba câu: đây là hàm nào, biến nào, kiểu gì (cây DIE trong `.debug_info`)? Địa chỉ này ứng với dòng nguồn nào (bảng dòng `.debug_line`)? Và biến `discount` lúc này đang nằm ở đâu (location)? Ta đi qua từng câu.
 
-*Cây DIE.* Đặc tả viết: DWARF dùng một chuỗi DIE để mô tả chương trình nguồn ở mức thấp; mỗi DIE gồm một tag và một chuỗi attribute[^dw-die]. Quan hệ sở hữu giữa các DIE tạo thành cây; con của một nút là các DIE mà nút đó sở hữu[^dw-tree]. Vì còn có tham chiếu chéo (biến → kiểu) nên nếu tính cả quan hệ này thì thành đồ thị chứ không còn là cây[^dw-graph]. Cây được lưu dạng "phẳng" trong section `.debug_info`: mỗi DIE bắt đầu bằng một mã trỏ vào bảng abbreviation rồi tới các giá trị attribute[^dw-abbrev-info]; các bảng abbreviation nằm ở section `.debug_abbrev`[^dw-abbrev]. Để tra ngược "địa chỉ này thuộc compilation unit nào", debugger quét bảng địa chỉ (`.debug_aranges`)[^dw-aranges].
+*Cây DIE.* DWARF dùng một chuỗi DIE để mô tả chương trình nguồn ở mức thấp, mỗi DIE gồm một tag và một chuỗi attribute[^dw-die]. Các DIE sở hữu nhau thành một cây, con của một nút là các DIE mà nút đó sở hữu[^dw-tree]. Nếu tính thêm cả tham chiếu chéo như biến trỏ tới kiểu thì nó thành đồ thị chứ không còn là cây[^dw-graph]. Về cách lưu, cây được trải "phẳng" trong section `.debug_info`: mỗi DIE bắt đầu bằng một mã trỏ vào bảng abbreviation rồi tới các giá trị attribute[^dw-abbrev-info]. Các bảng abbreviation nằm ở section `.debug_abbrev`[^dw-abbrev]. Để tra ngược "địa chỉ này thuộc compilation unit nào", debugger quét bảng địa chỉ `.debug_aranges`[^dw-aranges].
 
-*Bảng dòng.* `.debug_line` cho phép debugger gắn vị trí nguồn với địa chỉ lệnh máy: người dùng nói "tệp X dòng N", debugger tìm địa chỉ; ngược lại hiển thị địa chỉ theo tệp và dòng, và single-step theo dòng[^dw-line-intro][^dw-line-step]. Section này được tham chiếu từ DIE của compilation unit trong `.debug_info`[^dw-line-sect]. Mỗi hàng trong bảng có cờ `is_stmt`: "lệnh hiện tại là vị trí breakpoint được khuyến nghị"[^dw-isstmt]; và compiler có thể ghi dòng 0 cho lệnh không quy về dòng nguồn nào được[^dw-line0]. (Suy luận của người soạn: dòng 0 là một trong những lý do `step` ở bản tối ưu có lúc không dừng ở dòng bạn mong đợi; GDB cũng nói code đã tối ưu có thể chạy theo đường không khớp từng dòng nguồn[^gdb-optim].)
+*Bảng dòng.* `.debug_line` cho debugger gắn vị trí nguồn với địa chỉ lệnh máy: bạn nói "tệp X dòng N", debugger tìm ra địa chỉ[^dw-line-intro]. Chiều ngược lại, debugger cũng dùng nó để hiển thị địa chỉ theo tệp và dòng, và để single-step theo dòng[^dw-line-step]. Section này được tham chiếu từ DIE của compilation unit trong `.debug_info`[^dw-line-sect]. Mỗi hàng trong bảng có cờ `is_stmt`, nghĩa là "lệnh hiện tại là vị trí breakpoint được khuyến nghị"[^dw-isstmt]. Compiler còn có thể ghi dòng 0 cho lệnh không quy về dòng nguồn nào được[^dw-line0]. (Suy luận của người soạn: dòng 0 là một trong những lý do `step` ở bản tối ưu có lúc không dừng ở dòng bạn mong đợi.) GDB cũng cảnh báo rằng code đã tối ưu có thể chạy theo đường không khớp từng dòng nguồn[^gdb-optim].
 
-*Vị trí biến.* Attribute `DW_AT_location` mô tả vị trí biến lúc chạy. Nếu biến có thể đổi chỗ trong đời nó (thanh ghi này rồi ô nhớ kia) thì dùng location list thay cho một mô tả đơn[^dw-loclist]; danh sách nằm ở section `.debug_loclists` (hoặc `.debug_loclists.dwo` cho split DWARF)[^dw-loclists-sect]. Nếu một biến định nghĩa không có location hoặc location rỗng thì đặc tả coi biến "tồn tại trong source nhưng không tồn tại trong chương trình thực thi"[^dw-noloc]. Có cả trường hợp giá trị biết nhưng không nằm đâu cả: `DW_OP_stack_value` nói đối tượng không có trong bộ nhớ nhưng giá trị vẫn biết, là giá trị đỉnh stack biểu thức[^dw-stackval].
+*Vị trí biến.* Attribute `DW_AT_location` mô tả vị trí biến lúc chạy. Nếu biến có thể đổi chỗ trong đời nó (lúc ở thanh ghi này, lúc ở ô nhớ kia) thì dùng location list thay cho một mô tả đơn[^dw-loclist]. Danh sách nằm ở section `.debug_loclists`, hoặc `.debug_loclists.dwo` cho split DWARF[^dw-loclists-sect]. Nếu một biến có định nghĩa nhưng không có location, hoặc location rỗng, thì đặc tả coi biến "tồn tại trong source nhưng không tồn tại trong chương trình thực thi"[^dw-noloc]. Còn một trường hợp nữa: giá trị vẫn biết nhưng không nằm đâu cả. `DW_OP_stack_value` nói đối tượng không có trong bộ nhớ nhưng giá trị của nó vẫn biết, và là giá trị ở đỉnh stack biểu thức[^dw-stackval].
 
 ```mermaid
 flowchart LR
@@ -218,96 +225,94 @@ flowchart LR
   LOC --> VAL["đọc thanh ghi hoặc ô nhớ → giá trị"]
 ```
 
-*Inline.* Khi compiler inline hàm, thân hàm bị chép vào từng chỗ gọi thay vì nhảy tới một routine dùng chung[^gdb-inline], nên không còn lệnh `call`. DWARF vẫn ghi lại: entry của hàm được inline có attribute `DW_AT_inline`[^dw-inl], và tag `DW_TAG_inlined_subroutine` biểu diễn "một lần inline cụ thể của một hàm"[^dw-inl-tag]. Nhờ vậy GDB vẫn hiển thị hàm inline như hàm thường: có trong backtrace, xem được đối số/biến cục bộ, `step` vào, `next` bỏ qua, `finish` thoát[^gdb-inline]; GDB chỉ làm được điều đó khi compiler đã ghi thông tin inline vào debug info[^gdb-inline-dwarf].
+*Inline.* Khi compiler inline một hàm, thân hàm được chép vào từng chỗ gọi thay vì nhảy tới một routine dùng chung, nên không còn lệnh `call` (giải thích của người soạn). DWARF vẫn ghi lại chuyện đó. Entry của hàm được inline có attribute `DW_AT_inline`[^dw-inl]. Tag `DW_TAG_inlined_subroutine` biểu diễn "một lần inline cụ thể của một hàm"[^dw-inl-tag]. Nhờ vậy GDB vẫn hiển thị hàm inline như hàm thường: nó có trong backtrace, xem được đối số và biến cục bộ, `step` vào được, `next` bỏ qua được, `finish` thoát ra được[^gdb-inline]. GDB chỉ làm được điều đó khi compiler đã ghi thông tin inline vào debug info[^gdb-inline-dwarf].
 
-*`<optimized out>`.* GDB cảnh báo rằng với chương trình biên dịch có tối ưu (`-g -O`) trình tối ưu đã sắp xếp lại code, và debugger hiển thị đúng cái *thật sự có đó*; ví dụ biến khai báo mà không dùng thì GDB không bao giờ thấy vì compiler đã tối ưu nó biến mất[^gdb-optim]. Tài liệu cũng thừa nhận GDB chính xác hơn khi tắt tối ưu[^gdb-optim-better]. Khi giá trị tham số không được lưu trong stack frame, GDB hiển thị nó là `<optimized out>`[^gdb-optout-args]. Ví dụ trong tài liệu GDB về tail call: GDB không biết hàm `a` đã tự gọi mình qua `b` bao nhiêu lần; vì các lần gọi đó sửa biến `i` nên GDB không chắc giá trị nó biết có đúng, và in `<optimized out>`[^gdb-optout].
+*`<optimized out>`.* GDB nhắc rằng với chương trình biên dịch có tối ưu (`-g -O`), trình tối ưu đã sắp xếp lại code, và debugger hiển thị đúng cái *thật sự có đó*[^gdb-optim]. Một biến khai báo mà không dùng thì GDB không bao giờ thấy, vì compiler đã tối ưu cho nó biến mất[^gdb-optim]. Tài liệu cũng thừa nhận GDB chính xác hơn khi tắt tối ưu[^gdb-optim-better]. Khi giá trị tham số không được lưu trong stack frame, GDB hiển thị nó là `<optimized out>`[^gdb-optout-args]. Ví dụ trong tài liệu GDB về tail call: GDB không biết hàm `a` đã tự gọi mình qua `b` bao nhiêu lần. Các lần gọi đó sửa biến `i`, nên GDB không chắc giá trị nó biết là đúng và in `<optimized out>`[^gdb-optout]. Với `checkout`, `discount` có thể rơi vào một trong các trường hợp này: bản release không còn chỗ nào lưu nó tại địa chỉ bạn dừng (suy luận của người soạn từ các đoạn trên).
 
 <details><summary>Đi sâu: tham số hằng số trong hàm inline, DWARF 5 loclists, bảng abbreviation, cảnh báo phiên bản</summary>
 
-- Tham số hình thức "có giá trị hằng nhưng không có location" thường sinh ra khi hàm inline nhận một tham số thực hằng số — ví dụ trong đặc tả DWARF[^dw-inl-param]. (Suy luận của người soạn: đó là lý do khi debug bản `--release` đôi khi bạn thấy tham số in ra giá trị nhưng "không thể lấy địa chỉ".)
-- Dạng `loclist` (và `DW_AT_loclists_base`) là mới ở DWARF 5, nhằm giảm gần hết relocation cần cho location list[^dw-loclist-v5]. Mặc định rustc phát DWARF phiên bản 4 trên hầu hết nền tảng (Linux, macOS); `-C dwarf-version=5` đổi sang 5[^rustc-dwarf].
+- Tham số hình thức "có giá trị hằng nhưng không có location" thường sinh ra khi hàm inline nhận một tham số thực là hằng số; đặc tả DWARF nêu đúng ví dụ này[^dw-inl-param]. (Suy luận của người soạn: đó là lý do khi debug bản `--release` đôi khi bạn thấy tham số in ra giá trị nhưng "không thể lấy địa chỉ".)
+- Dạng `loclist` và attribute `DW_AT_loclists_base` là mới ở DWARF 5, nhằm giảm gần hết relocation cần cho location list[^dw-loclist-v5]. Mặc định rustc phát DWARF phiên bản 4 trên hầu hết nền tảng (Linux, macOS); `-C dwarf-version=5` đổi sang 5[^rustc-dwarf].
 - Dòng trong bảng không bảo đảm đơn điệu: sau tối ưu, dòng nguồn có thể xen kẽ vì lệnh được xếp lại (suy luận của người soạn từ cơ chế `is_stmt` và dòng 0 ở trên; không có số đo).
 - Cảnh báo phiên bản: trang GDB-Rust trong manual vẫn ghi "Rust compiler (version 1.8)" khi nói về lỗ hổng debug info[^gdb-rust-stale]. Hãy coi danh sách hạn chế đó là *có thể lỗi thời* và đối chiếu với bản GDB/rustc bạn đang dùng.
 
 </details>
 
-**Quay lại Q5:** DWARF là cây DIE (`.debug_info`) cộng bảng dòng (`.debug_line`) cộng location list; vì tối ưu làm biến đổi chỗ hoặc biến mất, nên debugger có khi không có chỗ đọc và báo `<optimized out>`.
+**Quay lại Q5:** DWARF là cây DIE (`.debug_info`) cộng bảng dòng (`.debug_line`) cộng location list; vì tối ưu làm biến đổi chỗ hoặc biến mất, nên debugger có khi không có chỗ đọc và báo `<optimized out>`. Với `checkout` bản release, đó là lý do `discount` không đọc được dù nó có trong source.
 
 ## 6. Backtrace: frame pointer, CFI và `.eh_frame` (Q6)
 
-> **Trả lời ngắn.** Để in backtrace, debugger phải "đi ngược" từ stack frame hiện tại sang frame của hàm gọi. Có hai nguồn thông tin: chuỗi frame pointer (nếu code duy trì; xem chương CPU, nơi có dẫn chứng), hoặc bảng **Call Frame Information (CFI)** trong DWARF, thường nằm ở `.eh_frame` (hoặc `.debug_frame`)[^dw-cfi][^lsb-ehframe]. CFI nói, tại từng địa chỉ lệnh, địa chỉ frame (CFA) tính thế nào và thanh ghi nào được lưu ở đâu; debugger *ảo* "unwind" từng bước mà không đổi trạng thái thật của process[^dw-virtual][^dw-virtual2].
+> **Trả lời ngắn.** Để in backtrace, debugger phải "đi ngược" từ stack frame hiện tại sang frame của hàm gọi. Có hai nguồn thông tin: chuỗi frame pointer (nếu code duy trì; xem chương CPU, nơi có dẫn chứng), hoặc bảng **Call Frame Information (CFI)** trong DWARF, dành cho nhu cầu debugger phải xem trạng thái của từng lần gọi hàm trên stack[^dw-cfi]. Bảng này thường nằm ở `.eh_frame` (hoặc `.debug_frame`)[^lsb-ehframe]. Tại từng địa chỉ lệnh, nó cho biết địa chỉ frame (CFA) tính thế nào và thanh ghi nào được lưu ở đâu[^dw-virtual]. Debugger "unwind ảo" từng bước theo bảng đó mà không đổi trạng thái thật của process[^dw-virtual2].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn dừng giữa chuyến đi và muốn lần ngược con đường đã đi. Frame pointer là sợi chỉ nối từng điểm dừng; CFI là cuốn sổ ghi "nếu đang đứng ở mốc này thì điểm dừng trước nằm cách bao xa".
+*Với `checkout`.* Một handler thread của `checkout` đang kẹt, bạn gõ `bt` để biết nó kẹt ở đâu và do hàm nào gọi tới. Thứ debugger có trong tay là thanh ghi hiện tại của thread (mục 1). Từ đó nó phải suy ra frame của hàm đã gọi, rồi frame của hàm gọi hàm đó, cho tới tận `main`. Làm thế nào để biết mỗi frame bắt đầu ở đâu? Chương CPU ([mục 6](../02-cpu/04-calling-convention-va-stack-frame.md)) đã giải thích prologue/epilogue và hai cách unwind; ở đây chỉ nêu phần phía debugger.
 
-Chương CPU ([mục 6](../02-cpu/04-calling-convention-va-stack-frame.md)) đã giải thích prologue/epilogue và hai cách unwind; ở đây chỉ nêu phần phía debugger.
+*Frame theo GDB.* GDB chia call stack thành các phần liền nhau gọi là stack frame. Mỗi frame là dữ liệu gắn với một lần gọi một hàm, gồm đối số, biến cục bộ và địa chỉ đang thực thi[^gdb-frames].
 
-*Khung gọi (frame) theo GDB.* GDB chia call stack thành các phần liền nhau gọi là stack frame; mỗi frame là dữ liệu gắn với một lần gọi một hàm, gồm đối số, biến cục bộ và địa chỉ đang thực thi[^gdb-frames].
+*CFI theo DWARF.* Đặc tả nêu bối cảnh: debugger thường cần xem và sửa trạng thái của bất kỳ lần kích hoạt hàm nào đang nằm trên call stack[^dw-cfi]. Một call frame được nhận diện bằng một địa chỉ gọi là Canonical Frame Address (CFA), thường định nghĩa là giá trị stack pointer tại chỗ gọi ở frame trước[^dw-cfa]. Từ đó debugger "virtually unwind" theo từng bước: bắt đầu từ activation hiện tại, nó khôi phục ảo các thanh ghi mà activation đó đã bảo toàn, rồi tính CFA và vị trí code của activation tiền nhiệm[^dw-virtual]. Gọi là "ảo" vì trạng thái thật của target process không đổi[^dw-virtual2].
 
-*CFI theo DWARF.* Đặc tả nêu bối cảnh: debugger cần xem và sửa trạng thái của bất kỳ lần kích hoạt hàm nào đang nằm trên call stack[^dw-cfi]. Khung gọi được nhận diện bằng một địa chỉ gọi là Canonical Frame Address (CFA), thường định nghĩa là giá trị stack pointer tại chỗ gọi ở frame trước[^dw-cfa]. Một debugger "virtually unwind" theo từng bước: bắt đầu từ activation hiện tại, nó khôi phục ảo các thanh ghi mà activation đó đã bảo toàn rồi tính CFA và vị trí code của activation tiền nhiệm[^dw-virtual]; gọi là "ảo" vì trạng thái thật của target process không đổi[^dw-virtual2].
+*Vì sao cần bảng chứ không chỉ một quy tắc.* Prologue và epilogue không phải lúc nào cũng nằm gọn ở đầu và cuối hàm: epilogue thường bị nhân đôi tại mỗi chỗ return[^dw-prologue]. (Suy luận của người soạn từ câu đó: vì thế thông tin unwind phải mô tả theo *địa chỉ lệnh*, không theo hàm.)
 
-*Vì sao cần bảng chứ không chỉ một quy tắc.* Prologue/epilogue không phải lúc nào cũng nằm gọn đầu và cuối hàm: epilogue thường bị nhân đôi tại mỗi chỗ return[^dw-prologue]. (Suy luận của người soạn từ câu đó: vì thế thông tin unwind phải được mô tả theo *địa chỉ lệnh*, không theo hàm.)
-
-*`.eh_frame`.* Đặc tả LSB nói thông tin này nằm trong các section đặc biệt `.eh_frame` và `.eh_framehdr`, dùng cho runtime của các ngôn ngữ có exception để biết call frame nào cần unwind khi xử lý exception[^lsb-ehframe]. Định dạng `.eh_frame` giống `.debug_frame` của DWARF về cấu trúc và mục đích nhưng có khác biệt tinh tế[^lsb-ehframe-similar]. (Nhận xét của người soạn: trong thực tế một bảng CFI phục vụ cả hai: debugger lấy backtrace và runtime tháo stack khi panic/exception. Chương [Panic, ABI, FFI](../10-rust-internals/08-panic-abi-ffi.md) nói về phía panic.)
+*`.eh_frame`.* Đặc tả LSB nói thông tin này nằm trong các section đặc biệt `.eh_frame` và `.eh_framehdr`, để runtime của các ngôn ngữ có exception biết call frame nào cần unwind khi xử lý exception[^lsb-ehframe]. Định dạng `.eh_frame` giống `.debug_frame` của DWARF về cấu trúc và mục đích, nhưng có khác biệt tinh tế[^lsb-ehframe-similar]. (Nhận xét của người soạn: trong thực tế một bảng CFI phục vụ cả hai: debugger lấy backtrace và runtime tháo stack khi panic/exception. Chương [Panic, ABI, FFI](../10-rust-internals/08-panic-abi-ffi.md) nói về phía panic.)
 
 <details><summary>Đi sâu: cờ rustc liên quan, khi không có CFI</summary>
 
 - `-C force-unwind-tables` ép sinh bảng unwind; nếu tắt mà target cần bảng này thì rustc báo lỗi[^rustc-unwind]. `-C force-frame-pointers` ép dùng frame pointer; mặc định phụ thuộc target[^rustc-fp].
-- Cắt debug info ít ảnh hưởng tới backtrace, theo tài liệu rustc: `-C strip=debuginfo` "nên giữ backtrace gần như nguyên vẹn" dù có thể làm gdb/lldb vô hiệu[^rustc-strip-debuginfo]; trái lại `-C strip=symbols` có thể làm backtrace khó đọc đến mức "không thể hiểu" trên những nền tảng dựa vào symbol table[^rustc-strip-symbols].
-- Trong Rust, backtrace có tệp/dòng cần debug info: `std::backtrace` nói với đa số nền tảng, muốn có tên tệp và số dòng thì chương trình phải biên dịch với debug info[^std-backtrace].
+- Cắt debug info ít ảnh hưởng tới backtrace. Theo tài liệu rustc, `-C strip=debuginfo` "nên giữ backtrace gần như nguyên vẹn" dù có thể làm gdb/lldb vô hiệu[^rustc-strip-debuginfo]. Trái lại, `-C strip=symbols` có thể làm backtrace khó đọc đến mức "không thể hiểu" trên những nền tảng dựa vào symbol table[^rustc-strip-symbols].
+- Trong Rust, backtrace có tệp/dòng cần debug info: `std::backtrace` nói rằng với đa số nền tảng, muốn có tên tệp và số dòng thì chương trình phải biên dịch với debug info[^std-backtrace].
 
 </details>
 
-**Quay lại Q6:** debugger lần ngược stack bằng frame pointer hoặc bằng bảng CFI (`.eh_frame`/`.debug_frame`), thứ mô tả theo từng địa chỉ lệnh cách tính CFA và vị trí các thanh ghi đã lưu, rồi "unwind ảo" mà không đổi process thật.
+**Quay lại Q6:** debugger lần ngược stack bằng frame pointer hoặc bằng bảng CFI (`.eh_frame`/`.debug_frame`), thứ mô tả theo từng địa chỉ lệnh cách tính CFA và vị trí các thanh ghi đã lưu, rồi "unwind ảo" mà không đổi process thật. Với thread kẹt của `checkout`, `bt` chính là kết quả của vòng lặp unwind đó.
 
 ## 7. Debug info nằm ngoài binary: debuglink, build ID, debuginfod, split DWARF (Q7)
 
-> **Trả lời ngắn.** Debug info thường rất lớn, có khi lớn hơn cả phần code, nên nhiều hệ thống để nó ở file riêng và chỉ cài khi cần debug[^gdb-sep-why]. GDB ghép hai file bằng **debug link** (tên file + CRC32) hoặc **build ID** (chuỗi định danh duy nhất có mặt ở cả hai file)[^gdb-debuglink-name][^gdb-buildid], và có thể tải file thiếu từ server `debuginfod` theo build ID[^gdb-debuginfod]. "Split DWARF" là chuyện khác: cho phép phần lớn DWARF ở lại file object, không qua linker, để link nhanh hơn[^dw-split][^dw-split-link].
+> **Trả lời ngắn.** Debug info thường rất lớn, có khi lớn hơn cả phần code, nên nhiều hệ thống để nó ở file riêng và chỉ cài khi cần debug[^gdb-sep-why]. GDB ghép hai file bằng **debug link**, gồm tên file và CRC32[^gdb-debuglink-name]. Cách thứ hai là **build ID**, một chuỗi định danh duy nhất có mặt ở cả hai file[^gdb-buildid]. GDB còn tải được file thiếu từ server `debuginfod` theo build ID[^gdb-debuginfod]. "Split DWARF" là chuyện khác: nó cho phần lớn DWARF ở lại file object, không qua linker, để link nhanh hơn[^dw-split].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): image production mỏng (binary đã `strip`) và một kho "bản đồ chi tiết" (file debug info) tra cứu bằng *vân tay* (build ID). Khi có sự cố, bạn mang đúng bản đồ có cùng vân tay ra đối chiếu.
+*Với `checkout`.* Image production của `checkout` mỏng, không mang DWARF. Vì vậy pipeline CI nên build ra hai thứ cùng một lúc: binary đưa vào image, và file debug giữ lại ở nơi khác. Khi có sự cố, gdb phải biết file debug nào đi với binary đang chạy trong pod. Ghép nhầm file của một lần build khác thì debug info vô nghĩa (nhận xét của người soạn). Mục này nói gdb đối chiếu hai file bằng cách nào, rồi nói về split DWARF, thứ hay bị lẫn với chuyện này.
 
-*Cách 1 — debug link.* Executable chứa section `.gnu_debuglink`[^gdb-debuglink-sec]; nó nêu tên file debug (thường `executable.debug`) và một CRC 32 bit của file debug để GDB kiểm tra file debug và executable đến từ cùng một lần build[^gdb-debuglink-name].
+*Cách 1: debug link.* Executable chứa section `.gnu_debuglink`[^gdb-debuglink-sec]. Section này nêu tên file debug (thường là `executable.debug`) và một CRC 32 bit của file debug, để GDB kiểm tra file debug và executable đến từ cùng một lần build[^gdb-debuglink-name].
 
-*Cách 2 — build ID.* Executable chứa một build ID, chuỗi bit duy nhất cũng có mặt ở file debug tương ứng[^gdb-buildid]. Bản mặc định dùng SHA1 cho 160 bit (40 ký tự hex)[^gdb-buildid-sha]; section cùng giá trị có mặt trong binary gốc, bản đã strip, và file debug[^gdb-buildid-sha]. Tên file debug *không* ghi sẵn mà tính từ build ID: GDB tìm trong thư mục con `.build-id` của các thư mục debug toàn cục một file `nn/nnnnnnnn.debug` với `nn` là hai ký tự hex đầu của build ID[^gdb-buildid-path]. Man page `elf(5)` mô tả section `.note.gnu.build-id` dùng để giữ một ID định danh duy nhất nội dung ảnh ELF[^elf-buildid].
+*Cách 2: build ID.* Executable chứa một build ID, chuỗi bit duy nhất cũng có mặt ở file debug tương ứng[^gdb-buildid]. Section cùng giá trị có mặt trong binary gốc, bản đã strip và file debug[^gdb-buildid-sha]. Tên file debug *không* ghi sẵn mà tính từ build ID: GDB tìm trong thư mục con `.build-id` của các thư mục debug toàn cục một file `nn/nnnnnnnn.debug`, với `nn` là hai ký tự hex đầu của build ID[^gdb-buildid-path]. Man page `elf(5)` mô tả section `.note.gnu.build-id` dùng để giữ một ID định danh duy nhất nội dung ảnh ELF[^elf-buildid].
 
-*Cách 3 — debuginfod.* `debuginfod` là HTTP server phân phối file ELF, DWARF và source; GDB (qua libdebuginfod) có thể hỏi server theo build ID để tải debug info, executable và source còn thiếu theo yêu cầu[^gdb-debuginfod]. Khi không tìm thấy file debug cục bộ mà debuginfod bật, GDB mới thử tải[^gdb-sep-order].
+*Cách 3: debuginfod.* `debuginfod` là HTTP server phân phối file ELF, DWARF và source. GDB (qua libdebuginfod) có thể hỏi server theo build ID để tải debug info, executable và source còn thiếu theo yêu cầu[^gdb-debuginfod]. GDB chỉ thử tải khi không tìm thấy file debug cục bộ mà debuginfod đang bật[^gdb-sep-order].
 
-*Tạo ra cặp file.* Binutils có `objcopy` để tạo cặp executable/file debug (`objcopy --only-keep-debug foo foo.debug`, rồi `strip -g foo`); muốn dùng debug link thì thêm `objcopy --add-gnu-debuglink=foo.debug foo`[^gdb-objcopy].
+*Tạo ra cặp file.* Binutils có `objcopy` để tạo cặp executable/file debug: `objcopy --only-keep-debug foo foo.debug`, rồi `strip -g foo`. Muốn dùng debug link thì thêm `objcopy --add-gnu-debuglink=foo.debug foo`[^gdb-objcopy].
 
-*Split DWARF (khác với "debug info ngoài binary").* Đặc tả DWARF 5 mô tả: producer có thể chia debug info sao cho phần lớn nằm lại trong từng file object, không qua linker[^dw-split]; điều đó giảm thời gian link vì linker phải xử lý ít thông tin hơn[^dw-split-link]. Phần thứ nhất đi qua linker vẫn gồm bảng dòng, bảng frame và các bảng truy cập nhanh[^dw-first-part]; một *skeleton compilation unit* là mô tả tối thiểu chỉ ra compilation unit "split" chứa phần còn lại (và là phần lớn) của mô tả[^dw-skel]. Ở rustc (mục 9), `-C split-debuginfo` cho ra các file `*.dwp` (chế độ `packed`) hoặc `*.dwo` (chế độ `unpacked`) trên nền tảng ngoài macOS và Windows[^rustc-split-packed][^rustc-split-unpacked]. (Suy luận của người soạn: đó là hiện thân của split DWARF trong đặc tả; tài liệu rustc không nói thẳng điều này.)
+*Split DWARF (khác với "debug info ngoài binary").* Đặc tả DWARF 5 mô tả: producer có thể chia debug info sao cho phần lớn nằm lại trong từng file object, không qua linker[^dw-split]. Điều đó giảm thời gian link vì linker phải xử lý ít thông tin hơn[^dw-split-link]. Phần đi qua linker vẫn gồm bảng dòng, bảng frame và các bảng truy cập nhanh[^dw-first-part]. Còn *skeleton compilation unit* là mô tả tối thiểu, chỉ ra compilation unit "split" chứa phần còn lại (và là phần lớn) của mô tả[^dw-skel]. Ở rustc (mục 9), `-C split-debuginfo` chế độ `packed` cho ra file `*.dwp` trên nền tảng ngoài macOS và Windows[^rustc-split-packed]. Chế độ `unpacked` cho ra các file `*.dwo` trên Unix ngoài macOS[^rustc-split-unpacked]. (Suy luận của người soạn: đó là hiện thân của split DWARF trong đặc tả; tài liệu rustc không nói thẳng điều này.)
 
 <details><summary>Đi sâu: kiểm tra khớp, thư mục tìm, thứ tự, gdbserver</summary>
 
-- GDB so sánh build ID của executable đang chạy với file nạp trong GDB; nếu lệch thì tùy `set exec-file-mismatch` (`ask` mặc định, `warn`, `off`)[^gdb-mismatch].
-- Thứ tự tìm file debug theo ví dụ trong manual với build ID `abcdef1234`: `/usr/lib/debug/.build-id/ab/cdef1234.debug`, rồi `/usr/bin/ls.debug`, `/usr/bin/.debug/ls.debug`, `/usr/lib/debug/usr/bin/ls.debug`; nếu vẫn không thấy và debuginfod bật thì mới tải[^gdb-sep-order].
-- File debug nên là một "executable thường" có đủ section với cùng tên, địa chỉ, kích thước như bản gốc nhưng không cần chứa dữ liệu — như `.bss`[^gdb-sep-format].
+- GDB so sánh build ID của executable đang chạy với file nạp trong GDB; nếu lệch thì xử lý theo `set exec-file-mismatch` (`ask` mặc định, `warn`, `off`)[^gdb-mismatch].
+- Thứ tự tìm file debug theo ví dụ trong manual với build ID `abcdef1234`: `/usr/lib/debug/.build-id/ab/cdef1234.debug`, rồi `/usr/bin/ls.debug`, `/usr/bin/.debug/ls.debug`, `/usr/lib/debug/usr/bin/ls.debug`. Nếu vẫn không thấy và debuginfod bật thì mới tải[^gdb-sep-order].
+- File debug nên là một "executable thường" có đủ section với cùng tên, địa chỉ, kích thước như bản gốc nhưng không cần chứa dữ liệu, như `.bss`[^gdb-sep-format].
 - Vì `gdbserver` không cần symbol table nên có thể chạy bản đã `strip` ở máy đích, còn GDB trên máy host giữ debug info[^gdbserver-strip].
-- (Nhận xét của người soạn.) Với container: image production thường không mang debug info; hãy lưu file debug theo build ID ở nơi bạn kiểm soát (hoặc chạy một debuginfod nội bộ) để khi cần có thể ghép lại mà không build lại.
+- (Nhận xét của người soạn.) Với container: image production thường không mang debug info. Hãy lưu file debug theo build ID ở nơi bạn kiểm soát (hoặc chạy một debuginfod nội bộ) để khi cần có thể ghép lại mà không phải build lại.
 
 </details>
 
-**Quay lại Q7:** debug info có thể tách thành file riêng, ghép bằng debug link (tên + CRC) hoặc build ID, tải từ debuginfod theo build ID; còn split DWARF là kỹ thuật giảm thời gian link bằng cách để DWARF ở file object.
+**Quay lại Q7:** debug info có thể tách thành file riêng, ghép bằng debug link (tên + CRC) hoặc build ID, tải từ debuginfod theo build ID; còn split DWARF là kỹ thuật giảm thời gian link bằng cách để DWARF ở file object. Với `checkout`, hãy giữ file debug của từng bản build theo build ID.
 
 ## 8. Attach vào process đang chạy: quyền, `ptrace_scope`, container (Q8)
 
-> **Trả lời ngắn.** `gdb -p PID` hay lệnh `attach` là kiểu "gắn vào process có sẵn" của ptrace (`PTRACE_ATTACH` hoặc `PTRACE_SEIZE`[^ptrace-traceme]; chương này không kiểm GDB dùng request nào). Kernel chỉ cho phép nếu qua được "ptrace access mode check": cùng uid *và* target còn "dumpable", hoặc có `CAP_SYS_PTRACE`[^ptrace-perm-attach][^ptrace-acc3][^ptrace-acc4]. Trên hệ có Yama LSM, `/proc/sys/kernel/yama/ptrace_scope` thắt thêm: giá trị 1 (mặc định theo man page) chỉ cho attach vào process con cháu, trừ khi có `CAP_SYS_PTRACE`[^ptrace-yama-conf][^ptrace-yama-1]. Trong container, Docker mặc định bỏ `CAP_SYS_PTRACE`[^docker-ptrace]; Kubernetes có ephemeral container để debug khi image thiếu công cụ[^k8s-ephem-use], và `kubectl debug --target` nhắm vào process namespace của container đích (cần container runtime hỗ trợ)[^k8s-target].
+> **Trả lời ngắn.** `gdb -p PID` hay lệnh `attach` là kiểu "gắn vào process có sẵn" của ptrace: `PTRACE_ATTACH` hoặc `PTRACE_SEIZE`[^ptrace-traceme] (chương này không kiểm GDB dùng request nào). Kernel kiểm tra "ptrace access mode" trước khi cho gắn[^ptrace-perm-attach]. Nó từ chối nếu uid/gid của target không khớp với caller mà caller không có `CAP_SYS_PTRACE`[^ptrace-acc3]. Nó cũng từ chối nếu target không "dumpable" và caller không có capability đó[^ptrace-acc4]. Trên hệ có Yama LSM, `/proc/sys/kernel/yama/ptrace_scope` thắt thêm[^ptrace-yama-conf]. Giá trị 1 (mặc định theo man page) chỉ cho attach vào process con cháu, trừ khi có `CAP_SYS_PTRACE`[^ptrace-yama-1]. Trong container, Docker mặc định bỏ `CAP_SYS_PTRACE`[^docker-ptrace]. Kubernetes có ephemeral container để debug khi image thiếu công cụ[^k8s-ephem-use]. Lệnh `kubectl debug --target` nhắm vào process namespace của container đích (cần container runtime hỗ trợ)[^k8s-target].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): attach giống việc bước vào phòng điều khiển của người khác. Cửa có nhiều khóa: cùng chủ (uid) mới được thử mở; chủ phải để cửa không đánh dấu "cấm" (dumpable); rồi còn quy định tòa nhà (Yama): chỉ người tạo ra căn phòng đó (cha của process) mới được vào; ai có thẻ quản trị (`CAP_SYS_PTRACE`) thì mở được hết.
+*Với `checkout`.* Bạn `kubectl exec` vào pod `checkout`, chạy `gdb -p <PID của checkout>` và nhận `Operation not permitted`, dù đang đứng ngay trong cùng container. Tình huống này khá quen khi debug production (nhận xét của người soạn). Nó không phải lỗi của gdb: attach là một lần xin quyền, và có nhiều lớp có thể từ chối. Mục này đi từ chuyện attach làm gì với process, qua các lớp kiểm tra của kernel, đến việc container và Kubernetes thêm gì vào.
 
-*Bước 1 — attach làm gì với process.* GDB: việc đầu tiên sau khi sắp xếp debug process là dừng nó[^gdb-attach-stop]; sau đó dùng mọi lệnh bình thường: đặt breakpoint, step, continue, sửa bộ nhớ. Muốn process chạy tiếp thì `continue`[^gdb-attach-stop]. Khi xong `detach` để giải phóng; thoát GDB khi đang attach cũng là detach, còn process do `run` khởi chạy thì bị kill[^gdb-detach]. Phía kernel, `PTRACE_ATTACH` gửi `SIGSTOP`[^ptrace-attach]; `PTRACE_SEIZE` thì không dừng process khi gắn[^ptrace-seize]. LLDB: `process attach --pid 123` hoặc `--name`, kèm `--waitfor` để chờ process mang tên đó xuất hiện rồi attach[^lldb-attach].
+*Bước 1: attach làm gì với process.* Việc đầu tiên GDB làm sau khi sắp xếp để debug process là dừng nó[^gdb-attach-stop]. Sau đó bạn dùng các lệnh bình thường như đặt breakpoint, step, sửa bộ nhớ, và muốn process chạy tiếp thì `continue`. Nghĩa là pod `checkout` đang phục vụ traffic sẽ đứng im từ lúc bạn attach (nhận xét của người soạn, suy ra từ việc process bị dừng), nên hãy cân nhắc trước khi attach vào pod production. Khi xong, `detach` để giải phóng. Thoát GDB khi đang attach cũng là detach, còn process do `run` khởi chạy thì bị kill[^gdb-detach]. Phía kernel, `PTRACE_ATTACH` gửi `SIGSTOP`[^ptrace-attach]. `PTRACE_SEIZE` thì không dừng process khi gắn[^ptrace-seize]. LLDB làm tương tự: `process attach --pid 123` hoặc `--name`, kèm `--waitfor` để chờ process mang tên đó xuất hiện rồi attach[^lldb-attach].
 
-*Bước 2 — kernel kiểm tra quyền.* Man page: quyền thực hiện `PTRACE_ATTACH` do kiểm tra `PTRACE_MODE_ATTACH_REALCREDS`[^ptrace-perm-attach]. Thuật toán kiểm tra gồm nhiều bước; những bước đáng nhớ:
+*Bước 2: kernel kiểm tra quyền.* Quyền thực hiện `PTRACE_ATTACH` do kiểm tra `PTRACE_MODE_ATTACH_REALCREDS` quyết định[^ptrace-perm-attach]. Thuật toán kiểm tra gồm nhiều bước; những bước đáng nhớ:
 
 1. Từ chối nếu *không* thỏa một trong hai: (a) uid/gid thật, hiệu lực, saved của target khớp với của caller; hoặc (b) caller có `CAP_SYS_PTRACE` trong user namespace của target[^ptrace-acc3].
-2. Từ chối nếu thuộc tính "dumpable" của target khác 1 và caller không có `CAP_SYS_PTRACE`[^ptrace-acc4]. Ví dụ `prctl(PR_SET_DUMPABLE)`: process không dumpable thì không attach bằng `PTRACE_ATTACH` được[^prctl-dumpable].
+2. Từ chối nếu thuộc tính "dumpable" của target khác 1 và caller không có `CAP_SYS_PTRACE`[^ptrace-acc4]. Ví dụ với `prctl(PR_SET_DUMPABLE)`: process không dumpable thì không attach bằng `PTRACE_ATTACH` được[^prctl-dumpable].
 3. Gọi interface của LSM (`security_ptrace_access_check()`); kết quả tùy LSM[^ptrace-acc5]. Yama là một LSM ở bước này.
 
-*Bước 3 — Yama và `ptrace_scope`.* Trên hệ có Yama, file `/proc/sys/kernel/yama/ptrace_scope` (từ Linux 3.4) giới hạn khả năng trace process bằng `ptrace()`, kéo theo cả `strace` và `gdb`[^ptrace-yama-conf]. Lý do ghi trong man page `ptrace(2)`: nếu một process bị chiếm quyền, kẻ tấn công có thể attach vào các process nhạy cảm khác của cùng user (như GPG agent, SSH session) để lấy thêm credential còn nằm trong bộ nhớ và mở rộng cuộc tấn công[^ptrace-yama-goal].
+*Bước 3: Yama và `ptrace_scope`.* Cùng uid và dumpable vẫn chưa đủ nếu máy bật Yama. Trên hệ có Yama, file `/proc/sys/kernel/yama/ptrace_scope` (từ Linux 3.4) giới hạn khả năng trace process bằng `ptrace()`, kéo theo cả `strace` và `gdb`[^ptrace-yama-conf]. Man page `ptrace(2)` ghi lý do: nếu một process bị chiếm quyền, kẻ tấn công có thể attach vào các process nhạy cảm khác của cùng user (như GPG agent, SSH session) để lấy thêm credential còn nằm trong bộ nhớ và mở rộng cuộc tấn công[^ptrace-yama-goal]. Bảng giá trị:
 
 | Giá trị | Ý nghĩa |
 |---|---|
@@ -316,30 +321,30 @@ Hình dung (nhận xét của người soạn): attach giống việc bước v�
 | 2 — "admin-only attach" | chỉ process có `CAP_SYS_PTRACE` mới attach được[^ptrace-yama-2] |
 | 3 — "no attach" | không ai attach được; ghi xong thì không đổi lại được[^ptrace-yama-3] |
 
-Tài liệu kernel nêu ví dụ cụ thể về mode 1: `gdb EXE` và `strace EXE` (debugger khởi chạy chương trình) vẫn chạy, còn `gdb --pid=PID` và `strace -p PID` cần `CAP_SYS_PTRACE` (tức root)[^yama-doc-parent]. Một target có thể dùng `prctl(PR_SET_PTRACER)` để khai báo thêm một PID được phép attach, như thể đó là tổ tiên trực tiếp[^prctl-ptracer].
+Tài liệu kernel nêu ví dụ cụ thể về mode 1: `gdb EXE` và `strace EXE` (debugger tự khởi chạy chương trình) vẫn chạy, còn `gdb --pid=PID` và `strace -p PID` cần `CAP_SYS_PTRACE`, tức root[^yama-doc-parent]. Một target có thể dùng `prctl(PR_SET_PTRACER)` để khai báo thêm một PID được phép attach, như thể đó là tổ tiên trực tiếp[^prctl-ptracer]. Với `checkout`, `gdb -p` từ một shell không phải cha của nó, dưới mode 1, chính là trường hợp cần `CAP_SYS_PTRACE` (nhận xét của người soạn, áp ví dụ trên vào tình huống của ta).
 
-*Bước 4 — gdbserver.* `gdbserver --attach comm pid` attach vào process đang chạy trên máy đích[^gdbserver-attach]. Cảnh báo của chính tài liệu: gdbserver không có bảo mật tích hợp, đừng chạy nối với mạng công cộng vì kết nối GDB cho quyền truy cập máy đích với đúng quyền của user chạy gdbserver[^gdbserver-sec].
+*Bước 4: gdbserver.* Nếu không muốn cài gdb vào máy đích, `gdbserver --attach comm pid` attach vào process đang chạy ở đó[^gdbserver-attach]. Tài liệu cảnh báo gdbserver không có bảo mật tích hợp: đừng chạy nối với mạng công cộng, vì kết nối GDB cho quyền truy cập máy đích với đúng quyền của user chạy gdbserver[^gdbserver-sec].
 
-*Bước 5 — trong container và Kubernetes.* Tài liệu Docker nói default seccomp profile là *allowlist* các syscall được phép[^docker-allowlist]. Trong bảng các syscall bị chặn hiệu dụng có `ptrace`: chặn ở kernel trước 4.8 để tránh bypass seccomp; còn việc trace process tùy ý thì đã bị chặn sẵn nhờ việc bỏ `CAP_SYS_PTRACE`, vì nó có thể làm lộ nhiều thông tin của host[^docker-ptrace]. Theo định nghĩa của `capabilities(7)`, `CAP_SYS_PTRACE` chính là quyền trace process tùy ý bằng ptrace[^cap-sysptrace]. Nghĩa là: muốn `gdb -p` trong container phải được cấp lại capability đó (nhận xét của người soạn — trên production hãy cân nhắc kỹ). Cấu trúc JSON của profile (khối `CAP_SYS_PTRACE`, khối `minKernel: 4.8` cho phép riêng `ptrace`) ở [Chương 05 (Container), mục 5](../08-containers/05-bao-mat-container.md).
+*Bước 5: trong container và Kubernetes.* Với pod `checkout`, hai lớp kiểm tra ở trên còn thêm lớp của container runtime. Tài liệu Docker nói default seccomp profile là *allowlist* các syscall được phép[^docker-allowlist]. Trong bảng các syscall bị chặn hiệu dụng có `ptrace`: chặn ở kernel trước 4.8 để tránh bypass seccomp. Còn việc trace process tùy ý thì đã bị chặn sẵn nhờ việc bỏ `CAP_SYS_PTRACE`, vì nó có thể làm lộ nhiều thông tin của host[^docker-ptrace]. Theo định nghĩa của `capabilities(7)`, `CAP_SYS_PTRACE` chính là quyền trace process tùy ý bằng ptrace[^cap-sysptrace]. Nghĩa là muốn `gdb -p` trong container thì phải cấp lại capability đó (nhận xét của người soạn: trên production hãy cân nhắc kỹ). Cấu trúc JSON của profile (khối `CAP_SYS_PTRACE`, khối `minKernel: 4.8` cho phép riêng `ptrace`) ở [Chương 05 (Container), mục 5](../08-containers/05-bao-mat-container.md).
 
-Cách Kubernetes giải quyết, theo docs: *ephemeral container* hữu ích cho troubleshoot tương tác khi `kubectl exec` không đủ vì container đã crash hoặc image không có công cụ debug[^k8s-ephem-use]. Lệnh `kubectl debug -it POD --image=… --target=CONTAINER` thêm một container debug; tham số `--target` nhắm vào process namespace của container khác[^k8s-target] (docs lưu ý runtime phải hỗ trợ `--target`, nếu không container có thể không khởi động hoặc có process namespace riêng). Nếu pod bật chia sẻ process namespace thì process của mọi container thấy được nhau, kể cả mọi thứ trong `/proc` (như mật khẩu truyền qua đối số hay biến môi trường)[^k8s-share-vis], và truy cập được filesystem container khác qua `/proc/$pid/root`[^k8s-share-root]. Ví dụ trong docs: gửi `SIGHUP` tới process của container khác yêu cầu capability `SYS_PTRACE`[^k8s-share-ptrace]. (Suy luận của người soạn: attach bằng `gdb -p` từ ephemeral container vào process của container khác cũng cần capability này, vì đó là ptrace chứ không phải chỉ gửi signal.)
+Cách Kubernetes giải quyết bài này là *ephemeral container*. Theo docs, nó hữu ích cho troubleshoot tương tác khi `kubectl exec` không đủ, vì container đã crash hoặc image không có công cụ debug[^k8s-ephem-use]. Với `checkout`, đây đúng là trường hợp image release không có gdb. Lệnh `kubectl debug -it POD --image=… --target=CONTAINER` thêm một container debug, và tham số `--target` nhắm vào process namespace của container khác[^k8s-target]. Docs lưu ý runtime phải hỗ trợ `--target`; nếu không, container có thể không khởi động hoặc có process namespace riêng. Nếu pod bật chia sẻ process namespace thì process của mọi container thấy được nhau, kể cả mọi thứ trong `/proc`, như mật khẩu truyền qua đối số hay biến môi trường[^k8s-share-vis]. Khi đó cũng truy cập được filesystem container khác qua `/proc/$pid/root`[^k8s-share-root]. Ví dụ trong docs: gửi `SIGHUP` tới process của container khác yêu cầu capability `SYS_PTRACE`[^k8s-share-ptrace]. (Suy luận của người soạn: attach bằng `gdb -p` từ ephemeral container vào process của container khác cũng cần capability này, vì đó là ptrace chứ không phải chỉ gửi signal.)
 
 <details><summary>Đi sâu: tạo user namespace làm yếu Yama, dumpable, PR_SET_PTRACER, nhắc nhở vận hành</summary>
 
 - Man page cảnh báo với giá trị 1 và 2: tạo user namespace mới thực chất gỡ bảo vệ của Yama, vì process ở namespace cha có UID khớp người tạo namespace con có mọi capability (kể cả `CAP_SYS_PTRACE`) trong namespace con[^ptrace-yama-userns].
 - Tài liệu kernel nói mode 0 tương đương: process có thể `PTRACE_ATTACH` vào bất kỳ process khác cùng uid miễn là target còn dumpable[^yama-doc-mode0].
-- Mặc định 1 có trong cả man page lẫn code kernel v6.8, nơi biến `ptrace_scope` được khởi tạo bằng `YAMA_SCOPE_RELATIONAL`[^yama-src]; vì giá trị này đổi được lúc chạy qua sysctl nên distro/hệ cụ thể có thể khác (suy luận của người soạn, chưa kiểm distro nào).
-- `PR_SET_DUMPABLE`: thuộc tính này quyết định có tạo core dump hay không và bị reset về giá trị trong `/proc/sys/fs/suid_dumpable` khi các ID của process đổi hoặc khi nó `execve` một chương trình set-user-ID/set-group-ID[^prctl-dumpable]; hệ quả là process setuid thường không attach được dù cùng user (suy luận của người soạn từ hai câu trên).
+- Mặc định 1 có trong cả man page lẫn code kernel v6.8, nơi biến `ptrace_scope` được khởi tạo bằng `YAMA_SCOPE_RELATIONAL`[^yama-src]. Giá trị này đổi được lúc chạy qua sysctl, nên distro hay hệ cụ thể có thể khác (suy luận của người soạn, chưa kiểm distro nào).
+- `PR_SET_DUMPABLE`: thuộc tính này quyết định có tạo core dump hay không, và bị reset về giá trị trong `/proc/sys/fs/suid_dumpable` khi các ID của process đổi hoặc khi nó `execve` một chương trình set-user-ID/set-group-ID[^prctl-dumpable]. Hệ quả là process setuid thường không attach được dù cùng user (suy luận của người soạn từ hai câu trên).
 - `PR_SET_PTRACER` chỉ có nghĩa khi Yama bật ở mode 1; truyền `PR_SET_PTRACER_ANY` vô hiệu hóa hạn chế Yama cho process gọi[^prctl-ptracer]. Tài liệu kernel cho biết crash handler của KDE, Chromium, Firefox dùng cơ chế này[^yama-doc-ptracer].
 - (Nhận xét của người soạn.) Đừng "chữa" lỗi `Operation not permitted` khi `gdb -p` bằng cách hạ `ptrace_scope` xuống 0 trên máy dùng chung: Yama ra đời chính vì rủi ro mà tài liệu trích ở trên. Dùng `sudo` hoặc `CAP_SYS_PTRACE` có phạm vi, hoặc chạy lại chương trình dưới debugger.
 
 </details>
 
-**Quay lại Q8:** attach thành công khi qua kiểm tra access mode (cùng uid + dumpable, hoặc `CAP_SYS_PTRACE`) và Yama (`ptrace_scope`); container mặc định thiếu `CAP_SYS_PTRACE` nên cần cấp thêm, hoặc dùng ephemeral container với `--target` để nhắm vào process namespace của container đích.
+**Quay lại Q8:** attach thành công khi qua kiểm tra access mode (cùng uid + dumpable, hoặc `CAP_SYS_PTRACE`) và Yama (`ptrace_scope`); container mặc định thiếu `CAP_SYS_PTRACE` nên cần cấp thêm, hoặc dùng ephemeral container với `--target` để nhắm vào process namespace của container đích. Với `checkout`, `Operation not permitted` thường là một trong các lớp kiểm tra này (nhận xét của người soạn).
 
 ## 9. Liên hệ với Rust
 
-Phần này gom những điểm cụ thể của Rust 1.95.0. Cấu trúc chung (ptrace, breakpoint, DWARF) ở trên không đổi — Rust chọn đi theo hướng "mở rộng GDB/LLDB để hiểu Rust" thay vì viết debugger riêng[^rdg-extend], và dùng DWARF làm định dạng debug trên Linux và macOS[^rdg-dwarf].
+Phần này gom những điểm cụ thể của Rust 1.95.0 vào một câu hỏi: `checkout` nên build thế nào để những sự cố ở mục 1–8 còn debug được? Cấu trúc chung (ptrace, breakpoint, DWARF) ở trên không đổi. Rust chọn hướng mở rộng GDB/LLDB để hiểu Rust, thay vì viết debugger riêng[^rdg-extend]. Trên Linux và macOS, định dạng debug mà rustc phát ra là DWARF[^rdg-dwarf].
 
 ### 9.1 Mức debug info: `-C debuginfo` và profile Cargo
 
@@ -353,146 +358,157 @@ Phần này gom những điểm cụ thể của Rust 1.95.0. Cấu trúc chung 
 | `1`/`limited` | debug info không có thông tin kiểu hay mức biến[^rustc-limited] |
 | `2`/`full` | đầy đủ; `-g` là bí danh của `-C debuginfo=2`[^rustc-g] |
 
-Cargo: profile `release` mặc định `debug = false` (không debug info) và `opt-level = 3`[^cargo-rel]; profile `dev` mặc định `opt-level = 0` và `debug = true`[^cargo-dev]. Trong tài liệu profile, `0/false/"none"` là mặc định cho release và `2/true/"full"` là mặc định cho dev[^cargo-debug-rel][^cargo-debug-dev]. (Bảng đầy đủ các khóa mặc định: [Chương 08 (Rust), mục 7](../09-rust-language/08-module-crate-cargo.md).) Hệ quả:
+Cargo có mặc định riêng theo profile. Profile `release` mặc định `debug = false` (không debug info) và `opt-level = 3`[^cargo-rel]. Profile `dev` mặc định `opt-level = 0` và `debug = true`[^cargo-dev]. Trong tài liệu profile, `0`/`false`/`"none"` là mặc định cho release[^cargo-debug-rel]. Còn `2`/`true`/`"full"` là mặc định cho dev[^cargo-debug-dev]. (Bảng đầy đủ các khóa mặc định: [Chương 08 (Rust), mục 7](../09-rust-language/08-module-crate-cargo.md).) Với `checkout`, hệ quả như sau:
 
-- Debug build (`cargo build`) có debug info đầy đủ, không tối ưu: ít `<optimized out>`, ít inline (suy luận của người soạn từ `opt-level = 0` và các đoạn GDB ở mục 5).
-- Binary `--release` mặc định không có debug info → `std::backtrace` không báo được tên tệp/số dòng[^std-backtrace]; breakpoint theo `file:line` không dùng được vì không có `.debug_line` (suy luận của người soạn từ mục 5).
+- Debug build (`cargo build`) có debug info đầy đủ và không tối ưu: ít `<optimized out>`, ít inline (suy luận của người soạn từ `opt-level = 0` và các đoạn GDB ở mục 5).
+- Binary `--release` mặc định không có debug info, nên `std::backtrace` không báo được tên tệp/số dòng[^std-backtrace].
+- Breakpoint theo `file:line` cũng không dùng được trên binary đó, vì không có `.debug_line` (suy luận của người soạn từ mục 5).
 - (Nhận xét của người soạn.) Tổ hợp thực dụng cho service chạy production: bản `release` với `debug = "line-tables-only"` để panic backtrace có dòng, hoặc `debug = true` rồi tách debug info ra ngoài (mục 9.2) để binary gọn mà vẫn debug được.
 
 ### 9.2 Tách và cắt: `-C split-debuginfo`, `-C strip`
 
-`-C split-debuginfo` điều khiển việc phát "split debuginfo"; mặc định phụ thuộc nền tảng và không phải mọi giá trị chạy được ở mọi nơi[^rustc-split-def]:
+`-C split-debuginfo` điều khiển việc phát "split debuginfo". Mặc định phụ thuộc nền tảng và không phải giá trị nào cũng chạy được ở mọi nơi:
 
 - `off`: mặc định cho nền tảng ELF; DWARF nằm trong section của chính executable[^rustc-split-def].
-- `packed`: gom hết debug info vào một file riêng — `*.pdb` trên Windows MSVC, thư mục `*.dSYM` trên macOS, `*.dwp` trên nền tảng khác[^rustc-split-packed].
+- `packed`: gom hết debug info vào một file riêng. Đó là `*.pdb` trên Windows MSVC, thư mục `*.dSYM` trên macOS, và `*.dwp` trên nền tảng khác[^rustc-split-packed].
 - `unpacked`: debug info nằm trong file riêng cho *từng compilation unit*; trên Unix khác macOS là các file `*.dwo`[^rustc-split-unpacked].
 - Cả ba đều chạy trên Linux và Apple[^rustc-split-note].
 
-Cargo có cùng thiết lập `split-debuginfo` trong profile, nhưng tài liệu nhấn mạnh Cargo và rustc có mặc định *khác nhau*, nên chương trình không nên giả định[^cargo-split-note]; ví dụ mặc định của Cargo trên macOS là `unpacked` cho profile có debug info[^cargo-split-mac]. (Suy luận của người soạn: khái niệm "skeleton + split unit" ở mục 7 là nền của các file `*.dwo`/`*.dwp`; tài liệu rustc không nói thẳng.)
+Cargo có cùng thiết lập `split-debuginfo` trong profile, nhưng tài liệu nhấn mạnh Cargo và rustc có mặc định *khác nhau*, nên chương trình không nên giả định[^cargo-split-note]. Ví dụ mặc định của Cargo trên macOS là `unpacked` cho profile có debug info[^cargo-split-mac]. (Suy luận của người soạn: khái niệm "skeleton + split unit" ở mục 7 là nền của các file `*.dwo`/`*.dwp`; tài liệu rustc không nói thẳng.)
 
-`-C strip` bỏ thông tin lúc link[^rustc-strip-debuginfo]: `none`, `debuginfo` (bỏ section debug và symbol debug; "nên giữ backtrace gần nguyên vẹn" nhưng có thể làm gdb/lldb vô hiệu), `symbols` (bỏ cả phần còn lại của symbol table, có thể làm trace "không thể hiểu" trên nền tảng dựa vào symbol, nên thường tránh nếu cần crash-reporting)[^rustc-strip-symbols]. Cargo: `strip` mặc định `"none"`, `strip = true` tương đương `"symbols"`[^cargo-strip].
+`-C strip` bỏ thông tin lúc link. Ba giá trị:
 
-Các cờ liên quan tới mục 6: `-C force-frame-pointers` và `-C force-unwind-tables`[^rustc-fp][^rustc-unwind]; `-C dwarf-version` chọn phiên bản DWARF (mặc định 4 trên hầu hết nền tảng)[^rustc-dwarf].
+- `none`: không bỏ gì.
+- `debuginfo`: bỏ section debug và symbol debug. Rustc book nói mức này "nên giữ backtrace gần nguyên vẹn" nhưng có thể làm gdb/lldb vô hiệu[^rustc-strip-debuginfo].
+- `symbols`: bỏ cả phần còn lại của symbol table. Mức này có thể làm trace "không thể hiểu" trên nền tảng dựa vào symbol, nên thường tránh nếu cần crash-reporting[^rustc-strip-symbols].
+
+Cargo: `strip` mặc định `"none"`, và `strip = true` tương đương `"symbols"`[^cargo-strip]. Với `checkout`, đây là chỗ quyết định image production còn gì để debug: `strip = "symbols"` cho image nhỏ nhất nhưng lấy đi cả tên hàm trong backtrace (suy luận của người soạn từ hai bullet trên).
+
+Các cờ liên quan tới mục 6 là `-C force-frame-pointers` và `-C force-unwind-tables`[^rustc-fp]. Còn `-C dwarf-version` chọn phiên bản DWARF, mặc định là 4 trên hầu hết nền tảng[^rustc-dwarf].
 
 ### 9.3 `rust-gdb` và `rust-lldb`
 
-`rust-gdb` là một script shell mỏng bọc `gdb`. Đọc source tag 1.95.0 cho thấy nó: tìm thư mục chứa module Python pretty printer ở `$(rustc --print sysroot)/lib/rustlib/etc`, rồi chạy GDB với các tham số bổ sung để nạp pretty printer[^rust-gdb-run]. Hai tham số đáng chú ý: `add-auto-load-safe-path` cho thư mục đó (GDB đòi `auto-load safe-path` cấu hình đúng khi tự nạp script, xem 9.4) và `set substitute-path /rustc/<commit-hash> <sysroot>/lib/rustlib/src/rust`[^rust-gdb-subst]. Cái sau ánh xạ đường dẫn mã nguồn std *lúc biên dịch* (ghi trong DWARF) sang bản `rust-src` trên máy bạn, để GDB hiển thị được dòng nguồn của thư viện chuẩn (suy luận của người soạn từ tên tham số và đường dẫn trong script).
+`rust-gdb` là một script shell mỏng bọc `gdb`. Đọc source tag 1.95.0 cho thấy nó tìm thư mục chứa module Python pretty printer ở `$(rustc --print sysroot)/lib/rustlib/etc`, rồi chạy GDB với các tham số bổ sung để nạp pretty printer[^rust-gdb-run]. Hai tham số đáng chú ý là `add-auto-load-safe-path` cho thư mục đó và `set substitute-path /rustc/<commit-hash> <sysroot>/lib/rustlib/src/rust`[^rust-gdb-subst]. Tham số đầu cần vì GDB đòi `auto-load safe-path` cấu hình đúng khi tự nạp script (xem 9.4). Tham số sau ánh xạ đường dẫn mã nguồn std *lúc biên dịch* (ghi trong DWARF) sang bản `rust-src` trên máy bạn, để GDB hiển thị được dòng nguồn của thư viện chuẩn (suy luận của người soạn từ tên tham số và đường dẫn trong script).
 
-`rust-lldb` tương tự: tìm lldb (ưu tiên bản trong sysroot rustlib), rồi chạy `lldb` kèm `--one-line-before-file` để import `lldb_lookup.py` và `--source-before-file` để nạp file lệnh[^rust-lldb-run]. Bảng đối ứng lệnh hay dùng: `attach 123` trong GDB ↔ `process attach --pid 123` trong LLDB[^lldb-map-attach]; `bt` ↔ `thread backtrace` (hoặc `bt`)[^lldb-map-bt].
+`rust-lldb` tương tự: tìm lldb (ưu tiên bản trong sysroot rustlib), rồi chạy `lldb` kèm `--one-line-before-file` để import `lldb_lookup.py` và `--source-before-file` để nạp file lệnh[^rust-lldb-run]. Hai lệnh hay dùng có đối ứng sau. `attach 123` trong GDB là `process attach --pid 123` trong LLDB[^lldb-map-attach]. `bt` là `thread backtrace` (hoặc `bt`)[^lldb-map-bt].
 
-Hạn chế đã biết, theo rustc-dev-guide (đây là ghi chú bài giảng, có thể lỗi thời): DWARF không phân biệt struct và tuple, nên rustc phát trường tên `__0`, `__1`… và debugger tự nhận ra dãy tên đó để cho phép viết `x.0`[^rdg-limits]; trait hoàn toàn không được phát vào DWARF nên gọi `x.method()` kiểu trait method không chạy được như bình thường[^rdg-traits]. Manual GDB cũng liệt kê: evaluator Rust của GDB chưa hiện thực `Drop` — đối tượng do evaluator tạo ra sẽ không bao giờ bị hủy[^gdb-rust-nodrop] — và GDB không suy luận kiểu cho generic nên bạn phải tự ghi tham số kiểu khi gọi hàm generic[^gdb-rust-generic]. Cùng nhận định chung: tài liệu rustc-dev-guide nói "GDB nhìn chung chạy tốt hơn trên Linux"[^rdg-gdb-better].
+Hạn chế đã biết của debugger với Rust, theo rustc-dev-guide (đây là ghi chú bài giảng, có thể lỗi thời), bắt đầu từ chuyện DWARF không phân biệt struct và tuple. Vì vậy rustc phát trường tên `__0`, `__1`… và debugger tự nhận ra dãy tên đó để cho phép viết `x.0`[^rdg-limits]. Trait hoàn toàn không được phát vào DWARF, nên gọi `x.method()` kiểu trait method không chạy được như bình thường[^rdg-traits]. Manual GDB cũng liệt kê hai hạn chế. Evaluator Rust của GDB chưa hiện thực `Drop`, nên đối tượng do evaluator tạo ra sẽ không bao giờ bị hủy[^gdb-rust-nodrop]. GDB cũng không suy luận kiểu cho generic, nên bạn phải tự ghi tham số kiểu khi gọi hàm generic[^gdb-rust-generic]. Về nền tảng, rustc-dev-guide nói "GDB nhìn chung chạy tốt hơn trên Linux"[^rdg-gdb-better].
 
-Để rustc tự mô tả thêm *vtable* cho trait object, rustc phát DIE cho vtable có attribute `DW_AT_containing_type` trỏ tới kiểu thật, nhờ vậy debugger "mổ" được con trỏ trait object và tìm đúng payload — đây là một phần mở rộng ngoài chuẩn DWARF[^rdg-ext].
+Để debugger "mổ" được con trỏ trait object, rustc phát DIE cho vtable có attribute `DW_AT_containing_type` trỏ tới kiểu thật, nhờ vậy debugger tìm đúng payload. Đây là một phần mở rộng ngoài chuẩn DWARF[^rdg-ext].
 
 ### 9.4 Pretty printer: `.debug_gdb_scripts` và `#[debugger_visualizer]`
 
-*Cơ chế GDB.* GDB cho phép pretty-print giá trị bằng code Python, giúp hiển thị đối tượng phức tạp gọn hơn[^gdb-pp]. Cách script đến được GDB mà không cần người dùng gõ gì: khi nạp một object file, GDB tìm section tên `.debug_gdb_scripts`; nội dung là danh sách các entry kết thúc bằng byte 0, mỗi entry chỉ định script cần nạp[^gdb-scripts-sect]. Script inline đòi `auto-load safe-path` cấu hình đúng, và đường dẫn cần đưa vào safe-path là đường dẫn của chính file chứa section đó[^gdb-scripts-safe]. (Suy luận của người soạn: `add-auto-load-safe-path` mà `rust-gdb` thêm cho thư mục `lib/rustlib/etc` phục vụ việc nạp các file script của Rust nằm ở đó; script inline trong binary của bạn là chuyện safe-path riêng.)
+*Cơ chế GDB.* GDB cho phép pretty-print giá trị bằng code Python, giúp hiển thị đối tượng phức tạp gọn hơn[^gdb-pp]. Còn cách script đến được GDB mà người dùng không phải gõ gì? Khi nạp một object file, GDB tìm section tên `.debug_gdb_scripts`. Nội dung section là danh sách các entry kết thúc bằng byte 0, mỗi entry chỉ định script cần nạp[^gdb-scripts-sect]. Script inline đòi `auto-load safe-path` cấu hình đúng, và đường dẫn cần đưa vào safe-path là đường dẫn của chính file chứa section đó[^gdb-scripts-safe]. (Suy luận của người soạn: `add-auto-load-safe-path` mà `rust-gdb` thêm cho thư mục `lib/rustlib/etc` phục vụ việc nạp các file script của Rust nằm ở đó; script inline trong binary của bạn là chuyện safe-path riêng.)
 
-*Phía rustc.* Mô-đun `gdb.rs` trong `rustc_codegen_llvm` (tag 1.95.0) tạo biến `__rustc_debug_gdb_scripts_section__` đặt vào section `.debug_gdb_scripts`[^rs-gdbrs-section]. Entry đầu luôn là `gdb_load_rust_pretty_printers.py` của thư viện chuẩn[^rs-gdbrs-std]; sau đó là các pretty printer khai báo bằng `#[debugger_visualizer]`, nhúng inline[^rs-gdbrs-inline]. Section chỉ phát ra cho *crate lá* (binary, cdylib…), không phát cho rlib, để tránh vi phạm ODR khi link: mỗi rlib có thể mang bộ visualizer khác nhau[^rs-gdbrs-leaf].
+*Phía rustc.* Mô-đun `gdb.rs` trong `rustc_codegen_llvm` (tag 1.95.0) tạo biến `__rustc_debug_gdb_scripts_section__` đặt vào section `.debug_gdb_scripts`[^rs-gdbrs-section]. Entry đầu luôn là `gdb_load_rust_pretty_printers.py` của thư viện chuẩn[^rs-gdbrs-std]. Sau đó là các pretty printer khai báo bằng `#[debugger_visualizer]`, nhúng inline[^rs-gdbrs-inline]. Section chỉ phát ra cho *crate lá* (binary, cdylib…), không phát cho rlib, để tránh vi phạm ODR khi link, vì mỗi rlib có thể mang bộ visualizer khác nhau[^rs-gdbrs-leaf].
 
-Script nạp sẽ đăng ký các printer của Rust với objfile hiện hành[^rs-gdbload]. Ví dụ `StdVecProvider` — printer cho `Vec` — đọc trực tiếp trường `len` và `buf.inner.ptr` của kiểu `Vec`[^rs-vec-provider]. (Suy luận của người soạn: vì printer bám theo tên trường *private* của `std`, nó phải được cập nhật cùng bản `rustc`; đó là lý do pretty printer đi kèm toolchain, và dùng `rust-gdb` của toolchain nào thì khớp với std của toolchain đó. Tên trường nội bộ không phải API ổn định.)
+Script được nạp sẽ đăng ký các printer của Rust với objfile hiện hành[^rs-gdbload]. Ví dụ `StdVecProvider`, printer cho `Vec`, đọc trực tiếp trường `len` và `buf.inner.ptr` của kiểu `Vec`[^rs-vec-provider]. Với `checkout`, đó là thứ giúp `print orders` (một `Vec<Order>`) hiện thành danh sách thay vì các trường thô (suy luận của người soạn). Printer bám theo tên trường *private* của `std`, nên nó phải được cập nhật cùng bản `rustc`; vì vậy pretty printer đi kèm toolchain, và `rust-gdb` của toolchain nào thì khớp với std của toolchain đó. Tên trường nội bộ không phải API ổn định (suy luận của người soạn).
 
-*Attribute `#[debugger_visualizer]`.* Reference mô tả: nó nhúng file visualizer vào debug info để cải thiện hiển thị giá trị[^ref-dv-intro]; chỉ áp dụng cho module hoặc crate root[^ref-dv-pos]; có hai khóa `natvis_file` (Windows MSVC) và `gdb_script_file` — Natvis chỉ nhúng được trên target `-windows-msvc`[^ref-dv-natvis].
+*Attribute `#[debugger_visualizer]`.* Reference mô tả: nó nhúng file visualizer vào debug info để cải thiện hiển thị giá trị[^ref-dv-intro]. Attribute chỉ áp dụng cho module hoặc crate root[^ref-dv-pos]. Nó có hai khóa là `natvis_file` (Windows MSVC) và `gdb_script_file`, trong đó Natvis chỉ nhúng được trên target `-windows-msvc`[^ref-dv-natvis].
 
 ### 9.5 Inline, `<optimized out>` và đừng ngạc nhiên
 
-Mọi cơ chế ở mục 5 áp dụng nguyên cho Rust (suy luận của người soạn từ `opt-level = 3` ở release và các đoạn GDB ở mục 5): bản `--release` đã tối ưu thì có thể có `<optimized out>`, frame inline, bước nhảy dòng. GDB nói thẳng: nếu biên dịch lại được mà không tối ưu thì dễ theo dõi chương trình hơn[^gdb-optim-better]. (Nhận xét của người soạn: với Rust, đặt `opt-level = 1` hoặc `debug = true` + `opt-level = 3` cho riêng crate cần soi trong profile `[profile.release.package.*]` là cách tiết kiệm; mình không có nguồn trong chương này cho hành vi cụ thể nên đây chỉ là gợi ý.)
+Mọi cơ chế ở mục 5 áp dụng nguyên cho Rust (suy luận của người soạn từ `opt-level = 3` ở release và các đoạn GDB ở mục 5): bản `--release` của `checkout` đã tối ưu thì có thể có `<optimized out>`, frame inline và bước nhảy dòng. GDB nói thẳng rằng nếu biên dịch lại được mà không tối ưu thì dễ theo dõi chương trình hơn[^gdb-optim-better]. (Nhận xét của người soạn: với Rust, đặt `opt-level = 1`, hoặc `debug = true` cùng `opt-level = 3`, cho riêng crate cần soi trong profile `[profile.release.package.*]` là cách tiết kiệm. Mình không có nguồn trong chương này cho hành vi cụ thể nên đây chỉ là gợi ý.)
 
 ## Tóm tắt
 
-- Debugger là process thường dùng `ptrace(2)`; tracee dừng khi có signal, debugger đợi bằng `waitpid`, đọc/ghi bộ nhớ và thanh ghi lúc đang dừng[^ptrace-def][^ptrace-wait].
-- Software breakpoint = thay lệnh tại địa chỉ đích bằng bẫy (`int3` 1 byte `0xCC` trên x86-64, `brk` trên AArch64); kernel đổi bẫy thành `SIGTRAP`; GDB mặc định gỡ bẫy khi dừng[^gdb-bp-replace][^k-int3][^k-arm-traps][^gdb-restore].
-- Single-step dùng cờ của CPU (`TF` trên x86, `SS` trên AArch64)[^k-step][^k-arm-ss]; hardware breakpoint/watchpoint dùng thanh ghi debug — x86 chỉ có bốn thanh ghi địa chỉ[^k-uapi-dr]; watchpoint phần mềm chậm hàng trăm lần[^gdb-watch-sw].
-- Symbol table (mỗi symbol có tên, giá trị, kích thước, loại[^elf-sym64]) khác debug info DWARF (kiểu, biến, dòng, inline); symbol không có debug info thì GDB không biết kiểu[^gdb-nondebug][^gdb-nodebuginfo].
-- DWARF: cây DIE (`.debug_info`) + bảng dòng (`.debug_line`) + location list; tối ưu làm biến đổi chỗ hoặc biến mất → `<optimized out>`[^dw-die][^dw-line-sect][^dw-loclist][^gdb-optout].
-- Backtrace dùng frame pointer hoặc CFI (`.eh_frame`/`.debug_frame`), unwind "ảo" mà không đổi process thật[^dw-cfi][^dw-virtual2].
-- Debug info có thể ở file riêng (debug link + CRC, build ID, debuginfod); split DWARF là kỹ thuật khác để giảm thời gian link[^gdb-debuglink-name][^gdb-buildid][^gdb-debuginfod][^dw-split-link].
-- Attach cần qua kiểm tra access mode (cùng uid + dumpable, hoặc `CAP_SYS_PTRACE`) và Yama (`ptrace_scope` mặc định 1 theo man page: chỉ con cháu)[^ptrace-acc3][^ptrace-acc4][^ptrace-yama-1]; Docker mặc định bỏ `CAP_SYS_PTRACE`[^docker-ptrace].
-- Rust: `rust-gdb`/`rust-lldb` bọc debugger kèm pretty printer; `.debug_gdb_scripts` đưa script vào binary; `-C debuginfo`, `-C split-debuginfo`, `-C strip` điều khiển lượng debug info[^rust-gdb-run][^rs-gdbrs-section][^rustc-debuginfo][^rustc-split-def][^rustc-strip-debuginfo].
+- Debugger là process thường dùng `ptrace(2)`; tracee dừng khi có signal, debugger đợi bằng `waitpid`, đọc/ghi bộ nhớ và thanh ghi lúc đang dừng.
+- Software breakpoint là thay lệnh tại địa chỉ đích bằng bẫy (`int3` 1 byte `0xCC` trên x86-64, `brk` trên AArch64); kernel đổi bẫy thành `SIGTRAP`; GDB mặc định gỡ bẫy khi dừng.
+- Single-step dùng cờ của CPU (`TF` trên x86, `SS` trên AArch64); hardware breakpoint/watchpoint dùng thanh ghi debug, x86 chỉ có bốn thanh ghi địa chỉ; watchpoint phần mềm chậm hàng trăm lần.
+- Symbol table (mỗi symbol có tên, giá trị, kích thước, loại) khác debug info DWARF (kiểu, biến, dòng, inline); symbol không có debug info thì GDB không biết kiểu.
+- DWARF gồm cây DIE (`.debug_info`), bảng dòng (`.debug_line`) và location list; tối ưu làm biến đổi chỗ hoặc biến mất nên có `<optimized out>`.
+- Backtrace dùng frame pointer hoặc CFI (`.eh_frame`/`.debug_frame`), unwind "ảo" mà không đổi process thật.
+- Debug info có thể ở file riêng (debug link + CRC, build ID, debuginfod); split DWARF là kỹ thuật khác, để giảm thời gian link.
+- Attach cần qua kiểm tra access mode (cùng uid + dumpable, hoặc `CAP_SYS_PTRACE`) và Yama (`ptrace_scope` mặc định 1 theo man page: chỉ con cháu); Docker mặc định bỏ `CAP_SYS_PTRACE`.
+- Rust: `rust-gdb`/`rust-lldb` bọc debugger kèm pretty printer; `.debug_gdb_scripts` đưa script vào binary; `-C debuginfo`, `-C split-debuginfo`, `-C strip` điều khiển lượng debug info.
 
 ## Câu hỏi tự kiểm tra
 
-1. Vì sao debugger chỉ đọc/ghi được bộ nhớ của tracee khi nó đang dừng, và tracer biết tracee dừng bằng cách nào?
+1. Vì sao debugger chỉ đọc/ghi được bộ nhớ của tracee (ví dụ một handler thread của `checkout`) khi nó đang dừng, và tracer biết tracee dừng bằng cách nào?
 <details><summary>Đáp án</summary>
 
-Hầu hết request ptrace đòi tracee ở trạng thái dừng[^ptrace-stopped-only]; tracee dừng mỗi lần nhận signal và tracer được báo ở lần `waitpid` kế tiếp[^ptrace-stop][^ptrace-wait].
+Hầu hết request ptrace đòi tracee ở trạng thái dừng[^ptrace-stopped-only]. Tracee dừng mỗi lần nhận signal[^ptrace-stop]. Tracer được báo ở lần `waitpid` kế tiếp[^ptrace-wait].
 
 </details>
 
 2. Mô tả chuỗi sự kiện từ lúc đặt breakpoint tại một địa chỉ đến lúc debugger nhận quyền điều khiển.
 <details><summary>Đáp án</summary>
 
-Debugger thay lệnh tại địa chỉ bằng lệnh bẫy[^gdb-bp-replace] (`int3` 0xCC trên x86-64[^k-int3], `brk` trên AArch64[^k-brk]); CPU chạy tới bẫy, kernel gửi `SIGTRAP`[^k-do-int3][^k-arm-traps]; tracee dừng, tracer nhận qua `waitpid`[^ptrace-stop][^ptrace-wait].
+Debugger thay lệnh tại địa chỉ bằng lệnh bẫy[^gdb-bp-replace]. Trên x86-64 đó là `int3` (0xCC)[^k-int3]. Trên AArch64 là `brk`[^k-brk]. CPU chạy tới bẫy thì kernel x86 gửi `SIGTRAP`[^k-do-int3]. AArch64 cũng gắn `BRK` với `SIGTRAP`[^k-arm-traps]. Tracee dừng, tracer nhận qua `waitpid`[^ptrace-wait].
 
 </details>
 
 3. Vì sao sau khi dừng, GDB mặc định khôi phục lệnh gốc thay vì để bẫy nguyên đó?
 <details><summary>Đáp án</summary>
 
-Để tránh để lại bẫy trong target nếu GDB đột ngột mất kết nối; chế độ `always-inserted` đổi hành vi này[^gdb-restore][^gdb-always].
+Để tránh để lại bẫy trong target nếu GDB đột ngột mất kết nối[^gdb-restore]. Chế độ `always-inserted` đổi hành vi này[^gdb-always].
 
 </details>
 
 4. Vì sao watchpoint phần mềm chậm hơn phần cứng tới mức nào, và x86 cho bao nhiêu thanh ghi địa chỉ?
 <details><summary>Đáp án</summary>
 
-Phần mềm: GDB single-step và kiểm tra giá trị mỗi bước, chậm hàng trăm lần[^gdb-watch-sw]; phần cứng không làm chậm[^gdb-watch-hw]. x86: các thanh ghi debug 0–3 chứa địa chỉ cần bẫy, tức bốn[^k-uapi-dr].
+Phần mềm: GDB single-step và kiểm tra giá trị mỗi bước, chậm hàng trăm lần[^gdb-watch-sw]. Phần cứng không làm chậm[^gdb-watch-hw]. Trên x86, các thanh ghi debug 0–3 chứa địa chỉ cần bẫy, tức bốn[^k-uapi-dr].
 
 </details>
 
 5. Một binary chỉ có `.symtab`, không có `.debug_*`: `break tên_hàm`, `bt`, `print biến_cục_bộ` làm được những gì?
 <details><summary>Đáp án</summary>
 
-Symbol table là nguồn của các "non-debugging symbol" nên GDB biết tên symbol[^gdb-nondebug]; đặt breakpoint theo tên và thấy tên hàm trong backtrace là suy luận của người soạn từ đó. Còn thiếu kiểu, biến cục bộ và dòng nguồn[^gdb-nodebuginfo][^dw-line-intro].
+Symbol table là nguồn của các "non-debugging symbol", nên GDB biết tên symbol[^gdb-nondebug]. Đặt breakpoint theo tên và thấy tên hàm trong backtrace là suy luận của người soạn từ đó. Còn thiếu kiểu[^gdb-nodebuginfo]. Dòng nguồn cũng thiếu, vì nó nằm ở bảng dòng của DWARF[^dw-line-intro]. Biến cục bộ thiếu vì chúng nằm ở debug info.
 
 </details>
 
 6. Vì sao `is_stmt` trong `.debug_line` quan trọng với việc đặt `break file:line`?
 <details><summary>Đáp án</summary>
 
-`is_stmt` đánh dấu lệnh là "vị trí breakpoint được khuyến nghị"[^dw-isstmt]; `.debug_line` là cầu nối giữa nguồn và địa chỉ[^dw-line-intro].
+`is_stmt` đánh dấu lệnh là "vị trí breakpoint được khuyến nghị"[^dw-isstmt]. `.debug_line` là cầu nối giữa nguồn và địa chỉ[^dw-line-intro].
 
 </details>
 
 7. Giải thích vì sao `print x` có thể ra `<optimized out>` dù biến `x` có trong source.
 <details><summary>Đáp án</summary>
 
-Trình tối ưu đã sắp xếp lại/xoá code nên debugger hiển thị đúng cái thật sự có[^gdb-optim]; location list/không có location nghĩa là không có chỗ đọc tại PC đó[^dw-loclist][^dw-noloc]; GDB hiển thị giá trị không được lưu là `<optimized out>`[^gdb-optout-args]; ví dụ tail call trong manual GDB[^gdb-optout].
+Trình tối ưu đã sắp xếp lại hoặc xoá code, nên debugger hiển thị đúng cái thật sự có[^gdb-optim]. Location list hay không có location nghĩa là không có chỗ đọc tại PC đó[^dw-loclist]. GDB hiển thị giá trị không được lưu là `<optimized out>`[^gdb-optout-args]. Manual GDB có ví dụ về tail call[^gdb-optout].
 
 </details>
 
 8. CFA là gì và vì sao thông tin unwind phải theo từng địa chỉ lệnh?
 <details><summary>Đáp án</summary>
 
-CFA là địa chỉ nhận diện call frame, thường là giá trị stack pointer tại chỗ gọi ở frame trước[^dw-cfa]; prologue/epilogue không luôn nằm gọn đầu/cuối hàm (epilogue thường bị nhân đôi tại mỗi return)[^dw-prologue].
+CFA là địa chỉ nhận diện call frame, thường là giá trị stack pointer tại chỗ gọi ở frame trước[^dw-cfa]. Prologue và epilogue không luôn nằm gọn đầu và cuối hàm; epilogue thường bị nhân đôi tại mỗi return[^dw-prologue].
 
 </details>
 
 9. Khác nhau giữa "debug info ở file riêng" (debug link/build ID) và "split DWARF"? Binary production nên làm gì để vẫn debug được sau này?
 <details><summary>Đáp án</summary>
 
-Debug link và build ID là cách GDB tìm và ghép file debug với executable[^gdb-debuglink-name][^gdb-buildid]; split DWARF là cách producer chia DWARF để không qua linker, giảm thời gian link[^dw-split][^dw-split-link]. Lưu file debug theo build ID hoặc chạy debuginfod[^gdb-debuginfod].
+Debug link và build ID là cách GDB tìm và ghép file debug với executable[^gdb-buildid]. Split DWARF là cách producer chia DWARF để không qua linker[^dw-split]. Nhờ đó thời gian link giảm[^dw-split-link]. Để debug được về sau, hãy lưu file debug theo build ID hoặc chạy debuginfod[^gdb-debuginfod].
 
 </details>
 
 10. `gdb -p PID` cho `Operation not permitted` dù cùng user. Liệt kê các nguyên nhân có thể có theo tài liệu.
 <details><summary>Đáp án</summary>
 
-Yama `ptrace_scope` = 1 chỉ cho con cháu[^ptrace-yama-1]; target không dumpable[^ptrace-acc4][^prctl-dumpable]; uid/gid không khớp và không có `CAP_SYS_PTRACE`[^ptrace-acc3]; trong container thiếu `CAP_SYS_PTRACE`[^docker-ptrace]; LSM khác từ chối[^ptrace-acc5].
+- Yama `ptrace_scope` = 1 chỉ cho con cháu[^ptrace-yama-1].
+- Target không dumpable[^ptrace-acc4].
+- uid/gid không khớp và không có `CAP_SYS_PTRACE`[^ptrace-acc3].
+- Trong container thiếu `CAP_SYS_PTRACE`[^docker-ptrace].
+- LSM khác từ chối[^ptrace-acc5].
 
 </details>
 
 11. `rust-gdb` thêm gì vào lệnh gọi `gdb`, và vì sao release build mặc định không cho bạn backtrace có số dòng?
 <details><summary>Đáp án</summary>
 
-Nó thêm `add-auto-load-safe-path` và `set substitute-path` rồi chạy gdb với pretty printer của toolchain[^rust-gdb-run][^rust-gdb-subst]. Release mặc định `debug = false`[^cargo-rel][^cargo-debug-rel]; backtrace có dòng cần debug info[^std-backtrace].
+Nó thêm `add-auto-load-safe-path` và `set substitute-path` rồi chạy gdb với pretty printer của toolchain[^rust-gdb-subst]. Release mặc định `debug = false`[^cargo-rel]. Backtrace có dòng cần debug info[^std-backtrace].
 
 </details>
 
 12. `-C strip=debuginfo` và `-C strip=symbols` khác nhau thế nào về hệ quả với backtrace và debugger?
 <details><summary>Đáp án</summary>
 
-`debuginfo`: backtrace gần như nguyên vẹn nhưng gdb/lldb có thể vô hiệu[^rustc-strip-debuginfo]; `symbols`: bỏ nốt symbol table, có thể làm trace "không thể hiểu" trên nền tảng dựa vào nó[^rustc-strip-symbols].
+`debuginfo`: backtrace gần như nguyên vẹn nhưng gdb/lldb có thể vô hiệu[^rustc-strip-debuginfo]. `symbols`: bỏ nốt symbol table, có thể làm trace "không thể hiểu" trên nền tảng dựa vào nó[^rustc-strip-symbols].
 
 </details>
 

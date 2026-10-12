@@ -18,7 +18,9 @@
 
 ## 1. Bối cảnh: mỗi container cần một "máy mạng" riêng (mục phụ trợ)
 
-Hai container cùng chạy web server đều muốn nghe port 80. Nếu cả hai dùng chung bảng port của host, đứa thứ hai sẽ thất bại ở `bind()` (nhận xét của người soạn). Chương này trả lời: kernel tạo ra "máy mạng ảo" như thế nào, và các lớp trên (Docker, Kubernetes) lắp các máy ảo đó lại với nhau ra sao. Phần lớn chương là hệ quả của một cơ chế duy nhất của kernel — network namespace — cộng với hai thiết bị ảo quen thuộc từ P6: veth và bridge.
+Giả sử bạn có `orders`, một service Rust nghe ở port 8080 và gọi tới Postgres (ta gọi container của Postgres là `db`). Trên laptop bạn chạy một bản và mọi thứ ổn. Lên staging, bạn muốn chạy hai bản `orders` trên cùng một host để chia tải. Nếu hai bản dùng chung bảng port của host, bản thứ hai sẽ thất bại ngay ở `bind()` vì port 8080 đã có người giữ (nhận xét của người soạn; `orders` là ví dụ giả định, không phải code trong repo). Container giải quyết chuyện này bằng cách cho mỗi bản `orders` một "máy mạng" riêng, với card mạng, địa chỉ IP, bảng route và bảng port của riêng nó.
+
+Chương này theo `orders` qua từng lớp. Trước hết là cách kernel dựng "máy mạng ảo" đó, rồi đến cách Docker và Kubernetes lắp các máy ảo lại với nhau. Phần lớn chương là hệ quả của một cơ chế duy nhất của kernel, network namespace, cộng với hai thiết bị ảo quen từ P6 là veth và bridge. Cuối chương là tình huống bạn sẽ gặp ngoài đời: `orders` không gọi được `db` thì nên nhìn từ đâu.
 
 ## 2. Network namespace (Q1)
 
@@ -26,20 +28,19 @@ Hai container cùng chạy web server đều muốn nghe port 80. Nếu cả hai
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mỗi namespace là một văn phòng có tổng đài và danh bạ nội bộ riêng — số máy lẻ 80 ở văn phòng này không đụng số 80 ở văn phòng kia.
+*Với service `orders`.* Hai bản `orders` cùng bind `0.0.0.0:8080` mà không đụng nhau, vì mỗi bản chạy trong một network namespace riêng. Cũng vì vậy, khi `orders` trong container kết nối tới `127.0.0.1:5432` thì nó gõ vào loopback của chính namespace mình chứ không phải của host, nên không thấy Postgres đang chạy trên host. Mục này cho biết namespace tách những gì và sống đến khi nào.
 
 ### 2.1 Nó cô lập gì
 
-`network_namespaces(7)` liệt kê: network namespace cô lập tài nguyên mạng gồm network device, ngăn xếp giao thức IPv4/IPv6, bảng routing IP, luật firewall, thư mục `/proc/net`, `/sys/class/net`, nhiều file dưới `/proc/sys/net`, port number (socket), và cả không gian tên abstract của UNIX domain socket[^nsns-isolate]. `ip-netns(8)` nói gọn hơn: một network namespace về mặt logic là thêm một bản của ngăn xếp mạng, với route, firewall rule và device riêng[^ipnetns-copy].
+Network namespace tách riêng cả một bộ tài nguyên mạng chứ không riêng port: network device, ngăn xếp giao thức IPv4/IPv6, bảng routing IP, luật firewall, thư mục `/proc/net`, `/sys/class/net`, nhiều file dưới `/proc/sys/net`, port number (socket), và cả không gian tên abstract của UNIX domain socket[^nsns-isolate]. Nói gọn, một network namespace về mặt logic là thêm một bản của ngăn xếp mạng, với route, firewall rule và device riêng[^ipnetns-copy].
 
-Hệ quả trực tiếp: hai namespace khác nhau có thể cùng bind port 80, cùng có một interface tên `eth0`, mỗi bên một bảng route riêng (suy luận của người soạn từ danh sách trên). Một tiến trình mặc định thừa kế network namespace từ cha, và lúc đầu mọi tiến trình dùng chung namespace mặc định của `init`[^ipnetns-inherit]. Khái niệm tạo namespace (`clone`/`unshare` với cờ `CLONE_NEWNET`) đã nói ở [chương 02](02-namespaces.md).
+Từ danh sách đó suy ra (suy luận của người soạn) rằng hai bản `orders` cùng bind được port 8080, mỗi bản có interface `eth0` riêng và bảng route riêng. Mặc định một tiến trình thừa kế network namespace từ cha, và lúc đầu mọi tiến trình dùng chung namespace mặc định của `init`[^ipnetns-inherit]. Muốn có namespace mới thì phải tạo, bằng `clone` hoặc `unshare` với cờ `CLONE_NEWNET`; chuyện đó đã nói ở [chương 02](02-namespaces.md).
 
 ### 2.2 Vòng đời
 
-- Một thiết bị vật lý chỉ sống trong đúng một network namespace. Khi namespace bị giải phóng (tiến trình cuối cùng thoát), thiết bị vật lý được trả về namespace khởi đầu[^nsns-phys].
-- Thiết bị veth nằm trong namespace bị giải phóng thì bị hủy[^nsns-veth-destroy].
-- Quy ước của `ip netns`: namespace có tên là một object tại `/run/netns/NAME`; mở file đó được file descriptor tham chiếu tới namespace, dùng với `setns(2)`, và giữ fd mở thì namespace còn sống[^ipnetns-fd]. Nói cách khác, một namespace có thể được giữ sống bởi một tham chiếu mà không cần tiến trình nào chạy bên trong (suy luận của người soạn từ câu trích).
-- Với ứng dụng nhận biết network namespace, quy ước là tìm file cấu hình toàn cục ở `/etc/netns/NAME/` trước rồi mới tới `/etc/`; ví dụ `resolv.conf` riêng cho namespace dùng cho VPN[^ipnetns-etc]. Với ứng dụng không nhận biết netns, `ip netns exec` tự động hóa việc này bằng cách tạo mount namespace và bind mount các file cấu hình riêng của namespace vào vị trí quen thuộc trong `/etc`[^ipnetns-exec].
+Namespace có hai quy tắc sống chết đáng biết khi vận hành `orders`. Quy tắc đầu liên quan tới thiết bị bên trong. Một thiết bị vật lý chỉ sống trong đúng một namespace, và khi namespace bị giải phóng (tiến trình cuối cùng thoát) thì thiết bị vật lý được trả về namespace khởi đầu[^nsns-phys]. Thiết bị veth thì khác: nằm trong namespace bị giải phóng là bị hủy[^nsns-veth-destroy]. Vậy khi tiến trình cuối cùng của container `orders` thoát, đầu veth trong container đó mất theo (suy luận của người soạn).
+
+Quy tắc thứ hai: namespace không nhất thiết cần một tiến trình để sống. Theo quy ước của `ip netns`, namespace có tên là một object tại `/run/netns/NAME`; mở file đó ra được một file descriptor tham chiếu tới namespace, dùng với `setns(2)`, và giữ fd mở thì namespace còn sống[^ipnetns-fd]. Nói cách khác, một tham chiếu cũng đủ giữ namespace, không cần tiến trình nào chạy bên trong (suy luận của người soạn từ câu trích). Ý này quay lại ở §6.1.
 
 <details><summary>Đi sâu: quan sát namespace trống và điều kiện quyền để thử</summary>
 
@@ -62,19 +63,23 @@ Không có route, và `lo` đang DOWN. Inode của namespace khác nhau: `readli
 
 Quan sát về `apparmor=unconfined` ở trên là bằng chứng trực tiếp duy nhất của giáo trình về việc AppArmor `docker-default` chặn thao tác mount; [P8 · Chương 02, mục 5](02-namespaces.md) và [P8 · Chương 05, mục 5](05-bao-mat-container.md) dẫn về đây khi giải thích vì sao `mount` thất bại trong lab dù seccomp đã tắt.
 
+### 2.4 Cấu hình riêng cho namespace trong `/etc/netns`
+
+Thêm một quy ước nhỏ của `ip netns`. Với ứng dụng nhận biết network namespace, quy ước là tìm file cấu hình toàn cục ở `/etc/netns/NAME/` trước rồi mới tới `/etc/`; ví dụ có thể đặt một `resolv.conf` riêng cho namespace dùng cho VPN[^ipnetns-etc]. Với ứng dụng không nhận biết netns, `ip netns exec` tự động hóa việc này bằng cách tạo mount namespace và bind mount các file cấu hình riêng của namespace vào vị trí quen thuộc trong `/etc`[^ipnetns-exec].
+
 </details>
 
 **Quay lại Q1:** network namespace là một bản riêng của cả ngăn xếp mạng, nên mỗi namespace có `lo`, route và bảng port riêng.
 
 ## 3. veth pair: sợi cáp ảo (Q2)
 
-> **Trả lời ngắn.** veth là một cặp thiết bị Ethernet ảo luôn đi đôi: gói gửi ra một đầu được nhận ngay ở đầu kia[^veth-pair][^veth-immediate]. Đặt mỗi đầu vào một namespace thì hai namespace nói chuyện được với nhau[^veth-ns].
+> **Trả lời ngắn.** veth là một cặp thiết bị Ethernet ảo luôn đi đôi[^veth-pair]. Gói gửi ra một đầu được nhận ngay ở đầu kia[^veth-immediate]. Đặt mỗi đầu vào một namespace thì hai namespace nói chuyện được với nhau[^veth-ns].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một sợi cáp mạng có hai đầu cắm vào hai văn phòng khác nhau.
+*Với service `orders`.* Cho `orders` một namespace riêng mới chỉ là một nửa chuyện: nó còn phải gọi được container `db` nằm trong namespace khác. Namespace mới tinh không có đường nào ra ngoài (quan sát ở §2.3), nên cần một thứ nối hai namespace lại. Thứ đó là veth.
 
-`veth(4)`: veth là thiết bị Ethernet ảo, luôn được tạo thành cặp nối với nhau; tạo cặp bằng `ip link add <p1> type veth peer name <p2>`[^veth-pair]. Gói gửi ra một đầu được nhận ngay ở đầu kia; khi một đầu down thì link state của cả cặp down[^veth-immediate]. Đặt mỗi đầu vào một namespace thì hai namespace thông nhau[^veth-ns]. `network_namespaces(7)` mô tả cặp veth là một cơ chế giống đường ống (pipe) dùng để tạo tunnel giữa các namespace[^nsns-pipe].
+veth là thiết bị Ethernet ảo, luôn được tạo thành cặp nối với nhau; bạn tạo cặp bằng `ip link add <p1> type veth peer name <p2>`[^veth-pair]. Gói gửi ra một đầu được nhận ngay ở đầu kia, và khi một đầu down thì link state của cả cặp down[^veth-immediate]. Chỗ đáng giá là đặt mỗi đầu vào một namespace khác nhau, vì khi đó hai namespace thông nhau[^veth-ns]. Với `orders` và `db`: một đầu nằm trong namespace của `orders`, đầu kia trong namespace của `db`, và hai bên ping được nhau; thí nghiệm ở phần Đi sâu bên dưới làm đúng việc này với hai namespace `a` và `b`. Nói theo cách khác, cặp veth là một cơ chế giống đường ống (pipe) dùng để tạo tunnel giữa các namespace[^nsns-pipe].
 
 <details><summary>Đi sâu: thí nghiệm hai namespace + một veth + ping</summary>
 
@@ -107,19 +112,19 @@ Hai điểm đáng chú ý. Thứ nhất, route `10.0.0.0/24` do kernel tự th�
 
 </details>
 
-**Quay lại Q2:** veth là sợi cáp ảo hai đầu; mỗi đầu đặt trong một namespace thì hai namespace thông nhau.
+**Quay lại Q2:** veth là cặp thiết bị ảo hai đầu; mỗi đầu đặt trong một namespace thì hai namespace thông nhau.
 
 ## 4. Linux bridge: switch ảo cho nhiều namespace (Q3)
 
-> **Trả lời ngắn.** Linux bridge là phiên bản phần mềm của switch (P6·02 mục 4 và mục 9 giải thích và có nguồn). Mỗi container có một veth pair: một đầu trong namespace của container, đầu kia ở namespace host và cắm vào bridge; nhờ vậy nhiều namespace nói chuyện được với nhau qua cùng một bridge (mô hình này là nhận xét của người soạn, quan sát ở mục 4 và mục 5.1).
+> **Trả lời ngắn.** Linux bridge là phiên bản phần mềm của switch (P6·02 mục 4 và mục 9 giải thích và có nguồn). Mỗi container có một veth pair: một đầu trong namespace của container, đầu kia ở namespace host và cắm vào bridge. Nhờ vậy nhiều container nói chuyện được với nhau qua cùng một bridge (mô hình này là nhận xét của người soạn, quan sát ở mục 4 và mục 5.1).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bridge là bộ chia cổng trong phòng máy, mỗi container một sợi cáp (veth) cắm vào đó.
+*Với service `orders`.* Trên một host bạn không chỉ có `orders` và `db`: còn bản `orders` thứ hai, một service `inventory` và vài container khác. Nối từng cặp bằng một veth riêng thì số dây tăng nhanh theo số container (suy luận của người soạn), nên cả nhóm được cắm chung vào một switch ảo. Mục này cho thấy switch đó là gì.
 
-Nối đúng hai namespace thì một veth đủ. Nhiều container thì cần một "switch" (nhận xét của người soạn). P6·02 đã giải thích switch học địa chỉ MAC nguồn rồi chuyển frame theo bảng — xem [mục 4 của chương link layer](../06-networking/02-link-layer.md) và danh sách thiết bị ảo ở mục 9 cùng chương; ở đây không lặp lại. Linux bridge là phiên bản phần mềm: một thiết bị `br0`, và `ip link set <dev> master br0` đặt `br0` làm master device của interface đó (enslave)[^iplink-master].
+Nối đúng hai namespace thì một veth là đủ. Nhiều container thì cần một switch (nhận xét của người soạn). Cách switch học địa chỉ MAC nguồn rồi chuyển frame theo bảng đã được giải thích ở [mục 4 của chương link layer](../06-networking/02-link-layer.md), cùng với danh sách thiết bị ảo ở mục 9 của chương đó, nên ở đây không lặp lại. Linux bridge là bản phần mềm của switch: một thiết bị `br0`, và `ip link set <dev> master br0` đặt `br0` làm master device của interface đó (enslave)[^iplink-master].
 
-Mô hình thường gặp (nhận xét của người soạn; quan sát ở mục 4 và mục 5.1): mỗi container một veth pair; một đầu ở trong namespace của container (thường đổi tên thành `eth0`), đầu kia ở namespace host và được cắm vào bridge. Bản thân bridge có thể có IP — khi đó host cũng là một thành viên của LAN ảo và là gateway của nó (quan sát: `br0` có `10.1.0.254` ở thí nghiệm dưới; `docker0` có gateway `172.17.0.1` ở mục 5.1).
+Mô hình thường gặp (nhận xét của người soạn; quan sát ở thí nghiệm bên dưới và ở mục 5.1) là mỗi container một veth pair. Một đầu nằm trong namespace của container, thường đổi tên thành `eth0`; đầu kia ở namespace host và cắm vào bridge. Bản thân bridge có thể có IP; khi đó host cũng là một thành viên của LAN ảo và là gateway của nó (quan sát: `br0` có `10.1.0.254` ở thí nghiệm dưới, `docker0` có gateway `172.17.0.1` ở mục 5.1).
 
 ```mermaid
 flowchart LR
@@ -151,31 +156,33 @@ Thí nghiệm (cùng container `SYS_ADMIN`): tạo `br0` có địa chỉ `10.1.
 
 ## 5. Mô hình mạng của Docker: bridge, user-defined, host, none (Q4)
 
-> **Trả lời ngắn.** Docker nối container vào một software bridge có subnet riêng; container ra ngoài bằng masquerade[^dk-masq], còn `-p` ánh xạ port của host vào container bằng luật firewall thực hiện NAT[^dk-pub-nat]. Mạng user-defined thêm phân giải DNS tự động giữa container[^dk-udb-dns]; container ở mạng custom dùng DNS server nhúng của Docker, địa chỉ `127.0.0.11`[^dk-dns-copy][^dk-dns-embedded]. `--network host` dùng chung namespace với host, còn `--network none` chỉ tạo loopback[^dk-host-share][^dk-none].
+> **Trả lời ngắn.** Docker nối container vào một software bridge có subnet riêng. Container ra ngoài bằng masquerade[^dk-masq]. Port của host được ánh xạ vào container bằng `-p`, qua luật firewall thực hiện NAT[^dk-pub-nat]. Mạng user-defined thêm phân giải DNS tự động giữa container[^dk-udb-dns]. Container ở mạng custom dùng DNS server nhúng của Docker[^dk-dns-copy], và địa chỉ của server này là `127.0.0.11`[^dk-dns-embedded]. `--network host` dùng chung namespace với host[^dk-host-share]. `--network none` thì chỉ tạo loopback[^dk-none].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): Docker lắp đúng các mảnh ở mục 2–4 thành một tòa nhà — bridge là hành lang chung, masquerade là lễ tân đứng tên cả tòa khi gửi thư ra ngoài, `-p` là cửa sổ nhận thư mở riêng cho từng phòng.
+*Với service `orders`.* Trong môi trường dev bạn chạy `orders` và `db` bằng Docker, và có bốn câu hỏi. `orders` gọi ra Internet (chẳng hạn một API thanh toán) bằng cách nào? Client bên ngoài gọi vào `orders:8080` bằng cách nào? `orders` tìm `db` bằng tên hay bằng IP? Chuyện gì đổi khi chạy `--network host`? Docker không thêm cơ chế kernel nào mới: nó lắp các mảnh của mục 2–4 lại với nhau.
 
-Mọi thứ trong mục này là hành vi Docker (docs không ghim phiên bản; engine trên máy thí nghiệm là 29.5.2 và có thể khác bản của bạn). Đây là sự lắp ghép của mục 2–4.
+Mọi thứ trong mục này là hành vi của Docker; docs không ghim phiên bản, và engine trên máy thí nghiệm là 29.5.2 nên có thể khác bản của bạn.
 
 ### 5.1 Các mảnh
 
-Docs mô tả bridge network có subnet IPv4 (và tùy chọn IPv6); mỗi container nối vào có interface với địa chỉ trong subnet đó. Mặc định: cho phép truy cập không hạn chế tới các container trong mạng từ host và từ container khác cùng mạng, và chặn truy cập từ container ở mạng khác và từ ngoài host[^dk-bridge-default]; dùng masquerading để container ra ngoài (mục 5.2)[^dk-masq]; hỗ trợ port publishing (mục 5.3)[^dk-pub-nat]. Về mặt triển khai, một bridge network dùng một software bridge[^dk-softbridge] — docs gọi nó là Linux bridge khi mô tả option đặt tên interface bridge[^dk-linuxbridge], tức là cùng loại với bridge ở mục 4. Khi Docker daemon khởi động, một mạng bridge mặc định (tên `bridge`) được tạo và container mới nối vào đó nếu không chỉ định khác[^dk-default-created]; docs nhắc tới bridge mặc định này dưới tên `docker0`[^dk-docker0].
+Một bridge network của Docker có một subnet IPv4 (và tùy chọn IPv6); mỗi container nối vào có một interface với địa chỉ trong subnet đó. Mặc định mạng này cho phép truy cập không hạn chế tới các container trong mạng từ host và từ container khác cùng mạng, và chặn truy cập từ container ở mạng khác và từ ngoài host[^dk-bridge-default]. Container ra ngoài bằng masquerading (§5.2)[^dk-masq]. Mạng này cũng hỗ trợ port publishing (§5.3)[^dk-pub-nat].
 
-Quan sát trên máy thí nghiệm: `docker network inspect bridge` cho subnet `172.17.0.0/16`, gateway `172.17.0.1`, và các option `com.docker.network.bridge.name=docker0`, `enable_ip_masquerade=true`, `enable_icc=true`, `driver.mtu=1500`. Một container thường (`docker run alpine ip addr`) có `lo` và `eth0@if619` với `172.17.0.6/16`. Với `--network host`, `ip addr` cho thấy namespace của máy chạy daemon (ở đây là VM của Colima, không phải macOS), trong đó có `docker0` và các `vethXXXX... master docker0` — các đầu host của veth pair, cắm vào bridge, đúng mô hình mục 4. Tên `@eth0` trong dòng `veth4d6d72c@eth0` là cách `ip` hiển thị peer theo ifindex, trong lúc quan sát từ namespace khác nên tên peer bị giải sai; chỉ đọc "có `master docker0`" là chắc (suy luận của người soạn).
+Về mặt triển khai, một bridge network dùng một software bridge[^dk-softbridge]. Docs gọi nó là Linux bridge khi mô tả option đặt tên interface bridge[^dk-linuxbridge], tức là cùng loại với bridge ở mục 4. Khi Docker daemon khởi động, nó tạo sẵn một mạng bridge mặc định tên `bridge`, và container mới nối vào đó nếu bạn không chỉ định khác[^dk-default-created]. Docs nhắc tới bridge mặc định này dưới tên `docker0`[^dk-docker0].
+
+Quan sát trên máy thí nghiệm: `docker network inspect bridge` cho subnet `172.17.0.0/16`, gateway `172.17.0.1`, và các option `com.docker.network.bridge.name=docker0`, `enable_ip_masquerade=true`, `enable_icc=true`, `driver.mtu=1500`. Một container thường (`docker run alpine ip addr`) có `lo` và `eth0@if619` với `172.17.0.6/16`. Với `--network host`, `ip addr` cho thấy namespace của máy chạy daemon (ở đây là VM của Colima, không phải macOS), trong đó có `docker0` và các `vethXXXX... master docker0`: đó là các đầu host của veth pair, cắm vào bridge, đúng mô hình mục 4.
 
 ### 5.2 Ra ngoài: masquerade
 
-Container có IP riêng trong subnet của bridge (quan sát: `172.17.x.x`, mục 5.1). Docs nói container ra ngoài bằng masquerading, và thiết bị ở mạng ngoài của host chỉ thấy địa chỉ IP của Docker host[^dk-masq]; trang port publishing cũng nói các kết nối đi ra của container được masquerade bằng địa chỉ IP của Docker host[^dk-pub-masq]. Cơ chế NAT/masquerade là đề tài của [P6·03 mục 9](../06-networking/03-ip.md), vì sao kết nối *đến* khó cũng ở đó. Ở đây đủ nhớ (nhận xét của người soạn): container là client thì NAT làm việc trong suốt; container là server thì cần publish.
+Container `orders` có IP riêng trong subnet của bridge (quan sát: `172.17.x.x`, §5.1). Để nó gọi được ra Internet, Docker dùng masquerading: thiết bị ở mạng ngoài của host chỉ thấy địa chỉ IP của Docker host[^dk-masq]. Trang port publishing nói cùng ý: kết nối đi ra của container được masquerade bằng địa chỉ IP của Docker host[^dk-pub-masq]. Cơ chế NAT/masquerade là đề tài của [P6·03 mục 9](../06-networking/03-ip.md), vì sao kết nối *đến* khó cũng nằm ở đó. Ở đây chỉ cần nhớ một điều (nhận xét của người soạn): khi container là client thì NAT làm việc trong suốt, còn khi container là server, như `orders` nhận request, thì phải publish port.
 
 ### 5.3 Vào trong: `-p` (DNAT)
 
-Mặc định Docker chặn truy cập tới port chưa publish, còn port đã publish được ánh xạ vào địa chỉ của host. Để làm vậy nó dùng luật firewall thực hiện NAT, PAT và masquerading[^dk-pub-nat]. Ví dụ docs: `docker run -p 8080:80 ...` tạo ánh xạ giữa port 8080 trên mọi địa chỉ của host và port 80 của container[^dk-pub-example]. Về hướng gói đi vào: đổi địa chỉ đích (host:8080 → container:80) là destination NAT (DNAT). Trang port-publishing không dùng chữ DNAT, nhưng trang firewall-iptables của Docker (với backend iptables) nói: khi gói tới chain `DOCKER-USER` thì chúng đã qua một bộ lọc DNAT, nên các cờ iptables chỉ khớp được địa chỉ và port nội bộ của container[^dk-dnat]. Gateway mode mặc định là `nat`: luật NAT và masquerading được dựng cho từng port published[^dk-gw-nat].
+Chiều ngược lại, client bên ngoài muốn gọi `orders` thì phải đi qua `-p`. Mặc định Docker chặn truy cập tới port chưa publish, còn port đã publish được ánh xạ vào địa chỉ của host; để làm vậy nó dùng luật firewall thực hiện NAT, PAT và masquerading[^dk-pub-nat]. Ví dụ trong docs: `docker run -p 8080:80 ...` tạo ánh xạ giữa port 8080 trên mọi địa chỉ của host và port 80 của container[^dk-pub-example]. Với gói đi vào, việc đổi địa chỉ đích (host:8080 → container:80) là destination NAT (DNAT). Trang port-publishing không dùng chữ DNAT, nhưng trang firewall-iptables của Docker (với backend iptables) có nói: khi gói tới chain `DOCKER-USER` thì chúng đã qua một bộ lọc DNAT, nên các cờ iptables chỉ khớp được địa chỉ và port nội bộ của container[^dk-dnat]. Gateway mode mặc định là `nat`: luật NAT và masquerading được dựng cho từng port published[^dk-gw-nat].
 
 Quan sát: `docker run -d --name w07web -p 18080:80 nginx:alpine` rồi `docker ps` hiện `0.0.0.0:18080->80/tcp, [::]:18080->80/tcp`, và từ macOS `curl localhost:18080` trả HTTP 200. Bên trong container `wget http://127.0.0.1:80` cũng thành công — nginx nghe trong chính namespace của nó.
 
-Cảnh báo bảo mật từ docs: publish port "is insecure by default" — port không chỉ mở cho host mà cho cả bên ngoài[^dk-pub-insecure]. Thêm địa chỉ localhost vào cờ (`-p 127.0.0.1:8080:80`) thì chỉ Docker host truy cập được[^dk-pub-local].
+Cẩn thận với `-p`: docs ghi rằng publish port là không an toàn theo mặc định ("is insecure by default"), vì port không chỉ mở cho host mà cho cả bên ngoài[^dk-pub-insecure]. Muốn chỉ Docker host truy cập được thì thêm địa chỉ localhost vào cờ, ví dụ `-p 127.0.0.1:8080:80`[^dk-pub-local].
 
 ```mermaid
 sequenceDiagram
@@ -192,11 +199,17 @@ sequenceDiagram
 
 ### 5.4 Mạng user-defined và DNS nhúng
 
-Docs nói user-defined bridge ưu việt hơn bridge mặc định[^dk-default-created] và liệt kê nhiều khác biệt; ba khác biệt đáng chú ý ở đây: (1) chúng có phân giải DNS tự động giữa container theo tên hoặc alias, trong khi mạng `bridge` mặc định chỉ truy cập nhau bằng IP trừ khi dùng `--link` (docs coi là legacy)[^dk-udb-dns]; (2) cô lập tốt hơn: container không chỉ định `--network` đều vào bridge mặc định nên các stack không liên quan có thể nói chuyện với nhau, còn user-defined network là phạm vi mà chỉ container gắn vào nó mới giao tiếp được[^dk-udb-isolation]; (3) có thể nối/ngắt container khỏi mạng user-defined khi đang chạy[^dk-udb-live].
+Còn `orders` tìm `db` thế nào? Nếu connection string là `postgres://db:5432/...` thì cái tên `db` phải được ai đó phân giải, và chỗ này mạng user-defined khác bridge mặc định. Docs nói user-defined bridge ưu việt hơn bridge mặc định[^dk-default-created] và liệt kê nhiều khác biệt; ba khác biệt đáng chú ý ở đây là:
 
-Về resolver: container mặc định dùng DNS server của host; container ở bridge mặc định nhận một *bản sao* `/etc/resolv.conf` của host, còn container ở mạng custom dùng DNS server nhúng của Docker[^dk-dns-copy]. Server nhúng chuyển tiếp truy vấn ngoài tới DNS của host, và địa chỉ của nó là `127.0.0.11`[^dk-dns-embedded].
+1. Phân giải DNS tự động giữa container theo tên hoặc alias. Trên mạng `bridge` mặc định, container chỉ truy cập nhau bằng IP, trừ khi dùng `--link` mà docs coi là legacy[^dk-udb-dns].
+2. Cô lập tốt hơn. Container không chỉ định `--network` đều vào bridge mặc định nên các stack không liên quan có thể nói chuyện với nhau; user-defined network là phạm vi mà chỉ container gắn vào nó mới giao tiếp được[^dk-udb-isolation].
+3. Nối và ngắt container khỏi mạng khi đang chạy[^dk-udb-live].
+
+Về resolver: container mặc định dùng cùng DNS server với host. Container ở bridge mặc định nhận một *bản sao* `/etc/resolv.conf` của host, còn container ở mạng custom dùng DNS server nhúng của Docker[^dk-dns-copy]. Server nhúng chuyển tiếp truy vấn ra ngoài tới DNS của host, và địa chỉ của nó là `127.0.0.11`[^dk-dns-embedded]. Vậy nếu `orders` và `db` cùng nằm trong một mạng user-defined thì `orders` gọi `db` bằng tên được; nếu cả hai ở `bridge` mặc định thì phải dùng IP (suy ra từ các câu trên, nhận xét của người soạn).
 
 ### 5.5 `host` và `none`
+
+Hai chế độ còn lại là hai thái cực: dùng chung namespace của host, hoặc không nối vào đâu cả.
 
 | Chế độ | Namespace (suy ra từ docs và quan sát) | Hệ quả (theo Docker docs) |
 |---|---|---|
@@ -204,9 +217,11 @@ Về resolver: container mặc định dùng DNS server của host; container �
 | `host` | dùng chung namespace của host | không có IP riêng; `-p` bị bỏ qua có cảnh báo |
 | `none` | namespace riêng, không nối đâu | chỉ có loopback |
 
-Với `host`, network stack của container không bị cô lập khỏi Docker host (dùng chung networking namespace) và container không được cấp IP riêng[^dk-host-share]; vì vậy port mapping không có tác dụng và `-p` bị bỏ qua kèm cảnh báo[^dk-host-p]. Ứng dụng bind port 80 là mở trên port 80 của host[^dk-host-80]. Với `none`, docs nói chỉ có thiết bị loopback được tạo[^dk-none]. Quan sát: `docker run --network none alpine ip addr` chỉ có `lo` với `127.0.0.1/8`; từ trong đó `wget http://127.0.0.1:80` bị `Connection refused` (không có gì nghe ở port đó, và cũng không có đường ra).
+Với `host`, network stack của container không bị cô lập khỏi Docker host (dùng chung networking namespace) và container không được cấp IP riêng[^dk-host-share]. Vì vậy port mapping không có tác dụng và `-p` bị bỏ qua kèm cảnh báo[^dk-host-p]. Nếu `orders` bind port 8080 thì nó mở luôn trên port 8080 của host; docs minh họa bằng port 80[^dk-host-80]. Với `none`, docs nói chỉ có thiết bị loopback được tạo[^dk-none]. Quan sát: `docker run --network none alpine ip addr` chỉ có `lo` với `127.0.0.1/8`; từ trong đó `wget http://127.0.0.1:80` bị `Connection refused` (không có gì nghe ở port đó, và cũng không có đường ra).
 
-<details><summary>Đi sâu: quan sát mạng user-defined, <code>resolv.conf</code> và <code>127.0.0.11</code></summary>
+<details><summary>Đi sâu: tên peer của veth, mạng user-defined, <code>resolv.conf</code> và <code>127.0.0.11</code></summary>
+
+**Về dòng `veth4d6d72c@eth0` ở §5.1.** Tên `@eth0` là cách `ip` hiển thị peer theo ifindex, nhưng ta nhìn từ namespace khác nên tên peer bị giải sai. Chỉ đọc "có `master docker0`" là chắc (suy luận của người soạn).
 
 Quan sát (`docker network create w07net`, hai container `alpine` `w07a`, `w07b` trong mạng đó):
 
@@ -233,31 +248,29 @@ Ngược lại, container trên bridge mặc định có `nameserver 192.168.5.1
 
 ## 6. Mạng Kubernetes (Q5)
 
-> **Trả lời ngắn.** Mỗi Pod có một IP riêng trong cluster, và các container trong Pod dùng chung network namespace nên gọi nhau qua localhost[^k8s-model-pod]. Việc dựng network namespace cho Pod do phần mềm cấp hệ thống hiện thực CRI đảm nhiệm, và trên Linux hầu hết runtime dùng CNI để làm việc với phần hiện thực mạng Pod[^k8s-cni-cri][^k8s-cni-plugins]. Service cho một địa chỉ ổn định[^k8s-service-api], và kube-proxy cấu hình node để chuyển traffic tới các endpoint phía sau (thường là Pod)[^vips-watch].
+> **Trả lời ngắn.** Mỗi Pod có một IP riêng trong cluster, và các container trong Pod dùng chung network namespace nên gọi nhau qua localhost[^k8s-model-pod]. Việc dựng network namespace cho Pod do phần mềm cấp hệ thống hiện thực CRI đảm nhiệm[^k8s-cni-cri]. Trên Linux hầu hết runtime dùng CNI để làm việc với phần hiện thực mạng Pod[^k8s-cni-plugins]. Service cho một địa chỉ ổn định[^k8s-service-api]. Còn kube-proxy cấu hình node để chuyển traffic tới các endpoint phía sau, thường là Pod[^vips-watch].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): Pod là một căn hộ có địa chỉ riêng, các container là người cùng nhà gọi nhau qua cửa trong; Service là số tổng đài cố định chuyển cuộc gọi tới căn hộ đang trực.
+*Với service `orders`.* Trên production `orders` chạy trong một Pod, kèm một sidecar (ví dụ proxy hoặc agent thu log), và các service khác gọi tới nó. Từ đó có bốn câu hỏi. Sidecar gọi `orders` thế nào? Pod `orders` gọi Pod khác ra sao? Khi Pod đến rồi đi, service khác gọi `orders` bằng địa chỉ nào? Và ai dựng mạng cho Pod? Bốn câu hỏi này khớp với bốn bài toán mạng mà docs Kubernetes liệt kê.
 
-Chỉ một phần mô hình mạng do chính Kubernetes hiện thực; với phần còn lại Kubernetes định nghĩa API, còn chức năng do thành phần bên ngoài cung cấp[^k8s-cni-cri]. Tài liệu (không ghim phiên bản; trang kube-proxy đã trích nhắc phiên bản 1.37) liệt kê bốn bài toán: giao tiếp container-với-container trong một Pod (giải bằng Pod và localhost), Pod-với-Pod, Pod-với-Service, bên-ngoài-với-Service[^k8s-4problems].
+Kubernetes định nghĩa mô hình mạng nhưng tự hiện thực rất ít: với phần lớn mô hình, nó chỉ định nghĩa API còn chức năng do thành phần bên ngoài cung cấp[^k8s-cni-cri]. Tài liệu (không ghim phiên bản; trang kube-proxy đã trích nhắc phiên bản 1.37) chia thành bốn bài toán: container–container trong một Pod (giải bằng Pod và localhost), Pod–Pod, Pod–Service, bên ngoài–Service[^k8s-4problems].
 
 ### 6.1 Mỗi Pod một IP, chung namespace
 
-Mô hình mạng: mỗi Pod có một địa chỉ IP duy nhất trong cả cluster; Pod có network namespace riêng, được chia sẻ bởi mọi container trong Pod, nên các tiến trình ở các container khác nhau của cùng Pod nói chuyện với nhau qua localhost[^k8s-model-pod]. Pod page nhắc lại: mỗi container trong Pod dùng chung network namespace, kể cả địa chỉ IP và port; trong Pod (và chỉ trong Pod) dùng localhost[^k8s-pod-shared]. Khi giao tiếp với bên ngoài Pod, các container phải phối hợp việc dùng port chung[^k8s-pod-ports].
+Mô hình mạng nói rằng mỗi Pod có một địa chỉ IP duy nhất trong cả cluster, và có một network namespace riêng dùng chung cho mọi container trong Pod. Vì vậy các tiến trình ở các container khác nhau của cùng Pod nói chuyện với nhau qua localhost[^k8s-model-pod]. Trang về Pod nhắc lại: mọi container trong Pod dùng chung network namespace, kể cả địa chỉ IP và port; localhost dùng được trong Pod, và chỉ trong Pod[^k8s-pod-shared]. Vì chung port nên khi giao tiếp với bên ngoài Pod, các container phải phối hợp việc dùng port[^k8s-pod-ports]. Với `orders`, sidecar gọi `localhost:8080` là tới app; nhưng nếu sidecar cũng bind 8080 thì hai container đụng nhau, vì chúng chung một bảng port (suy luận của người soạn từ các câu trích).
 
-Giữa các Pod, mô hình mạng đòi (trừ khi cố ý phân đoạn) mọi Pod nói chuyện được với mọi Pod khác, cùng node hay khác node, trực tiếp, không qua proxy hay NAT; riêng trên Windows, quy tắc này không áp dụng cho Pod dùng host network[^k8s-model-nonat].
+Còn giữa các Pod, mô hình mạng đòi (trừ khi cố ý phân đoạn) mọi Pod nói chuyện được với mọi Pod khác, cùng node hay khác node, trực tiếp, không qua proxy hay NAT; riêng trên Windows, quy tắc này không áp dụng cho Pod dùng host network[^k8s-model-nonat].
 
-Về mặt logic, namespace chung nghĩa là phải có một thứ *giữ* namespace sống trong khi các container ứng dụng đến và đi — cùng ý với "giữ fd mở thì namespace còn sống" ở mục 2.2 (suy luận của người soạn). Tài liệu Kubernetes mà tôi đã đọc nhắc tới "sandbox (pause) image" khi hướng dẫn cấu hình containerd và CRI-O[^k8s-pause-image], nhưng không giải thích vai trò của nó; vì vậy chương này **không khẳng định** pause container làm gì cụ thể. Chi tiết runtime xem [chương 06](06-runtime-oci.md).
-
-Tin vui cho việc debug: container cùng Pod gọi nhau bằng `localhost:port` là đúng; hai Pod khác nhau thì không dùng `localhost` (docs chỉ cho phép dùng localhost trong Pod[^k8s-pod-shared]).
+Khi debug, nhớ rằng container cùng Pod gọi nhau bằng `localhost:port` là đúng, còn hai Pod khác nhau thì không dùng `localhost`: docs chỉ cho phép dùng localhost trong Pod[^k8s-pod-shared]. Giữa hai Pod phải đi qua IP của Pod hoặc Service (§6.3).
 
 ### 6.2 Ai dựng namespace và interface: CRI và CNI
 
-Docs: việc setup network namespace của Pod do phần mềm cấp hệ thống hiện thực Container Runtime Interface đảm nhiệm[^k8s-cni-cri]; bản thân pod network do một pod network implementation quản lý; trên Linux hầu hết runtime dùng CNI để tương tác với implementation này, nên các implementation đó hay được gọi là CNI plugin[^k8s-cni-plugins]. Cluster networking page: mô hình được hiện thực bởi container runtime trên mỗi node, và các runtime phổ biến dùng CNI plugin để quản lý mạng và bảo mật[^k8s-cni-impl].
+Vậy ai tạo network namespace và interface cho Pod? Việc setup network namespace của Pod do phần mềm cấp hệ thống hiện thực Container Runtime Interface (CRI) đảm nhiệm[^k8s-cni-cri]. Bản thân mạng của Pod do một pod network implementation quản lý; trên Linux hầu hết runtime dùng CNI để làm việc với implementation đó, nên chúng hay được gọi là CNI plugin[^k8s-cni-plugins]. Trang cluster networking nói thêm rằng mô hình được hiện thực bởi container runtime trên mỗi node, và các runtime phổ biến dùng CNI plugin để quản lý mạng và bảo mật[^k8s-cni-impl].
 
-**CNI** (Container Networking Interface) có đặc tả riêng (đây là bản ghim tag `v1.2.0`). Spec định nghĩa: "container" là một *network isolation domain* mà công nghệ cô lập cụ thể không bị đặc tả ràng buộc (ví dụ network namespace hoặc máy ảo)[^cni-container]. Giao thức dựa trên việc runtime *thực thi một file nhị phân*[^cni-exec]. Tham số truyền qua biến môi trường, cấu hình qua stdin; plugin trả kết quả trên stdout, hoặc lỗi trên stderr, và cấu hình lẫn kết quả mã hóa bằng JSON[^cni-params]. CNI định nghĩa 5 thao tác: `ADD`, `DEL`, `CHECK`, `GC`, `VERSION`, truyền cho plugin qua biến môi trường `CNI_COMMAND`[^cni-ops]. Khi nhận `ADD`, spec nói plugin *nên* (should) tạo interface `CNI_IFNAME` trong container tại `CNI_NETNS`, hoặc chỉnh cấu hình interface đó[^cni-add] — nếu dùng network namespace thì `CNI_NETNS` là đường dẫn tới namespace, ví dụ `/run/netns/[nsname]`[^cni-netns], khớp với quy ước của `ip netns` ở mục 2.2. Runtime *phải* (must) chạy plugin trong *networking domain của runtime* (spec: trong đa số trường hợp, đó là root network namespace)[^cni-domain].
+**CNI** (Container Networking Interface) có đặc tả riêng (đây là bản ghim tag `v1.2.0`). Trong spec, "container" là một *network isolation domain*, còn công nghệ cô lập cụ thể không bị ràng buộc: có thể là network namespace hoặc máy ảo[^cni-container]. Cách làm việc khá đơn giản: runtime *thực thi một file nhị phân*[^cni-exec]. Runtime truyền tham số qua biến môi trường và cấu hình qua stdin; plugin trả kết quả trên stdout, hoặc lỗi trên stderr, và cấu hình lẫn kết quả mã hóa bằng JSON[^cni-params]. CNI định nghĩa 5 thao tác: `ADD`, `DEL`, `CHECK`, `GC`, `VERSION`, truyền cho plugin qua biến môi trường `CNI_COMMAND`[^cni-ops]. Với một Pod mới, thao tác quan trọng nhất là `ADD`: khi nhận `ADD`, spec nói plugin *nên* (should) tạo interface `CNI_IFNAME` trong container tại `CNI_NETNS`, hoặc chỉnh cấu hình interface đó[^cni-add]. Nếu dùng network namespace thì `CNI_NETNS` là đường dẫn tới namespace, ví dụ `/run/netns/[nsname]`[^cni-netns], khớp với quy ước của `ip netns` ở mục 2.2.
 
-Nói cách khác: những gì ta tự gõ ở mục 3–4 (tạo veth, đặt vào namespace, gán IP, route) chính là công việc một CNI plugin kiểu "bridge" tự động hóa cho mỗi Pod (suy luận của người soạn: spec không nêu plugin cụ thể nào trong các đoạn đã trích).
+Những gì ta gõ tay ở mục 3–4 (tạo veth, đặt vào namespace, gán IP, route) chính là việc một CNI plugin kiểu "bridge" tự động hóa cho mỗi Pod, trong đó có Pod `orders` (suy luận của người soạn: spec không nêu plugin cụ thể nào trong các đoạn đã trích).
 
 ```mermaid
 sequenceDiagram
@@ -272,13 +285,17 @@ sequenceDiagram
 
 ### 6.3 Service, ClusterIP và kube-proxy
 
-Pod đến rồi đi, IP đổi theo (nhận xét của người soạn). Service API cho một IP hoặc hostname ổn định, bên dưới là một nhóm Pod có thể thay đổi[^k8s-service-api]. Hiện thực "virtual IP" này do kube-proxy (trừ khi thay bằng thành phần khác) đảm nhiệm cho Service loại khác `ExternalName`[^vips-proxy]. Mỗi instance kube-proxy theo dõi control plane để biết Service và EndpointSlice thêm/bớt; với mỗi Service nó gọi API phù hợp mode để cấu hình node *bắt* traffic tới `clusterIP` và port của Service, rồi chuyển hướng tới một trong các endpoint (thường là Pod)[^vips-watch]. Một control loop giữ luật trên mỗi node đồng bộ với trạng thái Service và EndpointSlice mà API server nêu[^vips-loop].
+Pod đến rồi đi thì IP đổi theo (nhận xét của người soạn), nên service khác không thể gọi `orders` bằng IP của một Pod. Service API cho một IP hoặc hostname ổn định, đứng trước một nhóm Pod có thể thay đổi[^k8s-service-api]. Việc hiện thực "virtual IP" này thuộc về kube-proxy (trừ khi thay bằng thành phần khác), cho Service loại khác `ExternalName`[^vips-proxy]. Cụ thể, mỗi instance kube-proxy theo dõi control plane để biết Service và EndpointSlice nào được thêm hay bớt; với mỗi Service nó gọi API phù hợp mode để cấu hình node *bắt* traffic tới `clusterIP` và port của Service, rồi chuyển hướng tới một trong các endpoint, thường là Pod[^vips-watch]. Một control loop giữ luật trên mỗi node đồng bộ với trạng thái Service và EndpointSlice mà API server nêu[^vips-loop].
 
-Điểm cốt lõi: ClusterIP là địa chỉ *ảo* — không có interface nào mang nó như một host thật; nó chỉ tồn tại như điều kiện khớp trong luật chuyển gói trên mỗi node (suy luận của người soạn, dựa trên mô tả kube-proxy "bắt" traffic tới clusterIP rồi chuyển hướng ở trên).
+Điểm cốt lõi là ClusterIP là địa chỉ *ảo*: không có interface nào mang nó như một host thật, nó chỉ tồn tại như điều kiện khớp trong luật chuyển gói trên mỗi node (suy luận của người soạn, dựa trên mô tả kube-proxy "bắt" traffic tới clusterIP rồi chuyển hướng ở trên).
 
-Ở mode iptables, khi client kết nối tới virtual IP, luật iptables chạy, một backend được chọn (theo session affinity hoặc ngẫu nhiên) và gói được chuyển hướng tới backend mà không viết lại địa chỉ IP của client; với NodePort hay load balancer thì luồng cơ bản này vẫn chạy nhưng địa chỉ client bị thay đổi[^vips-flow].
+Ví dụ ở mode iptables, khi một service khác kết nối tới virtual IP của `orders`, luật iptables chạy, một backend được chọn (theo session affinity hoặc ngẫu nhiên) và gói được chuyển hướng tới backend mà không viết lại địa chỉ IP của client. Với NodePort hay load balancer thì luồng cơ bản này vẫn chạy, nhưng địa chỉ client bị thay đổi[^vips-flow].
 
-<details><summary>Đi sâu: các mode của kube-proxy</summary>
+<details><summary>Đi sâu: pause image, nơi runtime chạy plugin CNI, và các mode của kube-proxy</summary>
+
+**Pause image.** Namespace dùng chung của Pod kéo theo một câu hỏi: ai giữ namespace sống trong khi các container ứng dụng đến rồi đi? Ở §2.2 ta đã thấy một tham chiếu đủ giữ namespace, nên cần một thứ làm việc đó (suy luận của người soạn). Docs Kubernetes có nhắc tới "sandbox (pause) image" khi hướng dẫn cấu hình containerd và CRI-O[^k8s-pause-image], nhưng không giải thích vai trò của nó, nên chương này không khẳng định pause container làm gì cụ thể. Chi tiết runtime xem [chương 06](06-runtime-oci.md).
+
+**Nơi runtime chạy plugin CNI.** Runtime *phải* (must) chạy plugin trong *networking domain của runtime*; spec nói trong đa số trường hợp đó là root network namespace[^cni-domain].
 
 Các mode của kube-proxy trên Linux: `iptables`, `ipvs`, `nftables`[^vips-modes]. Chi tiết theo docs:
 
@@ -296,13 +313,15 @@ Docs còn ghi rằng nếu không chọn mode tường minh thì ở Kubernetes 
 
 ## 7. MTU và overlay (VXLAN) ở mức khái niệm (Q6)
 
-> **Trả lời ngắn.** Overlay VXLAN bọc frame gốc trong thêm header ngoài nên gói trên dây to hơn gói gốc[^rfc7348-rec]. RFC nói VTEP không được phân mảnh gói VXLAN[^rfc7348-mtu] và khuyến nghị MTU của hạ tầng vật lý đủ lớn cho phần đóng gói thêm; Path MTU discovery chỉ là kỹ thuật khác có thể dùng thêm[^rfc7348-rec].
+> **Trả lời ngắn.** Overlay VXLAN bọc frame gốc trong thêm header ngoài nên gói trên dây to hơn gói gốc[^rfc7348-rec]. RFC cấm VTEP phân mảnh gói VXLAN[^rfc7348-mtu], và khuyến nghị MTU của hạ tầng vật lý đủ lớn cho phần đóng gói thêm; Path MTU discovery chỉ là kỹ thuật khác có thể dùng thêm[^rfc7348-rec].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bọc một phong bì vào phong bì khác thì bưu kiện dày hơn; nếu hòm thư chỉ vừa phong bì cũ thì không nhét lọt.
+*Với service `orders`.* Hai Pod `orders` nằm ở hai node khác nhau và gọi nhau qua overlay. Request nhỏ qua được, nhưng response lớn đầy gói thì bị rớt: đó là biểu hiện thường gặp của vấn đề MTU (nhận xét của người soạn). Mục này giải thích vì sao đóng gói làm chuyện đó xảy ra.
 
-Mạng Pod liên node cần hoặc định tuyến được thẳng, hoặc dùng **overlay**: bọc frame của Pod vào gói của mạng vật lý (nhận xét của người soạn). VXLAN (RFC 7348) là một cách: RFC nói nó cũng có thể gọi là một lược đồ tunnel để phủ (overlay) mạng Layer 2 lên trên mạng Layer 3[^rfc7348-tunnel]. Frame gốc được đóng gói thêm header ngoài, nên gói trên dây to hơn gói gốc (RFC nhắc tới kích thước frame lớn hơn do việc đóng gói[^rfc7348-rec]). RFC quy định VTEP không được (MUST NOT) phân mảnh gói VXLAN; router trung gian có thể phân mảnh gói đã đóng gói vì frame lớn hơn, và VTEP đích có thể (MAY) lặng lẽ bỏ các mảnh đó[^rfc7348-mtu]. Để bảo đảm gói đến đích mà không phân mảnh, RFC khuyến nghị (RECOMMENDED) đặt MTU của hạ tầng vật lý đủ lớn cho phần đóng gói thêm; các kỹ thuật khác như Path MTU discovery cũng có thể (MAY) dùng để đáp ứng yêu cầu đó[^rfc7348-rec].
+Pod ở hai node khác nhau cần hoặc định tuyến được thẳng với nhau, hoặc đi qua một **overlay**: bọc frame của Pod vào gói của mạng vật lý (nhận xét của người soạn). VXLAN (RFC 7348) là một cách, và RFC nói nó cũng có thể gọi là một lược đồ tunnel để phủ (overlay) mạng Layer 2 lên trên mạng Layer 3[^rfc7348-tunnel]. Vì frame gốc được đóng gói thêm header ngoài nên gói trên dây to hơn gói gốc; RFC nhắc tới kích thước frame lớn hơn do việc đóng gói[^rfc7348-rec].
+
+Gói to hơn thì rắc rối ở chỗ không ai được phép chia nhỏ nó. RFC quy định VTEP không được (MUST NOT) phân mảnh gói VXLAN; router trung gian có thể phân mảnh gói đã đóng gói vì frame lớn hơn, và VTEP đích có thể (MAY) lặng lẽ bỏ các mảnh đó[^rfc7348-mtu]. Vì vậy, để gói đến đích mà không phân mảnh, RFC khuyến nghị (RECOMMENDED) đặt MTU của hạ tầng vật lý đủ lớn cho phần đóng gói thêm; các kỹ thuật khác như Path MTU discovery cũng có thể (MAY) dùng để đáp ứng yêu cầu đó[^rfc7348-rec].
 
 <details><summary>Đi sâu: hệ quả cho MTU phía container và option MTU của Docker</summary>
 
@@ -318,19 +337,17 @@ Hệ quả thực tế (khái niệm): nếu mạng vật lý MTU 1500 mà inter
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): gọi điện không thông thì kiểm tra theo thứ tự — có đúng số không, có đường dây không, có cùng tổng đài không, đầu dây bên kia có nhấc máy không.
+*Với service `orders`.* Một ngày `orders` báo không kết nối được tới `db`, hoặc client không gọi được `orders`. Đoán mò rất tốn thời gian; cách nhanh hơn là đi từng lớp theo đúng thứ tự mô hình đã dựng ở các mục trước. Mọi điều dưới đây là suy ra từ các mục trên và các thí nghiệm, không phải trích nguồn.
 
-Mọi điều dưới đây là suy ra từ các mục trên và các thí nghiệm, không phải trích nguồn.
+**Vì sao `localhost` trong container khác `localhost` của host.** Loopback là một interface *trong network namespace*, nên mỗi namespace có `lo` riêng (mục 2.1; quan sát ở mục 2.3: namespace mới chỉ có `lo`). Ngăn xếp IP và bảng port tách riêng theo namespace, nên cùng địa chỉ `127.0.0.1:8000` ở hai namespace là hai ổ cắm khác nhau, và chỉ namespace có tiến trình đang nghe mới nhận được kết nối (suy luận từ mục 2; chương này không có thí nghiệm riêng cho điểm đó). Với `orders`, điều đó có ba hệ quả:
 
-**Vì sao `localhost` trong container khác `localhost` của host.** Loopback là một interface *trong network namespace*; mỗi namespace có `lo` riêng (mục 2.1; quan sát ở mục 2.3: namespace mới chỉ có `lo`). Vì ngăn xếp IP và bảng port tách riêng theo namespace, cùng một địa chỉ `127.0.0.1:8000` ở hai namespace là hai ổ cắm khác nhau — chỉ namespace có tiến trình đang nghe mới nhận được kết nối (suy luận từ mục 2; chương này không có thí nghiệm riêng cho điểm đó). Từ đó:
+- Nếu `orders` trong container nghe `127.0.0.1:8080` thì không ai ngoài namespace đó gọi được, kể cả qua `-p`, vì DNAT chuyển gói tới địa chỉ của container chứ không phải loopback của nó. Cần bind `0.0.0.0` (hoặc IP của `eth0`). Đây là lỗi hay gặp với service dev "chạy được trên máy, container thì không" (nhận xét của người soạn).
+- Container `orders` gọi `localhost:5432` mong tới Postgres trên host sẽ không ra host. Với `--network host`, `localhost` lại là của host (mục 5.5).
+- Trong Pod, sidecar gọi `orders` qua `localhost` là hợp lệ vì chung namespace (mục 6.1); giữa hai Pod phải dùng Service hoặc DNS.
 
-- Ứng dụng trong container nghe `127.0.0.1` thì không ai ngoài namespace đó gọi được — kể cả `-p`, vì DNAT chuyển gói tới địa chỉ container, không phải loopback của nó. Cần bind `0.0.0.0` (hoặc IP của `eth0`). Đây là lỗi hay gặp với service dev "chạy được trên máy, container thì không" (nhận xét của người soạn).
-- Container gọi `localhost:5432` mong tới Postgres trên host sẽ không ra host. Với `--network host`, `localhost` lại là của host (mục 5.5).
-- Trong Pod, sidecar gọi app qua `localhost` là hợp lệ vì chung namespace (mục 6.1); giữa hai Pod phải dùng Service/DNS.
+**Debug khi `orders` không gọi được `db`.** Đi từng lớp theo mô hình:
 
-**Debug kết nối giữa hai service.** Đi từng lớp theo mô hình:
-
-1. Tên có ra đúng IP không? Xem `/etc/resolv.conf` của container (mạng user-defined: `127.0.0.11`; bridge mặc định: bản sao của host) và tra tên từ bên trong container.
+1. Tên `db` có ra đúng IP không? Xem `/etc/resolv.conf` của container (mạng user-defined: `127.0.0.11`; bridge mặc định: bản sao của host) và tra tên từ bên trong container.
 2. Có route/đường tới IP đó không? `ip route` trong namespace (như `Network is unreachable` ở mục 3.1 khi thiếu default route).
 3. Hai container có *cùng mạng* không? `docker network inspect <net>` liệt kê các container và IP của mạng; khác mạng thì không thấy nhau (đã quan sát: `w07web` ở `bridge` không phân giải được từ `w07net`).
 4. Server có bind đúng địa chỉ/port không (loopback hay `0.0.0.0`)? `ss -tln` trong namespace đích.
@@ -347,12 +364,12 @@ Mọi điều dưới đây là suy ra từ các mục trên và các thí nghi�
 
 ## Liên hệ với Rust
 
-Chương này gần như không có API Rust riêng; điểm chạm là *địa chỉ bind*. `std::net::TcpListener::bind(addr)` tạo một `TcpListener` gắn với địa chỉ chỉ định[^rust-tcp-bind]; nếu địa chỉ là `127.0.0.1:8080` thì chỉ loopback của namespace hiện tại nhận được kết nối — hành vi này là của kernel (suy luận của người soạn từ mục 2), không phải của Rust. Viết service Rust chạy trong container nên cho cấu hình địa chỉ bind (thường `0.0.0.0:PORT`) thay vì hard-code `127.0.0.1` (nhận xét của người soạn). Phần Rust trong container nói ở [chương 08](08-rust-trong-container.md).
+Chương này gần như không có API Rust riêng; điểm chạm là *địa chỉ bind* của `orders`. `std::net::TcpListener::bind(addr)` tạo một `TcpListener` gắn với địa chỉ chỉ định[^rust-tcp-bind]. Nếu địa chỉ là `127.0.0.1:8080` thì chỉ loopback của namespace hiện tại nhận được kết nối; hành vi này là của kernel (suy luận của người soạn từ mục 2), không phải của Rust. Vì vậy `orders` chạy trong container nên đọc địa chỉ bind từ cấu hình (thường `0.0.0.0:PORT`) thay vì hard-code `127.0.0.1` (nhận xét của người soạn). Phần Rust trong container nói ở [chương 08](08-rust-trong-container.md).
 
 ## Tóm tắt
 
 - Network namespace cô lập device, giao thức IP, route, firewall, `/proc/net`, và bảng port; mỗi namespace có `lo` riêng.
-- Namespace mới chỉ có `lo` (đang DOWN); veth pair là sợi cáp ảo nối hai namespace; Linux bridge là switch ảo nối nhiều veth.
+- Namespace mới chỉ có `lo` (đang DOWN); veth pair là cặp thiết bị ảo nối hai namespace; Linux bridge là switch ảo nối nhiều veth.
 - Docker bridge mặc định = `docker0` + veth cho mỗi container + subnet riêng (`172.17.0.0/16` khi quan sát) + masquerade ra ngoài + `-p` ánh xạ port host tới container qua NAT.
 - User-defined network: DNS tự động theo tên qua server nhúng `127.0.0.11`; bridge mặc định chỉ nhận bản sao `resolv.conf` của host.
 - `host` dùng chung namespace của host (và bỏ qua `-p`); `none` chỉ có loopback.
@@ -387,7 +404,7 @@ Namespace chỉ có route `10.0.0.0/24` do kernel thêm, không có default rout
 4. Hai namespace nối nhau qua bridge thay vì một veth trực tiếp — mỗi namespace cần mấy đầu veth và các đầu còn lại ở đâu?
 <details><summary>Đáp án</summary>
 
-Mỗi namespace một cặp veth; một đầu ở trong namespace, đầu kia ở namespace host cắm vào bridge (mục 4; mô tả veth: [^veth-ns]).
+Mỗi namespace một cặp veth; một đầu ở trong namespace, đầu kia ở namespace host cắm vào bridge (mục 4). Đặt hai đầu của một cặp veth vào hai namespace là cách nối chúng với nhau[^veth-ns].
 
 </details>
 
@@ -401,14 +418,14 @@ Ra: masquerade, bên ngoài chỉ thấy IP host[^dk-masq]. Vào: luật firewal
 6. `-p 127.0.0.1:8080:80` khác `-p 8080:80` thế nào?
 <details><summary>Đáp án</summary>
 
-Dạng có 127.0.0.1 chỉ cho Docker host truy cập; dạng không có địa chỉ mở ra cả bên ngoài[^dk-pub-local][^dk-pub-insecure].
+Dạng có 127.0.0.1 chỉ cho Docker host truy cập[^dk-pub-local]. Dạng không có địa chỉ mở ra cả bên ngoài[^dk-pub-insecure].
 
 </details>
 
 7. Container trong mạng user-defined có `nameserver` nào trong `resolv.conf`, và container ở bridge mặc định thì sao?
 <details><summary>Đáp án</summary>
 
-`127.0.0.11` (resolver nhúng) cho mạng custom; bản sao `resolv.conf` của host cho bridge mặc định[^dk-dns-copy][^dk-dns-embedded]. Quan sát: `192.168.5.1` trên máy thí nghiệm.
+`127.0.0.11` (resolver nhúng) cho mạng custom[^dk-dns-embedded]. Bridge mặc định thì nhận bản sao `resolv.conf` của host[^dk-dns-copy]. Quan sát: `192.168.5.1` trên máy thí nghiệm.
 
 </details>
 
@@ -429,21 +446,21 @@ Cùng Pod: `localhost` vì chung network namespace[^k8s-pod-shared]. Khác Pod: 
 10. kube-proxy làm gì với ClusterIP?
 <details><summary>Đáp án</summary>
 
-Cấu hình node bắt traffic tới `clusterIP` và port rồi chuyển tới một endpoint, theo mode iptables/ipvs/nftables[^vips-watch][^vips-modes].
+Cấu hình node bắt traffic tới `clusterIP` và port rồi chuyển tới một endpoint[^vips-watch]. Cách cấu hình tùy mode: iptables, ipvs hoặc nftables[^vips-modes].
 
 </details>
 
 11. Plugin CNI nhận thông tin gì để thêm một container vào mạng?
 <details><summary>Đáp án</summary>
 
-Thao tác (`CNI_COMMAND=ADD`), đường dẫn namespace `CNI_NETNS`, tên interface `CNI_IFNAME`; cấu hình qua stdin, kết quả JSON qua stdout[^cni-params][^cni-add].
+Thao tác (`CNI_COMMAND=ADD`), đường dẫn namespace `CNI_NETNS` và tên interface `CNI_IFNAME`[^cni-add]. Cấu hình qua stdin, kết quả JSON qua stdout[^cni-params].
 
 </details>
 
 12. Vì sao overlay VXLAN gắn với chuyện MTU?
 <details><summary>Đáp án</summary>
 
-Đóng gói làm gói to hơn; RFC cấm VTEP phân mảnh gói VXLAN (MUST NOT)[^rfc7348-mtu], khuyến nghị (RECOMMENDED) MTU hạ tầng vật lý đủ lớn cho phần đóng gói thêm, và nói Path MTU discovery là kỹ thuật khác có thể (MAY) dùng để đáp ứng yêu cầu đó[^rfc7348-rec].
+Đóng gói làm gói to hơn. RFC cấm VTEP phân mảnh gói VXLAN (MUST NOT)[^rfc7348-mtu]. Nó khuyến nghị (RECOMMENDED) MTU hạ tầng vật lý đủ lớn cho phần đóng gói thêm, và nói Path MTU discovery là kỹ thuật khác có thể (MAY) dùng để đáp ứng yêu cầu đó[^rfc7348-rec].
 
 </details>
 

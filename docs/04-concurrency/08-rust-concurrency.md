@@ -23,23 +23,30 @@ Ghi chú: API theo Rust 1.95.0; mọi lỗi biên dịch trong chương được
 
 ## 1. Ý tưởng chung: để type system trả lời "giá trị này đi qua thread được không?"
 
-Các chương trước đã cho thấy concurrency khó vì data race: hai thread cùng truy cập một vị trí nhớ, ít nhất một bên ghi, và không có đồng bộ[^nomicon-race-def] (đây là cách phát biểu của Nomicon; định nghĩa của `std` mà cả khóa dùng, có điều kiện "non-atomic", nằm ở [chương 06, mục 3](./06-memory-model.md)). Rust trả lời bằng hệ thống kiểu: giá trị kiểu `T` có được phép chuyển sang thread khác không (`Send`), có được phép để nhiều thread cùng giữ `&T` không (`Sync`). (Nhận xét của người soạn: thread, mutex, channel ở đây đều là kiểu của thư viện chuẩn, nên các ràng buộc ấy được kiểm lúc biên dịch như mọi ràng buộc kiểu khác.) Nomicon nói data race "được chặn chủ yếu chỉ bằng ownership": không thể alias một `&mut`, nên không thể có data race qua tham chiếu; *interior mutability* làm bài toán phức tạp hơn, và đó phần lớn là lý do tồn tại của `Send`/`Sync`[^nomicon-race-ownership].
+Xuyên suốt chương ta bám theo `orders`, một service HTTP viết bằng Rust (ví dụ giả định của người soạn, không phải code trong repo). Một thread nhận kết nối rồi giao cho vài worker thread. Các worker cùng đụng vào một bộ đếm request, một cache đơn hàng và một config nạp lúc khởi động; ngoài ra chúng gửi audit event về một thread chuyên ghi log. Mỗi thứ dùng chung đó là một chỗ data race có thể xảy ra.
+
+Nhắc lại: data race là khi hai thread cùng truy cập một vị trí nhớ, ít nhất một bên ghi, và không bên nào đồng bộ với bên kia[^nomicon-race-def]. (Đây là cách Nomicon phát biểu; định nghĩa của `std`, có thêm điều kiện "non-atomic", nằm ở [chương 06, mục 3](./06-memory-model.md).)
+
+Rust không dặn lập trình viên "nhớ cẩn thận" mà để hệ thống kiểu trả lời hai câu hỏi. Giá trị kiểu `T` có được chuyển sang thread khác không (`Send`)? Nhiều thread có được cùng giữ `&T` không (`Sync`)? Thread, mutex, channel đều là kiểu của thư viện chuẩn, nên các ràng buộc này được kiểm lúc biên dịch như mọi ràng buộc kiểu khác (nhận xét của người soạn).
+
+Nền của cơ chế là ownership: không thể alias một `&mut`, nên không thể có data race qua tham chiếu. Chỉ có *interior mutability* (đổi dữ liệu qua `&T`) làm bài toán phức tạp hơn, và phần lớn đó là lý do `Send`/`Sync` tồn tại[^nomicon-race-ownership].
 
 ## 2. `spawn`, `move` và `scope`: vì sao `F: Send + 'static` (Q1)
 
-> **Trả lời ngắn.** `'static` chặn thread giữ tham chiếu tới dữ liệu cục bộ, vì thread có thể sống lâu hơn nơi tạo ra nó[^std-spawn-static]. `Send` chặn việc chuyển sang thread khác những giá trị không an toàn để chuyển, vì closure và kết quả đi qua ranh giới thread[^std-spawn-send]. `thread::scope` nới `'static` thành `'scope`, vì scope bảo đảm mọi thread được join ở cuối scope[^std-scope].
+> **Trả lời ngắn.** `'static` chặn thread giữ tham chiếu tới dữ liệu cục bộ, vì thread có thể sống lâu hơn nơi tạo ra nó[^std-spawn-static]. `Send` chặn việc chuyển sang thread khác những giá trị không an toàn để chuyển, vì closure và kết quả đều đi qua ranh giới thread[^std-spawn-send]. `thread::scope` đổi `'static` thành `'scope`, vì scope bảo đảm mọi thread được join trước khi nó kết thúc[^std-scope].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): giao việc cho đồng nghiệp ca sau thì phải đưa hẳn bản gốc, không đưa tờ giấy "xem trên bàn tôi" vì có thể tôi đã nghỉ; `scope` là lời hứa "tôi chưa về cho tới khi bạn làm xong".
+*Với `orders`.* Thread nhận kết nối giao mỗi kết nối cho một worker bằng cách gọi `thread::spawn` với một closure xử lý kết nối đó. Nhưng hàm đang chạy vòng lặp nhận kết nối có thể quay đi nhận kết nối khác, thậm chí kết thúc, trong lúc worker còn chạy. Nếu closure của worker trỏ vào biến cục bộ của hàm ấy thì con trỏ sẽ treo. Mục này xem compiler chặn chuyện đó bằng gì, và `scope` cho phép nới ở đâu.
 
+### 2.1 Hai vế của chữ ký `spawn`
 
-`std::thread::spawn` tạo một OS thread; thư viện chuẩn dùng mô hình 1:1, mỗi thread của ngôn ngữ ứng với một thread của hệ điều hành[^book-11] (khớp với [chương 01](./01-thread.md)). Chữ ký của nó, theo docs 1.95.0, là `F: FnOnce() -> T + Send + 'static, T: Send + 'static`[^std-spawn-sig]. Docs giải thích từng vế:
+`std::thread::spawn` tạo một OS thread; thư viện chuẩn dùng mô hình 1:1, mỗi thread của ngôn ngữ ứng với một thread của hệ điều hành[^book-11] (khớp với [chương 01](./01-thread.md)). Chữ ký của nó là `F: FnOnce() -> T + Send + 'static, T: Send + 'static`[^std-spawn-sig]. Hai ràng buộc chặn hai loại lỗi khác nhau:
 
-- **`'static`**: closure và giá trị trả về phải sống suốt thời gian chạy của chương trình, vì thread có thể sống lâu hơn scope đã tạo ra nó[^std-spawn-static]. Chương trình không biết khi nào thread kết thúc, nên không thể cho phép nó giữ tham chiếu tới biến cục bộ của hàm gọi.
-- **`Send`**: closure được chuyển *theo giá trị* từ thread gọi sang thread mới, còn giá trị trả về được chuyển từ thread mới về thread gọi `join`[^std-spawn-send].
+- **`'static`** nói rằng closure và giá trị trả về phải sống suốt thời gian chạy của chương trình, vì thread có thể sống lâu hơn nơi đã tạo ra nó[^std-spawn-static]. Chương trình không biết khi nào thread kết thúc, nên không thể để nó giữ tham chiếu tới biến cục bộ của hàm gọi.
+- **`Send`** nói rằng closure được chuyển *theo giá trị* từ thread gọi sang thread mới, còn giá trị trả về đi ngược từ thread mới về thread gọi `join`[^std-spawn-send].
 
-Ví dụ vế `'static` (đã chạy):
+Thử vế `'static` với một closure chỉ mượn `v` (đã chạy):
 
 ```rust
 use std::thread;
@@ -62,9 +69,13 @@ note: function requires argument type to outlive `'static`
 help: to force the closure to take ownership of `v` (and any other referenced variables), use the `move` keyword
 ```
 
-Lỗi này là `E0373`, không phải `E0277`: nó thuộc vế `'static`/lifetime. Cách sửa mà compiler gợi ý là `move`: closure *lấy ownership* các giá trị nó dùng, tức chuyển ownership từ thread này sang thread kia[^book-move]. Sau `move`, `v` thuộc về thread con nên không còn tham chiếu nào có thể treo.
+Lỗi này là `E0373`, không phải `E0277`, vì nó thuộc vế `'static`/lifetime chứ không phải vế `Send`. Cách sửa compiler gợi ý là `move`: closure lấy ownership các giá trị nó dùng, tức chuyển ownership từ thread này sang thread kia[^book-move]. Sau `move`, `v` thuộc về thread con nên không còn tham chiếu nào có thể treo.
 
-**`thread::scope`: mượn biến cục bộ một cách hợp lệ.** Ràng buộc `'static` tồn tại vì `spawn` không biết khi nào thread kết thúc. `thread::scope` cho Rust biết điều đó: các thread trong scope được phép mượn dữ liệu không-`'static`, vì scope bảo đảm mọi thread được join ở cuối scope[^std-scope]; thread nào chưa join thủ công sẽ được join tự động trước khi `scope` trả về[^std-scope-auto]. Ràng buộc của `Scope::spawn` vì vậy là `F: FnOnce() -> T + Send + 'scope` — vẫn `Send`, nhưng `'scope` thay cho `'static`[^std-scope-spawn].
+### 2.2 `thread::scope`: mượn biến cục bộ cho đúng
+
+Ràng buộc `'static` tồn tại vì `spawn` không biết khi nào thread kết thúc. `thread::scope` cho Rust biết điều đó. Thread trong scope được mượn dữ liệu không-`'static`, vì scope bảo đảm mọi thread được join ở cuối scope[^std-scope]. Thread nào chưa join thủ công thì được join tự động trước khi `scope` trả về[^std-scope-auto]. Vì vậy ràng buộc của `Scope::spawn` là `F: FnOnce() -> T + Send + 'scope`: vẫn `Send`, nhưng `'scope` thay cho `'static`[^std-scope-spawn].
+
+Với `orders`, nghĩa là một hàm có thể chia dữ liệu nằm ngay trên stack của nó cho vài thread phụ chạy song song mà không cần `Arc`, miễn là các thread đó xong trước khi hàm trả về (nhận xét của người soạn).
 
 ```rust
 let mut v = vec![1, 2, 3];
@@ -83,7 +94,7 @@ Kết quả chạy thật: `len = 3` rồi `total = 6, v = [1, 2, 3, 4]`. Nếu 
 
 `spawn` trả về `JoinHandle<T>`, một giá trị owned mà khi gọi `join` sẽ chờ thread kết thúc[^book-spawn-join]. Hai điểm hay bị bỏ qua:
 
-- **Drop handle = detach.** Nếu `JoinHandle` bị drop, thread tự động bị *detach*; docs nhắc chương trình có trách nhiệm hoặc join hoặc detach thread, nếu không sẽ rò rỉ tài nguyên[^std-spawn-detach].
+- **Drop handle = detach.** Nếu `JoinHandle` bị drop, thread tự động bị *detach*[^std-spawn-detach]. Chương trình tự chịu trách nhiệm join hoặc detach thread, nếu không sẽ rò rỉ tài nguyên.
 - **Panic không làm sập process mặc định.** Nếu thread con panic, `join` trả `Err` chứa tham số của `panic!`[^std-spawn-panic].
 
 Quan sát (chạy thật):
@@ -110,30 +121,31 @@ Thread con in thông báo panic ra stderr; thread cha nhận `Err(Box<dyn Any + 
 
 ## 3. `Send` và `Sync` (Q2)
 
-> **Trả lời ngắn.** `Send`: giá trị của kiểu đó chuyển được sang thread khác[^book-send]. `Sync`: `T: Sync` khi và chỉ khi `&T: Send`[^std-sync]. Cả hai là `unsafe auto trait`[^std-send-auto]: compiler tự suy từ các thành phần[^nomicon-auto], còn `unsafe impl` thủ công là lời hứa mà compiler không kiểm, cài sai có thể gây Undefined Behavior[^nomicon-send-ub].
+> **Trả lời ngắn.** `Send` nghĩa là giá trị của kiểu đó chuyển được sang thread khác[^book-send]. `Sync` được định nghĩa qua `Send`: `T: Sync` khi và chỉ khi `&T: Send`[^std-sync]. Cả hai là `unsafe auto trait`[^std-send-auto]: compiler tự suy từ các thành phần của kiểu[^nomicon-auto], còn `unsafe impl` thủ công là lời hứa mà compiler không kiểm, cài sai có thể gây Undefined Behavior[^nomicon-send-ub].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Send` là "giao hẳn món đồ cho người khác"; `Sync` là "cho nhiều người cùng nhìn vào món đồ" — và định nghĩa quy việc nhìn chung về việc đưa *tờ ghi chú tham chiếu* cho người khác.
+*Với `orders`.* Hai câu hỏi của mục 2 đã quay về: closure giao cho worker có `Send` không, và bộ đếm request mà mọi worker cùng đọc ghi thì sao? Nhưng compiler không đi hỏi lập trình viên. Nó tự trả lời bằng hai trait `Send` và `Sync`. Mục này giải thích hai trait đó nghĩa là gì và cái gì quyết định một kiểu có hay không có chúng.
 
+### 3.1 Hai trait, một cách định nghĩa
 
-| Trait | Định nghĩa |
-|---|---|
-| `Send` | Giá trị của kiểu đó có thể được chuyển ownership sang thread khác[^book-send]; Nomicon: "an toàn khi gửi sang thread khác"[^nomicon-send-def] |
-| `Sync` | Định nghĩa chính xác trong docs: `T: Sync` khi và chỉ khi `&T: Send`[^std-sync] |
+`Send` hỏi: chuyển ownership của giá trị này sang thread khác có an toàn không[^book-send]? Nomicon phát biểu cùng ý theo kiểu "an toàn khi gửi sang thread khác", và đặt `Sync` cạnh nó: kiểu `T` là `Sync` nếu an toàn khi chia sẻ giữa các thread[^nomicon-send-def].
 
-Định nghĩa của `Sync` đáng đọc chậm: "chia sẻ giữa các thread" được *quy về* `Send` — một kiểu chia sẻ được khi việc gửi tham chiếu `&T` sang thread khác là an toàn. Docs còn tóm tắt các quan hệ với tham chiếu: `&T` là `Send` ⇔ `T` là `Sync`; `&mut T` là `Send` ⇔ `T` là `Send`; `&T` và `&mut T` là `Sync` ⇔ `T` là `Sync`[^std-sync-ref]. Cách hiểu "`&mut T: Send` ⇔ `T: Send`" (cách diễn giải của người soạn): một `&mut T` là quyền truy cập độc quyền, nên gửi nó đi chẳng khác gì gửi quyền sở hữu tạm thời.
+Chữ "chia sẻ" ở đây được docs quy về `Send` luôn: `T: Sync` khi và chỉ khi `&T: Send`[^std-sync]. Nói với `orders`: nếu mọi worker cùng đọc một bộ đếm thì mỗi worker giữ một `&Counter`, nên câu hỏi "bộ đếm có `Sync` không" chính là câu hỏi "gửi `&Counter` sang thread khác có an toàn không". Docs còn tóm tắt quan hệ với tham chiếu như sau: `&T` là `Send` ⇔ `T` là `Sync`; `&mut T` là `Send` ⇔ `T` là `Send`; `&T` và `&mut T` là `Sync` ⇔ `T` là `Sync`[^std-sync-ref]. Dòng giữa dễ hiểu theo cách này (cách diễn giải của người soạn): `&mut T` là quyền truy cập độc quyền, nên gửi nó đi chẳng khác gì gửi quyền sở hữu tạm thời.
 
-**Auto trait và `unsafe trait`.**
+### 3.2 Auto trait và `unsafe trait`
 
-`Send` và `Sync` khai báo là `pub unsafe auto trait`[^std-send-auto]. Hai chữ đó có nghĩa:
+`Send` và `Sync` khai báo là `pub unsafe auto trait`[^std-send-auto]. Hai chữ đó mang hai ý khác nhau.
 
-- **auto**: khác mọi trait khác, nếu một kiểu gồm toàn thành phần `Send`/`Sync` thì nó tự động là `Send`/`Sync`[^nomicon-auto]; vì là marker trait không có method nên không có gì để "cài"[^book-sendsync-manual]. Docs: trait được cài tự động "khi compiler xác định là phù hợp"[^std-send-auto2].
-- **unsafe**: `impl` thủ công phải viết `unsafe impl`. Nomicon: chúng là unsafe trait, nghĩa là unsafe để cài, và code unsafe khác được quyền *giả định* chúng đã được cài đúng[^nomicon-unsafe]; cài sai có thể gây Undefined Behavior[^nomicon-send-ub]. Đây chính là chỗ thư viện như `Mutex` đặt lời hứa với toàn hệ thống kiểu.
+**auto.** Khác hầu hết trait, nếu một kiểu gồm toàn thành phần `Send`/`Sync` thì nó tự động là `Send`/`Sync`[^nomicon-auto]. Cả hai là marker trait không có method nào, nên cũng chẳng có gì để "cài"[^book-sendsync-manual]. Vì vậy một `struct` của `orders` chứa toàn `String`, `u64`, `Vec` thì tự qua được thread, bạn không phải viết gì.
 
-Ngoại lệ chính của auto-derivation theo Nomicon: raw pointer không `Send`/`Sync`, `UnsafeCell` không `Sync` (kéo theo `Cell`, `RefCell` cũng không)[^nomicon-exceptions], và `Rc` không `Send`/`Sync`[^nomicon-rc]. Nomicon giải thích raw pointer bị đánh dấu thread-unsafe "nhiều hơn như một lint": dùng được raw pointer thì phải dereference vốn đã `unsafe`, nhưng đánh dấu như vậy là để các kiểu chứa nó không tự động được coi là thread-safe, vì tác giả của chúng nhiều khả năng chưa nghĩ kỹ về thread safety[^nomicon-rawptr-lint].
+**unsafe.** Muốn `impl` thủ công thì phải viết `unsafe impl`, vì đây là unsafe trait: code unsafe khác được quyền *giả định* chúng đã được cài đúng[^nomicon-unsafe]. Cài sai thì có thể gây Undefined Behavior[^nomicon-send-ub]. Đây chính là chỗ thư viện như `Mutex` đặt lời hứa của mình vào hệ thống kiểu: compiler tin lời hứa đó chứ không tự kiểm.
+
+Auto-derivation có vài ngoại lệ chính, theo Nomicon: raw pointer không `Send`/`Sync`, còn `UnsafeCell` không `Sync` nên `Cell` và `RefCell` cũng không[^nomicon-exceptions]. `Rc` thì không `Send` lẫn `Sync`[^nomicon-rc]. Kiểu nào chứa một thành phần thuộc nhóm này sẽ mất tính chất theo, và mục 4–5 đi vào hai trường hợp thường gặp nhất.
 
 <details><summary>Đi sâu: thử <code>MyBox</code> chứa raw pointer và <code>MutexGuard</code> không <code>Send</code></summary>
+
+**Raw pointer: lint hơn là rào chắn.** Nomicon giải thích rằng raw pointer bị đánh dấu thread-unsafe "nhiều hơn như một lint": dereference raw pointer vốn đã phải `unsafe`, nhưng đánh dấu như vậy để kiểu chứa nó không tự động bị coi là thread-safe, vì tác giả kiểu đó nhiều khả năng chưa nghĩ kỹ về thread safety[^nomicon-rawptr-lint].
 
 Thử với một kiểu chứa raw pointer:
 
@@ -148,11 +160,11 @@ error[E0277]: `*mut u8` cannot be sent between threads safely
 note: required because it appears within the type `MyBox`
 ```
 
-Thêm `unsafe impl Send for MyBox {}` (đúng dạng Nomicon minh họa cho "kiểu không tự derive thì tự cài"[^nomicon-mybox]) thì chương trình biên dịch được — đã chạy thật, 0 lỗi. Compiler *không* kiểm lời hứa đó: người viết `unsafe impl` chịu trách nhiệm toàn bộ.
+Thêm `unsafe impl Send for MyBox {}` (đúng dạng Nomicon minh họa cho "kiểu không tự derive thì tự cài"[^nomicon-mybox]) thì chương trình biên dịch được: đã chạy thật, 0 lỗi. Compiler *không* kiểm lời hứa đó; người viết `unsafe impl` chịu trách nhiệm toàn bộ.
 
-**Ví dụ phản diện: `MutexGuard` không `Send`.**
+**Ví dụ ngược: `MutexGuard` không `Send`.**
 
-`MutexGuard` cố ý không `Send`: Nomicon lấy nó làm ví dụ đẹp cho một kiểu không `Send`[^nomicon-mutexguard], vì implementation của lock đòi không giải phóng lock từ thread khác với thread đã lấy; gửi guard sang thread khác tức là destructor (nhả lock) chạy ở thread nhận[^nomicon-mutexguard-why]. Thử gửi guard:
+`MutexGuard` cố ý không `Send`. Nomicon lấy nó làm ví dụ đẹp cho một kiểu không `Send`[^nomicon-mutexguard]. Lý do: implementation của lock đòi không giải phóng lock từ thread khác với thread đã lấy nó, mà gửi guard sang thread khác thì destructor (nhả lock) sẽ chạy ở thread nhận[^nomicon-mutexguard-why]. Thử gửi guard:
 
 ```text
 error[E0277]: `std::sync::MutexGuard<'_, i32>` cannot be sent between threads safely
@@ -161,20 +173,25 @@ error[E0277]: `std::sync::MutexGuard<'_, i32>` cannot be sent between threads sa
 
 </details>
 
-**Quay lại Q2:** `Sync` được định nghĩa qua `Send` của `&T`; cả hai tự suy từ thành phần, và chỉ `unsafe impl` mới ép được chúng — bằng lời hứa của người viết.
+**Quay lại Q2:** `Sync` được định nghĩa qua `Send` của `&T`; cả hai tự suy từ thành phần, và chỉ `unsafe impl` mới ép được chúng, bằng lời hứa của người viết.
 
 ## 4. `Rc` và `Arc` (Q3)
 
-> **Trả lời ngắn.** `Rc` đếm tham chiếu bằng phép cộng/trừ thường, nên hai thread cùng clone có thể cập nhật bộ đếm cùng lúc và đó là UB; vì vậy `Rc` không `Send` hay `Sync`[^std-send-rc][^nomicon-rc]. `Arc` dùng phép atomic cho refcount nên thread-safe[^std-arc], nhưng `Arc<T>` chỉ là `Send + Sync` khi `T` cũng vậy[^std-arc-bound].
+> **Trả lời ngắn.** `Rc` đếm tham chiếu bằng phép cộng/trừ thường, nên hai thread cùng clone có thể cập nhật bộ đếm cùng lúc, và đó là UB; vì vậy `Rc` không `Send` hay `Sync`[^nomicon-rc]. `Arc` dùng phép atomic cho refcount nên thread-safe[^std-arc]. Nhưng `Arc<T>` chỉ là `Send + Sync` khi `T` cũng vậy[^std-arc-bound].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Rc` là sổ đếm người mượn sách ghi bằng bút chì ở một quầy; hai thủ thư cùng sửa một dòng là sai số. `Arc` là sổ mà mỗi lần sửa một dòng là một nét bút không thể chia cắt — nhưng nét bút đó chỉ bảo vệ con số đếm, không bảo vệ chính cuốn sách.
+*Với `orders`.* Config của `orders` là một giá trị nhiều worker cùng đọc. Cách quen để nhiều chủ cùng giữ một giá trị là con trỏ đếm tham chiếu: mỗi worker giữ một bản clone, bản cuối cùng bị drop thì giá trị được giải phóng. Rust có hai con trỏ như vậy, `Rc` và `Arc`, và chỉ một trong hai qua được `thread::spawn`. Mục này giải thích vì sao.
 
+### 4.1 `Rc`: bộ đếm không atomic
 
-`Rc` đếm tham chiếu bằng phép cộng/trừ thường. Docs `Send` nêu đúng kịch bản: hai thread cùng clone `Rc` trỏ tới một giá trị có thể cập nhật bộ đếm cùng lúc, là UB vì `Rc` không dùng atomic[^std-send-rc]. Nomicon tóm tắt: `Rc` không `Send` hay `Sync` vì refcount được chia sẻ mà không đồng bộ[^nomicon-rc]. Docs `Sync` bổ sung góc nhìn `Sync`: từ một `&Rc<T>` bất kỳ bạn đã có thể clone ra `Rc<T>` mới, tức sửa bộ đếm theo kiểu không atomic[^std-sync-rc] — nên `Rc` cũng không `Sync`, không chỉ không `Send`.
+`Rc` đếm tham chiếu bằng phép cộng/trừ thường. Hãy xem chuyện gì xảy ra nếu hai worker của `orders` cùng clone một `Rc` trỏ tới config: cả hai có thể cập nhật bộ đếm cùng lúc, và vì `Rc` không dùng atomic nên đó là UB[^std-send-rc]. Đó là lý do `Rc` không `Send`. Nó cũng không `Sync`: từ một `&Rc<T>` bất kỳ bạn đã có thể clone ra `Rc<T>` mới, tức sửa bộ đếm theo kiểu không atomic[^std-sync-rc]. Nên hai worker chỉ cần *chia sẻ* một `&Rc` là đã đủ gây hại, không cần gửi chính `Rc` đi.
 
-`Arc` là bản dùng atomic cho refcount nên thread-safe[^std-arc]; Book mô tả `Arc<T>` là kiểu như `Rc<T>` nhưng an toàn trong ngữ cảnh đồng thời[^book-arc]; sách Mara Bos: giống `Rc` trừ việc bảo đảm thay đổi bộ đếm là phép atomic không chia cắt được[^atomics-arc]. Cái giá là chi phí atomic (docs `Send` nói `Arc` dùng atomic "incurring some overhead")[^std-send-rc]. Hiểu lầm hay gặp: `Arc` *không* tự làm cho nội dung thread-safe — `Arc<T>` chỉ là `Send + Sync` khi `T` cũng `Send + Sync`[^std-arc-bound]. Mục 5 cho thấy hậu quả.
+### 4.2 `Arc`: bộ đếm atomic
+
+`Arc` là phiên bản dùng atomic cho refcount, nên thread-safe[^std-arc]. Cái giá là chi phí của phép atomic (docs `Send` nói `Arc` dùng atomic "incurring some overhead")[^std-send-rc].
+
+Có một hiểu lầm hay gặp: `Arc` *không* tự làm nội dung thread-safe. Atomic chỉ bảo vệ con số đếm, không bảo vệ giá trị `T` nằm sau nó. Vì thế `Arc<T>` chỉ là `Send + Sync` khi `T` cũng `Send + Sync`[^std-arc-bound]. Nếu `orders` đặt một kiểu `!Sync` vào `Arc` thì cả `Arc` đó bị từ chối; mục 5 cho thấy đúng chuyện này với `Cell`.
 
 <details><summary>Đi sâu: lỗi biên dịch khi gửi <code>Rc</code> vào <code>thread::spawn</code></summary>
 
@@ -209,14 +226,19 @@ Chuỗi nhân quả đọc từ lỗi: closure chứa `Rc<i32>` ⇒ closure khô
 
 ## 5. Interior mutability: `UnsafeCell`, `Cell`, `RefCell` (Q4)
 
-> **Trả lời ngắn.** `UnsafeCell<T>` là nền của interior mutability — cho đổi dữ liệu qua `&T`[^std-unsafecell-core]. `Cell` là `!Sync` vì `set` chỉ cần `&self` mà không đồng bộ gì[^std-sync-cell]; vì thế `Arc<Cell<i32>>` bị từ chối (`Arc<T>: Send` đòi `T: Sync`[^std-arc-bound]). `Mutex<T>` thêm khóa nên `Sync` khi `T: Send`[^std-mutex-sync].
+> **Trả lời ngắn.** `UnsafeCell<T>` là nền của interior mutability, tức cho đổi dữ liệu qua `&T`[^std-unsafecell-core]. `Cell` là `!Sync` vì `set` chỉ cần `&self` mà không đồng bộ gì[^std-sync-cell]; vì thế `Arc<Cell<i32>>` bị từ chối, do `Arc<T>` chỉ `Send` khi `T` cũng `Sync`[^std-arc-bound]. `Mutex<T>` thêm khóa nên `Sync` khi `T: Send`[^std-mutex-sync].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Cell` là ngăn kéo không khóa trong văn phòng riêng — an toàn khi một người dùng, nhưng hai người cùng mở thì lẫn lộn; `Mutex` là ngăn kéo có khóa.
+*Với `orders`.* Muốn đếm số request đã phục vụ, mỗi worker phải tăng một bộ đếm dùng chung, mà họ chỉ có `&Counter` chứ không có `&mut`. Cách thẳng nhất là bọc con số trong `Cell<u64>` rồi gọi `set`. Ở một thread thì ổn; qua nhiều worker thì Rust từ chối. Mục này lần theo vì sao, và vì sao `Mutex` thì được.
 
+### 5.1 Đổi dữ liệu qua `&T`
 
-Quy tắc nền của Rust: với một object, chỉ có thể có nhiều tham chiếu bất biến *hoặc* một tham chiếu khả biến[^std-cell-rule]. Interior mutability là cách "lách" có kiểm soát: cho đổi giá trị qua `&T`, trái với kiểu thường chỉ đổi được qua `&mut T`[^std-cell-interior]. Gốc của mọi kiểu như vậy là `UnsafeCell<T>`, primitive lõi của interior mutability[^std-unsafecell-core]: nó bỏ đảm bảo bất biến của `&T` — `&UnsafeCell<T>` có thể trỏ tới dữ liệu đang bị đổi — và `Cell`, `RefCell` đều dùng nó bên trong[^std-unsafecell]. Docs `Sync` còn nhấn mạnh: mọi kiểu có interior mutability *phải* dùng `UnsafeCell` bọc giá trị, vì không làm vậy là UB (ví dụ `transmute` từ `&T` sang `&mut T` là không hợp lệ)[^std-sync-unsafecell].
+Quy tắc nền của Rust: với một object, hoặc có nhiều tham chiếu bất biến, hoặc có một tham chiếu khả biến, không có cả hai[^std-cell-rule]. Interior mutability là cách lách có kiểm soát: cho đổi giá trị qua `&T`, trái với kiểu thường chỉ đổi được qua `&mut T`[^std-cell-interior].
+
+Gốc của mọi kiểu như vậy là `UnsafeCell<T>`, primitive lõi của interior mutability[^std-unsafecell-core]. Nó bỏ đảm bảo bất biến của `&T`: một `&UnsafeCell<T>` có thể trỏ tới dữ liệu đang bị đổi, và `Cell`, `RefCell` đều dùng nó bên trong[^std-unsafecell]. Docs `Sync` nhấn mạnh thêm: kiểu nào có interior mutability *phải* bọc giá trị bằng `UnsafeCell`, vì không làm vậy là UB (ví dụ `transmute` từ `&T` sang `&mut T` là không hợp lệ)[^std-sync-unsafecell].
+
+### 5.2 Bốn kiểu, bốn cách đổi qua `&T`
 
 | Kiểu | Cơ chế | Qua thread? |
 |---|---|---|
@@ -225,9 +247,13 @@ Quy tắc nền của Rust: với một object, chỉ có thể có nhiều tham
 | `Mutex<T>` | kiểm tra bằng lock; Book: `Mutex<T>` cung cấp interior mutability như họ `Cell`[^book-interior] | `Sync` khi `T: Send`[^std-mutex-sync] |
 | `Atomic*` | phép atomic; chương [06](./06-memory-model.md)–[07](./07-lock-free.md) | `Sync`[^std-atomic-sync] |
 
-**Vì sao `Cell` là `!Sync` — suy luận từng bước.** `Cell::set(&self, v)` chỉ cần `&Cell<T>`. Nếu `Cell<T>: Sync` thì theo định nghĩa `&Cell<T>: Send`, tức hai thread có thể cùng cầm `&Cell<T>` và cùng gọi `set`: hai lần ghi không đồng bộ vào một vị trí nhớ, đúng định nghĩa data race. Docs `Sync` nói gọn: method này không thực hiện đồng bộ nào, nên `Cell` không thể `Sync`[^std-sync-cell]. Còn `Send`: docs `Cell` liệt kê `impl<T> Send for Cell<T> where T: Send + ?Sized`[^std-cell-send] — tức `Cell<T>` là `Send` khi `T: Send`. Lý do (suy luận của người soạn): chuyển *quyền sở hữu* nguyên cả cell sang thread khác thì không ai còn alias nó. Mục 6 cho thấy `Mutex<Cell<i32>>` chạy được, khớp với hệ quả này; ví dụ `move` một `Cell<i32>` thẳng vào `thread::spawn` cũng biên dịch và chạy (quan sát của người soạn, in `2`).
+### 5.3 Vì sao `Cell` là `!Sync`
 
-Đây là lý do thực hành `Arc<Mutex<T>>` thay `Rc<RefCell<T>>`: Book so sánh đúng hai cặp này[^book-interior].
+`Cell::set(&self, v)` chỉ cần `&Cell<T>`. Giả sử `Cell<T>: Sync`. Theo định nghĩa ở mục 3, `&Cell<T>` khi đó là `Send`, nên hai worker của `orders` có thể cùng cầm `&Cell<u64>` và cùng gọi `set`. Đó là hai lần ghi không đồng bộ vào một vị trí nhớ, đúng định nghĩa data race. Docs `Sync` nói gọn: method này không thực hiện đồng bộ nào, nên `Cell` không thể `Sync`[^std-sync-cell].
+
+Còn `Send` thì `Cell<T>` có, miễn `T: Send`: docs `Cell` liệt kê `impl<T> Send for Cell<T> where T: Send + ?Sized`[^std-cell-send]. Lý do (suy luận của người soạn): chuyển *quyền sở hữu* nguyên cả cell sang thread khác thì không còn ai alias nó. Mục 6 cho thấy `Mutex<Cell<i32>>` chạy được, khớp với hệ quả này; ví dụ `move` một `Cell<i32>` thẳng vào `thread::spawn` cũng biên dịch và chạy (quan sát của người soạn, in `2`).
+
+Đó cũng là lý do thực hành `Arc<Mutex<T>>` thay cho `Rc<RefCell<T>>` khi qua thread: Book so sánh đúng hai cặp này[^book-interior]. Với bộ đếm của `orders`, chọn `Arc<Mutex<u64>>`, hoặc một atomic (mục 8).
 
 <details><summary>Đi sâu: lỗi biên dịch với <code>Arc&lt;Cell&lt;i32&gt;&gt;</code> và <code>&amp;Rc&lt;i32&gt;</code> trong <code>thread::scope</code></summary>
 
@@ -253,7 +279,7 @@ note: required by a bound in `spawn`
 
 Dòng `required for Arc<Cell<i32>> to implement Send` cho thấy `Arc<T>: Send` đòi `T: Send + Sync` (mục 4) mà `Cell<i32>: !Sync`.
 
-Một kiểm tra thú vị của định nghĩa `Sync ⇔ &T: Send`: `thread::scope` dùng `Send` trên closure, mà closure *mượn* `Rc` chỉ giữ `&Rc<i32>`. Chạy thật:
+Một phép thử thú vị cho định nghĩa `Sync ⇔ &T: Send`: `thread::scope` đòi `Send` trên closure, mà closure *mượn* `Rc` chỉ giữ `&Rc<i32>`. Chạy thật:
 
 ```text
 error[E0277]: `Rc<i32>` cannot be shared between threads safely
@@ -261,7 +287,7 @@ error[E0277]: `Rc<i32>` cannot be shared between threads safely
   = note: required for `&Rc<i32>` to implement `Send`
 ```
 
-Compiler tự chuyển "`&Rc<i32>` phải `Send`" thành "`Rc<i32>` phải `Sync`" đúng theo định nghĩa.
+Compiler tự chuyển "`&Rc<i32>` phải `Send`" thành "`Rc<i32>` phải `Sync`", đúng theo định nghĩa.
 
 </details>
 
@@ -269,37 +295,39 @@ Compiler tự chuyển "`&Rc<i32>` phải `Send`" thành "`Rc<i32>` phải `Sync
 
 ## 6. `Mutex`, `RwLock`, `Condvar` và poisoning (Q5)
 
-> **Trả lời ngắn.** `Mutex<T>` bọc dữ liệu và chỉ cho truy cập qua guard, nên chỉ chạm dữ liệu khi đang khóa[^std-mutex-guard]. `T` chỉ cần `Send` vì `&T` chỉ được đưa cho *một* thread tại một thời điểm[^std-mutex-notsync]; `RwLock` cho nhiều reader đồng thời nên cần `T: Send + Sync`[^std-rwlock-bounds]. Mutex bị poisoned khi thread đang giữ nó panic[^std-poison]; `RwLock` chỉ bị poisoned khi panic ở chế độ ghi[^std-rwlock-poison].
+> **Trả lời ngắn.** `Mutex<T>` bọc dữ liệu và chỉ cho truy cập qua guard, nên dữ liệu chỉ bị chạm khi mutex đang khóa[^std-mutex-guard]. `T` chỉ cần `Send` vì `&T` chỉ được đưa cho *một* thread tại một thời điểm[^std-mutex-notsync]. `RwLock` cho nhiều reader đồng thời nên cần `T: Send + Sync`[^std-rwlock-bounds]. Mutex bị poisoned khi thread đang giữ nó panic[^std-poison], còn `RwLock` chỉ bị poisoned khi panic ở chế độ ghi[^std-rwlock-poison].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Mutex<T>` là phòng có một chìa — ai cầm chìa mới vào được; poisoning là biển "người dùng phòng trước ngất giữa chừng, đồ đạc có thể lộn xộn".
+*Với `orders`.* Cache đơn hàng là dữ liệu ghi nhiều và đọc nhiều: worker nào tra không thấy thì nạp rồi ghi vào. Việc giữ cache cho đúng khi nhiều worker đụng vào chính là việc của lock. Ngoài ra còn hai câu hỏi riêng của Rust. Nếu một worker panic giữa lúc đang sửa cache thì các worker khác nhìn thấy gì? Và vì sao `Mutex<Cell<i32>>` qua được thread trong khi `Cell<i32>` trần thì không? Mục này trả lời cả hai.
 
-**`Mutex<T>`: dữ liệu nằm *trong* lock.**
+### 6.1 `Mutex<T>`: dữ liệu nằm *trong* lock
 
-Khác mutex ở [chương 03](./03-lock.md), `Mutex<T>` bọc dữ liệu, và dữ liệu chỉ truy cập được qua RAII guard, bảo đảm chỉ chạm dữ liệu khi mutex đang bị khóa[^std-mutex-guard]. `MutexGuard` cài `Deref` và `Drop`, nhả lock khi ra khỏi scope[^book-guard]; muốn nhả sớm thì tạo scope con hoặc `drop` guard thủ công[^std-mutex-drop]. Vì không có đường nào tới dữ liệu mà không qua guard, "quên lock" trở thành lỗi biên dịch (suy luận từ hai nguồn trên). Việc `unlock` rồi `lock` tạo quan hệ happens-before giữa các thread — một trong số ít trường hợp có sẵn theo Mara Bos[^atomics-hb-cases] ([chương 06](./06-memory-model.md)).
+Khác mutex ở [chương 03](./03-lock.md), `Mutex<T>` của Rust bọc luôn dữ liệu, và dữ liệu chỉ truy cập được qua RAII guard. Nhờ vậy dữ liệu chỉ bao giờ bị chạm khi mutex đang khóa[^std-mutex-guard]. `MutexGuard` cài `Deref` để trỏ tới dữ liệu và `Drop` để nhả lock khi ra khỏi scope[^book-guard]. Muốn nhả sớm thì tạo scope con hoặc `drop` guard thủ công[^std-mutex-drop]. Vì không có đường nào tới dữ liệu mà không qua guard, "quên lock" trở thành lỗi biên dịch (suy luận từ hai nguồn trên). Cuối cùng, `unlock` rồi `lock` tạo quan hệ happens-before giữa các thread, một trong số ít trường hợp có sẵn theo Mara Bos[^atomics-hb-cases] ([chương 06](./06-memory-model.md)).
 
-Locking đệ quy: nếu thread đã giữ lock mà gọi `lock` lần nữa, hành vi chính xác "không được chỉ định", nhưng hàm chắc chắn không trả về ở lần gọi thứ hai (có thể panic hoặc deadlock)[^std-mutex-twice].
+### 6.2 Vì sao `T: Send` mà không cần `T: Sync`
 
-**Ràng buộc kiểu — vì sao `T: Send` mà không cần `T: Sync`.** Docs: `Mutex<T>: Sync` khi `T: Send`, bảo đảm dữ liệu được bảo vệ truy cập an toàn từ nhiều thread[^std-mutex-sync]; và `T` không cần `Sync` vì `&T` chỉ được đưa cho *một* thread tại một thời điểm[^std-mutex-notsync]. Cũng có `impl Send for Mutex<T>` khi `T: Send`[^std-mutex-send]. Lập luận (của người soạn): `Sync` của `T` nghĩa là nhiều thread cùng giữ `&T` đồng thời an toàn; mutex chỉ đưa `&T` cho một thread mỗi lúc nên thứ cần thiết chỉ là *chuyển* `T` giữa các thread lần lượt — đúng nghĩa `Send`. Hệ quả kiểm chứng được ở phần Đi sâu.
+Docs nói `Mutex<T>` là `Sync` khi `T: Send`, và điều đó bảo đảm dữ liệu được bảo vệ truy cập an toàn từ nhiều thread[^std-mutex-sync]. Docs cũng nói rõ `T` không cần `Sync`, vì khi `T` không `Sync` thì `&T` chỉ được đưa cho một thread tại một thời điểm[^std-mutex-notsync]. Ngoài ra `Mutex<T>` là `Send` khi `T: Send`[^std-mutex-send].
 
-**Poisoning.**
+Lập luận (của người soạn): `T: Sync` nghĩa là nhiều thread cùng giữ `&T` đồng thời mà vẫn an toàn. Mutex không bao giờ đưa `&T` cho hai thread cùng lúc, nên thứ nó cần chỉ là khả năng *chuyển* `T` giữa các thread, lần lượt. Đó đúng là nghĩa của `Send`. Hệ quả kiểm chứng được ở phần Đi sâu: `Arc<Mutex<Cell<i32>>>` chạy được dù `Cell: !Sync`.
 
-Mutex bị *poisoned* khi nó nhận ra thread đang giữ nó đã panic[^std-poison]. Từ đó mọi thread khác mặc định không truy cập được dữ liệu vì nhiều khả năng nó bị "nhiễm" (một invariant không còn được giữ)[^std-poison-tainted]; hệ quả là `lock`/`try_lock` trả `Result`. Phần lớn code chỉ `unwrap()`, nhằm lan truyền panic giữa các thread để không ai nhìn thấy invariant có thể đã hỏng[^std-poison-unwrap]. Poisoning chỉ mang tính tư vấn: `PoisonError::into_inner` vẫn trả được guard như thể lock thành công[^std-poison-advisory]. Việc phát hiện panic "không lý tưởng", nên ngay cả mutex chưa poisoned cũng cần cẩn thận vì có thể có panic bị bỏ sót[^std-poison-detect].
+### 6.3 Poisoning
 
-`RwLock` có quy tắc riêng: chỉ bị poisoned khi panic xảy ra lúc đang khóa ở chế độ ghi; panic trong reader thì không[^std-rwlock-poison].
+Mutex bị *poisoned* khi nó nhận ra thread đang giữ nó đã panic[^std-poison]. Từ đó mọi thread khác mặc định không truy cập được dữ liệu, vì nhiều khả năng dữ liệu đã bị "nhiễm" (một invariant không còn được giữ)[^std-poison-tainted]. Với cache của `orders`: worker panic giữa lúc sửa dở thì các worker còn lại không đọc phải cache nửa cũ nửa mới. Hệ quả ở API là `lock`/`try_lock` trả `Result`, và phần lớn code chỉ `unwrap()` để panic lan giữa các thread, không ai nhìn thấy invariant có thể đã hỏng[^std-poison-unwrap].
 
-`Condvar::wait` cũng trả lỗi nếu mutex bị poisoned khi thread giành lại lock[^std-condvar-poison].
+Tuy vậy poisoning chỉ mang tính tư vấn: `PoisonError::into_inner` vẫn trả về guard như thể lock thành công[^std-poison-advisory]. `RwLock` có quy tắc riêng: nó chỉ bị poisoned khi panic xảy ra lúc khóa ở chế độ ghi; panic trong reader thì không[^std-rwlock-poison]. `Condvar::wait` cũng trả lỗi nếu mutex bị poisoned lúc thread giành lại lock[^std-condvar-poison].
 
-**`RwLock<T>`.**
+### 6.4 `RwLock<T>`
 
-`RwLock` cho nhiều reader đồng thời miễn là không có writer đang giữ[^std-rwlock]. Docs không bảo đảm chính sách ưu tiên — phụ thuộc OS — và writer đang chờ có thể chặn hoặc không chặn `read` mới[^std-rwlock-policy]; docs đưa ví dụ cùng thread gọi `read` hai lần trong khi có writer chờ có thể deadlock[^std-rwlock-deadlock]. Ràng buộc kiểu khác `Mutex`: cần `T: Send` để chia sẻ qua thread **và** `T: Sync` để nhiều reader truy cập đồng thời[^std-rwlock-bounds] — cụ thể `impl<T: Send + Sync> Sync for RwLock<T>`[^std-rwlock-sync].
+Cache của `orders` đọc nhiều hơn ghi, nên `RwLock` hợp lý: nó cho nhiều reader cùng giữ lock miễn là không có writer[^std-rwlock]. Ràng buộc kiểu vì vậy khác `Mutex`. `T` cần `Send` để chia sẻ qua thread, và cần cả `Sync` để nhiều reader truy cập đồng thời[^std-rwlock-bounds]. Cụ thể là `impl<T: Send + Sync> Sync for RwLock<T>`[^std-rwlock-sync]. Đây cũng là lý do `Arc<RwLock<Cell<i32>>>` bị từ chối trong khi `Arc<Mutex<Cell<i32>>>` thì được: nhiều reader song song có thể cùng gọi `Cell::set`.
 
-**`Condvar`.**
+### 6.5 `Condvar`
 
-`Condvar` cho thread chờ mà không tốn CPU[^std-condvar-cpu]; `wait(guard)` nhả mutex và chặn thread một cách atomic[^std-condvar-atomic]. Phải kiểm tra predicate trong vòng lặp vì spurious wakeup[^std-condvar-spurious] — đúng như [chương 04](./04-condition-variable-va-semaphore.md). Rust đóng gói vòng lặp đó trong `wait_while`, nhận sẵn điều kiện để chờ[^std-condvar-waitwhile]. Dùng nhiều mutex khác nhau cho cùng một condvar có thể gây panic lúc chạy[^std-condvar-mutex].
+Worker rảnh của `orders` không nên quay vòng hỏi "có việc chưa?". `Condvar` cho thread chờ mà không tốn CPU[^std-condvar-cpu]. Hàm `wait(guard)` nhả mutex và chặn thread trong một thao tác atomic[^std-condvar-atomic]. Vì spurious wakeup, thread phải kiểm tra lại predicate mỗi lần `wait` trả về[^std-condvar-spurious], đúng như [chương 04](./04-condition-variable-va-semaphore.md). Rust đóng gói vòng lặp đó trong `wait_while`, nhận sẵn điều kiện để chờ[^std-condvar-waitwhile]. Dùng nhiều mutex khác nhau cho cùng một condvar có thể gây panic lúc chạy[^std-condvar-mutex].
 
-<details><summary>Đi sâu: kiểm chứng ràng buộc kiểu và poisoning (chạy thật)</summary>
+<details><summary>Đi sâu: kiểm chứng ràng buộc kiểu và poisoning (chạy thật), lock đệ quy và chính sách RwLock</summary>
+
+**Kiểm chứng ràng buộc kiểu và poisoning.**
 
 - `Arc<Mutex<Cell<i32>>>` qua thread: **biên dịch và chạy** (in `2`), dù `Cell: !Sync`.
 - `Arc<Mutex<Rc<i32>>>` qua thread: bị từ chối vì `Rc: !Send`:
@@ -311,7 +339,7 @@ error[E0277]: `Rc<i32>` cannot be sent between threads safely
   = note: required for `Arc<std::sync::Mutex<Rc<i32>>>` to implement `Send`
 ```
 
-- `Arc<RwLock<Cell<i32>>>` bị từ chối (`Cell<i32>` không `Sync`), ngược với `Mutex<Cell<i32>>` — vì nhiều reader song song có thể cùng gọi `Cell::set`.
+- `Arc<RwLock<Cell<i32>>>` bị từ chối (`Cell<i32>` không `Sync`), ngược với `Mutex<Cell<i32>>`.
 - Poisoning:
 
 ```text
@@ -320,6 +348,12 @@ into_inner = 0
 rwlock poisoned after reader panic = false
 rwlock poisoned after writer panic = true
 ```
+
+**Việc phát hiện panic không hoàn hảo.** Docs nhắc rằng ngay cả mutex chưa poisoned cũng cần cẩn thận, vì có thể có panic bị bỏ sót[^std-poison-detect].
+
+**Lock đệ quy.** Nếu thread đã giữ lock mà gọi `lock` lần nữa, hành vi chính xác "không được chỉ định", nhưng hàm chắc chắn không trả về ở lần gọi thứ hai (có thể panic hoặc deadlock)[^std-mutex-twice].
+
+**Chính sách ưu tiên của `RwLock`.** Docs không bảo đảm chính sách nào, vì nó phụ thuộc OS; writer đang chờ có thể chặn hoặc không chặn `read` mới[^std-rwlock-policy]. Docs đưa ví dụ cùng thread gọi `read` hai lần trong lúc có writer chờ, và lần `read` thứ hai có thể deadlock[^std-rwlock-deadlock].
 
 </details>
 
@@ -331,13 +365,19 @@ rwlock poisoned after writer panic = true
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như cấu hình đọc từ file khi request đầu tiên tới — người đến sau phải chờ người đến trước nạp xong, rồi mọi người dùng chung kết quả.
+*Với `orders`.* Config của `orders` (đọc từ file, hoặc một bảng tra đã compile sẵn) chỉ cần nạp một lần, và nạp lười ở request đầu tiên thì tiện hơn nạp lúc khởi động. Vấn đề: request đầu tiên có thể đến cùng lúc ở nhiều worker. Ai nạp? Nạp mấy lần? Ai chờ ai?
 
+### 7.1 Vì sao không dùng `static mut` hay `Mutex<Option<T>>`
 
-Bài toán (nhận xét của người soạn): một giá trị global (config, bảng tra, regex đã compile) cần khởi tạo lười, đúng một lần, an toàn khi nhiều thread chạm vào lần đầu cùng lúc. `static mut` cần `unsafe` để truy cập, còn `Mutex<Option<T>>` trả phí lock ở mọi lần đọc. Std 1.95.0 có hai kiểu:
+Bài toán tổng quát (nhận xét của người soạn): một giá trị global cần khởi tạo lười, đúng một lần, và an toàn khi nhiều thread chạm vào lần đầu cùng lúc. `static mut` cần `unsafe` để truy cập, còn `Mutex<Option<T>>` bắt mọi lần đọc đều trả phí lock. Std 1.95.0 có hai kiểu giải bài này.
 
-- **`OnceLock<T>`**: "primitive đồng bộ mà nominally chỉ ghi được một lần"[^std-oncelock]. `get` trả `None` nếu chưa khởi tạo; `set` trả `Ok(())` nếu cell chưa khởi tạo, `Err(value)` nếu đã có[^std-oncelock-set]. `get_or_init`: nhiều thread có thể gọi đồng thời với các hàm khởi tạo khác nhau, nhưng bảo đảm chỉ một hàm được thực thi (nếu hàm không panic)[^std-oncelock-once].
-- **`LazyLock<T>`**: giá trị được khởi tạo ở lần truy cập đầu tiên[^std-lazylock]; vì có thể bị gọi từ nhiều thread, mọi lời gọi dereference sẽ block nếu một routine khởi tạo khác đang chạy[^std-lazylock-block]. Nếu closure khởi tạo panic thì lock bị poisoned[^std-lazylock-poison] — và khác `Mutex`, poisoning ở đây không phục hồi được: mọi lần truy cập sau đều panic[^std-lazylock-unrecoverable].
+### 7.2 `OnceLock<T>`
+
+Docs mô tả `OnceLock<T>` là primitive đồng bộ mà "nominally" chỉ ghi được một lần[^std-oncelock]. `get` trả `None` nếu chưa khởi tạo. `set` trả `Ok(())` nếu cell chưa khởi tạo và `Err(value)` nếu đã có[^std-oncelock-set]. Còn `get_or_init` là chỗ giải bài toán của `orders`: nhiều thread có thể gọi đồng thời, thậm chí với các hàm khởi tạo khác nhau, nhưng chỉ một hàm được thực thi (miễn hàm đó không panic)[^std-oncelock-once].
+
+### 7.3 `LazyLock<T>`
+
+`LazyLock<T>` gói sẵn hàm khởi tạo vào kiểu, và giá trị được khởi tạo ở lần truy cập đầu tiên[^std-lazylock]. Vì lần đầu có thể đến từ nhiều thread, mọi lời gọi dereference sẽ block nếu một routine khởi tạo khác đang chạy[^std-lazylock-block]. Nếu closure khởi tạo panic thì lock bị poisoned[^std-lazylock-poison]. Khác với `Mutex`, poisoning ở đây không phục hồi được: mọi lần truy cập sau đều panic[^std-lazylock-unrecoverable].
 
 <details><summary>Đi sâu: kết quả chạy thật</summary>
 
@@ -359,27 +399,40 @@ init table       <- LazyLock chỉ chạy closure ở lần deref đầu
 
 ## 8. Atomics trong Rust (nhắc ngắn)
 
-Kiểu atomic an toàn để chia sẻ giữa thread (cài `Sync`) nhưng không tự cung cấp cơ chế chia sẻ — thường đặt trong `Arc` hoặc `static`[^std-atomic-sync]. Docs định nghĩa data race là truy cập xung đột không đồng bộ mà ít nhất một bên là non-atomic, và nói data race là UB[^std-datarace]; do đó truy cập atomic không thuộc định nghĩa này (suy luận từ định nghĩa). Docs còn nêu nguồn UB khác của memory model: các truy cập atomic xung đột, không đồng bộ, chồng lấn một phần nhau (mixed-size)[^std-mixed-size]. Cách chọn `Ordering`, `happens-before`, `compare_exchange` nằm ở [chương 06](./06-memory-model.md) và [chương 07](./07-lock-free.md); điều cần mang theo từ chương này là: `Mutex` cho bạn đồng bộ "tặng kèm" (unlock→lock tạo happens-before[^atomics-hb-cases]), còn atomic bạn phải tự chọn ordering.
+Bộ đếm request của `orders` còn một cách làm nhẹ hơn `Arc<Mutex<u64>>`: dùng kiểu atomic. Kiểu atomic an toàn để chia sẻ giữa thread (cài `Sync`), nhưng tự nó không cung cấp cơ chế chia sẻ, nên thường được đặt trong `Arc` hoặc `static`[^std-atomic-sync]. Docs định nghĩa data race là truy cập xung đột không đồng bộ mà ít nhất một bên là non-atomic, và nói data race là UB[^std-datarace]; do đó truy cập atomic không thuộc định nghĩa này (suy luận từ định nghĩa).
+
+Cách chọn `Ordering`, `happens-before`, `compare_exchange` nằm ở [chương 06](./06-memory-model.md) và [chương 07](./07-lock-free.md). Điều cần mang theo từ chương này: `Mutex` cho bạn đồng bộ "tặng kèm" (unlock→lock tạo happens-before[^atomics-hb-cases]), còn atomic thì bạn phải tự chọn ordering.
+
+<details><summary>Đi sâu: nguồn UB thứ hai của memory model</summary>
+
+Ngoài data race, docs còn nêu một nguồn UB khác của memory model: các truy cập atomic xung đột, không đồng bộ, mà chồng lấn một phần nhau (mixed-size)[^std-mixed-size].
+
+</details>
 
 ## 9. Channel `std::sync::mpsc` (Q7)
 
-> **Trả lời ngắn.** `mpsc` là hàng đợi FIFO nhiều producer, một consumer[^std-mpsc]. `channel()` không giới hạn nên `send` không bao giờ block[^std-mpsc-async]; `sync_channel(n)` có bộ đệm cố định, `send` block đến khi có chỗ[^std-mpsc-sync], và `n = 0` là rendezvous[^std-mpsc-rendezvous]. Bên trong là kênh MPMC port từ crossbeam-channel[^std-mpsc-wrap].
+> **Trả lời ngắn.** `mpsc` là hàng đợi FIFO nhiều producer, một consumer[^std-mpsc]. `channel()` không giới hạn nên `send` không bao giờ block[^std-mpsc-async]. `sync_channel(n)` có bộ đệm cố định và `send` block đến khi có chỗ[^std-mpsc-sync]; riêng `n = 0` là rendezvous[^std-mpsc-rendezvous]. Bên trong là kênh MPMC port từ crossbeam-channel[^std-mpsc-wrap].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `channel()` là hộp thư không đáy; `sync_channel(n)` là hộp thư chỉ chứa n lá, đầy thì người gửi phải đợi; `n = 0` là trao tận tay.
+*Với `orders`.* Mỗi worker cần ghi audit event ("đã phục vụ đơn 42"), nhưng ta muốn đúng một thread chuyên ghi file để các dòng không xen lẫn nhau. Đó là hình dạng nhiều producer, một consumer, và `mpsc` được làm ra cho nó. Thay vì để các worker tranh nhau một lock quanh file, chúng chỉ việc gửi thông điệp.
 
+### 9.1 Hai dạng channel
 
-Triết lý (câu khẩu hiệu trong Book): đừng giao tiếp bằng cách chia sẻ bộ nhớ; hãy chia sẻ bộ nhớ bằng cách giao tiếp[^book-msg]. `mpsc` là hàng đợi FIFO multi-producer, single-consumer[^std-mpsc]; cả hai loại sender đều clone được để nhiều thread gửi đồng thời tới một receiver[^std-mpsc-clone]. Hai dạng:
+Book gói triết lý này thành một khẩu hiệu: đừng giao tiếp bằng cách chia sẻ bộ nhớ, hãy chia sẻ bộ nhớ bằng cách giao tiếp[^book-msg]. `mpsc` là hàng đợi FIFO multi-producer, single-consumer[^std-mpsc]. Cả hai loại sender đều clone được, nên nhiều worker gửi đồng thời tới một receiver[^std-mpsc-clone]. Hai dạng khác nhau ở chỗ bộ đệm:
 
 | | `channel()` | `sync_channel(n)` |
 |---|---|---|
 | Bộ đệm | không giới hạn, `send` không bao giờ block[^std-mpsc-async] | cố định; `send` block đến khi có chỗ[^std-mpsc-sync] |
 | `n = 0` | — | rendezvous: `send` không trả về cho đến khi có `recv` ghép cặp[^std-mpsc-rendezvous] |
 
-Thao tác thất bại thường nghĩa là nửa còn lại đã "hung up" do bị drop[^std-mpsc-hungup].
+Khi một thao tác gửi hay nhận thất bại, thường là nửa còn lại của channel đã "hung up" do bị drop[^std-mpsc-hungup]. Chẳng hạn thread ghi log của `orders` thoát thì mọi `send` sau đó trả lỗi.
 
-**Kiểu phản ánh "single-consumer".** Source 1.95.0 khai báo `impl<T> !Sync for Receiver<T>`[^std-mpsc-recv-nosync] và `unsafe impl<T: Send> Sync for Sender<T>`[^std-mpsc-sender-sync]. Suy luận của người soạn từ định nghĩa `Sync ⇔ &T: Send` (mục 3): vì `Receiver` là `!Sync` nên không thể gửi `&Receiver` sang thread khác, tức không thể cho nhiều thread cùng nhận qua một tham chiếu chung.
+Chọn dạng nào thì tùy `orders` sợ gì. Với `sync_channel`, bộ đệm có giới hạn chính là bounded buffer của bài producer/consumer ([chương 04](./04-condition-variable-va-semaphore.md)). Trong backend, nó là cơ chế *backpressure* tự nhiên: producer nhanh hơn consumer thì bị chặn thay vì phình bộ nhớ (nhận xét của người soạn). `channel()` không giới hạn thì không có tính chất đó: nếu thread ghi log chậm hơn các worker, hàng đợi cứ lớn dần.
+
+### 9.2 Kiểu phản ánh "single-consumer"
+
+Source 1.95.0 khai báo `impl<T> !Sync for Receiver<T>`[^std-mpsc-recv-nosync] và `unsafe impl<T: Send> Sync for Sender<T>`[^std-mpsc-sender-sync]. Suy luận của người soạn, từ định nghĩa `Sync ⇔ &T: Send` (mục 3): vì `Receiver` là `!Sync` nên không gửi được `&Receiver` sang thread khác, tức không thể cho nhiều thread cùng nhận qua một tham chiếu chung. Nói với `orders`: có nhiều worker thì có nhiều `Sender` clone, nhưng chỉ một thread giữ `Receiver`.
 
 <details><summary>Đi sâu: kết quả chạy thật và cài đặt bên trong</summary>
 
@@ -394,7 +447,13 @@ rendezvous try_send without receiver: Err(TrySendError::Full(..))
 recv after all senders dropped: Err(RecvError)
 ```
 
-**Bên trong (chi tiết cài đặt, có thể đổi giữa các phiên bản).** Source 1.95.0: `mpsc` là lớp bọc của kênh MPMC được port từ crossbeam-channel[^std-mpsc-wrap]; `mpsc::sync_channel` gọi `mpmc::sync_channel(bound)`[^std-mpsc-calls-mpmc]. Hàm tạo MPMC chọn một trong ba "flavor": `channel()` dùng `list::Channel`[^std-mpmc-pick-list] — danh sách liên kết không giới hạn[^std-mpmc-list]; `sync_channel(n>0)` dùng `array::Channel`[^std-mpmc-pick-array] — mảng cấp phát sẵn, dựa trên hàng đợi MPMC có giới hạn của Dmitry Vyukov[^std-mpmc-array][^std-mpmc-vyukov]; `sync_channel(0)` dùng `zero::Channel`[^std-mpmc-pick-zero] — kênh rendezvous[^std-mpmc-zero]. Tức là ba cài đặt riêng biệt, không phải một khuôn "mutex + condvar + buffer" chung (suy luận từ ba flavor). Với `sync_channel`, bộ đệm có giới hạn chính là bounded buffer của bài producer/consumer ([chương 04](./04-condition-variable-va-semaphore.md)); trong backend, nó là cơ chế *backpressure* tự nhiên: producer nhanh hơn consumer thì bị chặn thay vì phình bộ nhớ (nhận xét của người soạn). `channel()` không giới hạn thì không có tính chất đó.
+**Bên trong (chi tiết cài đặt, có thể đổi giữa các phiên bản).** Source 1.95.0: `mpsc` là lớp bọc của kênh MPMC được port từ crossbeam-channel[^std-mpsc-wrap], và `mpsc::sync_channel` gọi `mpmc::sync_channel(bound)`[^std-mpsc-calls-mpmc]. Hàm tạo MPMC chọn một trong ba "flavor":
+
+- `channel()` dùng `list::Channel`[^std-mpmc-pick-list], một danh sách liên kết không giới hạn[^std-mpmc-list].
+- `sync_channel(n>0)` dùng `array::Channel`[^std-mpmc-pick-array], một mảng cấp phát sẵn[^std-mpmc-array] dựa trên hàng đợi MPMC có giới hạn của Dmitry Vyukov[^std-mpmc-vyukov].
+- `sync_channel(0)` dùng `zero::Channel`[^std-mpmc-pick-zero], kênh rendezvous[^std-mpmc-zero].
+
+Tức là ba cài đặt riêng biệt, không phải một khuôn "mutex + condvar + buffer" chung (suy luận từ ba flavor).
 
 </details>
 
@@ -406,12 +465,19 @@ recv after all senders dropped: Err(RecvError)
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): compiler như thanh tra an toàn lao động kiểm tra dây điện không hở, nhưng không kiểm tra quy trình làm việc của bạn có hợp lý hay không.
+*Với `orders`.* Giả sử `orders` đã qua mọi kiểm tra của các mục trước: mọi thứ dùng chung đều nằm trong `Arc<Mutex<…>>`, compiler không phàn nàn gì. Vậy có thể yên tâm chưa? Chưa. Hãy lấy ví dụ tồn kho một mặt hàng, và hai kiểu lỗi mà compiler không thấy.
 
+### 10.1 Cái Rust bảo đảm
 
-Safe Rust bảo đảm không có data race[^nomicon-race-def]; Nomicon nói data race phần lớn bị chặn chỉ bằng ownership[^nomicon-race-ownership]. Nhưng Rust **không** chặn race condition tổng quát[^nomicon-race-cond]: Nomicon nói việc đó là bất khả về mặt toán học khi bạn không kiểm soát scheduler, như trong môi trường OS thông thường[^nomicon-race-impossible]; kiểm soát được preemption thì có thể chặn (framework như RTIC), nhưng đó là trường hợp rất hiếm[^nomicon-race-rtic]. Vì thế deadlock hay hành vi vô nghĩa do đồng bộ sai vẫn được xem là "safe"[^nomicon-race-deadlock]; Book nói thẳng `Mutex<T>` đi kèm rủi ro deadlock[^book-deadlock]. Một race condition tự nó không phá memory safety — chỉ khi kết hợp với code `unsafe` khác[^nomicon-race-safe].
+Safe Rust bảo đảm không có data race[^nomicon-race-def]. Nomicon nói data race phần lớn bị chặn chỉ bằng ownership[^nomicon-race-ownership]; phần còn lại là việc của `Send`/`Sync` như các mục trước. Với `orders`, nghĩa là mọi truy cập vào bộ đếm hay cache từ nhiều worker mà không có lock đều không biên dịch được.
 
-Sơ đồ dưới tóm tắt các chú thích ở trên (nhận xét của người soạn):
+### 10.2 Cái Rust không bảo đảm
+
+Rust **không** chặn race condition tổng quát[^nomicon-race-cond]. Nomicon giải thích rằng việc đó bất khả về mặt toán học khi bạn không kiểm soát scheduler, như trong môi trường OS thông thường[^nomicon-race-impossible]. Nếu kiểm soát được preemption thì có thể chặn (framework như RTIC làm vậy), nhưng đó là trường hợp rất hiếm[^nomicon-race-rtic].
+
+Vì thế deadlock, hay hành vi vô nghĩa do đồng bộ sai, vẫn được xem là "safe"[^nomicon-race-deadlock]. Book nói thẳng rằng `Mutex<T>` đi kèm rủi ro deadlock[^book-deadlock]. Điểm đáng nhớ: một race condition tự nó không phá memory safety; chỉ khi kết hợp với code `unsafe` khác thì nó mới phá được[^nomicon-race-safe].
+
+Sơ đồ dưới tóm tắt (nhận xét của người soạn):
 
 ```mermaid
 flowchart TD
@@ -427,7 +493,7 @@ flowchart TD
 
 Hai ví dụ chạy thật, hoàn toàn safe Rust:
 
-**Check-then-act (atomicity violation, [chương 05](./05-concurrency-bug-va-deadlock.md)).** Bốn thread chạy `if *m.lock().unwrap() > 0 { *m.lock().unwrap() -= 1; }` trên `Mutex` khởi tạo bằng `1`, hai lần `lock` tách rời (có `yield_now` giữa hai lần để dễ lộ bug). Biên dịch không cảnh báo; trong lần chạy của người soạn kết quả cuối là `final = -1`. Mỗi thao tác riêng lẻ đều được lock bảo vệ — không có data race — nhưng khoảng giữa hai lần lock là khe hở logic. (Đây là một lần quan sát, kết quả phụ thuộc scheduler; cách sửa là giữ một guard cho cả check và act.)
+**Check-then-act (atomicity violation, [chương 05](./05-concurrency-bug-va-deadlock.md)).** Bốn thread chạy `if *m.lock().unwrap() > 0 { *m.lock().unwrap() -= 1; }` trên `Mutex` khởi tạo bằng `1`, hai lần `lock` tách rời (có `yield_now` giữa hai lần để dễ lộ bug). Trong `orders`, hãy coi `m` là tồn kho còn một món và bốn request cùng đặt mua. Biên dịch không cảnh báo; trong lần chạy của người soạn kết quả cuối là `final = -1`, tức bán lố hai món. Mỗi thao tác riêng lẻ đều được lock bảo vệ, không có data race, nhưng khoảng giữa hai lần lock là khe hở logic. (Đây là một lần quan sát, kết quả phụ thuộc scheduler; cách sửa là giữ một guard cho cả check và act.)
 
 **Deadlock thứ tự lock ([chương 05](./05-concurrency-bug-va-deadlock.md)).** Thread A giữ `a` rồi xin `b`; thread chính giữ `b` rồi xin `a`, mỗi bên ngủ 100 ms giữa hai lần lock. Biên dịch được; chạy thật bị treo cho tới khi `timeout 3` kill (exit 124). Type system không thấy lỗi này; phòng bằng quy ước thứ tự lock, hoặc giữ lock ngắn, hoặc dùng `try_lock` có chiến lược lùi (nhận xét của người soạn).
 
@@ -440,7 +506,7 @@ Hai ví dụ chạy thật, hoàn toàn safe Rust:
 - `spawn` đòi `F: Send + 'static`: `'static` vì thread có thể sống lâu hơn nơi tạo ra nó; `Send` vì closure và kết quả đi qua ranh giới thread. `thread::scope` thay `'static` bằng `'scope` nhờ bảo đảm join cuối scope.
 - Drop `JoinHandle` là detach; panic của thread con hiện ra ở `join()` dưới dạng `Err`.
 - `T: Sync` ⇔ `&T: Send`. Cả hai là `unsafe auto trait`: tự suy từ thành phần; `unsafe impl` là lời hứa mà compiler không kiểm.
-- `Rc` không `Send`/`Sync` (refcount không atomic); `Arc<T>` chỉ `Send + Sync` khi `T` cũng vậy — nên `Arc<Cell<i32>>` bị từ chối với `E0277`.
+- `Rc` không `Send`/`Sync` (refcount không atomic); `Arc<T>` chỉ `Send + Sync` khi `T` cũng vậy, nên `Arc<Cell<i32>>` bị từ chối với `E0277`.
 - `Cell`/`RefCell` là `!Sync` vì mutate qua `&self` không đồng bộ; `Mutex<T>` cần `T: Send` chứ không cần `Sync` vì `&T` chỉ được đưa cho một thread tại một thời điểm; `RwLock<T>` cần cả hai.
 - `MutexGuard` là RAII và `!Send`; poisoning lan truyền panic, chỉ mang tính tư vấn; `RwLock` chỉ poisoned khi panic ở chế độ ghi.
 - `OnceLock` (ghi một lần, `set`/`get_or_init`) và `LazyLock` (lười ở lần deref đầu) khởi tạo global an toàn qua thread.
@@ -466,7 +532,7 @@ Hai ví dụ chạy thật, hoàn toàn safe Rust:
 3. Vì sao `impl Send`/`impl Sync` thủ công phải là `unsafe`?
 <details><summary>Đáp án</summary>
 
-Code unsafe khác được quyền giả định chúng đúng, và cài sai có thể gây UB[^nomicon-unsafe][^nomicon-send-ub]; compiler không kiểm lời hứa của `unsafe impl`.
+Code unsafe khác được quyền giả định chúng đúng[^nomicon-unsafe]. Cài sai có thể gây UB[^nomicon-send-ub]; compiler không kiểm lời hứa của `unsafe impl`.
 
 </details>
 
@@ -542,7 +608,6 @@ Có. Rust chỉ bảo đảm không data race[^nomicon-race-def]; race condition
 [^std-send-auto]: Rust std 1.95.0, `std::marker::Send` — <https://doc.rust-lang.org/1.95.0/std/marker/trait.Send.html> — "pub unsafe auto trait Send { }"
 [^nomicon-auto]: The Rustonomicon, Send and Sync — <https://doc.rust-lang.org/1.95.0/nomicon/send-and-sync.html> — "if a type is composed entirely of Send or Sync types, then it is Send or Sync."
 [^book-sendsync-manual]: The Rust Programming Language, 16.4 Extensible Concurrency with Sync and Send — <https://doc.rust-lang.org/1.95.0/book/ch16-04-extensible-concurrency-sync-and-send.html> — "As marker traits, they don’t even have any methods to implement."
-[^std-send-auto2]: Rust std 1.95.0, `std::marker::Send` — <https://doc.rust-lang.org/1.95.0/std/marker/trait.Send.html> — "This trait is automatically implemented when the compiler determines it’s appropriate."
 [^nomicon-unsafe]: The Rustonomicon, Send and Sync — <https://doc.rust-lang.org/1.95.0/nomicon/send-and-sync.html> — "they're unsafe traits. This means that they are unsafe to implement, and other unsafe code can assume that they are correctly implemented."
 [^nomicon-send-ub]: The Rustonomicon, Send and Sync — <https://doc.rust-lang.org/1.95.0/nomicon/send-and-sync.html> — "Incorrectly implementing Send or Sync can cause Undefined Behavior."
 [^nomicon-exceptions]: The Rustonomicon, Send and Sync — <https://doc.rust-lang.org/1.95.0/nomicon/send-and-sync.html> — "raw pointers are neither Send nor Sync (because they have no safety guards). UnsafeCell isn't Sync (and therefore Cell and RefCell aren't)."
@@ -554,8 +619,6 @@ Có. Rust chỉ bảo đảm không data race[^nomicon-race-def]; race condition
 [^nomicon-rc]: The Rustonomicon, Send and Sync — <https://doc.rust-lang.org/1.95.0/nomicon/send-and-sync.html> — "Rc isn't Send or Sync (because the refcount is shared and unsynchronized)."
 [^std-sync-rc]: Rust std 1.95.0, `std::marker::Sync` — <https://doc.rust-lang.org/1.95.0/std/marker/trait.Sync.html> — "Given any reference &Rc\<T>, you can clone a new Rc\<T>, modifying the reference counts in a non-atomic way."
 [^std-arc]: Rust std 1.95.0, `std::sync::Arc` — <https://doc.rust-lang.org/1.95.0/std/sync/struct.Arc.html> — "Unlike Rc\<T>, Arc\<T> uses atomic operations for its reference counting. This means that it is thread-safe."
-[^book-arc]: The Rust Programming Language, 16.3 Shared-State Concurrency — <https://doc.rust-lang.org/1.95.0/book/ch16-03-shared-state.html> — "Arc\<T> is a type like Rc\<T> that is safe to use in concurrent situations."
-[^atomics-arc]: Rust Atomics and Locks, ch.1 Basics of Rust Concurrency — <https://marabos.nl/atomics/basics.html> — "It’s identical to Rc, except it guarantees that modifications to the reference counter are indivisible atomic operations, making it safe to use it with multiple threads."
 [^std-arc-bound]: Rust std 1.95.0, `std::sync::Arc` — <https://doc.rust-lang.org/1.95.0/std/sync/struct.Arc.html> — "Arc\<T> will implement Send and Sync as long as the T implements Send and Sync."
 [^std-cell-rule]: Rust std 1.95.0, module `std::cell` — <https://doc.rust-lang.org/1.95.0/std/cell/index.html> — "Rust memory safety is based on this rule: Given an object T, it is only possible to have one of the following: Several immutable references (&T) to the object (also known as aliasing). One mutable reference (&mut T) to the object (also known as mutability)."
 [^std-cell-interior]: Rust std 1.95.0, module `std::cell` — <https://doc.rust-lang.org/1.95.0/std/cell/index.html> — "We say these cell types provide ‘interior mutability’ (mutable via &T), in contrast with typical Rust types that exhibit ‘inherited mutability’ (mutable only via &mut T)."

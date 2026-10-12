@@ -20,17 +20,17 @@ Page cache và `O_DIRECT` thuộc [chương 04](./04-page-cache-va-direct-io.md)
 
 ## 1. Vấn đề: biến một mảng block thành cây thư mục (Q1)
 
-> **Trả lời ngắn.** vsfs chia đĩa thành các block bằng nhau[^ost-4kb] và dành các vùng: superblock, inode bitmap, data bitmap, inode table, data region. Data region giữ dữ liệu người dùng[^ost-dr]; inode table là mảng inode trên đĩa[^ost-itable]; hai bitmap đánh dấu inode/block đang rảnh hay đang dùng[^ost-bitmap]; superblock giữ thông tin về chính file system[^ost-super] và được đọc đầu tiên khi mount[^ost-mount].
+> **Trả lời ngắn.** vsfs chia đĩa thành các block bằng nhau, mỗi block 4 KiB[^ost-4kb], rồi dành các block đó cho năm vùng: superblock, inode bitmap, data bitmap, inode table và data region. Data region giữ dữ liệu người dùng, và đó là phần lớn đĩa[^ost-dr]. Inode table là mảng inode nằm trên đĩa[^ost-itable]. Hai bitmap đánh dấu inode hoặc block nào đang rảnh, đang dùng[^ost-bitmap]. Superblock giữ thông tin về chính file system[^ost-super]. Nó cũng là thứ được đọc đầu tiên khi mount[^ost-mount].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đĩa như một kho có các ô đánh số; file system là sổ kho cho biết ô nào còn trống, món hàng nào nằm ô nào, và tên món hàng ghi ở đâu.
+*Với service của bạn.* Hãy hình dung `thumbs`, một service Rust chạy trên Linux: người dùng upload ảnh, nó resize rồi lưu mỗi thumbnail thành một file nhỏ dưới `/data/thumbs/` trên một volume ext4. Request nào cần ảnh thì mở lại đúng file đó, và mỗi đêm service còn xuất một file export vài GB. Ta sẽ bám theo `thumbs` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Ở phía code, `thumbs` chỉ thấy `open`, `read`, `write` trên đường dẫn; còn đĩa bên dưới chỉ biết đọc ghi từng block đánh số. Câu hỏi của mục này: cái gì nằm trên đĩa để một mảng block trở thành cây thư mục, nơi `/data/thumbs/42.jpg` có nghĩa?
 
-Đĩa chỉ biết đọc/ghi các block đánh số. File system phải trả lời hai việc: *cấu trúc dữ liệu trên đĩa* và *phương thức truy cập* (open/read/write ánh xạ lên cấu trúc đó như thế nào). OSTEP dạy cả hai qua một thiết kế đồ chơi tên **vsfs** (very simple file system).
+File system phải trả lời hai việc. Một là *cấu trúc dữ liệu trên đĩa*: dữ liệu và metadata xếp ra sao. Hai là *phương thức truy cập*: `open`, `read`, `write` ánh xạ lên cấu trúc đó thế nào. OSTEP dạy cả hai qua một thiết kế đồ chơi tên **vsfs** (very simple file system), và ta đi theo thiết kế này.
 
 ### 1.1. Bố cục vsfs
 
-OSTEP chia đĩa thành các block bằng nhau (4 KiB)[^ost-4kb] và chia thành các vùng; bố cục dưới đây theo thứ tự các vùng trong sách.
+vsfs chia đĩa thành các block 4 KiB bằng nhau[^ost-4kb], rồi gán mỗi block vào một vùng. Hình dưới là thứ tự các vùng như trong sách.
 
 ```mermaid
 flowchart LR
@@ -39,20 +39,18 @@ flowchart LR
 
 Mỗi vùng làm một việc:
 
-| Vùng | Giữ gì | Ghi chú theo OSTEP |
-|---|---|---|
-| Data region | nội dung file (và nội dung thư mục) | phần lớn đĩa |
-| Inode table | mảng inode, mỗi inode là metadata của một file | inode thường nhỏ, 128 hoặc 256 byte; với 256 byte thì một block 4 KiB chứa 16 inode[^ost-inode16] |
-| Inode bitmap, data bitmap | mỗi bit cho biết inode/block tương ứng đang rảnh (0) hay đang dùng (1)[^ost-bitmap] | OSTEP dùng nguyên một block 4 KiB cho mỗi bitmap cho đơn giản dù chỉ có 80 inode[^ost-bitmapblk] |
-| Superblock | thông tin về chính file system: số inode, số data block, inode table bắt đầu ở đâu, và có thể có magic number nhận diện loại file system[^ost-super] | đọc đầu tiên khi mount[^ost-mount] |
+- **Data region** giữ nội dung file, và cả nội dung thư mục. Đây là phần lớn đĩa[^ost-dr].
+- **Inode table** là mảng inode, mỗi inode là metadata của một file. Inode thường nhỏ, 128 hoặc 256 byte; với 256 byte thì một block 4 KiB chứa 16 inode[^ost-inode16].
+- **Inode bitmap và data bitmap**: mỗi bit cho biết inode hoặc block tương ứng đang rảnh (0) hay đang dùng (1)[^ost-bitmap]. vsfs dành nguyên một block 4 KiB cho mỗi bitmap cho đơn giản, dù chỉ có 80 inode[^ost-bitmapblk].
+- **Superblock** giữ thông tin về chính file system: số inode, số data block, inode table bắt đầu ở đâu, và có thể có magic number để nhận diện loại file system[^ost-super]. Khi mount, OS đọc superblock đầu tiên để khởi tạo các tham số, rồi mới gắn volume vào cây file system[^ost-mount].
 
 <details><summary>Đi sâu: ví dụ phân vùng 64 block của OSTEP</summary>
 
-Ví dụ trong sách là phân vùng 64 block: superblock, hai bitmap, 5 block inode table (80 inode), 56 block data region[^ost-inode16][^ost-super]. Các con số chỉ là của ví dụ.
+Ví dụ trong sách là một phân vùng 64 block, trong đó có 80 inode và 56 data block[^ost-bitmapblk]. Phần còn lại là một block superblock, hai block bitmap và 5 block inode table; 5 block × 16 inode mỗi block đúng bằng 80 inode[^ost-inode16]. Các con số chỉ là của ví dụ.
 
 </details>
 
-**Quay lại Q1:** vsfs gồm superblock, hai bitmap, inode table và data region; mỗi vùng giữ đúng một loại thông tin.
+**Quay lại Q1:** vsfs gồm superblock, hai bitmap, inode table và data region, mỗi vùng giữ đúng một loại thông tin. Với `thumbs`, mỗi thumbnail mới là một inode cộng một vài data block trong những vùng đó, còn tên `42.jpg` nằm ở chỗ khác (mục 4).
 
 ## 2. Inode: nơi chứa mọi thứ trừ tên (Q2)
 
@@ -60,47 +58,53 @@ Ví dụ trong sách là phân vùng 64 block: superblock, hai bitmap, 5 block i
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): i-number như số thứ tự trong sổ đăng ký; biết số và độ dày mỗi bản ghi thì mở thẳng tới trang cần tìm, không phải lật từ đầu.
+*Với service `thumbs`.* Volume của `thumbs` có hàng triệu file, nghĩa là hàng triệu inode. Mỗi lần `open` xong, kernel cần metadata của đúng một file trong số đó, và không thể duyệt từng inode để tìm. Nó cần một công thức. Mục này cho thấy công thức ấy, và vì sao nó chỉ dùng được vì inode là mảng.
 
 ### 2.1. Từ i-number đến byte trên đĩa
 
-Inode (index node) là cấu trúc giữ metadata của một file: các data block của file, độ dài, chủ sở hữu và quyền truy cập, thời gian truy cập/sửa[^ost-meta]. Mỗi inode được gọi bằng một số — i-number — dùng làm chỉ số vào mảng inode trên đĩa[^ost-inumidx]. Trong vsfs và các file system đơn giản khác, từ i-number tính thẳng ra được vị trí inode trên đĩa[^ost-inum]. Tính lại ví dụ của OSTEP (inode 256 byte, inode table bắt đầu ở 12 KiB): offset trong vùng inode là 32 × 256 = 8192 byte[^ost-ino8192], cộng 12 KiB được 20 KiB[^ost-ino32] — block inode có chỉ số 32 / 16 = 2, sector 20480 / 512 = 40 (phép tính của người soạn). Vì inode nhỏ nằm trong block lớn hơn[^ost-inblock], đọc *một* inode là đọc *cả block* chứa nó (suy luận của người soạn).
+Inode (index node) là cấu trúc giữ metadata của một file: các data block của file nằm đâu, độ dài, chủ sở hữu và quyền truy cập, thời gian truy cập và sửa[^ost-meta]. Tên file không có trong đó (mục 4 giải thích tại sao). Mỗi inode mang một số, i-number, làm chỉ số vào mảng inode trên đĩa[^ost-inumidx]. Vì vậy ở vsfs và các file system đơn giản khác, biết i-number là tính thẳng ra inode nằm ở đâu[^ost-inum].
+
+Ta thử với ví dụ của OSTEP: inode dài 256 byte, inode table bắt đầu ở 12 KiB, cần inode số 32. Offset trong vùng inode là 32 × 256 = 8192 byte[^ost-ino8192]. Cộng với 12 KiB đầu vùng thì ra byte 20 KiB, chính là block chứa inode đó[^ost-ino32]. Tính tiếp (phép tính của người soạn): một block 4 KiB chứa 16 inode, nên đó là block thứ 32 / 16 = 2 của inode table, và sector là 20480 / 512 = 40.
+
+Có một hệ quả cần nhớ. Inode chỉ vài trăm byte mà nằm trong một block lớn hơn nhiều[^ost-inblock], và đĩa đọc ghi theo block, nên đọc *một* inode là đọc *cả block* chứa nó (suy luận của người soạn).
 
 <details><summary>Đi sâu: công thức của ext4, kích thước inode, quan sát <code>debugfs</code></summary>
 
-ext4 dùng cùng ý tưởng nhưng inode table được chia theo block group. Tài liệu kernel ghi: mỗi block group có `s_inodes_per_group` inode; vì inode 0 không tồn tại, công thức tìm group là `bg = (inode_num - 1) / s_inodes_per_group`[^e4-find], và địa chỉ byte trong inode table của group là `offset = index * s_inode_size`[^e4-off], với `index = (inode_num - 1) % s_inodes_per_group`.
+ext4 dùng cùng ý tưởng, nhưng inode table bị chia theo block group: mỗi group có `s_inodes_per_group` inode. Inode 0 không tồn tại, nên group chứa một inode tính bằng `bg = (inode_num - 1) / s_inodes_per_group`[^e4-find]. Trong group đó, inode nằm ở byte `offset = index * s_inode_size` của inode table[^e4-off], với `index = (inode_num - 1) % s_inodes_per_group`.
 
-Trong ext4 mặc định, một bản ghi inode dài 256 byte (ext2/ext3 cố định 128 byte)[^e4-isize][^e4-isize128]. Trường `i_block` của inode có 60 byte và, tùy loại file, được dùng theo nhiều cách khác nhau[^e4-ibl].
+Mặc định, một bản ghi inode của ext4 dài 256 byte[^e4-isize]. ext2 và ext3 thì cố định 128 byte[^e4-isize128]. Trường `i_block` của inode dài 60 byte và dùng theo nhiều cách khác nhau tùy loại file[^e4-ibl].
 
-**Quan sát (chạy thật).** Trên một image ext4 16 MiB tạo bằng `mkfs.ext4` trong container (e2fsprogs 1.47.0), `dumpe2fs -h` báo block size 1024, 4096 inode, 2048 inode mỗi group, inode size 256. Sau khi ghi một file bằng `debugfs write`, file đó nhận inode số 12 (file tiếp theo là 13). Khớp bảng inode đặc biệt của docs: inode 11 là inode không-dành-riêng đầu tiên, thường là `lost+found`[^e4-special]. Lệnh `debugfs -R "imap <13>"` trả lời "Inode 13 is part of block group 0, located at block 137, offset 0x0000". Kiểm tra bằng công thức: inode table của group 0 bắt đầu ở block 134 (`dumpe2fs`), index = 12, offset = 12 × 256 = 3072 byte = 3 block 1 KiB, nên block 134 + 3 = 137 — khớp.
+**Quan sát (chạy thật).** Trên một image ext4 16 MiB tạo bằng `mkfs.ext4` trong container (e2fsprogs 1.47.0), `dumpe2fs -h` báo block size 1024, 4096 inode, 2048 inode mỗi group, inode size 256. Sau khi ghi một file bằng `debugfs write`, file đó nhận inode số 12 (file tiếp theo là 13). Con số này khớp bảng inode đặc biệt của docs: inode 11 là inode không-dành-riêng đầu tiên, thường là `lost+found`[^e4-special]. Lệnh `debugfs -R "imap <13>"` trả lời "Inode 13 is part of block group 0, located at block 137, offset 0x0000". Kiểm tra bằng công thức: inode table của group 0 bắt đầu ở block 134 (`dumpe2fs`), index = 12, offset = 12 × 256 = 3072 byte = 3 block 1 KiB, nên block 134 + 3 = 137, khớp.
 
 </details>
 
-**Quay lại Q2:** i-number là chỉ số vào mảng inode, nên vị trí inode tính trực tiếp từ i-number; ext4 làm thế theo block group.
+**Quay lại Q2:** i-number là chỉ số vào mảng inode, nên vị trí inode tính trực tiếp từ i-number; ext4 làm vậy theo từng block group. Nhờ thế `thumbs` mở file nào cũng tốn một phép tính, không phải một lần tìm kiếm.
 
 ## 3. Inode trỏ tới block: multi-level index và extent (Q3)
 
-> **Trả lời ngắn.** Inode giữ vài con trỏ trỏ thẳng tới block dữ liệu; file lớn hơn thì thêm indirect pointer, double indirect pointer — gọi là multi-level index[^ost-mlindex]. Extent gọn hơn: một extent là con trỏ đĩa cộng độ dài[^ost-extent], nên file liền khối chỉ cần một mục thay vì một con trỏ mỗi block[^e4-extent].
+> **Trả lời ngắn.** Inode giữ vài con trỏ trỏ thẳng tới block dữ liệu. File lớn hơn thì thêm indirect pointer, rồi double indirect pointer; cách làm này gọi là multi-level index[^ost-mlindex]. Extent gọn hơn: một extent là một con trỏ đĩa cộng độ dài[^ost-extent]. Vì vậy file liền khối chỉ cần một mục thay vì một con trỏ cho mỗi block[^e4-extent].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): con trỏ từng block giống ghi từng trang số bao nhiêu cho cuốn sách dày; extent chỉ ghi "từ trang 100, dài 1.000 trang".
+*Với service `thumbs`.* Service giữ hai loại file trái ngược nhau: hàng triệu thumbnail vài chục KB, và mỗi đêm một file export vài GB. Inode chỉ có chỗ cho vài con trỏ. Thumbnail thì vừa, còn file export thì lấy đâu ra chỗ cho từng ấy con trỏ? Mục này trả lời bằng hai cách, multi-level index và extent, rồi so sánh chúng.
 
 ### 3.1. Inode chỉ ra các block của file: multi-level index
 
-Inode giữ vài con số trỏ thẳng tới block dữ liệu (direct pointer), nhưng file lớn cần nhiều hơn chỗ inode có. OSTEP giải quyết bằng cây mất cân bằng: thêm một **indirect pointer** trỏ tới một block chỉ chứa các con số khác; thêm **double indirect** trỏ tới block chứa các indirect block; có thể thêm triple indirect. Cách này gọi là *multi-level index*[^ost-mlindex]. Với 12 direct pointer, một indirect và một double indirect, block 4 KiB và con trỏ 4 byte, OSTEP tính file tối đa "just over 4 GB"[^ost-4gb], tức `(12 + 1024 + 1024²) × 4 KiB`. Tính lại: 1.049.612 block × 4096 byte = 4.299.210.752 byte ≈ 4,004 GiB (phép tính của người soạn).
+Inode giữ một số ô con trỏ trỏ thẳng tới block dữ liệu (direct pointer), nhưng file lớn cần nhiều hơn số ô đó. OSTEP thêm một tầng: **indirect pointer** trỏ tới một block chỉ chứa toàn con trỏ, mỗi con trỏ lại trỏ tới một data block. **Double indirect** trỏ tới một block chứa các indirect block, và nếu cần nữa thì thêm triple indirect. Cây thu được lệch, có nhánh nông và nhánh sâu, nên sách gọi cách này là *multi-level index*[^ost-mlindex].
+
+Thử tính cho một inode có 12 direct pointer, một indirect và một double indirect, block 4 KiB, con trỏ 4 byte. Sách kết luận file lớn nhất khi đó là "just over 4 GB"[^ost-4gb]. Phép tính (của người soạn): `(12 + 1024 + 1024²) × 4 KiB` = 1.049.612 block × 4096 byte = 4.299.210.752 byte ≈ 4,004 GiB.
 
 ### 3.2. Vì sao imbalanced tree? Và vì sao extent
 
-Lý do hình cây lệch: OSTEP dẫn các nghiên cứu về file system, trong đó có phát hiện hầu hết file là nhỏ[^ost-small]; với 12 direct pointer, inode trỏ trực tiếp được 48 KB dữ liệu, file lớn hơn mới cần indirect block[^ost-48k].
+Cây lệch có lý do. OSTEP dẫn các nghiên cứu về file system, và một phát hiện trong đó là hầu hết file đều nhỏ[^ost-small]. Với 12 direct pointer, inode trỏ trực tiếp được 48 KB dữ liệu; file lớn hơn mới cần indirect block[^ost-48k]. Với `thumbs`, nghĩa là thumbnail dưới 48 KB chỉ cần direct pointer, còn file export mới đi qua các tầng indirect (nhận xét của người soạn).
 
-Tuy vậy, tài liệu ext4 nêu nhược điểm: ngay cả với một file *liền khối*, vẫn phải điền rất nhiều dữ liệu ánh xạ[^e4-ind-bad]. **Extent** là lời giải: một extent là *con trỏ đĩa cộng độ dài (số block)*[^ost-extent]. Tài liệu ext4 minh họa: cấp phát liên tục 1.000 block theo sơ đồ cũ cần indirect block ánh xạ 1.000 mục, còn với extent chỉ cần một `struct ext4_extent` với `ee_len = 1000`[^e4-extent].
+Nhưng đúng ở file export thì cách này bắt đầu tốn. Tài liệu ext4 chỉ ra rằng ngay cả với một file *liền khối*, file system vẫn phải điền rất nhiều dữ liệu ánh xạ[^e4-ind-bad]. File vài GB nằm liền nhau trên đĩa vẫn cần hàng triệu con trỏ, mỗi con trỏ một block 4 KiB (phép tính của người soạn), trong khi thông tin thực sự cần chỉ là "bắt đầu từ đâu, dài bao nhiêu". Đó chính là **extent**: một con trỏ đĩa cộng độ dài tính bằng block[^ost-extent]. Tài liệu ext4 lấy ví dụ cấp phát liên tục 1.000 block: sơ đồ cũ cần indirect block ánh xạ 1.000 mục, còn với extent chỉ cần một `struct ext4_extent` với `ee_len = 1000`[^e4-extent].
 
-Đánh đổi theo OSTEP: pointer linh hoạt nhất nhưng tốn nhiều metadata[^ost-extcmp]; extent gọn hơn nhưng kém linh hoạt, hiệu quả khi còn đủ chỗ trống để file nằm liền khối[^ost-extless]. Vì có thể khó tìm một vùng trống liền nhau, file system dựa trên extent thường cho phép nhiều extent[^ost-extmore]. OSTEP xếp ext2/ext3 vào nhóm multi-level index và ext4/XFS vào nhóm extent[^ost-who].
+Extent không miễn phí. Pointer là cách linh hoạt nhất nhưng tốn nhiều metadata cho mỗi file[^ost-extcmp]. Extent gọn hơn nhưng kém linh hoạt: nó hiệu quả khi đĩa còn đủ chỗ trống để file nằm liền khối[^ost-extless]. Vì không phải lúc nào cũng tìm được một dải trống đủ dài, file system dùng extent thường cho phép một file có nhiều extent[^ost-extmore]. Trong sách, ext4 và XFS thuộc nhóm dùng extent thay cho con trỏ đơn giản[^ost-who].
 
 <details><summary>Đi sâu: ext2/ext3, quan sát block map, cây extent của ext4</summary>
 
-Cách ext2/ext3 làm đúng như vậy: `i_block[0..11]` là direct, `i_block[12]` indirect, `[13]` double indirect, `[14]` triple indirect. Với block 4 KiB, các tầng phủ file block 0–11, 12–1035, 1036–1049611, và 1049612–1074791436 (docs ghi các biên này)[^e4-ind-ranges][^e4-ind-triple]. Phép tính của người soạn: 12 + 1024 + 1024² + 1024³ = 1.074.791.436 block (theo quy ước đánh số từ 0 của các tầng trên, chỉ số cuối phải là ...435; docs lệch 1), × 4 KiB ≈ 4,004 TiB, tức khoảng 4 TiB.
+ext2 và ext3 làm đúng theo kiểu multi-level index: `i_block[0..11]` là direct, `i_block[12]` là indirect, `[13]` là double indirect, `[14]` là triple indirect. Với block 4 KiB, ba tầng đầu phủ file block 0–11, 12–1035 và 1036–1049611[^e4-ind-ranges]. Tầng triple indirect phủ 1049612–1074791436[^e4-ind-triple]. Phép tính của người soạn: 12 + 1024 + 1024² + 1024³ = 1.074.791.436 block (theo quy ước đánh số từ 0 của các tầng trên, chỉ số cuối phải là ...435; docs lệch 1), nhân 4 KiB được khoảng 4,004 TiB, tức khoảng 4 TiB.
 
 **Quan sát (chạy thật).** Tạo ext2 block 1 KiB (256 con trỏ mỗi indirect block), ghi file 300 KiB bằng `debugfs write`, rồi `debugfs stat` in:
 
@@ -110,9 +114,9 @@ BLOCKS:
 TOTAL: 303
 ```
 
-Đọc: 12 block direct, indirect 574 quản 256 block tiếp theo, double indirect 831 trỏ tới indirect 832 quản block 268–299; 300 block dữ liệu + 3 block metadata = `TOTAL: 303`.
+Đọc kết quả: 12 block direct; indirect 574 quản 256 block tiếp theo; double indirect 831 trỏ tới indirect 832, quản block 268–299. Tổng cộng 300 block dữ liệu và 3 block metadata, đúng `TOTAL: 303`.
 
-Extent trong ext4 được tổ chức thành **cây**: nút gốc nằm ngay trong `inode.i_block`, nên bốn extent đầu không cần block metadata thêm[^e4-root]; cây sâu tối đa 5 tầng[^e4-depth]. Inode phải đặt cờ extents (0x80000) để dùng tính năng này[^e4-flag]. Mỗi extent ghi độ dài trong `ee_len`; độ dài tối đa của extent đã khởi tạo là 32768 block[^e4-eelen] (với block 4 KiB là 32768 × 4096 byte = 128 MiB; với block 1 KiB chỉ 32 MiB — phép tính của người soạn).
+Trong ext4, extent được tổ chức thành **cây**. Nút gốc nằm ngay trong `inode.i_block`, nên bốn extent đầu không cần block metadata thêm[^e4-root]. Cây sâu tối đa 5 tầng[^e4-depth]. Inode phải đặt cờ extents (0x80000) thì mới dùng được tính năng này[^e4-flag]. Mỗi extent ghi độ dài trong `ee_len`, và extent đã khởi tạo dài tối đa 32768 block[^e4-eelen]. Với block 4 KiB đó là 32768 × 4096 byte = 128 MiB; với block 1 KiB chỉ 32 MiB (phép tính của người soạn).
 
 **Quan sát (chạy thật).** Trong image ext4 (block 1 KiB), `debugfs stat` trên file 3 MiB ghi vào image còn trống cho:
 
@@ -126,17 +130,17 @@ Một extent duy nhất phủ 3072 block, không cần block metadata nào, và 
 
 </details>
 
-**Quay lại Q3:** con trỏ nhiều tầng tối ưu cho file nhỏ; extent (con trỏ + độ dài) gọn hơn cho file liền khối.
+**Quay lại Q3:** con trỏ nhiều tầng tối ưu cho file nhỏ, còn extent (con trỏ cộng độ dài) gọn hơn cho file liền khối. Với `thumbs`, thumbnail chỉ cần direct pointer, còn file export liền khối là loại file extent sinh ra để phục vụ.
 
 ## 4. Thư mục: danh sách (tên, inode number) (Q4)
 
-> **Trả lời ngắn.** Thư mục là một loại file đặc biệt: có inode, kiểu "directory", và data block chứa danh sách cặp (tên, inode number)[^ost-dir][^ost-dirfile]. ext4 lưu thư mục dạng gần như tuyến tính[^e4-linear], hoặc dạng htree (btree băm) khi inode có cờ `EXT4_INDEX_FL`[^e4-htree].
+> **Trả lời ngắn.** Thư mục chỉ là một danh sách các cặp (tên, inode number)[^ost-dir]. File system lưu nó như một loại file đặc biệt: có inode, kiểu "directory" và data block[^ost-dirfile]. ext4 lưu thư mục dạng gần như tuyến tính[^e4-linear]. Khi inode có cờ `EXT4_INDEX_FL` thì thư mục chuyển sang dạng htree, tức btree băm[^e4-htree].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư mục như cuốn danh bạ; tra một cái tên trong danh bạ vài chục dòng thì lật hết cũng nhanh, danh bạ cả triệu dòng cần có chỉ mục.
+*Với service `thumbs`.* `thumbs` dồn thumbnail vào một thư mục, và mỗi lần lưu thumbnail mới, file system phải chắc chắn tên đó chưa tồn tại. Thư mục có vài chục file thì không sao; thư mục có cả triệu file thì sao? Mục này xem tên được lưu thế nào và tra ra sao.
 
-Bài toán: inode không chứa tên file. Tên nằm ở thư mục. OSTEP: thư mục chỉ là một danh sách các cặp (tên, inode number)[^ost-dir], và file system coi thư mục là một loại file đặc biệt: có inode, kiểu "directory", có data block trong data region[^ost-dirfile]. Vì tên có độ dài thay đổi, mỗi mục mang theo thêm `reclen` (tổng byte của mục, gồm cả chỗ thừa) và `strlen` (độ dài tên thật)[^ost-dirent]. Ví dụ của OSTEP, thư mục `dir` (inode 5):
+Trước hết, inode không chứa tên file. Tên nằm ở thư mục, nên thư mục phải ghi lại "tên này ứng với inode nào". Vì vậy nó chỉ là một danh sách cặp (tên, inode number)[^ost-dir]. File system coi nó là một loại file đặc biệt: có inode kiểu "directory" và có data block trong data region[^ost-dirfile]. Tên thì dài ngắn khác nhau, nên mỗi mục mang thêm hai số: `reclen`, tổng byte của mục gồm cả chỗ thừa, và `strlen`, độ dài tên thật[^ost-dirent]. Ví dụ của OSTEP, thư mục `dir` (inode 5):
 
 | inum | reclen | strlen | name |
 |---|---|---|---|
@@ -146,13 +150,15 @@ Bài toán: inode không chứa tên file. Tên nằm ở thư mục. OSTEP: th�
 | 13 | 12 | 4 | `bar` |
 | 24 | 36 | 28 | `foobar_is_a_pretty_longname` |
 
-Lưu ý: sách ghi `strlen` = 28 nhưng tên này đếm được 27 ký tự; sách không giải thích (suy luận của người soạn: có thể tính cả byte NUL).
+Lưu ý: sách ghi `strlen` = 28 nhưng tên này đếm được 27 ký tự, và sách không giải thích (suy luận của người soạn: có thể tính cả byte NUL).
 
-Danh sách tuyến tính tốt cho thư mục nhỏ, tệ cho thư mục triệu file vì tạo file phải quét hết để kiểm tra tên chưa tồn tại. OSTEP nêu XFS dùng B-tree cho thư mục, làm thao tác tạo file nhanh hơn so với danh sách phải quét toàn bộ[^ost-xfsdir]. ext4 dùng **htree**: nếu inode có cờ `EXT4_INDEX_FL` (0x1000) thì thư mục là một btree băm[^e4-htree]. Gốc cây luôn nằm ở block dữ liệu đầu tiên của thư mục[^e4-htree-root]. Tra tên: tính hash của tên, tìm leaf node chứa dải hash đó, tương tự tra B-tree khóa theo hash[^e4-htree2].
+Danh sách tuyến tính tốt cho thư mục nhỏ, nhưng tệ cho thư mục cả triệu file, vì mỗi lần tạo file phải quét hết để chắc chắn tên chưa tồn tại. XFS tránh việc đó bằng B-tree cho thư mục; sách nêu cách này làm thao tác tạo file nhanh hơn so với danh sách phải quét toàn bộ[^ost-xfsdir]. ext4 dùng **htree**: nếu inode có cờ `EXT4_INDEX_FL` (0x1000) thì thư mục là một btree băm[^e4-htree]. Gốc cây luôn nằm ở data block đầu tiên của thư mục[^e4-htree-root]. Tra một tên thì tính hash của tên, rồi tìm leaf node chứa dải hash đó, giống như tra B-tree khóa theo hash[^e4-htree2]. Nghĩa là thư mục thumbnail triệu file chỉ tra nhanh nếu nó đang dùng htree; nếu không thì mỗi lần tạo phải quét tuyến tính (suy luận của người soạn từ hai đoạn trên).
 
 <details><summary>Đi sâu: mục thư mục bị xóa, loại file trong mục, quan sát <code>htree</code></summary>
 
-Xóa file (`unlink()`) có thể để lại lỗ giữa thư mục[^ost-unlink]; ext4 đánh dấu mục không dùng bằng `inode = 0`[^e4-unused]. ext4 lưu thư mục ở dạng "gần như tuyến tính": mỗi block chứa một mảng mục[^e4-linear], và mục không bị cắt ngang ranh giới block[^e4-nosplit]. Một chi tiết hay: ext4 chép *loại file* vào mục thư mục (bình thường nằm trong inode) vì lý do hiệu năng[^e4-ftype]; hệ quả (suy luận của người soạn): `readdir` có thể biết đó là file hay thư mục mà không cần đọc inode.
+Xóa file (`unlink()`) có thể để lại một lỗ trống giữa thư mục[^ost-unlink]. ext4 đánh dấu mục không dùng bằng `inode = 0`[^e4-unused]. Dạng "gần như tuyến tính" của ext4 là mỗi block chứa một mảng mục[^e4-linear]. Mục thư mục không bị cắt ngang ranh giới block[^e4-nosplit].
+
+Một chi tiết hay: loại file bình thường nằm trong inode, nhưng ext4 chép thêm một bản vào mục thư mục vì lý do hiệu năng[^e4-ftype]. Hệ quả (suy luận của người soạn): `readdir` có thể biết một mục là file hay thư mục mà không cần đọc inode.
 
 **Quan sát (chạy thật).** Thư mục `d` tạo bằng `debugfs` với 300 file tên dài có `Flags: 0x80000` (chỉ extents). Sau `e2fsck -fD` cùng thư mục có `Flags: 0x81000`, tức đã thêm `EXT4_INDEX_FL`, và `debugfs htree_dump d` in ra nút gốc htree ("Indirect levels: 0"; số entry tùy độ dài tên). Ở đây chính `e2fsck -D` dựng index; ngưỡng kernel tự bật index thì chương không khẳng định.
 
@@ -162,21 +168,15 @@ Xóa file (`unlink()`) có thể để lại lỗ giữa thư mục[^ost-unlink]
 
 ## 5. Đường đi truy cập: đọc và ghi một file (Q5)
 
-> **Trả lời ngắn.** `open("/foo/bar")` phải đọc inode và dữ liệu thư mục của từng cấp dọc đường dẫn, nên I/O tỷ lệ với độ dài đường dẫn[^ost-pathcost]. `read` không đụng bitmap, vì bitmap chỉ được truy cập khi cần cấp phát[^ost-readnobitmap]. Một lần `write` có cấp phát tốn 5 I/O logic[^ost-write5], và tạo file tốn nhiều hơn[^ost-create].
+> **Trả lời ngắn.** `open("/foo/bar")` phải đọc inode và dữ liệu thư mục của từng cấp dọc đường dẫn, nên lượng I/O tỷ lệ với độ dài đường dẫn[^ost-pathcost]. `read` không đụng bitmap, vì bitmap chỉ được truy cập khi cần cấp phát[^ost-readnobitmap]. Một lần `write` có cấp phát tốn 5 I/O logic[^ost-write5]. Tạo file tốn nhiều hơn nữa[^ost-create].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tìm một tài liệu trong tủ hồ sơ lồng nhau phải mở từng ngăn theo thứ tự; muốn cất tài liệu mới còn phải tìm ô trống và ghi vào sổ kho.
-
-**Tìm chỗ trống.**
-
-File system phải biết inode và block nào còn rảnh[^ost-free]. vsfs dùng hai bitmap: tạo file thì tìm bit 0 trong inode bitmap, đặt thành 1 và rồi ghi bitmap lên đĩa; block dữ liệu tương tự[^ost-free-use]. Lựa chọn khác là **free list** (superblock trỏ tới block rảnh đầu tiên, mỗi block rảnh trỏ tới block kế) của một số file system cũ; hệ thống hiện đại dùng cấu trúc tinh vi hơn như B-tree của XFS[^ost-freelist]. FFS chỉ ra ưu điểm của bitmap: dễ tìm một vùng trống lớn để cấp cho file[^ffs-bitmaps].
-
-Giả sử file system đã mount, superblock đã nằm trong bộ nhớ; mọi thứ khác còn trên đĩa.
+*Với service `thumbs`.* Mỗi request lấy thumbnail chạy `File::open("/data/thumbs/ab/42.jpg")` rồi `read`; mỗi request lưu thumbnail mới chạy `File::create` rồi `write`. Mục này đếm xem mỗi dòng đó biến thành bao nhiêu lần đọc ghi đĩa. Để gọn, ta đếm trên ví dụ `/foo/bar` của OSTEP, và giả sử file system đã mount, superblock đã nằm trong bộ nhớ, còn mọi thứ khác vẫn ở trên đĩa.
 
 ### 5.1. `open("/foo/bar")` rồi `read()`
 
-Mọi duyệt đường dẫn bắt đầu từ root `/`. Inode của root phải có số "well known"; trên hầu hết UNIX file system đó là **2**[^ost-root2] (ext4 cũng ghi inode 2 là root directory[^e4-root2]). FS đọc block chứa inode 2, dùng con trỏ trong đó đọc data block của root, tìm mục `foo` để lấy inode number (ví dụ 44), rồi lặp lại: đọc inode của `foo`, đọc data của `foo`, tìm `bar`. Bước cuối của `open()` là đọc inode của `bar`; FS kiểm tra quyền lần cuối, cấp một file descriptor trong bảng open-file của tiến trình rồi trả về[^ost-openend].
+Mọi lần duyệt đường dẫn bắt đầu từ root `/`, nên inode của root phải có một số ai cũng biết trước. Trên hầu hết UNIX file system, số đó là **2**[^ost-root2]. ext4 cũng ghi inode 2 là root directory[^e4-root2]. File system đọc block chứa inode 2, theo con trỏ trong đó đọc data block của root, và tìm mục `foo` để lấy inode number (ví dụ 44). Sau đó nó lặp lại: đọc inode của `foo`, đọc data của `foo`, tìm `bar`. Bước cuối của `open()` là đọc inode của `bar`, kiểm tra quyền lần cuối, cấp một file descriptor trong bảng open-file của process rồi trả về[^ost-openend].
 
 ```mermaid
 sequenceDiagram
@@ -198,13 +198,20 @@ sequenceDiagram
     Note over FS,D: close: không có I/O đĩa
 ```
 
-OSTEP cho biết: lượng I/O của `open` tỷ lệ với độ dài đường dẫn[^ost-pathcost], mỗi lần `read` một block phải xem inode, đọc block, rồi ghi lại inode để cập nhật thời gian truy cập[^ost-read], còn `close()` không gây I/O đĩa[^ost-close]. Đây là mô hình của sách; trên Linux, từ 2.6.30 kernel mặc định dùng `relatime`[^mount-relatime], chỉ cập nhật thời gian truy cập khi lần truy cập trước sớm hơn thời gian sửa/đổi[^mount-relatime2] hoặc đã quá 1 ngày[^mount-relatime3], nên nhiều `read` thực tế không kèm lần ghi inode đó (suy luận của người soạn).
+Từ sơ đồ đọc ra ba điều. Một: lượng I/O của `open` tỷ lệ với độ dài đường dẫn[^ost-pathcost]. Hai: mỗi lần `read` một block phải xem inode, đọc block, rồi ghi lại inode để cập nhật thời gian truy cập[^ost-read]. Ba: `close()` không gây I/O đĩa[^ost-close].
 
-Hiểu lầm hay gặp: nghĩ rằng đọc file cũng đọc bitmap. OSTEP nói rõ: các cấu trúc cấp phát như bitmap chỉ được truy cập khi cần cấp phát; inode, thư mục và indirect block đã đủ thông tin cho thao tác đọc[^ost-readnobitmap].
+Đó là mô hình của sách. Trên Linux thực tế có một khác biệt: từ 2.6.30, kernel mặc định dùng `relatime`[^mount-relatime]. Chế độ này chỉ cập nhật thời gian truy cập khi lần truy cập trước sớm hơn thời gian sửa hoặc đổi[^mount-relatime2]. Nó cũng cập nhật nếu thời gian truy cập cũ đã quá 1 ngày[^mount-relatime3]. Vì vậy nhiều lần `read` thực tế không kèm lần ghi inode ở sơ đồ trên (suy luận của người soạn).
+
+Một hiểu lầm hay gặp là đọc file cũng phải đọc bitmap. Không phải: bitmap và các cấu trúc cấp phát khác chỉ được truy cập khi cần cấp phát, còn inode, thư mục và indirect block đã đủ thông tin cho thao tác đọc[^ost-readnobitmap].
 
 ### 5.2. Tạo file và `write()`
 
-Ghi vào file khác đọc ở chỗ có thể phải cấp phát block (trừ khi ghi đè). Mỗi lần ghi có cấp phát, về logic, gồm 5 I/O: đọc data bitmap, ghi data bitmap, đọc inode, ghi inode, và ghi chính block dữ liệu[^ost-write5]. Tạo file đắt hơn nữa: đọc inode bitmap để tìm inode rảnh, ghi inode bitmap, ghi inode mới, ghi dữ liệu thư mục để gắn tên với inode number, và đọc rồi ghi inode của thư mục[^ost-create]; nếu thư mục phải lớn thêm thì còn thêm data bitmap và block thư mục mới. Với ví dụ tạo `/foo/bar` rồi ghi ba block 4 KiB, OSTEP đếm: 10 I/O cho việc duyệt đường dẫn và tạo file[^ost-create10], và mỗi write có cấp phát tốn 5 I/O[^ost-allocwrite].
+Ghi khác đọc ở chỗ phải cấp phát block (trừ khi ghi đè), mà muốn cấp phát thì file system phải biết inode và block nào còn rảnh[^ost-free]. vsfs dùng hai bitmap: tạo file thì tìm bit 0 trong inode bitmap, đặt thành 1 rồi ghi bitmap lên đĩa; với block dữ liệu cũng làm tương tự[^ost-free-use]. Cách khác là **free list**: superblock trỏ tới block rảnh đầu tiên, và mỗi block rảnh trỏ tới block kế. Một số file system đời đầu dùng cách này, còn hệ thống hiện đại dùng cấu trúc tinh vi hơn như B-tree của XFS[^ost-freelist]. Bitmap có ưu điểm là dễ tìm một vùng trống lớn để cấp cho file[^ffs-bitmaps].
+
+Với bitmap, một lần ghi có cấp phát về logic gồm 5 I/O: đọc data bitmap, ghi data bitmap, đọc inode, ghi inode, và ghi chính block dữ liệu[^ost-write5]. Tạo file đắt hơn nữa: đọc inode bitmap để tìm inode rảnh, ghi inode bitmap, ghi inode mới, ghi dữ liệu thư mục để gắn tên với inode number, rồi đọc và ghi inode của thư mục[^ost-create]. Nếu thư mục phải lớn thêm thì còn thêm data bitmap và block thư mục mới. Với ví dụ tạo `/foo/bar` rồi ghi ba block 4 KiB, OSTEP đếm được 10 I/O cho việc duyệt đường dẫn và tạo file[^ost-create10]. Mỗi write có cấp phát tốn thêm 5 I/O[^ost-allocwrite].
+
+Áp vào `thumbs`: một thumbnail 12 KiB là ba block 4 KiB, nên theo mô hình của sách mỗi lần lưu tốn 10 + 3 × 5 = 25 I/O logic (phép tính của người soạn). Con số này là trước khi cache và write buffering làm giảm, như phần Đi sâu bên dưới.
+
 <details><summary>Đi sâu: bảng timeline I/O, caching và write buffering</summary>
 
 Bảng timeline rút gọn theo hình của OSTEP (thứ tự thời gian từ trên xuống; "R" đọc, "W" ghi):
@@ -220,78 +227,88 @@ Bảng này là bản dựng lại của người soạn (tổng create = 10, m�
 
 **Giảm chi phí: caching và buffering.**
 
-"Làm sao giảm I/O?" — OSTEP trả lời: dùng bộ nhớ để cache các block quan trọng[^ost-cache]. Nếu không cache, mở file tốn ít nhất hai lần đọc cho mỗi cấp thư mục[^ost-nocache]. Hệ thống đời đầu dùng cache cố định (khoảng 10% bộ nhớ)[^ost-10pct]; hệ thống hiện đại gộp page bộ nhớ ảo và page file system thành **unified page cache**[^ost-unified]. (Page cache được phân tích kỹ ở [chương 04](./04-page-cache-va-direct-io.md).)
+Làm sao bớt từng ấy I/O? Câu trả lời của OSTEP là dùng bộ nhớ để cache các block quan trọng[^ost-cache]. Không cache thì mở file tốn ít nhất hai lần đọc cho mỗi cấp thư mục[^ost-nocache]. Hệ thống đời đầu dùng cache kích thước cố định, khoảng 10% bộ nhớ[^ost-10pct]; hệ thống hiện đại gộp page bộ nhớ ảo và page file system thành **unified page cache**[^ost-unified]. (Page cache được phân tích kỹ ở [chương 04](./04-page-cache-va-direct-io.md).)
 
-Với đọc, cache đủ lớn tránh được hẳn I/O; với ghi, dữ liệu vẫn phải xuống đĩa để bền, nên cache không "lọc" được write traffic như với read[^ost-readcache]. Dù vậy **write buffering** có lợi: gom nhiều cập nhật thành ít I/O hơn, cho phép sắp lịch I/O, và có khi bỏ hẳn I/O (tạo rồi xóa file ngay). OSTEP: sự lười biếng là một đức tính[^ost-lazy], và hầu hết file system hiện đại đệm ghi trong khoảng năm đến ba mươi giây[^ost-wbuf]. Cái giá là crash trong khoảng đó thì mất dữ liệu chưa xuống đĩa — đó là lý do có `fsync` (chương [06](./06-durability-trong-thuc-te.md)) và journaling (chương [05](./05-crash-consistency-va-journaling.md)).
+Với đọc, cache đủ lớn tránh được hẳn I/O. Ghi thì khác: dữ liệu vẫn phải xuống đĩa mới bền, nên cache không "lọc" được write traffic như với read[^ost-readcache]. Dù vậy **write buffering** vẫn có lợi: gom nhiều cập nhật thành ít I/O hơn, cho phép sắp lịch I/O, và có khi bỏ hẳn I/O (tạo rồi xóa file ngay). Sách kết luận sự lười biếng ở đây là một đức tính[^ost-lazy]. Vì vậy hầu hết file system hiện đại đệm ghi trong bộ nhớ khoảng năm đến ba mươi giây[^ost-wbuf]. Cái giá là nếu crash trong khoảng đó thì dữ liệu chưa xuống đĩa bị mất. Với `thumbs`, đó là lý do một thumbnail vừa ghi xong có thể mất khi máy mất điện nếu service không gọi `fsync` (nhận xét của người soạn); chủ đề này nằm ở chương [06](./06-durability-trong-thuc-te.md) và journaling ở chương [05](./05-crash-consistency-va-journaling.md).
 
 </details>
 
-**Quay lại Q5:** `open` đọc inode và dữ liệu từng cấp thư mục, `read` không đụng bitmap, còn `write` có cấp phát tốn 5 I/O logic.
+**Quay lại Q5:** `open` đọc inode và dữ liệu từng cấp thư mục, `read` không đụng bitmap, còn `write` có cấp phát tốn 5 I/O logic. Với `thumbs`, đường dẫn càng sâu thì mỗi `open` càng đắt, và mỗi thumbnail mới đắt hơn nhiều so với một lần đọc.
 
 ## 6. FFS: file system nhận biết đĩa (Q6)
 
-> **Trả lời ngắn.** FFS chia đĩa thành nhiều cylinder group (block group)[^ffs-cg], mỗi group có đủ các cấu trúc kiểu vsfs: chỗ cho inode, data block và cấu trúc theo dõi cái nào đang rảnh[^ffs-struct]. Phương châm: giữ những thứ liên quan ở gần nhau, và những thứ không liên quan ở xa nhau[^ffs-mantra]. ext4 thừa hưởng block group và các chính sách đặt chỗ tương tự[^e4-samebg].
+> **Trả lời ngắn.** FFS chia đĩa thành nhiều cylinder group, còn gọi là block group[^ffs-cg]. Mỗi group có đủ các cấu trúc kiểu vsfs: chỗ cho inode, data block và cấu trúc theo dõi cái nào đang rảnh[^ffs-struct]. Phương châm của FFS là giữ những thứ liên quan ở gần nhau, và những thứ không liên quan ở xa nhau[^ffs-mantra]. ext4 thừa hưởng block group và các chính sách đặt chỗ tương tự[^e4-samebg].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): FFS như chia kho thành các dãy; hồ sơ cùng dự án xếp chung một dãy để người thủ kho đỡ chạy đi chạy lại.
+*Với service `thumbs`.* `thumbs` lưu thumbnail của cùng một người dùng vào cùng một thư mục, và request sau hay đọc lại nhiều file trong đó. Nếu file system rải các file ấy khắp đĩa thì mỗi file có thể là một lần seek xa trên HDD (xem [chương 01](./01-thiet-bi-luu-tru.md)). FFS là lời giải đầu tiên cho chuyện này, bằng cách đặt chỗ có chủ ý. ext4 vẫn mang các ý tưởng đó, nên hiểu FFS là hiểu vì sao các file của `thumbs` được đặt như hiện tại.
 
 ### 6.1. Vấn đề và ý tưởng
 
-Nhóm Berkeley xây Fast File System (FFS)[^ffs-berk] với ý tưởng làm cấu trúc và chính sách cấp phát "disk aware" để tăng hiệu năng. Họ giữ nguyên giao diện (`open`, `read`, `write`…) và chỉ đổi cài đặt bên trong[^ffs-api].
+Một nhóm ở Berkeley xây Fast File System (FFS)[^ffs-berk] với ý tưởng làm cho cấu trúc dữ liệu và chính sách cấp phát "disk aware", để tăng hiệu năng. Họ giữ nguyên giao diện (`open`, `read`, `write`…) và chỉ đổi cài đặt bên trong[^ffs-api].
 
 ### 6.2. Cylinder group / block group
 
-FFS chia đĩa thành nhiều **cylinder group**[^ffs-cg] (cách gọi khác là **block group**, tên mà ext2/3/4 dùng). Đây là cơ chế trung tâm để FFS cải thiện hiệu năng: đặt hai file trong cùng một group thì truy cập lần lượt không gây seek xa[^ffs-bg]. Mỗi group có đủ bộ cấu trúc kiểu vsfs thu nhỏ: một bản sao superblock (vì độ tin cậy: một bản hỏng vẫn mount được bằng bản khác)[^ffs-sb], inode bitmap + data bitmap riêng[^ffs-percg], vùng inode, vùng dữ liệu.
+FFS chia đĩa thành nhiều **cylinder group**[^ffs-cg]; cách gọi khác là **block group**, tên mà ext2/3/4 dùng. Đây là cơ chế trung tâm để FFS cải thiện hiệu năng: đặt hai file trong cùng một group thì truy cập lần lượt không gây seek xa[^ffs-bg]. Mỗi group là một vsfs thu nhỏ, gồm:
+
+- một bản sao superblock, vì độ tin cậy: một bản hỏng thì vẫn mount được bằng bản khác[^ffs-sb];
+- inode bitmap và data bitmap riêng[^ffs-percg];
+- vùng inode và vùng dữ liệu.
 
 ### 6.3. Chính sách đặt chỗ
 
-Phương châm của FFS: giữ những thứ liên quan ở gần nhau, và giữ những thứ không liên quan ở xa nhau[^ffs-mantra]. Cụ thể:
+Từ phương châm "giữ những thứ liên quan ở gần nhau, những thứ không liên quan ở xa nhau"[^ffs-mantra], FFS rút ra hai quy tắc:
 
-- **Thư mục:** chọn group có ít thư mục đã cấp phát (để cân bằng) và nhiều inode rảnh (để sau này chứa nhiều file), đặt inode và data của thư mục ở đó[^ffs-dir].
+- **Thư mục:** chọn group có ít thư mục đã cấp phát (để cân bằng) và nhiều inode rảnh (để sau này chứa nhiều file), rồi đặt inode và data của thư mục ở đó[^ffs-dir].
 - **File:** đặt data block cùng group với inode của nó, và đặt các file cùng thư mục vào group của thư mục đó[^ffs-file].
 
-Ví dụ OSTEP: `/a/b`, `/a/c`, `/a/d` được đặt gần nhau, `/b/f` ở xa. Chính sách đối lập, trải đều inode qua mọi group, giữ data gần inode nhưng làm các file trong cùng thư mục tản ra nhiều group[^ffs-spread]. Cơ sở của FFS là lẽ thường[^ffs-sense], vì file cùng thư mục hay được truy cập cùng nhau[^ffs-together].
+Ví dụ OSTEP: `/a/b`, `/a/c`, `/a/d` được đặt gần nhau, còn `/b/f` ở xa. Chính sách đối lập là trải đều inode qua mọi group; nó vẫn giữ data gần inode, nhưng làm các file trong cùng một thư mục tản ra nhiều group[^ffs-spread]. Các quy tắc của FFS chỉ dựa trên lẽ thường[^ffs-sense]. File cùng thư mục hay được truy cập cùng nhau[^ffs-together]; sách lấy ví dụ biên dịch một loạt file rồi link chúng thành một file thực thi. Thumbnail của `thumbs` cùng thư mục cũng là loại truy cập như vậy.
 
 ### 6.4. Ngoại lệ file lớn (large-file exception)
 
-Nếu chỉ theo quy tắc trên, một file lớn sẽ lấp đầy cả block group nơi nó được đặt (và có thể nhiều hơn)[^ffs-large], khiến các file "liên quan" sau đó không còn chỗ — hỏng locality. FFS xử lý: sau khi cấp phát một số block đầu trong group (ví dụ 12 block, bằng số direct pointer của inode)[^ffs-large2], phần "chunk" lớn kế tiếp (ví dụ phần do indirect block đầu tiên trỏ tới) đặt sang group khác, rồi chunk kế sang group khác nữa. Trải file như vậy làm giảm hiệu năng đọc tuần tự[^ffs-seq], nhưng nếu chunk đủ lớn thì phần lớn thời gian là truyền dữ liệu và chỉ một phần nhỏ là seek giữa các chunk[^ffs-chunk]. Kỹ thuật giảm overhead bằng cách làm nhiều việc hơn cho mỗi lần trả overhead gọi là **amortization**[^ffs-amort].
+Quy tắc trên có một lỗ hổng: một file lớn sẽ lấp đầy cả block group nơi nó được đặt, và có thể cả group khác[^ffs-large]. Khi đó các file "liên quan" ghi sau không còn chỗ trong group ấy, tức là hỏng locality. Với `thumbs`, file export vài GB đặt cạnh thumbnail có thể ăn hết group của cả thư mục thumbnail đó (suy luận của người soạn).
+
+FFS xử lý bằng cách cắt file ra. Sau khi cấp phát một số block đầu trong group (ví dụ 12 block, bằng số direct pointer của inode)[^ffs-large2], phần "chunk" lớn kế tiếp (ví dụ phần do indirect block đầu tiên trỏ tới) được đặt sang group khác, rồi chunk kế sang group khác nữa. Trải file ra như vậy làm giảm hiệu năng đọc tuần tự[^ffs-seq]. Nhưng nếu chunk đủ lớn thì phần lớn thời gian là truyền dữ liệu, chỉ một phần nhỏ là seek giữa các chunk[^ffs-chunk]. Kỹ thuật giảm overhead bằng cách làm nhiều việc hơn cho mỗi lần trả overhead gọi là **amortization**[^ffs-amort].
+
 <details><summary>Đi sâu: ví dụ file lớn, allocator của ext4, flex_bg, quan sát <code>dumpe2fs</code></summary>
 
-Ví dụ của OSTEP: file `/a` 30 block; không có ngoại lệ thì nằm gọn trong group 0, với chunk 5 block thì trải ra sáu group[^ffs-ex]. Chunk cần lớn cỡ nào: với định vị 10 ms và truyền 40 MB/s, cần 409,6 KB mỗi lần seek để nửa thời gian là truyền dữ liệu[^ffs-409], và khoảng 3,6 MB để đạt 90% băng thông đỉnh[^ffs-90]. FFS thật không tính vậy mà bám theo inode: 12 direct block đầu cùng group với inode, mỗi indirect block cùng các block nó trỏ tới ở group khác, nên cứ 4 MB (1024 block 4 KB) sang group mới[^ffs-real].
+Ví dụ của OSTEP: file `/a` dài 30 block. Nếu không có ngoại lệ thì nó nằm gọn trong group 0; với chunk 5 block thì nó trải ra sáu group[^ffs-ex]. Chunk cần lớn cỡ nào? Với định vị 10 ms và truyền 40 MB/s, cần 409,6 KB mỗi lần seek để một nửa thời gian là truyền dữ liệu[^ffs-409]. Muốn đạt 90% băng thông đỉnh thì cần khoảng 3,6 MB[^ffs-90]. FFS thật không tính như vậy mà bám theo inode: 12 direct block đầu nằm cùng group với inode, mỗi indirect block cùng các block nó trỏ tới nằm ở một group khác, nên cứ 4 MB (1024 block 4 KB) file sang group mới[^ffs-real].
 
 **Pre-allocation và delayed allocation.**
 
-Ngoài *tìm* chỗ trống còn có *chính sách* chọn chỗ. OSTEP nêu heuristic **pre-allocation**: ext2/ext3 tìm một dãy block trống (ví dụ 8 block) khi file mới cần block, để bảo đảm một phần file liền nhau trên đĩa[^ost-prealloc]. ext4 nâng lên: *multi-block allocator* cấp đầu cơ 8 KiB cho file mới[^e4-alloc1], và **delayed allocation** — hoãn chọn vị trí đến khi các dirty buffer thực sự được ghi ra[^e4-delalloc].
+Ngoài việc *tìm* chỗ trống còn có *chính sách* chọn chỗ. ext2/ext3 dùng heuristic **pre-allocation**: khi file mới cần block, nó tìm một dãy block trống (ví dụ 8 block) để bảo đảm một phần file nằm liền nhau trên đĩa[^ost-prealloc]. ext4 đi xa hơn. *Multi-block allocator* cấp đầu cơ 8 KiB cho file mới[^e4-alloc1]. Còn **delayed allocation** hoãn chọn vị trí cho tới khi các dirty buffer thực sự được ghi ra[^e4-delalloc].
 
 **ext4 thừa hưởng gì.**
 
-Docs ext4 liệt kê "năm mẹo" cấp phát, gần như bản FFS + bổ sung: multi-block allocator (đầu cơ 8 KiB), delayed allocation, giữ data block cùng group với inode, đặt mọi inode trong một thư mục cùng group với thư mục "khi khả thi"[^e4-samebg], và chia đĩa thành các block group 128 MB[^e4-128]. Con số 128 MB ứng với block 4 KiB (32768 block); image block 1 KiB bên dưới có 8192 block mỗi group, tức 8 MiB (phép tính của người soạn). Có một "tật cố ý": khi thư mục được tạo trong root, inode allocator quét các group và đặt nó vào group ít tải nhất tìm được, để thư mục trải ra đĩa[^e4-spread].
+ext4 mượn nhiều từ FFS. Docs của nó liệt kê một loạt mẹo cấp phát: multi-block allocator (đầu cơ 8 KiB), delayed allocation, giữ data block cùng group với inode, và đặt mọi inode của một thư mục cùng group với thư mục đó "khi khả thi"[^e4-samebg]. Ngoài ra đĩa được chia thành các block group 128 MB[^e4-128]. Con số 128 MB ứng với block 4 KiB (32768 block); image block 1 KiB bên dưới có 8192 block mỗi group, tức 8 MiB (phép tính của người soạn). Có một "tật cố ý": khi thư mục được tạo trong root, inode allocator quét các group và đặt nó vào group ít tải nhất tìm được, để thư mục trải ra đĩa[^e4-spread].
 
-Về bố cục, bitmap và inode table "có thể ở bất cứ đâu", thậm chí bitmap sau inode table hoặc ở group khác (flex_bg)[^e4-bgpos]; các bản sao dự phòng superblock và group descriptor chỉ nằm ở *một số* group[^e4-layout].
+Về bố cục, bitmap và inode table "có thể ở bất cứ đâu": bitmap có thể nằm sau inode table, hoặc hai thứ nằm ở group khác nhau (flex_bg)[^e4-bgpos]. Các bản sao dự phòng của superblock và group descriptor chỉ nằm ở *một số* group[^e4-layout].
 
-**flex_bg.** Trong flexible block group, vài block group được gộp thành một nhóm logic; bitmap và inode table của tất cả group trong nhóm được dồn vào group đầu tiên của nhóm[^e4-flex]. Hiệu quả: metadata nằm gần nhau nên tải nhanh hơn, và file lớn có thể liền khối trên đĩa[^e4-flexeff]. Số group mỗi flex_bg là `2 ^ s_log_groups_per_flex`[^e4-flexn].
+**flex_bg.** Trong flexible block group, vài block group được gộp thành một nhóm logic; bitmap và inode table của tất cả group trong nhóm được dồn vào group đầu tiên của nhóm[^e4-flex]. Nhờ vậy metadata nằm gần nhau nên tải nhanh hơn, và file lớn có thể liền khối trên đĩa[^e4-flexeff]. Số group mỗi flex_bg là `2 ^ s_log_groups_per_flex`[^e4-flexn].
 
-
-**Quan sát (chạy thật).** `dumpe2fs` trên image 16 MiB cho: feature gồm `flex_bg extent dir_index metadata_csum ...`, "Flex block group size: 16", "Blocks per group: 8192". Group 0: `Block bitmap at 130`, `Inode bitmap at 132`, `Inode table at 134-645`. Group 1: `Block bitmap at 131 (bg #0 + 130)`, `Inode bitmap at 133 (bg #0 + 132)`, `Inode table at 646-1157`. Tức bitmap và inode table của group 1 nằm ngay cạnh của group 0, trong vùng của group 0 — đúng bố cục flex_bg docs mô tả.
+**Quan sát (chạy thật).** `dumpe2fs` trên image 16 MiB cho: feature gồm `flex_bg extent dir_index metadata_csum ...`, "Flex block group size: 16", "Blocks per group: 8192". Group 0: `Block bitmap at 130`, `Inode bitmap at 132`, `Inode table at 134-645`. Group 1: `Block bitmap at 131 (bg #0 + 130)`, `Inode bitmap at 133 (bg #0 + 132)`, `Inode table at 646-1157`. Tức bitmap và inode table của group 1 nằm ngay cạnh của group 0, trong vùng của group 0, đúng bố cục flex_bg docs mô tả.
 
 </details>
 
-**Quay lại Q6:** FFS đặt đồ liên quan gần nhau theo block group, có ngoại lệ cho file lớn; ext4 kế thừa block group và bổ sung flex_bg cùng allocator riêng.
+**Quay lại Q6:** FFS đặt đồ liên quan gần nhau theo block group, có ngoại lệ cho file lớn; ext4 kế thừa block group và bổ sung flex_bg cùng allocator riêng. Với `thumbs`, thumbnail cùng thư mục được kéo về gần nhau, còn file export được cắt thành chunk để không chiếm hết một group.
 
 ## 7. Inode hết trước dung lượng: `df -i` (Q7)
 
-> **Trả lời ngắn.** Tỷ lệ inode trên dung lượng của ext4 được chốt lúc tạo file system[^mke2fs-ratio]. Khi không còn chỗ cho file mới, `open(O_CREAT)` báo `ENOSPC`[^open-enospc]; ext4 trả `-ENOSPC` khi duyệt hết mọi group mà không có inode rảnh[^e4-enospc], nên hết inode thì tạo file thất bại dù data region còn chỗ (suy luận của người soạn từ source). Cách kiểm tra là `df -i`[^df-i].
+> **Trả lời ngắn.** Tỷ lệ inode trên dung lượng của ext4 được chốt lúc tạo file system[^mke2fs-ratio]. Khi không còn chỗ cho file mới, `open(O_CREAT)` báo `ENOSPC`[^open-enospc]. Source ext4 trả `-ENOSPC` khi duyệt hết mọi group mà không có inode rảnh[^e4-enospc], nên hết inode thì tạo file thất bại dù data region còn chỗ (suy luận của người soạn từ source). Cách kiểm tra là `df -i`[^df-i].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): kho còn nhiều ô trống nhưng hết phiếu đăng ký thì vẫn không nhận thêm món hàng mới.
+*Với service `thumbs`.* Vài tháng sau, `thumbs` bắt đầu ghi log `No space left on device` mỗi khi lưu thumbnail, trong khi `df -h` báo volume còn 60% trống. Dung lượng không thiếu. Thứ đã hết là inode: mỗi thumbnail là một file nên tốn một inode, dù chỉ vài KB dữ liệu. Mục này giải thích vì sao có thể hết inode trước khi hết block, và cách phát hiện sớm.
 
-Tỷ lệ inode trên dung lượng của ext4 bị chốt lúc tạo file system: `mke2fs` tạo một inode cho mỗi `bytes-per-inode` byte đĩa[^mke2fs-ratio], và không thể đổi tỷ lệ này sau khi đã tạo (resize thì đổi số inode để giữ nguyên tỷ lệ)[^mke2fs-fixed]; hoặc có thể chỉ định thẳng số inode bằng `-N`[^mke2fs-N]. Vsfs cũng vậy: inode table là vùng có kích thước cố định trong bố cục, hết inode rảnh thì không tạo được file dù data region còn chỗ (OSTEP: số inode trong vsfs chính là số file tối đa của file system đó[^ost-maxfiles]). Khi `open(O_CREAT)` không còn chỗ cho file mới, `open(2)` báo `ENOSPC`[^open-enospc]; man page chỉ nói "no room", còn source ext4 v6.8 (chi tiết cài đặt) trả `-ENOSPC` khi duyệt hết mọi group mà không có inode rảnh[^e4-enospc]. `statfs(2)` có `f_files` (tổng số inode) và `f_ffree` (số inode rảnh)[^statfs], còn `df -i` liệt kê thông tin inode thay cho thông tin block[^df-i].
+Lý do nằm ngay ở bố cục của §1. Inode table là một vùng có kích thước cố định, nên số file tối đa cũng cố định: OSTEP nói số inode của vsfs chính là số file tối đa của file system đó[^ost-maxfiles]. Hết inode rảnh thì không tạo thêm được file nào, dù data region còn nhiều chỗ (suy luận của người soạn).
+
+ext4 cũng vậy, và còn chốt tỷ lệ ngay lúc tạo: `mke2fs` tạo một inode cho mỗi `bytes-per-inode` byte đĩa[^mke2fs-ratio]. Tỷ lệ này không đổi được sau khi file system đã tạo; resize file system thì đổi số inode để giữ nguyên tỷ lệ[^mke2fs-fixed]. Nếu muốn khác mặc định, có thể chỉ định thẳng số inode bằng `-N`[^mke2fs-N].
+
+Về lỗi trả về: khi `open(O_CREAT)` không còn chỗ cho file mới, `open(2)` báo `ENOSPC`[^open-enospc]. Man page chỉ nói "no room"; còn source ext4 v6.8 (chi tiết cài đặt) trả `-ENOSPC` khi duyệt hết mọi group mà không có inode rảnh[^e4-enospc]. Để đo, `statfs(2)` trả `f_files` (tổng số inode) và `f_ffree` (số inode rảnh)[^statfs]. Từ dòng lệnh thì `df -i` liệt kê thông tin inode thay cho thông tin block[^df-i].
 
 Nhận xét của người soạn cho backend:
 
-- Các workload tạo rất nhiều file nhỏ (cache trên đĩa, thumbnail, mỗi object một file) tiêu inode nhanh hơn tiêu dung lượng; dashboard chỉ theo dõi "disk %" sẽ không thấy sắp hết. Hãy giám sát cả số inode rảnh, và với volume như vậy chọn `-i` hoặc `-N` ngay lúc `mkfs` vì không đổi được tỷ lệ sau đó.
+- Các workload tạo rất nhiều file nhỏ (cache trên đĩa, thumbnail, mỗi object một file) tiêu inode nhanh hơn tiêu dung lượng, và dashboard chỉ theo dõi "disk %" sẽ không thấy sắp hết. Hãy giám sát cả số inode rảnh, và với volume như vậy chọn `-i` hoặc `-N` ngay lúc `mkfs`, vì không đổi được tỷ lệ sau đó.
 
 <details><summary>Đi sâu: quan sát <code>mkfs.ext4 -N 16</code></summary>
 
@@ -299,11 +316,11 @@ Nhận xét của người soạn cho backend:
 
 </details>
 
-**Quay lại Q7:** inode là tài nguyên có số lượng cố định lúc tạo file system, nên có thể hết trước block.
+**Quay lại Q7:** inode là tài nguyên có số lượng cố định từ lúc tạo file system, nên có thể hết trước block. Với `thumbs`, hãy đưa `df -i` vào monitoring cùng với `df -h`.
 
 ## 8. Liên hệ với Rust
 
-Trên Unix, `std::os::unix::fs::MetadataExt` phơi bày kết quả `stat`: `ino()` trả inode number[^rust-ino], `blksize()` trả block size cho I/O của file system[^rust-blksize], còn `blocks()` trả số block đã cấp phát cho file, tính theo đơn vị 512 byte[^rust-blocks] — nên không phải số block theo block size của file system (suy luận của người soạn). Chương [08](./08-rust-va-luu-tru.md) nói rộng hơn.
+Service `thumbs` nhìn các khái niệm trên qua `std::os::unix::fs::MetadataExt`, trait phơi bày kết quả `stat` của Unix. `ino()` trả inode number[^rust-ino]. `blksize()` trả block size cho I/O của file system[^rust-blksize]. `blocks()` trả số block đã cấp phát cho file, tính theo đơn vị 512 byte[^rust-blocks]. Vì vậy `blocks()` không đếm theo block size của file system (suy luận của người soạn). Chương [08](./08-rust-va-luu-tru.md) nói rộng hơn.
 
 ```rust
 use std::fs::{self, File};
@@ -335,23 +352,23 @@ Chạy thật (rustc 1.95.0, Linux aarch64 trong container, thư mục `/tmp` n�
 /tmp/c03_sparse: ino=1338497 len=1073741825 blksize=4096 blocks512=8
 ```
 
-Đọc kết quả: file 100 byte chiếm 8 × 512 byte = 4 KiB, đúng một block (độ dài logic ≠ không gian cấp phát); file "thưa" dài hơn 1 GiB cũng chỉ chiếm một block. Chỉ khẳng định cho lần chạy này, trên filesystem dưới overlay mà tôi không xác định được loại.
+Đọc kết quả: file 100 byte chiếm 8 × 512 byte = 4 KiB, đúng một block, nên độ dài logic không phải là không gian cấp phát. File "thưa" dài hơn 1 GiB cũng chỉ chiếm một block. Chỉ khẳng định cho lần chạy này, trên filesystem dưới overlay mà tôi không xác định được loại.
 
 ## Tóm tắt
 
-- vsfs: superblock + inode bitmap + data bitmap + inode table + data region; inode không chứa tên, từ i-number tính ra vị trí inode; bitmap chỉ dùng khi cấp phát.
-- Multi-level index tối ưu cho file nhỏ; extent (con trỏ + độ dài) gọn hơn cho file liền khối, ext4 lưu dạng cây, bốn extent đầu nằm trong inode.
-- Thư mục là file đặc biệt chứa (tên, inode number); ext4: danh sách tuyến tính hoặc htree khi có `EXT4_INDEX_FL`.
-- `open` tốn I/O tỷ lệ với độ dài đường dẫn; write có cấp phát tốn 5 I/O logic; cache và write buffering giảm chi phí, đổi lại rủi ro mất dữ liệu khi crash.
-- FFS: block group có bitmap và inode riêng; "đồ liên quan ở gần nhau", ngoại lệ file lớn trải qua nhiều group, bù bằng amortization. ext4 thừa hưởng: block group, flex_bg, multi-block allocator, delayed allocation.
-- Tỷ lệ inode/dung lượng chốt lúc tạo file system; hết inode thì `open(O_CREAT)` báo `ENOSPC` dù còn nhiều block. Theo dõi `df -i`.
+- vsfs gồm superblock, inode bitmap, data bitmap, inode table và data region. Inode không chứa tên, vị trí inode tính từ i-number, và bitmap chỉ dùng khi cấp phát.
+- Multi-level index tối ưu cho file nhỏ. Extent (con trỏ cộng độ dài) gọn hơn cho file liền khối; ext4 lưu extent dạng cây, bốn extent đầu nằm ngay trong inode.
+- Thư mục là file đặc biệt chứa các cặp (tên, inode number). ext4 dùng danh sách tuyến tính, hoặc htree khi inode có `EXT4_INDEX_FL`.
+- `open` tốn I/O tỷ lệ với độ dài đường dẫn, và write có cấp phát tốn 5 I/O logic. Cache và write buffering giảm chi phí, đổi lại rủi ro mất dữ liệu khi crash.
+- FFS cho mỗi block group bitmap và inode riêng, theo phương châm "đồ liên quan ở gần nhau". File lớn là ngoại lệ: nó được trải qua nhiều group và bù lại bằng amortization. ext4 thừa hưởng block group, flex_bg, multi-block allocator và delayed allocation.
+- Tỷ lệ inode trên dung lượng được chốt lúc tạo file system, nên hết inode thì `open(O_CREAT)` báo `ENOSPC` dù còn nhiều block. Hãy theo dõi `df -i`.
 
 ## Câu hỏi tự kiểm tra
 
 1. Trong vsfs, thông tin nào nằm ở superblock, và vì sao nó được đọc trước tiên khi mount?
 <details><summary>Đáp án</summary>
 
-Số inode, số data block, vị trí inode table, magic number[^ost-super]; mount đọc nó để khởi tạo tham số rồi gắn volume vào cây[^ost-mount].
+Số inode, số data block, vị trí inode table và magic number[^ost-super]. Mount đọc nó để khởi tạo tham số rồi mới gắn volume vào cây[^ost-mount].
 
 </details>
 
@@ -365,42 +382,42 @@ Số inode, số data block, vị trí inode table, magic number[^ost-super]; mo
 3. Mô tả các lần đọc đĩa khi `open("/foo/bar")` với cache lạnh.
 <details><summary>Đáp án</summary>
 
-Inode root (số 2[^ost-root2]) → data root (tìm `foo`) → inode `foo` → data `foo` (tìm `bar`) → inode `bar`; I/O tỷ lệ với độ dài đường dẫn[^ost-pathcost].
+Inode root (số 2[^ost-root2]), rồi data root (tìm `foo`), inode `foo`, data `foo` (tìm `bar`) và cuối cùng inode `bar`. Số lần I/O tỷ lệ với độ dài đường dẫn[^ost-pathcost].
 
 </details>
 
 4. Vì sao một write có cấp phát block cần 5 I/O logic?
 <details><summary>Đáp án</summary>
 
-Đọc+ghi data bitmap, đọc+ghi inode, ghi block dữ liệu[^ost-write5].
+Đọc và ghi data bitmap, đọc và ghi inode, ghi block dữ liệu[^ost-write5].
 
 </details>
 
 5. Extent giải quyết điều gì mà block map không giải quyết? Điều kiện để extent hiệu quả?
 <details><summary>Đáp án</summary>
 
-Một file liền khối chỉ cần một (con trỏ, độ dài) thay vì một con trỏ mỗi block[^e4-extent]; hiệu quả khi còn đủ chỗ trống để file nằm liền khối[^ost-extless].
+Một file liền khối chỉ cần một (con trỏ, độ dài) thay vì một con trỏ cho mỗi block[^e4-extent]. Extent hiệu quả khi còn đủ chỗ trống để file nằm liền khối[^ost-extless].
 
 </details>
 
 6. FFS đặt thư mục và file như thế nào? Tại sao có ngoại lệ file lớn?
 <details><summary>Đáp án</summary>
 
-Thư mục vào group ít thư mục và nhiều inode rảnh[^ffs-dir]; file cùng group với inode và với thư mục cha[^ffs-file]. File lớn lấp đầy cả group, hỏng locality[^ffs-large], nên được trải theo chunk đủ lớn để amortize seek[^ffs-amort].
+Thư mục vào group ít thư mục và nhiều inode rảnh[^ffs-dir]. File vào cùng group với inode của nó và với thư mục cha[^ffs-file]. File lớn thì lấp đầy cả group và hỏng locality[^ffs-large]. Vì vậy FFS trải nó theo chunk đủ lớn để amortize chi phí seek[^ffs-amort].
 
 </details>
 
 7. Thư mục ext4 tra tên theo cách nào khi bật `EXT4_INDEX_FL`?
 <details><summary>Đáp án</summary>
 
-Htree: hash tên, tìm leaf theo dải hash như B-tree khóa theo hash[^e4-htree][^e4-htree2].
+Htree: hash tên, rồi tìm leaf theo dải hash như B-tree khóa theo hash[^e4-htree2]. Điều kiện bật là inode có cờ `EXT4_INDEX_FL`[^e4-htree].
 
 </details>
 
 8. Production báo `No space left on device` khi tạo file nhưng `df -h` còn 60% trống. Bạn kiểm tra gì và vì sao có thể xảy ra?
 <details><summary>Đáp án</summary>
 
-Chạy `df -i`[^df-i]: số inode theo `bytes-per-inode` cố định lúc tạo file system[^mke2fs-ratio], hết inode thì tạo file mới `ENOSPC`[^open-enospc] (quan sát ở mục 7: 16 inode hết khi còn 3013 block trống).
+Chạy `df -i`[^df-i]. Số inode được xác định theo `bytes-per-inode`, cố định lúc tạo file system[^mke2fs-ratio]. Hết inode thì tạo file mới báo `ENOSPC`[^open-enospc] (quan sát ở mục 7: 16 inode hết khi còn 3013 block trống).
 
 </details>
 

@@ -21,65 +21,85 @@
 - [Chương 08 — Sự cố hệ phân tán](08-su-co-he-phan-tan.md): mạng mất/trễ/trùng gói, đồng hồ không đáng tin — gốc của mọi vấn đề *trùng lặp* và *sai thứ tự* ở chương này.
 - [P5 · Chương 05 — Crash consistency và journaling](../05-storage/05-crash-consistency-va-journaling.md) (WAL) và [P5 · Chương 06 — Durability](../05-storage/06-durability-trong-thuc-te.md): "ghi vào log trước" và `fsync`; chương này không lặp lại.
 
+Bạn đã quen với một service backend ghi vào database; chương này nói về chuyện xảy ra *sau* cú ghi đó, khi nhiều hệ khác cũng cần biết dữ liệu vừa đổi. Code Rust chỉ xuất hiện ở phần "Liên hệ với Rust".
+
 (Batch processing đối chiếu ở [Chương 10](10-batch-processing.md); ghép stream vào kiến trúc tổng thể và dữ liệu dẫn xuất ở [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md); warehouse/lake/ETL ở [Chương 13](13-kien-truc-he-du-lieu.md); xóa dữ liệu cá nhân và GDPR ở [Chương 14](14-trach-nhiem-voi-du-lieu.md). Các chủ đề đó chỉ được nhắc 1–2 câu ở đây.)
 
 ## 1. Event, stream, producer, consumer (Q1)
 
-> **Trả lời ngắn.** *Event* là bản ghi rằng "một chuyện đã xảy ra" — trong Kafka nó gồm key, value, timestamp và vài header tùy chọn[^k-event][^k-event-fields]. *Stream* là chuỗi event không có điểm kết thúc đã biết trước; *producer* ghi event vào, *consumer* đọc ra, hai bên không cần biết nhau[^k-decoupled]. "Unbounded" (không biên) là tính chất của *dữ liệu*; "streaming" chỉ là một loại *engine* chạy — engine batch vẫn xử lý được dữ liệu không biên bằng cách chạy lặp, và engine streaming cũng xử lý được dữ liệu hữu hạn[^df-unbounded].
+> **Trả lời ngắn.** *Event* là bản ghi rằng "một chuyện đã xảy ra" trong thế giới hoặc trong nghiệp vụ[^k-event]. Trong Kafka, event gồm key, value, timestamp và vài header tùy chọn[^k-event-fields]. *Stream* là chuỗi event cứ nối dài mãi, không biết trước điểm kết thúc: *producer* ghi event vào, *consumer* đọc ra, và hai bên không cần biết nhau[^k-decoupled]. Hai chữ hay bị lẫn là "unbounded" và "streaming": unbounded (không biên) là tính chất của *dữ liệu*, còn streaming chỉ là một loại *engine*, vì engine batch vẫn xử lý được dữ liệu không biên và engine streaming cũng xử lý được dữ liệu hữu hạn[^df-unbounded].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảng `orders` trong database là *ảnh chụp* — "hiện giờ đơn #7 đang ở trạng thái PAID". Stream là *cuốn nhật ký* dẫn tới ảnh chụp đó: "đơn #7 tạo", "đơn #7 thanh toán", "đơn #7 hủy". Có nhật ký thì dựng lại được ảnh chụp tại mọi thời điểm; có ảnh chụp thì không suy ngược ra nhật ký.
+*Với service của bạn.* Hãy hình dung `orders`, service Rust của một shop online. Một đơn hàng đi qua vài trạng thái: tạo, thanh toán, có thể hủy. Ngoài `orders` còn ba bên cần biết mỗi lần đơn đổi trạng thái: `billing` xuất hóa đơn, `search-index` cập nhật trang tìm đơn, `dashboard` đếm số đơn mỗi 5 phút. Ta sẽ bám theo `orders` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này: `orders` báo cho ba bên kia bằng cách nào mà không phải biết từng bên là ai?
 
-*Event.* Docs Kafka định nghĩa event là bản ghi về việc "có chuyện đã xảy ra" trong thế giới hoặc trong nghiệp vụ; trong tài liệu nó còn được gọi là record hoặc message[^k-event]. Về khái niệm, event có key, value, timestamp và header tùy chọn[^k-event-fields]. Ví dụ của docs: key là "Alice", value là "Made a payment of $200 to Bob", kèm một mốc thời gian[^k-event-example]. Điểm cần nhớ: timestamp nằm *trong* event — mục 6 sẽ cho thấy nó là nền của toàn bộ bài toán thời gian.
+### 1.1 Event: "đã có chuyện gì"
 
-*Producer và consumer.* Producer là ứng dụng ghi (publish) event; consumer là ứng dụng đăng ký đọc và xử lý chúng. Kafka coi hai phía là tách rời hoàn toàn, và docs nói đó là một yếu tố thiết kế chính cho khả năng mở rộng — ví dụ producer không bao giờ phải chờ consumer[^k-decoupled]. Một topic có thể có số producer và số consumer tùy ý, kể cả không có[^k-topicmulti].
+Bảng `orders` trong database chỉ cho biết hiện giờ đơn #7 đang ở trạng thái PAID. Điều ba bên kia cần là câu chuyện dẫn tới trạng thái đó: đơn #7 được tạo, rồi thanh toán, rồi hủy. Câu chuyện ấy chính là một stream. Có stream thì dựng lại được bảng tại mọi thời điểm, còn có bảng thì không suy ngược ra stream được (nhận xét của người soạn).
 
-*Unbounded và bounded.* Bài Dataflow (Google, VLDB 2015) chọn dùng cặp *unbounded/bounded* (vô hạn/hữu hạn) cho **dữ liệu**, và dành *streaming/batch* cho **engine thực thi**, vì cặp sau ngụ ý một loại engine cụ thể[^df-unbounded-def]. Lý do: dữ liệu vô hạn từ lâu đã được xử lý bằng cách chạy batch lặp đi lặp lại, và engine streaming được thiết kế tốt xử lý được cả dữ liệu hữu hạn[^df-unbounded]. Với dữ liệu vô hạn, phép gộp theo key (`GroupByKey`) có vấn đề: ta không biết khi nào dữ liệu hết; lời giải thông dụng là chia dữ liệu thành *window* (mục 6)[^df-groupbykey].
+Docs Kafka gọi mỗi mẩu của câu chuyện ấy là event, và cũng gọi là record hoặc message[^k-event]. Docs lấy ví dụ một event có key là "Alice", value là khoản thanh toán 200 đô cho Bob, kèm một mốc thời gian[^k-event-example]. Event "đơn #7 đã thanh toán" của `orders` có cùng dạng. Điều đáng nhớ là timestamp nằm *trong* event; mục 6 sẽ cho thấy chính nó là gốc của cả bài toán thời gian.
+
+### 1.2 Producer và consumer
+
+Trong ví dụ này `orders` là producer: nó ghi event "đơn #7 đã thanh toán" lên Kafka rồi xong việc. `billing`, `search-index`, `dashboard` là ba consumer, mỗi bên tự đọc theo nhịp của mình. Kafka coi hai phía là tách rời hoàn toàn, và docs nói đó là một yếu tố thiết kế chính để hệ thống mở rộng được; chẳng hạn producer không bao giờ phải chờ consumer[^k-decoupled].
 
 ```mermaid
 flowchart LR
-  P1["Producer A"] -->|"ghi event (key, value, timestamp)"| T["Topic / stream"]
-  P2["Producer B"] --> T
-  T -->|"đọc"| C1["Consumer 1: cập nhật search index"]
-  T -->|"đọc"| C2["Consumer 2: tính thống kê"]
+  P["orders (producer)"] -->|"ghi event: key, value, timestamp"| T["Topic orders"]
+  T -->|"đọc"| C1["billing"]
+  T -->|"đọc"| C2["search-index"]
+  T -->|"đọc"| C3["dashboard"]
 ```
 
-*Sơ đồ minh họa của người soạn: producer không chờ consumer, consumer không biết producer.*
+*Sơ đồ minh họa của người soạn: `orders` không chờ ba bên kia đọc, và ba bên kia không cần biết `orders` là ai.*
+
+### 1.3 Unbounded và bounded
+
+Dòng event của `orders` là dữ liệu không biên: đơn hàng cứ đến mãi. Bài Dataflow (Google, VLDB 2015) dùng cặp *unbounded/bounded* (vô hạn/hữu hạn) để nói về **dữ liệu**, và để cặp *streaming/batch* cho **engine thực thi**, vì cặp sau ngụ ý một loại engine cụ thể[^df-unbounded-def]. Lý do thực tế là dữ liệu vô hạn từ lâu đã được xử lý bằng cách chạy batch lặp đi lặp lại, và một engine streaming được thiết kế tốt xử lý được cả dữ liệu hữu hạn[^df-unbounded].
+
+Dữ liệu không biên còn kéo theo một khó khăn. Phép gộp theo key (`GroupByKey`) phải gom hết dữ liệu của một key rồi mới đẩy xuống bước sau, mà với đầu vào không biên ta không biết bao giờ dữ liệu hết[^df-groupbykey]. Lối ra thông dụng là chia dữ liệu thành các *window* hữu hạn; đó là chuyện của mục 6.
 
 <details><summary>Đi sâu: vì sao không chỉ "poll bảng database"; batch là trường hợp riêng của stream?</summary>
 
-- Tách rời producer/consumer nghĩa là thêm consumer mới (ví dụ một job báo cáo) không đụng tới code của producer. Với cách "mỗi consumer tự truy vấn bảng của service khác", coupling nằm ở schema bảng (nhận xét của người soạn).
-- Dataflow mô tả bài toán theo bốn câu hỏi: *tính cái gì*, *ở đâu trong event time*, *khi nào trong processing time thì phát kết quả*, và *kết quả sớm liên hệ với kết quả hiệu chỉnh sau thế nào*[^df-four]. Ba câu sau là nội dung mục 6; câu đầu là phép biến đổi thông thường.
-- Cùng bài đó nhận xét rằng với góc nhìn của mô hình, batch hay streaming "phần lớn không liên quan" — chỉ là chọn engine theo độ trễ và chi phí[^df-unbounded-def]. Chương 10 nói batch từ phía kia.
+- Một topic có số producer và consumer tùy ý, kể cả không có[^k-topicmulti]. Vì vậy thêm một consumer mới, ví dụ job báo cáo, không đụng tới code của `orders`. Nếu mỗi consumer tự truy vấn bảng của service khác thì coupling nằm ở schema bảng (nhận xét của người soạn).
+- Dataflow mô tả bài toán bằng bốn câu hỏi: *tính cái gì*, *ở đâu trong event time*, *khi nào trong processing time thì phát kết quả*, và *kết quả sớm liên hệ với kết quả hiệu chỉnh sau thế nào*[^df-four]. Ba câu sau là nội dung mục 6; câu đầu là phép biến đổi thông thường.
+- Cũng bài đó nhận xét rằng với góc nhìn của mô hình, batch hay streaming "phần lớn không liên quan": chỉ là chọn engine theo độ trễ và chi phí[^df-unbounded-def]. [Chương 10](10-batch-processing.md) nói batch từ phía kia.
 
 </details>
 
-**Quay lại Q1:** event là bản ghi "đã có chuyện"; stream là chuỗi event không biên; producer và consumer tách rời; "streaming" là kiểu engine, "unbounded" là kiểu dữ liệu.
+**Quay lại Q1:** event là bản ghi "đã có chuyện"; stream là chuỗi event không biên mà producer ghi, consumer đọc, tách rời nhau (`orders` ghi, ba bên kia đọc); "streaming" là kiểu engine, "unbounded" là kiểu dữ liệu.
 
 ## 2. Queue hay log: hai kiểu message broker (Q2)
 
-> **Trả lời ngắn.** Broker kiểu *queue* (ví dụ RabbitMQ) chia việc cho các consumer, chờ ack rồi bỏ message khỏi hàng đợi[^rmq-workq][^rmq-ack-discard]. Broker kiểu *log* (Kafka) giữ event theo thời hạn cấu hình chứ không xóa sau khi tiêu thụ[^k-notdeleted], và để consumer tự giữ vị trí đọc[^k-offset-one]. Hệ quả: queue hợp với "giao việc một lần cho một worker"; log hợp với "nhiều bên cùng đọc, đọc lại, dựng lại state".
+> **Trả lời ngắn.** Broker kiểu *queue* (ví dụ RabbitMQ) chia việc cho các consumer, đợi ack rồi bỏ message khỏi hàng đợi[^rmq-ack-discard]. Broker kiểu *log* (Kafka) không xóa event sau khi tiêu thụ mà giữ theo thời hạn cấu hình[^k-notdeleted]. Mỗi consumer tự giữ vị trí đọc của mình[^k-offset-one]. Vì vậy queue hợp với việc "giao một lần cho một worker", còn log hợp khi nhiều bên cùng đọc, cần đọc lại, hoặc cần dựng lại state.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): queue là *khay công văn* trên bàn thư ký — ai lấy tờ nào thì tờ đó rời khay. Log là *cuốn sổ cái đóng gáy* — mọi người đứng đọc cùng một cuốn, mỗi người kẹp một tờ giấy đánh dấu "tôi đọc đến dòng này".
+*Với service `orders`.* Đơn #7 vừa thanh toán và `orders` có hai việc phải giao đi. Việc thứ nhất là gửi email xác nhận: chỉ cần *một* worker làm, làm xong là hết. Việc thứ hai là báo cho `billing`, `search-index` và `dashboard`: cả ba đều phải thấy đơn này, và tuần sau nếu có bên thứ tư thì nó còn muốn đọc lại cả lịch sử. Hai nhu cầu đó kéo về hai loại broker khác nhau (nhận xét của người soạn).
 
-*Kiểu queue.* Ý chính của work queue (RabbitMQ gọi là task queue) là khỏi làm việc nặng ngay trong lúc xử lý request, mà đóng việc thành message bỏ vào hàng đợi cho worker chạy nền[^rmq-workq]. Mặc định RabbitMQ gửi message cho consumer kế tiếp theo vòng, nên trung bình các consumer nhận số message bằng nhau — gọi là round-robin[^rmq-rr]. Khi consumer báo ack (xác nhận đã xử lý), broker ghi nhận message đã giao và có thể bỏ nó[^rmq-ack-discard]. Nếu consumer chết khi chưa ack, message được đưa lại vào hàng đợi (requeue) khi kênh/kết nối đóng[^rmq-requeue]; vì vậy docs yêu cầu consumer phải chịu được việc nhận lại và nên idempotent[^rmq-idem]. (Docs RabbitMQ được dẫn là bản ghi *Version 4.3* trên trang; URL không mang số phiên bản.)
+### 2.1 Kiểu queue
 
-*Kiểu log.* Kafka lưu event trong topic; event không bị xóa sau khi đọc — khác với hệ messaging truyền thống — mà bị bỏ khi quá thời hạn retention cấu hình theo từng topic[^k-notdeleted][^k-retain]. Vì không xóa theo consumer, broker không phải nhớ "message nào đã giao cho ai". Docs Kafka giải thích tại sao điều này quan trọng: hầu hết hệ messaging giữ metadata "đã tiêu thụ" ở broker[^k-broker-state]; làm vậy thì nếu đánh dấu "đã tiêu thụ" ngay lúc gửi, consumer chết giữa chừng sẽ làm mất message; còn thêm ack thì nếu consumer xử lý xong nhưng chết trước khi gửi ack, message bị tiêu thụ hai lần[^k-ack-problem]. Kafka đi hướng khác: mỗi partition chỉ có một consumer trong mỗi consumer group tại một thời điểm, nên vị trí đọc chỉ là *một số nguyên* mỗi partition — offset của message kế tiếp[^k-group-excl][^k-offset-one].
+Gửi email là việc chậm, nên `orders` không làm ngay trong lúc xử lý request mà đóng nó thành một message, bỏ vào hàng đợi cho worker chạy nền. Đó là ý chính của work queue (RabbitMQ gọi là task queue)[^rmq-workq]. Mặc định RabbitMQ chuyển message cho consumer kế tiếp theo vòng, nên trung bình các worker nhận số message bằng nhau; cách chia này gọi là round-robin[^rmq-rr]. Khi worker xử lý xong và báo ack (xác nhận), broker ghi nhận message đã giao và có thể bỏ nó[^rmq-ack-discard].
 
-*Hệ quả của khác biệt đó.*
+Worker chết khi chưa ack thì sao? Message được đưa lại vào hàng đợi (requeue) khi kênh hoặc kết nối của worker đó đóng[^rmq-requeue]. Vì vậy docs yêu cầu consumer phải chịu được việc nhận lại cùng một message, và nên viết theo hướng idempotent[^rmq-idem].
+
+### 2.2 Kiểu log
+
+Với ba bên kia, queue không hợp: message bị bỏ sau ack thì `billing` lấy xong là `search-index` hết thấy. Kafka đi hướng khác. Nó lưu event trong topic, và khác với hệ messaging truyền thống, event không bị xóa sau khi tiêu thụ[^k-notdeleted]. Event chỉ bị bỏ khi quá thời hạn *retention*, cấu hình riêng cho từng topic[^k-retain]. Vì không xóa theo consumer, broker khỏi phải nhớ "message nào đã giao cho ai".
+
+Docs Kafka giải thích vì sao điều đó đáng giá. Phần lớn hệ messaging giữ metadata "đã tiêu thụ" ngay ở broker[^k-broker-state]. Cách đó hỏng theo hai kiểu: nếu broker đánh dấu "đã tiêu thụ" ngay lúc gửi thì consumer chết giữa chừng làm mất message; còn nếu thêm ack thì consumer xử lý xong nhưng chết trước khi gửi ack sẽ khiến message bị tiêu thụ hai lần[^k-ack-problem]. Kafka tránh cả hai bằng cách khác: mỗi partition chỉ có một consumer trong mỗi consumer group tại một thời điểm[^k-group-excl] (partition và group nói kỹ ở mục 3). Nhờ vậy vị trí đọc chỉ cần là một số nguyên cho mỗi partition, tức offset của message kế tiếp[^k-offset-one].
+
+### 2.3 Hai kiểu so với nhau
 
 | | Queue (kiểu RabbitMQ) | Log (kiểu Kafka) |
 |---|---|---|
 | Sau khi tiêu thụ | message bị bỏ khi được ack[^rmq-ack-discard] | event vẫn còn tới hết retention[^k-notdeleted] |
-| Ai nhớ vị trí | broker theo dõi ack | consumer giữ offset mỗi partition[^k-offset-one] |
-| Đọc lại | không phải hợp đồng của work queue cổ điển (nhận xét của người soạn); RabbitMQ có thêm loại *stream* — log append-only đọc lại được tới khi hết hạn[^rmq-streams] | consumer có thể tua lại offset cũ và đọc lại[^k-rewind] |
+| Ai nhớ vị trí | broker theo dõi ack | consumer giữ offset cho mỗi partition[^k-offset-one] |
+| Đọc lại | không phải hợp đồng của work queue cổ điển (nhận xét của người soạn); RabbitMQ có thêm loại *stream*, là log append-only đọc lại được tới khi hết hạn[^rmq-streams] | consumer tua lại offset cũ và đọc lại được[^k-rewind] |
 | Chia tải | message lần lượt tới các consumer[^rmq-rr] | mỗi partition một consumer trong group[^k-group-excl] |
-| Consumer chậm | (nhận xét của người soạn) hàng đợi dài ra | consumer cứ tụt lại rồi đuổi kịp khi có thể (do cơ chế pull)[^k-pull] |
+| Consumer chậm | hàng đợi dài ra (nhận xét của người soạn) | consumer tụt lại rồi đuổi kịp khi có thể[^k-pull] |
 
-Dòng cuối: Kafka chọn mô hình pull — consumer kéo dữ liệu — vì push dễ làm consumer bị quá tải khi tốc độ tiêu thụ thấp hơn tốc độ sinh, còn pull cho phép consumer tụt lại và đuổi kịp khi có thể[^k-pull].
+Dòng cuối của bảng là chuyện *pull* so với *push*. Kafka chọn mô hình pull, tức consumer chủ động kéo dữ liệu, vì push dễ làm consumer quá tải khi tốc độ tiêu thụ thấp hơn tốc độ sinh; pull thì để consumer tụt lại và đuổi kịp khi có thể[^k-pull].
 
 ```mermaid
 flowchart TB
@@ -101,29 +121,42 @@ flowchart TB
 
 <details><summary>Đi sâu: vì sao log "rẻ" — pagecache, ghi tuần tự, sendfile; và cái giá</summary>
 
-- Kafka ghi mọi thứ vào log trên filesystem "mà không nhất thiết flush xuống đĩa", tức thực chất là chuyển vào pagecache của kernel[^k-pagecache]. Bài đó phụ thuộc vào cơ chế page cache của OS: xem [P5 · Chương 04](../05-storage/04-page-cache-va-direct-io.md), và `fsync` ở [P5 · Chương 06](../05-storage/06-durability-trong-thuc-te.md).
-- Docs lập luận rằng cấu trúc log (đọc và append tuần tự) có mọi thao tác O(1), đọc không chặn ghi và không chặn nhau[^k-O1], nên Kafka có thể giữ message khá lâu — ví dụ một tuần — thay vì xóa ngay khi tiêu thụ[^k-retain-week].
-- Gửi từ pagecache ra socket dùng `sendfile`, tránh chép dữ liệu qua lại: docs mô tả đường đi cổ điển có bốn lần chép và hai syscall, còn `sendfile` cho OS gửi thẳng từ pagecache ra mạng[^k-sendfile]. Cơ chế `sendfile` giải thích ở [P6 · Chương 09](../06-networking/09-zero-copy-io.md).
-- Cái giá (suy luận của người soạn từ "mỗi partition một consumer trong group"[^k-group-excl]): số consumer *hữu ích* trong một group bị chặn trên bởi số partition; và một message "độc" (xử lý luôn lỗi) chặn các message sau nó *trong cùng partition* nếu consumer không bỏ qua hoặc chuyển nó sang nơi khác (dead-letter).
-- Broker log vẫn cần *ack ở phía producer* — mức độ bền khi ghi (mục 4).
+- Kafka ghi mọi thứ vào log trên filesystem mà không nhất thiết flush xuống đĩa, nghĩa là thực chất dữ liệu chỉ mới vào pagecache của kernel[^k-pagecache]. Cách làm này dựa vào page cache của OS: xem [P5 · Chương 04](../05-storage/04-page-cache-va-direct-io.md), còn `fsync` ở [P5 · Chương 06](../05-storage/06-durability-trong-thuc-te.md).
+- Docs lập luận rằng log (đọc và append tuần tự) có mọi thao tác O(1), và đọc không chặn ghi cũng không chặn nhau[^k-O1]. Nhờ vậy Kafka giữ được message khá lâu, ví dụ một tuần, thay vì xóa ngay khi tiêu thụ[^k-retain-week].
+- Khi gửi từ pagecache ra socket, Kafka dùng `sendfile` để khỏi chép dữ liệu qua lại: `sendfile` cho OS gửi thẳng từ pagecache ra mạng[^k-sendfile]. Cơ chế này giải thích ở [P6 · Chương 09](../06-networking/09-zero-copy-io.md).
+- Cái giá (suy luận của người soạn từ "mỗi partition một consumer trong group"[^k-group-excl]): số consumer *hữu ích* trong một group bị chặn trên bởi số partition. Ngoài ra một message "độc" (xử lý luôn lỗi) sẽ chặn các message sau nó *trong cùng partition*, trừ khi consumer bỏ qua hoặc chuyển nó sang nơi khác (dead-letter).
+- Broker log vẫn cần *ack ở phía producer*, tức mức độ bền khi ghi (mục 4).
+- Docs RabbitMQ được dẫn ở mục này là bản ghi *Version 4.3* trên trang; URL không mang số phiên bản.
 
 </details>
 
-**Quay lại Q2:** queue = broker nhớ ai đã nhận gì và xóa sau ack; log = broker giữ một chuỗi append-only, consumer tự giữ offset, nên đọc lại và nhiều bên cùng đọc là chuyện bình thường.
+**Quay lại Q2:** queue = broker nhớ ai đã nhận gì và xóa sau ack; log = broker giữ một chuỗi append-only, consumer tự giữ offset. Với `orders`, email xác nhận hợp với queue, còn dòng event cho `billing`, `search-index`, `dashboard` hợp với log.
 
 ## 3. Bên trong một log kiểu Kafka (Q3)
 
-> **Trả lời ngắn.** Một topic chia thành nhiều *partition*, mỗi partition là một log append-only; event cùng key đi vào cùng partition và được đọc đúng thứ tự ghi — nhưng thứ tự chỉ bảo đảm *trong một partition*[^k-partition][^k-partition-order]. Vị trí đọc của consumer là *offset*; các consumer chung *consumer group* chia nhau các partition. Dữ liệu bị xóa khi quá *retention* (theo thời gian hoặc kích thước), hoặc được *compact* để giữ ít nhất giá trị mới nhất của mỗi key[^k-compaction].
+> **Trả lời ngắn.** Một topic chia thành nhiều *partition*, mỗi partition là một log append-only. Event cùng key đi vào cùng partition[^k-partition]. Chúng được đọc đúng thứ tự ghi, nhưng thứ tự chỉ được bảo đảm *trong một partition*[^k-partition-order]. Vị trí đọc của consumer là *offset*, và các consumer chung một *consumer group* chia nhau các partition. Dữ liệu bị xóa khi quá *retention* (theo thời gian hoặc kích thước), hoặc được *compact* để giữ ít nhất giá trị mới nhất của mỗi key[^k-compaction].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cả công ty có một cuốn sổ cái quá lớn cho một máy; ta xé thành N cuốn nhỏ đánh số, quy ước "hóa đơn của khách hàng nào luôn ghi vào cuốn do tên khách hàng quyết định". Trong mỗi cuốn, thứ tự dòng là cố định; giữa các cuốn thì không có thứ tự chung nào.
+*Với service `orders`.* Giả sử topic `orders` nhận nhiều event đến mức một máy không gánh nổi, nên ta chia nó thành 3 partition. Hai câu hỏi nảy ra ngay. Thứ nhất, các event của cùng một đơn (tạo, rồi thanh toán, rồi hủy) có còn đúng thứ tự không? Thứ hai, nếu `billing` chạy hai instance thì ai đọc partition nào? Mục này trả lời cả hai, rồi nói thêm event nằm lại trong log bao lâu.
 
-*Partition và key.* Topic được "trải" ra nhiều partition đặt trên các broker khác nhau, để client đọc/ghi song song với nhiều broker; khi event được publish nó được append vào *một* partition của topic[^k-partition]. Event cùng key (ví dụ ID khách hàng) vào cùng partition, và Kafka bảo đảm consumer của một topic-partition đọc các event của partition đó đúng thứ tự đã ghi[^k-partition][^k-partition-order]. Client quyết định ghi vào partition nào: ngẫu nhiên, hoặc theo hàm phân vùng ngữ nghĩa băm key — docs lấy ví dụ key là user id để mọi dữ liệu của một user vào một partition[^k-keypartition]. Chia theo key là ý của [Chương 06](06-partitioning.md); điều chương này thêm là: *thứ tự theo key được bảo toàn, thứ tự toàn cục thì không* (suy luận của người soạn từ câu "đúng thứ tự trong partition" ở nguồn).
+### 3.1 Partition và key
 
-*Offset.* Offset là số thứ tự message trong một partition. Kafka dùng nó làm id của message; docs giải thích đã chọn một bộ đếm nguyên tử theo partition thay vì GUID của producer để khỏi phải dựng cấu trúc chỉ mục nặng[^k-offset-id]. Consumer gửi yêu cầu *fetch* tới broker đang là leader của partition và nêu offset muốn đọc[^k-fetch]; vì vậy consumer kiểm soát được vị trí của mình và tua lại khi cần[^k-rewind].
+Topic được trải ra nhiều partition đặt trên các broker khác nhau, để client đọc ghi song song với nhiều broker. Khi một event được publish, nó được append vào *một* partition của topic[^k-partition]. Event cùng key (ví dụ ID khách hàng) vào cùng partition, và consumer của một topic-partition luôn đọc event của partition đó đúng thứ tự đã ghi[^k-partition-order].
 
-*Consumer group.* Mỗi consumer khai `group.id` để cho biết nó thuộc group nào[^kc-group-id]. Trong một group, mỗi partition do đúng một consumer đọc tại một thời điểm[^k-group-excl]. Kafka Streams — thư viện xử lý stream của Kafka — lấy chính điều này làm mô hình song song: số task cố định, tính theo số partition đầu vào, mỗi task được giao một danh sách partition[^ks-tasks]; số instance chạy song song tối đa bị chặn bởi số partition của topic đầu vào, ví dụ topic 5 partition thì tối đa 5 instance[^ks-maxpar].
+Ai chọn partition? Client chọn: ngẫu nhiên, hoặc theo một hàm phân vùng băm key. Docs lấy ví dụ key là user id, để mọi dữ liệu của một user vào cùng một partition[^k-keypartition]. Với `orders`, nếu lấy ID đơn hàng làm key thì ba event của đơn #7 luôn nằm trong cùng partition và được đọc theo thứ tự tạo, thanh toán, hủy (nhận xét của người soạn).
+
+Chia theo key là ý của [Chương 06](06-partitioning.md). Điều chương này thêm là: *thứ tự theo key được bảo toàn, thứ tự toàn cục thì không* (suy luận của người soạn từ câu "đúng thứ tự trong partition" ở nguồn). Event của đơn #7 và đơn #8 nằm ở hai partition khác nhau thì không có thứ tự chung nào giữa chúng.
+
+### 3.2 Offset
+
+Offset là số thứ tự của message trong một partition, và Kafka dùng nó làm id của message. Docs giải thích Kafka đã chọn một bộ đếm nguyên tử theo partition thay vì GUID do producer sinh, để khỏi phải dựng cấu trúc chỉ mục nặng[^k-offset-id]. Consumer gửi yêu cầu *fetch* tới broker đang là leader của partition, kèm offset muốn đọc[^k-fetch]. Vì vậy consumer tự kiểm soát vị trí đọc của mình và tua lại được khi cần[^k-rewind]. Chẳng hạn `dashboard` phát hiện hôm qua mình đếm sai: sửa code xong, nó tua offset về đầu hôm qua và đọc lại (nhận xét của người soạn).
+
+### 3.3 Consumer group
+
+Mỗi consumer khai `group.id` để cho biết nó thuộc group nào[^kc-group-id]. Trong một group, mỗi partition do đúng một consumer đọc tại một thời điểm[^k-group-excl]. Với `orders`, group `billing` có hai consumer và group `search-index` có một. Mỗi group giữ offset riêng và đọc toàn bộ topic, độc lập với group kia (suy luận của người soạn từ "mỗi partition một consumer trong mỗi group đăng ký").
+
+Kafka Streams, thư viện xử lý stream của Kafka, lấy chính quy tắc này làm mô hình song song. Nó tạo một số task cố định, tính theo số partition đầu vào, và giao mỗi task một danh sách partition[^ks-tasks]. Vì vậy số instance chạy song song tối đa bị chặn bởi số partition của topic đầu vào; ví dụ topic 5 partition thì chạy tối đa 5 instance[^ks-maxpar].
 
 ```mermaid
 flowchart LR
@@ -149,47 +182,76 @@ flowchart LR
 
 *Sơ đồ minh họa của người soạn: mỗi group có offset riêng và đọc toàn bộ topic độc lập với group khác (suy luận của người soạn từ "mỗi partition một consumer trong mỗi group đăng ký").*
 
-*Rebalance.* Khi thành viên group đổi (consumer chết, thêm instance), các partition được chia lại — gọi là rebalance. Consumer bị coi là hỏng nếu không gọi `poll()` trong `max.poll.interval.ms`, khi đó group rebalance để giao partition cho thành viên khác[^kc-poll-interval]. Docs Kafka cũng nêu rằng với ứng dụng có state lớn, các task bị chuyển sang instance khác lúc deploy/restart phải mất thời gian phục hồi state, nên có *static membership* (đặt `group.instance.id` cố định) để tránh rebalance không cần thiết[^k-static].
+### 3.4 Rebalance
 
-*Retention.* Dữ liệu không xóa theo consumer mà xóa theo chính sách của topic. Việc xóa làm theo từng *segment* (file log)[^k-impl-delete]. Kafka cho chọn xóa theo thời gian hoặc kích thước; chính sách theo thời gian dựa vào timestamp lớn nhất trong segment[^k-impl-retention], còn chính sách theo kích thước (mặc định tắt) xóa segment cũ nhất cho tới khi partition nằm trong giới hạn[^k-impl-size].
+Khi thành viên của group đổi (một consumer chết, hoặc ta thêm instance), các partition được chia lại; việc đó gọi là *rebalance*. Một consumer bị coi là hỏng nếu không gọi `poll()` trước khi hết `max.poll.interval.ms`, và khi đó group rebalance để giao partition của nó cho thành viên khác[^kc-poll-interval].
 
-*Compaction.* Với log là dòng thay đổi của dữ liệu có key (ví dụ bảng email người dùng), có thể thay retention theo thời gian bằng *log compaction*: bảo đảm giữ ít nhất giá trị cập nhật cuối của mỗi key[^k-compaction]. Bản ghi có key và payload null là *tombstone* — đánh dấu xóa[^k-tombstone]. Compaction không đổi thứ tự message và không đổi offset: offset là định danh vĩnh viễn của một vị trí trong log[^k-compact-order][^k-compact-offsets]. Docs nêu các dùng cho compaction: đăng ký theo dõi thay đổi database[^k-compact-cdc], event sourcing[^k-compact-es], và journaling để phục hồi state của một tiến trình xử lý[^k-compact-uses] — ba chủ đề của mục 5 và 8.
+Rebalance đắt nhất với ứng dụng có state lớn. Khi deploy hay restart, các task bị chuyển sang instance khác phải mất thời gian phục hồi state cục bộ trước khi xử lý tiếp, nên ứng dụng có thể bị gián đoạn một phần hoặc toàn phần[^k-static]. Để tránh rebalance không cần thiết, Kafka có *static membership*: đặt `group.instance.id` cố định cho từng instance.
 
-*Replication và "committed".* Đơn vị replicate là partition: mỗi partition có một leader và các follower[^k-repl-unit]. Một message được coi là *committed* khi mọi replica trong ISR (tập replica đang đồng bộ) đã áp dụng nó vào log[^k-committed]; consumer chỉ được giao message đã committed[^k-committed-only], và message committed không mất miễn là còn ít nhất một replica đồng bộ còn sống[^k-committed-lost]. Đừng đọc "ISR" thành "mọi replica được gán": với `acks=all`, ack được trả ngay khi mọi replica *hiện đang* trong ISR đã nhận message[^k-acks-all-isr], và nếu producer đòi ack yếu hơn thì message vẫn có thể được commit và consume kể cả khi số replica đồng bộ thấp hơn mức tối thiểu của topic (tối đa là chỉ còn leader)[^k-min-isr]. Giao thức replicate log và bầu leader giải thích ở [Chương 05](05-replication.md) và [Chương 09](09-consistency-va-consensus.md).
+### 3.5 Retention và compaction
 
-<details><summary>Đi sâu: static membership, chọn partition, giới hạn của "thứ tự"</summary>
+Dữ liệu không bị xóa theo consumer mà theo chính sách của topic. Việc xóa làm theo từng *segment*, tức từng file log một[^k-impl-delete]. Ta chọn xóa theo thời gian hoặc theo kích thước. Chính sách theo thời gian dựa vào timestamp lớn nhất trong segment để quyết định cả segment hết hạn chưa[^k-impl-retention]. Chính sách theo kích thước (mặc định tắt) xóa segment cũ nhất cho tới khi partition nằm trong giới hạn[^k-impl-size].
 
-- **Static membership:** docs yêu cầu broker và client từ 2.3 trở lên, và mỗi instance một `group.instance.id` riêng; nếu trùng id giữa hai instance, broker "fence" instance trùng bằng `FencedInstanceIdException`[^k-static-detail].
-- **Timestamp của record:** từ Kafka 0.10, timestamp được nhúng sẵn vào message; tùy cấu hình broker nó đại diện *event time* hoặc *ingestion time* — chọn ở cấu hình Kafka chứ không phải ở Kafka Streams[^ks-ts-choice]. Điều này nối sang mục 6.
+Có một loại log cần cách giữ khác: dòng thay đổi của dữ liệu có key, ví dụ bảng email người dùng. Với log đó, ta thay retention theo thời gian bằng *log compaction*, bảo đảm giữ ít nhất giá trị cập nhật cuối của mỗi key[^k-compaction]. Bản ghi có key và payload null gọi là *tombstone*, đánh dấu xóa[^k-tombstone]. Compaction không đổi thứ tự message, chỉ bỏ bớt một số[^k-compact-order]. Offset cũng giữ nguyên, vì nó là định danh vĩnh viễn của một vị trí trong log[^k-compact-offsets].
+
+Docs nêu ba cách dùng compaction, và cả ba quay lại ở mục 5 và 8:
+
+- đăng ký theo dõi thay đổi của database, để mỗi thay đổi được phản ánh sang cache, search cluster và nơi khác[^k-compact-cdc];
+- event sourcing, tức dùng log thay đổi làm nơi lưu chính của ứng dụng[^k-compact-es];
+- journaling để phục hồi state: một tiến trình ghi lại mọi thay đổi của state cục bộ, để tiến trình khác nạp lại và chạy tiếp nếu nó chết[^k-compact-uses].
+
+### 3.6 Replication và "committed"
+
+Đơn vị replicate là partition: mỗi partition có một leader và các follower[^k-repl-unit]. Một message được coi là *committed* khi mọi replica trong ISR (tập replica đang đồng bộ) đã áp dụng nó vào log[^k-committed]. Consumer chỉ được giao message đã committed[^k-committed-only]. Message committed không mất miễn là còn ít nhất một replica đồng bộ còn sống[^k-committed-lost]. Giao thức replicate log và bầu leader giải thích ở [Chương 05](05-replication.md) và [Chương 09](09-consistency-va-consensus.md).
+
+<details><summary>Đi sâu: ISR không phải "mọi replica", static membership, timestamp, chọn số partition</summary>
+
+- **ISR không phải "mọi replica được gán".** Với `acks=all`, ack được trả ngay khi mọi replica *hiện đang* trong ISR đã nhận message[^k-acks-all-isr]. Nếu producer đòi ack yếu hơn thì message vẫn có thể được commit và consume kể cả khi số replica đồng bộ thấp hơn mức tối thiểu của topic, thấp nhất là chỉ còn leader[^k-min-isr].
+- **Static membership:** docs yêu cầu broker và client từ 2.3 trở lên, và mỗi instance một `group.instance.id` riêng. Nếu hai instance trùng id, broker "fence" instance trùng bằng `FencedInstanceIdException`[^k-static-detail].
+- **Timestamp của record:** từ Kafka 0.10, timestamp được nhúng sẵn vào message; tùy cấu hình broker, nó đại diện *event time* hoặc *ingestion time*, và chọn ở cấu hình Kafka chứ không phải ở Kafka Streams[^ks-ts-choice]. Điều này nối sang mục 6.
 - **Thứ tự và timestamp không đồng nhất:** trong một partition, timestamp của record có thể không tăng đơn điệu theo offset[^ks-oo-sources]. Nên "thứ tự theo offset" và "thứ tự theo thời gian" là hai thứ khác nhau.
-- **Chọn số partition** (nhận xét của người soạn): số partition cố định mức song song tối đa của một group (ở trên), nên chọn dư một chút ngay từ đầu; đổi số partition sau này làm đổi ánh xạ key → partition, một chủ đề của [Chương 06](06-partitioning.md).
+- **Chọn số partition** (nhận xét của người soạn): số partition cố định mức song song tối đa của một group (ở trên), nên chọn dư một chút ngay từ đầu. Đổi số partition sau này làm đổi ánh xạ key → partition, một chủ đề của [Chương 06](06-partitioning.md).
 
 </details>
 
-**Quay lại Q3:** topic = N log append-only (partition); key quyết định partition và bảo toàn thứ tự theo key; offset là vị trí đọc; group chia partition cho consumer; retention hoặc compaction quyết định phần nào của log còn lại.
+**Quay lại Q3:** topic = N log append-only (partition); key quyết định partition và bảo toàn thứ tự theo key (với `orders`: mọi event của một đơn nằm chung partition); offset là vị trí đọc; group chia partition cho consumer; retention hoặc compaction quyết định phần nào của log còn lại.
 
 ## 4. At-most-once, at-least-once, exactly-once (Q4)
 
-> **Trả lời ngắn.** *At-most-once*: message có thể mất nhưng không bao giờ giao lại. *At-least-once*: không mất nhưng có thể giao lại (trùng). *Exactly-once*: mỗi message được giao đúng một lần — điều mà mọi người thực sự muốn[^k-three][^k-three-2][^k-three-3]. Sự thật khó chịu là mất/trùng xuất phát từ việc *không biết* một yêu cầu đã thành công hay chưa sau khi mạng lỗi[^k-prod-unsure]. Kafka cung cấp producer idempotent và transaction để đạt exactly-once *trong Kafka*; với hệ bên ngoài thì cần cộng tác của hệ đó (idempotent write hoặc ghi offset cùng chỗ với kết quả)[^k-external-note].
+> **Trả lời ngắn.** *At-most-once*: message có thể mất nhưng không bao giờ giao lại[^k-three]. *At-least-once*: không mất nhưng có thể giao lại, tức bị trùng[^k-three-2]. *Exactly-once*: mỗi message giao đúng một lần, điều mà mọi người thực sự muốn[^k-three-3]. Mất hay trùng đều bắt nguồn từ chỗ: sau khi mạng lỗi, ta *không biết* yêu cầu trước đã thành công hay chưa[^k-prod-unsure]. Kafka có producer idempotent và transaction để đạt exactly-once *bên trong Kafka*; với hệ bên ngoài thì hệ đó phải cộng tác, bằng cách ghi idempotent hoặc ghi offset cùng chỗ với kết quả[^k-external-note].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn gọi shipper "giao đơn #7" rồi điện thoại đứt giữa chừng. Bạn không biết shipper nghe chưa. Nếu không gọi lại, có thể đơn không bao giờ được giao (at-most-once). Nếu gọi lại, đơn có thể được giao hai lần (at-least-once). Muốn "đúng một lần" thì cuộc gọi lại phải kèm số đơn để shipper nhận ra "đơn này tôi đã giao rồi".
+*Với service `orders`.* `billing` đọc event "đơn #7 đã thanh toán" rồi ghi hóa đơn vào database của nó. Giả sử `billing` ghi xong hóa đơn rồi chết trước khi kịp lưu offset: khi khởi động lại nó đọc lại event của đơn #7 và xuất hóa đơn lần nữa. Ngược lại, nếu nó lưu offset *trước* rồi mới ghi hóa đơn, và chết ở giữa, thì đơn #7 vĩnh viễn không có hóa đơn. Mục này đi từ hai kịch bản đó tới câu hỏi: làm sao để hóa đơn có đúng một bản?
 
-*Ba mức bảo đảm.* Docs Kafka định nghĩa: at most once — message có thể mất nhưng không giao lại[^k-three]; at least once — không mất nhưng có thể giao lại[^k-three-2]; exactly once — mỗi message giao một lần và chỉ một lần[^k-three-3]. Docs cũng lưu ý bài toán tách làm hai: bảo đảm bền khi *publish* và bảo đảm khi *tiêu thụ*[^k-two-problems], và cảnh báo rằng nhiều hệ tuyên bố "exactly once" nhưng phần lớn lời tuyên bố đó gây hiểu nhầm (không đúng khi consumer/producer có thể lỗi, khi có nhiều consumer, hoặc khi dữ liệu ghi đĩa có thể mất)[^k-exactly-fine].
+### 4.1 Ba mức bảo đảm, và vì sao khó
 
-*Phía producer.* Producer gửi message và gặp lỗi mạng thì không biết lỗi xảy ra trước hay sau khi message được committed[^k-prod-unsure]. Trước Kafka 0.11.0.0, producer chỉ còn cách gửi lại, tức at-least-once vì lần gửi trước có thể đã thành công[^k-prod-resend]. Từ 0.11.0.0 có *idempotent producer*: broker gán cho producer một ID và khử trùng bằng số thứ tự (sequence number) kèm mỗi message, nhờ đó gửi lại không tạo bản ghi trùng trong log[^k-idem]. Bật bằng `enable.idempotence=true`: producer bảo đảm chỉ một bản sao mỗi message được ghi vào stream; nó đòi `max.in.flight.requests.per.connection` ≤ 5, `retries` > 0 và `acks=all`[^kp-idem]. `acks=all` nghĩa là leader chờ toàn bộ ISR xác nhận, bảo đảm record không mất miễn là còn một replica đồng bộ sống[^kp-acks-all].
+Docs Kafka tách bài toán thành hai: bảo đảm bền khi *publish* một message, và bảo đảm khi *tiêu thụ* nó[^k-two-problems]. Docs cũng cảnh báo rằng nhiều hệ tuyên bố "exactly once", nhưng phần lớn lời tuyên bố ấy gây hiểu nhầm: nó không còn đúng khi consumer hoặc producer có thể lỗi, khi có nhiều consumer process, hay khi dữ liệu ghi xuống đĩa có thể mất[^k-exactly-fine].
 
-*Phía consumer.* Thứ tự hai việc "xử lý" và "lưu offset" quyết định mức bảo đảm khi consumer chết giữa chừng:
+### 4.2 Phía producer
+
+`orders` gửi event lên Kafka và gặp lỗi mạng. Nó không thể biết lỗi xảy ra trước hay sau khi message được committed[^k-prod-unsure]. Trước Kafka 0.11.0.0, producer chỉ còn cách gửi lại, và đó là at-least-once vì lần gửi trước có thể đã thành công, khiến message bị ghi vào log lần nữa[^k-prod-resend].
+
+Từ 0.11.0.0 có *idempotent producer*. Broker gán cho mỗi producer một ID và khử trùng bằng số thứ tự (sequence number) mà producer gửi kèm mỗi message, nên gửi lại không tạo bản ghi trùng trong log[^k-idem]. Muốn bật, đặt `enable.idempotence=true`; cấu hình này đòi `max.in.flight.requests.per.connection` ≤ 5, `retries` > 0 và `acks=all`[^kp-idem]. `acks=all` nghĩa là leader chờ toàn bộ ISR xác nhận, nên record không mất miễn là còn một replica đồng bộ sống[^kp-acks-all].
+
+### 4.3 Phía consumer
+
+Với `billing`, mức bảo đảm do thứ tự của hai việc "xử lý" và "lưu offset" quyết định. Nếu consumer chết giữa chừng thì:
 
 | Thứ tự | Nếu chết ở giữa | Mức bảo đảm |
 |---|---|---|
 | đọc → **lưu offset** → xử lý | process thay thế bắt đầu từ offset đã lưu, bỏ sót message chưa xử lý | at-most-once[^k-cons-1] |
 | đọc → xử lý → **lưu offset** | process thay thế xử lý lại vài message đầu | at-least-once[^k-cons-alo] |
 
-Docs Kafka thêm: nhiều khi message có primary key nên cập nhật *idempotent* (nhận hai lần chỉ ghi đè bản ghi bằng chính nó)[^k-cons-2]. Mặc định Kafka bảo đảm at-least-once; at-most-once đạt được bằng cách tắt retry ở producer và commit offset trước khi xử lý batch[^k-default-alo].
+Cách cứu quen thuộc là làm cho việc xử lý *idempotent*. Docs Kafka nhận xét rằng nhiều message có primary key, nên cập nhật là idempotent: nhận cùng message hai lần thì chỉ ghi đè một bản ghi bằng chính nó[^k-cons-2]. Hóa đơn của `billing` ghi theo ID đơn hàng thì nằm đúng trường hợp này (nhận xét của người soạn).
 
-*Exactly-once trong Kafka (transaction).* Khi vòng lặp là *đọc từ topic A → xử lý → ghi vào topic B*, có thể dùng producer transaction: producer có thể ghi nhiều partition theo kiểu "hoặc tất cả thành công, hoặc không cái nào"[^k-txn]. Vị trí đọc của consumer được lưu như một message trong một topic, nên offset được ghi trong *cùng transaction* với dữ liệu ra; transaction abort thì offset trở về giá trị cũ và dữ liệu ra không hiện với consumer khác[^k-offset-in-txn]. Consumer chọn thấy gì bằng `isolation.level`: `read_uncommitted` (mặc định của Kafka consumer) thấy cả message của transaction đã abort; `read_committed` chỉ thấy message của transaction đã commit và message không thuộc transaction nào[^k-readcommitted].
+Mặc định Kafka bảo đảm at-least-once. Muốn at-most-once, ta tắt retry ở producer và commit offset trước khi xử lý batch[^k-default-alo].
+
+### 4.4 Exactly-once trong Kafka: transaction
+
+Nếu vòng lặp của ta là *đọc từ topic A, xử lý, ghi vào topic B* thì dùng được producer transaction: producer ghi nhiều partition theo kiểu "hoặc tất cả thành công, hoặc không cái nào"[^k-txn]. Mấu chốt nằm ở chỗ vị trí đọc của consumer cũng được lưu như một message trong một topic, nên offset được ghi trong *cùng transaction* với dữ liệu ra. Transaction abort thì offset trở về giá trị cũ và dữ liệu ra không hiện với consumer khác[^k-offset-in-txn].
+
+Consumer chọn thấy gì bằng `isolation.level`. Ở `read_uncommitted` (mặc định của Kafka consumer) nó thấy cả message của transaction đã abort; ở `read_committed` nó chỉ thấy message của transaction đã commit và message không thuộc transaction nào[^k-readcommitted].
 
 ```mermaid
 sequenceDiagram
@@ -210,31 +272,37 @@ sequenceDiagram
 
 *Sơ đồ minh họa vòng consume–transform–produce; tên hàm theo API của `rdkafka` (mục "Liên hệ với Rust").*
 
-*Với hệ bên ngoài Kafka.* Ghi ra database/HDFS thì cái khó là phải *phối hợp vị trí consumer với thứ thực sự được lưu*. Cách cổ điển là two-phase commit giữa nơi lưu offset và nơi lưu output; docs Kafka nói cách đơn giản và tổng quát hơn là lưu offset *cùng chỗ* với output, vì nhiều hệ đích không hỗ trợ 2PC — ví dụ một connector ghi dữ liệu vào HDFS cùng offset để dữ liệu và offset hoặc cùng cập nhật hoặc cùng không[^k-external]. Kết luận của docs: Kafka hỗ trợ exactly-once trong Kafka Streams; producer/consumer transactional dùng được cho việc chuyển và xử lý dữ liệu *giữa các topic Kafka*; với hệ đích khác thì cần cộng tác của hệ đó[^k-external-note].
+### 4.5 Khi đích là hệ ngoài Kafka
 
-*Vì sao "chỉ cần idempotent" là đủ trong nhiều trường hợp* (tóm tắt; phân tích đầy đủ ở [Chương 12, mục 4–5](12-dung-dan-va-tich-hop-du-lieu.md)). Bài giảng của Kleppmann tại Cambridge: nếu retry không tránh được, exactly-once = retry + idempotence hoặc khử trùng[^cam-eo]. Cập nhật idempotent có thể áp dụng nhiều lần nhưng hiệu quả như đúng một lần[^cam-idem]; đếm "like" bằng `+1` không idempotent, còn thêm user vào *tập* thì idempotent[^cam-counter]. Khử trùng thì phải lưu thông tin về request đã thấy ở nơi bền, để nhận ra trùng cả sau khi crash[^cam-dedup]. Theo lập luận end-to-end của Saltzer–Reed–Clark, việc khử trùng phải do ứng dụng làm, vì chỉ nó biết cách nhận ra trùng của mình[^e2e-dup].
+`billing` ghi hóa đơn vào database chứ không vào một topic Kafka, và đó là chỗ transaction của Kafka hết với tới. Cái khó là phải phối hợp *vị trí consumer* với *thứ thực sự được lưu*. Cách cổ điển là two-phase commit giữa nơi lưu offset và nơi lưu output. Docs Kafka bảo có cách đơn giản và tổng quát hơn: lưu offset *cùng chỗ* với output, vì nhiều hệ đích không hỗ trợ 2PC. Ví dụ docs nêu là một connector ghi dữ liệu vào HDFS kèm offset, để dữ liệu và offset hoặc cùng được cập nhật hoặc cùng không[^k-external].
+
+Kết luận của docs: Kafka hỗ trợ exactly-once trong Kafka Streams, và producer/consumer transactional dùng được khi chuyển và xử lý dữ liệu *giữa các topic Kafka*; với hệ đích khác thì cần cộng tác của hệ đó[^k-external-note]. Với `billing`, đó nghĩa là hoặc ghi offset vào cùng database trong cùng transaction với hóa đơn, hoặc để hóa đơn ghi idempotent theo ID đơn (nhận xét của người soạn).
+
+Vì sao "chỉ cần idempotent" thường là đủ? (Tóm tắt; phân tích đầy đủ ở [Chương 12, mục 4–5](12-dung-dan-va-tich-hop-du-lieu.md).) Bài giảng của Kleppmann ở Cambridge gói gọn: nếu retry không tránh được thì exactly-once = retry + idempotence hoặc khử trùng[^cam-eo]. Một cập nhật idempotent có thể áp dụng nhiều lần mà hiệu quả vẫn như đúng một lần[^cam-idem]. Đếm "like" bằng `+1` thì không idempotent, còn thêm một user vào *tập* thì idempotent[^cam-counter]. Khử trùng thì phải lưu thông tin về các request đã thấy ở nơi bền, để nhận ra trùng cả sau khi crash[^cam-dedup]. Theo lập luận end-to-end của Saltzer–Reed–Clark, việc khử trùng phải do chính ứng dụng làm, vì chỉ ứng dụng biết cách nhận ra bản trùng của mình[^e2e-dup].
 
 <details><summary>Đi sâu: LSO, fencing, Kafka Streams, và "exactly-once" của Flink thực sự nghĩa là gì</summary>
 
-- **LSO.** Ở `read_committed`, `poll()` chỉ trả message tới *last stable offset* (LSO) — nhỏ hơn offset của transaction đang mở đầu tiên một đơn vị; mọi message nằm sau message của transaction đang chạy bị giữ lại tới khi transaction đó xong, nên consumer `read_committed` không đọc tới high watermark được khi có transaction đang bay[^kc-iso].
-- **`transactional.id`.** Cấu hình này cho phép bảo đảm kéo dài qua nhiều phiên producer: client bảo đảm các transaction cùng id đã hoàn tất trước khi bắt đầu transaction mới[^kp-txid2]; có `transactional.id` thì `enable.idempotence` được ngầm bật[^kp-txid]. Mặc định transaction cần cụm tối thiểu ba broker[^kp-txid]. Hàm `init_transactions` của `rdkafka` ghi: nó bảo đảm mọi transaction của producer trước dùng cùng id được hoàn tất, transaction còn mở sẽ bị abort[^rk-init-tx].
-- **Kafka Streams.** Điểm khác biệt mà docs nêu: Streams tích hợp chặt với Kafka nên commit offset đầu vào, cập nhật state store và ghi topic đầu ra hoàn tất nguyên tử, không coi Kafka như hệ ngoài có tác dụng phụ[^ks-eos]. Bật chế độ exactly-once bằng cấu hình `processing.guarantee`[^ks-pg], mặc định là `at_least_once`[^ks-pg-default]; từ bản 3.0.0 phiên bản đầu của exactly-once bị đánh dấu deprecated và docs khuyến khích dùng "exactly-once v2" (`EXACTLY_ONCE_V2`)[^ks-eos-v2].
+- **LSO.** Ở `read_committed`, `poll()` chỉ trả message tới *last stable offset* (LSO), nhỏ hơn offset của transaction đang mở đầu tiên một đơn vị[^kc-iso]. Mọi message nằm sau message của transaction đang chạy bị giữ lại tới khi transaction đó xong, nên consumer `read_committed` không đọc tới high watermark được khi còn transaction đang bay.
+- **`transactional.id`.** Cấu hình này cho bảo đảm kéo dài qua nhiều phiên producer: client bảo đảm các transaction cùng id đã hoàn tất trước khi bắt đầu transaction mới[^kp-txid2]. Có `transactional.id` thì `enable.idempotence` được ngầm bật, và mặc định transaction cần cụm tối thiểu ba broker[^kp-txid]. Hàm `init_transactions` của `rdkafka` ghi: nó bảo đảm mọi transaction của producer trước dùng cùng id được hoàn tất, và transaction còn mở sẽ bị abort[^rk-init-tx].
+- **Kafka Streams.** Điểm khác biệt mà docs nêu: Streams tích hợp chặt với Kafka nên việc commit offset đầu vào, cập nhật state store và ghi topic đầu ra hoàn tất nguyên tử, không coi Kafka như hệ ngoài có tác dụng phụ[^ks-eos]. Bật chế độ exactly-once bằng cấu hình `processing.guarantee`[^ks-pg]. Mặc định của nó là `at_least_once`[^ks-pg-default]. Từ bản 3.0.0, phiên bản đầu của exactly-once bị đánh dấu deprecated và docs khuyến khích dùng "exactly-once v2" (`EXACTLY_ONCE_V2`)[^ks-eos-v2].
 - **Flink.** Flink nói rõ "exactly once" *không* có nghĩa mỗi event được xử lý đúng một lần, mà là mỗi event *ảnh hưởng đến state do Flink quản lý* đúng một lần, vì Flink khôi phục bằng cách tua lại và phát lại nguồn[^flink-eo]. Muốn exactly-once đầu-cuối thì nguồn phải phát lại được và sink phải transactional hoặc idempotent[^flink-e2e].
-- **Lưu ý cho consumer Rust** (nhận xét của người soạn): `rdkafka` 0.39.0 đi kèm librdkafka 2.12.1[^rk-sys-ver][^rk-sys-readme]; `CONFIGURATION.md` của librdkafka ở đúng tag đó ghi mặc định `isolation.level` là `read_committed`[^lib-iso], và docs `rdkafka` cũng nói consumer nhận biết transaction dùng mặc định `read_committed`[^rk-iso], trong khi docs consumer của client Java Kafka 3.9.0 ghi mặc định là `read_uncommitted`[^kc-iso-default]. Hai mặc định khác nhau vì là hai thư viện khác nhau (C và Java), nên **đặt `isolation.level` tường minh** thay vì dựa vào mặc định — nhất là khi bạn đổi qua lại giữa hai client hoặc dùng `dynamic-linking` với bản librdkafka khác.
+- **Lưu ý cho consumer Rust** (nhận xét của người soạn): `rdkafka` 0.39.0 đi kèm librdkafka 2.12.1[^rk-sys-ver]. Phiên bản này suy ra từ số hiệu của crate `rdkafka-sys`, theo quy ước `RX.RY.RZ` là bản librdkafka đi kèm[^rk-sys-readme]. `CONFIGURATION.md` của librdkafka ở đúng tag đó ghi mặc định `isolation.level` là `read_committed`[^lib-iso]. Docs `rdkafka` cũng nói consumer nhận biết transaction dùng mặc định `read_committed`[^rk-iso]. Trong khi đó docs consumer của client Java Kafka 3.9.0 ghi mặc định là `read_uncommitted`[^kc-iso-default]. Hai mặc định khác nhau vì đó là hai thư viện khác nhau (C và Java), nên **đặt `isolation.level` tường minh** thay vì dựa vào mặc định, nhất là khi bạn đổi qua lại giữa hai client hoặc dùng `dynamic-linking` với bản librdkafka khác.
 
 </details>
 
-**Quay lại Q4:** mất/trùng sinh ra từ việc không biết một lần gửi đã thành công chưa; thứ tự "xử lý rồi lưu offset" cho at-least-once; transaction của Kafka cho exactly-once *trong* Kafka; với hệ ngoài phải idempotent hoặc ghi offset cùng chỗ với kết quả.
+**Quay lại Q4:** mất/trùng sinh ra từ việc không biết một lần gửi đã thành công chưa; "xử lý rồi lưu offset" cho at-least-once; transaction của Kafka cho exactly-once *trong* Kafka; với hệ ngoài (như database của `billing`) phải ghi idempotent hoặc ghi offset cùng chỗ với kết quả.
 
 ## 5. CDC, event sourcing và stream–table duality (Q5)
 
-> **Trả lời ngắn.** *Change data capture* (CDC) biến mọi thay đổi đã commit của database thành một stream event. Với PostgreSQL, cơ chế là *logical decoding*: đọc WAL và giải mã thành dạng dễ hiểu[^pg-ld-wal], giao qua *replication slot* theo đúng thứ tự thực hiện trên server gốc[^pg-slot] (các transaction đồng thời được giải mã theo thứ tự commit[^pg-commit-order]). *Event sourcing* khác: ở đó chính log event là nơi lưu sự thật, và trạng thái hiện tại được dựng bằng cách phát lại event[^az-es][^az-replay]. Cả hai nối vào ý "stream là changelog của một bảng, bảng là ảnh chụp của một stream"[^ks-stream-table][^ks-table-snapshot].
+> **Trả lời ngắn.** *Change data capture* (CDC) biến mọi thay đổi đã commit của database thành một stream event. Với PostgreSQL, cơ chế là *logical decoding*: đọc WAL và giải mã thành dạng dễ hiểu[^pg-ld-wal]. Kết quả được giao qua *replication slot* theo đúng thứ tự thực hiện trên server gốc[^pg-slot]. *Event sourcing* làm ngược lại: chính log event là nơi lưu sự thật, và trạng thái hiện tại được dựng bằng cách phát lại event[^az-es]. Cả hai nối vào ý "stream là changelog của một bảng, bảng là ảnh chụp của một stream"[^ks-stream-table].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hệ thống của bạn có database là nguồn sự thật, và các hệ phụ — search index, cache, warehouse — cần theo kịp. Cách ngây thơ là app ghi database *rồi* ghi message lên broker. Hai bước ghi đó không nguyên tử: app chết giữa hai bước là database và search index lệch nhau vĩnh viễn. CDC đảo cách làm: chỉ ghi database; thay đổi của database *tự* thành stream.
+*Với service `orders`.* `orders` lưu đơn vào PostgreSQL, còn `search-index` và một lớp cache cần theo kịp mỗi thay đổi. Cách ngây thơ là code của `orders` ghi database *rồi* ghi message lên Kafka. Hai bước ghi đó không nguyên tử: `orders` chết giữa hai bước thì database và search index lệch nhau vĩnh viễn. CDC đảo cách làm: `orders` chỉ ghi database, còn thay đổi của database *tự* trở thành stream. Mục này giải thích cơ chế, những chỗ vận hành dễ vỡ, và event sourcing khác CDC ra sao.
 
-*Logical decoding của PostgreSQL.* Docs định nghĩa logical decoding là quá trình trích mọi thay đổi bền của các bảng thành một định dạng mạch lạc, dễ hiểu, diễn giải được mà không cần biết nội bộ database[^pg-ld-def]. Trong PostgreSQL, nó được cài bằng cách giải mã nội dung WAL — vốn mô tả thay đổi ở mức lưu trữ — thành dạng ứng dụng dùng được như dòng tuple hay câu SQL[^pg-ld-wal]. (WAL và nguyên tắc "ghi log trước" xem [P5 · Chương 05](../05-storage/05-crash-consistency-va-journaling.md).) Điều kiện: `wal_level = logical` thêm thông tin cần cho logical decoding[^pg-wal-level].
+### 5.1 Logical decoding của PostgreSQL
+
+Docs định nghĩa logical decoding là quá trình trích mọi thay đổi bền của các bảng thành một định dạng mạch lạc, dễ hiểu, diễn giải được mà không cần biết nội bộ database[^pg-ld-def]. Trong PostgreSQL, nó được cài bằng cách giải mã nội dung WAL, vốn chỉ mô tả thay đổi ở mức lưu trữ, thành dạng ứng dụng dùng được như dòng tuple hay câu SQL[^pg-ld-wal]. (WAL và nguyên tắc "ghi log trước" xem [P5 · Chương 05](../05-storage/05-crash-consistency-va-journaling.md).) Điều kiện là đặt `wal_level = logical` để WAL chứa thêm thông tin cần cho logical decoding[^pg-wal-level].
 
 ```mermaid
 flowchart LR
@@ -249,106 +317,154 @@ flowchart LR
 
 *Sơ đồ minh họa của người soạn.*
 
-*Replication slot.* Slot là một dòng thay đổi có thể phát lại cho client theo đúng thứ tự thực hiện trên server gốc; mỗi slot phát thay đổi của một database[^pg-slot]. Slot tồn tại độc lập với kết nối đang dùng nó và an toàn khi crash[^pg-slot-persist]. Các thay đổi được giải mã theo *thứ tự commit*; giữa begin và commit chỉ có thay đổi của đúng transaction đó; transaction bị rollback không bao giờ được giải mã[^pg-commit-order]. Chỉ transaction đã được flush an toàn xuống đĩa mới được giải mã[^pg-flushed]. *Output plugin* biến biểu diễn nội bộ của WAL thành định dạng mà consumer của slot muốn[^pg-plugin]. Có thể dùng slot qua giao thức streaming replication hoặc qua hàm SQL[^pg-consume].
+### 5.2 Replication slot
 
-*Hai điểm vận hành quan trọng* (đều có trong docs):
+Slot là một dòng thay đổi có thể phát lại cho client theo đúng thứ tự thực hiện trên server gốc; mỗi slot phát thay đổi của một database[^pg-slot]. Slot tồn tại độc lập với kết nối đang dùng nó và an toàn khi crash[^pg-slot-persist]. Các thay đổi được giải mã theo *thứ tự commit*; giữa begin và commit chỉ có thay đổi của đúng transaction đó, và transaction bị rollback không bao giờ được giải mã[^pg-commit-order]. Chỉ transaction đã được flush an toàn xuống đĩa mới được giải mã[^pg-flushed].
 
-1. **Trùng lặp sau crash.** Slot phát mỗi thay đổi một lần trong điều kiện bình thường; nhưng vị trí slot chỉ được lưu tại checkpoint, nên sau crash slot có thể lùi về LSN cũ và gửi lại các thay đổi gần nhất; client chịu trách nhiệm tránh tác hại khi nhận cùng message nhiều lần[^pg-slot-once]. Nói cách khác CDC bản chất là *at-least-once* (mục 4) ở phía consumer. Debezium (một connector CDC phổ biến) nói đúng điều đó: khi hệ thống chạy bình thường nó giao exactly-once mỗi bản ghi thay đổi[^deb-eo], nhưng trong các tình huống bất thường nó, giống Kafka, chỉ bảo đảm at-least-once[^deb-alo].
-2. **Slot giữ WAL.** Slot tồn tại qua crash và không biết trạng thái consumer; nó ngăn xóa tài nguyên cần thiết ngay cả khi không có kết nối nào dùng — theo docs, WAL cần thiết và các hàng catalog hệ thống cần thiết đều không được dọn chừng nào slot còn cần chúng, nên tốn dung lượng[^pg-slot-caution]; trong trường hợp cực đoan có thể làm database tắt để tránh wraparound ID transaction, và slot không còn dùng thì phải xóa[^pg-slot-wrap]. `max_slot_wal_keep_size` mặc định `-1` nghĩa là slot có thể giữ lượng WAL không giới hạn[^pg-maxslot]. (Nhận xét của người soạn: consumer CDC chết lâu là sự cố đĩa của database nguồn, nên cần theo dõi độ trễ slot.)
+*Output plugin* biến biểu diễn nội bộ của WAL thành định dạng mà consumer của slot muốn[^pg-plugin]. Consumer lấy thay đổi từ slot qua giao thức streaming replication hoặc qua hàm SQL[^pg-consume].
 
-*Replica identity.* Output plugin luôn thấy hàng mới của INSERT và phiên bản mới của UPDATE; còn hàng *cũ* của UPDATE/DELETE có hay không phụ thuộc cấu hình replica identity[^pg-ri]. Mặc định chỉ ghi giá trị cũ của cột khóa chính[^pg-ri-default]; `FULL` ghi giá trị cũ của mọi cột[^pg-ri-full].
+CDC cần trạng thái đầu rồi mới theo dõi thay đổi. Khi tạo slot qua giao thức streaming replication, PostgreSQL xuất một snapshot cho biết đúng trạng thái database mà sau đó mọi thay đổi sẽ được đưa vào stream. Nhờ đó ta dựng được bản sao rồi áp tiếp nội dung slot mà không mất thay đổi nào[^pg-snapshot]. Debezium (một connector CDC phổ biến) làm tương tự: lần đầu kết nối, connector chụp một snapshot nhất quán, rồi liên tục bắt thay đổi mức hàng đã commit[^deb-snap]. Nó ghi vị trí WAL cho mỗi event, và khi khởi động lại thì đọc tiếp từ chỗ dừng[^deb-resume].
 
-*Snapshot ban đầu.* CDC cần trạng thái đầu rồi mới theo dõi thay đổi. Khi tạo slot qua giao thức streaming replication, PostgreSQL xuất một snapshot cho biết đúng trạng thái database mà sau đó mọi thay đổi sẽ được đưa vào stream — dùng để dựng bản sao rồi áp tiếp nội dung slot mà không mất thay đổi nào[^pg-snapshot]. Debezium làm tương tự: lần đầu kết nối, connector chụp snapshot nhất quán, rồi liên tục bắt thay đổi mức hàng đã commit[^deb-snap]; nó ghi vị trí WAL cho mỗi event và khi khởi động lại thì đọc tiếp từ chỗ dừng[^deb-resume].
+### 5.3 Hai điểm vận hành dễ vỡ
 
-*Outbox* (tóm tắt; mẫu này và cách vận hành ở [Chương 12, mục 6](12-dung-dan-va-tich-hop-du-lieu.md)). Khi service cần vừa đổi state trong database vừa phát event, mẫu *outbox* (ghi event vào một bảng trong cùng transaction với thay đổi nghiệp vụ, rồi để CDC chuyển bảng đó lên broker) tránh sự không nhất quán giữa state nội bộ của service và state trong các event[^deb-outbox]. Phần chuyển lên broker là at-least-once nên consumer vẫn phải idempotent (suy luận của người soạn).
+Cả hai đều có trong docs.
 
-*Event sourcing.* Thay vì lưu trạng thái hiện tại rồi cập nhật tại chỗ, event sourcing lưu toàn bộ chuỗi hành động trên đối tượng vào kho append-only; kho đó là system of record để dựng lại đối tượng[^az-es]. Mỗi entity có một event stream riêng; trạng thái hiện tại có được bằng cách phát lại các event của nó — gọi là rehydration[^az-replay]. Vì phát lại tốn kém nên thường duy trì *materialized view* — phép chiếu chỉ-đọc của event store, tối ưu cho truy vấn[^az-mv]; vì view cập nhật sau event nên hệ thống chỉ *nhất quán cuối cùng* (eventually consistent)[^az-ec]. Khác biệt cốt lõi với CDC (nhận xét của người soạn): CDC *suy ra* event từ thay đổi của một database vốn là nơi giữ state; event sourcing đặt event làm nơi giữ state, còn bảng chỉ là dẫn xuất.
+**Trùng lặp sau crash.** Trong điều kiện bình thường slot phát mỗi thay đổi một lần. Nhưng vị trí slot chỉ được lưu tại checkpoint, nên sau crash slot có thể lùi về LSN cũ và gửi lại các thay đổi gần nhất; client có trách nhiệm tránh tác hại khi nhận cùng message nhiều lần[^pg-slot-once]. Nói cách khác, CDC là *at-least-once* (mục 4) ở phía consumer. Debezium nói đúng điều đó: khi hệ thống chạy bình thường, nó giao exactly-once mỗi bản ghi thay đổi[^deb-eo]. Trong các tình huống bất thường thì nó, giống Kafka, chỉ bảo đảm at-least-once[^deb-alo].
 
-*Stream–table duality.* Docs Kafka Streams mô tả: stream có thể xem như changelog của một bảng — mỗi record là một thay đổi trạng thái[^ks-stream-table]; bảng có thể xem như ảnh chụp, tại một thời điểm, của giá trị mới nhất mỗi key trong một stream[^ks-table-snapshot]. Nói gọn: stream xem như bảng, bảng xem như stream; log compaction của Kafka khai thác chính tính đối ngẫu này[^ks-duality]. Đây là nền cho join stream–table ở mục 7 và cho changelog của state ở mục 8.
+**Slot giữ WAL.** Slot sống qua crash và không biết gì về trạng thái consumer của nó. Nó ngăn việc xóa tài nguyên cần thiết ngay cả khi không còn kết nối nào dùng: theo docs, cả WAL cần thiết lẫn các hàng catalog hệ thống cần thiết đều không được dọn chừng nào slot còn cần, nên tốn dung lượng[^pg-slot-caution]. Trong trường hợp cực đoan, database có thể tự tắt để tránh wraparound ID transaction, và slot không còn dùng thì phải xóa[^pg-slot-wrap]. Cấu hình `max_slot_wal_keep_size` mặc định là `-1`, nghĩa là slot có thể giữ lượng WAL không giới hạn[^pg-maxslot]. Hệ quả cho `orders` (nhận xét của người soạn): consumer CDC chết lâu thì thành sự cố đĩa của chính database nguồn, nên phải theo dõi độ trễ của slot.
 
-<details><summary>Đi sâu: event sourcing trả giá gì; xóa dữ liệu cá nhân; thử logical decoding bằng SQL</summary>
+### 5.4 Outbox: tránh ghi hai nơi
 
-- **Giá phải trả.** Docs Azure Architecture Center cảnh báo event sourcing là một mẫu phức tạp với nhiều đánh đổi, thay đổi cách lưu dữ liệu, xử lý đồng thời, tiến hóa schema và truy vấn trạng thái[^az-complex]. Sự kiện đã lưu bất biến: muốn sửa hay hoàn tác chỉ có cách thêm *compensating event*[^az-comp]; đổi schema event có thể xử lý bằng *upcasting* — hàm chuyển schema cũ sang schema hiện tại lúc giải tuần tự hóa[^az-upcast]. Snapshot chỉ là tối ưu: event stream vẫn là nguồn sự thật[^az-snap]. Phân phối event thường at-least-once nên handler phải idempotent[^az-idem].
-- **Xóa dữ liệu cá nhân.** Chính nguồn này nêu rằng tính append-only/bất biến của event store xung đột với quy định yêu cầu xóa dữ liệu cá nhân (quyền "được quên")[^az-gdpr]. Hướng xử lý (tách dữ liệu cá nhân, crypto-shredding…) được bàn ở [Chương 14](14-trach-nhiem-voi-du-lieu.md), không lặp lại ở đây.
-- **Thử bằng SQL.** Docs PostgreSQL có ví dụ: tạo slot bằng `pg_create_logical_replication_slot` rồi đọc thay đổi bằng `pg_logical_slot_get_changes`[^pg-ex]. Ví dụ đó ghi chú rằng khi thay đổi đã được đọc bằng `get_changes` thì chúng được tiêu thụ và không phát lại[^pg-ex-consumed]; muốn xem trước mà không tiêu thụ thì dùng `pg_logical_slot_peek_changes`[^pg-ex-peek].
-- **CDC vs replication** (nhận xét của người soạn): đây là *replication ở mức logic* (hàng/bảng) nên có thể đi sang hệ khác kiểu (search, warehouse); replication vật lý (byte WAL) chỉ nối PostgreSQL với PostgreSQL. Phân tích đầy đủ ở [Chương 05](05-replication.md).
-- **Ghép lên kiến trúc lớn.** Dòng thay đổi này là một trong các cách đưa dữ liệu từ hệ vận hành sang hệ phân tích — xem [Chương 13](13-kien-truc-he-du-lieu.md) — và là chất liệu của "dữ liệu dẫn xuất" ở [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md).
+Quay lại bài toán ghi hai nơi ở đầu mục. Khi service cần vừa đổi state trong database vừa phát event, mẫu *outbox* ghi event vào một bảng ngay trong transaction đổi nghiệp vụ, rồi để CDC chuyển bảng đó lên broker. Cách này tránh được sự không nhất quán giữa state nội bộ của service và state trong các event mà service khác nhận[^deb-outbox]. (Tóm tắt; mẫu này và cách vận hành ở [Chương 12, mục 6](12-dung-dan-va-tich-hop-du-lieu.md).) Phần chuyển lên broker là at-least-once, nên consumer vẫn phải idempotent (suy luận của người soạn).
+
+### 5.5 Event sourcing
+
+Thay vì lưu trạng thái hiện tại rồi cập nhật tại chỗ, event sourcing lưu toàn bộ chuỗi hành động trên một đối tượng vào kho append-only; kho đó là system of record để dựng lại đối tượng[^az-es]. Mỗi entity có một event stream riêng; trạng thái hiện tại có được bằng cách phát lại các event của nó, gọi là rehydration[^az-replay]. Vì phát lại tốn kém nên hệ thống thường duy trì *materialized view*, một phép chiếu chỉ-đọc của event store, tối ưu cho truy vấn[^az-mv]. View cập nhật sau event, nên hệ thống chỉ *nhất quán cuối cùng* (eventually consistent)[^az-ec].
+
+Khác biệt cốt lõi với CDC (nhận xét của người soạn): CDC *suy ra* event từ thay đổi của một database vốn là nơi giữ state; event sourcing đặt chính event làm nơi giữ state, còn bảng chỉ là dẫn xuất. Nếu `orders` theo hướng event sourcing, kho event của đơn #7 là sự thật, còn bảng `orders` chỉ là một view dựng từ đó.
+
+### 5.6 Stream–table duality
+
+Docs Kafka Streams gọi tên mối quan hệ giữa hai thứ trên. Một stream có thể xem như changelog của một bảng, mỗi record là một thay đổi trạng thái[^ks-stream-table]. Ngược lại, một bảng có thể xem như ảnh chụp, tại một thời điểm, của giá trị mới nhất mỗi key trong một stream[^ks-table-snapshot]. Nói gọn: stream xem như bảng, bảng xem như stream, và log compaction của Kafka khai thác chính tính đối ngẫu này[^ks-duality]. Đây là nền cho join stream–table ở mục 7 và cho changelog của state ở mục 8.
+
+<details><summary>Đi sâu: replica identity, event sourcing trả giá gì, xóa dữ liệu cá nhân, thử logical decoding bằng SQL</summary>
+
+- **Replica identity.** Output plugin luôn thấy hàng mới của INSERT và phiên bản mới của UPDATE, còn hàng *cũ* của UPDATE/DELETE có hay không là tùy cấu hình replica identity[^pg-ri]. Mặc định chỉ ghi giá trị cũ của các cột khóa chính[^pg-ri-default]. Với `FULL` thì ghi giá trị cũ của mọi cột[^pg-ri-full].
+- **Giá phải trả của event sourcing.** Docs Azure Architecture Center cảnh báo đây là mẫu phức tạp với nhiều đánh đổi: nó thay đổi cách lưu dữ liệu, xử lý đồng thời, tiến hóa schema và truy vấn trạng thái[^az-complex]. Event đã lưu là bất biến, nên muốn sửa hay hoàn tác chỉ có cách thêm một *compensating event*[^az-comp]. Đổi schema event thì có thể dùng *upcasting*, tức hàm chuyển schema cũ sang schema hiện tại lúc giải tuần tự hóa[^az-upcast]. Snapshot chỉ là tối ưu: event stream vẫn là nguồn sự thật[^az-snap]. Event thường được giao at-least-once nên handler phải idempotent[^az-idem].
+- **Xóa dữ liệu cá nhân.** Cũng nguồn đó nêu rằng tính append-only và bất biến của event store xung đột với quy định yêu cầu xóa dữ liệu cá nhân, như quyền "được quên"[^az-gdpr]. Hướng xử lý (tách dữ liệu cá nhân, crypto-shredding…) bàn ở [Chương 14](14-trach-nhiem-voi-du-lieu.md), không lặp lại ở đây.
+- **Thử bằng SQL.** Docs PostgreSQL có ví dụ tạo slot bằng `pg_create_logical_replication_slot` rồi đọc thay đổi bằng `pg_logical_slot_get_changes`[^pg-ex]. Ví dụ đó ghi chú rằng thay đổi đã đọc bằng `get_changes` thì bị tiêu thụ và không phát lại[^pg-ex-consumed]. Muốn xem trước mà không tiêu thụ thì dùng `pg_logical_slot_peek_changes`[^pg-ex-peek].
+- **CDC so với replication** (nhận xét của người soạn): CDC là *replication ở mức logic* (hàng/bảng) nên đi được sang hệ khác kiểu như search hay warehouse; replication vật lý (byte WAL) chỉ nối PostgreSQL với PostgreSQL. Phân tích đầy đủ ở [Chương 05](05-replication.md).
+- **Ghép lên kiến trúc lớn.** Dòng thay đổi này là một trong các cách đưa dữ liệu từ hệ vận hành sang hệ phân tích (xem [Chương 13](13-kien-truc-he-du-lieu.md)), và là chất liệu của "dữ liệu dẫn xuất" ở [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md).
 
 </details>
 
-**Quay lại Q5:** CDC = đọc WAL → slot → stream thay đổi theo thứ tự commit (at-least-once; nhớ theo dõi slot giữ WAL); event sourcing = lưu event làm sự thật, state là dẫn xuất; hai thứ gặp nhau ở ý stream và bảng là hai mặt của cùng dữ liệu.
+**Quay lại Q5:** CDC = đọc WAL → slot → stream thay đổi theo thứ tự commit (at-least-once; nhớ theo dõi slot giữ WAL), nên `orders` chỉ cần ghi database; event sourcing = lưu event làm sự thật, state là dẫn xuất; hai thứ gặp nhau ở ý stream và bảng là hai mặt của cùng dữ liệu.
 
 ## 6. Event time, processing time, window và watermark (Q6)
 
-> **Trả lời ngắn.** *Event time* là lúc sự việc thực sự xảy ra; *processing time* là lúc hệ thống xử lý nó, có thể muộn hơn vài mili-giây tới vài ngày[^ks-event-time][^ks-proc-time]. Gộp theo thời gian thì phải chia stream thành *window* (tumbling, hopping, session…), và vì event tới trễ/sai thứ tự nên cần *watermark* — tín hiệu "event time đã tới mốc t" — nhưng watermark thường chỉ là ước lượng nên có thể sai[^df-fast], và event trễ vẫn phải có chính sách riêng (grace period của Kafka Streams[^ks-grace], allowed lateness của Flink[^fl-late-drop]).
+> **Trả lời ngắn.** *Event time* là lúc sự việc thực sự xảy ra; *processing time* là lúc hệ thống xử lý nó, và hai mốc đó có thể cách nhau từ vài mili-giây tới vài ngày[^ks-proc-time]. Muốn gộp theo thời gian thì phải chia stream thành *window* (tumbling, hopping, session). Vì event tới trễ và sai thứ tự nên cần thêm *watermark*, tín hiệu "event time đã tới mốc t"; watermark thường chỉ là ước lượng nên có thể sai[^df-fast], và event trễ vẫn cần chính sách riêng (grace period, allowed lateness).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): app giao hàng tính "số đơn mỗi 5 phút". Một shipper đi qua hầm, bấm "đã giao" lúc 12:03 nhưng điện thoại chỉ có sóng và gửi lúc 12:09. Nếu đếm theo *lúc server nhận* (processing time) thì đơn này vào ô 12:05–12:10 — sai so với thực tế. Nếu đếm theo *lúc xảy ra* (event time) thì nó thuộc ô 12:00–12:05 — nhưng ô đó có thể đã được chốt và gửi báo cáo.
+*Với service `orders`.* `dashboard` đếm "số đơn mỗi 5 phút". Giả sử một khách đặt đơn trên app mobile lúc 12:03 khi đang đi qua đoạn hầm mất sóng; điện thoại giữ đơn lại và chỉ gửi lên được lúc 12:09. Nếu `dashboard` đếm theo *lúc server nhận* (processing time) thì đơn này rơi vào ô 12:05–12:10, sai so với thực tế. Nếu đếm theo *lúc xảy ra* (event time) thì nó thuộc ô 12:00–12:05, nhưng ô đó có thể đã được chốt và gửi báo cáo từ lâu. Cả mục này xoay quanh khoảng lệch đó.
 
-*Hai miền thời gian.* Dataflow định nghĩa event time là thời điểm sự kiện thực sự xảy ra (đồng hồ của hệ sinh ra nó); processing time là thời điểm sự kiện được quan sát tại một điểm của pipeline theo đồng hồ hệ thống, và bài không giả định các đồng hồ phân tán được đồng bộ[^df-evdef][^df-procdef]. Event time của một sự kiện gần như không đổi, còn processing time luôn trôi tới[^df-time]. Độ chênh (skew) giữa hai miền thay đổi động vì độ trễ truyền thông, lập lịch, thời gian xử lý…[^df-skew] Kafka Streams tách thêm *ingestion time* — lúc broker lưu record vào partition[^ks-ingest]. Đồng hồ trên thiết bị sinh event không đáng tin tới đâu thì event time cũng sai tới đó (suy luận của người soạn; xem [Chương 08](08-su-co-he-phan-tan.md)).
+### 6.1 Hai miền thời gian
 
-*Window.* Windowing chia stream thành các khối hữu hạn để xử lý theo nhóm; với dữ liệu không biên, nó cần cho nhiều phép (gộp, outer join…)[^df-windowing] và về thực chất luôn dựa trên thời gian (nhiều hệ hỗ trợ window theo số tuple, nhưng đó là window theo thời gian logic)[^df-window-time]. Kafka Streams dùng window để nhóm các record cùng key[^ks-win-def], và theo dõi window *theo từng key*[^ks-win-key]. Các kiểu chính:
+Event time là thời điểm event hoặc data record xảy ra, tức lúc nó được tạo ra "ở nguồn"[^ks-event-time]. Dataflow nói chặt hơn một chút: đó là đồng hồ của hệ sinh ra event, đọc tại lúc xảy ra[^df-evdef]. Processing time là thời điểm event được quan sát tại một điểm trong pipeline theo đồng hồ hệ thống, và bài này không giả định các đồng hồ phân tán đã đồng bộ[^df-procdef].
 
-| Kiểu | Định nghĩa | Ghi chú |
+Hai miền này khác nhau ở điểm sau: event time của một sự kiện gần như không bao giờ đổi, còn processing time cứ trôi tới khi event đi qua pipeline[^df-time]. Độ chênh (skew) giữa hai miền cũng không cố định, vì nó phụ thuộc độ trễ truyền thông, thuật toán lập lịch, thời gian xử lý…[^df-skew] Kafka Streams tách thêm *ingestion time*: lúc broker lưu record vào partition[^ks-ingest]. Đồng hồ trên thiết bị sinh event không đáng tin tới đâu thì event time cũng sai tới đó (suy luận của người soạn; xem [Chương 08](08-su-co-he-phan-tan.md)).
+
+### 6.2 Window
+
+Windowing chia stream thành các khối hữu hạn để xử lý theo nhóm. Với dữ liệu không biên nó cần cho nhiều phép, như gộp hay outer join[^df-windowing]. Về thực chất window luôn dựa trên thời gian: nhiều hệ hỗ trợ window theo số tuple, nhưng đó chỉ là window theo thời gian logic[^df-window-time]. Kafka Streams dùng window để nhóm các record cùng key[^ks-win-def]. Nó theo dõi window *theo từng key*[^ks-win-key]. Với `dashboard`, "mỗi 5 phút" là một window. Các kiểu chính:
+
+| Kiểu | Định nghĩa | Một record thuộc |
 |---|---|---|
-| **Tumbling** (Dataflow: "fixed") | cửa sổ cỡ cố định, không chồng lấn, không hở[^ksdsl-tumb][^df-fixed] | một record thuộc đúng một window[^ksdsl-tumb] |
-| **Hopping** (Dataflow: "sliding") | cỡ cố định + bước tiến (advance); có thể chồng lấn, ví dụ cỡ 5 phút, bước 1 phút[^ksdsl-hop][^ksdsl-hop2][^df-sliding] | một record có thể thuộc nhiều window[^ksdsl-hop] |
-| **Session** | chuỗi hoạt động ngăn cách bởi khoảng im lặng (gap); cỡ thay đổi[^ksdsl-sess2], window của mỗi key được theo dõi độc lập[^ksdsl-sess-keys][^df-session] | event rơi trong gap của session đang có thì gộp vào đó[^ksdsl-sess] |
+| **Tumbling** (Dataflow gọi là "fixed"[^df-fixed]) | cửa sổ cỡ cố định, không chồng lấn, không hở[^ksdsl-tumb] | đúng một window |
+| **Hopping** (Dataflow gọi là "sliding"[^df-sliding]) | cỡ cố định cộng một bước tiến (advance), nên có thể chồng lấn[^ksdsl-hop] | có thể nhiều window |
+| **Session** | chuỗi hoạt động ngăn cách bởi khoảng im lặng (gap), nên cỡ thay đổi[^ksdsl-sess2] | window của session đang có, nếu rơi trong gap[^ksdsl-sess] |
 
-Tumbling là trường hợp riêng của hopping có cỡ bằng bước tiến[^ksdsl-tumb]; Dataflow nói tương tự: fixed window là trường hợp riêng của sliding window khi cỡ bằng chu kỳ[^df-fixed-special]. **Cẩn thận tên gọi:** Kafka Streams có thêm một kiểu riêng tên "sliding", là cửa sổ cỡ cố định chồng lấn dựa trên *chênh lệch giữa timestamp các record*[^ksdsl-sliding] — khác "sliding" của Dataflow, tương đương "hopping" của Kafka Streams. Flink dùng tên tumbling, sliding, session cho các window assigner[^fl-tumbling][^fl-session].
+"Đơn mỗi 5 phút" của `dashboard` là tumbling. Nếu muốn "đơn trong 5 phút gần nhất, cập nhật mỗi phút" thì dùng hopping cỡ 5 phút, bước 1 phút[^ksdsl-hop2]. Window session hợp với "phiên mua hàng của một khách", vì window của mỗi key được theo dõi độc lập[^ksdsl-sess-keys] (nhận xét của người soạn).
 
-*Watermark.* Flink định nghĩa: `Watermark(t)` khai báo rằng event time đã tới t trong stream đó, nghĩa là không còn element nào có timestamp ≤ t[^fl-wm-def]. Với nhiều đầu vào, event time của operator là *min* của các đầu vào[^fl-wm-min]. Bài Dataflow nêu hai nhược điểm đều về tính đúng đắn: watermark đôi khi *quá nhanh* — vẫn có dữ liệu trễ tới sau watermark[^df-fast]; và đôi khi *quá chậm* — là một thước đo tiến độ toàn cục, một datum chậm có thể giữ cả pipeline[^df-slow]. Gốc rễ là với đa số tập dữ liệu phân tán thực tế, hệ thống không đủ thông tin để dựng watermark đúng 100%[^df-heur]. Kết luận của bài: chỉ watermark thì chưa đủ[^df-insufficient].
+Tumbling là trường hợp riêng của hopping có cỡ bằng bước tiến[^ksdsl-tumb]. Dataflow nói tương tự: fixed window là trường hợp riêng của sliding window khi cỡ bằng chu kỳ[^df-fixed-special].
 
-*Dữ liệu trễ.* Flink: element trễ là element tới sau khi đồng hồ event time (theo watermark) đã đi quá timestamp của nó[^fl-late]; làm watermark chậm hơn để chờ thì làm trễ kết quả window[^fl-wm-delay]. Nên có tham số cho phép trễ: `allowed lateness` mặc định 0, element tới sau watermark bị bỏ[^fl-late-drop]; đặt lớn hơn 0 thì element trễ nhưng chưa bị bỏ vẫn được thêm vào window và có thể làm window phát kết quả lần nữa[^fl-lateness]. Kafka Streams có *grace period*: thời gian chờ record sai thứ tự của một window[^ks-grace]; record tới sau grace period bị bỏ[^ks-grace2]. Docs gọi thẳng đây là đánh đổi giữa độ trễ, chi phí và độ đúng[^ks-tradeoff].
+**Cẩn thận tên gọi.** Kafka Streams có thêm một kiểu riêng tên "sliding", là cửa sổ cỡ cố định chồng lấn dựa trên *chênh lệch giữa timestamp các record*[^ksdsl-sliding]. Nó khác "sliding" của Dataflow, vốn tương đương "hopping" của Kafka Streams. Flink thì dùng tên tumbling, sliding, session cho các window assigner[^fl-tumbling]. Session window của Flink đóng lại khi không nhận element nào trong một khoảng thời gian[^fl-session].
 
-*Phát kết quả khi nào, và sửa ra sao.* Dataflow tách "khi nào phát" thành *trigger*[^df-trigger], và "kết quả sau liên hệ kết quả trước thế nào" thành chế độ tinh chỉnh: *discarding* (bỏ nội dung window sau mỗi lần phát)[^df-discarding], *accumulating* (giữ lại, kết quả sau là bản tinh chỉnh của kết quả trước)[^df-trigger-modes]. Trigger theo watermark phát khi watermark vượt cuối window[^df-wm-trigger]. Bài nhận xét Lambda Architecture né bài toán đầy đủ-dữ-liệu bằng cách chỉ cho ước lượng độ trễ thấp từ pipeline stream, kèm hứa hẹn đúng đắn về sau khi batch chạy[^df-lambda] — nối sang [Chương 10](10-batch-processing.md) và [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md).
+### 6.3 Watermark
+
+Flink định nghĩa: `Watermark(t)` khai báo rằng event time đã tới t trong stream đó, nghĩa là không còn element nào có timestamp ≤ t sẽ tới nữa[^fl-wm-def]. Operator có nhiều đầu vào thì event time của nó là *min* của các đầu vào[^fl-wm-min]. Với `dashboard`, watermark là cách nó biết "ô 12:00–12:05 chắc đã đủ đơn, chốt được rồi".
+
+Chữ "chắc" ở đó là điểm yếu. Bài Dataflow nêu hai nhược điểm, đều về tính đúng đắn. Watermark đôi khi *quá nhanh*: vẫn có dữ liệu trễ tới sau watermark[^df-fast]. Và đôi khi *quá chậm*: nó là thước đo tiến độ toàn cục, nên một datum chậm có thể giữ cả pipeline lại[^df-slow]. Gốc rễ là với đa số tập dữ liệu phân tán thực tế, hệ thống không đủ thông tin để dựng watermark đúng 100%[^df-heur]. Kết luận của bài: chỉ watermark thì chưa đủ[^df-insufficient].
+
+### 6.4 Dữ liệu trễ
+
+Đơn lúc 12:03 của khách trong hầm là một element trễ. Theo Flink, element trễ là element tới sau khi đồng hồ event time (theo watermark) đã đi quá timestamp của nó[^fl-late]. Ta có thể làm watermark chậm đi để chờ, nhưng như vậy kết quả window bị trễ theo[^fl-wm-delay]. Vì vậy cần một tham số riêng cho phép trễ.
+
+Ở Flink, `allowed lateness` mặc định là 0, tức element tới sau watermark bị bỏ[^fl-late-drop]. Đặt lớn hơn 0 thì element trễ nhưng chưa bị bỏ vẫn được thêm vào window, và window có thể phát kết quả lần nữa[^fl-lateness]. Kafka Streams có *grace period*, thời gian chờ record sai thứ tự của một window[^ks-grace]. Record tới sau grace period thì bị bỏ[^ks-grace2]. Docs gọi thẳng đây là đánh đổi giữa độ trễ, chi phí và độ đúng[^ks-tradeoff].
+
+### 6.5 Phát kết quả khi nào, và sửa ra sao
+
+Dataflow tách câu hỏi "khi nào phát" thành *trigger*, quyết định lúc nào trong processing time thì kết quả của phép gộp được phát ra[^df-trigger]. Trigger theo watermark phát khi watermark vượt cuối window[^df-wm-trigger]. Còn câu hỏi "kết quả sau liên hệ với kết quả trước thế nào" thành chế độ tinh chỉnh. *Discarding* bỏ nội dung window sau mỗi lần phát, kết quả sau không liên quan tới kết quả trước[^df-discarding]. *Accumulating* giữ nội dung lại, và kết quả sau là bản tinh chỉnh của kết quả trước[^df-trigger-modes].
+
+Bài Dataflow cũng nhận xét về Lambda Architecture: nó né bài toán đầy đủ-dữ-liệu bằng cách chỉ cho ước lượng độ trễ thấp từ pipeline stream, kèm hứa hẹn kết quả đúng về sau khi batch chạy[^df-lambda]. Phần này nối sang [Chương 10](10-batch-processing.md) và [Chương 12](12-dung-dan-va-tich-hop-du-lieu.md).
 
 <details><summary>Đi sâu: stream time của Kafka Streams, nguồn nhàn rỗi, watermark theo partition</summary>
 
-- **Stream time.** Kafka Streams gán timestamp cho mỗi record qua `TimestampExtractor`; thời gian do dữ liệu dẫn dắt (*stream time*) chỉ tiến khi có record mới tới processor[^ks-streamtime] — khác wall-clock time lúc ứng dụng chạy[^ks-streamtime2].
-- **Nguồn nhàn rỗi (idle source).** Nếu một partition lâu không có event, bộ sinh watermark không có thông tin mới; watermark bị giữ lại vì nó là *min* của các watermark song song[^fl-idle]. Flink có `WatermarkStrategy` phát hiện nguồn nhàn rỗi và đánh dấu nó idle[^fl-idle2]. Tình huống này hay gặp khi một topic Kafka có partition thưa (nhận xét của người soạn).
-- **Watermark theo partition Kafka.** Flink nêu rằng khi đọc Kafka song song nhiều partition, các event xen kẽ nhau và phá mẫu timestamp của từng partition, nên Flink có sinh watermark *bên trong* consumer Kafka theo từng partition rồi gộp[^fl-kafka-wm].
-- **Event time và tính tái lập** (suy luận của người soạn): kết quả theo event time không phụ thuộc lúc chạy nên chạy lại trên log cũ cho kết quả như cũ — đó là lý do replay (mục 8) quan trọng; kết quả theo processing time thì không.
+- **Stream time.** Kafka Streams gán timestamp cho mỗi record qua `TimestampExtractor`. Thời gian do dữ liệu dẫn dắt (*stream time*) chỉ tiến khi có record mới tới processor[^ks-streamtime]. Nó khác wall-clock time lúc ứng dụng thực sự chạy[^ks-streamtime2].
+- **Nguồn nhàn rỗi (idle source).** Nếu một partition lâu không có event, bộ sinh watermark không có thông tin mới, và watermark bị giữ lại vì nó là *min* của các watermark song song[^fl-idle]. Flink có `WatermarkStrategy` phát hiện nguồn nhàn rỗi và đánh dấu nó idle[^fl-idle2]. Tình huống này hay gặp khi một topic Kafka có partition thưa (nhận xét của người soạn).
+- **Watermark theo partition Kafka.** Flink nêu rằng khi đọc Kafka song song nhiều partition, các event xen kẽ nhau và phá mẫu timestamp của từng partition. Vì vậy Flink sinh watermark *bên trong* consumer Kafka theo từng partition rồi gộp lại[^fl-kafka-wm].
+- **Event time và tính tái lập** (suy luận của người soạn): kết quả theo event time không phụ thuộc lúc chạy, nên chạy lại trên log cũ cho kết quả như cũ; đó là lý do replay (mục 8) quan trọng. Kết quả theo processing time thì không.
 
 </details>
 
-**Quay lại Q6:** event time là lúc xảy ra, processing time là lúc xử lý; window chia stream thành khối hữu hạn (tumbling/hopping/session); watermark ước lượng tiến độ event time nhưng có thể sai, nên cần thêm allowed lateness/grace và trigger.
+**Quay lại Q6:** event time là lúc xảy ra, processing time là lúc xử lý; window chia stream thành khối hữu hạn (tumbling/hopping/session); watermark ước lượng tiến độ event time nhưng có thể sai, nên `dashboard` cần thêm allowed lateness/grace và trigger cho những đơn tới muộn.
 
 ## 7. Stream join (Q7)
 
-> **Trả lời ngắn.** Join trên stream khác join trong database ở chỗ dữ liệu chưa đầy đủ và còn tới tiếp. Có ba dạng: *stream–stream* (hai dòng event ghép theo key trong một khoảng thời gian), *stream–table* (làm giàu event bằng giá trị mới nhất của một bảng được duy trì từ changelog) và *table–table*. Hai việc dễ sai là *co-partitioning* (hai đầu vào phải chia partition cùng cách) và *thứ tự* (xử lý theo offset hay theo timestamp).
+> **Trả lời ngắn.** Join trên stream khác join trong database ở chỗ dữ liệu chưa đầy đủ và còn đang tới tiếp. Có ba dạng: *stream–stream* (ghép hai dòng event theo key trong một khoảng thời gian), *stream–table* (làm giàu event bằng giá trị mới nhất của một bảng được duy trì từ changelog) và *table–table*. Hai chỗ dễ sai là *co-partitioning* (hai đầu vào phải chia partition cùng cách) và *thứ tự* (xử lý theo offset hay theo timestamp).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có luồng "lượt xem quảng cáo" và luồng "lượt click"; muốn biết click nào đến từ lượt xem nào. Hai luồng không đồng bộ: click có thể tới trước view trong log vì độ trễ khác nhau. Vì vậy join phải *nhớ* một lúc cả hai phía — nghĩa là có state và phải có giới hạn thời gian để state không phình mãi.
+*Với service `orders`.* Giả sử ngoài topic `orders`, một service thanh toán khác phát topic `payments`. Ta muốn ghép để biết đơn nào đã được thanh toán. Hai stream này không đồng bộ: event thanh toán có thể tới Kafka *trước* event tạo đơn, vì độ trễ của hai đường khác nhau. Vì vậy join phải *nhớ* cùng lúc cả hai phía, nghĩa là có state, và phải có giới hạn thời gian để state không phình mãi (nhận xét của người soạn). Ta lần lượt xem các dạng join, rồi hai chỗ dễ sai.
 
-*Stream–stream (window join).* Flink: window join ghép các element của hai stream có cùng key và cùng nằm trong một window; window xác định bằng window assigner[^fl-win-join]. Các cặp được tạo như inner join: element không có đối tác ở stream kia thì không được phát ra[^fl-inner]. Có thêm *interval join*: element của stream B có timestamp nằm trong một khoảng tương đối so với timestamp của element stream A cùng key[^fl-interval]; hiện chỉ hỗ trợ event time[^fl-interval-event]. Kafka Streams: join stream–stream là join có cửa sổ; theo docs, ba loại (inner, outer, left) đều xử lý đúng dữ liệu sai thứ tự[^ks-join-ss].
+### 7.1 Stream–stream: ghép `orders` với `payments`
 
-*Stream–table (làm giàu).* Join KStream–KTable không dùng window: khi có record mới trên stream, nó tra một KTable (changelog stream)[^ksj-streamtable]; theo cách hiểu của người soạn (từ stream–table duality ở mục 5), đó là tra giá trị mới nhất của mỗi key. Ví dụ docs: làm giàu luồng hoạt động của user bằng thông tin hồ sơ user mới nhất[^ksj-enrich]. Đây chính là stream–table duality (mục 5) áp dụng.
+Ở Flink, window join ghép các element của hai stream có cùng key và cùng nằm trong một window; window xác định bằng window assigner[^fl-win-join]. Các cặp được tạo ra như inner join: element không có đối tác ở stream kia thì không được phát ra[^fl-inner]. Flink còn có *interval join*: element của stream B có timestamp nằm trong một khoảng tương đối so với timestamp của element stream A cùng key[^fl-interval]. Hiện nay interval join chỉ hỗ trợ event time[^fl-interval-event]. Kafka Streams thì coi join stream–stream là join có cửa sổ, và theo docs cả ba loại (inner, outer, left) đều xử lý đúng dữ liệu sai thứ tự[^ks-join-ss].
 
-*Co-partitioning.* Với equi-join, hai đầu vào phải *co-partitioned*: record cùng key của hai bên phải đến cùng một task xử lý[^ksj-copart]; điều kiện gồm hai topic có *cùng số partition* (và cùng cách phân vùng)[^ksj-same-parts], và docs nhấn mạnh việc bảo đảm điều đó là trách nhiệm của người dùng[^ksj-copart-user]. Đây là hệ quả trực tiếp của partition theo key ở [Chương 06](06-partitioning.md): muốn ghép hai dòng theo key mà không chuyển dữ liệu liên máy thì cả hai phải chia theo cùng cách (suy luận của người soạn).
+### 7.2 Stream–table: làm giàu event
 
-*Thứ tự.* Stream–table join không dùng *versioned store* thì Kafka Streams không kiểm tra record sai thứ tự, chỉ xử lý theo thứ tự offset, nên có thể cho kết quả không đoán trước được[^ks-join-ooo]. Với versioned store, record phía stream sẽ join với bản ghi bảng có timestamp mới nhất mà không vượt quá timestamp của record stream[^ks-versioned]. Phía bảng sai thứ tự vẫn chưa được xử lý[^ks-join-ooo2].
+Giả sử `orders` muốn gắn vào mỗi event hồ sơ mới nhất của khách hàng. Đây là join KStream–KTable. Nó không dùng window: mỗi khi có record mới trên stream, nó tra một KTable (một changelog stream)[^ksj-streamtable]. Theo cách hiểu của người soạn (từ stream–table duality ở mục 5), đó là tra giá trị mới nhất của mỗi key. Ví dụ của docs rất giống: làm giàu luồng hoạt động của user bằng thông tin hồ sơ user mới nhất[^ksj-enrich].
+
+### 7.3 Co-partitioning
+
+Với equi-join, hai đầu vào phải *co-partitioned*: record cùng key của hai bên phải tới cùng một task xử lý[^ksj-copart]. Điều kiện gồm hai topic có *cùng số partition* và cùng cách phân vùng[^ksj-same-parts]. Docs nhấn mạnh việc bảo đảm điều đó là trách nhiệm của người dùng[^ksj-copart-user]. Đây là hệ quả trực tiếp của partition theo key ở [Chương 06](06-partitioning.md): muốn ghép hai dòng theo key mà không chuyển dữ liệu liên máy thì cả hai phải chia theo cùng một cách (suy luận của người soạn). Với `orders` và `payments`, nghĩa là cả hai topic phải lấy ID đơn hàng làm key và có cùng số partition.
+
+### 7.4 Thứ tự
+
+Nếu stream–table join không dùng *versioned store*, Kafka Streams không kiểm tra record sai thứ tự mà chỉ xử lý theo thứ tự offset, nên kết quả có thể không đoán trước được[^ks-join-ooo]. Với versioned store, record phía stream sẽ join với bản ghi bảng có timestamp mới nhất mà không vượt quá timestamp của record stream[^ks-versioned]. Phía bảng mà sai thứ tự thì vẫn chưa được xử lý[^ks-join-ooo2].
 
 <details><summary>Đi sâu: các biến thể khác</summary>
 
-- Kafka Streams có `GlobalKTable` và *foreign-key join* của KTable không đòi co-partitioning (docs ghi rõ ở phần co-partitioning)[^ksj-copart-exempt]. Chi tiết xem developer guide.
-- Phát biểu tổng quát (suy luận của người soạn): mọi join stream cần state có giới hạn thời gian (window hoặc interval) hoặc cần một bảng materialize; chọn kích thước window/interval là quyết định đánh đổi giống `grace period` ở mục 6.
+- Kafka Streams có `GlobalKTable` và *foreign-key join* của KTable, những kiểu không đòi co-partitioning (docs ghi rõ ở phần co-partitioning)[^ksj-copart-exempt]. Chi tiết xem developer guide.
+- Phát biểu tổng quát (suy luận của người soạn): mọi join stream cần state có giới hạn thời gian (window hoặc interval), hoặc cần một bảng materialize. Chọn kích thước window hay interval là quyết định đánh đổi, giống `grace period` ở mục 6.
 
 </details>
 
-**Quay lại Q7:** join stream = ghép hai nguồn đang tới tiếp, nên cần state; hai đầu vào phải chia partition cùng cách; và kết quả phụ thuộc vào chính sách xử lý sai thứ tự.
+**Quay lại Q7:** join stream = ghép hai nguồn đang tới tiếp (như `orders` với `payments`), nên cần state; hai đầu vào phải chia partition cùng cách; và kết quả phụ thuộc vào chính sách xử lý sai thứ tự.
 
 ## 8. Chịu lỗi cho xử lý có state (Q8)
 
-> **Trả lời ngắn.** Job có state (đếm, window, join) mất state khi máy chết, nên phải lưu lại state một cách có hệ thống và biết đọc lại nguồn từ đúng điểm. Hai cách phổ biến: *checkpoint* — chụp state của mọi operator cùng offset nguồn (Flink)[^flink-barrier], và *changelog* — mỗi state store ghi mọi cập nhật vào một topic Kafka để dựng lại sau lỗi (Kafka Streams)[^ks-changelog]. Cả hai đều dựa vào nguồn *phát lại được*.
+> **Trả lời ngắn.** Job có state (đếm, window, join) mất state khi máy chết, nên phải lưu state một cách có hệ thống và biết đọc lại nguồn từ đúng điểm. Có hai cách phổ biến. *Checkpoint* chụp state của mọi operator cùng với offset nguồn (Flink)[^flink-barrier]. *Changelog* thì cho mỗi state store ghi mọi cập nhật vào một topic Kafka để dựng lại sau lỗi (Kafka Streams)[^ks-changelog]. Cả hai đều dựa vào nguồn *phát lại được*.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đang đếm phiếu bầu từ nhiều thùng phiếu, người đếm ghi tổng trên giấy nháp. Nếu người đếm ngất, người thay thế cần: (1) tờ giấy nháp lần ghi gần nhất, và (2) biết đã đếm đến phiếu số mấy ở mỗi thùng *tương ứng với tờ giấy đó*. Hai thứ này phải khớp nhau; lệch một chút là đếm sót hoặc đếm đôi.
+*Với service `orders`.* Job `dashboard` giữ số đơn đang đếm của từng window trong RAM. Máy chạy nó chết thì số đếm mất. Job thay thế cần hai thứ: bản ghi gần nhất của các số đếm, và biết số đếm đó ứng với offset nào trong topic `orders`. Hai thứ này phải khớp nhau. Giả sử bản ghi ứng với offset 1000: nếu job mới đọc tiếp từ offset 1200 thì sót 200 đơn, còn nếu đọc từ 800 thì đếm đôi 200 đơn (nhận xét của người soạn).
 
-*Checkpoint kiểu Flink.* Flink dùng một biến thể của thuật toán Chandy–Lamport gọi là *asynchronous barrier snapshotting*[^flink-abs]. Khi checkpoint coordinator ra lệnh, mọi nguồn ghi lại offset của mình và chèn các *barrier* đánh số vào stream; barrier trôi qua đồ thị job, đánh dấu phần stream trước và sau mỗi checkpoint[^flink-barrier]. Checkpoint n chứa state của mỗi operator có được sau khi đã tiêu thụ mọi event *trước* barrier n và không event nào *sau* nó[^flink-cp-n]. Operator có hai đầu vào thực hiện *barrier alignment* để snapshot phản ánh state sau khi tiêu thụ cả hai đầu vào tới (nhưng không quá) hai barrier[^flink-align]. Khi lỗi, Flink khôi phục bằng cách tua lại và phát lại các stream nguồn[^flink-replay].
+### 8.1 Checkpoint kiểu Flink
+
+Flink dùng một biến thể của thuật toán Chandy–Lamport, gọi là *asynchronous barrier snapshotting*[^flink-abs]. Khi checkpoint coordinator ra lệnh, mọi nguồn ghi lại offset của mình rồi chèn các *barrier* đánh số vào stream. Barrier trôi qua đồ thị job, đánh dấu phần stream trước và sau mỗi checkpoint[^flink-barrier]. Checkpoint n chứa state của mỗi operator có được sau khi đã tiêu thụ mọi event *trước* barrier n và không event nào *sau* nó[^flink-cp-n].
+
+Operator có hai đầu vào thực hiện *barrier alignment*, để snapshot phản ánh state sau khi tiêu thụ cả hai đầu vào tới (nhưng không quá) hai barrier[^flink-align]. Khi có lỗi, Flink khôi phục bằng cách tua lại và phát lại các stream nguồn[^flink-replay].
 
 ```mermaid
 flowchart LR
@@ -360,38 +476,46 @@ flowchart LR
 
 *Sơ đồ minh họa của người soạn: barrier B(n) chia stream thành "trước" và "sau" checkpoint n.*
 
-Ba kết quả có thể: Flink không cố gắng khôi phục (at-most-once); không mất nhưng có thể trùng kết quả (at-least-once); không mất, không trùng (exactly-once)[^flink-three]. Barrier alignment chỉ cần cho exactly-once; không cần thì có thể cấu hình `AT_LEAST_ONCE` để bỏ alignment cho nhanh hơn[^flink-alo]. Như mục 4: exactly-once ở đây là về *state của Flink*[^flink-eo]; ra hệ ngoài cần sink transactional hoặc idempotent[^flink-e2e].
+Flink có ba kết quả khả dĩ sau lỗi: không cố khôi phục (at-most-once); không mất nhưng có thể trùng kết quả (at-least-once); không mất, không trùng (exactly-once)[^flink-three]. Barrier alignment chỉ cần cho exactly-once, nên nếu không cần thì ta cấu hình `AT_LEAST_ONCE` để bỏ alignment cho nhanh hơn[^flink-alo]. Như ở mục 4, exactly-once ở đây là về *state của Flink*[^flink-eo]. Ra tới hệ ngoài thì cần sink transactional hoặc idempotent[^flink-e2e].
 
-*Changelog kiểu Kafka Streams.* Mỗi state store cục bộ có một *changelog topic* Kafka (replicate) ghi mọi cập nhật; topic này được partition để mỗi store/task có phần changelog riêng, và bật log compaction để dữ liệu cũ dọn được mà topic không phình mãi[^ks-changelog][^ks-changelog2]. Nếu task chạy trên máy hỏng và khởi động lại ở máy khác, Kafka Streams bảo đảm khôi phục state như trước lỗi bằng cách phát lại changelog trước khi tiếp tục xử lý[^ks-restore]. Chi phí khởi tạo lại chủ yếu là thời gian dựng lại state; để giảm, có thể cấu hình *standby replica*[^ks-standby] — bản sao đầy đủ của state[^ks-standby2]. Và theo mục 4, offset đầu vào, cập nhật state store và ghi topic đầu ra được commit nguyên tử trong chế độ exactly-once[^ks-eos].
+### 8.2 Changelog kiểu Kafka Streams
 
-*So sánh hai cách* (nhận xét của người soạn): checkpoint chụp *toàn bộ job tại một điểm cắt thống nhất*; ở dạng đầy đủ mỗi lần chụp phải ghi lượng state tương ứng, còn checkpoint tăng dần[^flink-ckstorage] giảm bớt phần này; changelog ghi *từng cập nhật* liên tục nên phục hồi tốn thời gian phát lại (giảm bằng standby). Cả hai chỉ đúng nếu nguồn đọc lại được từ một offset — lý do log kiểu Kafka (mục 2–3) hợp với stream processing.
+Mỗi state store cục bộ có một *changelog topic* Kafka, được replicate, ghi mọi cập nhật của store[^ks-changelog]. Topic này được partition để mỗi store/task có phần changelog riêng, và bật log compaction để dữ liệu cũ dọn được mà topic không phình mãi[^ks-changelog2]. Nếu task chạy trên máy hỏng và khởi động lại ở máy khác, Kafka Streams bảo đảm khôi phục state như trước lỗi bằng cách phát lại changelog trước khi tiếp tục xử lý[^ks-restore].
+
+Chi phí khởi tạo lại chủ yếu là thời gian dựng lại state. Để giảm, ta cấu hình *standby replica*[^ks-standby]. Đó là bản sao đầy đủ của state[^ks-standby2]. Và theo mục 4, trong chế độ exactly-once, việc commit offset đầu vào, cập nhật state store và ghi topic đầu ra được thực hiện nguyên tử[^ks-eos].
+
+### 8.3 So sánh hai cách
+
+Hai cách đánh đổi khác nhau (nhận xét của người soạn). Checkpoint chụp *toàn bộ job tại một điểm cắt thống nhất*; ở dạng đầy đủ mỗi lần chụp phải ghi lượng state tương ứng, còn checkpoint tăng dần giảm bớt phần này[^flink-ckstorage]. Changelog ghi *từng cập nhật* liên tục, nên phục hồi tốn thời gian phát lại, và standby giúp giảm khoản đó. Cả hai chỉ đúng nếu nguồn đọc lại được từ một offset, và đó là lý do log kiểu Kafka (mục 2–3) hợp với stream processing. Với `dashboard`, nguồn là topic `orders` giữ trong retention, nên đọc lại từ offset đã chụp là việc làm được.
 
 <details><summary>Đi sâu: nơi lưu checkpoint, backpressure, và liên hệ với batch</summary>
 
-- Flink tách *checkpoint* (snapshot tự động để phục hồi lỗi, có thể tăng dần, tối ưu cho việc khôi phục nhanh)[^flink-ckstorage] khỏi *savepoint* (snapshot do người dùng kích hoạt cho mục đích vận hành như redeploy/nâng cấp/đổi cỡ)[^flink-savepoint]; vị trí lưu snapshot cấu hình qua checkpoint storage[^flink-ckstore2].
-- Một task Kafka Streams là đơn vị song song cố định, gắn với danh sách partition đầu vào; phép gán partition–task không đổi[^ks-tasks]. (Suy luận của người soạn: nên mỗi task phục hồi state độc lập với task khác.)
+- Flink có hai loại snapshot. *Checkpoint* là snapshot tự động để phục hồi lỗi, có thể tăng dần, tối ưu cho việc khôi phục nhanh[^flink-ckstorage]. *Savepoint* là snapshot do người dùng kích hoạt cho mục đích vận hành như redeploy, nâng cấp hay đổi cỡ[^flink-savepoint]. Vị trí lưu snapshot cấu hình qua checkpoint storage[^flink-ckstore2].
+- Một task Kafka Streams là đơn vị song song cố định, gắn với danh sách partition đầu vào, và phép gán partition–task không đổi[^ks-tasks]. (Suy luận của người soạn: nên mỗi task phục hồi state độc lập với task khác.)
 - Backpressure trong stream engine là bài toán cùng họ với channel bounded ở [P7 · Chương 09, mục 3](../07-io-async/09-async-trong-production.md): consumer chậm thì phải làm producer chậm theo, không để hàng đợi phình vô hạn.
-- Kafka docs cho thấy ý "task thất bại khởi động lại từ vị trí gốc mà không có dữ liệu trùng" ở ví dụ nạp dữ liệu vào Hadoop[^k-hadoop] — ví dụ cổ điển cho batch tải offline từ log (nối sang [Chương 10](10-batch-processing.md)).
+- Kafka docs có ví dụ nạp dữ liệu vào Hadoop, nơi task thất bại khởi động lại từ vị trí gốc mà không có dữ liệu trùng[^k-hadoop]. Đó là ví dụ cổ điển cho batch tải offline từ log (nối sang [Chương 10](10-batch-processing.md)).
 
 </details>
 
-**Quay lại Q8:** state phải lưu cùng vị trí nguồn tương ứng (checkpoint, hoặc changelog + offset commit nguyên tử) và nguồn phải phát lại được; chịu lỗi khi đó là "tua lại và chạy lại".
+**Quay lại Q8:** state phải lưu cùng vị trí nguồn tương ứng (checkpoint, hoặc changelog + offset commit nguyên tử) và nguồn phải phát lại được; chịu lỗi khi đó là "tua lại và chạy lại", như `dashboard` đọc lại `orders` từ offset đã chụp.
 
 ## Liên hệ với Rust
 
 > Các API dưới đây theo docs.rs **`rdkafka` 0.39.0** (binding an toàn tới `librdkafka`; docs cảnh báo thư viện đang phát triển và API có thể đổi[^rk-warn]) và **`tokio` 1.53.2**. Đoạn code chỉ để minh họa cách ghép API, **chưa được biên dịch hay chạy**; không khẳng định kết quả chạy.
 
+Giả sử `billing` cũng viết bằng Rust và đọc topic `orders` bằng `rdkafka`. Phần này nói `rdkafka` cho `billing` những công cụ gì cho các khái niệm ở trên, và hai chỗ dễ vấp khi ghép với async Rust.
+
 **Các kiểu của `rdkafka` ứng với khái niệm trong chương.**
 
 | Khái niệm | Kiểu / hàm | Ghi chú (nguồn) |
 |---|---|---|
-| producer async | `FutureProducer` | trả một `Future` hoàn tất khi message được giao tới Kafka (hoặc lỗi)[^rk-clients]; có thread poll nội bộ nên không cần poll tay[^rk-fp-poll] |
+| producer async | `FutureProducer` | trả một `Future` hoàn tất khi message được giao tới Kafka (hoặc lỗi)[^rk-clients]. Có thread poll nội bộ nên không cần poll tay[^rk-fp-poll] |
 | consumer async | `StreamConsumer` | một `Stream` message, tự poll consumer[^rk-clients]; `recv().await` lấy message kế |
 | thông tin message | trait `Message` | `key()`, `payload()`, `topic()`, `partition()`, `offset()`, `timestamp()`[^rk-msg] |
 | commit offset | `Consumer::commit_message`, `CommitMode::{Sync, Async}` | tương đương `commit` với offset + 1[^rk-commit-plus1] |
 | transaction | `init_transactions`, `begin_transaction`, `send_offsets_to_transaction`, `commit_transaction`, `abort_transaction` | trait `Producer`[^rk-tx-section] |
 
-**At-least-once với `StreamConsumer`.** Docs `rdkafka` mô tả quy tắc ở mục 4 bằng lời Rust: để at-least-once, ứng dụng phải commit offset *chỉ sau khi* xử lý xong message; commit quá sớm có thể mất message vì khi phục hồi consumer bắt đầu từ message *kế tiếp*, bỏ qua message đang lỗi[^rk-alo]. Hai điểm API cần biết: `commit` coi mọi offset trước cũng đã commit, nên chỉ dùng khi xử lý *đúng thứ tự*[^rk-commit]; và `commit_message` tự cộng 1 vào offset của message[^rk-commit-plus1]. Muốn tự điều khiển, đặt `enable.auto.offset.store=false` rồi gọi `store_offset`[^rk-store].
+**At-least-once với `StreamConsumer`.** Quy tắc ở mục 4 viết lại bằng lời Rust: để at-least-once, ứng dụng phải commit offset *chỉ sau khi* xử lý xong message. Commit quá sớm có thể mất message, vì khi phục hồi, consumer bắt đầu từ message *kế tiếp* và bỏ qua message đang lỗi[^rk-alo]. Có hai điểm API cần biết. `commit` coi mọi offset trước cũng đã commit, nên chỉ dùng khi xử lý *đúng thứ tự*[^rk-commit]. Còn `commit_message` tự cộng 1 vào offset của message[^rk-commit-plus1]. Muốn tự điều khiển, đặt `enable.auto.offset.store=false` rồi gọi `store_offset`[^rk-store].
 
 ```rust
 // Minh họa (chưa biên dịch): đọc → xử lý idempotent → commit.
@@ -422,9 +546,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 Hai bẫy sát với async Rust (đều ghi trong docs):
 
 - `StreamConsumer` phải được lấy message ra ít nhất mỗi `max.poll.interval.ms`, nếu không `librdkafka` coi luồng xử lý bị treo và rời group[^rk-sc-poll]. (Nhận xét của người soạn: handler `await` một lời gọi chậm rồi mới quay lại `recv` là cách dễ vi phạm; kết hợp với timeout và backpressure ở [P7 · Chương 09](../07-io-async/09-async-trong-production.md).)
-- `CommitMode::Async` *không* "async theo nghĩa Rust": mọi API commit chỉ đặt yêu cầu vào hàng đợi cục bộ, thread riêng gửi tới broker; khác biệt Sync/Async là caller có chờ broker trả lời hay không, và docs nói API commit không phải `async` vì `librdkafka` không có giao diện callback[^rk-commitmode][^rk-commitmode2].
+- `CommitMode::Async` *không* "async theo nghĩa Rust". Mọi API commit chỉ đặt yêu cầu vào hàng đợi cục bộ, rồi một thread riêng gửi tới broker[^rk-commitmode]. Khác biệt Sync/Async là caller có chờ broker trả lời hay không; docs nói API commit không phải `async` vì `librdkafka` không có giao diện callback[^rk-commitmode2].
 
-**Transaction (exactly-once trong Kafka).** Docs `rdkafka`: EOS đạt được bằng producer transactional, cho phép record và offset consumer được commit hoặc abort nguyên tử; consumer cần `isolation.level = read_committed` mới chỉ thấy message đã commit[^rk-eos]. Thứ tự gọi: `init_transactions` một lần[^rk-init-tx]; mỗi batch `begin_transaction` → gửi record → `send_offsets_to_transaction` → `commit_transaction`[^rk-tx-section]. `send_offsets_to_transaction` đánh dấu các offset là một phần transaction hiện tại và chỉ coi là đã commit nếu transaction commit thành công[^rk-send-offsets]; consumer không được bật auto commit[^rk-send-offsets-hint]. Sau khi `init_transactions`, producer không được ghi ngoài transaction[^rk-tx-nooutside]. Các hàm này có thể *chặn* tới hết timeout được truyền vào[^rk-tx-block] — (nhận xét của người soạn) trong runtime Tokio nên đặt chúng vào `spawn_blocking` hoặc thread riêng theo [P7 · Chương 09, mục 5](../07-io-async/09-async-trong-production.md).
+**Transaction (exactly-once trong Kafka).** Docs `rdkafka` nói EOS đạt được bằng producer transactional, cho phép record và offset consumer được commit hoặc abort nguyên tử; consumer cần `isolation.level = read_committed` mới chỉ thấy message đã commit[^rk-eos]. Thứ tự gọi: `init_transactions` một lần[^rk-init-tx]. Mỗi batch thì `begin_transaction` → gửi record → `send_offsets_to_transaction` → `commit_transaction`[^rk-tx-section]. Hàm `send_offsets_to_transaction` đánh dấu các offset là một phần transaction hiện tại và chỉ coi là đã commit nếu transaction commit thành công[^rk-send-offsets]. Consumer không được bật auto commit[^rk-send-offsets-hint]. Sau khi `init_transactions`, producer không được ghi ngoài transaction[^rk-tx-nooutside]. Các hàm này có thể *chặn* tới hết timeout được truyền vào[^rk-tx-block]; trong runtime Tokio nên đặt chúng vào `spawn_blocking` hoặc thread riêng, theo [P7 · Chương 09, mục 5](../07-io-async/09-async-trong-production.md) (nhận xét của người soạn).
 
 ```rust
 // Minh họa (chưa biên dịch): một vòng consume–transform–produce.
@@ -458,33 +582,34 @@ async fn step<C: Consumer>(
 }
 ```
 
-`commit_transaction` flush các message đang chờ trước khi commit; nếu một message lỗi vĩnh viễn, transaction vào trạng thái lỗi có thể abort, và phải gọi `abort_transaction` trước khi bắt đầu transaction mới[^rk-commit-tx]. Hàm nhận `offsets` là offset *của message kế tiếp sẽ đọc*, tức offset đã xử lý cộng một[^rk-send-offsets-next].
+`commit_transaction` flush các message đang chờ trước khi commit. Nếu một message lỗi vĩnh viễn, transaction vào trạng thái lỗi có thể abort, và phải gọi `abort_transaction` trước khi bắt đầu transaction mới[^rk-commit-tx]. Hàm nhận `offsets` là offset *của message kế tiếp sẽ đọc*, tức offset đã xử lý cộng một[^rk-send-offsets-next].
 
-**`tokio::sync::mpsc`: queue *trong* process.** Module `mpsc` là hàng đợi nhiều-producer một-consumer để gửi giá trị giữa các task async[^tk-mpsc]; biến thể bounded giới hạn số message và `send` chờ khi đầy[^tk-bounded] — chính là backpressure đã học ở [P7 · Chương 09, mục 3](../07-io-async/09-async-trong-production.md). So với log của Kafka (nhận xét của người soạn):
+**`tokio::sync::mpsc`: queue *trong* process.** Module `mpsc` là hàng đợi nhiều-producer một-consumer để gửi giá trị giữa các task async[^tk-mpsc]. Biến thể bounded giới hạn số message, và `send` chờ khi đầy[^tk-bounded]; đó chính là backpressure đã học ở [P7 · Chương 09, mục 3](../07-io-async/09-async-trong-production.md). So với log của Kafka (nhận xét của người soạn):
 
 | | `tokio::sync::mpsc` | Log kiểu Kafka |
 |---|---|---|
 | Phạm vi | trong một process | giữa nhiều process/máy |
-| Consumer | một consumer[^tk-mpsc] | mỗi partition một consumer trong mỗi group[^k-group-excl]; vị trí đọc là offset riêng của từng group (suy luận của người soạn từ [^k-offset-one]) |
-| Giữ sau khi nhận | không (message chuyển cho receiver) | giữ tới hết retention, đọc lại được[^k-notdeleted][^k-rewind] |
+| Consumer | một consumer[^tk-mpsc] | mỗi partition một consumer trong mỗi group[^k-group-excl] |
+| Giữ sau khi nhận | không (message chuyển cho receiver) | giữ tới hết retention[^k-notdeleted] |
+| Đọc lại | không | được, bằng cách tua lại offset[^k-rewind] |
 | Bền qua crash | message nằm trong bộ nhớ process nên mất khi process chết (suy luận của người soạn) | log trên đĩa broker, replicate theo partition[^k-repl-unit] |
 
-Suy ra cách ghép thường gặp (suy luận của người soạn): trong service, consumer Kafka đọc message rồi đẩy vào `mpsc` bounded cho một pool worker; offset chỉ được commit *sau* khi worker xử lý xong, nếu không thì channel trở thành chỗ mất message (hàng đợi trong RAM đã "ack" lên Kafka mà chưa xử lý).
+Từ đó suy ra cách ghép thường gặp trong một service như `billing` (suy luận của người soạn): consumer Kafka đọc message rồi đẩy vào `mpsc` bounded cho một pool worker, và offset chỉ được commit *sau* khi worker xử lý xong. Nếu commit sớm hơn thì channel trở thành chỗ mất message: hàng đợi trong RAM đã "ack" lên Kafka mà chưa xử lý.
 
-**Stream processing viết bằng Rust.** Docs `rdkafka` liệt kê một số dự án dùng nó, trong đó `timely-dataflow` — một compute engine song song dữ liệu phân tán[^rk-users]; bài Dataflow và docs Flink ở trên là nguồn khái niệm chung cho các engine đó.
+**Stream processing viết bằng Rust.** Docs `rdkafka` liệt kê một số dự án dùng nó, trong đó có `timely-dataflow`, một compute engine song song dữ liệu phân tán[^rk-users]. Bài Dataflow và docs Flink ở trên là nguồn khái niệm chung cho các engine đó.
 
 ## Tóm tắt
 
-- Event là bản ghi "đã có chuyện" (key, value, timestamp, header); stream là chuỗi event không biên; producer và consumer tách rời. Unbounded là tính chất dữ liệu, streaming là kiểu engine.
-- Queue: broker theo dõi ack rồi bỏ message, chia việc cho worker. Log: broker giữ theo retention, consumer giữ offset, đọc lại và nhiều bên đọc là bình thường.
-- Kafka: topic = N partition; key → partition; thứ tự chỉ trong partition; mỗi partition một consumer trong mỗi group; retention theo segment hoặc compaction giữ giá trị mới nhất mỗi key.
-- Mất/trùng sinh ra từ "không biết đã thành công chưa". "Xử lý rồi lưu offset" → at-least-once; "lưu offset rồi xử lý" → at-most-once. Idempotent producer + transaction cho exactly-once *trong Kafka*; với hệ ngoài thì idempotent write hoặc ghi offset cùng chỗ với kết quả.
-- CDC của PostgreSQL = logical decoding đọc WAL, slot phát theo thứ tự commit, at-least-once sau crash, và slot giữ WAL — phải theo dõi. Outbox tránh ghi hai nơi. Event sourcing lưu event làm sự thật, trả giá bằng độ phức tạp.
-- Stream và bảng là hai mặt của cùng dữ liệu (stream là changelog, bảng là ảnh chụp mới nhất mỗi key).
-- Event time là lúc xảy ra, processing time là lúc xử lý; window tumbling/hopping/session; watermark là ước lượng tiến độ event time và có thể quá nhanh hoặc quá chậm, nên cần allowed lateness/grace và trigger.
-- Stream join cần state có giới hạn thời gian, co-partitioning, và chính sách cho dữ liệu sai thứ tự.
+- Event là bản ghi "đã có chuyện" (key, value, timestamp, header); stream là chuỗi event không biên mà producer ghi và consumer đọc, tách rời nhau. Unbounded là tính chất dữ liệu, streaming là kiểu engine.
+- Queue: broker theo dõi ack rồi bỏ message, chia việc cho worker. Log: broker giữ theo retention, consumer giữ offset, nên đọc lại và nhiều bên cùng đọc là chuyện bình thường.
+- Kafka: topic = N partition; key → partition; thứ tự chỉ có trong partition; mỗi partition một consumer trong mỗi group; retention theo segment, hoặc compaction giữ giá trị mới nhất mỗi key.
+- Mất/trùng sinh ra từ "không biết đã thành công chưa". "Xử lý rồi lưu offset" → at-least-once; "lưu offset rồi xử lý" → at-most-once. Idempotent producer + transaction cho exactly-once *trong Kafka*; với hệ ngoài thì ghi idempotent hoặc ghi offset cùng chỗ với kết quả.
+- CDC của PostgreSQL = logical decoding đọc WAL, slot phát theo thứ tự commit, at-least-once sau crash, và slot giữ WAL nên phải theo dõi. Outbox tránh ghi hai nơi. Event sourcing lưu event làm sự thật và trả giá bằng độ phức tạp.
+- Stream và bảng là hai mặt của cùng dữ liệu: stream là changelog, bảng là ảnh chụp giá trị mới nhất mỗi key.
+- Event time là lúc xảy ra, processing time là lúc xử lý; window có tumbling, hopping, session; watermark là ước lượng tiến độ event time và có thể quá nhanh hoặc quá chậm, nên cần allowed lateness/grace và trigger.
+- Stream join cần state có giới hạn thời gian, co-partitioning, và một chính sách cho dữ liệu sai thứ tự.
 - Chịu lỗi cho state: checkpoint (barrier + offset nguồn) hoặc changelog (+ standby); cả hai cần nguồn phát lại được; exactly-once của engine là về state nội bộ của nó.
-- Rust: `rdkafka` (`StreamConsumer`, `FutureProducer`, transaction API; commit offset *sau* xử lý; các hàm transaction có thể chặn), `tokio::sync::mpsc` là queue trong process với backpressure nhưng không bền.
+- Rust: `rdkafka` (`StreamConsumer`, `FutureProducer`, transaction API; commit offset *sau* xử lý; các hàm transaction có thể chặn); `tokio::sync::mpsc` là queue trong process, có backpressure nhưng không bền.
 
 ## Câu hỏi tự kiểm tra
 
@@ -503,24 +628,24 @@ Suy ra cách ghép thường gặp (suy luận của người soạn): trong ser
 
 <details><summary>Đáp án</summary>
 
-1. "Streaming/batch" ngụ ý một loại engine cụ thể; thực tế dữ liệu vô hạn từng được xử lý bằng batch lặp, và engine streaming tốt xử lý được dữ liệu hữu hạn[^df-unbounded-def][^df-unbounded].
-2. Queue: message bị bỏ sau ack[^rmq-ack-discard]; log giữ tới hết retention[^k-notdeleted]; queue chia round-robin[^rmq-rr], log chia theo partition[^k-group-excl]; log cho tua lại offset[^k-rewind]. Vì mỗi partition được đúng một consumer trong group đọc nên vị trí chỉ là offset của message kế tiếp[^k-offset-one].
-3. Docs: mỗi partition do đúng một consumer trong group đọc tại một thời điểm[^k-group-excl]; số instance chạy song song tối đa bị chặn bởi số partition đầu vào (ví dụ 5 partition → tối đa 5 instance)[^ks-maxpar]. Suy luận: chỉ 4 consumer nhận dữ liệu, 2 consumer nhàn rỗi.
-4. Lưu offset rồi xử lý → at-most-once; xử lý rồi lưu offset → at-least-once[^k-cons-1][^k-cons-alo]. Khi cập nhật idempotent (ví dụ upsert theo khóa chính), nhận lại hai lần chỉ ghi đè bằng chính nó[^k-cons-2].
-5. Broker gán ID cho producer và khử trùng bằng sequence number[^k-idem]. Nó chỉ bảo vệ việc ghi *vào Kafka*; phần xử lý rồi ghi ra hệ ngoài cần idempotent hoặc ghi offset cùng chỗ với output[^k-external][^k-external-note].
+1. "Streaming/batch" ngụ ý một loại engine cụ thể[^df-unbounded-def]. Thực tế dữ liệu vô hạn từng được xử lý bằng batch lặp, và engine streaming tốt xử lý được dữ liệu hữu hạn[^df-unbounded].
+2. Queue: message bị bỏ sau ack[^rmq-ack-discard]. Log giữ tới hết retention[^k-notdeleted]. Queue chia round-robin[^rmq-rr]. Log chia theo partition[^k-group-excl]. Log còn cho tua lại offset[^k-rewind]. Kafka chỉ cần một số nguyên vì mỗi partition được đúng một consumer trong group đọc, nên vị trí chỉ là offset của message kế tiếp[^k-offset-one].
+3. Docs: mỗi partition do đúng một consumer trong group đọc tại một thời điểm[^k-group-excl]. Số instance chạy song song tối đa bị chặn bởi số partition đầu vào, ví dụ 5 partition thì tối đa 5 instance[^ks-maxpar]. Suy luận: chỉ 4 consumer nhận dữ liệu, 2 consumer nhàn rỗi.
+4. Lưu offset rồi xử lý → at-most-once[^k-cons-1]. Xử lý rồi lưu offset → at-least-once[^k-cons-alo]. At-least-once vẫn cho kết quả đúng khi cập nhật idempotent (ví dụ upsert theo khóa chính): nhận lại hai lần chỉ ghi đè bằng chính nó[^k-cons-2].
+5. Broker gán ID cho producer và khử trùng bằng sequence number[^k-idem]. Nó chỉ bảo vệ việc ghi *vào Kafka*. Phần xử lý rồi ghi ra hệ ngoài cần idempotent hoặc ghi offset cùng chỗ với output[^k-external]. Docs tóm lại rằng với hệ đích khác thì cần cộng tác của hệ đó[^k-external-note].
 6. Offset được lưu như một message trong một topic và ghi trong cùng transaction với dữ liệu ra: abort thì offset về giá trị cũ và dữ liệu ra không hiện[^k-offset-in-txn]. `read_committed` chỉ trả message tới LSO, các message sau transaction đang mở bị giữ lại[^kc-iso].
-7. Trùng lặp sau crash (client phải chịu được nhận lại cùng thay đổi)[^pg-slot-once]; slot giữ WAL và catalog nên đĩa đầy hoặc nguy cơ wraparound nếu consumer chết lâu — xóa slot không dùng, đặt giới hạn `max_slot_wal_keep_size` (mặc định không giới hạn)[^pg-slot-caution][^pg-maxslot].
-8. CDC suy ra event từ thay đổi của database đang giữ state; event sourcing dùng event store làm system of record[^az-es]. Event bất biến và append-only xung đột với quy định đòi xóa dữ liệu cá nhân[^az-gdpr] — hướng xử lý ở Chương 14.
-9. Event time: lúc xảy ra; processing time: lúc xử lý[^df-evdef][^df-procdef]. Tumbling: cỡ cố định không chồng lấn[^ksdsl-tumb]; hopping: cỡ cố định + bước tiến, chồng lấn được[^ksdsl-hop]; session: ngăn cách bởi gap im lặng, cỡ thay đổi[^ksdsl-sess]. Quá nhanh → dữ liệu trễ sau watermark[^df-fast]; quá chậm → một datum chậm giữ cả pipeline[^df-slow].
-10. Stream–stream: hai dòng không đồng bộ nên phải nhớ cả hai phía trong một khoảng thời gian (window/interval)[^fl-win-join][^fl-interval]; co-partitioning để record cùng key tới cùng task[^ksj-copart]. Stream–table không versioned: chỉ xử lý theo offset, có thể cho kết quả không đoán trước[^ks-join-ooo].
-11. Checkpoint: chụp state mọi operator tại barrier cùng offset nguồn[^flink-barrier]; changelog: mỗi store ghi cập nhật vào topic để phát lại[^ks-changelog][^ks-restore]. Cả hai cần nguồn phát lại được[^flink-replay]. Flink exactly-once: mỗi event ảnh hưởng *state do Flink quản lý* đúng một lần, không phải được xử lý đúng một lần[^flink-eo].
-12. Commit sớm rồi chết thì lúc phục hồi consumer bắt đầu từ message kế tiếp và bỏ qua message lỗi[^rk-alo]; offset commit là *vị trí message kế sẽ đọc* nên cộng 1[^rk-commit-plus1]. Các hàm transaction có thể chặn tới hết timeout[^rk-tx-block]; chặn trên worker thread async làm đói các task khác (nhận xét của người soạn, xem P7·09 mục 5).
+7. Thứ nhất, trùng lặp sau crash: client phải chịu được việc nhận lại cùng thay đổi[^pg-slot-once]. Thứ hai, slot giữ WAL và catalog nên đĩa đầy hoặc có nguy cơ wraparound nếu consumer chết lâu[^pg-slot-caution]. Cách phòng: xóa slot không dùng, và đặt giới hạn `max_slot_wal_keep_size` (mặc định không giới hạn)[^pg-maxslot].
+8. CDC suy ra event từ thay đổi của database đang giữ state; event sourcing dùng event store làm system of record[^az-es]. Event bất biến và append-only xung đột với quy định đòi xóa dữ liệu cá nhân[^az-gdpr]; hướng xử lý ở Chương 14.
+9. Event time là lúc xảy ra[^df-evdef]. Processing time là lúc xử lý[^df-procdef]. Tumbling: cỡ cố định không chồng lấn[^ksdsl-tumb]. Hopping: cỡ cố định cộng bước tiến, chồng lấn được[^ksdsl-hop]. Session: ngăn cách bởi gap im lặng, cỡ thay đổi[^ksdsl-sess2]. Watermark quá nhanh thì dữ liệu trễ nằm sau watermark[^df-fast]. Quá chậm thì một datum chậm giữ cả pipeline[^df-slow].
+10. Stream–stream: hai dòng không đồng bộ nên phải nhớ cả hai phía trong một khoảng thời gian (window hoặc interval)[^fl-win-join]. Interval join cũng như vậy, theo khoảng tương đối giữa hai timestamp[^fl-interval]. Co-partitioning để record cùng key tới cùng task[^ksj-copart]. Stream–table không versioned: chỉ xử lý theo offset, có thể cho kết quả không đoán trước[^ks-join-ooo].
+11. Checkpoint chụp state mọi operator tại barrier cùng offset nguồn[^flink-barrier]. Changelog thì mỗi store ghi cập nhật vào topic để phát lại[^ks-changelog]. Cả hai cần nguồn phát lại được[^flink-replay]. "Exactly-once" của Flink nghĩa là mỗi event ảnh hưởng *state do Flink quản lý* đúng một lần, chứ không phải được xử lý đúng một lần[^flink-eo].
+12. Commit sớm rồi chết thì lúc phục hồi consumer bắt đầu từ message kế tiếp và bỏ qua message lỗi[^rk-alo]. Offset commit là *vị trí message kế sẽ đọc* nên cộng 1[^rk-commit-plus1]. Các hàm transaction có thể chặn tới hết timeout[^rk-tx-block]; chặn trên worker thread async làm đói các task khác (nhận xét của người soạn, xem P7·09 mục 5).
 
 </details>
 
 ## Đọc thêm
 
-- DDIA (ấn bản 1) chương 11 *Stream Processing* — chương tương ứng của chương này; mục lục chương liệt kê "Transmitting Event Streams", "Databases and Streams" và "Processing Streams"[^toc-ddia11]. Sách chỉ dùng làm khung chủ đề, không trích; giới thiệu sách ở <https://dataintensive.net/>. Liên quan thêm: chương 5 *Replication* (log)[^toc-ddia5], chương 10 *Batch Processing*[^toc-ddia10] và chương 12 *The Future of Data Systems* (dữ liệu dẫn xuất)[^toc-ddia12] — đọc sau khi đã nắm nguồn mở ở chương này để so cách trình bày.
+- DDIA (ấn bản 1) chương 11 *Stream Processing* là chương tương ứng của chương này; mục lục chương liệt kê "Transmitting Event Streams", "Databases and Streams" và "Processing Streams"[^toc-ddia11]. Sách chỉ dùng làm khung chủ đề, không trích; giới thiệu sách ở <https://dataintensive.net/>. Nên đọc sau khi đã nắm nguồn mở ở chương này để so cách trình bày. Chương 5 *Replication* nói về log[^toc-ddia5]. Chương 10 *Batch Processing* là phía đối chiếu[^toc-ddia10]. Chương 12 *The Future of Data Systems* nói về dữ liệu dẫn xuất[^toc-ddia12].
 - [Kafka 3.9.0 — Design (docs/design.html)](https://raw.githubusercontent.com/apache/kafka/3.9.0/docs/design.html): mục 4.5 (Consumer, vị trí consumer), 4.6 (Message Delivery Semantics), 4.7 (Replication), Log Compaction — nguồn chính của mục 2–4.
 - [Kafka 3.9.0 — Kafka Streams core concepts](https://raw.githubusercontent.com/apache/kafka/3.9.0/docs/streams/core-concepts.html) và [architecture](https://raw.githubusercontent.com/apache/kafka/3.9.0/docs/streams/architecture.html): time, windowing, stream–table duality, exactly-once, out-of-order, state/changelog/standby.
 - [The Dataflow Model (VLDB 2015)](https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf): mục 1.2–2.4 (window, trigger, watermark, accumulating/discarding) — khung tư duy cho event time.
@@ -675,7 +800,6 @@ Suy ra cách ghép thường gặp (suy luận của người soạn): trong ser
 [^df-skew]: Akidau et al., The Dataflow Model (VLDB 2015), 1.3 Time Domains — <https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf> — "During processing, the realities of the systems in use (communication delays, scheduling algorithms, time spent processing, pipeline serialization, etc.) result in an inherent and dynamically changing amount of skew between the two domains."
 [^df-fixed]: Akidau et al., The Dataflow Model (VLDB 2015), 1.2 Windowing — <https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf> — "Fixed windows (sometimes called tumbling windows) are defined by a static window size"
 [^df-sliding]: Akidau et al., The Dataflow Model (VLDB 2015), 1.2 Windowing — <https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf> — "Sliding windows are defined by a window size and slide period, e.g. hourly windows starting every minute."
-[^df-session]: Akidau et al., The Dataflow Model (VLDB 2015), 1.2 Windowing — <https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf> — "Sessions are windows that capture some period of activity over a subset of the data, in this case per key. Typically they are defined by a timeout gap."
 [^df-fixed-special]: Akidau et al., The Dataflow Model (VLDB 2015), 1.2 Windowing — <https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf> — "Fixed windows are really a special case of sliding windows where size equals period."
 [^df-heur]: Akidau et al., The Dataflow Model (VLDB 2015), 1.3 (footnote 6) — <https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf> — "For most real-world distributed data sets, the system lacks sufficient knowledge to establish a 100% correct watermark."
 [^df-fast]: Akidau et al., The Dataflow Model (VLDB 2015), 2.3 — <https://www.vldb.org/pvldb/vol8/p1792-Akidau.pdf> — "They are sometimes too fast, meaning there may be late data that arrives behind the watermark."

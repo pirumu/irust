@@ -1,6 +1,6 @@
 # P10 · Chương 01 — Pipeline của rustc
 
-> Nguồn chính của chương là **rustc-dev-guide** (sách dành cho người đóng góp vào compiler). Sách này không ghim phiên bản (trang "latest"), nên mô tả có thể đã đổi khi bạn đọc; chương cũng không chạy compiler, mọi điều ở đây là *tài liệu nói gì*, không phải quan sát (riêng thứ tự chạy của borrow checker so với tối ưu MIR được đối chiếu thêm với source rustc 1.95.0 ở [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1)). Phần nào là ý kiến thì ghi "(nhận xét của người soạn)", phần suy ra từ nguồn nhưng nguồn chưa nói thẳng thì ghi "(suy luận của người soạn)". Tên bước trong sách (ví dụ "HIR", "THIR") là tên *nội bộ* của rustc, không phải đặc tả ngôn ngữ (nhận xét của người soạn).
+> Nguồn chính của chương là **rustc-dev-guide**, sách dành cho người đóng góp vào compiler. Sách không ghim phiên bản (ta đọc trang "latest"), nên mô tả có thể đã đổi khi bạn đọc. Chương này cũng không chạy compiler: mọi điều ở đây là *tài liệu nói gì*, không phải quan sát. Riêng thứ tự chạy của borrow checker so với tối ưu MIR có đối chiếu thêm với source rustc 1.95.0 ở [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1). Phần nào là ý kiến thì ghi "(nhận xét của người soạn)"; phần suy ra từ nguồn mà nguồn chưa nói thẳng thì ghi "(suy luận của người soạn)". Tên các bước ("HIR", "THIR"…) là tên *nội bộ* của rustc, không phải đặc tả ngôn ngữ (nhận xét của người soạn).
 
 ## Bạn sẽ hiểu được gì
 
@@ -13,23 +13,72 @@
 
 ## Kiến thức cần trước
 
-- Biết biên dịch là gì ở mức "source → file chạy được" (không cần kiến thức compiler).
-- Chương này đứng *trước* ba chương dùng lại nó: [Chương 02 — Type layout](02-type-layout.md) (layout kiểu mà codegen cần biết), [Chương 04 — Monomorphization](04-monomorphization.md) (đi sâu mục 5) và [Chương 06 — Borrow checker](06-borrow-checker.md) (đi sâu mục 4).
+Bạn chỉ cần biết biên dịch là gì ở mức "source thành file chạy được"; không cần kiến thức compiler. Ví dụ xuyên suốt chương là `orders`, một service Rust nhận đơn hàng dạng JSON và tính tổng tiền; mỗi mục sẽ chỉ ra rustc làm gì với đúng những dòng code của nó.
+
+Chương này đứng *trước* ba chương dùng lại nó: [Chương 02 — Type layout](02-type-layout.md) (layout kiểu mà codegen cần biết), [Chương 04 — Monomorphization](04-monomorphization.md) (đi sâu mục 5) và [Chương 06 — Borrow checker](06-borrow-checker.md) (đi sâu mục 4).
 
 ## 1. Bản đồ: từ source đến binary (Q1)
 
-> **Trả lời ngắn.** rustc không phân tích trực tiếp text, vì text khó và dễ lỗi để xử lý[^dev-ir-why]. Nó dựng lần lượt các biểu diễn trung gian (IR): dòng token, AST, HIR, THIR, MIR, rồi LLVM-IR; mỗi biểu diễn tối ưu cho một mục đích riêng[^dev-irs]. Cuối cùng LLVM phát machine code và các thư viện/binary được link thành file cuối[^dev-llvm][^dev-link].
+> **Trả lời ngắn.** rustc không phân tích thẳng trên text, vì làm việc với text vừa bất tiện vừa dễ sai[^dev-ir-why]. Nó dựng lần lượt vài biểu diễn trung gian (IR), mỗi cái tối ưu cho một việc: dòng token, AST, HIR, THIR, MIR, rồi LLVM-IR[^dev-irs]. Cuối cùng LLVM phát machine code[^dev-llvm]. Sau đó các thư viện và binary được link với nhau thành file cuối[^dev-link].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): xây một ngôi nhà bằng bản vẽ. Không ai kiểm tra đường điện trên bản phác tay của chủ nhà; kiến trúc sư vẽ sơ đồ mặt bằng để xét kết cấu, thợ điện dùng sơ đồ điện, cuối cùng mới là bản thi công chi tiết. Mỗi bản vẽ bỏ bớt cái không cần và làm rõ cái cần cho việc kiểm tra tiếp theo. rustc cũng làm vậy với code của bạn.
+*Với service của bạn.* Giả sử bạn viết `orders`, một service Rust nhận JSON của đơn hàng rồi tính tổng tiền. Lõi của crate trông như dưới đây (ví dụ giả định của người soạn; chương này không biên dịch nó, chỉ dùng để chỉ ra mỗi mục sau nói về dòng nào):
 
-Sách nói rõ lý do: source code được thiết kế để thân thiện với con người đồng thời không nhập nhằng, nhưng lại bất tiện cho việc như type checking; vì vậy hầu hết compiler, kể cả rustc, dựng một IR dễ phân tích hơn từ source[^dev-ir-why]. rustc có vài IR, mỗi cái tối ưu cho một mục đích[^dev-irs]. Theo thứ tự:
+```rust
+use serde::{de::DeserializeOwned, Deserialize};
 
-1. **Token stream**: lexer đọc text thành dòng token, dễ cho parser xử lý hơn text thô[^dev-lex-ir].
-2. **AST** (Abstract Syntax Tree): dựng từ token, phản ánh gần như đúng những gì người dùng viết[^dev-ast-desc].
-3. **HIR** (High-level IR): một dạng AST đã *desugar*[^dev-hir-desc] (bung cú pháp viết tắt thành dạng tường minh hơn)[^dev-desugar], phù hợp cho type checking[^dev-hir-amenable].
-4. **THIR** (Typed HIR): trung gian giữa HIR và MIR; có đầy đủ kiểu và desugar thêm một chút[^dev-thir-typed], nên hạ từ THIR xuống MIR dễ hơn hạ thẳng từ HIR[^dev-thir-easier].
+#[derive(Deserialize)]
+struct Line { price: u64, qty: u64 }
+
+#[derive(Deserialize)]
+struct Order { id: u64, lines: Vec<Line> }
+
+#[derive(Deserialize)]
+struct Refund { order_id: u64, amount: u64 }
+
+fn load<T: DeserializeOwned>(body: &str) -> T {
+    serde_json::from_str(body).unwrap()
+}
+
+impl Order {
+    fn total(&self) -> u64 {
+        let mut sum = 0;
+        for line in &self.lines {
+            sum += line.price * line.qty;
+        }
+        sum
+    }
+}
+
+fn handle(body: &str) -> u64 {
+    let order: Order = load(body);
+    match order.lines.len() {
+        0 => 0,
+        _ => order.total(),
+    }
+}
+
+fn handle_refund(body: &str) -> u64 {
+    let refund: Refund = load(body);
+    refund.amount
+}
+```
+
+Bạn chạy `rustc` trực tiếp, hoặc để `cargo build` gọi nó thay bạn[^dev-invoke]. Câu hỏi của chương: từ mấy chục dòng text này đến binary, rustc đã làm những gì, và mỗi loại kiểm tra (macro, kiểu, borrow) nằm ở bước nào?
+
+### 1.1 Vì sao không phân tích thẳng trên text
+
+Source code viết ra cho người đọc và không nhập nhằng, nhưng làm việc trực tiếp trên nó rất bất tiện và dễ lỗi, chẳng hạn khi kiểm tra kiểu. Vì vậy rustc, cũng như hầu hết compiler, dựng từ source một biểu diễn trung gian (IR) dễ phân tích hơn[^dev-ir-why]. Với `orders`: để biết `line.price` là `u64`, type checker không nên phải lo dấu cách, comment hay macro đang nằm quanh nó; trên một cây cú pháp thì chỉ cần nhìn một nút (nhận xét của người soạn).
+
+### 1.2 Sáu biểu diễn, theo thứ tự
+
+rustc không dùng một IR duy nhất mà dùng vài cái, mỗi cái tối ưu cho một mục đích[^dev-irs]. Theo thứ tự chạy:
+
+1. **Token stream**: lexer cắt thẳng source thành một dòng token[^dev-lex-ir].
+2. **AST** (Abstract Syntax Tree): dựng từ token, phản ánh gần như đúng những gì bạn viết[^dev-ast-desc].
+3. **HIR** (High-level IR): một dạng AST đã *desugar*[^dev-hir-desc]. Desugar là bung cú pháp viết tắt thành dạng tường minh hơn[^dev-desugar]. Dạng này hợp để type check[^dev-hir-amenable].
+4. **THIR** (Typed HIR): đứng giữa HIR và MIR, có đầy đủ kiểu và desugar thêm một chút[^dev-thir-typed]. Nhờ vậy hạ từ THIR xuống MIR dễ hơn hạ thẳng từ HIR[^dev-thir-easier].
 5. **MIR** (Mid-level IR): về cơ bản là một control-flow graph[^dev-ir-mir].
 6. **LLVM-IR**: dạng đầu vào chuẩn của LLVM[^dev-llvm-ir].
 
@@ -42,47 +91,62 @@ flowchart LR
   M --> MC["monomorphization collection"] --> L["LLVM IR<br/>(monomorphize ở đây)"] --> O["machine code"] --> LK["link → binary"]
 ```
 
-(Sơ đồ là cách vẽ lại các câu có chú thích ở mục 1–5; mũi tên chấm là việc làm *trên* HIR, kết quả dùng khi hạ xuống THIR.)
+(Sơ đồ vẽ lại các câu có chú thích ở mục 1–5. Mũi tên chấm là việc làm *trên* HIR, kết quả dùng khi hạ xuống THIR.)
 
-Mỗi kiểm tra "sống" ở đâu? Bảng dưới gom lại chủ yếu từ chương *Overview of the compiler*; từng ô được giải thích ở mục tương ứng.
+### 1.3 Mỗi kiểm tra "sống" ở đâu
 
-| Việc | Xảy ra ở | Mục |
-|---|---|---|
-| macro expansion, AST validation, name resolution, early lint | giai đoạn lexing/parsing, trên AST[^dev-macro][^dev-nodeid-use] | 2 |
-| desugar `loop`, `async fn` | hạ AST → HIR[^dev-desugar] | 3 |
-| type inference, trait solving, type checking | trên HIR[^dev-typeinf] | 3 |
-| kiểm tra pattern và exhaustiveness | THIR[^dev-hir-mir] | 3 |
-| borrow check, kiểm tra biến chưa khởi tạo, tối ưu, const eval | MIR[^dev-mir-use] | 4 |
-| monomorphization collection | mức MIR[^dev-collect-mir] | 5 |
-| monomorphize thật sự | lúc chuyển MIR → LLVM-IR[^dev-codegen] | 5 |
+Bảng dưới gắn từng dòng của `orders` với bước xử lý nó. Bảng gom chủ yếu từ chương *Overview of the compiler*; từng ô được giải thích kỹ ở mục tương ứng.
+
+| Trong `orders` | rustc làm gì | Xảy ra ở | Mục |
+|---|---|---|---|
+| `#[derive(Deserialize)]`, `use serde::…` | bung macro, kiểm tra AST, phân giải tên, early lint | trên AST, trong giai đoạn lexing/parsing[^dev-macro] | 2 |
+| `for line in &self.lines` | desugar `for` thành `loop` | lúc hạ AST xuống HIR[^dev-hir] | 3 |
+| `let order: Order = load(body)` | type inference, trait solving (ghép `impl` cho bound `T: DeserializeOwned`), type checking | trên HIR[^dev-typeinf] | 3 |
+| `match order.lines.len() { … }` | kiểm tra pattern và exhaustiveness | THIR[^dev-hir-mir] | 3 |
+| `order.total()` | method call thành lời gọi hàm thường | THIR[^dev-thir] | 3 |
+| `&self.lines` trong `total`, `sum` phải có giá trị trước khi cộng | borrow check, kiểm tra biến chưa khởi tạo, tối ưu, const eval | MIR[^dev-mir-use] | 4 |
+| `load::<Order>`, `load::<Refund>` | thu thập các bản generic cần sinh mã | mức MIR[^dev-collect-mir] | 5 |
+| cũng hai lời gọi trên | monomorphize thật sự | lúc chuyển MIR sang LLVM-IR[^dev-codegen] | 5 |
 
 <details><summary>Đi sâu: điểm vào, cờ dòng lệnh, interning, tính song song</summary>
 
-- Quá trình bắt đầu khi người dùng gọi `rustc` trên source; việc cần làm do tùy chọn dòng lệnh quyết định (ví dụ bật tính năng nightly bằng cờ `-Z`, chỉ kiểm tra không sinh mã, hay phát LLVM-IR thay vì machine code); `rustc` có thể được gọi gián tiếp qua `cargo`[^dev-invoke].
-- Phân tích tham số dòng lệnh diễn ra trong crate `rustc_driver`[^dev-driver].
-- Nhiều giá trị trong compiler được *intern*: cấp phát trong một arena đặc biệt rồi chuyền tham chiếu, để giá trị giống hệt (ví dụ một kiểu) chỉ cấp phát một lần và so sánh rẻ bằng so con trỏ[^dev-intern].
-- Về song song: sách ghi chỉ có một phần của rustc song song theo mặc định là code generation; phần còn lại chưa song song, và sách nhận xét đã tốn nhiều công nhưng nói chung đây là bài toán khó[^dev-par].
-- Compiler phải cân nhiều mục tiêu kéo ngược nhau, ví dụ tốc độ compile[^dev-goals]; sách còn nêu bộ nhớ compiler dùng, tốc độ và kích thước của chương trình sinh ra, thời gian build bản thân compiler[^dev-goals-more] (danh sách trong sách dài hơn nữa).
+- Quá trình biên dịch bắt đầu khi bạn gọi `rustc` trên source. Việc compiler phải làm do tùy chọn dòng lệnh quyết định: ví dụ bật tính năng nightly bằng cờ `-Z`, chỉ kiểm tra mà không sinh mã, hay phát LLVM-IR thay vì machine code. `cargo` cũng có thể gọi `rustc` thay bạn[^dev-invoke].
+- Việc đọc tham số dòng lệnh nằm trong crate `rustc_driver`[^dev-driver].
+- Nhiều giá trị trong compiler được *intern*: compiler cấp phát chúng trong một arena đặc biệt rồi chuyền tham chiếu đi. Nhờ vậy giá trị giống hệt nhau (ví dụ một kiểu) chỉ cấp phát một lần và so sánh rẻ bằng so con trỏ[^dev-intern].
+- Về song song: sách ghi rằng chỉ một phần của rustc song song theo mặc định, đó là code generation. Phần còn lại chưa song song; đã tốn nhiều công nhưng nói chung đây là bài toán khó[^dev-par].
+- Compiler phải cân nhiều mục tiêu kéo ngược nhau, ví dụ tốc độ compile[^dev-goals]. Sách còn nêu bộ nhớ compiler dùng, tốc độ và kích thước của chương trình sinh ra, và thời gian build bản thân compiler[^dev-goals-more]; danh sách trong sách còn dài hơn.
 
 </details>
 
-**Quay lại Q1:** rustc đi qua token → AST → HIR → THIR → MIR → LLVM-IR → machine code → link, mỗi tầng đặt đúng chỗ cho một loại kiểm tra.
+**Quay lại Q1:** rustc đi qua token → AST → HIR → THIR → MIR → LLVM-IR → machine code → link, và mỗi tầng đặt đúng chỗ cho một loại kiểm tra; với `orders`, macro `derive` xử lý ở tầng AST, vòng `for` ở HIR, borrow check ở MIR.
 
 ## 2. Lexing, parsing, macro expansion, name resolution (Q2)
 
-> **Trả lời ngắn.** Lexer cắt text thành token, parser dựng token thành AST[^dev-lex][^dev-parse]. Ngay trong giai đoạn này compiler còn bung macro, kiểm tra AST, phân giải tên và chạy early lint[^dev-macro]. Vì chuyện đó xảy ra trước khi có HIR, type checker chỉ thấy code đã được bung macro (suy luận của người soạn từ thứ tự trên).
+> **Trả lời ngắn.** Lexer cắt text thành token[^dev-lex]. Parser dịch dòng token đó thành AST[^dev-parse]. Ngay trong giai đoạn này compiler còn bung macro, kiểm tra AST, phân giải tên và chạy early lint[^dev-macro]. Vì tất cả xảy ra trước khi có HIR, type checker chỉ thấy code đã bung hết macro (suy luận của người soạn từ thứ tự trên).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): trước khi đọc một bản hợp đồng, bạn phải tách câu thành từ (lexing), hiểu cấu trúc câu (parsing), thay các điều khoản "xem phụ lục A" bằng nội dung phụ lục (macro expansion), rồi tra xem "Bên A" nghĩa là ai (name resolution). Chỉ sau đó mới bàn tới chuyện điều khoản có hợp lý không.
+*Với service `orders`.* Ba dòng `#[derive(Deserialize)]` ở đầu `orders` không phải code mà type checker nhìn thấy: chúng là lời gọi macro. rustc phải bung chúng thành code thật, và tìm ra `Deserialize` nghĩa là gì, trước khi các bước sau chạy (suy luận của người soạn từ thứ tự các giai đoạn). Mục này đi theo bốn việc theo đúng thứ tự: lexing, parsing, macro expansion, name resolution.
 
-*Lexing.* Văn bản source được một lexer mức thấp trong `rustc_lexer` phân tích[^dev-lexer]; kết quả là dòng các đơn vị nguyên tử của source code, gọi là token[^dev-lex]. Dòng token đi tiếp qua một lexer mức cao hơn trong `rustc_parse`, nơi chuỗi được đổi thành symbol đã intern[^dev-lex2]. Lexer giữ đầy đủ thông tin cho IDE và procedural macro[^dev-lex-fidelity].
+### 2.1 Lexing: từ text sang token
 
-*Parsing.* Parser dịch dòng token thành AST[^dev-parse] theo kiểu recursive descent, từ trên xuống[^dev-rd]. AST phản ánh cấu trúc chương trình trong bộ nhớ và dùng `Span` để nối mỗi nút về đoạn text gốc[^dev-ast-span]. Parser cố phục hồi từ lỗi bằng cách phân tích một *tập cha* của ngữ pháp Rust và phát ra một kiểu "lỗi"[^dev-recover]. Mỗi nút AST có một `NodeId` duy nhất trong crate[^dev-nodeid-def].
+Text của source trước hết đi qua một lexer mức thấp nằm trong `rustc_lexer`[^dev-lexer]. Kết quả là một dòng các đơn vị nguyên tử của source, gọi là token[^dev-lex]; với `orders`, đó là những mẩu như `fn`, `handle`, `(`, `body`… (ví dụ minh họa của người soạn). Dòng token đi tiếp qua một lexer mức cao hơn trong `rustc_parse`, nơi chuỗi ký tự đổi thành symbol đã intern[^dev-lex2]. Lexer giữ đầy đủ thông tin cho IDE và procedural macro[^dev-lex-fidelity].
 
-*Macro expansion.* Việc bung macro xảy ra ở mức crate[^dev-macro-crate]. Với crate nguồn thô, compiler tạo ra một AST lớn đã bung hết macro và đã đưa nội dung mọi module vào[^dev-macro-fully]. Thuật toán chạy theo vòng lặp trên một hàng đợi các lời gọi macro chưa phân giải (chưa tìm được định nghĩa)[^dev-macro-queue]; nếu một vòng không tiến triển được thì đó là lỗi biên dịch[^dev-macro-noprogress]. Với macro sinh ra token (ví dụ proc macro), compiler parse chúng thành AST và việc đó có thể sinh lỗi parse[^dev-macro-tokens].
+### 2.2 Parsing: từ token sang AST
 
-*Name resolution.* Phân giải tên là quá trình hai pha[^dev-nr-twophase]. Pha đầu chạy *trong lúc* bung macro: chỉ phân giải import và tên macro, vì cần biết cái gì để bung[^dev-nr-partial]. Pha sau chạy khi đã có cả AST: phân giải mọi tên trong crate[^dev-nr-late]; lúc này chỉ cần thử một lần, vì không còn tên mới nào được thêm vào[^dev-nr-once]. Chuyện `type x = u32; let x: x = 1;` hợp lệ là vì tên kiểu và tên biến nằm ở các *namespace* khác nhau nên cùng tồn tại được[^dev-nr-ns].
+Parser dịch dòng token thành AST, theo kiểu recursive descent, tức phân tích cú pháp từ trên xuống[^dev-rd]. AST phản ánh cấu trúc của chương trình trong bộ nhớ, và dùng `Span` để nối mỗi nút về đoạn text gốc[^dev-ast-span]. Khi gặp lỗi cú pháp, parser cố phục hồi bằng cách phân tích một *tập cha* của ngữ pháp Rust và phát ra một kiểu "lỗi"[^dev-recover].
+
+### 2.3 Macro expansion
+
+`#[derive(Deserialize)]` của `orders` được xử lý ở đây. Việc bung macro làm ở mức crate[^dev-macro-crate]. Với source thô của một crate, compiler sinh ra một AST lớn: mọi macro đã bung, mọi module đã nằm sẵn trong đó[^dev-macro-fully].
+
+Thuật toán là một vòng lặp trên hàng đợi các lời gọi macro chưa phân giải, tức những macro compiler chưa tìm được định nghĩa[^dev-macro-queue]. Nếu một vòng không tiến triển được thì đó là lỗi biên dịch[^dev-macro-noprogress]. Macro nào sinh ra token (ví dụ proc macro, loại mà `derive(Deserialize)` thuộc về; nhận xét của người soạn) thì compiler parse chỗ token đó thành AST, và bước parse này có thể báo lỗi[^dev-macro-tokens].
+
+### 2.4 Name resolution
+
+Phân giải tên là quá trình hai pha[^dev-nr-twophase]. Pha đầu chạy *ngay trong lúc* bung macro và chỉ phân giải import cùng tên macro, vì không biết macro nào thì không biết cần bung gì[^dev-nr-partial]. Với `orders`, `use serde::Deserialize` phải phân giải xong thì `derive(Deserialize)` mới bung được (suy luận của người soạn từ câu trên).
+
+Pha sau chạy khi đã có AST đầy đủ và phân giải mọi tên trong crate[^dev-nr-late]. Lúc này mỗi tên chỉ cần thử một lần, vì không còn tên mới nào được thêm vào[^dev-nr-once]. Một chuyện nhỏ về namespace: `type x = u32; let x: x = 1;` hợp lệ vì tên kiểu và tên biến nằm ở các namespace khác nhau nên cùng tồn tại được[^dev-nr-ns].
 
 ```mermaid
 flowchart TD
@@ -99,50 +163,67 @@ flowchart TD
 
 <details><summary>Đi sâu: NodeId, cfg, hygiene, proc macro</summary>
 
-- `NodeId` là số định danh trong crate cho mỗi nút AST, kể cả statement và expression; nhưng vì tuyệt đối trong crate, thêm hay bỏ một nút làm mọi `NodeId` sau đó đổi, nên gần như vô dụng cho incremental compilation[^dev-nodeid-incr]. Sách ghi `NodeId` được dùng ở các phần làm việc trực tiếp trên AST như macro expansion và name resolution[^dev-nodeid-use].
+- Mỗi nút AST có một `NodeId`, kể cả statement và expression; đó là số định danh duy nhất trong crate[^dev-nodeid-def]. Nhưng vì `NodeId` tuyệt đối trong crate, thêm hay bỏ một nút làm mọi `NodeId` sau đó đổi, nên nó gần như vô dụng cho incremental compilation[^dev-nodeid-incr]. Sách ghi `NodeId` dùng ở các phần làm việc trực tiếp trên AST, như macro expansion và name resolution[^dev-nodeid-use].
 - `cfg` và `cfg_attr` được xử lý đặc biệt, khác các macro thường[^dev-cfg].
-- Vòng lặp macro còn ghi dữ liệu hygiene: khi một macro được phân giải, compiler gọi `set_expn_data` để điền thuộc tính của nó vào dữ liệu toàn cục gắn với `ExpnId`[^dev-macro-expn]; khi bung, compiler tạo các `SyntaxContext`[^dev-macro-syntaxctx]; sách dành riêng một mục *Hygiene* về cách dữ liệu hygiene được thu thập[^dev-macro-hyg].
-- Điều đáng nhớ cho người dùng `proc-macro`: Reference nói procedural macro hoạt động trên token stream chứ không phải nút AST[^ref-proc-token]; vì giai đoạn này đứng trước type check nên proc macro không có thông tin kiểu để hỏi (suy luận của người soạn từ thứ tự các giai đoạn).
+- Vòng lặp macro còn ghi dữ liệu hygiene. Khi một macro được phân giải, compiler gọi `set_expn_data` để điền thuộc tính của nó vào dữ liệu toàn cục gắn với `ExpnId`[^dev-macro-expn]. Khi bung, compiler tạo các `SyntaxContext`[^dev-macro-syntaxctx]. Sách dành riêng một mục *Hygiene* về cách thu thập dữ liệu này[^dev-macro-hyg].
+- Điều đáng nhớ cho người dùng `proc-macro`: Reference nói procedural macro hoạt động trên token stream chứ không phải nút AST[^ref-proc-token]. Giai đoạn này đứng trước type check, nên proc macro không có thông tin kiểu để hỏi (suy luận của người soạn từ thứ tự các giai đoạn).
 
 </details>
 
-**Quay lại Q2:** macro, import và tên được xử lý trên AST, trước HIR và trước type check; nhờ vậy các bước sau chỉ làm việc với code đã bung hết.
+**Quay lại Q2:** macro, import và tên được xử lý trên AST, trước HIR và trước type check; nhờ vậy các bước sau chỉ làm việc với code đã bung hết, như `Order` đã có phần code mà `derive` sinh ra.
 
 ## 3. HIR, THIR và type checking (Q3)
 
-> **Trả lời ngắn.** AST được hạ (lowering) thành HIR, một dạng AST đã desugar như `for` thành `loop`[^dev-hir]; type inference, trait solving và type checking chạy trên HIR[^dev-lower][^dev-typeinf]. Sau khi đã có kiểu[^dev-thir-typed2], HIR được hạ tiếp qua THIR, một dạng desugar sâu hơn dùng để kiểm tra pattern rồi dựng MIR[^dev-hir-mir].
+> **Trả lời ngắn.** AST hạ (lowering) thành HIR, một dạng AST đã desugar, ví dụ `for` thành `loop`[^dev-hir]. Type inference, trait solving và type checking chạy trên HIR[^dev-typeinf]. Khi kiểu đã đầy đủ, HIR hạ tiếp qua THIR, một dạng desugar sâu hơn dùng để kiểm tra pattern rồi dựng MIR[^dev-hir-mir].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): HIR giống bản thảo đã được biên tập — bỏ cách viết tắt, đưa mọi thứ về vài dạng chuẩn — nhưng vẫn là *chữ của tác giả*. THIR giống bản thảo đã chú thích đầy đủ loại của từng từ, sẵn sàng đem đi dịch.
+*Với service `orders`.* Ở mục này hai thứ xảy ra với `total` và `handle`. Thứ nhất, vòng `for line in &self.lines` không còn là `for` nữa. Thứ hai, rustc biết `line.price` kiểu gì, `load(body)` trả kiểu gì, và `order.total()` thực chất gọi hàm nào. Ta đi theo ba bước: hạ xuống HIR, type checking trên HIR, rồi hạ tiếp xuống THIR.
 
-*Lowering AST → HIR.* HIR là biểu diễn chính được dùng ở hầu hết rustc[^dev-hir-primary]. Nó được sinh sau parsing, macro expansion và name resolution[^dev-hir-after]. Quá trình hạ là việc desugar (bung các cú pháp viết tắt thành dạng tường minh) những thứ như loop và `async fn`[^dev-desugar]; cụ thể `for` được đổi thành `loop` nên không còn trong HIR[^dev-hir]. HIR vẫn gần cách viết của người dùng, kèm một số thứ ngầm như lifetime bị lược[^dev-hir-implicit]; sách nói dạng này thuận tiện cho type checking[^dev-hir-amenable].
+### 3.1 Hạ AST xuống HIR
 
-*Type checking trên HIR.* Trên HIR, rustc làm type inference (tự suy ra kiểu của biểu thức), trait solving (ghép một `impl` với mỗi chỗ dùng trait) và type checking[^dev-typeinf]. Sách giải thích type checking ở đây còn là chuyển các kiểu người dùng viết (`hir::Ty`) sang biểu diễn nội bộ của compiler (`Ty<'tcx>`)[^dev-typeck-conv].
+HIR là biểu diễn chính ở hầu hết rustc[^dev-hir-primary]. Compiler sinh nó sau khi parsing, macro expansion và name resolution đã xong[^dev-hir-after]. Bước chuyển từ AST sang HIR gọi là lowering, và kèm nhiều desugar (bung cú pháp viết tắt thành dạng tường minh) cho những thứ như loop và `async fn`[^dev-desugar]. Vòng `for` trong `total` là một ví dụ: nó bị đổi thành `loop`, nên HIR không còn `for` nữa[^dev-hir].
 
-*THIR.* Với kiểu đã điền đầy đủ (chỉ làm được sau khi type checking xong)[^dev-thir-typed2], THIR desugar thêm: tham chiếu và dereference tự động thành tường minh, method call và toán tử overload thành lời gọi hàm thường[^dev-thir]. THIR là bước đệm: hạ từ THIR xuống MIR dễ hơn hạ thẳng từ HIR[^dev-thir-easier]; nó được dùng cho kiểm tra pattern, exhaustiveness[^dev-hir-mir], và trang THIR còn liệt kê dựng MIR, kiểm tra `unsafe` và kiểm tra explicit tail call (ghi nhận tại thời điểm sách viết)[^dev-thir-use].
+Phần còn lại của HIR vẫn gần cách bạn viết, kèm một số thứ ngầm như lifetime bị lược[^dev-hir-implicit]. Dạng này thuận tiện cho type checking[^dev-hir-amenable].
+
+### 3.2 Type checking trên HIR
+
+Trên HIR, rustc làm ba việc: type inference (tự suy ra kiểu của biểu thức), trait solving (ghép một `impl` với mỗi chỗ dùng trait) và type checking[^dev-typeinf]. Trong `orders`, `sum` khởi tạo bằng `0` rồi cộng với một `u64`, nên rustc suy ra `sum: u64`; còn `let order: Order = load(body)` cho `T = Order`, rồi trait solving phải tìm một `impl DeserializeOwned for Order` cho bound của `load` (minh họa của người soạn). Type checking ở đây còn có nghĩa là chuyển các kiểu bạn viết (`hir::Ty`) sang biểu diễn nội bộ của compiler (`Ty<'tcx>`)[^dev-typeck-conv].
+
+### 3.3 Hạ tiếp xuống THIR
+
+Kiểu chỉ điền đầy đủ được sau khi type checking xong[^dev-thir-typed2]. Từ lúc đó THIR mới dựng được, và nó desugar thêm: tham chiếu và dereference tự động thành tường minh, method call và toán tử overload thành lời gọi hàm thường[^dev-thir]. Trong `orders`, `order.total()` thành lời gọi hàm thường nhận `&order` làm tham số (minh họa của người soạn).
+
+THIR là bước đệm: hạ từ THIR xuống MIR dễ hơn hạ thẳng từ HIR[^dev-thir-easier]. Nó cũng là nơi kiểm tra pattern và exhaustiveness[^dev-hir-mir]; với `orders`, đó là việc kiểm tra `match order.lines.len()` đã phủ hết các trường hợp (minh họa của người soạn).
 
 <details><summary>Đi sâu: HIR lưu thế nào, THIR chỉ có body, định danh</summary>
 
 - Cấu trúc HIR lưu *ngoài luồng*: nút module `foo` chỉ giữ `ItemId` của hàm `bar()` bên trong; muốn chi tiết thì phải tra bảng `items`[^dev-hir-ooband]. Lợi ích kèm theo: mỗi lần tra là một cơ hội để compiler ghi nhận phụ thuộc cho incremental compilation[^dev-hir-incr].
-- `DefId` định danh một định nghĩa (item) trong một crate; không có `DefId` cho mỗi expression nên ổn định hơn qua các lần biên dịch[^dev-defid]. `HirId` định danh một nút HIR của crate hiện tại và chi tiết đến expression[^dev-hirid].
-- HIR chỉ được dựng cho crate đang biên dịch[^dev-hir-crate].
-- THIR giống MIR ở chỗ chỉ biểu diễn *body* (code thực thi: thân hàm, const initializer), nên không có biểu diễn cho struct hay trait[^dev-thir-nobodies]. Mỗi body THIR chỉ lưu tạm và bị hủy khi hết cần, khác với HIR lưu đến hết quá trình biên dịch[^dev-thir-temp].
-- Xem HIR bằng cờ `-Z` (thuộc các tính năng nightly[^dev-invoke]): `-Z unpretty=hir-tree`[^dev-unpretty-tree], hoặc `-Z unpretty=hir` cho dạng gần source hơn[^dev-unpretty].
+- `DefId` định danh một định nghĩa (item) trong một crate. Không có `DefId` cho mỗi expression nên nó ổn định hơn qua các lần biên dịch[^dev-defid]. `HirId` định danh một nút HIR của crate hiện tại và chi tiết đến expression[^dev-hirid].
+- HIR chỉ dựng cho crate đang biên dịch[^dev-hir-crate].
+- THIR giống MIR ở chỗ chỉ biểu diễn *body* (code thực thi: thân hàm, const initializer), nên không có biểu diễn cho struct hay trait[^dev-thir-nobodies]. Mỗi body THIR chỉ lưu tạm và bị hủy khi hết cần, khác HIR lưu đến hết quá trình biên dịch[^dev-thir-temp].
+- Trang THIR liệt kê THIR dùng cho dựng MIR, kiểm tra exhaustiveness, kiểm tra `unsafe` và kiểm tra explicit tail call (ghi nhận tại thời điểm sách viết)[^dev-thir-use].
+- Muốn xem HIR thì dùng cờ `-Z` (thuộc các tính năng nightly[^dev-invoke]): `-Z unpretty=hir-tree`[^dev-unpretty-tree], hoặc `-Z unpretty=hir` cho dạng gần source hơn[^dev-unpretty].
 
 </details>
 
-**Quay lại Q3:** HIR là AST đã desugar để type check; THIR là HIR đã có kiểu và desugar sâu hơn, làm cầu sang MIR.
+**Quay lại Q3:** HIR là AST đã desugar để type check (`for` trong `total` thành `loop`); THIR là HIR đã có kiểu và desugar sâu hơn (`order.total()` thành lời gọi hàm thường), làm cầu sang MIR.
 
 ## 4. MIR: nơi borrow check và tối ưu sống (Q4)
 
-> **Trả lời ngắn.** MIR là bản vẽ của hàm dưới dạng đồ thị các khối lệnh đơn giản, nối nhau bằng các mũi tên rẽ nhánh (CFG, đồ thị luồng điều khiển); không có biểu thức lồng nhau và mọi kiểu đều tường minh[^dev-mir-chars]. Vì MIR đơn giản hơn HIR nhiều nên borrow checker đỡ lỗi[^dev-bc-simpler], và vì nó còn *generic* (chưa tách thành bản riêng cho từng kiểu cụ thể) nên nhiều phân tích làm ở đây hiệu quả hơn so với sau monomorphization[^dev-mir-generic]; rustc đặt ở MIR việc borrow check, kiểm tra biến chưa khởi tạo, nhiều tối ưu và const evaluation[^dev-mir-use]. Borrow checker chạy trên MIR, và chính điều đó cho phép "non-lexical lifetimes", tức vùng sống của borrow được suy ra từ đồ thị luồng điều khiển[^dev-bc-mir][^dev-nll].
+> **Trả lời ngắn.** MIR là dạng của một hàm sau khi đã đơn giản hóa tối đa: một đồ thị gồm các khối lệnh đơn giản nối nhau bằng mũi tên rẽ nhánh (CFG, đồ thị luồng điều khiển), không còn biểu thức lồng nhau và mọi kiểu đều tường minh[^dev-mir-chars]. Vì MIR đơn giản hơn HIR nhiều nên borrow checker đỡ lỗi[^dev-bc-simpler]. MIR còn *generic*, tức chưa tách thành bản riêng cho từng kiểu cụ thể, nên nhiều phân tích làm ở đây hiệu quả hơn so với sau monomorphization[^dev-mir-generic]. Vì vậy rustc đặt ở MIR việc borrow check, kiểm tra biến chưa khởi tạo, nhiều tối ưu và const evaluation[^dev-mir-use]. Borrow checker chạy trên MIR[^dev-bc-mir]. Chính điều đó cho phép "non-lexical lifetimes", tức vùng sống của borrow được suy ra từ đồ thị luồng điều khiển[^dev-nll].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): MIR giống lưu đồ của một quy trình nghiệp vụ — các ô xử lý đơn giản nối với nhau bằng mũi tên rẽ nhánh; không còn câu văn lồng nhau như "nếu A thì (làm B rồi nếu C thì D)". Muốn hỏi "có đường đi nào dùng dữ liệu sau khi đã trả không?" thì lưu đồ trả lời tự nhiên hơn đoạn văn.
+*Với service `orders`.* MIR là dạng mà `total` mang khi đến borrow checker: một vòng lặp, một phép cộng dồn và một lần trả về, tất cả thành các khối lệnh nối nhau, không còn câu lệnh lồng nhau. Câu hỏi mà borrow checker phải trả lời kiểu như "có đường đi nào trong hàm dùng `&self.lines` sau khi dữ liệu đã hết hiệu lực không?". Hỏi chuyện đó trên đồ thị đường đi thì tự nhiên hơn nhiều so với hỏi trên cây cú pháp lồng nhau (nhận xét của người soạn).
 
-*Thành phần.* MIR dựa trên CFG; đơn vị là **basic block** gồm các *statement* (một successor) và kết thúc bằng một *terminator* (có thể nhiều successor, luôn nằm cuối block)[^dev-mir-bb]. **Local** là chỗ nhớ cấp trên stack (theo khái niệm) cho tham số, biến cục bộ và temporary; đánh số `_1`, `_2`…, riêng `_0` giữ giá trị trả về[^dev-mir-locals]. Biến trong MIR không có tên, chỉ có chỉ số; biến người dùng nằm lẫn với temporary[^dev-mir-nonames], và tên của biến người dùng chỉ còn lại ở chú thích debuginfo cho debugger[^dev-mir-hint][^dev-mir-debuginfo]. **Place** là biểu thức chỉ một vị trí bộ nhớ như `_1` hay `_1.f`; **rvalue** là biểu thức sinh giá trị; **operand** là đối số của rvalue: hằng hoặc place[^dev-mir-place]. Lời gọi hàm luôn là terminator vì có thể unwind[^dev-mir-call]. Unwind nghĩa là khi panic, Rust đi ngược lên stack và dọn dữ liệu của từng hàm nó đi qua[^book-unwind]; chi tiết ở [Chương 08, mục 1](08-panic-abi-ffi.md).
+### 4.1 Thành phần của MIR
+
+- **Basic block** là đơn vị của CFG. Nó gồm các *statement*, mỗi statement chỉ có một successor, và kết thúc bằng một *terminator*. Terminator có thể có nhiều successor và luôn nằm cuối block[^dev-mir-bb].
+- **Local** là chỗ nhớ cấp trên stack (về mặt khái niệm) cho tham số, biến cục bộ và temporary. Local đánh số `_1`, `_2`…; riêng `_0` giữ giá trị trả về[^dev-mir-locals].
+- Biến trong MIR không có tên, chỉ có chỉ số, và biến của bạn nằm lẫn với temporary[^dev-mir-nonames]. Chỗ duy nhất còn cho biết `_1` là biến của người dùng là phần chú thích debuginfo[^dev-mir-hint]. Mỗi chú thích đó gắn tên biến với place để debugger tìm được dữ liệu của biến[^dev-mir-debuginfo].
+- **Place** là biểu thức chỉ một vị trí trong bộ nhớ, như `_1` hay `_1.f`. **Rvalue** là biểu thức sinh ra giá trị. **Operand** là đối số của rvalue, là hằng hoặc một place[^dev-mir-place].
+- Lời gọi hàm luôn là terminator, vì nó có thể unwind[^dev-mir-call]. Trong `orders`, `serde_json::from_str(body)` bên trong `load` là một terminator như thế. Unwind nghĩa là khi panic, Rust đi ngược lên stack và dọn dữ liệu của từng hàm nó đi qua[^book-unwind]; chi tiết ở [Chương 08, mục 1](08-panic-abi-ffi.md).
 
 ```mermaid
 flowchart LR
@@ -158,67 +239,91 @@ flowchart LR
   t0 -.->|"unwind"| cl["cleanup block"]
 ```
 
-(Sơ đồ minh họa khái niệm basic block/terminator và lý do lời gọi hàm là terminator, không phải một MIR dump thật. Nhánh unwind vẽ theo ví dụ trong sách, nơi một lời gọi hàm có hai successor: `return` và `unwind`[^dev-mir-unwind-edge]; gọi block đích là "cleanup" là cách đặt tên của người soạn.)
+(Sơ đồ minh họa khái niệm basic block/terminator và lý do lời gọi hàm là terminator, không phải một MIR dump thật. Nhánh unwind vẽ theo ví dụ trong sách, nơi một lời gọi hàm có hai successor: `return` và `unwind`[^dev-mir-unwind-edge]. Việc gọi block đích là "cleanup" là cách đặt tên của người soạn.)
 
-*Vì sao dùng MIR.* MIR còn generic nên nhiều phân tích làm ở đây hiệu quả hơn so với sau monomorphization[^dev-mir-generic]; nhiều tối ưu được làm ở MIR vì nó generic, và điều đó cải thiện code generation lẫn tốc độ biên dịch về sau[^dev-mir-opt]. Sách cũng nói một số tối ưu dễ làm ở MIR hơn ở LLVM-IR[^dev-mir-opt-easier].
+### 4.2 Vì sao dùng MIR
 
-*Borrow checker nằm ở đâu trong luồng.* Theo trang "MIR queries and passes", `mir_drops_elaborated_and_const_checked` thực hiện borrow checking rồi làm MIR sẵn sàng cho tối ưu[^dev-mir-passes-drops], còn `optimized_mir` mới thực hiện các tối ưu[^dev-mir-passes-opt]. Vậy borrow check chạy trên MIR *trước* các pass tối ưu và trước khi sinh mã; sách còn nói nó phải chạy cho mọi code vì tính đúng đắn, kể cả dead code[^dev-bc-dead]. Chuỗi query đầy đủ, thứ tự theo trang Overview, đối chiếu với source rustc 1.95.0 và danh sách luật nó ép buộc nằm ở [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1); region inference ở mục 4, two-phase borrow ở mục 6, vì sao chương trình đúng vẫn bị từ chối ở mục 7.
+Điểm mấu chốt là MIR còn generic. Với `orders`, `load::<T>` trong MIR vẫn là *một* hàm cho mọi `T`; phân tích nó một lần rẻ hơn phân tích hai bản riêng cho `Order` và `Refund` sau khi monomorphize (suy luận của người soạn từ câu trên của sách[^dev-mir-generic]). Nhiều tối ưu cũng đặt ở MIR vì nó generic, và điều đó cải thiện cả code generation lẫn tốc độ biên dịch về sau[^dev-mir-opt]. Ngoài ra một số tối ưu dễ làm ở MIR hơn ở LLVM-IR[^dev-mir-opt-easier].
+
+### 4.3 Borrow checker nằm ở đâu trong luồng
+
+Còn thứ tự giữa borrow check và tối ưu thì sao? Trang "MIR queries and passes" trả lời qua hai query. `mir_drops_elaborated_and_const_checked` làm borrow checking rồi chuẩn bị MIR cho tối ưu[^dev-mir-passes-drops]. `optimized_mir` mới là nơi chạy các tối ưu[^dev-mir-passes-opt]. Vậy borrow check chạy trên MIR *trước* các pass tối ưu và trước khi sinh mã. Nó còn phải chạy cho mọi code vì tính đúng đắn, kể cả dead code[^dev-bc-dead]; một hàm của `orders` mà không ai gọi vẫn bị kiểm (suy luận của người soạn từ câu trên).
+
+Chuỗi query đầy đủ theo trang Overview, đối chiếu với source rustc 1.95.0, và danh sách luật borrow checker ép buộc nằm ở [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1). Region inference ở mục 4, two-phase borrow ở mục 6, vì sao chương trình đúng vẫn bị từ chối ở mục 7.
 
 <details><summary>Đi sâu: định dạng MIR dump, <code>--emit</code>, MIR chưa tối ưu</summary>
 
-- Sách ghi MIR còn được dùng cho const evaluation qua Miri[^dev-mir-use]; `unsafe` và Miri ở [Chương 07](07-unsafe-ub-miri.md) (Miri: mục 7).
+- MIR còn dùng cho const evaluation qua Miri[^dev-mir-use]; `unsafe` và Miri ở [Chương 07](07-unsafe-ub-miri.md) (Miri: mục 7).
 - Định dạng in MIR chỉ dành cho người đọc và có thể đổi không báo trước[^dev-mir-warn].
 - `--emit` của rustc nhận nhiều giá trị: `mir` (file `CRATE_NAME.mir`)[^rustc-emit], `llvm-ir` (`CRATE_NAME.ll`)[^rustc-emit-ir], `asm` (`CRATE_NAME.s`)[^rustc-emit-asm] và `obj` (file object native)[^rustc-emit-obj].
-- Sách chỉ ra MIR trên Playground là bản *đã tối ưu*, trong đó một số statement như `StorageLive` bị bỏ[^dev-mir-playground]; muốn xem MIR chưa tối ưu thì dùng `-Z mir-opt-level=0 --emit mir`, cần toolchain nightly[^dev-mir-nightly].
-- Vì "chạy lệnh để xem" nằm ngoài phạm vi chương này (không chạy thí nghiệm), ví dụ MIR thật (dump `--emit=mir`, đã được chạy khi soạn Chương 06) nằm ở [Chương 06, mục 2](06-borrow-checker.md#2-mir-trong-năm-phút-q2); dump đó là MIR tối ưu, không phải đúng thứ borrow checker đã duyệt (đối chiếu source ở [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1)).
+- MIR trên Playground là bản *đã tối ưu*, trong đó một số statement như `StorageLive` đã bị bỏ[^dev-mir-playground]. Muốn xem MIR chưa tối ưu thì dùng `-Z mir-opt-level=0 --emit mir`, cần toolchain nightly[^dev-mir-nightly].
+- Chương này không chạy lệnh nào để xem MIR. Ví dụ MIR thật (dump `--emit=mir`, đã chạy khi soạn Chương 06) nằm ở [Chương 06, mục 2](06-borrow-checker.md#2-mir-trong-năm-phút-q2). Dump đó là MIR đã tối ưu, không phải đúng thứ borrow checker đã duyệt (đối chiếu source ở [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1)).
 
 </details>
 
-**Quay lại Q4:** MIR là CFG đơn giản, còn generic; vì vậy các phân tích dataflow như borrow check, cùng nhiều tối ưu, đặt ở đây — và borrow check chạy trước các pass tối ưu.
+**Quay lại Q4:** MIR là CFG đơn giản, còn generic; vì vậy các phân tích dataflow như borrow check của `total`, cùng nhiều tối ưu, đặt ở đây, và borrow check chạy trước các pass tối ưu.
 
 ## 5. Monomorphization, codegen, LLVM, link (Q5)
 
-> **Trả lời ngắn.** Code generic được "đóng dấu" thành một bản riêng cho mỗi kiểu cụ thể cần dùng[^dev-mono]; rustc trước hết *thu thập* danh sách những bản đó ở mức MIR, rồi monomorphize thật sự khi chuyển MIR sang LLVM-IR[^dev-collect-mir][^dev-codegen]. Các mục thu thập được chia vào các codegen unit (CGU); mỗi CGU là một "module" LLVM và nhiều module có thể được codegen đồng thời[^dev-mono-run][^dev-cgu]. LLVM tối ưu thêm và phát machine code, sau đó các object được link[^dev-llvm][^dev-link]. Chương trình sinh ra nhanh, đổi lại tốn thời gian biên dịch và kích thước binary[^dev-mono-cost].
+> **Trả lời ngắn.** Code generic được "đóng dấu" thành một bản riêng cho mỗi kiểu cụ thể cần dùng[^dev-mono]. rustc trước hết *thu thập* danh sách các bản đó, ở mức MIR[^dev-collect-mir]. Sau đó nó mới monomorphize thật khi chuyển MIR sang LLVM-IR[^dev-codegen]. Danh sách được chia vào các codegen unit (CGU)[^dev-mono-run]; mỗi CGU là một "module" LLVM, và nhiều module có thể được codegen đồng thời[^dev-cgu]. LLVM tối ưu thêm rồi phát machine code[^dev-llvm], và các object được link lại[^dev-link]. Chương trình sinh ra nhanh, đổi lại tốn thời gian biên dịch và kích thước binary[^dev-mono-cost].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một mẫu đơn có chỗ trống "\<tên khách hàng>". In đơn thật nghĩa là in một bản cho từng khách hàng cụ thể. Trước khi in, phải lập danh sách "ai cần đơn" — đó là bước *collection*. Mỗi bản in xong rất nhanh vì mọi chỗ trống đã điền sẵn, nhưng càng nhiều khách hàng thì càng tốn giấy.
+*Với service `orders`.* `load<T>` là hàm generic, nhưng `handle` gọi nó với `Order` còn `handle_refund` gọi với `Refund`. Mục này trả lời: rustc sinh machine code cho `load` ra sao khi `T` có hai giá trị, cái giá phải trả là gì, và đoạn code đó đi qua những ai trước khi thành binary.
 
-*Định nghĩa.* Sách mô tả monomorphization là việc làm bản sao của toàn bộ code generic với tham số kiểu thay bằng kiểu cụ thể[^dev-mono-def]. Ví dụ trong sách: dùng cả `Vec<u64>` và `Vec<String>` thì binary có hai bản code cho `Vec`[^dev-mono]. Đây là bước đầu của backend rustc[^dev-mono-first].
+### 5.1 Monomorphization là gì
 
-*Collection.* Cần biết những kiểu cụ thể nào được dùng; công việc đó gọi là collection và code làm việc đó là *monomorphization collector*[^dev-mono-collect-def]. Ví dụ: `main` gọi `banana` gọi `peach::<u64>` thì collector trả danh sách `[main, banana, peach::<u64>]` — những hàm sẽ được sinh machine code[^dev-mono-collect]; collector cũng thêm cả `static` vào danh sách[^dev-mono-statics]. Bước này chạy ở mức MIR[^dev-collect-mir]; `codegen_crate` gọi query `collect_and_partition_mono_items`, làm collection rồi chia các mục thành codegen unit[^dev-mono-run].
+Monomorphization là việc làm bản sao của toàn bộ code generic, với tham số kiểu thay bằng kiểu cụ thể[^dev-mono-def]. Ví dụ trong sách: dùng cả `Vec<u64>` và `Vec<String>` thì binary có hai bản code cho `Vec`[^dev-mono]. Theo đúng cách đó, `load::<Order>` và `load::<Refund>` sẽ thành hai hàm riêng trong binary của `orders` (suy luận của người soạn). Đây là bước đầu tiên của backend rustc[^dev-mono-first].
 
-*Codegen unit (CGU).* Sau collection, các mục được chia vào các CGU[^dev-mono-run]. Để build tăng dần nhanh hơn, bộ chia tạo hai CGU cho mỗi module ở mức source: một cho code "ổn định" (không generic), một cho code hay đổi hơn (bản monomorphize/specialize)[^dev-mono-cgu]. Mỗi CGU sẽ trở thành một "module" LLVM; nhiều module có thể được codegen đồng thời để tận dụng nhiều lõi[^dev-cgu]. Số CGU tối đa của một crate chỉnh được bằng cờ `-C codegen-units`[^rustc-cgu].
+### 5.2 Collection: lập danh sách cần đóng dấu
 
-*Sang LLVM.* rustc dùng LLVM nên bước đầu của codegen là đổi MIR sang LLVM-IR, và *đó là chỗ MIR thực sự được monomorphize*[^dev-codegen]. LLVM-IR được đưa vào LLVM để tối ưu thêm nhiều rồi phát machine code (ví dụ object ELF hoặc WASM)[^dev-llvm]. Các object được đưa cho linker cùng (tùy chọn) object metadata để ra archive hoặc file thực thi[^dev-link-obj].
+Muốn đóng dấu thì trước hết phải biết cần những bản nào. Công việc đó gọi là collection, và code làm việc đó là *monomorphization collector*[^dev-mono-collect-def]. Ví dụ của sách: `main` gọi `banana` gọi `peach::<u64>` thì collector trả danh sách `[main, banana, peach::<u64>]`, những hàm sẽ được sinh machine code[^dev-mono-collect]. Với `orders`, danh sách sẽ có `handle`, `handle_refund`, `load::<Order>` và `load::<Refund>` (minh họa của người soạn). Collector cũng thêm cả `static` vào danh sách[^dev-mono-statics].
 
-*Vì sao dùng LLVM.* Sách nêu lợi ích: không phải viết cả backend, hưởng bộ tối ưu hóa lớn của LLVM, và biên dịch sang mọi nền tảng LLVM hỗ trợ[^dev-llvm-benefit].
+Bước này chạy ở mức MIR[^dev-collect-mir]. Cụ thể, `codegen_crate` gọi query `collect_and_partition_mono_items`, làm collection rồi chia các mục thành codegen unit[^dev-mono-run].
+
+### 5.3 Codegen unit (CGU)
+
+Mỗi CGU sẽ trở thành một "module" LLVM, và nhiều module có thể được codegen đồng thời để tận dụng nhiều lõi[^dev-cgu]. Cách chia còn tính tới build tăng dần: bộ chia tạo hai CGU cho mỗi module ở mức source, một cho code "ổn định" (không generic) và một cho code hay đổi hơn (các bản monomorphize/specialize)[^dev-mono-cgu]. Nếu `total` và `load` nằm cùng một module, `total` sẽ vào CGU ổn định còn `load::<Order>` vào CGU kia (suy luận của người soạn). Số CGU tối đa của một crate chỉnh được bằng cờ `-C codegen-units`[^rustc-cgu].
+
+### 5.4 Sang LLVM và link
+
+rustc dùng LLVM nên bước đầu của codegen là đổi MIR sang LLVM-IR, và *đó mới là chỗ MIR thực sự được monomorphize*[^dev-codegen]. LLVM-IR vào LLVM, nơi nó được tối ưu thêm nhiều rồi phát machine code (ví dụ object ELF hoặc WASM)[^dev-llvm]. Các object đi tới linker cùng (tùy chọn) object metadata, để ra archive hoặc file thực thi[^dev-link-obj].
+
+Dùng LLVM có ba lợi ích mà sách nêu: không phải viết cả backend, hưởng bộ tối ưu hóa lớn của LLVM, và biên dịch sang mọi nền tảng LLVM hỗ trợ[^dev-llvm-benefit].
 
 <details><summary>Đi sâu: bảng CGU cho generic, LTO, vì sao chương này không đo kích thước</summary>
 
-- Bảng trong chương *Monomorphization* mô tả crate B dùng hàm của crate A: hàm không generic của A không xuất hiện trong CGU nào của B (bảng có thêm một dòng riêng cho hàm `#[inline]`; xem [Chương 04, mục 7](04-monomorphization.md))[^dev-mono-table-ng]; hàm generic của A thì mọi bản monomorphize xuất hiện trong một CGU của B, bất kể inline[^dev-mono-table].
-- Không nhất thiết bước codegen là bước chạy tối ưu: với một số kiểu LTO, tối ưu hóa có thể xảy ra lúc link[^dev-lto].
-- Các CGU được lập từ thời điểm monomorphization collection[^dev-cgu-est].
-- Nhận xét của người soạn: một bản mã cho mỗi kiểu là lý do generic không tốn chi phí runtime[^book-generic-cost] nhưng tốn thời gian compile và kích thước binary[^dev-mono-cost]. Trait object (`dyn`) đi hướng ngược lại: method được chọn lúc chạy qua các con trỏ trong trait object và việc tra cứu này có chi phí runtime[^book-dyn]; vtable ở [Chương 03](03-dst-fat-pointer-vtable.md). Chương này không đo kích thước nào; so sánh chi tiết nằm ở [Chương 04 — Monomorphization](04-monomorphization.md).
+- Bảng trong chương *Monomorphization* mô tả crate B dùng hàm của crate A. Hàm không generic của A không xuất hiện trong CGU nào của B (bảng có thêm một dòng riêng cho hàm `#[inline]`; xem [Chương 04, mục 7](04-monomorphization.md))[^dev-mono-table-ng]. Hàm generic của A thì mọi bản monomorphize xuất hiện trong một CGU của B, bất kể inline[^dev-mono-table].
+- Không nhất thiết codegen là bước chạy tối ưu: với một số kiểu LTO, tối ưu hóa có thể xảy ra lúc link[^dev-lto].
+- Các CGU đã được lập từ thời điểm monomorphization collection[^dev-cgu-est].
+- Nhận xét của người soạn: một bản mã cho mỗi kiểu là lý do generic không tốn chi phí runtime[^book-generic-cost]. Cái giá là thời gian compile và kích thước binary[^dev-mono-cost]. Trait object (`dyn`) đi hướng ngược lại: method được chọn lúc chạy qua các con trỏ trong trait object, và việc tra cứu này có chi phí runtime[^book-dyn]. Vtable ở [Chương 03](03-dst-fat-pointer-vtable.md). Chương này không đo kích thước nào; so sánh chi tiết nằm ở [Chương 04 — Monomorphization](04-monomorphization.md).
 - Suy luận của người soạn: codegen cần biết layout (size, alignment) của từng kiểu để cấp chỗ và truy cập field; layout xem [Chương 02 — Type layout](02-type-layout.md).
 
 </details>
 
-**Quay lại Q5:** collection chọn những bản generic cần sinh (ở mức MIR), monomorphize thật xảy ra khi sinh LLVM-IR, rồi LLVM và linker làm nốt phần máy.
+**Quay lại Q5:** collection chọn những bản generic cần sinh (ở mức MIR, như `load::<Order>` và `load::<Refund>`), monomorphize thật xảy ra khi sinh LLVM-IR, rồi LLVM và linker làm nốt phần máy.
 
 ## 6. Query system và incremental compilation (Q6)
 
-> **Trả lời ngắn.** rustc không được tổ chức thành chuỗi pass chạy tuần tự trên code[^dev-query-notseq]. Các bước lớn từ HIR đến LLVM-IR là các *query* gọi lẫn nhau (lexing, parsing, macro expansion, name resolution thì chưa, xem phần Đi sâu), kết quả được ghi nhớ[^dev-query-memo]; nhờ vậy khi bạn sửa code và biên dịch lại, compiler làm càng ít việc thừa càng tốt[^dev-query-why][^dev-query-nov2022]. Vì thế sơ đồ ở mục 1 là thứ tự phụ thuộc về mặt khái niệm, không phải thứ tự thực thi từng dòng (suy luận của người soạn).
+> **Trả lời ngắn.** rustc không được tổ chức thành chuỗi pass chạy tuần tự trên code[^dev-query-notseq]. Các bước lớn từ HIR đến LLVM-IR là những *query* gọi lẫn nhau, và kết quả của mỗi query được ghi nhớ[^dev-query-memo]. Lexing, parsing, macro expansion và name resolution thì chưa (mốc 11/2022, xem phần Đi sâu)[^dev-query-nov2022]. Nhờ cách tổ chức này, khi bạn sửa code rồi biên dịch lại, compiler làm càng ít việc thừa càng tốt[^dev-query-why]. Vì thế sơ đồ ở mục 1 là thứ tự phụ thuộc về mặt khái niệm, không phải thứ tự thực thi từng dòng (suy luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `make` với Makefile — bạn yêu cầu file đích, `make` tự suy ra cần build gì trước và bỏ qua phần chưa đổi. rustc làm điều tương tự nhưng ở độ chi tiết từng hàm, từng kiểu, và theo kiểu *kéo* (hỏi khi cần) hơn là *đẩy*.
+*Với service `orders`.* Bạn sửa một dòng trong `total` rồi `cargo build` lại. Nếu rustc chạy lại toàn bộ pipeline từ lexing thì dòng sửa nhỏ đó cũng tốn bằng một lần build đầy đủ. Câu hỏi của mục này: làm sao rustc biết phần nào của `orders` không cần làm lại?
 
-*Query là gì.* Sách mô tả các bước chính ở trên được tổ chức thành các query gọi nhau[^dev-query-examples] (nhưng chỉ một phần đã được "query hóa", xem phần Đi sâu); ví dụ có query hỏi kiểu của một thứ và query hỏi MIR đã tối ưu của một hàm[^dev-query-examples]. Sách gọi cách này là "demand-driven" (kéo theo nhu cầu), trái với các pass độc lập[^dev-query-demand]; trang Query system còn ghi compiler vẫn đang chuyển dần từ kiểu pass-based sang demand-driven (mốc 7/2021)[^dev-query-passes].
+### 6.1 Query là gì
 
-*Thực thi và cache.* Lần đầu gọi query thì tính, lần sau trả kết quả từ hashtable[^dev-query-memo]. Query là method trên `TyCtxt`, nơi cũng chứa cache trong bộ nhớ[^dev-query-tcx]. Khi query chưa có trong cache, compiler gọi *provider* tương ứng[^dev-query-provider]. Khi chạy một query, compiler còn phát hiện *lúc chạy* nó phụ thuộc những query nào, từ đó dựng đồ thị phụ thuộc của crate, làm cho tính toán tăng dần là *sound* (đúng đắn)[^dev-query-deps].
+Trong rustc, các bước lớn ở trên được tổ chức thành các query gọi nhau. Ví dụ có query hỏi kiểu của một thứ, và query hỏi MIR đã tối ưu của một hàm[^dev-query-examples]. Sách gọi cách này là *demand-driven* (kéo theo nhu cầu), trái với các pass độc lập chạy lần lượt[^dev-query-demand]. Trang Query system còn ghi compiler vẫn đang chuyển dần từ kiểu pass-based sang demand-driven (mốc 7/2021)[^dev-query-passes].
 
-*Query kéo cả pipeline.* Sách mô tả bức tranh nguyên lý: từ HIR của một hàm, hỏi LLVM-IR của nó kéo theo `optimized_mir`, kéo theo borrow checker, kéo theo việc dựng MIR[^dev-query-drives]; rồi nói thẳng bức tranh đó quá đơn giản hóa[^dev-query-simplified]. Thực tế (sách dùng chữ "hiện tại" nên chi tiết này có thể đã đổi): query `mir_borrowck` được chạy trước trên mọi hàm của crate[^dev-bc-first]; sau đó backend gọi `collect_and_partition_mono_items`, nó đòi đệ quy `optimized_mir` của mọi hàm đạt được, mỗi `optimized_mir` kéo theo `mir_borrowck` cho hàm đó (nếu hàm đã được kiểm ở bước trước thì kết quả query đã được ghi nhớ — suy luận của người soạn), rồi codegen unit được tạo[^dev-bc-order]. Phần chia tách này cần giữ để hàm không với tới được vẫn phát lỗi[^dev-query-split].
+### 6.2 Query chạy và cache thế nào
+
+Lần đầu bạn gọi một query thì compiler tính; lần sau kết quả lấy từ hashtable[^dev-query-memo]. Query là method của `TyCtxt`, nơi cũng giữ cache trong bộ nhớ[^dev-query-tcx]. Khi query chưa có trong cache, compiler gọi *provider* tương ứng[^dev-query-provider]. Trong lúc chạy một query, compiler còn phát hiện *lúc chạy* nó phụ thuộc những query nào. Từ đó nó dựng đồ thị phụ thuộc của crate, làm cho tính toán tăng dần là *sound* (đúng đắn)[^dev-query-deps].
+
+### 6.3 Một query kéo cả pipeline
+
+Sách mô tả bức tranh nguyên lý thế này: từ HIR của một hàm, hỏi LLVM-IR của nó sẽ kéo theo `optimized_mir`, kéo theo borrow checker, kéo theo việc dựng MIR[^dev-query-drives]. Sách cũng nói thẳng bức tranh đó quá đơn giản hóa[^dev-query-simplified].
+
+Thực tế khác một chút (sách dùng chữ "hiện tại" nên chi tiết này có thể đã đổi). Query `mir_borrowck` chạy trước trên mọi hàm của crate[^dev-bc-first]. Sau đó backend gọi `collect_and_partition_mono_items`, nó đòi đệ quy `optimized_mir` của mọi hàm đạt được; mỗi `optimized_mir` lại kéo theo `mir_borrowck` cho hàm đó, rồi codegen unit được tạo[^dev-bc-order]. Hàm nào đã kiểm ở bước trước thì kết quả query đã được ghi nhớ nên không chạy lại (suy luận của người soạn). Phần chia tách này cần giữ để hàm không với tới được vẫn phát lỗi[^dev-query-split].
 
 ```mermaid
 flowchart TD
@@ -228,44 +333,51 @@ flowchart TD
   bck --> cgu["tạo codegen unit"]
 ```
 
-(Sơ đồ chỉ vẽ các bước mà đoạn trích về `mir_borrowck` / `optimized_mir` / `collect_and_partition_mono_items` nói tới[^dev-bc-order][^dev-query-split]; thứ tự mũi tên theo lời sách, còn nhiều query khác không được vẽ.)
+(Sơ đồ chỉ vẽ các bước mà đoạn trích về `mir_borrowck` / `optimized_mir` / `collect_and_partition_mono_items` nói tới[^dev-bc-order]. Thứ tự mũi tên theo lời sách; còn nhiều query khác không được vẽ.)
 
-*Incremental.* Kết quả query được cache trên đĩa để compiler biết kết quả nào đổi so với lần trước và chỉ làm lại những cái đó[^dev-query-cache]; tuy vậy không phải query nào cũng được cache trên đĩa[^dev-query-notdisk]. Mỗi query được gán *màu*: **đỏ** nếu kết quả lần này khác lần trước, **xanh** nếu giống[^dev-incr-colors]. Hai ý then chốt: nếu mọi input của query Q đều xanh thì Q phải cho kết quả như cũ nên không cần chạy lại[^dev-incr-green-inputs]; và dù input đổi, query vẫn có thể cho cùng kết quả, nên sau khi chạy lại ta so hash kết quả cũ/mới và nếu không đổi thì vẫn đánh dấu xanh[^dev-incr-partial][^dev-incr-hash].
+### 6.4 Incremental: tô màu đỏ và xanh
+
+Kết quả query được cache trên đĩa, để compiler biết kết quả nào đã đổi so với lần biên dịch trước và chỉ làm lại những cái đó[^dev-query-cache]. Không phải query nào cũng cache trên đĩa[^dev-query-notdisk]. Mỗi query được gán một *màu*: **đỏ** nếu kết quả lần này khác lần trước, **xanh** nếu giống[^dev-incr-colors].
+
+Có hai ý then chốt. Một: nếu mọi input của query Q đều xanh thì Q phải cho kết quả như cũ, nên không cần chạy lại[^dev-incr-green-inputs]. Hai: input đổi vẫn có thể cho ra kết quả cũ[^dev-incr-partial]. Vì vậy sau khi chạy lại Q, ta so hash kết quả cũ với mới, và nếu hash không đổi thì Q vẫn xanh[^dev-incr-hash].
+
+Áp vào `orders`: sửa một dòng trong `total` thì query đọc thẳng thân `total` có thể đỏ; còn query của `load`, mà input không đổi, đều xanh nên không chạy lại (minh họa của người soạn, không phải mô tả chính xác từng query).
 
 <details><summary>Đi sâu: phần chưa query-fy, provider, try-mark-green</summary>
 
-- Không phải mọi bước đã là query. Theo sách (mốc tháng 11/2022, hiện nay có thể đã đổi), các bước từ HIR đến LLVM-IR đã là query; còn lexing, parsing, name resolution và macro expansion chạy một lượt cho cả chương trình[^dev-query-nov2022]. Sách nói rõ rằng query system được "gắn thêm" vào compiler sau này, nên có phần chưa query-fy; LLVM không phải code của rustc nên cũng không query-fy[^dev-query-retrofit].
-- *Provider*: hàm cài đặt thật của một query, được đăng ký vào struct `Providers` (query của crate hiện tại) hoặc `ExternProviders` (crate phụ thuộc)[^dev-query-providers].
-- *try-mark-green*: thuật toán xác định màu của một query Q chưa chạy: nếu Q chưa từng chạy ở lần trước thì chạy lại và tô đỏ[^dev-incr-tmg0]; nếu từng chạy thì lần lượt hỏi màu các query nó đã đọc *theo đúng thứ tự cũ*[^dev-incr-reads]; nếu có query đỏ thì Q "dirty" và được chạy lại để so hash[^dev-incr-tmg]. Thứ tự đọc được giữ vì một nhánh `if` đổi kết quả có thể khiến Q đi đường khác[^dev-incr-order].
-- Nhận xét của người soạn cho backend engineer: đây là cùng tư tưởng với build cache theo content hash (như Bazel) hay memoization trong service; điểm khác là rustc tự *khám phá* đồ thị phụ thuộc lúc chạy thay vì khai báo trước. Phần so sánh là nhận xét, không có trong nguồn.
-- Ghi chú về HIR và incremental: `DefId` ổn định hơn `HirId` qua các lần biên dịch vì không có `DefId` cho từng expression[^dev-defid]; còn `NodeId` thì gần như vô dụng cho incremental[^dev-nodeid-incr] (xem mục 2, 3).
+- Không phải mọi bước đã là query. Theo sách (mốc tháng 11/2022, hiện nay có thể đã đổi), các bước từ HIR đến LLVM-IR đã là query; còn lexing, parsing, name resolution và macro expansion chạy một lượt cho cả chương trình[^dev-query-nov2022]. Sách nói rõ rằng query system được "gắn thêm" vào compiler sau này, nên còn phần chưa query-fy. LLVM không phải code của rustc nên cũng không query-fy[^dev-query-retrofit].
+- *Provider* là hàm cài đặt thật của một query, đăng ký vào struct `Providers` (query của crate hiện tại) hoặc `ExternProviders` (crate phụ thuộc)[^dev-query-providers].
+- *try-mark-green* là thuật toán xác định màu của một query Q chưa chạy. Nếu Q chưa từng chạy ở lần trước thì chạy lại và tô đỏ[^dev-incr-tmg0]. Nếu từng chạy thì lần lượt hỏi màu các query nó đã đọc, *theo đúng thứ tự cũ*[^dev-incr-reads]. Có query đỏ thì Q "dirty" và chạy lại để so hash[^dev-incr-tmg]. Thứ tự đọc được giữ vì một nhánh `if` đổi kết quả có thể khiến Q đi đường khác[^dev-incr-order].
+- Nhận xét của người soạn cho backend engineer: đây là cùng tư tưởng với build cache theo content hash (như Bazel) hay memoization trong service, nhưng rustc tự *khám phá* đồ thị phụ thuộc lúc chạy thay vì khai báo trước. Phần so sánh là nhận xét, không có trong nguồn.
+- Ghi chú về HIR và incremental: `DefId` ổn định hơn `HirId` qua các lần biên dịch vì không có `DefId` cho từng expression[^dev-defid]. Còn `NodeId` thì gần như vô dụng cho incremental[^dev-nodeid-incr] (xem mục 2, 3).
 
 </details>
 
-**Quay lại Q6:** rustc là đồ thị query có cache và theo dõi phụ thuộc; "pipeline" là thứ tự phụ thuộc khái niệm, còn việc làm lại nhanh nhờ tô màu đỏ/xanh.
+**Quay lại Q6:** rustc là đồ thị query có cache và theo dõi phụ thuộc; "pipeline" là thứ tự phụ thuộc khái niệm, còn việc build lại `orders` nhanh nhờ tô màu đỏ/xanh.
 
 ## Liên hệ với Rust
 
 Những gì bạn chạm hằng ngày mà ánh xạ vào pipeline này (đều là diễn giải của người soạn từ các mục trên, trừ chỗ có chú thích):
 
-- **Lỗi borrow checker** đến từ giai đoạn MIR[^dev-bc-mir]; lỗi macro hay import không phân giải được đến từ giai đoạn bung macro, trước HIR[^dev-macro-undefined][^dev-hir-after]. Biết lỗi đến từ tầng nào giúp bạn đoán mình đang cãi nhau với cơ chế nào (nhận xét của người soạn).
-- **`--emit`** cho xem từng sản phẩm trung gian: `mir`, `llvm-ir`, `asm`, `obj`[^rustc-emit][^rustc-emit-ir][^rustc-emit-asm][^rustc-emit-obj]; cờ `-Z` (nightly) cho xem HIR và MIR chưa tối ưu[^dev-unpretty][^dev-mir-nightly]. Nội dung dump đổi không báo trước[^dev-mir-warn], nên đừng parse nó trong công cụ.
-- **Generic cost**: viết `fn f<T: Trait>` nghĩa là chấp nhận một bản code cho mỗi `T` thật dùng[^dev-mono]; đổi lại không trả chi phí runtime cho generics[^book-generic-cost]. Đây là lý do thời gian biên dịch và kích thước binary tăng khi lạm dụng generic[^dev-mono-cost].
-- **Build tăng dần**: sửa một hàm không làm rustc dựng lại mọi thứ vì cache query[^dev-query-cache]; ở mức dự án, `cargo` là cách gọi `rustc` gián tiếp[^dev-invoke] (nhận xét của người soạn: CI cache thư mục `target` hiệu quả vì cùng nguyên lý "đừng làm lại cái chưa đổi").
+- **Lỗi borrow checker** đến từ giai đoạn MIR[^dev-bc-mir]. Lỗi macro không tìm thấy hay import không phân giải được thì đến từ giai đoạn bung macro, trước HIR[^dev-macro-undefined]. Biết lỗi đến từ tầng nào giúp bạn đoán mình đang vướng cơ chế nào (nhận xét của người soạn).
+- **`--emit`** cho lấy các sản phẩm trung gian của `orders` (các giá trị `mir`, `llvm-ir`, `asm`, `obj` nằm ở phần Đi sâu của mục 4). Cờ `-Z unpretty=hir` (nightly) cho xem HIR[^dev-unpretty]. MIR chưa tối ưu thì xem bằng `-Z mir-opt-level=0 --emit mir`[^dev-mir-nightly]. Nội dung dump đổi không báo trước[^dev-mir-warn], nên đừng parse nó trong công cụ.
+- **Generic cost**: viết `fn load<T: DeserializeOwned>` nghĩa là chấp nhận một bản code cho mỗi `T` thật dùng[^dev-mono]. Đổi lại generics không tốn chi phí runtime[^book-generic-cost]. Đó cũng là lý do thời gian biên dịch và kích thước binary tăng khi lạm dụng generic[^dev-mono-cost].
+- **Build tăng dần**: sửa một hàm không làm rustc dựng lại mọi thứ nhờ cache query[^dev-query-cache]. Ở mức dự án, `cargo` là cách gọi `rustc` gián tiếp[^dev-invoke] (nhận xét của người soạn: CI cache thư mục `target` hiệu quả vì cùng nguyên lý "đừng làm lại cái chưa đổi").
 - **Ở chương sau**: layout kiểu (size, alignment, `repr`) ở [Chương 02](02-type-layout.md), generic vs `dyn` ở [Chương 04](04-monomorphization.md), cơ chế borrow checker ở [Chương 06](06-borrow-checker.md).
 
 ## Tóm tắt
 
 - rustc đi qua token → AST → HIR → THIR → MIR → LLVM-IR → machine code → link; mỗi biểu diễn tối ưu cho một mục đích riêng[^dev-irs].
-- Macro expansion, AST validation, name resolution và early lint xảy ra ở giai đoạn đầu trên AST, trước HIR[^dev-macro][^dev-hir-after].
-- Name resolution có hai pha: import/macro trong lúc bung macro, mọi tên khi đã có AST đầy đủ[^dev-nr-partial][^dev-nr-late].
-- HIR là AST đã desugar (`for` → `loop`); type inference, trait solving, type checking chạy trên HIR[^dev-hir][^dev-typeinf].
-- THIR có kiểu đầy đủ, method call thành lời gọi hàm; dùng kiểm tra pattern rồi dựng MIR[^dev-thir][^dev-hir-mir].
-- MIR là CFG đơn giản và còn generic[^dev-mir-chars][^dev-mir-generic]; borrow check, kiểm tra khởi tạo, nhiều tối ưu và const eval làm ở đây[^dev-mir-use], trong đó borrow check chạy trước các pass tối ưu của `optimized_mir`[^dev-mir-passes-drops][^dev-mir-passes-opt].
-- Monomorphization collection ở mức MIR; monomorphize thật khi sinh LLVM-IR; chương trình nhanh đổi bằng thời gian compile và kích thước binary[^dev-collect-mir][^dev-codegen][^dev-mono-cost].
-- Codegen unit là các module LLVM, có thể codegen song song; object được link ở cuối[^dev-cgu][^dev-link-obj].
-- rustc là hệ query có cache, theo dõi phụ thuộc và tô màu đỏ/xanh để làm lại ít nhất[^dev-query-notseq][^dev-incr-colors].
-- `mir_borrowck` chạy cho mọi hàm, kể cả hàm không với tới[^dev-bc-dead][^dev-query-split].
+- Macro expansion, AST validation, name resolution và early lint xảy ra ở giai đoạn đầu trên AST, trước HIR[^dev-macro].
+- Name resolution có hai pha: import và macro trong lúc bung macro[^dev-nr-partial], mọi tên khi đã có AST đầy đủ[^dev-nr-late].
+- HIR là AST đã desugar (`for` → `loop`)[^dev-hir]. Type inference, trait solving, type checking chạy trên HIR[^dev-typeinf].
+- THIR có kiểu đầy đủ và method call thành lời gọi hàm[^dev-thir]. Nó dùng để kiểm tra pattern rồi dựng MIR[^dev-hir-mir].
+- MIR là CFG đơn giản và còn generic[^dev-mir-chars]. Borrow check, kiểm tra khởi tạo, nhiều tối ưu và const eval làm ở đây[^dev-mir-use].
+- Borrow check chạy trước các pass tối ưu của `optimized_mir`[^dev-mir-passes-opt].
+- Monomorphization collection ở mức MIR[^dev-collect-mir]; monomorphize thật khi sinh LLVM-IR[^dev-codegen]. Chương trình nhanh đổi bằng thời gian compile và kích thước binary[^dev-mono-cost].
+- Codegen unit là các module LLVM, có thể codegen song song[^dev-cgu]. Object được link ở cuối[^dev-link-obj].
+- rustc là hệ query có cache[^dev-query-notseq]. Nó theo dõi phụ thuộc và tô màu đỏ/xanh để làm lại ít nhất[^dev-incr-colors].
+- `mir_borrowck` chạy cho mọi hàm, kể cả hàm không với tới[^dev-query-split].
 
 ## Câu hỏi tự kiểm tra
 
@@ -284,18 +396,18 @@ Những gì bạn chạm hằng ngày mà ánh xạ vào pipeline này (đều l
 
 <details><summary>Đáp án</summary>
 
-1. Token → AST → HIR → THIR → MIR → LLVM-IR → machine code → link[^dev-lex-ir][^dev-ast-desc][^dev-hir-desc][^dev-thir-typed][^dev-ir-mir][^dev-llvm-ir]. Borrow check trên MIR, trước các pass tối ưu MIR[^dev-bc-mir][^dev-mir-passes-drops][^dev-mir-passes-opt]; monomorphization collection ở mức MIR, monomorphize thật khi sang LLVM-IR[^dev-collect-mir][^dev-codegen].
-2. Macro expansion nằm ở giai đoạn đầu cùng parsing[^dev-macro], còn type inference chạy trên HIR sinh sau đó[^dev-hir-after][^dev-typeinf]; type checker chỉ thấy code đã bung (suy luận của người soạn từ thứ tự).
-3. Hai pha: trong lúc bung macro chỉ phân giải import và macro[^dev-nr-partial]; sau khi có AST đầy đủ phân giải mọi tên[^dev-nr-late].
-4. `for` → `loop`[^dev-hir]; method call và toán tử overload → lời gọi hàm thường[^dev-thir].
-5. Dựa trên CFG, không biểu thức lồng nhau, kiểu tường minh[^dev-mir-chars]. Lời gọi hàm là terminator vì có thể unwind[^dev-mir-call].
-6. Vì MIR còn generic: phân tích hiệu quả hơn so với sau monomorphization[^dev-mir-generic], và tối ưu ở đây cải thiện codegen cùng tốc độ biên dịch[^dev-mir-opt].
-7. Collection liệt kê hàm cần sinh mã, ở mức MIR[^dev-collect-mir]; monomorphize thật khi chuyển sang LLVM-IR[^dev-codegen]. Danh sách: `[main, banana, peach::<u64>]`[^dev-mono-collect].
-8. Các "module" LLVM; chia để codegen đồng thời tận dụng nhiều lõi[^dev-cgu]; bộ chia còn tách code ổn định khỏi code hay đổi để build tăng dần nhanh hơn[^dev-mono-cgu].
-9. Nếu mọi input của Q xanh thì Q không cần chạy lại[^dev-incr-green-inputs]; nếu input đổi nhưng hash kết quả không đổi thì Q vẫn xanh[^dev-incr-partial][^dev-incr-hash].
-10. Có: borrow checker phải chạy cho mọi code, kể cả dead code[^dev-bc-dead]; `mir_borrowck` được chạy trước trên mọi hàm của crate[^dev-bc-first], và sách nói phần chia tách này cần giữ để hàm không với tới được vẫn phát lỗi[^dev-query-split].
-11. Không, theo sách (mốc 11/2022): các bước từ HIR đến LLVM-IR là query; lexing, parsing, name resolution, macro expansion chạy một lượt cho cả chương trình; LLVM không phải query[^dev-query-nov2022][^dev-query-retrofit].
-12. Trước. Theo trang "MIR queries and passes", `mir_drops_elaborated_and_const_checked` thực hiện borrow checking rồi làm MIR sẵn sàng cho tối ưu[^dev-mir-passes-drops], còn `optimized_mir` mới thực hiện các tối ưu[^dev-mir-passes-opt]; trang Overview cũng mô tả `optimized_mir` kéo theo `mir_borrowck` cho hàm đó[^dev-bc-order]. [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1) đối chiếu thêm với source rustc 1.95.0.
+1. Token → AST → HIR → THIR → MIR → LLVM-IR → machine code → link; mục 1 đã dẫn từng bước[^dev-irs]. Borrow check chạy trên MIR, trước các pass tối ưu MIR[^dev-mir-passes-opt]. Monomorphization collection ở mức MIR[^dev-collect-mir]. Monomorphize thật khi sang LLVM-IR[^dev-codegen].
+2. Macro expansion nằm ở giai đoạn đầu cùng parsing[^dev-macro]. Type inference thì chạy trên HIR, sinh ra sau đó[^dev-typeinf]. Vậy type checker chỉ thấy code đã bung (suy luận của người soạn từ thứ tự).
+3. Hai pha. Trong lúc bung macro chỉ phân giải import và macro[^dev-nr-partial]. Sau khi có AST đầy đủ mới phân giải mọi tên[^dev-nr-late].
+4. `for` → `loop`[^dev-hir]. Method call và toán tử overload → lời gọi hàm thường[^dev-thir].
+5. MIR dựa trên CFG, không có biểu thức lồng nhau, và mọi kiểu đều tường minh[^dev-mir-chars]. Lời gọi hàm là terminator vì có thể unwind[^dev-mir-call].
+6. Vì MIR còn generic nên phân tích hiệu quả hơn so với sau monomorphization[^dev-mir-generic]. Tối ưu ở đây cũng cải thiện codegen và tốc độ biên dịch[^dev-mir-opt].
+7. Collection liệt kê hàm cần sinh mã, ở mức MIR[^dev-collect-mir]. Monomorphize thật xảy ra khi chuyển sang LLVM-IR[^dev-codegen]. Danh sách của ví dụ là `[main, banana, peach::<u64>]`[^dev-mono-collect].
+8. CGU là các "module" LLVM; chia để codegen đồng thời, tận dụng nhiều lõi[^dev-cgu]. Bộ chia còn tách code ổn định khỏi code hay đổi để build tăng dần nhanh hơn[^dev-mono-cgu].
+9. Nếu mọi input của Q xanh thì Q không cần chạy lại[^dev-incr-green-inputs]. Nếu input đổi nhưng hash kết quả không đổi thì Q vẫn xanh[^dev-incr-hash].
+10. Có. Borrow checker phải chạy cho mọi code, kể cả dead code[^dev-bc-dead]. `mir_borrowck` chạy trước trên mọi hàm của crate[^dev-bc-first]. Sách nói phần chia tách này cần giữ để hàm không với tới được vẫn phát lỗi[^dev-query-split].
+11. Không, theo sách (mốc 11/2022): các bước từ HIR đến LLVM-IR là query. Lexing, parsing, name resolution, macro expansion chạy một lượt cho cả chương trình[^dev-query-nov2022]. LLVM không phải query[^dev-query-retrofit].
+12. Trước. `mir_drops_elaborated_and_const_checked` làm borrow checking rồi chuẩn bị MIR cho tối ưu[^dev-mir-passes-drops]. `optimized_mir` mới làm các tối ưu[^dev-mir-passes-opt]. Trang Overview cũng mô tả `optimized_mir` kéo theo `mir_borrowck` cho hàm đó[^dev-bc-order]. [Chương 06, mục 1](06-borrow-checker.md#1-borrowck-chạy-ở-đâu-q1) đối chiếu thêm với source rustc 1.95.0.
 
 </details>
 
@@ -322,7 +434,6 @@ Những gì bạn chạm hằng ngày mà ánh xạ vào pipeline này (đều l
 [^dev-lex]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "At this stage, the source text is turned into a stream of atomic source code units known as tokens."
 [^dev-parse]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "The parser translates the token stream from the lexer into an Abstract Syntax Tree (AST)."
 [^dev-macro]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "Macro-expansion, AST-validation, name-resolution, and early linting also take place during the lexing and parsing stage."
-[^dev-lower]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "Next the AST is converted into High-Level Intermediate Representation (HIR), a more compiler-friendly representation of the AST."
 [^dev-typeinf]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "We then use the HIR to do type inference (the process of automatic detection of the type of an expression), trait solving (the process of pairing up an impl with each reference to a trait), and type checking."
 [^dev-hir-mir]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "The HIR is further lowered to MIR (used for borrow checking) by constructing the THIR (an even more desugared HIR used for pattern and exhaustiveness checking) to convert into MIR."
 [^dev-mir-use]: rustc-dev-guide, Overview of the compiler — <https://rustc-dev-guide.rust-lang.org/overview.html> — "MIR is used for borrow checking and other important dataflow-based checks, such as checking for uninitialized values. It is also used for a series of optimizations and for constant evaluation (via Miri)."

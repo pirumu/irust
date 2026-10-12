@@ -1,17 +1,19 @@
 # P6 · Chương 08 — DNS, HTTP và TLS
 
-Chương này đi từ **tên** (`api.example.com`) đến một response HTTPS: DNS đổi tên thành IP; TCP (hoặc QUIC) mở đường; TLS mã hóa; HTTP chạy trên cùng. Mỗi lớp tốn thời gian theo RTT, cuối chương ta cộng chúng thành *latency budget* và đo thử trong container.
+Chương này đi theo một request HTTPS từ lúc ta chỉ có **tên** (`api.example.com`) cho tới lúc nhận được response. DNS đổi tên thành IP, TCP (hoặc QUIC) mở đường, TLS mã hóa, rồi HTTP chạy trên cùng. Mỗi lớp tốn thời gian theo RTT (round-trip time: thời gian một gói đi tới đích rồi phản hồi quay về). Cuối chương ta cộng các RTT lại thành *latency budget* và đo thử trong container.
+
+Ví dụ chạy xuyên chương là `orders`, một service viết bằng Rust. Mỗi khi khách thanh toán, `orders` gọi `POST https://api.example.com/v1/charges` tới nhà cung cấp thanh toán (nhận xét của người soạn: ví dụ giả định, không phải code trong repo). Mỗi mục mở đầu bằng cùng một câu hỏi: lớp này làm gì cho lần gọi đó, và nó tốn của `orders` những gì?
 
 ## Bạn sẽ hiểu được gì
 
-- **Q1.** Zone, root, TLD, authoritative khác nhau thế nào; stub resolver khác recursive resolver ra sao; "iterative" khác "recursive" ở đâu? → mục 1
-- **Q2.** Các loại record `A`, `AAAA`, `CNAME`, `MX`, `NS`, `TXT` để làm gì; TTL điều khiển cache thế nào và vì sao đổi IP của dịch vụ không có hiệu lực ngay? → mục 2
-- **Q3.** Vì sao DNS/UDP truyền thống giới hạn 512 byte, bit TC và EDNS(0) giải quyết gì? → mục 3
-- **Q4.** Chương trình của bạn đi từ tên đến địa chỉ qua đường nào (`getaddrinfo`, `nsswitch.conf`, `/etc/hosts`, RFC 6724)? → mục 4
-- **Q5.** HTTP/1.1 đóng khung message và tái dùng kết nối ra sao; head-of-line blocking nằm ở đâu qua HTTP/1.1 và HTTP/2? → mục 5
-- **Q6.** Vì sao HTTP/3 rời TCP, và QUIC khác TCP thế nào (UDP, stream độc lập, connection ID, migration)? → mục 6
-- **Q7.** TLS 1.3 handshake gồm những bước nào, vì sao là 1-RTT, 0-RTT đổi lấy gì (replay)? → mục 7
-- **Q8.** Một request HTTPS mới tốn bao nhiêu RTT cho DNS, TCP, TLS; kết nối tái dùng tiết kiệm gì (số đo cho kết nối mới; phần tái dùng là suy luận từ mô hình)? → mục 8
+1. **Q1.** Khi `orders` chỉ có tên `api.example.com`, ai biết IP của nó? Zone, root, TLD, authoritative khác nhau thế nào; stub resolver khác recursive resolver ra sao; "iterative" khác "recursive" ở đâu? → mục 1
+2. **Q2.** Các loại record `A`, `AAAA`, `CNAME`, `MX`, `NS`, `TXT` để làm gì; TTL điều khiển cache thế nào, và vì sao nhà cung cấp đổi IP rồi mà `orders` vẫn có thể gọi IP cũ một lúc? → mục 2
+3. **Q3.** Vì sao DNS/UDP truyền thống giới hạn 512 byte, và bit TC cùng EDNS(0) giải quyết chuyện gì? → mục 3
+4. **Q4.** Từ chuỗi `"api.example.com:443"`, chương trình của bạn đi tới địa chỉ IP qua đường nào (`getaddrinfo`, `nsswitch.conf`, `/etc/hosts`, RFC 6724)? Vì sao `dig` ra IP đúng mà ứng dụng vẫn nối sang IP khác? → mục 4
+5. **Q5.** Khi `orders` gửi nhiều request tới cùng một server, HTTP/1.1 đóng khung message và tái dùng kết nối ra sao; head-of-line blocking nằm ở đâu qua HTTP/1.1 và HTTP/2? → mục 5
+6. **Q6.** Vì sao HTTP/3 rời TCP, và QUIC khác TCP thế nào (UDP, stream độc lập, connection ID, migration)? → mục 6
+7. **Q7.** TLS 1.3 handshake gồm những bước nào, vì sao chỉ cần 1-RTT, và 0-RTT đổi lấy gì (replay)? → mục 7
+8. **Q8.** Một request HTTPS mới tốn bao nhiêu RTT cho DNS, TCP, TLS; kết nối tái dùng tiết kiệm gì (số đo cho kết nối mới; phần tái dùng là suy luận từ mô hình)? → mục 8
 
 ## Kiến thức cần trước
 
@@ -20,36 +22,48 @@ Chương này đi từ **tên** (`api.example.com`) đến một response HTTPS:
 
 ## 1. Zone, root, TLD, authoritative, stub và recursive resolver (Q1)
 
-> **Trả lời ngắn.** DNS là một cây tên phân cấp; không server nào giữ cả cây mà mỗi server có thẩm quyền (authoritative) cho một vùng gọi là zone[^rfc1034-auth]. Chương trình của bạn thường chỉ dùng một stub resolver đẩy việc sang recursive resolver[^rfc1034-stub]; recursive resolver mới đi hỏi root → TLD → authoritative, đi theo referral từ server này sang server khác[^rfc1034-resolver-def] (chuỗi root → TLD → authoritative là cách mô tả thông dụng của người soạn). Iterative bắt buộc phải hỗ trợ, recursive chỉ là tùy chọn[^rfc1034-iter-req].
+> **Trả lời ngắn.** DNS là một cây tên phân cấp, và không server nào giữ cả cây. Mỗi server chỉ có thẩm quyền (authoritative) với một phần cây gọi là zone[^rfc1034-auth]. Chương trình của bạn thường không tự đi hỏi mà đẩy việc cho một stub resolver, và stub này nhờ recursive resolver làm hộ[^rfc1034-stub]. Recursive resolver mới là bên lần lượt hỏi root, TLD rồi authoritative, đi theo referral từ server này sang server khác[^rfc1034-resolver-def] (chuỗi root → TLD → authoritative là cách mô tả thông dụng của người soạn). Giao thức bắt buộc server phải hỗ trợ kiểu iterative, còn recursive chỉ là tùy chọn[^rfc1034-iter-req].
 
-**Giải thích.** Như hỏi đường (nhận xét của người soạn): bạn hỏi người bán hàng quen (recursive resolver); ông ta hỏi trạm trung tâm (root), được chỉ sang trạm khu vực (TLD), rồi chủ nhà (authoritative), và nhớ câu trả lời.
+**Giải thích.**
 
-**Vấn đề và không gian tên.** Con người nhớ tên, IP thì đổi, và cơ sở dữ liệu tên–địa chỉ của cả Internet không thể nằm trong một file. RFC 1034: cơ sở dữ liệu quá lớn và cập nhật quá thường xuyên, nên phải duy trì phân tán, với cache cục bộ[^rfc1034-dist]. Giải pháp là một **cây** tên[^rfc1034-tree]. Mỗi node có một *label* dài 0–63 octet[^rfc1034-label]; label rỗng (độ dài 0) là nhãn duy nhất được dành riêng, dùng cho root[^rfc1034-nulllabel]. Tên miền của một node là danh sách label từ node đó lên root[^rfc1034-name]. DNS có ba thành phần; thành phần đầu là không gian tên và các resource record (RR) gắn với tên[^rfc1034-comp]. Hai thành phần còn lại: name server (giữ dữ liệu), resolver (đi hỏi).
+*Với service `orders`.* Để gọi `https://api.example.com/v1/charges`, `orders` cần một địa chỉ IP, vì socket chỉ nối được tới địa chỉ chứ không nối được tới tên. Vậy ai đổi `api.example.com` thành IP, và vì sao việc đó không nằm trong một file hay một server duy nhất? Mục này trả lời cả hai câu.
 
-**Zone và authoritative.** Name server không giữ cả cây. Nó là **authority** cho những phần cây mà nó có thông tin đầy đủ; thông tin có thẩm quyền được tổ chức thành các **zone**, có thể sao chép sang nhiều name server để dự phòng[^rfc1034-auth]. Một zone bắt đầu bằng record `SOA`[^rfc1035-cname-soa]; record `NS` ghi tên một name server có thẩm quyền[^rfc1035-a-ns]. Cách gọi thông dụng (nhận xét của người soạn): **root**, **TLD** (như `.com`), **authoritative** của zone cần tra. Root server cuối cùng sẽ dẫn tới mọi phần của không gian tên[^rfc1034-roots] — resolver bắt đầu từ root đi xuống bằng các *referral* ("không phải tôi, hãy hỏi server này").
+### 1.1 Vì sao cần một cây tên
 
-**Resolver.** Chương trình của bạn không tự đi hỏi root. Nó dùng một **resolver** — chương trình nối ứng dụng với name server[^rfc1034-resolver]. Resolver phải truy cập được ít nhất một name server và dùng thông tin của nó để trả lời trực tiếp hoặc đi theo referral sang server khác[^rfc1034-resolver-def]. Có hai kiểu truy vấn:
+Con người nhớ tên, còn IP thì hay đổi. Cơ sở dữ liệu tên–địa chỉ của cả Internet lại quá lớn và cập nhật quá thường xuyên để nằm ở một chỗ, nên RFC 1034 kết luận phải duy trì nó phân tán, kèm cache cục bộ cho nhanh[^rfc1034-dist]. Cách tổ chức là một **cây** tên[^rfc1034-tree]. Mỗi node có một *label* dài 0–63 octet[^rfc1034-label]. Label rỗng (độ dài 0) là label duy nhất được dành riêng, dùng cho root[^rfc1034-nulllabel]. Tên miền của một node là danh sách label đi từ node đó lên root[^rfc1034-name]; vì vậy `api.example.com` gồm các label `api`, `example`, `com`, rồi tới root.
 
-- **Recursive**: server đầu tiên theo đuổi truy vấn thay cho client ở các server khác[^rfc1034-recursive].
+DNS có ba thành phần. Thành phần đầu là không gian tên cùng các resource record (RR) gắn với từng tên[^rfc1034-comp]. Hai thành phần còn lại là name server (giữ dữ liệu) và resolver (đi hỏi).
+
+### 1.2 Zone và authoritative
+
+Name server không giữ cả cây. Nó là **authority** cho những phần cây mà nó có thông tin đầy đủ. Thông tin có thẩm quyền được gom thành các **zone**, và zone có thể sao chép sang nhiều name server để dự phòng[^rfc1034-auth]. Một zone bắt đầu bằng record `SOA`[^rfc1035-cname-soa]. Record `NS` thì ghi tên một name server có thẩm quyền[^rfc1035-a-ns].
+
+Theo cách gọi thông dụng (nhận xét của người soạn), **root** ở đỉnh cây, **TLD** là tầng dưới (như `.com`), và **authoritative** là server của zone cần tra, ở đây là `example.com`. Root server rốt cuộc dẫn tới mọi phần của không gian tên[^rfc1034-roots], nên resolver bắt đầu từ root rồi đi xuống bằng các *referral*, tức những câu trả lời kiểu "không phải tôi, hãy hỏi server này".
+
+### 1.3 Ai đi hỏi: stub và recursive resolver
+
+`orders` không tự đi hỏi root. Nó dùng một **resolver**, tức chương trình nối ứng dụng với name server[^rfc1034-resolver]. Resolver phải truy cập được ít nhất một name server, rồi dùng thông tin của server đó để trả lời thẳng hoặc đi theo referral sang server khác[^rfc1034-resolver-def]. Hai kiểu truy vấn khác nhau ở chỗ ai đi tiếp khi server đầu tiên chưa biết câu trả lời:
+
+- **Recursive**: server đầu tiên đuổi theo truy vấn thay client ở các server khác[^rfc1034-recursive].
 - **Iterative**: server chỉ trả referral và để client tự đi tiếp[^rfc1034-iterative].
 
-**Stub resolver** là kiểu resolver tối giản: đẩy toàn bộ việc giải quyết sang một name server hỗ trợ recursive[^rfc1034-stub]. `libc` trên máy bạn (mục 4) chính là một stub (nhận xét của người soạn): nó hỏi các `nameserver` trong `/etc/resolv.conf`[^resolv-ns] (việc libc đặt RD=1 là suy luận của người soạn, chưa kiểm bằng bắt gói). Server nhận câu hỏi (của ISP, công ty, hay dịch vụ công cộng) là **recursive resolver**; nó mới là bên đi hỏi root → TLD → authoritative theo kiểu iterative và giữ cache dùng chung cho nhiều client (cách gọi và mô tả thông dụng, nhận xét của người soạn).
+**Stub resolver** là kiểu resolver tối giản: nó đẩy toàn bộ việc giải quyết sang một name server hỗ trợ recursive[^rfc1034-stub]. Với `orders`, `libc` trên máy chính là một stub (nhận xét của người soạn; mục 4 kể cách `libc` làm). Nó hỏi các `nameserver` ghi trong `/etc/resolv.conf`[^resolv-ns] (việc `libc` đặt bit RD=1 là suy luận của người soạn, chưa kiểm bằng bắt gói). Server nhận câu hỏi, của ISP, công ty hay một dịch vụ công cộng, là **recursive resolver**. Chính nó đi hỏi root → TLD → authoritative theo kiểu iterative, và giữ cache dùng chung cho nhiều client (cách gọi và mô tả thông dụng, nhận xét của người soạn).
 
 ```mermaid
 sequenceDiagram
-  participant App as Ứng dụng
+  participant App as orders (ứng dụng)
   participant S as Stub resolver (libc)
   participant R as Recursive resolver
   participant Root as Root
   participant TLD as TLD (.com)
   participant Auth as Authoritative (example.com)
-  App->>S: getaddrinfo("www.example.com")
+  App->>S: getaddrinfo("api.example.com")
   S->>R: truy vấn, RD=1 (recursive)
-  R->>Root: www.example.com ?
+  R->>Root: api.example.com ?
   Root-->>R: referral → server của .com
-  R->>TLD: www.example.com ?
+  R->>TLD: api.example.com ?
   TLD-->>R: referral → server của example.com
-  R->>Auth: www.example.com ?
+  R->>Auth: api.example.com ?
   Auth-->>R: A/AAAA + TTL
   R-->>S: địa chỉ (R cache theo TTL)
   S-->>App: danh sách địa chỉ
@@ -59,33 +73,39 @@ sequenceDiagram
 
 <details><summary>Đi sâu: bit RD/RA, nhiều zone trên một server</summary>
 
-Trong header của message DNS, bit **RD** (Recursion Desired) trong query nhờ server đi tìm hộ[^rfc1035-rd], và bit **RA** trong response cho biết server có hỗ trợ không[^rfc1035-ra]. Một server có thể giữ nhiều zone, liền kề hoặc rời nhau[^rfc1034-zones].
+Trong header của message DNS, bit **RD** (Recursion Desired) trong query nhờ server đi tìm hộ[^rfc1035-rd]. Bit **RA** trong response cho biết server có hỗ trợ việc đó không[^rfc1035-ra]. Một server có thể giữ nhiều zone, liền kề hoặc rời nhau[^rfc1034-zones].
 
 </details>
 
-**Quay lại Q1:** zone chia quyền quản lý, authoritative trả lời chính thức, còn stub → recursive → (root, TLD, authoritative) là đường đi của một câu hỏi.
+**Quay lại Q1:** zone chia quyền quản lý, authoritative trả lời chính thức, còn đường đi của câu hỏi "IP của `api.example.com` là gì" là stub trong `libc` → recursive resolver → root, TLD, authoritative.
 
 ## 2. Các loại record, TTL và cache (Q2)
 
-> **Trả lời ngắn.** Mỗi record có một TYPE: `A`/`AAAA` cho địa chỉ IPv4/IPv6, `CNAME` cho bí danh, `NS` cho server có thẩm quyền, `MX` cho mail, `TXT` cho văn bản. Mỗi record mang TTL tính bằng giây cho biết được cache bao lâu[^rfc1035-ttl-sec]. Đổi IP thì cache vẫn có thể giữ bản cũ tới hết TTL; nếu biết trước thay đổi thì có thể hạ TTL trước khi đổi[^rfc1034-ttl-change].
+> **Trả lời ngắn.** Mỗi record có một TYPE: `A`/`AAAA` cho địa chỉ IPv4/IPv6, `CNAME` cho bí danh, `NS` cho server có thẩm quyền, `MX` cho mail, `TXT` cho văn bản. Mỗi record mang một TTL tính bằng giây, cho biết nó được cache bao lâu[^rfc1035-ttl-sec]. Vì vậy khi IP đổi, cache vẫn có thể giữ bản cũ tới hết TTL; nếu biết trước thay đổi thì có thể hạ TTL trước khi đổi[^rfc1034-ttl-change].
 
-**Giải thích.** Giống tem "dùng trước ngày" trên hàng đã bán (nhận xét của người soạn): ai đã mua bản cũ cứ dùng tới hạn, bạn không thu hồi được.
+**Giải thích.**
 
-Mỗi record có TYPE; bảng dưới là các TYPE RFC 1035 liệt kê[^rfc1035-a-ns][^rfc1035-cname-soa][^rfc1035-mx-txt].
+*Với service `orders`.* Giả sử nhà cung cấp chuyển `api.example.com` sang IP mới lúc 10:00. Một lúc sau `orders` vẫn có thể gọi IP cũ, dù bạn không đổi dòng code nào. Lý do nằm ở TTL của record `A`, và để hiểu nó ta cần biết record là gì.
+
+### 2.1 Các loại record
+
+Resource record (RR) mà mục 1 nhắc tới có nhiều TYPE khác nhau. Bảng dưới là các TYPE RFC 1035 liệt kê:
 
 | Type | Ý nghĩa | Ghi chú |
 |---|---|---|
-| `A` | địa chỉ host (IPv4) | RDATA là một địa chỉ Internet 32 bit[^rfc1035-arec] |
-| `AAAA` | địa chỉ IPv6 | RFC 3596: lưu một địa chỉ IPv6 128 bit; host có nhiều địa chỉ IPv6 thì có nhiều record[^rfc3596-aaaa][^rfc3596-multi] |
-| `CNAME` | tên chính (canonical) của một alias | tên này là bí danh của tên kia |
-| `NS` | name server có thẩm quyền | ghi tên một name server có thẩm quyền (xem mục 1) |
-| `MX` | mail exchange | |
-| `TXT` | chuỗi văn bản | |
-| `SOA` | đánh dấu đầu một zone | |
+| `A` | địa chỉ host (IPv4)[^rfc1035-a-ns] | RDATA là một địa chỉ Internet 32 bit[^rfc1035-arec] |
+| `AAAA` | địa chỉ IPv6 | RFC 3596: loại record này lưu một địa chỉ IPv6 128 bit[^rfc3596-aaaa]. Host có nhiều địa chỉ IPv6 thì có nhiều record[^rfc3596-multi] |
+| `CNAME` | tên chính (canonical) của một alias[^rfc1035-cname-soa] | tên này là bí danh của tên kia |
+| `NS` | name server có thẩm quyền[^rfc1035-a-ns] | ghi tên một name server có thẩm quyền (xem mục 1) |
+| `MX` | mail exchange[^rfc1035-mx-txt] | |
+| `TXT` | chuỗi văn bản[^rfc1035-mx-txt] | |
+| `SOA` | đánh dấu đầu một zone[^rfc1035-cname-soa] | |
 
-Mỗi RR mang TTL — số nguyên 32 bit, đơn vị **giây**, cho biết RR có thể được cache bao lâu trước khi bị bỏ[^rfc1035-ttl-sec]. RFC 1034: TTL là giới hạn thời gian một RR được giữ trong cache; TTL do quản trị viên của zone đặt[^rfc1034-ttl-cache][^rfc1034-ttl]. TTL 0 nghĩa là cấm cache[^rfc1034-zero].
+### 2.2 TTL: record được cache bao lâu
 
-Đổi IP thì cache còn giữ bản cũ tới hết TTL (suy luận của người soạn từ định nghĩa TTL). RFC 1034 nêu cách làm: nếu có thể lường trước thay đổi thì hạ TTL trước khi đổi để giảm bất nhất, rồi nâng lại sau đó[^rfc1034-ttl-change].
+Mỗi RR mang một TTL, là số nguyên 32 bit không dấu, đơn vị **giây**. Nó cho biết RR được phép cache bao lâu trước khi phải bỏ[^rfc1035-ttl-sec]. Nói cách khác, TTL là giới hạn thời gian một RR được giữ trong cache[^rfc1034-ttl-cache]. Quản trị viên của zone nơi dữ liệu xuất phát là người đặt TTL[^rfc1034-ttl]. TTL bằng 0 nghĩa là cấm cache[^rfc1034-zero].
+
+Quay lại ví dụ ở đầu mục: cache chỉ biết giữ bản cũ tới hết TTL, nên sau khi IP đổi, cache nào vừa lấy bản cũ vẫn trả bản đó cho tới hạn (suy luận của người soạn từ định nghĩa TTL). RFC 1034 nêu cách giảm nhẹ chuyện này. Nếu lường trước được thay đổi thì hạ TTL trước khi đổi để giảm bất nhất, rồi nâng lại giá trị cũ sau đó[^rfc1034-ttl-change].
 
 <details><summary>Đi sâu: tra ngược IPv6 và quan sát TTL giảm dần</summary>
 
@@ -95,19 +115,27 @@ Tra ngược (IP → tên) cho IPv6 dùng miền đặc biệt `IP6.ARPA`[^rfc35
 
 </details>
 
-**Quay lại Q2:** TTL là hạn cache do chủ zone đặt, nên IP mới chỉ lan hết sau tối đa khoảng một TTL (suy luận của người soạn, giả sử cache tuân thủ TTL).
+**Quay lại Q2:** TTL là hạn cache do chủ zone đặt, nên khi nhà cung cấp đổi IP của `api.example.com`, `orders` chỉ chắc chắn thấy IP mới sau tối đa khoảng một TTL (suy luận của người soạn, giả sử cache tuân thủ TTL).
 
 ## 3. UDP 512 byte, bit TC và EDNS(0) (Q3)
 
-> **Trả lời ngắn.** Message DNS qua UDP truyền thống bị giới hạn 512 byte; dài hơn thì bị cắt và đặt bit TC[^rfc1035-udp]. Client thấy TC thì thử lại bằng TCP[^rfc7766-tc]. EDNS(0) cho requestor báo kích thước UDP payload lớn nhất mà nó nhận được[^rfc6891-size], nhờ đó server có thể trả message lớn hơn 512 byte mà không cần cắt (suy luận của người soạn từ giới hạn 512).
+> **Trả lời ngắn.** Message DNS qua UDP truyền thống bị giới hạn 512 byte; dài hơn thì bị cắt và server đặt bit TC trong header[^rfc1035-udp]. Client thấy TC thì thử lại bằng TCP[^rfc7766-tc]. EDNS(0) cho bên hỏi báo kích thước UDP payload lớn nhất mà nó nhận được[^rfc6891-size], nhờ đó server có thể trả message lớn hơn 512 byte mà không cần cắt (suy luận của người soạn từ giới hạn 512).
 
-**Giải thích.** Như phong bì chỉ nhét vừa một tờ (nhận xét của người soạn): thư dài hơn bị cắt và đánh dấu "chưa hết"; người nhận xin gửi lại bằng đường khác (TCP), hoặc báo trước mình nhận được phong bì to hơn (EDNS).
+**Giải thích.**
 
-Giới hạn 512 byte không tính header IP/UDP; UDP là cách được khuyến nghị cho truy vấn chuẩn[^rfc1035-udp2]. Khi không có EDNS0, server cắt response cho vừa 512 byte rồi đặt TC; client nhận response đó coi TC là dấu hiệu nên thử lại bằng TCP[^rfc7766-tc]. **EDNS(0)** (RFC 6891) nới giới hạn: 512 octet là trần của DNS truyền thống qua UDP[^rfc6891-512]. Requestor có thể thêm pseudo-RR **OPT** vào phần additional của request[^rfc6891-opt]; trường CLASS của OPT mang *UDP payload size* — số octet lớn nhất của UDP payload mà requestor ghép lại và nhận được[^rfc6891-size].
+*Với service `orders`.* Truy vấn DNS chuẩn thường đi qua UDP, vì RFC 1035 khuyến nghị cách đó[^rfc1035-udp2]. Một datagram UDP thì có hạn, trong khi một tên có thể có rất nhiều record. Vậy khi câu trả lời cho tên mà `orders` cần tra không vừa trong một datagram thì chuyện gì xảy ra? DNS truyền thống và DNS có EDNS(0) xử lý theo hai cách khác nhau.
+
+### 3.1 DNS truyền thống: cắt và đặt TC
+
+Giới hạn 512 byte không tính header IP và UDP. Message dài hơn bị cắt, và server đặt bit TC trong header[^rfc1035-udp]. Client nhận response mang TC thì coi đó là dấu hiệu nên thử lại bằng TCP[^rfc7766-tc].
+
+### 3.2 EDNS(0): báo trước kích thước nhận được
+
+Trần 512 octet là của DNS truyền thống qua UDP[^rfc6891-512]; EDNS(0) (RFC 6891) là cách nới nó. Bên gửi truy vấn (requestor) có thể thêm một pseudo-RR **OPT** vào phần additional của request[^rfc6891-opt]. Trường CLASS của OPT mang *UDP payload size*, là số octet lớn nhất của UDP payload mà requestor ghép lại và nhận được[^rfc6891-size]. Biết con số đó, server trả được message lớn hơn 512 byte mà không cần cắt (suy luận của người soạn).
 
 <details><summary>Đi sâu: path MTU, giá trị dưới 512, số đo trong container</summary>
 
-Kích thước payload có thể lớn hơn path MTU[^rfc6891-mtu]; giá trị dưới 512 coi như 512[^rfc6891-512min].
+Kích thước payload có thể lớn hơn path MTU[^rfc6891-mtu]. Giá trị dưới 512 được coi như 512[^rfc6891-512min].
 
 **Quan sát (container).** Server gốc có `big.lab.test` với 6 bản ghi TXT, mỗi bản 200 ký tự:
 
@@ -121,61 +149,88 @@ Kích thước payload có thể lớn hơn path MTU[^rfc6891-mtu]; giá trị d
 
 </details>
 
-**Quay lại Q3:** 512 byte là trần UDP truyền thống; TC đẩy client sang TCP, còn OPT của EDNS(0) nâng trần ngay trên UDP.
+**Quay lại Q3:** 512 byte là trần UDP truyền thống; với câu trả lời lớn, TC đẩy stub resolver của `orders` sang TCP, còn OPT của EDNS(0) nâng trần ngay trên UDP.
 
 ## 4. Từ tên đến địa chỉ trên máy bạn: getaddrinfo, nsswitch, hosts, resolv.conf (Q4)
 
-> **Trả lời ngắn.** Ứng dụng gọi `getaddrinfo(3)`; hàm này hỏi `/etc/nsswitch.conf` xem nguồn nào được tra trước (thường `files` rồi `dns`), nên `/etc/hosts` có thể thắng DNS. `dig` nói DNS thẳng, không qua nsswitch, nên `dig` ra IP đúng chưa chứng minh ứng dụng thấy IP đó (nhận xét của người soạn). Khi có nhiều địa chỉ, thứ tự do hàm sắp xếp trong glibc quyết định (man page ghi RFC 3484, nay được RFC 6724 thay thế) và chỉnh được bằng `/etc/gai.conf`[^getaddrinfo3-sort][^rfc6724-obs].
+> **Trả lời ngắn.** Ứng dụng gọi `getaddrinfo(3)`. Hàm này đọc `/etc/nsswitch.conf` để biết nguồn nào được tra trước (thường `files` rồi `dns`), nên `/etc/hosts` có thể thắng DNS. `dig` thì nói chuyện DNS thẳng, không qua nsswitch, nên `dig` ra IP đúng chưa chứng minh ứng dụng thấy IP đó (nhận xét của người soạn). Khi có nhiều địa chỉ, thứ tự do hàm sắp xếp trong glibc quyết định, và bạn chỉnh được bằng `/etc/gai.conf`[^getaddrinfo3-sort]. Man page ghi hàm sắp xếp theo RFC 3484, nhưng RFC này đã bị RFC 6724 thay thế[^rfc6724-obs].
 
-**Giải thích.** Như sổ danh bạ của công ty (nhận xét của người soạn): bạn xem tờ ghi chú trên bàn (`/etc/hosts`) trước, không thấy mới gọi tổng đài (DNS); `dig` là gọi thẳng tổng đài, bỏ qua tờ ghi chú.
+**Giải thích.**
 
-Ứng dụng hiếm khi nói DNS trực tiếp. Chúng gọi `getaddrinfo(3)`, hàm trả về một hoặc nhiều cấu trúc addrinfo, mỗi cấu trúc chứa một địa chỉ Internet dùng được trong `bind(2)` hay `connect(2)`[^getaddrinfo3]. Nó gồm nhiều bước:
+*Với service `orders`.* Giả sử bạn gõ `dig api.example.com` trên máy chạy `orders` và thấy IP mới, vậy mà `orders` vẫn nối sang IP khác. Chuyện này xảy ra được vì `orders` không hỏi DNS theo cách `dig` hỏi. Mục này đi theo đường mà chuỗi `"api.example.com:443"` thực sự đi qua `libc`.
 
-1. **`/etc/nsswitch.conf`** quyết định *nguồn* nào được hỏi. Dòng `hosts:` liệt kê các dịch vụ; thứ tự trên dòng là thứ tự được hỏi, lần lượt, cho tới khi có kết quả[^nsswitch-order]. Cơ sở dữ liệu `hosts` dành cho tên và địa chỉ host, dùng bởi `gethostbyname(3)` và các hàm liên quan[^nsswitch-hosts]. Debian mặc định ghi `hosts: files dns` (đọc từ file `/etc/nsswitch.conf` của container bookworm).
-2. **`files`** là `/etc/hosts`: file văn bản liên kết địa chỉ IP với hostname, mỗi địa chỉ một dòng[^hosts5].
-3. **`dns`** là stub resolver. Nó đọc `/etc/resolv.conf`: các dòng `nameserver` (tối đa MAXNS, hiện là 3) được hỏi theo thứ tự liệt kê[^resolv-ns]. Tham số `ndots` (mặc định 1) quyết định tên có ít nhất chừng đó dấu chấm thì được thử như tên tuyệt đối trước khi ghép các miền trong `search`[^resolv-ndots].
+### 4.1 Đường đi của một lần tra tên
 
-Man page nói hàm sắp xếp trong `getaddrinfo` được định nghĩa ở RFC 3484 và chỉnh được qua `/etc/gai.conf`[^getaddrinfo3-sort]; RFC 3484 đã bị RFC 6724 thay thế[^rfc6724-obs]. Rust truyền hints với `ai_flags = 0` (mục 9), nên không đi qua đường lọc `AI_ADDRCONFIG` của `hints = NULL`.
+Ứng dụng hiếm khi nói DNS trực tiếp. Chúng gọi `getaddrinfo(3)`, hàm trả về một hoặc nhiều cấu trúc addrinfo, mỗi cấu trúc chứa một địa chỉ Internet dùng được trong `bind(2)` hay `connect(2)`[^getaddrinfo3]. Để chọn nguồn và tra tên, hàm dựa vào ba thứ:
+
+1. **`/etc/nsswitch.conf`** quyết định hỏi *nguồn* nào. Dòng `hosts:` liệt kê các dịch vụ, và thứ tự trên dòng là thứ tự được hỏi, lần lượt, cho tới khi có kết quả[^nsswitch-order]. Cơ sở dữ liệu `hosts` dành cho tên và địa chỉ host, do `gethostbyname(3)` và các hàm liên quan dùng[^nsswitch-hosts]. Debian mặc định ghi `hosts: files dns` (đọc từ file `/etc/nsswitch.conf` của container bookworm).
+2. **`files`** là `/etc/hosts`, một file văn bản liên kết địa chỉ IP với hostname, mỗi địa chỉ một dòng[^hosts5].
+3. **`dns`** là stub resolver của mục 1. Nó đọc `/etc/resolv.conf`, trong đó các dòng `nameserver` (tối đa MAXNS, hiện là 3) được hỏi theo thứ tự liệt kê[^resolv-ns]. Tham số `ndots` (mặc định 1) quyết định cách thử tên: tên có ít nhất chừng đó dấu chấm thì được thử như tên tuyệt đối trước khi ghép các miền trong `search`[^resolv-ndots].
+
+Với `hosts: files dns`, tên nào có trong `/etc/hosts` sẽ được trả lời ngay từ file mà không hỏi DNS. Còn `dig` chỉ nói DNS, tức chỉ phản ánh nhánh thứ ba (quan sát ở phần Đi sâu).
+
+Khi một tên có nhiều địa chỉ, `getaddrinfo` còn phải sắp xếp chúng. Man page nói hàm sắp xếp được định nghĩa ở RFC 3484 và chỉnh được qua `/etc/gai.conf`[^getaddrinfo3-sort]. RFC 3484 đã bị RFC 6724 thay thế[^rfc6724-obs]. Rust truyền hints với `ai_flags = 0` (mục 9), nên không đi qua đường lọc `AI_ADDRCONFIG` của `hints = NULL`.
 
 <details><summary>Đi sâu: quan sát strace, thứ tự RFC 6724 từng luật, AI_ADDRCONFIG</summary>
 
 **Quan sát (container, glibc Debian bookworm).** `strace -f` một chương trình Rust tra tên cho thấy `openat` lần lượt `/etc/nsswitch.conf`, `/etc/resolv.conf`, `/etc/hosts`. Thêm `192.0.2.50 app.lab.test` vào `/etc/hosts` trong khi DNS trả `::1` và `127.0.0.1` cho cùng tên: `hosts: files dns` cho `192.0.2.50`; `hosts: dns files` cho `::1` và `127.0.0.1`. `dig +short` cho tên chỉ có trong `/etc/hosts` không ra gì — **`dig` nói DNS thẳng, không qua nsswitch**.
 
-**Thứ tự địa chỉ.** Quan sát (container, glibc 2.36): `/etc/gai.conf` vẫn viết "RFC 3484 governs the sorting" và ghi precedence mặc định của `::ffff:0:0/96` là **10**, không phải 35 như RFC 6724 — nên bảng glibc thực dùng phải đọc từ file đó. Dưới đây dùng luật RFC 6724 (bản hiện hành). RFC 6724 so từng cặp đích theo chuỗi luật: Rule 1 tránh đích không dùng được[^rfc6724-r1]; Rule 5 ưu tiên đích có label trùng label nguồn[^rfc6724-r5]; Rule 6 ưu tiên precedence cao hơn[^rfc6724-r6]; Rule 9 ưu tiên tiền tố chung dài nhất khi cùng họ[^rfc6724-r9]. Bảng policy mặc định của RFC 6724: `::1/128` precedence 50, `::/0` 40, `::ffff:0:0/96` (IPv4) 35[^rfc6724-table], nên ứng dụng dùng IPv6 trước IPv4 khi hai bên phù hợp như nhau[^rfc6724-v6first].
+**Thứ tự địa chỉ.** Quan sát (container, glibc 2.36): `/etc/gai.conf` vẫn viết "RFC 3484 governs the sorting" và ghi precedence mặc định của `::ffff:0:0/96` là **10**, không phải 35 như RFC 6724, nên bảng glibc thực dùng phải đọc từ file đó. Phần dưới dùng luật RFC 6724 (bản hiện hành). RFC 6724 so từng cặp địa chỉ đích theo một chuỗi luật. Bốn luật đáng chú ý:
 
-**Vì sao `::1` đứng trước `127.0.0.1`** (suy luận của người soạn từ các luật trên, đã đối chiếu với quan sát `[::1]:80` ra trước). IPv4 phải được tra bảng dưới dạng địa chỉ IPv4-mapped (`::ffff:127.0.0.1`)[^rfc6724-v4mapped]; cả `::1` lẫn `127/8` đều có scope link-local[^rfc6724-lo6][^rfc6724-lo4], nên Rule 2 hòa. Giả sử mỗi đích chọn nguồn loopback cùng họ, Rule 5 cũng hòa (label 0/0 và 4/4). Rule 6: 50 > 35 (và > 10 ở bảng glibc), nên `::1` thắng ở cả hai bảng, miễn cả hai đều dùng được (Rule 1).
+- Rule 1 tránh đích không dùng được[^rfc6724-r1].
+- Rule 5 ưu tiên đích có label trùng label nguồn[^rfc6724-r5].
+- Rule 6 ưu tiên precedence cao hơn[^rfc6724-r6].
+- Rule 9 ưu tiên tiền tố chung dài nhất khi hai đích cùng họ địa chỉ[^rfc6724-r9].
 
-Với `hints = NULL`, glibc dùng `AI_V4MAPPED | AI_ADDRCONFIG`[^gai-null]; `AI_ADDRCONFIG` chỉ trả họ địa chỉ mà máy có cấu hình (loopback không tính)[^gai-addrconfig].
+Bảng policy mặc định của RFC 6724 gán `::1/128` precedence 50, `::/0` 40, `::ffff:0:0/96` (IPv4) 35[^rfc6724-table]. Hệ quả là ứng dụng dùng IPv6 trước IPv4 khi hai bên phù hợp như nhau[^rfc6724-v6first].
+
+**Vì sao `::1` đứng trước `127.0.0.1`** (suy luận của người soạn từ các luật trên, đã đối chiếu với quan sát `[::1]:80` ra trước). IPv4 phải được tra bảng dưới dạng địa chỉ IPv4-mapped (`::ffff:127.0.0.1`)[^rfc6724-v4mapped]. Loopback IPv6 `::1` có scope link-local[^rfc6724-lo6]. Dải `127/8` của IPv4 cũng được gán scope link-local[^rfc6724-lo4]. Vì vậy Rule 2 hòa. Giả sử mỗi đích chọn nguồn loopback cùng họ, Rule 5 cũng hòa (label 0/0 và 4/4). Đến Rule 6 thì 50 > 35 (và > 10 ở bảng glibc), nên `::1` thắng ở cả hai bảng, miễn cả hai đều dùng được (Rule 1).
+
+Với `hints = NULL`, glibc dùng `AI_V4MAPPED | AI_ADDRCONFIG`[^gai-null]. Riêng `AI_ADDRCONFIG` chỉ trả họ địa chỉ mà máy có cấu hình (loopback không tính)[^gai-addrconfig].
 
 </details>
 
-**Quay lại Q4:** ứng dụng đi qua `getaddrinfo` → nsswitch → hosts/DNS → sắp xếp theo RFC 6724, còn `dig` chỉ phản ánh một nhánh DNS.
+**Quay lại Q4:** `orders` đi qua `getaddrinfo` → nsswitch → hosts/DNS → sắp xếp theo RFC 6724, còn `dig` chỉ phản ánh nhánh DNS, nên hai bên có thể thấy hai IP khác nhau.
 
 ## 5. HTTP/1.1 và HTTP/2: framing, kết nối tái dùng, head-of-line (Q5)
 
-> **Trả lời ngắn.** HTTP/1.1 là văn bản có khuôn cố định; TCP không có ranh giới message nên HTTP tự nói body dài bao nhiêu[^rfc9112-cl]. Kết nối mặc định được tái dùng[^rfc9112-persist], nhưng khi pipeline, response phải trả đúng thứ tự request[^rfc9112-pipeline] nên một response chậm chặn các response sau[^hpbn-h1-hol]. HTTP/2 multiplex nhiều stream trên một TCP nhưng vẫn dính HOL blocking của TCP[^rfc9113-tcphol].
+> **Trả lời ngắn.** HTTP/1.1 là giao thức văn bản có khuôn cố định. TCP không có ranh giới message, nên HTTP phải tự nói body dài bao nhiêu[^rfc9112-cl]. Kết nối mặc định được tái dùng cho nhiều request[^rfc9112-persist]. Nhưng nếu client gửi pipeline thì response phải trả đúng thứ tự request[^rfc9112-pipeline]. Vì thế một response chậm chặn mọi response sau nó[^hpbn-h1-hol]. HTTP/2 multiplex nhiều stream trên một kết nối TCP, nhưng vẫn dính head-of-line (HOL) blocking của chính TCP[^rfc9113-tcphol].
 
-**Giải thích.** Như một hàng xếp trước một quầy (nhận xét của người soạn): HTTP/1.1 trả lời đúng thứ tự, người đầu chậm thì cả hàng chờ; HTTP/2 chia nhiều quầy ảo nhưng chung một con đường TCP, đường tắc thì mọi quầy tắc.
+**Giải thích.**
 
-**Semantics và syntax tách đôi.** RFC 9110 mô tả ngữ nghĩa: HTTP là giao thức request/response không trạng thái[^rfc9110-stateless]; `GET` yêu cầu truyền biểu diễn hiện tại của resource đích[^rfc9110-get]; `2xx` nghĩa request đã được nhận, hiểu, chấp nhận[^rfc9110-2xx]. RFC 9112 mô tả *cách ghi lên dây* của HTTP/1.1.
+*Với service `orders`.* Giả sử mỗi giây `orders` gọi `api.example.com` hàng chục lần. Mỗi lần gọi có phải mở một kết nối TCP và TLS mới không? Nếu các lần gọi dùng chung kết nối, một response chậm có chặn các request sau nó không? Câu trả lời khác nhau giữa HTTP/1.1 và HTTP/2, và mục này đi từng bước.
 
-**Định dạng message.** Một message gồm start-line + CRLF, các dòng header, một dòng trống, body tùy chọn[^rfc9112-msg]. Request-line là `method SP request-target SP HTTP-version`[^rfc9112-reqline]; status-line là `HTTP-version SP status-code SP [reason-phrase]`[^rfc9112-statusline]. Client phải gửi `Host` trong mọi request HTTP/1.1[^rfc9112-host-client]; server phải trả 400 cho request HTTP/1.1 thiếu `Host`[^rfc9112-host]. `Host` cho origin server phân biệt resource khi phục vụ nhiều tên miền[^rfc9110-host].
+### 5.1 Ngữ nghĩa và cách ghi lên dây
 
-**Đóng khung body** — TCP là byte stream không có ranh giới message, nên chính HTTP phải nói "body dài đến đâu":
+RFC tách HTTP làm hai tầng. Ngữ nghĩa nằm ở RFC 9110: HTTP là giao thức request/response không trạng thái[^rfc9110-stateless]. `GET` yêu cầu truyền biểu diễn hiện tại của resource đích[^rfc9110-get]. Mã `2xx` nghĩa là request đã được nhận, hiểu và chấp nhận[^rfc9110-2xx]. Còn cách ghi message HTTP/1.1 lên dây nằm ở RFC 9112.
 
-- `Content-Length` hợp lệ và không có `Transfer-Encoding`: giá trị thập phân là độ dài body theo octet[^rfc9112-cl].
-- Chunked coding: bọc nội dung thành chuỗi chunk, mỗi chunk có chỉ báo kích thước riêng, cho phép stream độ dài chưa biết trước[^rfc9112-chunked].
-- Response không khai báo độ dài: body kéo dài tới khi server đóng kết nối[^rfc9112-closebody]. Rủi ro: không phân biệt được response hoàn chỉnh với response bị mạng cắt giữa chừng, nên server nên dùng framing theo độ dài khi có thể[^rfc9112-closerisk].
+### 5.2 Định dạng message
 
-Hệ quả (suy luận): parser phải đọc lặp tới `\r\n\r\n` rồi đúng số byte body.
+Một message HTTP/1.1 gồm start-line kết thúc bằng CRLF, các dòng header, một dòng trống, rồi body tùy chọn[^rfc9112-msg]. Request-line có dạng `method SP request-target SP HTTP-version`[^rfc9112-reqline], chẳng hạn `POST /v1/charges HTTP/1.1` trong request của `orders` (ví dụ của người soạn theo cú pháp đó). Status-line có dạng `HTTP-version SP status-code SP [reason-phrase]`[^rfc9112-statusline].
 
-**Persistent connection (keep-alive).** HTTP/1.1 mặc định dùng lại kết nối cho nhiều request[^rfc9112-persist]; server không hỗ trợ phải gửi option `close` trong mọi response trừ 1xx[^rfc9112-close]. HPBN xếp keepalive vào các cải tiến hiệu năng chính của HTTP/1.1[^hpbn-keepalive].
+Header `Host` là bắt buộc. Client phải gửi `Host` trong mọi request HTTP/1.1[^rfc9112-host-client]. Server phải trả 400 cho request HTTP/1.1 thiếu `Host`[^rfc9112-host]. Lý do là `Host` giúp origin server phân biệt resource khi một server phục vụ nhiều tên miền[^rfc9110-host].
 
-**Head-of-line ở tầng HTTP.** Khi client pipeline (gửi nhiều request không chờ response), server phải trả response đúng thứ tự nhận request[^rfc9112-pipeline]; HPBN: một response chậm chặn mọi request sau nó[^hpbn-h1-hol]. Client HTTP/1.x vì thế mở nhiều kết nối song song[^rfc9113-multiconn] — HPBN nêu mức song song tối đa khoảng sáu request mỗi origin[^hpbn-six]. (Nhận xét của người soạn: đây cũng là lý do HTTP client trong backend có connection pool, mỗi kết nối kèm chi phí TCP/TLS riêng.)
+### 5.3 Đóng khung body
 
-**HTTP/2.** (Nhận xét của người soạn:) HTTP/1.1 buộc chọn giữa serialize trên một kết nối (HOL) và mở nhiều kết nối (tốn handshake); HTTP/2 giữ ngữ nghĩa HTTP nhưng đổi cách ghi lên dây. Nó chạy trên một kết nối TCP; đơn vị cơ bản là **frame**[^rfc9113-overview]. Mỗi cặp request/response gắn với một **stream** riêng — đó là multiplexing[^rfc9113-mux]. Các stream phần lớn độc lập: một request/response bị chặn hoặc chậm không cản các stream khác[^rfc9113-streams].
+TCP là byte stream và không có ranh giới giữa các message, nên chính HTTP phải báo body dài đến đâu. Có ba cách:
 
-**HOL của TCP vẫn còn.** RFC viết thẳng rằng HOL blocking của TCP không được giao thức này giải quyết[^rfc9113-tcphol]. Mọi stream chung **một** byte stream đúng thứ tự của TCP: mất một segment thì dữ liệu sau nó chưa giao cho ứng dụng cho tới khi truyền lại — mọi stream phải chờ (suy luận từ tính đúng thứ tự của TCP). HPBN nêu cùng điều này[^hpbn-h2-tcp].
+- `Content-Length` hợp lệ và không có `Transfer-Encoding`: giá trị thập phân của nó là độ dài body tính bằng octet[^rfc9112-cl].
+- Chunked coding: nội dung được bọc thành chuỗi chunk, mỗi chunk có chỉ báo kích thước riêng, nên stream được cả nội dung có độ dài chưa biết trước[^rfc9112-chunked].
+- Response không khai báo độ dài: body kéo dài tới khi server đóng kết nối[^rfc9112-closebody]. Cách này có rủi ro, vì không phân biệt được response hoàn chỉnh với response bị mạng cắt giữa chừng, nên server nên dùng framing theo độ dài khi có thể[^rfc9112-closerisk].
+
+Với `Content-Length`, hệ quả là parser phải đọc lặp tới `\r\n\r\n` rồi đọc đúng số byte body (suy luận của người soạn).
+
+### 5.4 Tái dùng kết nối và head-of-line ở tầng HTTP
+
+HTTP/1.1 mặc định dùng lại một kết nối cho nhiều request (*persistent connection*, hay keep-alive)[^rfc9112-persist]. Server không hỗ trợ thì phải gửi option `close` trong mọi response trừ 1xx[^rfc9112-close]. Keepalive là một trong những cải tiến hiệu năng chính của HTTP/1.1[^hpbn-keepalive]. Với `orders`, dùng lại kết nối nghĩa là các lần gọi sau khỏi trả lại chi phí TCP và TLS (mục 8 sẽ đếm).
+
+Nhưng dùng lại kết nối kéo theo một vấn đề. Khi client pipeline, tức gửi nhiều request mà không chờ response, server phải trả response đúng thứ tự nhận request[^rfc9112-pipeline]. Hậu quả là một response chậm chặn mọi request sau nó[^hpbn-h1-hol]. Client HTTP/1.x vì thế mở nhiều kết nối song song để gửi request đồng thời[^rfc9113-multiconn]. Mức song song tối đa khoảng sáu request mỗi origin[^hpbn-six]. Nhận xét của người soạn: đây cũng là lý do HTTP client trong backend có connection pool, và mỗi kết nối trong pool mang theo chi phí TCP/TLS riêng.
+
+### 5.5 HTTP/2: một kết nối, nhiều stream
+
+HTTP/1.1 buộc phải chọn giữa hai cái giá: xếp request nối đuôi nhau trên một kết nối (HOL), hoặc mở nhiều kết nối (tốn handshake) (nhận xét của người soạn). HTTP/2 giữ nguyên ngữ nghĩa HTTP nhưng đổi cách ghi lên dây. Nó chạy trên một kết nối TCP, và đơn vị cơ bản của giao thức là **frame**[^rfc9113-overview]. Mỗi cặp request/response gắn với một **stream** riêng; đó là cách HTTP/2 multiplex[^rfc9113-mux]. Các stream phần lớn độc lập, nên một request/response bị chặn hoặc chậm không cản các stream khác[^rfc9113-streams]. Với `orders`, hàng chục lần gọi đồng thời có thể cùng đi trên một kết nối.
+
+Nhưng HOL của TCP thì còn nguyên. RFC ghi thẳng rằng HTTP/2 không giải quyết HOL blocking của TCP[^rfc9113-tcphol]. Lý do (suy luận từ tính đúng thứ tự của TCP): mọi stream chung **một** byte stream đúng thứ tự, nên khi mất một segment, dữ liệu sau nó chưa giao cho ứng dụng cho tới khi segment được truyền lại, và mọi stream phải chờ. Sách *High Performance Browser Networking* cũng nêu đúng điều này[^hpbn-h2-tcp].
 
 <details><summary>Đi sâu: frame 9 octet, stream ID, HPACK, ALPN, quan sát nc/curl</summary>
 
@@ -183,27 +238,35 @@ Gõ tay qua `nc` tới server Python trong container (`GET /index.html HTTP/1.1`
 
 Quan sát: `curl` gọi hai URL liên tiếp tới server Python (`protocol_version = 'HTTP/1.1'`) in `Connected` một lần rồi `Re-using existing connection`.
 
-**Frame, stream.** Mọi frame bắt đầu bằng header cố định 9 octet[^rfc9113-frame9]. Stream định danh bằng số nguyên 31 bit, client mở stream với số lẻ, server với số chẵn[^rfc9113-sid]. Số stream mở đồng thời bị giới hạn bởi `SETTINGS_MAX_CONCURRENT_STREAMS`, do mỗi bên đặt cho bên kia[^rfc9113-maxconc].
+**Frame, stream.** Mọi frame bắt đầu bằng header cố định 9 octet[^rfc9113-frame9]. Stream định danh bằng số nguyên 31 bit; client mở stream với số lẻ, server với số chẵn[^rfc9113-sid]. Mỗi bên có thể giới hạn số stream mở đồng thời của bên kia bằng tham số `SETTINGS_MAX_CONCURRENT_STREAMS`[^rfc9113-maxconc].
 
-**Nén header: HPACK.** Header lặp lại nhiều giữa các request, nên frame mang chúng được nén[^rfc9113-redundant] theo **HPACK** (RFC 7541), một định dạng nén để biểu diễn header field hiệu quả[^rfc7541-abs]. Nén có **trạng thái**: mỗi endpoint có một encoder context và một decoder context cho mọi field block trên kết nối[^rfc9113-hpack-state] (suy luận của người soạn: nhờ trạng thái chung đó, request sau có thể tham chiếu lại header đã gửi).
+**Nén header: HPACK.** Header lặp lại nhiều giữa các request, nên HTTP/2 nén các frame mang chúng[^rfc9113-redundant]. Định dạng nén là **HPACK** (RFC 7541), thiết kế để biểu diễn header field hiệu quả[^rfc7541-abs]. Nén có **trạng thái**: mỗi endpoint giữ một encoder context và một decoder context cho mọi field block trên kết nối[^rfc9113-hpack-state]. Nhờ trạng thái chung đó, request sau có thể tham chiếu lại header đã gửi (suy luận của người soạn).
 
-**ALPN.** Chuỗi `h2` định danh HTTP/2 trên TLS và đi trong extension ALPN của TLS[^rfc9113-alpn], và ALPN thương lượng giao thức ngay trong handshake TLS mà không thêm round-trip[^rfc7301-norrt]. Quan sát: `curl --http2-prior-knowledge` tới `nghttpd --no-tls` in `HTTP/2 200`, `Using Stream ID: 1`, và `Re-using existing connection` cho URL thứ hai.
+**ALPN.** Chuỗi `h2` định danh HTTP/2 trên TLS và đi trong extension ALPN của TLS[^rfc9113-alpn]. ALPN thương lượng giao thức ngay trong handshake TLS mà không thêm round-trip[^rfc7301-norrt]. Quan sát: `curl --http2-prior-knowledge` tới `nghttpd --no-tls` in `HTTP/2 200`, `Using Stream ID: 1`, và `Re-using existing connection` cho URL thứ hai.
 
 </details>
 
-**Quay lại Q5:** HTTP/1.1 chặn theo thứ tự response, HTTP/2 gỡ chặn ở tầng HTTP nhưng chung một byte stream TCP nên vẫn chặn khi mất gói.
+**Quay lại Q5:** HTTP/1.1 buộc response trả theo thứ tự nên một response chậm chặn các response sau; HTTP/2 gỡ chặn ở tầng HTTP, nhưng các stream chung một byte stream TCP nên mất gói vẫn chặn tất cả.
 
 ## 6. HTTP/3 và QUIC (Q6)
 
-> **Trả lời ngắn.** HTTP/3 chạy trên QUIC thay vì TCP; QUIC là transport an toàn, đa dụng, hướng kết nối[^rfc9000-quic]. RFC 9000 nêu một lợi ích của QUIC là tránh head-of-line blocking giữa các stream: mất gói chỉ chặn các stream có dữ liệu trong gói đó[^rfc9000-hol]. QUIC dùng connection ID nên kết nối sống sót khi IP/port đổi[^rfc9000-migration].
+> **Trả lời ngắn.** HTTP/3 chạy trên QUIC thay vì TCP; QUIC là transport an toàn, đa dụng, hướng kết nối[^rfc9000-quic]. Một lợi ích QUIC nêu rõ là tránh head-of-line blocking giữa các stream: mất gói thì chỉ những stream có dữ liệu trong gói đó bị chặn[^rfc9000-hol]. Ngoài ra QUIC dùng connection ID, nên kết nối sống sót khi IP hoặc port đổi[^rfc9000-migration].
 
-**Giải thích.** Nếu TCP là một đường một làn thì QUIC là nhiều làn riêng (nhận xét của người soạn): xe hỏng ở làn nào chỉ kẹt làn đó.
+**Giải thích.**
 
-**QUIC** (RFC 9000) là transport an toàn, đa dụng, hướng kết nối[^rfc9000-quic]. HTTP/3 (RFC 9114) chạy ngữ nghĩa HTTP trên QUIC với lớp framing tương tự HTTP/2[^rfc9114-quic].
+*Với service `orders`.* Nếu `api.example.com` bật HTTP/3, hàng chục lần gọi đồng thời của `orders` đi trên QUIC thay vì trên một kết nối TCP. Vậy mất một gói giữa chừng thì ai phải chờ? Còn ở chiều ngược lại, giả sử app di động của khách gọi `orders` bằng HTTP/3 và máy chuyển từ Wi-Fi sang 4G giữa lúc đang gọi (ví dụ giả định của người soạn), thì kết nối có đứt không? Hai câu hỏi này dẫn tới hai cơ chế của QUIC.
 
-**Chạy trên UDP.** Gói QUIC nằm trong UDP datagram để dễ triển khai trên hệ thống và mạng hiện có[^rfc9000-udp] (suy luận của người soạn: hạ tầng hiện có đã chuyển được UDP). Vì UDP không cho độ tin cậy hay thứ tự (chương [04](04-udp-va-tcp-co-ban.md)), phần đó QUIC phải tự lo (suy luận của người soạn).
+### 6.1 QUIC và HTTP/3
 
-**Stream độc lập.** Stream trong QUIC là một trừu tượng byte-stream có thứ tự, nhẹ[^rfc9000-streams]; nhưng QUIC không có cơ chế bảo đảm thứ tự giữa byte của các stream khác nhau[^rfc9000-orderless]. Khi mất gói, chỉ những stream có dữ liệu trong gói đó phải chờ truyền lại, còn các stream khác tiếp tục tiến lên[^rfc9000-hol]. Trong HTTP/3 mỗi request đi trên một request stream (bidirectional stream do client khởi tạo)[^rfc9114-reqstream], và HTTP không cần tự multiplex nữa vì QUIC lo việc đó[^rfc9114-nomux].
+**QUIC** (RFC 9000) là transport an toàn, đa dụng, hướng kết nối[^rfc9000-quic]. HTTP/3 (RFC 9114) chạy ngữ nghĩa HTTP trên QUIC, với một lớp framing nội bộ tương tự HTTP/2[^rfc9114-quic].
+
+### 6.2 Chạy trên UDP
+
+Gói QUIC nằm trong UDP datagram để dễ triển khai trên hệ thống và mạng hiện có[^rfc9000-udp] (suy luận của người soạn: hạ tầng hiện có đã chuyển được UDP). UDP không cho độ tin cậy hay thứ tự (chương [04](04-udp-va-tcp-co-ban.md)), nên phần đó QUIC phải tự lo (suy luận của người soạn).
+
+### 6.3 Stream độc lập
+
+Stream trong QUIC là một byte-stream có thứ tự và nhẹ[^rfc9000-streams]. Nhưng giữa các stream khác nhau thì QUIC không có cách nào bảo đảm thứ tự các byte[^rfc9000-orderless]. Vì vậy khi mất gói, chỉ những stream có dữ liệu trong gói đó phải chờ truyền lại, còn các stream khác vẫn tiến lên[^rfc9000-hol]. Trong HTTP/3, mỗi request đi trên một request stream, là bidirectional stream do client khởi tạo[^rfc9114-reqstream]. HTTP cũng không cần tự multiplex nữa, vì QUIC đã lo việc đó[^rfc9114-nomux].
 
 ```mermaid
 flowchart LR
@@ -223,25 +286,37 @@ flowchart LR
 
 (Minh họa của người soạn; số stream chỉ là ví dụ.)
 
-**Connection ID và migration.** QUIC dùng **connection ID**, do mỗi endpoint chọn và mờ đục với bên kia[^rfc9000-cid-def]; nhờ nó kết nối sống sót khi IP/port đổi, ví dụ khi máy chuyển sang mạng khác[^rfc9000-migration].
+### 6.4 Connection ID và migration
+
+QUIC dùng **connection ID**. Mỗi endpoint tự chọn connection ID, và với bên kia nó là một giá trị mờ đục[^rfc9000-cid-def]. Nhờ connection ID, kết nối sống sót khi IP hoặc port đổi, ví dụ khi máy chuyển sang mạng khác[^rfc9000-migration]. Với app di động ở trên, đó là lý do kết nối tới `orders` không phải dựng lại.
 
 <details><summary>Đi sâu: hệ quả của migration và TLS trong QUIC</summary>
 
-Code dùng IP client để log hay kiểm soát truy cập phải chủ động lấy địa chỉ hiện tại của client khi cần, hoặc chấp nhận rằng địa chỉ ban đầu có thể đổi[^rfc9114-migr]. Handshake QUIC tích hợp handshake TLS[^rfc9000-tls].
+Code dùng IP client để log hay kiểm soát truy cập phải chủ động lấy địa chỉ hiện tại của client khi cần, hoặc chấp nhận rằng địa chỉ ban đầu có thể đổi[^rfc9114-migr]. Còn handshake QUIC thì tích hợp sẵn handshake TLS[^rfc9000-tls].
 
 </details>
 
-**Quay lại Q6:** QUIC đưa stream xuống transport nên mất gói chỉ chặn đúng stream liên quan, và connection ID giữ kết nối qua đổi mạng.
+**Quay lại Q6:** QUIC đưa stream xuống tầng transport nên mất gói chỉ chặn đúng stream liên quan, và connection ID giữ kết nối qua đổi mạng.
 
 ## 7. TLS 1.3: handshake, 1-RTT, 0-RTT và replay (Q7)
 
-> **Trả lời ngắn.** TLS tạo kênh an toàn trên một data stream tin cậy, đúng thứ tự[^rfc8446-goal]. Client gửi sẵn phần Diffie-Hellman key share (extension `key_share`) ngay trong ClientHello[^rfc8446-keyshare], nên (suy luận của người soạn từ Figure 1) chỉ cần một vòng là có khóa để gửi dữ liệu ứng dụng (1-RTT). 0-RTT tiết kiệm thêm một vòng cho phiên nối lại, đổi bằng mất một số tính chất bảo mật[^rfc8446-0rtt-add], gồm bảo đảm chống replay[^rfc8446-0rtt].
+> **Trả lời ngắn.** TLS tạo một kênh an toàn trên một data stream tin cậy, đúng thứ tự[^rfc8446-goal]. Client gửi sẵn phần Diffie-Hellman key share (extension `key_share`) ngay trong ClientHello[^rfc8446-keyshare]. Nhờ vậy chỉ cần một vòng là hai bên có khóa để gửi dữ liệu ứng dụng (1-RTT; suy luận của người soạn từ Figure 1). 0-RTT bớt thêm một vòng cho phiên nối lại, nhưng đổi lại mất một số tính chất bảo mật[^rfc8446-0rtt-add]. Một trong số đó là bảo đảm chống replay[^rfc8446-0rtt].
 
-**Giải thích.** Như hai người trao đổi chìa khóa kèm lời chào ngay câu đầu (nhận xét của người soạn): không cần hỏi "bạn hỗ trợ gì" rồi mới đưa khóa, nên tiết kiệm một lượt qua lại.
+**Giải thích.**
 
-**Mục tiêu.** TLS tạo kênh an toàn giữa hai peer; yêu cầu duy nhất với transport bên dưới là một data stream tin cậy, đúng thứ tự[^rfc8446-goal] — vì vậy thường chạy trên TCP (suy luận của người soạn); với HTTP/3, QUIC tự tích hợp TLS handshake (mục 6). Kênh bảo đảm xác thực (server luôn được xác thực, client tùy chọn)[^rfc8446-auth], bí mật[^rfc8446-conf] và toàn vẹn[^rfc8446-integrity].
+*Với service `orders`.* Trước khi gửi `POST /v1/charges`, `orders` phải bắt tay TLS với `api.example.com`, và handshake mất mấy vòng thì khách chờ bấy nhiêu RTT. 0-RTT nghe hấp dẫn vì cho gửi dữ liệu ngay lượt đầu. Nhưng nếu dữ liệu đó là lệnh charge thì có thể có hai lệnh charge đến server thay vì một (nhận xét của người soạn). Mục này giải thích handshake chạy thế nào và cái giá của 0-RTT nằm ở đâu.
 
-**Ba pha của handshake.** Key Exchange (thiết lập khóa chung, chọn tham số mật mã; mọi thứ sau pha này được mã hóa), Server Parameters (các tham số handshake khác, như client có được xác thực không)[^rfc8446-phases], và Authentication (xác thực server, tùy chọn cả client, kèm xác nhận khóa và toàn vẹn handshake)[^rfc8446-authphase]. So với TLS 1.2, mọi handshake message sau ServerHello được mã hóa[^rfc8446-enc].
+### 7.1 Mục tiêu của TLS
+
+TLS tạo kênh an toàn giữa hai peer, và yêu cầu duy nhất với transport bên dưới là một data stream tin cậy, đúng thứ tự[^rfc8446-goal]. Vì vậy TLS thường chạy trên TCP (suy luận của người soạn). Với HTTP/3, QUIC tự tích hợp TLS handshake (mục 6). Kênh này bảo đảm ba thứ:
+
+- Xác thực: server luôn phải xác thực, client thì tùy chọn[^rfc8446-auth].
+- Bí mật: dữ liệu gửi qua kênh sau khi thiết lập chỉ hai đầu nhìn thấy[^rfc8446-conf].
+- Toàn vẹn: kẻ tấn công không sửa được dữ liệu mà không bị phát hiện[^rfc8446-integrity].
+
+### 7.2 Ba pha của handshake và vì sao chỉ một vòng
+
+Hai pha đầu là Key Exchange (thiết lập khóa chung, chọn tham số mật mã; mọi thứ sau pha này được mã hóa) và Server Parameters (các tham số handshake khác, như client có được xác thực không)[^rfc8446-phases]. Pha thứ ba, Authentication, xác thực server (tùy chọn cả client), kèm xác nhận khóa và toàn vẹn handshake[^rfc8446-authphase]. So với TLS 1.2, mọi handshake message sau ServerHello đều được mã hóa[^rfc8446-enc].
 
 ```mermaid
 sequenceDiagram
@@ -256,9 +331,15 @@ sequenceDiagram
   S-->>C: [Application Data]
 ```
 
-(Rút gọn Figure 1 RFC 8446: `{}` mã hóa bằng handshake key, `[]` bằng application key.) Điểm mấu chốt: ClientHello đã mang sẵn Diffie-Hellman key share[^rfc8446-keyshare], nên sau **một** vòng (ClientHello → ServerHello...Finished) client đã có đủ khóa để gửi dữ liệu ứng dụng cùng với Finished của mình (suy luận của người soạn từ Figure 1). HPBN: TLS 1.2 cần hai roundtrip cho full handshake[^hpbn-tls12], còn mục tiêu của TLS 1.3 là 1-RTT cho kết nối mới và 0-RTT cho phiên nối lại[^hpbn-tls13].
+(Rút gọn Figure 1 RFC 8446: `{}` mã hóa bằng handshake key, `[]` bằng application key.)
 
-**0-RTT.** Khi hai bên đã có PSK dùng chung (lấy ngoài băng hoặc từ handshake trước), TLS 1.3 cho client gửi dữ liệu ngay trong first flight ("early data")[^rfc8446-psk]. Client dùng PSK để xác thực server và mã hóa early data[^rfc8446-early]. Lợi ích: tiết kiệm một round trip khi thiết lập kết nối, với cái giá là mất một số tính chất bảo mật[^rfc8446-0rtt-add]. Cụ thể: dữ liệu 0-RTT không forward secret, và **không có bảo đảm non-replay giữa các kết nối**[^rfc8446-0rtt]. Quy tắc: client không được gửi trong early data message không an toàn khi bị phát lại[^rfc8446-safe]; ứng dụng không được dùng 0-RTT khi chưa có *profile* xác định thứ gì an toàn[^rfc8446-profile].
+Điểm mấu chốt nằm ở dòng đầu: ClientHello đã mang sẵn Diffie-Hellman key share[^rfc8446-keyshare]. Vì vậy sau **một** vòng (ClientHello → ServerHello…Finished), client đã đủ khóa để gửi dữ liệu ứng dụng cùng với Finished của mình (suy luận của người soạn từ Figure 1). So sánh: TLS 1.2 cần hai roundtrip cho full handshake[^hpbn-tls12]. Mục tiêu của TLS 1.3 là 1-RTT cho kết nối mới và 0-RTT cho phiên nối lại[^hpbn-tls13].
+
+### 7.3 0-RTT và replay
+
+Khi hai bên đã có PSK dùng chung (lấy ngoài băng hoặc từ handshake trước), TLS 1.3 cho client gửi dữ liệu ngay trong first flight, gọi là early data[^rfc8446-psk]. Client dùng PSK để xác thực server và mã hóa early data[^rfc8446-early]. Lợi ích là tiết kiệm một round trip khi thiết lập kết nối, với cái giá là mất một số tính chất bảo mật[^rfc8446-0rtt-add]. Cụ thể, dữ liệu 0-RTT không forward secret, và **không có bảo đảm non-replay giữa các kết nối**[^rfc8446-0rtt]. Replay ở đây nghĩa là server có thể nhận nhiều bản của cùng một message ứng dụng (chi tiết ở phần Đi sâu).
+
+Từ đó có hai quy tắc. Client không được gửi trong early data những message không an toàn khi bị phát lại[^rfc8446-safe]. Ứng dụng cũng không được dùng 0-RTT khi chưa có *profile* xác định cách dùng nó[^rfc8446-profile]. Với `orders`, một lệnh charge mà bị phát lại là charge hai lần, nên `POST /v1/charges` không phải loại message nên gửi trong early data (nhận xét của người soạn).
 
 <details><summary>Đi sâu: quan sát openssl s_server, vì sao replay xảy ra</summary>
 
@@ -266,33 +347,35 @@ sequenceDiagram
 
 0-RTT chỉ là phần dữ liệu thêm vào handshake 1-RTT trong first flight[^rfc8446-fig4].
 
-Vì sao replay xảy ra? Với dữ liệu 1-RTT thường, chống replay đến từ giá trị Random của server; 0-RTT không phụ thuộc ServerHello nên bảo đảm yếu hơn[^rfc8446-replay-1rtt]. RFC chỉ ra hai mối đe dọa: kẻ tấn công trên mạng nhân đôi nguyên một flight 0-RTT[^rfc8446-threat1], hoặc lợi dụng hành vi retry của client để server nhận nhiều bản của cùng một message ứng dụng[^rfc8446-threat2].
+Vì sao replay xảy ra? Với dữ liệu 1-RTT thường, chống replay đến từ giá trị Random của server. 0-RTT không phụ thuộc ServerHello nên bảo đảm yếu hơn[^rfc8446-replay-1rtt]. RFC chỉ ra hai mối đe dọa. Một là kẻ tấn công trên mạng nhân đôi nguyên một flight 0-RTT[^rfc8446-threat1]. Hai là kẻ tấn công lợi dụng hành vi retry của client để server nhận nhiều bản của cùng một message ứng dụng[^rfc8446-threat2].
 
 </details>
 
-**Quay lại Q7:** `key_share` đi kèm ClientHello cho 1-RTT; 0-RTT bớt thêm một vòng nhưng không chống replay nên chỉ dùng cho message an toàn khi bị phát lại.
+**Quay lại Q7:** `key_share` đi kèm ClientHello nên chỉ cần 1-RTT; 0-RTT bớt thêm một vòng nhưng không chống replay, nên `orders` chỉ nên dùng nó cho message an toàn khi bị phát lại.
 
 ## 8. Latency budget của một request HTTPS mới (Q8)
 
-> **Trả lời ngắn.** Kết nối mới tiêu RTT theo từng lớp: DNS ≥ 1, TCP 1, TLS 1.3 thêm 1 (TLS 1.2: 2), request/response 1 — tổng 4 RTT (TLS 1.2: 5) trước byte đầu. Kết nối tái dùng bỏ DNS, TCP, TLS, chỉ còn khoảng 1 RTT (suy luận từ mô hình, chưa đo).
+> **Trả lời ngắn.** Kết nối mới tiêu RTT theo từng lớp: DNS ≥ 1, TCP 1, TLS 1.3 thêm 1 (TLS 1.2: thêm 2), request/response 1. Tổng là 4 RTT (TLS 1.2: 5) trước byte đầu của response. Kết nối tái dùng bỏ được DNS, TCP và TLS nên chỉ còn khoảng 1 RTT (suy luận từ mô hình, chưa đo).
 
-**Giải thích.** Như làm thủ tục qua nhiều quầy (nhận xét của người soạn): mỗi quầy cần một lượt đi–về, nên tổng là tổng các lượt.
+**Giải thích.**
 
-Latency tổng là tổng các thành phần: propagation, transmission, processing, queuing[^hpbn-latency-sum]. Với kết nối *mới*, RTT được tiêu theo từng lớp — mỗi lớp cần ít nhất một vòng trước khi lớp trên có dữ liệu:
+*Với service `orders`.* Nếu `orders` mở kết nối mới cho mỗi lần gọi `api.example.com`, nó phải trả đủ các lớp ở các mục trước trước khi nhận byte đầu của response, và mỗi RTT là thêm một lượt khách phải chờ. Mục này cộng các lớp lại và đo thử trong container.
+
+Latency tổng là tổng các thành phần: propagation, transmission, processing, queuing[^hpbn-latency-sum]. Với kết nối *mới*, RTT được tiêu theo từng lớp, vì mỗi lớp cần ít nhất một vòng trước khi lớp trên có dữ liệu:
 
 | Bước | Chi phí (theo RTT) | Nguồn |
 |---|---|---|
-| DNS (cache miss) | ≥ 1 RTT tới resolver — mỗi lần phân giải hostname cần một roundtrip, chặn request[^hpbn-dns] | mục 1 |
+| DNS (cache miss) | ≥ 1 RTT tới resolver: mỗi lần phân giải hostname cần một roundtrip và chặn request[^hpbn-dns] | mục 1 |
 | TCP handshake | 1 RTT trước khi có dữ liệu ứng dụng[^hpbn-hs-rtt] | chương 04 |
-| TLS 1.3 | +1 RTT (TLS 1.2: +2)[^hpbn-tls13][^hpbn-tls12] | mục 7 |
+| TLS 1.3 | +1 RTT[^hpbn-tls13]. TLS 1.2: +2[^hpbn-tls12] | mục 7 |
 | HTTP request/response | +1 RTT cho byte đầu tiên (TTFB) (suy ra từ request → response) | — |
 | Slow start | `cwnd` ban đầu giới hạn lượng byte đầu[^hpbn-ss-every] | chương 06 |
 
-Cộng DNS 1 + TCP 1 + TLS 1.3 1 + request 1 = **4 RTT** trước byte đầu của response; TLS 1.2 là 5 RTT (cộng dồn từ các mục trên, chưa tính xử lý và slow start).
+Cộng DNS 1 + TCP 1 + TLS 1.3 1 + request 1 = **4 RTT** trước byte đầu của response. TLS 1.2 là 5 RTT. Các con số này cộng dồn từ các mục trên, chưa tính thời gian xử lý và slow start.
 
 <details><summary>Đi sâu: ví dụ HPBN và số đo netem trong container</summary>
 
-HPBN: client New York, server London qua cáp quang, handshake 3 bước tốn tối thiểu 56 ms[^hpbn-ny].
+Ví dụ trong HPBN: client New York, server London qua cáp quang, handshake 3 bước tốn tối thiểu 56 ms[^hpbn-ny].
 
 **Đo thật (container, một lần chạy, không phụ thuộc Internet).** Dựng dnsmasq làm resolver cục bộ, server HTTP (Python, `HTTP/1.1`), và hai `openssl s_server` (TLS 1.3 và TLS 1.2). Gắn `tc qdisc add dev lo root netem delay 50ms` — mỗi gói trên loopback chậm 50 ms mỗi chiều, nên RTT ≈ 100 ms (kể cả khi `curl` hỏi dnsmasq qua `lo`). Thời gian tích lũy do `curl -w` báo (giây):
 
@@ -308,17 +391,19 @@ HPBN: client New York, server London qua cáp quang, handshake 3 bước tốn t
 
 </details>
 
-**Quay lại Q8:** HTTPS mới tốn 4 RTT (TLS 1.3) hoặc 5 (TLS 1.2) trước byte đầu, và đo trong container khớp mô hình; theo mô hình, tái dùng kết nối cắt gần hết (suy luận, chưa đo).
+**Quay lại Q8:** mỗi kết nối HTTPS mới của `orders` tốn 4 RTT (TLS 1.3) hoặc 5 (TLS 1.2) trước byte đầu, và số đo trong container khớp mô hình; theo mô hình, tái dùng kết nối cắt gần hết chi phí đó (suy luận, chưa đo).
 
 ## 9. Liên hệ với Rust
 
-`std::net` không có DNS client riêng. Thứ gọi resolver là trait **`ToSocketAddrs`**, dùng để chuyển/phân giải một đối tượng thành một hoặc nhiều giá trị `SocketAddr`[^std-tosa].
+Với `orders` viết bằng Rust, mọi chuyện ở mục 4 bắt đầu từ một dòng như `TcpStream::connect("api.example.com:443")`. Phần này chỉ ra dòng đó gọi xuống resolver bằng đường nào.
 
-- Với `&str` dạng `"host:port"`: thử parse thẳng thành `SocketAddr` trước; không được thì tách tại dấu `:` cuối cùng, parse port thành `u16`, rồi gọi `lookup_host`[^std-str-impl][^std-str-rsplit].
-- Với `(&str, u16)`: thử parse host thành `IpAddr` trước; nếu không phải IP, nhờ hệ thống tra[^std-tuple-impl].
-- `lookup_host` gọi **`getaddrinfo` của libc** (không có DNS client trong std)[^std-getaddrinfo], với hints chỉ đặt `ai_socktype = SOCK_STREAM` (phần còn lại zeroed, tức `ai_flags = 0`)[^std-hints]. Vì vậy mọi thứ ở mục 4 — `nsswitch.conf`, `/etc/hosts`, `resolv.conf`, thứ tự RFC 6724 — áp dụng nguyên vẹn cho `TcpStream::connect("host:port")`. Phần `AI_ADDRCONFIG` mà man page gán cho `hints = NULL` ở mục 4 không áp dụng vì Rust truyền hints khác NULL.
-- Hàm có thể **chặn thread** trong lúc phân giải[^std-tosa-block]. (Nhận xét của người soạn: trong task async nó chặn executor thread.)
-- `TcpStream::connect` với nhiều địa chỉ thử lần lượt từng cái cho tới khi thành công[^std-connect-multi] — khớp với khuyến nghị của man page là thử các địa chỉ theo thứ tự `getaddrinfo` trả về[^getaddrinfo3-order].
+`std::net` không có DNS client riêng. Thứ gọi resolver là trait **`ToSocketAddrs`**, dùng để chuyển hoặc phân giải một đối tượng thành một hay nhiều giá trị `SocketAddr`[^std-tosa].
+
+- Với `&str` dạng `"host:port"` (như `"api.example.com:443"`), Rust thử parse thẳng thành `SocketAddr` trước[^std-str-impl]. Không được thì nó tách tại dấu `:` cuối cùng, parse port thành `u16`, rồi gọi `lookup_host`[^std-str-rsplit].
+- Với `(&str, u16)`, Rust thử parse host thành `IpAddr` trước. Nếu không phải IP thì nhờ hệ thống tra[^std-tuple-impl].
+- `lookup_host` gọi **`getaddrinfo` của libc**, vì `std` không có DNS client[^std-getaddrinfo]. Hints chỉ đặt `ai_socktype = SOCK_STREAM`, phần còn lại zeroed, tức `ai_flags = 0`[^std-hints]. Vì vậy mọi thứ ở mục 4 (`nsswitch.conf`, `/etc/hosts`, `resolv.conf`, thứ tự RFC 6724) áp dụng nguyên vẹn cho `TcpStream::connect("host:port")`. Riêng `AI_ADDRCONFIG` mà man page gán cho `hints = NULL` ở mục 4 thì không áp dụng, vì Rust truyền hints khác NULL.
+- Hàm có thể **chặn thread** trong lúc phân giải[^std-tosa-block]. Nếu gọi từ task async thì nó chặn executor thread (nhận xét của người soạn).
+- `TcpStream::connect` với nhiều địa chỉ thì thử lần lượt từng cái cho tới khi thành công[^std-connect-multi]. Cách này khớp với khuyến nghị của man page: thử các địa chỉ theo thứ tự `getaddrinfo` trả về[^getaddrinfo3-order].
 
 **Chạy thật** (rustc 1.95.0 trong container, resolver cục bộ như mục 1–2):
 
@@ -338,14 +423,14 @@ Quan sát: `app.lab.test:80` (DNS: `::1` + `127.0.0.1`) ra `[[::1]:80, 127.0.0.1
 
 ## Tóm tắt
 
-- DNS là cây tên phân cấp; quyền chia theo **zone**, mỗi zone có server **authoritative**; root và TLD trả referral.
-- **Stub resolver** (libc) hỏi **recursive resolver**, bên này đi **iterative** từ root.
-- TTL tính bằng giây; đổi IP lan chậm nên hạ TTL trước. `dig` không qua nsswitch.
-- DNS/UDP ≤ 512 byte, vượt thì TC; EDNS(0) cho payload lớn hơn (đo: 456 byte + `tc` so với 1319 byte).
-- Rust `ToSocketAddrs` gọi `getaddrinfo` và chặn thread.
-- HTTP/1.1 tự đóng khung body, tái dùng kết nối nhưng HOL theo thứ tự response; HTTP/2 multiplex trên một TCP còn HOL của TCP; HTTP/3 trên QUIC có stream độc lập và connection ID.
-- TLS 1.3: 1-RTT; 0-RTT bớt thêm một vòng nhưng không chống replay.
-- Request HTTPS mới = 4 RTT (đo ≈ 0.42 s với RTT 100 ms); theo mô hình, kết nối tái dùng cắt phần lớn (chưa đo).
+- DNS là cây tên phân cấp. Quyền quản lý chia theo **zone**, mỗi zone có server **authoritative**; root và TLD chỉ trả referral.
+- `orders` dùng **stub resolver** (libc); stub hỏi **recursive resolver**, và bên này đi hỏi theo kiểu **iterative** từ root.
+- TTL tính bằng giây, nên đổi IP lan chậm; nếu biết trước thì hạ TTL trước khi đổi. `dig` không đi qua nsswitch, nên chưa chứng minh được ứng dụng thấy IP nào.
+- DNS/UDP truyền thống ≤ 512 byte, vượt thì server cắt và đặt TC; EDNS(0) cho payload lớn hơn (đo trong container: 456 byte kèm `tc` so với 1319 byte).
+- Trong Rust, `ToSocketAddrs` gọi `getaddrinfo` của libc và có thể chặn thread.
+- HTTP/1.1 tự đóng khung body và tái dùng kết nối, nhưng response phải trả đúng thứ tự nên bị HOL. HTTP/2 multiplex nhiều stream trên một TCP nhưng vẫn dính HOL của TCP. HTTP/3 trên QUIC có stream độc lập và connection ID.
+- TLS 1.3 cần 1-RTT; 0-RTT bớt thêm một vòng nhưng không chống replay, nên không hợp với request như `POST /v1/charges` (nhận xét của người soạn).
+- Một request HTTPS mới tốn 4 RTT (đo ≈ 0.42 s với RTT 100 ms); theo mô hình, kết nối tái dùng cắt phần lớn (chưa đo).
 
 ## Câu hỏi tự kiểm tra
 
@@ -353,7 +438,7 @@ Quan sát: `app.lab.test:80` (DNS: `::1` + `127.0.0.1`) ra `[[::1]:80, 127.0.0.1
 
 <details><summary>Đáp án</summary>
 
-Domain là phần của cây tên nằm ở hoặc dưới một tên cho trước[^rfc1034-domain]; zone là đơn vị thông tin có thẩm quyền mà name server giữ[^rfc1034-auth]. Authority của `www.example.com` là name server mà record `NS` của zone chứa tên đó nêu ra[^rfc1035-a-ns]; root chỉ dẫn xuống qua referral[^rfc1034-roots].
+Domain là phần của cây tên nằm ở hoặc dưới một tên cho trước[^rfc1034-domain]. Zone là đơn vị thông tin có thẩm quyền mà name server giữ[^rfc1034-auth]. Authority của `www.example.com` là name server mà record `NS` của zone chứa tên đó nêu ra[^rfc1035-a-ns]. Root không trả lời thay mà chỉ dẫn xuống qua referral[^rfc1034-roots].
 
 </details>
 
@@ -361,7 +446,7 @@ Domain là phần của cây tên nằm ở hoặc dưới một tên cho trư�
 
 <details><summary>Đáp án</summary>
 
-Stub đẩy cả việc giải quyết sang server hỗ trợ recursive[^rfc1034-stub]; recursive resolver mới đi hỏi theo referral. RD đặt trong query, RA trong response[^rfc1035-rd].
+Stub đẩy cả việc giải quyết sang server hỗ trợ recursive[^rfc1034-stub]; recursive resolver mới là bên đi hỏi theo referral. RD đặt trong query, RA trong response[^rfc1035-rd].
 
 </details>
 
@@ -369,15 +454,15 @@ Stub đẩy cả việc giải quyết sang server hỗ trợ recursive[^rfc1034
 
 <details><summary>Đáp án</summary>
 
-Cache có thể giữ bản cũ tối đa TTL giây tính từ lúc nó được lấy[^rfc1035-ttl-sec], nên cache vừa lấy ngay trước 10:00 có thể sống tới ~11:00; sau mốc đó (nếu cache tuân thủ TTL) client thấy IP mới (suy từ định nghĩa TTL). Nếu biết trước thay đổi thì hạ TTL trước khi đổi rồi nâng lại[^rfc1034-ttl-change].
+Cache có thể giữ bản cũ tối đa TTL giây tính từ lúc nó lấy bản đó[^rfc1035-ttl-sec]. Vì vậy cache vừa lấy ngay trước 10:00 có thể sống tới khoảng 11:00; sau mốc đó, nếu cache tuân thủ TTL, client thấy IP mới (suy từ định nghĩa TTL). Nếu biết trước thay đổi thì hạ TTL trước khi đổi rồi nâng lại[^rfc1034-ttl-change].
 
 </details>
 
-4. `dig app.example.com` ra IP đúng nhưng ứng dụng kết nối tới IP khác. Nêu hai nguyên nhân khả dĩ theo chương này.
+4. `dig api.example.com` ra IP đúng nhưng `orders` kết nối tới IP khác. Nêu hai nguyên nhân khả dĩ theo chương này.
 
 <details><summary>Đáp án</summary>
 
-`/etc/hosts` đứng trước `dns` trong `nsswitch.conf`[^nsswitch-order][^hosts5]; thứ tự nhiều địa chỉ do RFC 6724 và `gai.conf` quyết định[^getaddrinfo3-sort]. Lab: `dig` không đọc `/etc/hosts`.
+Nguyên nhân thứ nhất: `/etc/hosts` đứng trước `dns` trong `nsswitch.conf`[^nsswitch-order]. File đó có thể chứa dòng cho tên này[^hosts5]. Nguyên nhân thứ hai: khi tên có nhiều địa chỉ, thứ tự do RFC 6724 và `gai.conf` quyết định[^getaddrinfo3-sort]. Trong thí nghiệm của chương, `dig` không đọc `/etc/hosts`.
 
 </details>
 
@@ -385,7 +470,7 @@ Cache có thể giữ bản cũ tối đa TTL giây tính từ lúc nó được
 
 <details><summary>Đáp án</summary>
 
-Mọi stream chung một byte stream đúng thứ tự của TCP; RFC nói rõ TCP HOL không được giao thức này giải quyết[^rfc9113-tcphol][^hpbn-h2-tcp].
+Mọi stream chung một byte stream đúng thứ tự của TCP. RFC ghi rõ HTTP/2 không giải quyết TCP HOL[^rfc9113-tcphol]. HPBN cũng viết như vậy[^hpbn-h2-tcp].
 
 </details>
 
@@ -393,7 +478,7 @@ Mọi stream chung một byte stream đúng thứ tự của TCP; RFC nói rõ T
 
 <details><summary>Đáp án</summary>
 
-Stream độc lập, không có thứ tự giữa các stream[^rfc9000-orderless]; mất gói chỉ chặn stream liên quan[^rfc9000-hol]. Connection ID cho phép kết nối sống qua thay đổi IP/port[^rfc9000-migration].
+Stream độc lập: QUIC không bảo đảm thứ tự giữa các stream[^rfc9000-orderless]. Nhờ vậy mất gói chỉ chặn stream liên quan[^rfc9000-hol]. Còn connection ID cho phép kết nối sống qua thay đổi IP/port[^rfc9000-migration].
 
 </details>
 
@@ -401,7 +486,7 @@ Stream độc lập, không có thứ tự giữa các stream[^rfc9000-orderless
 
 <details><summary>Đáp án</summary>
 
-Theo HPBN, 1.2 cần hai roundtrip và 1.3 nhắm 1-RTT[^hpbn-tls12][^hpbn-tls13]. Cơ chế (suy luận từ Figure 1 của RFC 8446[^rfc8446-phases]): ClientHello đã mang key share[^rfc8446-keyshare], nên server trả luôn tham số khóa và xác thực trong cùng flight.
+TLS 1.2 cần hai roundtrip cho kết nối mới[^hpbn-tls12]. TLS 1.3 đặt mục tiêu 1-RTT[^hpbn-tls13]. Cơ chế (suy luận từ Figure 1 của RFC 8446): ClientHello đã mang key share[^rfc8446-keyshare], nên server trả luôn tham số khóa và xác thực trong cùng flight.
 
 </details>
 
@@ -409,15 +494,15 @@ Theo HPBN, 1.2 cần hai roundtrip và 1.3 nhắm 1-RTT[^hpbn-tls12][^hpbn-tls13
 
 <details><summary>Đáp án</summary>
 
-Tiết kiệm một round trip[^rfc8446-0rtt-add]; không forward secret và không non-replay giữa các kết nối[^rfc8446-0rtt]. Client không được gửi trong early data message không an toàn khi bị phát lại[^rfc8446-safe], và ứng dụng không được dùng 0-RTT khi chưa có profile xác định cách dùng[^rfc8446-profile].
+Nó tiết kiệm một round trip[^rfc8446-0rtt-add]. Đổi lại, dữ liệu 0-RTT không forward secret và không có bảo đảm non-replay giữa các kết nối[^rfc8446-0rtt]. Client không được gửi trong early data message không an toàn khi bị phát lại[^rfc8446-safe]. Ứng dụng cũng không được dùng 0-RTT khi chưa có profile xác định cách dùng[^rfc8446-profile].
 
 </details>
 
-9. Tính latency tới byte đầu tiên của HTTPS mới, RTT = 80 ms, TLS 1.3, DNS miss một RTT tới resolver gần. Con số, và nếu kết nối keep-alive?
+9. Tính latency tới byte đầu tiên của HTTPS mới, RTT = 80 ms, TLS 1.3, DNS miss một RTT tới resolver gần. Con số là bao nhiêu, và nếu kết nối keep-alive thì sao?
 
 <details><summary>Đáp án</summary>
 
-DNS 1 + TCP 1 + TLS 1.3 1 + request 1 = 4 RTT = 320 ms[^hpbn-dns][^hpbn-hs-rtt][^hpbn-tls13]. Với kết nối tái dùng chỉ còn request 1 RTT = 80 ms (suy luận từ mô hình).
+DNS cần một roundtrip tới resolver[^hpbn-dns]. TCP handshake thêm một RTT[^hpbn-hs-rtt]. TLS 1.3 thêm một RTT[^hpbn-tls13]. Request/response thêm một RTT nữa. Tổng là 4 RTT = 320 ms. Với kết nối tái dùng chỉ còn request, tức 1 RTT = 80 ms (suy luận từ mô hình).
 
 </details>
 

@@ -1,35 +1,41 @@
 # P11 · Chương 06 — ELF, linker và loader
 
-> Mọi khẳng định về kernel/syscall là về **Linux** (man page Debian bookworm, `man-pages 6.03`; mã nguồn kernel `v6.8`). Phần `ld.so` mô tả **glibc**; phần musl lấy từ tài liệu của dự án musl. Chương này **không chạy thí nghiệm**: lệnh `readelf`/`objdump` trong chương là lệnh minh họa để bạn tự chạy, không kèm kết quả. Ví dụ mô tả PLT lấy từ tài liệu của Drepper viết cho IA-32 (x86 32-bit); mục 5 đối chiếu thêm với đặc tả x86-64 psABI: cơ chế tương tự nhưng chi tiết khác nhau theo kiến trúc.
+> Phạm vi: mọi khẳng định về kernel/syscall là về **Linux** (man page Debian bookworm, `man-pages 6.03`; mã nguồn kernel `v6.8`). Phần `ld.so` mô tả **glibc**; phần musl lấy từ tài liệu của dự án musl. Chương này **không chạy thí nghiệm**: lệnh `readelf`/`objdump` trong chương là lệnh minh họa để bạn tự chạy, không kèm kết quả. Ví dụ mô tả PLT lấy từ tài liệu của Drepper viết cho IA-32 (x86 32-bit); mục 5 đối chiếu thêm với đặc tả x86-64 psABI. Cơ chế hai bên tương tự nhưng chi tiết khác nhau theo kiến trúc.
 
 ## Bạn sẽ hiểu được gì
 
-1. **Q1.** ELF gồm những gì; *section* khác *segment* ở đâu, và vì sao file có hai bảng mục lục? → mục 1
-2. **Q2.** Symbol và relocation là gì; linker biến nhiều file `.o` thành một file chạy được ra sao? → mục 2
-3. **Q3.** `execve` nạp một ELF thế nào; `PT_INTERP` và `ld.so` vào cuộc lúc nào? → mục 3
+1. **Q1.** Trong một file ELF có những gì; *section* khác *segment* ra sao, và vì sao file cần hai bảng mục lục? → mục 1
+2. **Q2.** Symbol và relocation là gì; linker biến nhiều file `.o` thành một file chạy được bằng cách nào? → mục 2
+3. **Q3.** `execve` nạp một ELF ra sao; `PT_INTERP` và `ld.so` vào cuộc lúc nào? → mục 3
 4. **Q4.** `ld.so` tìm thư viện ở đâu (`LD_LIBRARY_PATH`, `RPATH`/`RUNPATH`, `ld.so.cache`)? → mục 4
-5. **Q5.** PLT/GOT và lazy binding hoạt động ra sao; RELRO bảo vệ cái gì? → mục 5
+5. **Q5.** PLT/GOT và lazy binding chạy thế nào; RELRO bảo vệ cái gì? → mục 5
 6. **Q6.** PIE và ASLR là gì; kernel đặt chương trình ở địa chỉ nào? → mục 6
-7. **Q7.** Static vs dynamic, glibc vs musl, symbol versioning: chọn gì cho binary chạy trong container? → mục 7
-8. **Q8.** Rust ánh xạ lên các khái niệm trên thế nào: crate type, target `*-musl`, `-C relocation-model`, `strip`, kích thước binary? → mục 8
+7. **Q7.** Static hay dynamic, glibc hay musl, symbol versioning: binary chạy trong container nên chọn gì? → mục 7
+8. **Q8.** Rust tương ứng với các khái niệm trên thế nào: crate type, target `*-musl`, `-C relocation-model`, `strip`, kích thước binary? → mục 8
 
 ## Kiến thức cần trước
 
-- [P2·03 — Assembly x86-64 và AArch64](../02-cpu/03-assembly-x86-64-va-aarch64.md): đọc được `call`, `jmp`, và cách lấy địa chỉ kiểu `@GOTPCREL(%rip)`; chương này dùng lại khi nói về GOT/PLT.
-- [P3·05 — Bộ nhớ của tiến trình trên Linux](../03-memory/05-bo-nho-tien-trinh-linux.md): mục 1–3 đã giới thiệu ELF, `.bss`, `PT_LOAD`, `/proc/<pid>/maps` và ASLR ở mức nhập môn. Chương này đi sâu vào *file* ELF, linker và loader; không lặp lại thí nghiệm `.bss`.
+Chương này đi theo một service Rust từ lúc nó còn là các file `.o` cho tới lúc thành process đang chạy trong container. Để theo được, bạn cần ba thứ từ các chương trước:
+
+- [P2·03 — Assembly x86-64 và AArch64](../02-cpu/03-assembly-x86-64-va-aarch64.md): đọc được `call`, `jmp` và cách lấy địa chỉ kiểu `@GOTPCREL(%rip)`; chương này dùng lại khi nói về GOT/PLT.
+- [P3·05 — Bộ nhớ của tiến trình trên Linux](../03-memory/05-bo-nho-tien-trinh-linux.md): mục 1–3 đã giới thiệu ELF, `.bss`, `PT_LOAD`, `/proc/<pid>/maps` và ASLR ở mức nhập môn. Chương này đi sâu vào *file* ELF, linker và loader, không lặp lại thí nghiệm `.bss`.
 - [P8·08 — Rust trong container](../08-containers/08-rust-trong-container.md): mục 5–6 đo kích thước image musl/glibc và tác dụng của `strip`. Chương này giải thích *vì sao* những con số đó khác nhau.
 
 ## 1. ELF: header, section và segment (Q1)
 
-> **Trả lời ngắn.** ELF là định dạng file thực thi, thư viện và object trên Linux. File bắt đầu bằng ELF header ở offset 0, trỏ tới hai bảng mục lục: *section header table* (dành cho linker và công cụ) và *program header table* (dành cho loader/kernel)[^elf-hdr-tables]. Một segment chứa một hoặc nhiều section[^elf-phdr]; file dùng để dựng process bắt buộc phải có program header table[^gabi-pht].
+> **Trả lời ngắn.** ELF là định dạng file của executable, thư viện và object trên Linux. File bắt đầu bằng ELF header ở offset 0, trỏ tới hai bảng mục lục: *section header table* (dành cho linker và công cụ) và *program header table* (dành cho loader/kernel)[^elf-hdr-tables]. Một segment chứa một hoặc nhiều section[^elf-phdr]. File dùng để dựng process bắt buộc phải có program header table[^gabi-pht].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một cuốn sách có hai mục lục. Mục lục thứ nhất theo *chương* (section) cho biên tập viên và nhà in: chương này là mã, chương kia là dữ liệu chỉ đọc, chương nọ là bảng tên. Mục lục thứ hai theo *kệ sách* (segment) cho thủ thư: "trang 1–40 xếp lên kệ chỉ-đọc-chạy-được, trang 41–60 xếp lên kệ đọc-ghi". Người dùng cuối (CPU) chỉ cần mục lục thứ hai để biết xếp sách thế nào.
+*Với service `orders`.* Giả sử `orders` là một service Rust (ví dụ giả định của người soạn, không phải code trong repo), được build trên CI, đóng vào container image rồi chạy trên Kubernetes. Thứ nằm trên đĩa của image là một file ELF tên `orders`. Mỗi lần container khởi động, kernel phải đọc file này, quyết định nạp phần nào vào bộ nhớ, rồi mới chuyển điều khiển cho code của service. Ta sẽ bám theo `orders` suốt chương, từ các file `.o` lúc build tới process đang chạy. Câu hỏi của mục này: trong file `orders` có những gì, và kernel cần đọc phần nào?
 
-**Ba loại file ELF.** *Relocatable* (đầu ra của compiler, thường `.o`): mã và dữ liệu sẵn sàng để linker ghép với các object khác thành file thực thi hoặc shared object. *Executable*: chương trình sẵn sàng chạy[^gabi-3types]. *Shared object* (`.so`): dùng được ở hai ngữ cảnh — linker ghép nó với object khác, và dynamic linker kết hợp nó với executable lúc chạy để tạo process image[^gabi-so]. Loại file nằm ở trường `e_type` của header: `ET_REL`, `ET_EXEC`, `ET_DYN`, `ET_CORE`[^elf-etype]. Một PIE động (mục 6) là `ET_DYN` có *interpreter* (chương trình mà `PT_INTERP` chỉ tới, tức `ld.so`; mục 3)[^binfmt-pie].
+### 1.1 Ba loại file ELF
 
-**Hai khung nhìn của cùng một file.** Định dạng cung cấp hai "khung nhìn" song song vì hai việc (build và chạy) cần thông tin khác nhau[^gabi-views]; hình dưới là bố cục của hai khung nhìn.
+Trước khi thành file chạy được, `orders` đi qua nhiều file ELF, nên cần phân biệt ba loại. *Relocatable* (đầu ra của compiler, thường là `.o`) chứa code và data sẵn sàng để linker ghép với các object khác, còn *executable* chứa một chương trình sẵn sàng chạy[^gabi-3types]. *Shared object* (`.so`) dùng được ở hai ngữ cảnh: linker ghép nó với các object khác, rồi dynamic linker kết hợp nó với executable lúc chạy để tạo process image[^gabi-so]. Loại file nằm ở trường `e_type` của ELF header, với ba giá trị `ET_REL`, `ET_EXEC`, `ET_DYN`[^elf-etype]. Có một ca dễ nhầm: PIE (mục 6) mang `e_type` là `ET_DYN` chứ không phải `ET_EXEC`, nhưng khác shared object thường ở chỗ nó có *interpreter*, tức chương trình mà `PT_INTERP` chỉ tới (chính là `ld.so`, mục 3)[^binfmt-pie].
+
+### 1.2 Hai bảng mục lục
+
+Cùng một file mà lúc build và lúc chạy cần thông tin khác nhau, nên ELF cho hai "khung nhìn" song song lên nó[^gabi-views]. Hình dưới là bố cục của hai khung nhìn đó.
 
 ```mermaid
 flowchart LR
@@ -47,87 +53,99 @@ flowchart LR
   end
 ```
 
-(Sơ đồ theo Hình 4-1 của gABI. Thứ tự thực tế trong file có thể khác hình; chỉ ELF header có vị trí cố định[^gabi-order].)
+(Sơ đồ theo Hình 4-1 của gABI. Thứ tự thực tế trong file có thể khác hình, chỉ ELF header có vị trí cố định[^gabi-order].)
 
-Hệ quả trực tiếp: file dùng để dựng process **phải** có program header table, còn relocatable thì không cần[^gabi-pht]; file dùng lúc linking phải có section header table, các file khác có thể có hoặc không[^gabi-sht]. Nói cách khác, kernel nạp chương trình dựa vào segment; section là thông tin cho công cụ (suy luận của người soạn từ hai trích dẫn trên).
+Từ hình suy ra hai điều. File dùng để dựng process phải có program header table, còn relocatable thì không cần[^gabi-pht]. Ngược lại, file dùng lúc linking phải có section header table, còn các file khác có hay không đều được[^gabi-sht]. Ghép hai điều ấy lại, kernel nạp chương trình dựa vào segment, còn section là thông tin cho linker và công cụ như `readelf` (suy luận của người soạn từ hai trích dẫn trên). Với `orders`, khi container khởi động kernel đọc program header table chứ không cần tới section.
 
-**ELF header** nằm ở offset 0[^elf-hdr-tables]. Các trường đáng nhớ:
+### 1.3 ELF header
+
+ELF header nằm ở offset 0[^elf-hdr-tables]. Các trường đáng nhớ:
 
 | Trường | Nói gì |
 |---|---|
-| `e_ident` | 16 byte nhận dạng; byte đầu là magic `0x7f` rồi `'E'`, `'L'`, `'F'`[^elf-magic]; còn chứa class 32/64-bit[^elf-class] và cách mã hóa dữ liệu |
-| `e_type` | `ET_REL` / `ET_EXEC` / `ET_DYN` / `ET_CORE`[^elf-etype] |
-| `e_machine` | kiến trúc yêu cầu; ví dụ `EM_X86_64`[^elf-machine] |
+| `e_ident` | 16 byte nhận dạng; byte đầu là magic `0x7f`, theo sau là `'E'`, `'L'`, `'F'`[^elf-magic] |
+| `e_type` | loại file: `ET_REL`, `ET_EXEC` hoặc `ET_DYN`[^elf-etype] |
+| `e_machine` | kiến trúc mà file yêu cầu, ví dụ `EM_X86_64`[^elf-machine] |
 | `e_entry` | địa chỉ ảo mà hệ thống chuyển điều khiển tới đầu tiên[^elf-entry] |
-| `e_phoff`, `e_phnum` | vị trí và số phần tử của program header table[^elf-phoff][^elf-phnum] |
-| `e_shoff`, `e_shnum` | vị trí và số phần tử của section header table; bằng 0 nếu không có bảng[^elf-shoff] |
-| `e_shstrndx` | chỉ số section chứa tên các section[^elf-shstrndx] |
+| `e_phoff` | vị trí (offset trong file) của program header table[^elf-phoff] |
+| `e_phnum` | số phần tử của program header table[^elf-phnum] |
+| `e_shoff` | vị trí của section header table; bằng 0 nếu file không có bảng này[^elf-shoff] |
+| `e_shstrndx` | chỉ số của section chứa tên các section[^elf-shstrndx] |
 
-**Section** là đơn vị của linker. Section header table "cho phép định vị mọi section của file"[^elf-shdr]; mỗi section có tên (là chỉ số vào bảng chuỗi tên section), kiểu, cờ, địa chỉ, offset, kích thước. Hai điểm quan trọng:
+### 1.4 Section: đơn vị của linker
 
-- Cờ `SHF_ALLOC` đánh dấu section chiếm bộ nhớ khi chương trình chạy; một số section điều khiển không có mặt trong memory image[^elf-shf-alloc]. Ví dụ section `.debug` chứa thông tin debug mà nội dung không được đặc tả[^elf-debug] — loader không cần nó để chạy chương trình (suy luận của người soạn).
-- Kiểu `SHT_NOBITS` là section không chiếm chỗ trong file nhưng "giống" `SHT_PROGBITS`[^elf-nobits]; `.bss` là ví dụ[^elf-bss] (thí nghiệm thấy ở [P3·05 mục 1](../03-memory/05-bo-nho-tien-trinh-linux.md)).
+Section header table cho phép định vị mọi section trong file[^elf-shdr]. Mỗi section có tên (là chỉ số vào bảng chuỗi tên section), kiểu, cờ, địa chỉ, offset và kích thước. Hai điểm trong đó ảnh hưởng tới chuyện chạy chương trình:
 
-**Segment** là đơn vị của loader. Program header table là mảng cấu trúc, mỗi phần tử mô tả một segment hoặc thông tin khác hệ thống cần để chuẩn bị chạy; một segment chứa một hoặc nhiều section[^elf-phdr]. Các loại hay gặp:
+- Cờ `SHF_ALLOC` đánh dấu section chiếm bộ nhớ khi chương trình chạy, và một số section điều khiển không có mặt trong memory image[^elf-shf-alloc]. Ví dụ section `.debug` chứa thông tin cho debugger và nội dung của nó không được đặc tả[^elf-debug]; loader không cần nó để chạy chương trình (suy luận của người soạn).
+- Kiểu `SHT_NOBITS` là section không chiếm chỗ trong file nhưng ngoài ra giống `SHT_PROGBITS`[^elf-nobits]. `.bss` là ví dụ quen thuộc[^elf-bss]; thí nghiệm quan sát nó nằm ở [P3·05 mục 1](../03-memory/05-bo-nho-tien-trinh-linux.md).
 
-| `p_type` | Ý nghĩa |
-|---|---|
-| `PT_LOAD` | segment nạp được, mô tả bằng `p_filesz`/`p_memsz`; byte của file được map vào đầu segment, phần `p_memsz` dư được định nghĩa là số 0[^elf-load][^elf-load-zero] |
-| `PT_INTERP` | đường dẫn (kết thúc bằng null) của interpreter cần gọi; tối đa một lần, và nếu có thì phải đứng trước mọi `PT_LOAD`[^elf-interp] |
-| `PT_DYNAMIC` | thông tin liên kết động[^elf-ptdynamic] |
-| `PT_PHDR` | vị trí của chính program header table trong memory image[^elf-phdr-self] |
-| `PT_GNU_STACK` | extension GNU, kernel Linux dùng để điều khiển trạng thái stack qua `p_flags`[^elf-gnustack] |
-
-Cờ `p_flags` quy định quyền của segment: segment text (chứa mã lệnh) thường có `PF_X` và `PF_R`, segment data thường có `PF_W` và `PF_R`[^elf-pflags].
-
-**Vài section đáng biết** (tên là quy ước theo `elf(5)`):
+Các section sẽ gặp lại ở những mục sau (tên là quy ước theo `elf(5)`):
 
 | Section | Chứa gì |
 |---|---|
 | `.interp` | pathname của program interpreter[^elf-interp-sec] |
 | `.dynamic` | thông tin liên kết động[^elf-dynamic-sec] |
-| `.dynsym` | bảng symbol dành cho liên kết động, tối thiểu[^elf-dynsym] |
-| `.symtab` | bảng symbol đầy đủ, điển hình để link editing[^elf-symtab] |
+| `.dynsym` | bảng symbol dành cho liên kết động, ở dạng tối thiểu[^elf-dynsym] |
+| `.symtab` | bảng symbol đầy đủ, điển hình dùng cho link editing[^elf-symtab] |
 | `.relaNAME` | các relocation áp lên section `NAME`[^elf-relaname] |
-| `.got` / `.plt` | global offset table / procedure linkage table (mục 5)[^elf-got][^elf-plt] |
+| `.got` | global offset table (mục 5)[^elf-got] |
+| `.plt` | procedure linkage table (mục 5)[^elf-plt] |
 | `.gnu.version_r` | các version symbol mà file *cần* (mục 7)[^elf-verneed] |
 
-<details><summary>Đi sâu: <code>e_phnum</code> tràn, căn chỉnh <code>p_vaddr</code>/<code>p_offset</code>, lệnh để tự xem</summary>
+### 1.5 Segment: đơn vị của loader
 
-- Nếu số phần tử program header ≥ `PN_XNUM` (0xffff) thì `e_phnum` giữ giá trị `PN_XNUM` và số thật nằm ở `sh_info` của phần tử đầu section header table[^elf-phnum-xnum]. Hai trường kia tràn theo cơ chế riêng, với ngưỡng `SHN_LORESERVE` (0xff00): `e_shnum` bằng 0 và số thật nằm ở `sh_size` của phần tử đầu section header table[^elf-shnum-xindex]; `e_shstrndx` giữ `SHN_XINDEX` (0xffff) và chỉ số thật nằm ở `sh_link` của phần tử đầu[^elf-shstrndx-xindex].
-- Segment nạp được phải có `p_vaddr` và `p_offset` đồng dư theo kích thước page[^elf-malign]. (Suy luận của người soạn: đó là điều kiện để kernel map trực tiếp page của file vào địa chỉ ảo.)
-- `PT_INTERP` phải đứng trước mọi `PT_LOAD`[^elf-interp], và `PT_PHDR` cũng vậy[^elf-phdr-self].
-- Đoạn mã đọc ELF header bằng tay (minh họa, không phải kết quả đã chạy): đọc 16 byte đầu rồi so với `7f 45 4c 46`; byte thứ 5 là class (`ELFCLASS64` = "định nghĩa kiến trúc 64-bit"[^elf-class]).
-- Lệnh để tự xem (chưa chạy trong chương này): `readelf -h` (ELF header), `readelf -lW` (program header, tức segment), `readelf -SW` (section header), `readelf -d` (`.dynamic`), `objdump -p file | grep NEEDED` (các `DT_NEEDED`).
-- Core file cũng là ELF (`ET_CORE`); ghi chú (note) cho phép đính kèm thông tin tùy ý cho hệ thống dùng và chủ yếu thấy trong core file[^elf-notes].
+Program header table là một mảng cấu trúc. Mỗi phần tử mô tả một segment, hoặc một thông tin khác mà hệ thống cần để chuẩn bị chạy chương trình[^elf-phdr]. Với `orders`, ba loại `p_type` quan trọng nhất là:
+
+| `p_type` | Ý nghĩa |
+|---|---|
+| `PT_LOAD` | segment nạp được, mô tả bằng `p_filesz` và `p_memsz`; byte của file được map vào đầu segment[^elf-load] |
+| `PT_INTERP` | đường dẫn (kết thúc bằng null) của interpreter cần gọi; xuất hiện tối đa một lần, và nếu có thì phải đứng trước mọi `PT_LOAD`[^elf-interp] |
+| `PT_DYNAMIC` | thông tin liên kết động[^elf-ptdynamic] |
+
+Với `PT_LOAD`, phần `p_memsz` dư so với `p_filesz` được định nghĩa là số 0[^elf-load-zero]. Từ đó suy ra cách một segment có `.bss` mà file không tốn chỗ cho nó (suy luận của người soạn từ `SHT_NOBITS` và `PT_LOAD`). Quyền truy cập của segment nằm ở `p_flags`: segment text (chứa mã lệnh) thường có `PF_X` và `PF_R`, segment data thường có `PF_W` và `PF_R`[^elf-pflags].
+
+<details><summary>Đi sâu: <code>e_phnum</code> tràn, căn chỉnh <code>p_vaddr</code>/<code>p_offset</code>, <code>PT_PHDR</code>, <code>PT_GNU_STACK</code>, lệnh để tự xem</summary>
+
+- **Số phần tử vượt giới hạn trường.** Nếu số phần tử program header ≥ `PN_XNUM` (0xffff) thì `e_phnum` giữ giá trị `PN_XNUM` và số thật nằm ở `sh_info` của phần tử đầu section header table[^elf-phnum-xnum]. Hai trường kia tràn theo cơ chế riêng, với ngưỡng `SHN_LORESERVE` (0xff00). Khi vượt ngưỡng, `e_shnum` bằng 0 và số thật nằm ở `sh_size` của phần tử đầu section header table[^elf-shnum-xindex]. Còn `e_shstrndx` giữ `SHN_XINDEX` (0xffff) và chỉ số thật nằm ở `sh_link` của phần tử đầu[^elf-shstrndx-xindex].
+- **Căn chỉnh.** Segment nạp được phải có `p_vaddr` và `p_offset` đồng dư theo kích thước page[^elf-malign]. Suy luận của người soạn: đó là điều kiện để kernel map trực tiếp page của file vào địa chỉ ảo.
+- **Thêm hai loại `p_type`.** `PT_PHDR` cho biết vị trí của chính program header table trong memory image, và nếu có thì cũng phải đứng trước mọi `PT_LOAD`[^elf-phdr-self]. `PT_GNU_STACK` là extension GNU, kernel Linux dùng nó để điều khiển trạng thái stack qua `p_flags`[^elf-gnustack].
+- **Đọc ELF header bằng tay.** Đoạn mã minh họa (không phải kết quả đã chạy) đọc 16 byte đầu rồi so với `7f 45 4c 46`. Byte thứ 5 là class, trong đó `ELFCLASS64` định nghĩa kiến trúc 64-bit[^elf-class].
+- **Lệnh để tự xem** (chưa chạy trong chương này): `readelf -h` (ELF header), `readelf -lW` (program header, tức segment), `readelf -SW` (section header), `readelf -d` (`.dynamic`), `objdump -p file | grep NEEDED` (các `DT_NEEDED`).
+- **Core file** cũng là ELF (`ET_CORE`). Phần ghi chú (note) cho phép đính kèm thông tin tùy ý cho hệ thống dùng, và chủ yếu thấy trong core file[^elf-notes].
 
 </details>
 
-**Quay lại Q1:** ELF có header ở offset 0 trỏ tới hai bảng: section (cho linker/công cụ) và segment (cho loader); lúc chạy kernel chỉ cần các segment, đặc biệt `PT_LOAD` và `PT_INTERP`.
+**Quay lại Q1:** ELF có header ở offset 0 trỏ tới hai bảng: section (cho linker/công cụ) và segment (cho loader). Lúc chạy, kernel chỉ cần các segment, đặc biệt `PT_LOAD` và `PT_INTERP`.
 
 ## 2. Symbol và relocation: linker làm gì (Q2)
 
-> **Trả lời ngắn.** Mỗi file `.o` định nghĩa một số *symbol* (tên hàm/biến) và tham chiếu tới symbol định nghĩa nơi khác; địa chỉ cuối cùng chưa biết nên compiler để lại chỗ trống kèm một *relocation entry* ghi "chỗ này cần điền địa chỉ của symbol X". Relocation là quá trình nối tham chiếu symbol với định nghĩa symbol[^gabi-reloc]; linker nối các object, tìm định nghĩa cho từng tham chiếu rồi điền vào chỗ trống.
+> **Trả lời ngắn.** Mỗi file `.o` định nghĩa một số *symbol* (tên hàm, tên biến) và tham chiếu tới những symbol định nghĩa ở nơi khác. Địa chỉ cuối cùng của chúng chưa biết lúc compile, nên compiler để lại chỗ trống kèm một *relocation entry* ghi "chỗ này cần điền địa chỉ của symbol X". Relocation là quá trình nối tham chiếu symbol với định nghĩa symbol[^gabi-reloc]. Linker gom các object lại, tìm định nghĩa cho từng tham chiếu rồi điền vào chỗ trống.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn viết bản thảo nhiều chương, mỗi chương ghi chú "xem trang [chương 7]". Lúc viết chưa biết số trang. Nhà in dàn trang xong mới điền số trang thật vào từng chỗ ghi chú. Chỗ ghi chú = relocation entry; nhà in = linker.
+*Với service `orders`.* Code của `orders` gọi những hàm nó không tự định nghĩa. Giả sử một đoạn gọi `SSL_read` của OpenSSL để đọc dữ liệu TLS từ client (ví dụ giả định). Khi compiler biên dịch file chứa lời gọi đó thành `.o`, nó chưa thể biết `SSL_read` nằm ở địa chỉ nào. Mục này trả lời hai câu hỏi: compiler ghi lại điều chưa biết ấy ra sao, và ai điền vào sau.
 
-**Từ vựng.** *Static linker* (`ld`, chạy lúc build) ghép các object thành file đầu ra; *dynamic linker* (`ld.so`, chạy lúc chương trình khởi động) tìm và nạp shared object rồi chuẩn bị chương trình chạy[^ldso-desc]. Chữ "linker" đứng một mình trong mục này là static linker (giải nghĩa thuật ngữ của người soạn).
+### 2.1 Hai loại linker
 
-**Symbol.** Bảng symbol giữ thông tin cần để định vị và relocate các định nghĩa và tham chiếu symbol của chương trình[^elf-symtab-def]. Mỗi entry có tên (chỉ số vào bảng chuỗi symbol)[^elf-st-name], giá trị[^elf-st-value], kích thước[^elf-st-size], loại và binding (`st_info`)[^elf-st-info], visibility (`st_other`)[^elf-st-other], và chỉ số section mà nó thuộc về (`st_shndx`)[^elf-st-shndx]. Có hai bảng: `.symtab` đầy đủ, điển hình cho link editing; `.dynsym` tối thiểu cho liên kết động[^elf-symtab][^elf-dynsym].
+Có hai linker cần phân biệt. *Static linker* (`ld`) chạy lúc build và ghép các object thành file đầu ra. *Dynamic linker* (`ld.so`) chạy lúc chương trình khởi động: nó tìm và nạp các shared object rồi chuẩn bị chương trình để chạy[^ldso-desc]. Chữ "linker" đứng một mình trong mục này là static linker (giải nghĩa thuật ngữ của người soạn).
 
-Ba binding quyết định cách linker xử lý khi gặp trùng tên:
+### 2.2 Symbol và relocation entry
 
-- `STB_LOCAL`: không nhìn thấy ngoài object chứa định nghĩa; hai file có thể có local symbol cùng tên mà không đụng nhau[^elf-bind-local].
+Mỗi object mang một bảng symbol, giữ thông tin cần để định vị và relocate các định nghĩa symbol và tham chiếu symbol của chương trình[^elf-symtab-def]. Có hai bảng, đã gặp ở bảng section của mục 1: `.symtab` đầy đủ dùng khi link, `.dynsym` tối thiểu dùng cho liên kết động.
+
+Trong `.o` của `orders`, `SSL_read` có chỉ số section `st_shndx` là `SHN_UNDEF`, tức *chưa định nghĩa* trong file này. Khi linker ghép file đó với file định nghĩa `SSL_read`, tham chiếu sẽ được nối với định nghĩa thật[^gabi-undef]. Chỗ trong code cần địa chỉ của `SSL_read` được compiler để trống, kèm một relocation entry. Đến lúc điền, cách áp dụng điển hình là: xác định giá trị của symbol được tham chiếu, lấy addend (hằng số cộng thêm), áp công thức của loại relocation lên cặp (symbol, addend), rồi đặt kết quả vào chỗ cần sửa[^gabi-reloc-apply]. Các trường của symbol và của relocation entry nằm ở phần Đi sâu.
+
+### 2.3 Ba binding quyết định cách xử lý tên trùng
+
+Khi hai object cùng có symbol trùng tên, kết quả phụ thuộc vào *binding* của symbol:
+
+- `STB_LOCAL`: không nhìn thấy ngoài object chứa định nghĩa, nên hai file có thể có local symbol cùng tên mà không đụng nhau[^elf-bind-local].
 - `STB_GLOBAL`: nhìn thấy với mọi object đang được ghép; định nghĩa ở file này thỏa mãn tham chiếu chưa định nghĩa ở file khác[^elf-bind-global]. Linker không cho phép nhiều định nghĩa `STB_GLOBAL` cùng tên[^gabi-global-weak].
-- `STB_WEAK`: giống global nhưng định nghĩa có độ ưu tiên thấp hơn[^elf-bind-weak]; nếu đã có định nghĩa global thì weak cùng tên không gây lỗi, linker giữ bản global[^gabi-global-weak].
+- `STB_WEAK`: giống global nhưng định nghĩa có độ ưu tiên thấp hơn[^elf-bind-weak]. Nếu đã có định nghĩa global thì weak cùng tên không gây lỗi và linker giữ bản global[^gabi-global-weak].
 
-Một symbol có `st_shndx` là `SHN_UNDEF` nghĩa là *chưa định nghĩa* trong file này; khi linker ghép với file định nghĩa nó, tham chiếu sẽ được nối với định nghĩa thật[^gabi-undef].
+### 2.4 Linker ghép các mảnh
 
-**Relocation entry.** Mỗi entry ghi: `r_offset` (chỗ cần sửa), `r_info` (chỉ số symbol + loại relocation)[^elf-relocs] và, ở dạng `Rela`, `r_addend` (hằng số cộng thêm)[^elf-raddend]. Loại relocation phụ thuộc bộ xử lý và được mô tả trong processor supplement[^gabi-reloc-type]. Dạng `Rel` không có trường addend mà để giá trị cộng thêm ngay tại chỗ cần sửa[^gabi-rel-addend]. Ý nghĩa của `r_offset` đổi theo loại file: trong relocatable file đó là offset trong một section, còn trong executable/shared object đó là địa chỉ ảo của chỗ cần sửa[^elf-roffset]. Cách áp dụng điển hình: xác định giá trị symbol được tham chiếu, lấy addend, áp công thức của loại relocation lên cặp (symbol, addend), rồi đặt kết quả vào chỗ cần sửa[^gabi-reloc-apply].
-
-**Linker ghép các mảnh.** Quy trình khái quát (mô tả của người soạn, các điểm chi tiết có chú thích bên dưới):
+Hình dưới là quy trình khái quát (của người soạn; các điểm chi tiết có chú thích bên dưới):
 
 ```mermaid
 flowchart LR
@@ -138,40 +156,76 @@ flowchart LR
   L --> X["file thực thi / .so<br/>(ET_EXEC / ET_DYN)"]
 ```
 
-- Với archive `.a`: linker *rút* (extract) các member chứa định nghĩa cho symbol global còn chưa định nghĩa và chép vào đầu ra[^gabi-archive-extract][^gabi-archive-copy]; với tham chiếu weak chưa định nghĩa, linker không rút member, và weak chưa giải quyết có giá trị 0[^gabi-weak-undef]. Đây là lý do một binary liên kết tĩnh chỉ chứa các member archive được rút để giải quyết symbol còn thiếu, chứ không phải cả thư viện (suy luận của người soạn từ hai trích dẫn đó; đơn vị rút là member, nên phần không dùng *bên trong* một member đã rút vẫn có mặt).
-- Với shared object: định nghĩa *không* được chép vào; tham chiếu được ghi lại để dynamic linker xử lý lúc chạy (mục 3–5). Mã đã nạp thì chương trình tĩnh "đã được static linker làm xong mọi thứ"[^dr-static].
-- Với executable truyền thống: địa chỉ nạp biết lúc link, nên static linker tự thực hiện relocation, "ứng dụng không có relative relocation"[^dr-no-relative]. (Câu này của Drepper nói về executable cố định địa chỉ; PIE ở mục 6 khác.)
+Linker xử lý ba nguồn đầu vào theo ba cách khác nhau.
 
-**Visibility.** `STV_DEFAULT`: symbol global/weak có sẵn cho module khác, và tham chiếu trong module có thể bị định nghĩa ở module khác *chèn vào thay thế* (interposition)[^elf-vis-default]. `STV_HIDDEN`: không thấy ngoài module, và tham chiếu trong module luôn trỏ vào bản cục bộ[^elf-vis-hidden]. Điều này liên quan tới việc lời gọi có cần đi qua PLT hay không (mục 5; suy luận của người soạn).
+**Archive `.a`.** Linker *rút* (extract) những member chứa định nghĩa cho symbol global còn chưa định nghĩa[^gabi-archive-extract]. Những member đó được chép vào file đầu ra[^gabi-archive-copy]. Với tham chiếu weak chưa định nghĩa thì linker không rút member, và weak chưa giải quyết có giá trị 0[^gabi-weak-undef]. Vì vậy một binary liên kết tĩnh chỉ chứa các member archive được rút để lấp symbol còn thiếu chứ không chứa cả thư viện (suy luận của người soạn từ các trích dẫn đó). Đơn vị rút là member, nên phần không dùng *bên trong* một member đã rút vẫn có mặt.
 
-<details><summary>Đi sâu: relocation tĩnh vs động, chi phí, tên symbol, lệnh tự xem</summary>
+**Shared object.** Linker chỉ xử lý shared object cùng các object khác; việc kết hợp nó với executable để tạo process image thuộc về dynamic linker lúc chạy[^gabi-so]. Nói cách khác, định nghĩa nằm lại trong `.so` và tham chiếu được ghi lại cho dynamic linker (suy luận của người soạn; mục 3–5 đi tiếp). Với `orders`, nếu `SSL_read` nằm trong `libssl.so` thì `orders` không chứa hàm đó, nó chỉ ghi lại rằng cần nó.
 
-- Trong executable/shared object, các relocation còn lại *dành cho dynamic linker* nằm ở các section `.rela*`; `DT_JMPREL` trỏ vào nhóm relocation gắn riêng với PLT để dynamic linker có thể bỏ qua chúng lúc khởi tạo nếu bật lazy binding[^gabi-jmprel].
-- Drepper chia relocation động làm hai loại: *relative* (đích nằm trong chính object — linker biết offset, dynamic linker chỉ cộng địa chỉ nạp rồi ghi kết quả[^dr-relative]) và *theo symbol* (cần tìm định nghĩa, "tốn kém, càng nhiều DSO và symbol thì tra cứu càng lâu"[^dr-symreloc-cost]).
-- Nếu relocation phải sửa vào segment chỉ-đọc (text relocation), page bị sửa không còn chia sẻ được với process khác dùng cùng object[^dr-textrel]. Đó là một lý do thư viện được biên dịch position-independent (mục 5).
-- Tên symbol có thể khác tên trong mã nguồn: Rust "mangle" tên symbol (mục 8). Liên hệ với assembly: `call foo@PLT` hay `@GOTPCREL(%rip)` trong [P2·03](../02-cpu/03-assembly-x86-64-va-aarch64.md) là những chỗ trong mã mà địa chỉ phải được điền lúc link hoặc lúc chạy (suy luận của người soạn; mục 5 giải thích PLT/GOT).
-- Lệnh tự xem (chưa chạy): `readelf -sW file.o` (symbol), `readelf -rW file.o` (relocation trong `.o`), `readelf -rW exe` (relocation động còn lại).
+**Executable truyền thống.** Địa chỉ nạp đã biết ngay lúc link, nên static linker tự thực hiện relocation, và ứng dụng không có relative relocation[^dr-no-relative]. Câu này của Drepper nói về executable cố định địa chỉ; PIE ở mục 6 khác.
+
+<details><summary>Đi sâu: các trường symbol và relocation, visibility, relocation tĩnh vs động, tên symbol, lệnh tự xem</summary>
+
+- **Một entry trong bảng symbol** có các trường sau:
+
+  | Trường | Nói gì |
+  |---|---|
+  | `st_name` | chỉ số vào bảng chuỗi symbol, nơi giữ tên symbol[^elf-st-name] |
+  | `st_value` | giá trị của symbol[^elf-st-value] |
+  | `st_size` | kích thước; bằng 0 nếu symbol không có kích thước hoặc chưa biết[^elf-st-size] |
+  | `st_info` | loại và binding của symbol[^elf-st-info] |
+  | `st_other` | visibility của symbol[^elf-st-other] |
+  | `st_shndx` | chỉ số section header mà symbol thuộc về[^elf-st-shndx] |
+
+- **Một relocation entry** ghi chỗ cần sửa và cách sửa:
+
+  | Trường | Nói gì |
+  |---|---|
+  | `r_offset` | trong relocatable file là offset từ đầu một section; trong executable/shared object là địa chỉ ảo của chỗ cần sửa[^elf-roffset] |
+  | `r_info` | chỉ số symbol cần dùng và loại relocation[^elf-relocs] |
+  | `r_addend` | hằng số cộng thêm, chỉ có ở dạng `Rela`[^elf-raddend] |
+
+  Loại relocation phụ thuộc bộ xử lý và được mô tả trong processor supplement[^gabi-reloc-type]. Dạng `Rel` không có trường addend, mà để giá trị cộng thêm ngay tại chỗ cần sửa[^gabi-rel-addend].
+- **Visibility.** `STV_DEFAULT`: symbol global/weak có sẵn cho module khác, và tham chiếu trong module có thể bị định nghĩa ở module khác *chèn vào thay thế* (interposition)[^elf-vis-default]. `STV_HIDDEN`: không thấy ngoài module, và tham chiếu trong module luôn trỏ vào bản cục bộ[^elf-vis-hidden]. Điều này liên quan tới việc lời gọi có cần đi qua PLT hay không (mục 5; suy luận của người soạn).
+- **Relocation còn lại cho dynamic linker.** Trong executable/shared object, các relocation này nằm ở các section `.rela*`. `DT_JMPREL` trỏ vào nhóm relocation gắn riêng với PLT, để dynamic linker bỏ qua chúng lúc khởi tạo nếu bật lazy binding[^gabi-jmprel].
+- **Hai loại relocation động** theo Drepper. *Relative*: đích nằm trong chính object, linker biết sẵn offset, dynamic linker chỉ cộng địa chỉ nạp rồi ghi kết quả[^dr-relative]. *Theo symbol*: phải tìm định nghĩa, và đó là việc tốn kém, càng nhiều DSO và symbol thì tra cứu càng lâu[^dr-symreloc-cost].
+- **Text relocation.** Nếu relocation phải sửa vào segment chỉ-đọc, page bị sửa không còn chia sẻ được với process khác dùng cùng object[^dr-textrel]. Đó là một lý do thư viện được biên dịch position-independent (mục 5).
+- **Tên symbol** có thể khác tên trong mã nguồn: Rust "mangle" tên symbol (mục 8). Liên hệ với assembly: `call foo@PLT` hay `@GOTPCREL(%rip)` trong [P2·03](../02-cpu/03-assembly-x86-64-va-aarch64.md) là những chỗ trong mã mà địa chỉ phải được điền lúc link hoặc lúc chạy (suy luận của người soạn; mục 5 giải thích PLT/GOT).
+- **Lệnh tự xem** (chưa chạy): `readelf -sW file.o` (symbol), `readelf -rW file.o` (relocation trong `.o`), `readelf -rW exe` (relocation động còn lại).
 
 </details>
 
-**Quay lại Q2:** `.o` chỉ chứa tên và "lỗ" cần điền; linker nối các tham chiếu symbol với định nghĩa và điền địa chỉ (relocation); phần nào thuộc shared object thì để dynamic linker làm lúc chạy.
+**Quay lại Q2:** `.o` của `orders` chỉ chứa tên và những "lỗ" cần điền. Linker nối các tham chiếu symbol với định nghĩa và điền địa chỉ (relocation); phần nào thuộc shared object thì để dynamic linker làm lúc chạy.
 
 ## 3. `execve` nạp ELF: `PT_INTERP`, auxv, `ld.so` (Q3)
 
-> **Trả lời ngắn.** `execve` thay chương trình đang chạy của process bằng chương trình mới[^execve-replace]. Kernel đọc program header; nếu có `PT_INTERP` thì mở file interpreter đó, map cả chương trình lẫn interpreter, dựng auxiliary vector trên stack rồi chuyển điều khiển cho *interpreter* chứ không phải cho chương trình[^dr-entry]. Interpreter (`ld.so`) nạp các thư viện cần, relocate, rồi mới chạy chương trình[^ldso-desc].
+> **Trả lời ngắn.** `execve` thay chương trình đang chạy của process bằng một chương trình mới[^execve-replace]. Kernel đọc program header; nếu có `PT_INTERP` thì nó mở file interpreter đó, map cả chương trình lẫn interpreter, dựng auxiliary vector trên stack rồi chuyển điều khiển cho *interpreter* chứ không phải cho chương trình[^dr-entry]. Interpreter (`ld.so`) nạp các thư viện cần, relocate, rồi mới chạy chương trình[^ldso-desc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): kernel là người dọn nhà. Với binary tĩnh, mọi đồ đạc đã đóng sẵn trong một thùng: kernel xếp vào và bật công tắc. Với binary động, thùng còn thiếu — trên nhãn ghi "nhờ quản lý kho `ld.so` mang đồ thiếu tới"; kernel mang quản lý kho vào *trước*, đưa cho ông ấy danh sách và để ông ấy hoàn tất rồi mới bật công tắc.
+*Với service `orders`.* Khi ai đó chạy `orders` (từ shell, hay từ entrypoint của container), kernel xử lý việc đó bằng `execve`. Nếu `orders` liên kết tĩnh thì file đã đủ, kernel chỉ việc đặt nó vào bộ nhớ rồi nhảy vào entry. Nếu `orders` liên kết động, và đó là mặc định của target `*-gnu` (mục 8), thì file còn thiếu một phần: địa chỉ của `SSL_read` và mọi hàm lấy từ thư viện khác vẫn là những chỗ trống (mục 2). Kernel không tự lấp được chúng, nên nó nhờ `ld.so` làm việc đó trước khi code của `orders` được chạy. Mục này đi qua từng bước của chuyện đó.
 
-Từng bước (với binary liên kết động):
+### 3.1 Từng bước với binary liên kết động
 
-1. **Thay chương trình.** `execve()` thay chương trình hiện tại bằng chương trình mới với stack, heap và data segment mới khởi tạo[^execve-replace]; memory mapping cũ không được giữ lại[^execve-mappings].
-2. **Tìm `PT_INTERP`.** Chương trình ghi interpreter trong program header: kernel không hard-code `ld.so`[^dr-ptinterp]. Trong source kernel `v6.8`, `load_elf_binary` duyệt program header, gặp `PT_INTERP` thì đọc chuỗi đường dẫn rồi mở file đó[^binfmt-interp][^binfmt-open], và vòng lặp dừng ở `PT_INTERP` đầu tiên[^binfmt-interp-break]. Interpreter không phải định dạng nhận ra được → `ELIBBAD`[^execve-elibbad]. Lưu ý khác biệt giữa tài liệu và code: `execve(2)` ghi rằng nhiều hơn một `PT_INTERP` → `EINVAL`[^execve-einval] và `elf(5)` nói `PT_INTERP` không được xuất hiện quá một lần[^elf-interp]; nhưng trong đoạn `v6.8` đã đọc người soạn không thấy kiểm tra tương ứng (nhận xét của người soạn; chi tiết cài đặt, có thể khác ở bản kernel khác).
-3. **Map hai ELF.** Kernel map các `PT_LOAD` của chương trình, rồi gọi `load_elf_interp` để map interpreter và nhận lại địa chỉ nạp của nó[^binfmt-interp-load]. Interpreter phải hoàn chỉnh và có thể relocate tự do, vì chính nó không có ai nạp hộ[^dr-interp-complete] (vế sau là suy luận của người soạn).
-4. **Dựng auxiliary vector (auxv).** Kernel đặt một mảng cặp (tag, value) lên stack process mới; mảng này giúp dynamic linker tránh nhiều syscall[^dr-auxv]. Source kernel đặt vào đó, trong số các mục khác, `AT_PHDR` (địa chỉ program header của chương trình), `AT_PHENT`, `AT_PHNUM`, `AT_BASE` (địa chỉ nạp interpreter) và `AT_ENTRY` (entry của chương trình)[^binfmt-auxv]. Ý nghĩa theo `getauxval(3)`: `AT_BASE` là base address của program interpreter[^auxv-base]; `AT_ENTRY` là entry address của executable[^auxv-entry]; `AT_PHDR` là địa chỉ program header của executable[^auxv-phdr].
-5. **Chuyển điều khiển cho interpreter.** Entry kernel nhảy tới là `e_entry` của *interpreter* cộng địa chỉ nạp[^binfmt-entry], không phải entry của chương trình[^dr-entry].
-6. **`ld.so` làm việc.** Nhiệm vụ: xác định và nạp các dependency, relocate chương trình cùng mọi dependency, khởi tạo chúng theo đúng thứ tự[^dr-steps]. Tóm gọn: "tìm và nạp các shared object cần, chuẩn bị chương trình để chạy, rồi chạy nó"[^ldso-desc]. Khi đã xong, điều khiển mới đến chương trình[^dr-dynlinker-tasks] (dùng `AT_ENTRY` làm đích — suy luận của người soạn từ định nghĩa `AT_ENTRY`).
+**Bước 1: thay chương trình.** `execve()` thay chương trình hiện tại bằng chương trình mới, với stack, heap và data segment mới khởi tạo[^execve-replace]. Các memory mapping cũ không được giữ lại[^execve-mappings].
+
+**Bước 2: tìm `PT_INTERP`.** Binary tự ghi interpreter của nó trong program header, kernel không hard-code `ld.so`[^dr-ptinterp]. Trong source kernel `v6.8`, hàm `load_elf_binary` duyệt program header và bỏ qua mọi phần tử không phải `PT_INTERP`[^binfmt-interp]. Với phần tử `PT_INTERP`, nó đọc chuỗi đường dẫn rồi mở file đó[^binfmt-open]. Vòng lặp dừng ở `PT_INTERP` đầu tiên[^binfmt-interp-break].
+
+**Bước 3: map hai ELF.** Kernel map các `PT_LOAD` của chương trình, rồi gọi `load_elf_interp` để map interpreter và nhận lại địa chỉ nạp của nó[^binfmt-interp-load]. Interpreter phải hoàn chỉnh và có thể relocate tự do[^dr-interp-complete]. Lý do (suy luận của người soạn) là chính nó không có ai nạp hộ.
+
+**Bước 4: dựng auxiliary vector (auxv).** Kernel đặt một mảng cặp (tag, value) lên stack của process mới. Mảng này giúp dynamic linker tránh được nhiều syscall[^dr-auxv]. Source kernel đặt vào đó, trong số các mục khác, `AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_BASE` và `AT_ENTRY`[^binfmt-auxv]. Ba tag `ld.so` cần nhất mang ý nghĩa sau, theo `getauxval(3)`:
+
+| Tag | Ý nghĩa |
+|---|---|
+| `AT_PHDR` | địa chỉ program header của executable[^auxv-phdr] |
+| `AT_BASE` | base address của program interpreter, thường là dynamic linker[^auxv-base] |
+| `AT_ENTRY` | entry address của executable[^auxv-entry] |
+
+**Bước 5: chuyển điều khiển cho interpreter.** Entry mà kernel nhảy tới là `e_entry` của *interpreter* cộng địa chỉ nạp[^binfmt-entry]. Đó không phải entry của chương trình[^dr-entry].
+
+**Bước 6: `ld.so` làm việc.** Nhiệm vụ của nó gồm ba việc: xác định và nạp các dependency, relocate chương trình cùng mọi dependency, rồi khởi tạo chúng theo đúng thứ tự[^dr-steps]. Man page tóm gọn là "tìm và nạp các shared object cần, chuẩn bị chương trình để chạy, rồi chạy nó"[^ldso-desc]. Khi mọi việc xong, điều khiển mới đến chương trình[^dr-dynlinker-tasks], và đích nhảy là `AT_ENTRY` (suy luận của người soạn từ định nghĩa `AT_ENTRY`).
+
+Toàn bộ chuỗi trên, với `orders` là chương trình ở cột bên phải:
 
 ```mermaid
 sequenceDiagram
@@ -188,101 +242,143 @@ sequenceDiagram
   L->>A: nhảy tới AT_ENTRY
 ```
 
-**Binary tĩnh cổ điển** (địa chỉ nạp cố định, không PIE) không có `PT_INTERP`: tải trọng "đã hoàn chỉnh", nên kernel chỉ cần đưa binary vào address space và chuyển điều khiển tới entry của ứng dụng; mọi việc còn lại đã do static linker làm[^dr-static]. Static-PIE (mục 6) cũng không có `PT_INTERP` nhưng không có địa chỉ nạp cố định, nên câu của Drepper (viết cho trường hợp "fixed load address") không áp dụng nguyên văn: suy luận của người soạn là nó cần thêm bước relocate lúc chạy; chương này không đi sâu.
+### 3.2 Binary tĩnh: không cần interpreter
 
-<details><summary>Đi sâu: PIE và interpreter nạp ở đâu, chạy <code>ld.so</code> trực tiếp, <code>ldd</code>, vDSO, script <code>#!</code></summary>
+Binary tĩnh cổ điển (địa chỉ nạp cố định, không PIE) không có `PT_INTERP`. Tải trọng của nó đã hoàn chỉnh, nên kernel chỉ cần đưa binary vào address space và chuyển điều khiển tới entry của ứng dụng, mọi việc còn lại static linker đã làm xong[^dr-static]. Static-PIE (mục 6) cũng không có `PT_INTERP` nhưng không có địa chỉ nạp cố định, nên câu của Drepper, viết cho trường hợp "fixed load address", không áp dụng nguyên văn. Suy luận của người soạn: nó cần thêm một bước relocate lúc chạy; chương này không đi sâu.
 
-- Source kernel phân biệt hai loại `ET_DYN`: *chương trình* (PIE: `ET_DYN` có `INTERP`) và *loader* (`ET_DYN` không có `INTERP`, vì chúng *chính là* interpreter)[^binfmt-pie]. Lý do tách: loader phải nạp xa chương trình, vì chương trình có thể đụng vào loader (đặc biệt khi `ET_EXEC` không có vị trí ngẫu nhiên)[^binfmt-loader-away]. Chương trình PIE được đặt lệch từ `ELF_ET_DYN_BASE`, còn loader vào vùng mmap ngẫu nhiên độc lập[^binfmt-pie-base]. (Suy luận của người soạn: static-PIE — `ET_DYN` không có `INTERP` — rơi vào nhóm thứ hai theo phân loại này.) Mục 6 quay lại.
-- Chạy interpreter trực tiếp: `/lib/ld-linux.so.* [OPTIONS] [PROGRAM [ARGUMENTS]]`; chạy gián tiếp qua một chương trình động thì không truyền được option cho dynamic linker, và với ELF thì interpreter ghi ở `.interp` được thực thi[^ldso-interp-sec]. Option hữu ích: `--list` ("liệt kê mọi dependency và cách chúng được giải quyết")[^ldso-list].
-- `ldd` gọi dynamic linker chuẩn với biến môi trường `LD_TRACE_LOADED_OBJECTS` bằng 1[^ldd-trace]. **Cảnh báo an toàn:** với chương trình khai báo interpreter khác `ld-linux.so`, một số phiên bản `ldd` có thể thực thi chương trình; không bao giờ chạy `ldd` trên executable không tin cậy[^ldd-sec]. Cách an toàn hơn là `objdump -p /path/to/program | grep NEEDED` (chỉ liệt kê dependency trực tiếp)[^ldd-objdump].
-- Dòng `linux-vdso.so.1` trong đầu ra `ldd` là dependency đặc biệt: `ldd` ghi chú vdso và ld-linux là đặc biệt[^ldd-special]; auxv có `AT_SYSINFO_EHDR` là địa chỉ page chứa vDSO *ảo* mà kernel tạo ra để cung cấp bản cài đặt nhanh cho một số syscall[^auxv-vdso].
-- `execve` cũng chạy được script bắt đầu bằng `#!interpreter [optional-arg]`[^execve-script]; đó là cơ chế khác `PT_INTERP`: interpreter của script là chương trình đọc file script, còn `PT_INTERP` của ELF là bộ nạp.
-- `AT_SECURE` khác 0 nghĩa là chương trình cần được xử lý "an toàn", thường do set-user-ID/set-group-ID[^auxv-secure]; `ld.so` dùng nó để chọn secure-execution mode (mục 4).
+<details><summary>Đi sâu: ca nhiều <code>PT_INTERP</code>, PIE và interpreter nạp ở đâu, chạy <code>ld.so</code> trực tiếp, <code>ldd</code>, vDSO, script <code>#!</code></summary>
+
+- **Interpreter sai định dạng.** Nếu interpreter không phải một định dạng nhận ra được, `execve` trả `ELIBBAD`[^execve-elibbad].
+- **Tài liệu và code lệch nhau ở ca nhiều `PT_INTERP`.** `execve(2)` ghi rằng ELF có nhiều hơn một `PT_INTERP` thì lỗi `EINVAL`[^execve-einval]. `elf(5)` cũng nói `PT_INTERP` không được xuất hiện quá một lần[^elf-interp]. Nhưng trong đoạn `v6.8` đã đọc, người soạn không thấy kiểm tra tương ứng (nhận xét của người soạn; đây là chi tiết cài đặt, có thể khác ở bản kernel khác).
+- **PIE và loader trong source kernel.** Source kernel phân biệt hai loại `ET_DYN`: *chương trình* (PIE: `ET_DYN` có `INTERP`) và *loader* (`ET_DYN` không có `INTERP`, vì chúng *chính là* interpreter)[^binfmt-pie]. Hai loại này phải nạp ở hai chỗ khác nhau, vì chương trình có thể đụng vào loader, đặc biệt khi `ET_EXEC` không có vị trí ngẫu nhiên[^binfmt-loader-away]. Chương trình PIE được đặt lệch từ `ELF_ET_DYN_BASE`, còn loader vào vùng mmap ngẫu nhiên độc lập[^binfmt-pie-base]. Suy luận của người soạn: static-PIE (`ET_DYN` không có `INTERP`) rơi vào nhóm thứ hai theo phân loại này. Mục 6 quay lại.
+- **Chạy interpreter trực tiếp.** Cú pháp là `/lib/ld-linux.so.* [OPTIONS] [PROGRAM [ARGUMENTS]]`. Chạy gián tiếp qua một chương trình động thì không truyền được option cho dynamic linker, và với ELF thì interpreter ghi ở `.interp` được thực thi[^ldso-interp-sec]. Option hữu ích là `--list`, liệt kê mọi dependency và cách chúng được giải quyết[^ldso-list].
+- **`ldd`** gọi dynamic linker chuẩn với biến môi trường `LD_TRACE_LOADED_OBJECTS` bằng 1[^ldd-trace]. Cảnh báo an toàn: với chương trình khai báo interpreter khác `ld-linux.so`, một số phiên bản `ldd` có thể thực thi chương trình, nên không bao giờ chạy `ldd` trên executable không tin cậy[^ldd-sec]. Cách an toàn hơn là `objdump -p /path/to/program | grep NEEDED`, nhưng nó chỉ liệt kê dependency trực tiếp[^ldd-objdump].
+- **`linux-vdso.so.1`.** Dòng này trong đầu ra `ldd` là dependency đặc biệt; `ldd` ghi chú vdso và ld-linux là đặc biệt[^ldd-special]. Trong auxv, `AT_SYSINFO_EHDR` là địa chỉ page chứa vDSO *ảo* mà kernel tạo ra để cung cấp bản cài đặt nhanh cho một số syscall[^auxv-vdso].
+- **Script `#!`.** `execve` cũng chạy được script bắt đầu bằng `#!interpreter [optional-arg]`[^execve-script]. Đó là cơ chế khác `PT_INTERP`: interpreter của script là chương trình đọc file script, còn `PT_INTERP` của ELF là bộ nạp.
+- **`AT_SECURE`.** Giá trị khác 0 nghĩa là chương trình cần được xử lý "an toàn", thường do set-user-ID/set-group-ID[^auxv-secure]. `ld.so` dùng nó để chọn secure-execution mode (mục 4).
 
 </details>
 
-**Quay lại Q3:** kernel đọc `PT_INTERP`, map chương trình và `ld.so`, đưa thông tin qua auxv rồi nhảy vào `ld.so`; `ld.so` nạp thư viện, relocate và chuyển điều khiển sang chương trình.
+**Quay lại Q3:** kernel đọc `PT_INTERP`, map chương trình và `ld.so`, đưa thông tin qua auxv rồi nhảy vào `ld.so`. Với `orders` động, `ld.so` nạp thư viện, relocate và chỉ sau đó mới chuyển điều khiển sang code của service.
 
 ## 4. `ld.so` tìm thư viện ở đâu (Q4)
 
-> **Trả lời ngắn.** Với dependency có chứa dấu `/`, `ld.so` coi đó là đường dẫn và nạp thẳng[^ldso-slash]. Nếu không, theo `ld.so(8)` nó thử lần lượt: `DT_RPATH` (chỉ khi không có `DT_RUNPATH`), `LD_LIBRARY_PATH`, `DT_RUNPATH`, cache `/etc/ld.so.cache`, rồi thư mục mặc định `/lib` và `/usr/lib`[^ldso-order-rpath][^ldso-order-ldlp][^ldso-order-runpath][^ldso-order-cache][^ldso-order-default].
+> **Trả lời ngắn.** Nếu tên dependency có chứa dấu `/`, `ld.so` coi đó là đường dẫn và nạp thẳng[^ldso-slash]. Nếu không, theo `ld.so(8)` nó thử lần lượt năm nơi. Đầu tiên là `DT_RPATH` của binary, nhưng chỉ khi binary không có `DT_RUNPATH`[^ldso-order-rpath]. Kế đến là biến môi trường `LD_LIBRARY_PATH`[^ldso-order-ldlp]. Rồi đến `DT_RUNPATH`[^ldso-order-runpath]. Sau đó là cache `/etc/ld.so.cache`[^ldso-order-cache]. Cuối cùng là thư mục mặc định `/lib` rồi `/usr/lib`[^ldso-order-default].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn cần cuốn "libssl". Thủ thư đầu tiên xem ghi chú dính trên chương trình (RPATH/RUNPATH), nhưng trước đó có biển báo "ưu tiên kệ của anh" do người dùng dựng (LD_LIBRARY_PATH); sau đó tra danh mục trung tâm (ld.so.cache), cuối cùng lục các kệ mặc định.
+*Với service `orders`.* Giả sử `orders` build trên máy CI, còn image chạy thật dùng một image nền khác, và `libssl` ở đó nằm chỗ khác hoặc không có. Container khởi động rồi thoát ngay, vì `ld.so` không tìm ra thư viện mà `orders` cần. Muốn sửa đúng chỗ, bạn phải biết `ld.so` tìm ở đâu và theo thứ tự nào. Mục này trả lời hai câu hỏi đó.
 
-Tên trong `DT_NEEDED` là bản sao của chuỗi `DT_SONAME` (tên định danh do chính shared object khai báo[^gabi-soname]) hoặc đường dẫn của shared object dùng lúc build[^gabi-needed-names] — nên bạn thường thấy `libc.so.6` (SONAME) chứ không phải đường dẫn tuyệt đối. Thứ tự tìm với tên không có `/` (theo `ld.so(8)`):
+### 4.1 Binary ghi tên thư viện thế nào
+
+`DT_SONAME` là tên định danh do chính shared object khai báo[^gabi-soname]. Tên trong `DT_NEEDED` của `orders` là bản sao của chuỗi `DT_SONAME`, hoặc của đường dẫn shared object dùng lúc build[^gabi-needed-names]. Vì thế bạn thường thấy `libc.so.6` (một SONAME) chứ không phải đường dẫn tuyệt đối. Tên không có `/` như vậy chính là loại phải đi qua quy trình tìm kiếm dưới đây.
+
+### 4.2 Thứ tự tìm
+
+Với tên không có `/`, `ld.so(8)` tìm theo bảng sau:
 
 | Bước | Nguồn | Ghi chú |
 |---|---|---|
-| 1 | `DT_RPATH` của binary | chỉ khi **không** có `DT_RUNPATH`; `DT_RPATH` bị đánh dấu deprecated[^ldso-order-rpath]; áp dụng cho cả cây dependency[^ldso-order-runpath] |
+| 1 | `DT_RPATH` của binary | chỉ dùng khi **không** có `DT_RUNPATH`; `DT_RPATH` bị đánh dấu deprecated[^ldso-order-rpath] |
 | 2 | `LD_LIBRARY_PATH` | bị bỏ qua trong secure-execution mode[^ldso-order-ldlp] |
-| 3 | `DT_RUNPATH` | chỉ dùng để tìm dependency trực tiếp (`DT_NEEDED`) của object chứa nó, *không* áp xuống con cháu[^ldso-order-runpath][^gabi-runpath-scope] |
+| 3 | `DT_RUNPATH` | chỉ dùng để tìm dependency trực tiếp (`DT_NEEDED`) của object chứa nó, *không* áp xuống con cháu[^ldso-order-runpath] |
 | 4 | `/etc/ld.so.cache` | danh sách đã biên dịch các shared object ứng viên[^ldso-order-cache] |
-| 5 | `/lib`, rồi `/usr/lib` | (trên một số kiến trúc 64-bit là `/lib64`, `/usr/lib64`; bước này bị bỏ qua nếu binary được link với `-z nodeflib`)[^ldso-order-default] |
+| 5 | `/lib`, rồi `/usr/lib` | trên một số kiến trúc 64-bit là `/lib64`, `/usr/lib64`; bước này bị bỏ qua nếu binary được link với `-z nodeflib`[^ldso-order-default] |
 
-**`$ORIGIN` và đóng gói.** `$ORIGIN` được mở rộng thành thư mục chứa chương trình hoặc shared object[^ldso-tokens]; việc mở rộng token áp dụng trong giá trị các tag `DT_NEEDED`, `DT_RPATH`, `DT_RUNPATH`... của binary ELF, ngoài ra còn ở các biến môi trường như `LD_LIBRARY_PATH`[^ldso-tokens-where]. Ví dụ man page: build với `-Wl,-rpath,'$ORIGIN/../lib'` để chương trình tìm shared object đi kèm trong `somedir/lib` bất kể `somedir` nằm đâu[^ldso-origin]. Nhờ đó ứng dụng "turn-key" có thể giải nén ở thư mục bất kỳ[^ldso-origin-turnkey]. (Nhận xét của người soạn: cách này dùng khi bạn phải mang theo `.so` riêng trong image thay vì cài vào hệ thống.)
+Hai bước 1 và 3 khác nhau ở phạm vi. `DT_RPATH` áp cho việc tìm mọi object con trong cây dependency[^ldso-order-runpath]. `DT_RUNPATH` của một object thì không ảnh hưởng việc tìm dependency của object khác[^gabi-runpath-scope]. Ví dụ áp dụng bước 3: nếu `orders` có `DT_RUNPATH` trỏ vào thư mục `lib/` của nó, thì `libssl` được tìm ở đó, nhưng một thư viện mà `libssl` kéo theo phải tự có `DT_RUNPATH` riêng.
 
-**Bẫy `LD_LIBRARY_PATH`.** Danh sách phân tách bằng dấu hai chấm hoặc chấm phẩy, không có cơ chế escape; **một tên thư mục độ dài 0 nghĩa là thư mục hiện tại**[^ldso-ldlp]. Ở secure-execution mode (kích hoạt khi `AT_SECURE` khác 0[^ldso-secure], ví dụ chương trình set-user-ID — file có bit cho process chạy với quyền của chủ file), biến này bị bỏ qua[^ldso-order-ldlp]. Với `LD_PRELOAD` — nạp thêm shared object *trước* mọi object khác để có thể ghi đè hàm[^ldso-preload] — chế độ này cũng hạn chế đường dẫn có dấu `/`[^ldso-preload-secure]. (Nhận xét của người soạn: vì thế đừng dựa vào hai biến này cho chương trình đặc quyền; còn trong container, ưu tiên cài `.so` đúng chỗ hoặc dùng `RUNPATH` có `$ORIGIN` thay vì để `LD_LIBRARY_PATH` trong image.)
+### 4.3 `$ORIGIN`: đóng gói thư viện cạnh binary
 
-**`dlopen` dùng cùng quy tắc.** Theo mô tả của `dlopen(3)`, khi chương trình gọi `dlopen` với tên không có `/`, dynamic linker tìm theo trình tự tương tự: `DT_RPATH` (nếu không có `DT_RUNPATH`) của *đối tượng gọi*, `LD_LIBRARY_PATH`, `DT_RUNPATH`, cache, rồi `/lib`, `/usr/lib`[^dlopen-search].
+`$ORIGIN` được mở rộng thành thư mục chứa chương trình hoặc shared object[^ldso-tokens]. Việc mở rộng áp dụng trong giá trị các tag `DT_NEEDED`, `DT_RPATH`, `DT_RUNPATH` và vài tag khác của binary ELF[^ldso-tokens-where]. Ví dụ trong man page: build với `-Wl,-rpath,'$ORIGIN/../lib'` thì chương trình tìm được shared object đi kèm trong `somedir/lib`, bất kể `somedir` nằm ở đâu trong cây thư mục[^ldso-origin]. Nhờ vậy ứng dụng kiểu "turn-key" có thể giải nén vào thư mục bất kỳ mà vẫn chạy[^ldso-origin-turnkey]. Nhận xét của người soạn: cách này hợp khi `orders` phải mang theo `.so` riêng trong image thay vì cài vào hệ thống.
 
-<details><summary>Đi sâu: thư viện sai kiến trúc, <code>LD_DEBUG</code>, <code>--list</code>, hardware capabilities</summary>
+### 4.4 Bẫy của `LD_LIBRARY_PATH`
 
-- Khi tìm, gặp một file ELF có thuộc tính không hợp (sai class, sai `e_machine`...) **không** phải lỗi nghiêm trọng: dynamic linker vét hết các đường dẫn rồi mới kết luận không tìm thấy[^gabi-wrong-attrs].
-- Chẩn đoán: `LD_DEBUG` bật log chi tiết hoạt động của dynamic linker[^ldso-debug]; hạng mục `libs` hiển thị các đường dẫn tìm thư viện[^ldso-debug-libs] (`LD_DEBUG=help` liệt kê các hạng mục). `ld.so --list` liệt kê dependency và cách giải quyết[^ldso-list].
-- `ld.so.cache` do `ldconfig(8)` duy trì (theo `ld.so(8)`: file chứa danh sách đã biên dịch các thư mục và danh sách có thứ tự các shared object ứng viên)[^ldso-cache-file]. Suy luận của người soạn: thêm `.so` vào một thư mục mà chưa cập nhật cache thì bước 4 không thấy nó.
-- Biến `LD_LIBRARY_PATH` được `ld.so` đọc khi chương trình *khởi động*; `dlopen` dùng giá trị tại thời điểm chương trình bắt đầu chạy[^dlopen-ldlp-start].
-- `DT_RPATH` và `DT_RUNPATH` trong `.dynamic`: `DT_RPATH` ghi là deprecated; `DT_RUNPATH` là chuỗi chứa đường dẫn tìm thư viện[^elf-dt-rpath][^elf-dt-runpath].
-- `ld.so` còn ưu tiên các thư mục "hardware capabilities" (ví dụ thư viện tối ưu cho tập lệnh mở rộng) nếu có và phù hợp với CPU[^ldso-hwcap].
+`LD_LIBRARY_PATH` là danh sách thư mục phân tách bằng dấu hai chấm hoặc chấm phẩy, không có cơ chế escape, và một tên thư mục độ dài 0 nghĩa là thư mục hiện tại[^ldso-ldlp]. Đó là chỗ dễ ra chuyện: một dấu hai chấm thừa ở cuối biến có thể kéo thư mục làm việc vào đường tìm thư viện (suy luận của người soạn từ quy tắc trên).
+
+Secure-execution mode được kích hoạt khi `AT_SECURE` trong auxv khác 0[^ldso-secure]; ví dụ điển hình là chương trình set-user-ID, tức file có bit cho process chạy với quyền của chủ file. Ở chế độ này `ld.so` bỏ qua `LD_LIBRARY_PATH`[^ldso-order-ldlp]. `LD_PRELOAD` là biến để nạp thêm shared object *trước* mọi object khác nhằm ghi đè hàm[^ldso-preload]. Ở chế độ này nó cũng hạn chế các đường dẫn có dấu `/`[^ldso-preload-secure]. Nhận xét của người soạn: đừng dựa vào hai biến này cho chương trình đặc quyền. Còn trong container, hãy cài `.so` đúng chỗ hoặc dùng `RUNPATH` có `$ORIGIN`, thay vì để `LD_LIBRARY_PATH` nằm sẵn trong image.
+
+### 4.5 `dlopen` dùng cùng quy tắc
+
+Khi chương trình gọi `dlopen` với tên không có `/`, dynamic linker tìm theo trình tự tương tự: `DT_RPATH` (nếu không có `DT_RUNPATH`) của *đối tượng gọi*, `LD_LIBRARY_PATH`, `DT_RUNPATH`, cache, rồi `/lib`, `/usr/lib`[^dlopen-search].
+
+<details><summary>Đi sâu: thư viện sai kiến trúc, <code>LD_DEBUG</code>, <code>--list</code>, <code>ld.so.cache</code>, hardware capabilities</summary>
+
+- **Thư viện sai kiến trúc.** Khi tìm, gặp một file ELF có thuộc tính không hợp (sai class, sai `e_machine`...) không phải lỗi nghiêm trọng: dynamic linker vét hết các đường dẫn rồi mới kết luận không tìm thấy[^gabi-wrong-attrs].
+- **Chẩn đoán.** `LD_DEBUG` bật log chi tiết hoạt động của dynamic linker[^ldso-debug]. Hạng mục `libs` hiển thị các đường dẫn tìm thư viện[^ldso-debug-libs]; `LD_DEBUG=help` liệt kê các hạng mục. `ld.so --list` liệt kê dependency và cách giải quyết[^ldso-list].
+- **`ld.so.cache`** do `ldconfig(8)` duy trì. Theo `ld.so(8)`, đó là file chứa danh sách đã biên dịch các thư mục và danh sách có thứ tự các shared object ứng viên[^ldso-cache-file]. Suy luận của người soạn: thêm `.so` vào một thư mục mà chưa cập nhật cache thì bước 4 không thấy nó.
+- **Thời điểm đọc `LD_LIBRARY_PATH`.** `ld.so` đọc biến này khi chương trình *khởi động*; `dlopen` dùng giá trị tại thời điểm chương trình bắt đầu chạy[^dlopen-ldlp-start].
+- **`DT_RPATH` và `DT_RUNPATH` trong `.dynamic`.** `DT_RPATH` được ghi là deprecated[^elf-dt-rpath]. `DT_RUNPATH` là chuỗi chứa đường dẫn tìm thư viện[^elf-dt-runpath].
+- **Hardware capabilities.** `ld.so` còn ưu tiên các thư mục "hardware capabilities" (ví dụ thư viện tối ưu cho tập lệnh mở rộng) nếu có và phù hợp với CPU[^ldso-hwcap].
 
 </details>
 
-**Quay lại Q4:** `ld.so` tìm theo thứ tự RPATH (nếu không có RUNPATH) → `LD_LIBRARY_PATH` → RUNPATH → `ld.so.cache` → `/lib`, `/usr/lib`; `$ORIGIN` cho phép đóng gói thư viện cạnh binary, và `LD_LIBRARY_PATH` bị bỏ qua với chương trình đặc quyền.
+**Quay lại Q4:** `ld.so` tìm theo thứ tự RPATH (nếu không có RUNPATH) → `LD_LIBRARY_PATH` → RUNPATH → `ld.so.cache` → `/lib`, `/usr/lib`. `$ORIGIN` cho phép đóng gói thư viện cạnh binary của `orders`, và `LD_LIBRARY_PATH` bị bỏ qua với chương trình đặc quyền.
 
 ## 5. PLT, GOT, lazy binding và RELRO (Q5)
 
-> **Trả lời ngắn.** Mã trong shared object không được chứa địa chỉ tuyệt đối của hàm/biến bên ngoài, vì sẽ phải sửa vào text lúc chạy[^dr-got-why]. Thay vào đó, mã đọc địa chỉ từ một bảng dữ liệu (GOT), và gọi hàm ngoài qua một đoạn "bắc cầu" (PLT)[^dr-plt-stub]. Với *lazy binding*, lần gọi đầu đi qua dynamic linker để tìm địa chỉ thật rồi ghi vào GOT; các lần sau nhảy thẳng[^dr-plt-resolve]. RELRO chuyển các section chỉ bị relocation sửa sang trang riêng và gỡ quyền ghi sau khi relocate xong[^dr-relro]; với Full RELRO (kèm bind-now) cả GOT thành chỉ-đọc[^rs-relro-full].
+> **Trả lời ngắn.** Mã trong shared object không được chứa địa chỉ tuyệt đối của hàm hay biến bên ngoài, vì như thế phải sửa vào text lúc chạy[^dr-got-why]. Thay vào đó, mã đọc địa chỉ từ một bảng dữ liệu gọi là GOT, và gọi hàm ngoài qua một đoạn "bắc cầu" gọi là PLT[^dr-plt-stub]. Với *lazy binding*, lần gọi đầu đi qua dynamic linker để tìm địa chỉ thật rồi ghi vào GOT, các lần sau nhảy thẳng[^dr-plt-resolve]. RELRO chuyển các section chỉ bị relocation sửa sang trang riêng và gỡ quyền ghi sau khi relocate xong[^dr-relro]. Với Full RELRO (kèm bind-now), cả GOT thành chỉ-đọc[^rs-relro-full].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): GOT là cuốn danh bạ điện thoại in sẵn nhưng nhiều ô còn trống; PLT là tổng đài trung gian. Lần đầu gọi "bar", ô trong danh bạ trống nên cuộc gọi chuyển tới tổng đài (`ld.so`); tổng đài tra số, **ghi vào danh bạ**, rồi nối máy. Từ lần sau, bạn đọc số từ danh bạ và quay thẳng, không qua tổng đài.
+*Với service `orders`.* Mỗi request, `orders` gọi `SSL_read` nhiều lần. Hàm này nằm trong `libssl.so`, một object khác `orders`, và địa chỉ nạp của nó chỉ `ld.so` biết lúc chạy. Vậy lệnh `call` trong code của `orders` nhảy tới đâu? Mục này trả lời bằng GOT và PLT, rồi nói địa chỉ được điền vào lúc nào (lazy binding), và cuối cùng là cách khóa bảng địa chỉ lại để kẻ tấn công không sửa được (RELRO).
 
-**Vì sao cần GOT.** Với `extern int foo; extern int bar(int);`, hàm dùng cả hai cần hai relocation: một để nạp giá trị `foo`, một để tìm địa chỉ `bar`[^dr-two-relocs]. Nếu mã mã hóa thẳng địa chỉ vào lệnh thì khi địa chỉ chỉ dynamic linker biết, text segment (vùng mã lệnh) phải bị sửa lúc chạy — điều cần tránh[^dr-got-why]. Mã sinh ra cho DSO (*dynamic shared object*, cách Drepper gọi shared object; `-fpic`/`-fPIC` là cờ compiler sinh mã position-independent) lấy địa chỉ `foo` từ GOT; vị trí của ô GOT so với một thanh ghi PIC (`%ebx` trong ví dụ IA-32 của Drepper) biết lúc link, nên *chỉ GOT bị sửa, text giữ nguyên*[^dr-got-load]. Trên x86-64 cùng ý tưởng: psABI mô tả GOT là bảng giữ địa chỉ tuyệt đối trong dữ liệu riêng, nhờ đó địa chỉ có sẵn mà không làm mất tính position-independent của text[^psabi-got]; mã truy cập bằng địa chỉ tương đối `%rip`, ví dụ `jmp *name1@GOTPCREL(%rip)` trong entry PLT[^psabi-plt-entry] (xem `@GOTPCREL` trong [P2·03](../02-cpu/03-assembly-x86-64-va-aarch64.md)).
+### 5.1 Vì sao cần GOT
 
-**Vì sao cần PLT.** Hàm không chắc được định nghĩa trong chính object gọi[^dr-plt-always] thì mỗi lần gọi đi qua một đoạn stub trong PLT[^dr-plt-stub]. Ngay cả khi có định nghĩa cùng file vẫn không đủ để tránh PLT, vì định nghĩa có thể bị object khác chèn thay thế (interposition)[^dr-plt-always][^dr-interposition].
+Drepper dùng một ví dụ C: một hàm dùng `extern int foo;` và gọi `extern int bar(int);`. Hàm này cần hai relocation, một để nạp giá trị `foo` và một để tìm địa chỉ `bar`[^dr-two-relocs]. Giả sử mã mã hóa thẳng địa chỉ vào lệnh, trong khi địa chỉ đó chỉ dynamic linker biết. Khi đó text segment (vùng chứa mã lệnh) phải bị sửa lúc chạy, điều cần tránh[^dr-got-why].
 
-**Lazy binding từng bước** (mô hình IA-32 của Drepper; kiến trúc khác chi tiết khác[^dr-plt-arch]):
+Vì vậy mã sinh cho shared object lấy địa chỉ `foo` từ GOT. (Drepper gọi shared object là DSO, *dynamic shared object*; compiler sinh mã kiểu này với cờ `-fpic`/`-fPIC`, tức position-independent code.) Vị trí của ô GOT so với một thanh ghi PIC (`%ebx` trong ví dụ IA-32 của Drepper) đã biết từ lúc link, nên chỉ GOT bị sửa còn text giữ nguyên[^dr-got-load].
+
+Trên x86-64 ý tưởng giống vậy. psABI mô tả GOT là bảng giữ địa chỉ tuyệt đối trong dữ liệu riêng, nhờ đó địa chỉ có sẵn mà text vẫn position-independent[^psabi-got]. Mã truy cập GOT bằng địa chỉ tương đối `%rip`, ví dụ `jmp *name1@GOTPCREL(%rip)` trong entry PLT[^psabi-plt-entry] (xem `@GOTPCREL` ở [P2·03](../02-cpu/03-assembly-x86-64-va-aarch64.md)).
+
+### 5.2 Vì sao cần PLT
+
+Khi hàm không chắc được định nghĩa trong chính object gọi nó, mỗi lần gọi phải đi qua một đoạn stub trong PLT[^dr-plt-stub]. Với `orders`, `SSL_read` nằm ở object khác nên chắc chắn vào trường hợp này. Nhưng ngay cả khi có định nghĩa cùng file, vẫn chưa đủ để tránh PLT[^dr-plt-always]. Lý do là định nghĩa đó có thể bị object khác chèn thay thế (interposition)[^dr-interposition].
+
+### 5.3 Lazy binding từng bước
+
+Ý của lazy binding là lúc `orders` khởi động, ô GOT của `SSL_read` chưa cần chứa địa chỉ thật. Cơ chế dưới đây là mô hình IA-32 của Drepper; kiến trúc khác chi tiết khác[^dr-plt-arch]. Ở sơ đồ, `SSL_read` đứng ở chỗ Drepper dùng `bar`.
 
 ```mermaid
 sequenceDiagram
-  participant C as mã gọi
-  participant S as PLT entry của bar
-  participant G as GOT slot của bar
+  participant C as mã gọi (orders)
+  participant S as PLT entry của SSL_read
+  participant G as GOT slot của SSL_read
   participant R as PLT0 + ld.so
-  participant F as bar thật
+  participant F as SSL_read thật
   Note over G: lúc khởi động slot trỏ vào lệnh thứ 2 của PLT entry
-  C->>S: call bar@PLT (lần đầu)
-  S->>G: jmp *GOT[bar]
+  C->>S: call SSL_read@PLT (lần đầu)
+  S->>G: jmp *GOT[SSL_read]
   G-->>S: quay lại lệnh pushl trong PLT entry
   S->>R: push offset (IA-32) hoặc index (x86-64) của relocation, nhảy PLT0 rồi vào ld.so
-  R->>R: tìm địa chỉ bar, ghi vào GOT slot
-  R->>F: nhảy tới bar
-  C->>S: call bar@PLT (lần sau)
-  S->>G: jmp *GOT[bar]
-  G->>F: nhảy thẳng tới bar
+  R->>R: tìm địa chỉ SSL_read, ghi vào GOT slot
+  R->>F: nhảy tới SSL_read
+  C->>S: call SSL_read@PLT (lần sau)
+  S->>G: jmp *GOT[SSL_read]
+  G->>F: nhảy thẳng tới SSL_read
 ```
 
-- Mỗi entry PLT đúng một symbol hàm; lệnh đầu là nhảy gián tiếp qua một slot GOT[^dr-plt-slot]. Lúc khởi động, dynamic linker điền slot bằng địa chỉ trỏ vào lệnh thứ hai của chính entry PLT; nên lần gọi đầu nhảy tới lệnh `pushl` kế tiếp, đẩy offset relocation của hàm cần gọi lên stack[^dr-plt-first].
-- Sau đó điều khiển chuyển tới entry PLT đặc biệt đầu tiên, đẩy thêm giá trị và nhảy vào dynamic linker[^dr-plt0].
-- Khi đã xác định địa chỉ hàm, dynamic linker ghi vào đúng slot GOT mà lệnh `jmp` đầu PLT dùng rồi nhảy tới hàm; mọi lần dùng sau không qua dynamic linker nữa, mà nhảy thẳng tới hàm[^dr-plt-resolve] (nhận xét của người soạn: lời gọi vẫn đi qua entry PLT và một lệnh nhảy gián tiếp qua slot GOT).
-- **Đối chiếu x86-64 (psABI)** — cùng khung, khác chi tiết so với ví dụ IA-32. Entry PLT gồm `jmp *name@GOTPCREL(%rip)`, `pushq $index`, `jmp .PLT0`[^psabi-plt-entry]. Lúc tạo memory image, dynamic linker đặt giá trị đặc biệt vào ô GOT thứ hai và thứ ba[^psabi-got-special]; lúc đầu slot của hàm chứa địa chỉ lệnh `pushq` kế tiếp[^psabi-got-init]; lệnh `pushq` đẩy một relocation *index* (ví dụ IA-32 của Drepper nói *offset*)[^psabi-index]. `.PLT0` đẩy giá trị ở `GOT+8` lên stack rồi nhảy tới địa chỉ ở `GOT+16`, tức vào dynamic linker[^psabi-plt0]. Sau khi bind, `jmp` đầu entry nhảy thẳng tới hàm thay vì rơi xuống `pushq`[^psabi-subseq].
+Đọc từ trên xuống:
 
-Lazy binding là *tùy chọn* của dynamic linker: gABI cho phép dynamic linker đánh giá entry PLT một cách lười, tránh phân giải symbol và relocation cho hàm không được gọi[^gabi-lazy]. Chỉ tham chiếu *hàm* được bind lười; tham chiếu biến luôn được bind ngay khi nạp[^dlopen-lazy-var]. Mục `DT_JMPREL` tách riêng các relocation PLT để dynamic linker bỏ qua chúng lúc khởi tạo khi lazy binding bật[^gabi-jmprel].
+1. Mỗi entry PLT ứng với đúng một symbol hàm, và lệnh đầu của nó là một lệnh nhảy gián tiếp qua một slot GOT[^dr-plt-slot].
+2. Lúc khởi động, dynamic linker điền slot ấy bằng địa chỉ trỏ vào lệnh thứ hai của chính entry PLT. Vì thế lần gọi đầu, lệnh nhảy rơi xuống lệnh `pushl` kế tiếp, và lệnh này đẩy offset relocation của hàm cần gọi lên stack[^dr-plt-first].
+3. Sau đó điều khiển chuyển tới entry PLT đặc biệt đầu tiên (PLT0), đẩy thêm giá trị rồi nhảy vào dynamic linker[^dr-plt0].
+4. Khi đã xác định được địa chỉ hàm, dynamic linker ghi nó vào đúng slot GOT mà lệnh `jmp` đầu PLT dùng, rồi nhảy tới hàm. Mọi lần gọi sau không qua dynamic linker nữa mà nhảy thẳng tới hàm[^dr-plt-resolve]. Nhận xét của người soạn: lời gọi vẫn đi qua entry PLT và một lệnh nhảy gián tiếp qua slot GOT.
 
-**Tắt lazy binding (bind now).** Có ba cách: biến môi trường `LD_BIND_NOW` khác rỗng → phân giải mọi symbol lúc khởi động[^ldso-bindnow]; cờ trong chính object (gABI: mục `DT_BIND_NOW`, nay đã được thay bằng cờ `DF_BIND_NOW`) → xử lý mọi relocation của object đó trước khi chuyển điều khiển, và có ưu tiên hơn chỉ thị lazy từ môi trường hoặc `dlopen`[^gabi-dtbindnow]; và `-z now` lúc link, linker đặt cờ `DF_BIND_NOW` trong entry `DT_FLAGS` của DSO[^dr-bindnow]. `dlopen` có `RTLD_NOW` để phân giải hết trước khi `dlopen` trả về[^dlopen-now].
+Trên x86-64 (psABI) cùng khung đó, khác ở chỗ lệnh `pushq` đẩy một relocation *index* chứ không phải *offset* như ví dụ IA-32 của Drepper[^psabi-index]. Các chi tiết còn lại của psABI nằm ở phần Đi sâu.
 
-**RELRO.** Nếu kẻ tấn công ghi được một word tùy ý vào address space thì nhắm vào một ô GOT là mục tiêu đáng giá: đổi địa chỉ hàm gọi qua PLT sang chỗ khác[^dr-got-attack]. Chặn ghi GOT mà cho dynamic linker vẫn ghi được là khó, vì gọi `mprotect` mỗi lần đổi giá trị thì quá đắt[^dr-mprotect]. Giải pháp: `-z relro` — linker chuyển các section chỉ bị sửa bởi relocation sang trang bộ nhớ riêng và phát ra program header `PT_GNU_RELRO` trỏ tới các trang đó; lúc chạy dynamic linker gỡ quyền ghi sau khi xong việc[^dr-relro]. Đây là giải pháp một phần; kết hợp `-z now` thì mọi relocation đều đủ điều kiện được bảo vệ, đổi lại chi phí khởi động tăng[^dr-now]. rustc gọi các mức này là `relro-level`:
+Lazy binding là *tùy chọn* của dynamic linker: gABI cho phép nó đánh giá entry PLT một cách lười, để tránh chi phí phân giải symbol và relocation cho những hàm không bao giờ được gọi[^gabi-lazy]. Chỉ tham chiếu *hàm* được bind lười, còn tham chiếu biến luôn được bind ngay khi nạp[^dlopen-lazy-var]. Mục `DT_JMPREL` tách riêng các relocation của PLT để dynamic linker bỏ qua chúng lúc khởi tạo khi lazy binding bật[^gabi-jmprel].
+
+### 5.4 Tắt lazy binding (bind now)
+
+Có ba cách tắt. Cách thứ nhất là đặt biến môi trường `LD_BIND_NOW` khác rỗng, khiến dynamic linker phân giải mọi symbol ngay lúc khởi động[^ldso-bindnow]. Cách thứ hai là cờ nằm trong chính object: gABI ghi mục `DT_BIND_NOW` (nay đã được thay bằng cờ `DF_BIND_NOW`) khiến dynamic linker xử lý mọi relocation của object đó trước khi chuyển điều khiển, và mục này ưu tiên hơn chỉ thị lazy từ môi trường hay từ `dlopen`[^gabi-dtbindnow]. Cách thứ ba là truyền `-z now` lúc link, khi đó linker đặt cờ `DF_BIND_NOW` trong entry `DT_FLAGS` của DSO[^dr-bindnow]. Riêng với `dlopen`, cờ `RTLD_NOW` phân giải hết trước khi `dlopen` trả về[^dlopen-now].
+
+### 5.5 RELRO: khóa GOT lại
+
+Nếu kẻ tấn công ghi được một word tùy ý vào address space của `orders`, thì một ô GOT là mục tiêu đáng giá: chỉ cần đổi địa chỉ hàm gọi qua PLT sang chỗ khác[^dr-got-attack]. Chặn ghi GOT mà vẫn để dynamic linker ghi được là việc khó, vì gọi `mprotect` mỗi lần đổi giá trị thì quá đắt[^dr-mprotect].
+
+Giải pháp là `-z relro`. Linker chuyển những section mà chỉ relocation mới sửa sang trang bộ nhớ riêng, và phát ra program header `PT_GNU_RELRO` trỏ tới các trang đó. Lúc chạy, dynamic linker gỡ quyền ghi sau khi xong việc[^dr-relro]. Đây mới là giải pháp một phần. Kết hợp thêm `-z now` thì mọi relocation đều đủ điều kiện được bảo vệ, đổi lại chi phí khởi động tăng[^dr-now].
+
+rustc gọi các mức bảo vệ này là `relro-level`:
 
 | Mức | Hành vi theo rustc book |
 |---|---|
@@ -290,107 +386,136 @@ Lazy binding là *tùy chọn* của dynamic linker: gABI cho phép dynamic link
 | `partial` | hàm động phân giải lười, ghi vào phần GOT của PLT (`.got.plt`); phần GOT còn lại (`.got`) thành chỉ-đọc[^rs-relro-partial] |
 | `full` | hàm động được phân giải ngay lúc bắt đầu chạy, GOT được điền sớm rồi chuyển thành chỉ-đọc; tốn thêm bộ nhớ và làm tăng thời gian khởi động process[^rs-relro-full] |
 
-rustc bật Full RELRO mặc định trên nền tảng hỗ trợ[^rs-relro-default]; trong source target spec của Rust 1.95.0, nền tảng Linux đặt `relro_level: RelroLevel::Full`[^rs-base-linux]. Drepper nhận xét với ứng dụng chạy lâu và nhạy cảm bảo mật thì chi phí khởi động không nặng bằng lợi ích an ninh[^dr-now-longrun]. (Nhận xét của người soạn: với service backend chạy hàng ngày, Full RELRO gần như không đáng kể; với công cụ CLI khởi động hàng nghìn lần mỗi giờ hay chương trình cần cold start cực ngắn thì nên cân nhắc đo.)
+rustc bật Full RELRO mặc định trên nền tảng hỗ trợ[^rs-relro-default]. Trong source target spec của Rust 1.95.0, các nền tảng Linux đặt `relro_level: RelroLevel::Full`[^rs-base-linux]. Về chi phí, Drepper nhận xét rằng với ứng dụng chạy lâu và nhạy cảm bảo mật, chi phí khởi động không nặng bằng lợi ích an ninh[^dr-now-longrun]. Nhận xét của người soạn: với một service backend như `orders`, chạy hàng ngày, Full RELRO gần như không đáng kể. Với công cụ CLI khởi động hàng nghìn lần mỗi giờ, hay chương trình cần cold start cực ngắn, nên cân nhắc đo.
 
-<details><summary>Đi sâu: x86-64 vs IA-32, quan sát bind, musl, <code>RTLD_*</code></summary>
+<details><summary>Đi sâu: x86-64 vs IA-32, quan sát bind, <code>STV_HIDDEN</code>, <code>RTLD_*</code></summary>
 
-- Cấu trúc GOT/PLT là chi tiết riêng của từng kiến trúc (theo psABI). Ví dụ ở IA-32 PLT chỉ-đọc, còn một số kiến trúc khác (Drepper không nêu tên) thì PLT phải ghi được vì entry PLT bị sửa trực tiếp thay vì nhảy gián tiếp qua GOT[^dr-plt-arch]; entry PLT x86-64 thì nhảy gián tiếp qua GOT như đã thấy ở trên[^psabi-plt-entry]. Vì vậy mô hình IA-32 chỉ là *ví dụ minh họa* cho cơ chế.
-- Quan sát: `LD_BIND_NOT` (nếu đặt) khiến dynamic linker **không** cập nhật GOT/PLT sau khi phân giải; kết hợp với `LD_DEBUG` hạng mục `bindings` và `symbols` có thể xem mọi lần bind lúc chạy[^ldso-bindnot].
-- Symbol `STV_HIDDEN` không bị chèn thay thế nên tham chiếu trong module luôn trỏ vào bản cục bộ[^elf-vis-hidden]; đây là lý do thư viện nên ẩn symbol không xuất khẩu (suy luận của người soạn: để tránh PLT cho lời gọi nội bộ — Drepper hứa giải thích "khi nào và cách tránh PLT" ở phần sau của tài liệu[^dr-avoid-plt]).
-- **musl không hỗ trợ lazy binding**: vì lý do tin cậy (không thể báo cáo lỗi bind lười) và vì giảm đáng kể mã dễ lỗi phụ thuộc kiến trúc[^musl-lazy]; glibc thì có lazy binding, trì hoãn giải quyết tới lần gọi đầu tiên[^musl-glibc-lazy].
-- `dlopen`: `RTLD_LAZY` — "chỉ phân giải symbol khi mã tham chiếu được thực thi; symbol không bao giờ được tham chiếu thì không bao giờ phân giải"[^dlopen-lazy]; `RTLD_NOW` hoặc `LD_BIND_NOW` đặt thì phải phân giải hết symbol chưa định nghĩa trước khi `dlopen` trả về[^dlopen-now]; `LD_BIND_NOW` thắng `RTLD_LAZY`[^dlopen-lazy-var].
+- **Cấu trúc GOT/PLT là chi tiết riêng của từng kiến trúc.** Ví dụ ở IA-32 PLT chỉ-đọc, còn một số kiến trúc khác (Drepper không nêu tên) thì PLT phải ghi được, vì entry PLT bị sửa trực tiếp thay vì nhảy gián tiếp qua GOT[^dr-plt-arch]. Entry PLT x86-64 thì nhảy gián tiếp qua GOT như đã thấy ở mục 5.1[^psabi-plt-entry]. Vì vậy mô hình IA-32 chỉ là *ví dụ minh họa* cho cơ chế.
+- **Chi tiết psABI x86-64.** Entry PLT gồm `jmp *name@GOTPCREL(%rip)`, `pushq $index`, `jmp .PLT0`[^psabi-plt-entry]. Lúc tạo memory image, dynamic linker đặt giá trị đặc biệt vào ô GOT thứ hai và thứ ba[^psabi-got-special]. Lúc đầu, slot của hàm chứa địa chỉ lệnh `pushq` kế tiếp[^psabi-got-init]. `.PLT0` đẩy giá trị ở `GOT+8` lên stack rồi nhảy tới địa chỉ ở `GOT+16`, tức vào dynamic linker[^psabi-plt0]. Sau khi bind, `jmp` đầu entry nhảy thẳng tới hàm thay vì rơi xuống `pushq`[^psabi-subseq].
+- **Quan sát bind.** `LD_BIND_NOT` (nếu đặt) khiến dynamic linker **không** cập nhật GOT/PLT sau khi phân giải một hàm. Kết hợp biến này với `LD_DEBUG` ở các hạng mục `bindings` và `symbols`, bạn có thể xem mọi lần bind lúc chạy[^ldso-bindnot].
+- **`STV_HIDDEN`.** Symbol loại này không bị chèn thay thế nên tham chiếu trong module luôn trỏ vào bản cục bộ[^elf-vis-hidden]. Suy luận của người soạn: đó là lý do thư viện nên ẩn symbol không xuất khẩu, để lời gọi nội bộ khỏi qua PLT. Drepper hứa giải thích "khi nào và cách tránh PLT" ở phần sau của tài liệu[^dr-avoid-plt].
+- **`dlopen` và lazy.** `RTLD_LAZY` nghĩa là "chỉ phân giải symbol khi mã tham chiếu được thực thi; symbol không bao giờ được tham chiếu thì không bao giờ phân giải"[^dlopen-lazy]. Nếu `RTLD_NOW` hoặc `LD_BIND_NOW` được đặt thì phải phân giải hết symbol chưa định nghĩa trước khi `dlopen` trả về[^dlopen-now]. `LD_BIND_NOW` thắng `RTLD_LAZY`[^dlopen-lazy-var].
+- **musl** xử lý lazy binding khác glibc, xem bảng so sánh ở mục 7.
 
 </details>
 
-**Quay lại Q5:** GOT là bảng địa chỉ được ghi lúc chạy, PLT là đoạn stub dùng GOT; lazy binding bind hàm ở lần gọi đầu; RELRO khóa phần GOT chỉ bị relocation sửa sau khi relocate xong (Full RELRO kèm bind-now: cả GOT chỉ-đọc).
+**Quay lại Q5:** GOT là bảng địa chỉ được ghi lúc chạy, PLT là đoạn stub dùng GOT, và lazy binding bind hàm ở lần gọi đầu. Trong `orders`, RELRO khóa phần GOT chỉ bị relocation sửa sau khi relocate xong (Full RELRO kèm bind-now: cả GOT chỉ-đọc).
 
 ## 6. PIE và ASLR (Q6)
 
-> **Trả lời ngắn.** *PIE* (Position Independent Executable) là executable được build để chạy đúng ở địa chỉ nạp bất kỳ, nên kernel có thể đặt nó lệch ngẫu nhiên. *ASLR* là cơ chế của kernel ngẫu nhiên hóa vị trí các vùng của process, điều khiển bằng `kernel.randomize_va_space`; ở mức 1 nó ngẫu nhiên hóa mmap base, stack và trang vDSO, và với binary PIE cả điểm bắt đầu của code[^aslr-1]. Binary không PIE (`ET_EXEC`) thì nằm ở địa chỉ cố định ghi trong file[^gabi-exec-abs][^binfmt-elf-load].
+> **Trả lời ngắn.** *PIE* (Position Independent Executable) là executable được build để chạy đúng ở địa chỉ nạp bất kỳ, nên kernel có thể đặt nó lệch ngẫu nhiên. *ASLR* là cơ chế của kernel nhằm ngẫu nhiên hóa vị trí các vùng của process, điều khiển bằng `kernel.randomize_va_space`. Ở mức 1, nó ngẫu nhiên hóa mmap base, stack và trang vDSO, và với binary PIE thì cả điểm bắt đầu của code[^aslr-1]. Binary không PIE (`ET_EXEC`) nằm ở địa chỉ cố định ghi trong file[^gabi-exec-abs].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ASLR giống việc khách sạn mỗi ngày xếp lại số phòng. Kẻ cướp mà "biết" phòng 101 có két sắt thì hôm nay đến sai chỗ. Nhưng để xếp lại được, mọi biển chỉ dẫn trong khách sạn phải *tương đối* ("cách thang máy 3 bước") chứ không phải số phòng cố định — đó là position-independent.
+*Với service `orders`.* Giả sử `orders` crash trong production và log ghi một địa chỉ trong code. Chạy lại lần sau, cùng lỗi ấy lại cho một địa chỉ khác. Nguyên nhân là `orders` được build thành PIE, nên kernel đặt nó lệch một khoảng khác nhau mỗi lần chạy. Mục này nói PIE khác executable truyền thống ở đâu, kernel đặt địa chỉ thế nào, và PIE tốn thêm gì.
 
-**Executable truyền thống vs shared object.** Executable "thường chứa mã tuyệt đối": các segment phải nằm ở đúng địa chỉ ảo đã dùng khi build; còn segment của shared object thường chứa mã position-independent, nên địa chỉ ảo có thể đổi từ process này sang process khác mà không làm hỏng việc thực thi[^gabi-exec-abs][^gabi-base]. Chênh lệch giữa địa chỉ ảo thực trong bộ nhớ và địa chỉ ảo trong file là một hằng số cho mỗi object trong một process; hằng số đó là *base address*[^gabi-baseaddr]. Drepper: DSO (*dynamic shared object*, tức shared object) "gần như chỉ là một loại binary đặc biệt" — khác ở chỗ không có địa chỉ nạp cố định nên cần dynamic linker mới chạy được; với PIE sự khác biệt còn thu hẹp hơn[^dr-dso][^dr-pie].
+### 6.1 Mã tuyệt đối và mã position-independent
 
-**PIE trong kernel.** Source kernel `v6.8` xếp: PIE là `ET_DYN` có `INTERP`[^binfmt-pie] (ở đây gọi *PIE động* để phân biệt với static-PIE). Với loại này, kernel đặt `load_bias = ELF_ET_DYN_BASE` rồi — khi cờ `PF_RANDOMIZE` bật — cộng thêm `arch_mmap_rnd()`[^binfmt-load-bias]; chương trình PIE được nạp lệch từ `ELF_ET_DYN_BASE`, còn loader vào vùng mmap ngẫu nhiên độc lập[^binfmt-pie-base]. Với `ET_EXEC` thì khác: `load_bias` khởi tạo bằng 0[^binfmt-load-bias-init], dòng chú thích nói không cần xử lý đặc biệt[^binfmt-etexec], và mỗi `PT_LOAD` được map tại `load_bias + vaddr`[^binfmt-elf-load] — tức đúng tại `p_vaddr` ghi trong file, với cờ `MAP_FIXED_NOREPLACE` cho segment đầu[^binfmt-etexec-fixed]. Đây là đọc từ source `v6.8` (chi tiết cài đặt, không phải bảo đảm của `execve(2)`); khớp với gABI: executable chứa mã tuyệt đối nên segment phải nằm ở địa chỉ đã dùng khi build[^gabi-exec-abs]. Suy luận của người soạn: static-PIE (`ET_DYN` không `INTERP`) rơi vào nhóm "loader" của phân loại trên, tức vào vùng mmap ngẫu nhiên chứ không lệch từ `ELF_ET_DYN_BASE`.
+Executable truyền thống thường chứa mã tuyệt đối: các segment phải nằm đúng ở địa chỉ ảo đã dùng khi build[^gabi-exec-abs]. Segment của shared object thì thường chứa mã position-independent, nên địa chỉ ảo của nó có thể đổi từ process này sang process khác mà việc thực thi vẫn đúng[^gabi-base]. Chênh lệch giữa địa chỉ ảo thật trong bộ nhớ và địa chỉ ảo ghi trong file là một hằng số cho mỗi object trong một process. Hằng số đó là *base address*[^gabi-baseaddr].
 
-**ASLR là một sysctl.** `randomize_va_space` có ba mức 0/1/2; ý nghĩa từng mức (kèm trích tài liệu kernel) và cách quan sát trên `maps` ở [P3·05 mục 3](../03-memory/05-bo-nho-tien-trinh-linux.md). Phần riêng của chương này là phía kernel khi nạp ELF: ở mức 1 trở lên, với binary PIE cả điểm bắt đầu của code cũng được ngẫu nhiên hóa[^aslr-1]. Trong `load_elf_binary`, process được đặt cờ `PF_RANDOMIZE` trừ khi personality có `ADDR_NO_RANDOMIZE` hoặc sysctl bằng 0[^binfmt-pfrandomize]; khi dựng stack, hàm này truyền `randomize_stack_top(STACK_TOP)`[^binfmt-stack-rnd] (thân hàm đó nằm ngoài đoạn source đã đọc nên chương này không khẳng định nó phụ thuộc điều kiện nào).
+Drepper tóm lại rằng DSO "gần như chỉ là một loại binary đặc biệt", khác ở chỗ không có địa chỉ nạp cố định nên cần dynamic linker mới chạy được[^dr-dso]. Với PIE, sự khác biệt đó còn thu hẹp hơn[^dr-pie].
 
-**Chi phí của PIE: relative relocation.** Mọi con trỏ tuyệt đối nằm trong *dữ liệu* và trỏ tới đích nằm trong chính file (ví dụ mảng con trỏ hàm, vtable) cần được cộng địa chỉ nạp lúc chạy: đó là relative relocation — dynamic linker chỉ cộng địa chỉ nạp vào offset đã tính sẵn rồi ghi vào chỗ chỉ định[^dr-relative]. Con trỏ tới symbol ở object khác thì cần relocation theo symbol (xem phần Đi sâu mục 2). Drepper lưu ý executable không PIE không có relative relocation vì địa chỉ nạp biết lúc link[^dr-no-relative]; PIE phải có chúng (suy luận của người soạn từ hai câu đó).
+### 6.2 Kernel đặt PIE ở đâu
 
-<details><summary>Đi sâu: PIE trong Rust, static-PIE, quan sát backtrace</summary>
+Trong source kernel `v6.8`, PIE là `ET_DYN` có `INTERP`[^binfmt-pie] (ở đây gọi *PIE động* để phân biệt với static-PIE). Với loại này, kernel đặt `load_bias = ELF_ET_DYN_BASE`, rồi khi cờ `PF_RANDOMIZE` bật thì cộng thêm `arch_mmap_rnd()`[^binfmt-load-bias]. Executable cố định (`ET_EXEC`) thì khác: `load_bias` khởi tạo bằng 0[^binfmt-load-bias-init]. Mỗi `PT_LOAD` của nó được map tại `load_bias + vaddr`, tức đúng tại `p_vaddr` ghi trong file[^binfmt-elf-load]. Hai đoạn code này là chi tiết cài đặt của `v6.8`, không phải bảo đảm của `execve(2)`. Chúng khớp với gABI: executable chứa mã tuyệt đối nên segment phải nằm ở địa chỉ đã dùng khi build[^gabi-exec-abs]. Phần Đi sâu có thêm các chi tiết còn lại của đoạn code đó.
 
-- rustc: `-C relocation-model` điều khiển việc sinh position-independent code[^rs-reloc-intro]; `pic` — relocatable hoàn toàn, lệnh máy phải dùng chế độ địa chỉ tương đối[^rs-reloc-pic] — là mặc định cho đa số target[^rs-reloc-default]; `pie` là relocatable nhưng không hỗ trợ interposition (thay symbol theo tên bằng `LD_PRELOAD`...) và không link được vào shared library[^rs-reloc-pie]; `static` là non-relocatable, lệnh có thể dùng địa chỉ tuyệt đối[^rs-reloc-static].
-- Khi relocation model là `pic` và target hỗ trợ PIE, linker được yêu cầu (`-pie`) sinh executable PIE[^rs-reloc-link]. Target Linux của Rust đặt `position_independent_executables: true`[^rs-base-linux].
-- Nếu target không hỗ trợ đồng thời position-independent và statically linked executable, `-C target-feature=+crt-static` "thắng" `-C relocation-model=pic` và linker sinh binary tĩnh không PIE[^rs-reloc-crt]. Target `x86_64-unknown-linux-musl` đặt `static_position_independent_executables = true`[^rs-x64-musl]; định nghĩa trong spec: executable vừa tĩnh vừa position-independent *được hỗ trợ*[^rs-spec-static-pie]. Hai nguồn này chỉ cho thấy target spec khai báo khả năng đó, không mô tả cơ chế tạo static-PIE; chương này không khẳng định binary musl cụ thể của bạn có phải static-PIE hay không — tự kiểm bằng `readelf -h` (`e_type`) và `readelf -lW` (có/không `PT_INTERP`) (lệnh minh họa, chưa chạy).
-- Suy luận của người soạn (backend): địa chỉ trong crash log/backtrace của binary PIE đổi mỗi lần chạy, nên khi symbolize cần địa chỉ nạp (đọc từ `/proc/<pid>/maps`, hoặc `AT_BASE`/`AT_PHDR` ở auxv) để quy về offset trong file — xem [P3·05 mục 3](../03-memory/05-bo-nho-tien-trinh-linux.md).
-- Tắt ASLR theo từng process bằng personality `ADDR_NO_RANDOMIZE` — source kernel kiểm tra nó khi đặt `PF_RANDOMIZE`[^binfmt-pfrandomize]; `LD_PREFER_MAP_32BIT_EXEC` (chỉ x86-64) *giảm* không gian ngẫu nhiên hóa vì `MAP_32BIT` chỉ ánh xạ 2 GB thấp, nên luôn bị tắt ở secure-execution mode[^ldso-map32].
+### 6.3 ASLR là một sysctl
+
+`randomize_va_space` có ba mức 0/1/2. Ý nghĩa từng mức, kèm trích tài liệu kernel và cách quan sát qua `maps`, nằm ở [P3·05 mục 3](../03-memory/05-bo-nho-tien-trinh-linux.md). Phần riêng của chương này là phía kernel khi nạp ELF. Ở mức 1 trở lên, với binary PIE cả điểm bắt đầu của code cũng được ngẫu nhiên hóa[^aslr-1]. Trong `load_elf_binary`, process được đặt cờ `PF_RANDOMIZE` trừ khi personality có `ADDR_NO_RANDOMIZE` hoặc sysctl bằng 0[^binfmt-pfrandomize].
+
+### 6.4 Chi phí của PIE: relative relocation
+
+Mọi con trỏ tuyệt đối nằm trong *dữ liệu* và trỏ tới đích trong chính file (ví dụ mảng con trỏ hàm, hay vtable) cần được cộng địa chỉ nạp lúc chạy. Đó là relative relocation: dynamic linker chỉ cộng địa chỉ nạp vào offset đã tính sẵn rồi ghi vào chỗ chỉ định[^dr-relative]. Con trỏ tới symbol ở object khác thì cần relocation theo symbol, xem phần Đi sâu của mục 2. Drepper lưu ý rằng executable không PIE không có relative relocation, vì địa chỉ nạp đã biết lúc link[^dr-no-relative]. Suy luận của người soạn từ hai câu đó: PIE phải có chúng.
+
+<details><summary>Đi sâu: chi tiết code kernel, PIE trong Rust, static-PIE, quan sát backtrace</summary>
+
+- **Thêm về `v6.8`.** Chương trình PIE được nạp lệch từ `ELF_ET_DYN_BASE`, còn loader vào vùng mmap ngẫu nhiên độc lập[^binfmt-pie-base]. Với `ET_EXEC`, dòng chú thích trong code nói không cần xử lý đặc biệt cho `PT_LOAD` đầu tiên[^binfmt-etexec]. Segment đầu đó được map với cờ `MAP_FIXED_NOREPLACE`[^binfmt-etexec-fixed]. Suy luận của người soạn: static-PIE (`ET_DYN` không `INTERP`) rơi vào nhóm "loader" của phân loại ở trên, tức vào vùng mmap ngẫu nhiên chứ không lệch từ `ELF_ET_DYN_BASE`.
+- **Stack.** Khi dựng stack, `load_elf_binary` truyền `randomize_stack_top(STACK_TOP)`[^binfmt-stack-rnd]. Thân hàm đó nằm ngoài đoạn source đã đọc nên chương này không khẳng định nó phụ thuộc điều kiện nào.
+- **`relocation-model` của rustc.** Cờ `-C relocation-model` điều khiển việc sinh position-independent code[^rs-reloc-intro]. Giá trị `pic` là relocatable hoàn toàn, lệnh máy phải dùng chế độ địa chỉ tương đối[^rs-reloc-pic]. Nó là mặc định cho đa số target[^rs-reloc-default]. Giá trị `pie` là relocatable nhưng không hỗ trợ interposition (thay symbol theo tên bằng `LD_PRELOAD`...)[^rs-reloc-pie]. Giá trị `static` là non-relocatable, lệnh có thể dùng địa chỉ tuyệt đối[^rs-reloc-static].
+- **Khi nào ra PIE.** Nếu relocation model là `pic` và target hỗ trợ PIE, linker được yêu cầu (`-pie`) sinh executable PIE[^rs-reloc-link]. Target Linux của Rust đặt `position_independent_executables: true`[^rs-base-linux].
+- **`crt-static` và static-PIE.** Nếu target không hỗ trợ đồng thời position-independent và statically linked executable, thì `-C target-feature=+crt-static` "thắng" `-C relocation-model=pic`, và linker sinh binary tĩnh không PIE[^rs-reloc-crt]. Target `x86_64-unknown-linux-musl` đặt `static_position_independent_executables = true`[^rs-x64-musl]. Định nghĩa trong spec nói executable vừa tĩnh vừa position-independent *được hỗ trợ*[^rs-spec-static-pie]. Hai nguồn này chỉ cho thấy target spec khai báo khả năng đó, không mô tả cơ chế tạo static-PIE. Chương này không khẳng định binary musl cụ thể của bạn có phải static-PIE hay không; hãy tự kiểm bằng `readelf -h` (`e_type`) và `readelf -lW` (có hay không `PT_INTERP`), là lệnh minh họa, chưa chạy.
+- **Backtrace của service PIE.** Suy luận của người soạn (backend): địa chỉ trong crash log/backtrace của binary PIE đổi mỗi lần chạy, nên khi symbolize cần địa chỉ nạp (đọc từ `/proc/<pid>/maps`, hoặc `AT_BASE`/`AT_PHDR` trong auxv) để quy về offset trong file. Xem [P3·05 mục 3](../03-memory/05-bo-nho-tien-trinh-linux.md).
+- **Tắt ASLR theo từng process.** Dùng personality `ADDR_NO_RANDOMIZE`: source kernel kiểm tra nó khi đặt `PF_RANDOMIZE`[^binfmt-pfrandomize].
+- **`LD_PREFER_MAP_32BIT_EXEC`** (chỉ x86-64) *giảm* không gian ngẫu nhiên hóa, vì `MAP_32BIT` chỉ ánh xạ 2 GB thấp; nên biến này luôn bị tắt ở secure-execution mode[^ldso-map32].
 
 </details>
 
-**Quay lại Q6:** PIE động là executable `ET_DYN` có interpreter để kernel đặt lệch ngẫu nhiên khi ASLR bật; ASLR (`randomize_va_space`) ngẫu nhiên hóa mmap base/stack/vDSO/PIE và, ở mức 2, cả heap.
+**Quay lại Q6:** PIE động là executable `ET_DYN` có interpreter, kernel đặt lệch ngẫu nhiên khi ASLR bật, nên địa chỉ trong crash log của `orders` đổi mỗi lần chạy. ASLR (`randomize_va_space`) ngẫu nhiên hóa mmap base/stack/vDSO/PIE và, ở mức 2, cả heap[^aslr-2].
 
 ## 7. Static vs dynamic, glibc vs musl, symbol versioning (Q7)
 
-> **Trả lời ngắn.** Binary *tĩnh* chép thư viện vào file nên tự đủ; binary *động* chỉ ghi tên thư viện (`DT_NEEDED`) và nhờ `ld.so` nạp lúc chạy. Với glibc, symbol versioning khiến binary build trên distro mới có thể từ chối chạy trên distro cũ hơn khi thiếu version cần (suy luận của người soạn từ cơ chế mô tả bên dưới); musl + liên kết tĩnh cho một binary không phụ thuộc gì bên ngoài[^musl-no-deps], đổi lại có vài khác biệt hành vi (DNS, dynamic loader, stack thread). Trong container, binary tĩnh không cần `ld.so` hay `libc.so` trong image nên có thể chạy trên image `scratch` chỉ chứa binary (suy luận của người soạn; số đo ở P8·08).
+> **Trả lời ngắn.** Binary *tĩnh* chép thư viện vào file nên tự đủ; binary *động* chỉ ghi tên thư viện (`DT_NEEDED`) và nhờ `ld.so` nạp lúc chạy. Với glibc, symbol versioning khiến binary build trên distro mới có thể từ chối chạy trên distro cũ hơn khi thiếu version cần (suy luận của người soạn từ cơ chế mô tả bên dưới). Còn musl kết hợp liên kết tĩnh cho một binary không phụ thuộc gì bên ngoài[^musl-no-deps], đổi lại có vài khác biệt hành vi (DNS, dynamic loader, stack thread). Trong container, binary tĩnh không cần `ld.so` hay `libc.so` trong image, nên có thể chạy trên image `scratch` chỉ chứa binary (suy luận của người soạn; số đo ở P8·08).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): binary tĩnh như hành lý đã đóng sẵn cả bộ đồ nghề; binary động như mang theo tờ danh sách "cần cưa hiệu A phiên bản ≥ 2". Đến nơi nếu không có cưa thì khỏi làm việc. Symbol versioning là *ghi rõ phiên bản* cho từng món trong danh sách.
+*Với service `orders`.* Giả sử CI build `orders` trên một image mới, trong khi cluster chạy nó trên image nền cũ hơn. `orders` là binary động, nên nó hứa với môi trường chạy rằng sẽ có những thư viện, và cả những *phiên bản* của chúng, đúng như lúc build. Image cũ có thể không giữ được lời hứa đó. Cách khác là liên kết tĩnh với musl, để `orders` tự mang đủ mọi thứ, nhưng khi đó hành vi của libc đổi theo. Mục này cho thấy cả hai phía của lựa chọn.
 
-**Hai chế độ.** `ld.so(8)`: binary Linux cần liên kết động trừ khi truyền `-static` cho `ld(1)` lúc build[^ldso-static]. Binary tĩnh cổ điển (không PIE) được static linker hoàn thiện sẵn; kernel chỉ việc nạp và nhảy vào entry[^dr-static]. Binary động chưa "hoàn chỉnh" khi nằm trên đĩa nên kernel không chuyển điều khiển ngay cho ứng dụng, mà cần dynamic linker bổ sung phần còn lại[^dr-dynamic-incomplete]. Mỗi dependency được ghi bằng một entry `DT_NEEDED` trong `.dynamic`[^elf-needed]; shared object được nối vào process đúng một lần dù xuất hiện nhiều lần trong danh sách dependency[^gabi-once]; dynamic linker tìm symbol theo thứ tự breadth-first, từ executable rồi tới các `DT_NEEDED` theo thứ tự[^gabi-bfs].
+### 7.1 Hai chế độ: tĩnh và động
 
-**libc làm gì.** libc là thư viện cài đặt chuẩn ISO C/POSIX và các extension thông dụng; ví dụ musl được xây trên API syscall của Linux[^musl-libc-def]. Nó cung cấp lớp C cho các giao diện OS, stdio có đệm, quản lý bộ nhớ, tạo thread và đồng bộ, nạp shared library...[^musl-libc-does]. Vì vậy chọn libc là chọn nền tảng thực thi của binary (nhận xét của người soạn).
+Theo `ld.so(8)`, binary Linux cần liên kết động trừ khi truyền `-static` cho `ld(1)` lúc build[^ldso-static]. Binary tĩnh cổ điển (không PIE) được static linker hoàn thiện sẵn, kernel chỉ việc nạp rồi nhảy vào entry[^dr-static]. Binary động thì khác: khi còn nằm trên đĩa nó chưa "hoàn chỉnh", nên kernel không chuyển điều khiển ngay cho ứng dụng mà cần dynamic linker bổ sung phần còn lại[^dr-dynamic-incomplete]. Mỗi dependency được ghi bằng một entry `DT_NEEDED` trong `.dynamic`[^elf-needed]; mục 3–4 đã cho thấy `ld.so` dùng các entry đó ra sao.
 
-**Symbol versioning** giải quyết bài toán "thư viện cần đổi API/ABI nhưng không muốn đổi tên file". Drepper mô tả ba lớp:
+### 7.2 libc làm gì
 
-1. *Đổi tên file* (đổi `DT_SONAME`): thô nhất; mỗi lần có thay đổi không tương thích phải đổi tên[^dr-ver-filename]. Phụ thuộc: `DT_NEEDED` ghi tên DSO, thường lấy từ `DT_SONAME`[^dr-soname].
-2. *Versioning nội bộ kiểu Sun*: mỗi symbol gắn một version; linker ghi lại phiên bản symbol dùng và lưu danh sách version cần vào binary[^dr-ver-record]; lúc khởi động dynamic linker kiểm tra mọi interface cần có đủ version — **nếu không khớp thì DSO ở runtime không tương thích và chương trình không khởi động**[^dr-ver-fail].
-3. *Cơ chế của Linux (và GNU Hurd)*: mở rộng (2); cho phép **nhiều định nghĩa của cùng một symbol** (version phải khác nhau) và binary ghi lại *từng symbol* đã dùng version nào từ DSO nào[^dr-linux-ver-two]. Nhờ đó ABI *thường* có thể giữ ổn định lâu tùy ý[^dr-linux-ver].
+libc là thư viện cài đặt chuẩn ISO C/POSIX cùng các extension thông dụng; ví dụ musl được xây trên API syscall của Linux[^musl-libc-def]. Nó cung cấp lớp C cho các giao diện OS, stdio có đệm, quản lý bộ nhớ, tạo thread và đồng bộ, nạp shared library...[^musl-libc-does]. Vì vậy chọn libc cũng là chọn nền tảng thực thi của binary (nhận xét của người soạn).
 
-Trong file ELF, các section `.gnu.version_d` (định nghĩa version), `.gnu.version_r` (version cần) và `.gnu.version` (bảng version symbol) mang thông tin này[^elf-verdef][^elf-verneed][^elf-versym].
+### 7.3 Symbol versioning
 
-**Hệ quả với glibc.** Dynamic linker của glibc kiểm tra từng version mà object cần (đọc `elf/dl-version.c` tag `glibc-2.36`, bản của Debian bookworm; chi tiết cài đặt): nếu không tìm thấy thì tham chiếu weak không gây lỗi nghiêm trọng[^glibc-ver-weak], còn lại báo lỗi dạng `version ... not found (required by ...)`[^glibc-ver-msg]. Suy luận của người soạn: binary build trên distro có glibc mới có thể ghi nhận một version symbol mà glibc cũ không định nghĩa (Drepper nói linker ghi lại version của symbol đã dùng[^dr-ver-record]), nên dừng theo cơ chế trên. Muốn binary chạy rộng, build trên môi trường glibc *cũ nhất* bạn cần hỗ trợ (nhận xét của người soạn). Bảng nền tảng của rustc ghi `x86_64-unknown-linux-gnu` kèm "kernel 3.2+, glibc 2.17+"[^rs-glibc217]; binary bạn tự build còn phụ thuộc thêm glibc của máy build.
+Bài toán là thư viện cần đổi API/ABI mà không muốn đổi tên file. Drepper mô tả ba lớp giải pháp, từ thô tới tinh:
 
-**musl và binary tĩnh.** musl cho phép triển khai ứng dụng thành *một* file duy nhất chạy trên máy có kiến trúc và Linux kernel (hoặc lớp tương thích syscall ABI) phù hợp[^musl-single]; binary liên kết tĩnh với musl không có dependency ngoài, kể cả với tính năng như DNS lookup hay chuyển charset mà glibc cài đặt bằng dynamic loading[^musl-no-deps]. musl cũng nhắm tới độ nhỏ: binary tĩnh tối thiểu có thể dưới 10 kB mã, ngay cả khi có thread, và chương trình hữu ích có thể dưới 50 kB[^musl-small].
+1. *Đổi tên file* (đổi `DT_SONAME`) là cách thô nhất: mỗi lần có thay đổi không tương thích lại phải đổi tên[^dr-ver-filename]. Cách này dựa vào chỗ `DT_NEEDED` ghi tên DSO, thường lấy từ `DT_SONAME`[^dr-soname].
+2. *Versioning nội bộ kiểu Sun*: mỗi symbol gắn một version. Khi link, linker ghi lại phiên bản symbol đã dùng và lưu danh sách version cần vào binary[^dr-ver-record]. Lúc khởi động, dynamic linker kiểm tra mọi interface cần có đủ version. **Nếu không khớp thì DSO ở runtime không tương thích và chương trình không khởi động**[^dr-ver-fail].
+3. *Cơ chế của Linux (và GNU Hurd)* mở rộng cách (2). Nó cho phép **nhiều định nghĩa của cùng một symbol** (version phải khác nhau), và binary ghi lại *từng symbol* đã dùng version nào từ DSO nào[^dr-linux-ver-two]. Nhờ đó ABI *thường* có thể giữ ổn định lâu tùy ý[^dr-linux-ver].
 
-Khác biệt hành vi quan trọng giữa glibc và musl (theo trang "Functional differences from glibc" của musl):
+Trong file ELF, ba section mang thông tin này. `.gnu.version_d` chứa định nghĩa version[^elf-verdef]. `.gnu.version_r` chứa version cần[^elf-verneed]. `.gnu.version` là bảng version symbol[^elf-versym].
 
-| Chủ đề | glibc | musl |
-|---|---|---|
-| Lazy binding | có, hoãn đến lần gọi hàm đầu[^musl-glibc-lazy] | **không hỗ trợ**[^musl-lazy] |
-| `dlclose` | đếm tham chiếu và gỡ thư viện khi đếm về 0[^musl-dlclose-glibc] | thư viện nạp vĩnh viễn tới khi process thoát/`exec`; `dlclose` là no-op[^musl-dlclose] |
-| Symbol versioning | hỗ trợ versioned symbol qua version table trong section ELF riêng của GNU | chỉ hỗ trợ tập con cho phép chọn *version mặc định*[^musl-ver] |
-| Stack mặc định của thread | theo `RLIMIT_STACK` của main thread, thường 2–10 MB[^glibc-stack] | 128k[^musl-stack] |
-| DNS nhiều nameserver | thử lần lượt[^musl-dns-seq] | hỏi song song, nhận phản hồi đến trước[^musl-dns-parallel] |
-| DNS qua TCP | — | chưa hỗ trợ trước 1.2.4[^musl-dns-tcp] |
+### 7.4 Hệ quả với glibc
 
-**Hai khác biệt chạm thẳng vào vận hành backend** (nhận xét của người soạn, dựa trên các trích dẫn): (1) *resolver*: `search` dài hơn 256 ký tự bị musl bỏ qua[^musl-dns-256], và với tên có số dấu chấm ≥ `ndots` musl chỉ thử ở global namespace, không quay lại `search` như glibc[^musl-dns-ndots]. Kubernetes cấu hình `/etc/resolv.conf` của Pod để mở rộng truy vấn bằng `search`[^k8s-resolv], và ví dụ trong docs có `options ndots:5`[^k8s-ndots]; vì vậy DNS nội bộ Kubernetes có thể cư xử khác giữa hai libc (suy luận của người soạn). (2) *thread stack*: nếu code (hoặc thư viện C) tạo thread bằng pthread mà không đặt kích thước thì musl chỉ cấp 128k. Rust `std::thread` mặc định 2 MiB trên các nền tảng Tier-1[^rs-thread-stack]; riêng với musl, source std 1.95.0 (đã đọc ở [P3·07 mục 9](../03-memory/07-stack-alignment-padding.md), Đi sâu) đặt `DEFAULT_MIN_STACK_SIZE = 2 * 1024 * 1024` cho các target Unix không ngoại lệ (nhánh riêng chỉ có cho l4re, vxworks, espidf, nuttx) và gọi `pthread_attr_setstacksize` với `max(stack, min_stack_size)`[^std-default-stack][^std-setstacksize]. Vì thế mặc định 128k của musl không áp lên `std::thread` (suy luận của người soạn từ source; chưa đo trên musl); chỉ thread do thư viện C tự tạo mới nhận 128k.
+Dynamic linker của glibc kiểm tra từng version mà object cần (đọc `elf/dl-version.c` tag `glibc-2.36`, bản của Debian bookworm; đây là chi tiết cài đặt). Nếu không tìm thấy mà tham chiếu là weak thì không gây lỗi nghiêm trọng[^glibc-ver-weak]. Các trường hợp còn lại báo lỗi dạng `version ... not found (required by ...)`[^glibc-ver-msg].
 
-<details><summary>Đi sâu: static trong container, allocator, vì sao chưa nên nói "musl chậm"/"musl nhanh"</summary>
+Suy luận của người soạn: binary build trên distro có glibc mới có thể ghi nhận một version symbol mà glibc cũ không định nghĩa, vì Drepper nói linker ghi lại version của symbol đã dùng[^dr-ver-record]. Khi đó nó dừng theo cơ chế trên. Vì vậy, muốn `orders` chạy rộng, hãy build trên môi trường glibc *cũ nhất* bạn cần hỗ trợ (nhận xét của người soạn). Bảng nền tảng của rustc ghi `x86_64-unknown-linux-gnu` kèm "kernel 3.2+, glibc 2.17+"[^rs-glibc217]. Binary bạn tự build còn phụ thuộc thêm glibc của máy build.
 
-- Image `scratch` chỉ có binary: cần binary tĩnh; số đo kích thước image/binary ở [P8·08 mục 5](../08-containers/08-rust-trong-container.md), còn arena của glibc ở [P8·08 mục 2](../08-containers/08-rust-trong-container.md) (malloc của musl chưa được đo ở đó). Chương này giải thích vì sao tĩnh: không có `PT_INTERP` (mục 3) nên không cần `ld.so` và không cần `libc.so` trong image.
-- Rust tài liệu cho biết một số target có chế độ C runtime tĩnh *mặc định*, trong đó có `x86_64-unknown-linux-musl`; phần lớn target khác link động mặc định[^rs-crt-default]. Trong source target spec, đặc tả x86_64 musl có chú thích FIXME của team compiler: "target musl nên link động theo mặc định" và đặt `crt_static_default = true`[^rs-x64-musl-crt]; đặc tả aarch64 musl (target của máy lab) có đúng chú thích và giá trị đó[^rs-a64-musl-crt]. Nghĩa là musl tĩnh là mặc định *hiện tại*, không phải khẳng định thiết kế lâu dài (suy luận của người soạn).
-- `crt-static` thuộc loại feature mà rustc đọc qua `-C target-feature=+crt-static` / `-crt-static`[^rs-crt-flag]; target không hỗ trợ chuyển đổi sẽ bỏ qua cờ này, và Rust khuyên kiểm tra lại binary sau khi build[^rs-crt-ineffective].
-- Allocator: docs Rust không chỉ định allocator toàn cục mặc định; source std 1.95.0 hiện dùng `System`, tức `malloc` của libc, khi chương trình không đăng ký `#[global_allocator]` (chi tiết cài đặt có thể đổi, không phải lời hứa; xem [P3·06 mục 10](../03-memory/06-heap-allocator.md) và [P8·08 mục 2](../08-containers/08-rust-trong-container.md)). Vì vậy *hiện nay* allocator mặc định đi theo libc; chi tiết glibc (arena) ở [P3·06 mục 7](../03-memory/06-heap-allocator.md). Chương này không có nguồn riêng về malloc của musl (P8·08 cũng nói không đo hành vi của nó), nên không khẳng định gì về malloc của musl hay chiều nhanh/chậm.
-- Khi `dlclose`, glibc chạy destructor (nếu không còn tham chiếu) và lần mở lại sẽ chạy lại constructor; musl thì constructor chỉ chạy lần đầu và destructor chỉ chạy khi thoát[^musl-dlclose-ctor].
-- Plugin qua `dlopen` (`libloading`...) nên cân nhắc: với musl, `dlclose` là no-op[^musl-dlclose] — hành vi quan sát được khi hot-reload plugin (nhận xét của người soạn).
+### 7.5 musl và binary tĩnh
+
+musl cho phép triển khai ứng dụng thành *một* file duy nhất, chạy trên máy có kiến trúc và Linux kernel (hoặc lớp tương thích syscall ABI) phù hợp[^musl-single]. Binary liên kết tĩnh với musl không có dependency ngoài, kể cả với những tính năng như DNS lookup hay chuyển charset mà glibc cài đặt bằng dynamic loading[^musl-no-deps]. Với `orders`, nghĩa là image không cần chứa `ld.so` hay `libc.so`.
+
+### 7.6 Hai khác biệt chạm thẳng vào vận hành backend
+
+Đổi từ glibc sang musl không chỉ đổi cách liên kết. Nhận xét của người soạn, dựa trên các trích dẫn bên dưới: có hai khác biệt mà một service Rust trong container dễ chạm vào.
+
+**Resolver.** Khi `/etc/resolv.conf` có nhiều nameserver, glibc thử lần lượt từng cái[^musl-dns-seq]. Resolver của musl thì hỏi tất cả song song và nhận phản hồi đến trước[^musl-dns-parallel]. Với tên miền, `search` dài hơn 256 ký tự bị musl bỏ qua[^musl-dns-256]. Tên có số dấu chấm ≥ `ndots` thì musl chỉ thử ở global namespace, không quay lại `search` như glibc[^musl-dns-ndots]. Giờ nhìn vào Pod của `orders`: Kubernetes cấu hình `/etc/resolv.conf` của Pod để mở rộng truy vấn bằng `search`[^k8s-resolv]. Ví dụ trong docs có `options ndots:5`[^k8s-ndots]. Vì vậy DNS nội bộ Kubernetes có thể cư xử khác giữa hai libc (suy luận của người soạn).
+
+**Thread stack.** Với thread tạo bằng pthread mà không đặt kích thước stack, glibc lấy theo `RLIMIT_STACK` của main thread, thường 2–10 MB[^glibc-stack]. musl thì chỉ cấp 128k[^musl-stack]. Rust `std::thread` mặc định 2 MiB trên các nền tảng Tier-1[^rs-thread-stack]. Riêng với musl, source std 1.95.0 (đã đọc ở [P3·07 mục 9](../03-memory/07-stack-alignment-padding.md), Đi sâu) đặt `DEFAULT_MIN_STACK_SIZE = 2 * 1024 * 1024` cho các target Unix[^std-default-stack]. Khi tạo thread, std gọi `pthread_attr_setstacksize` với `max(stack, min_stack_size)`[^std-setstacksize]. Vì thế mặc định 128k của musl không áp lên `std::thread`, và chỉ thread do thư viện C tự tạo mới nhận 128k (suy luận của người soạn từ source; chưa đo trên musl).
+
+<details><summary>Đi sâu: static trong container, <code>crt-static</code>, allocator, <code>dlclose</code>, các khác biệt glibc/musl còn lại</summary>
+
+- **Image `scratch`.** Image chỉ có binary cần binary tĩnh. Số đo kích thước image/binary ở [P8·08 mục 5](../08-containers/08-rust-trong-container.md), còn arena của glibc ở [P8·08 mục 2](../08-containers/08-rust-trong-container.md) (malloc của musl chưa được đo ở đó). Chương này giải thích vì sao tĩnh được: không có `PT_INTERP` (mục 3) nên không cần `ld.so` và không cần `libc.so` trong image.
+- **Mặc định tĩnh của musl.** Tài liệu Rust cho biết một số target có chế độ C runtime tĩnh *mặc định*, trong đó có `x86_64-unknown-linux-musl`; phần lớn target khác link động mặc định[^rs-crt-default]. Trong source target spec, đặc tả x86_64 musl có chú thích FIXME của team compiler "target musl nên link động theo mặc định", cùng với `crt_static_default = true`[^rs-x64-musl-crt]. Đặc tả aarch64 musl (target của máy lab) có đúng chú thích và giá trị đó[^rs-a64-musl-crt]. Nghĩa là musl tĩnh là mặc định *hiện tại*, không phải khẳng định thiết kế lâu dài (suy luận của người soạn).
+- **Cờ `crt-static`** thuộc loại feature mà rustc đọc qua `-C target-feature=+crt-static` hoặc `-crt-static`[^rs-crt-flag]. Target không hỗ trợ chuyển đổi sẽ bỏ qua cờ này, và Rust khuyên kiểm tra lại binary sau khi build[^rs-crt-ineffective].
+- **Allocator.** Docs Rust không chỉ định allocator toàn cục mặc định. Source std 1.95.0 hiện dùng `System`, tức `malloc` của libc, khi chương trình không đăng ký `#[global_allocator]`; đây là chi tiết cài đặt có thể đổi, không phải lời hứa (xem [P3·06 mục 10](../03-memory/06-heap-allocator.md) và [P8·08 mục 2](../08-containers/08-rust-trong-container.md)). Vì vậy *hiện nay* allocator mặc định đi theo libc; chi tiết glibc (arena) ở [P3·06 mục 7](../03-memory/06-heap-allocator.md). Chương này không có nguồn riêng về malloc của musl (P8·08 cũng nói không đo hành vi của nó), nên không khẳng định gì về malloc của musl hay chiều nhanh/chậm.
+- **Nhánh stack riêng.** Theo source std 1.95.0 đã đọc, với `DEFAULT_MIN_STACK_SIZE` ở trên, nhánh riêng trong source std chỉ có cho l4re, vxworks, espidf và nuttx; các target Unix còn lại đi chung một giá trị.
+- **Lazy binding.** glibc có, trì hoãn việc phân giải đến lần gọi hàm đầu tiên[^musl-glibc-lazy]. musl không hỗ trợ, vì lý do tin cậy (báo lỗi của lazy binding là bất khả thi) và vì giảm đáng kể mã dễ lỗi phụ thuộc kiến trúc[^musl-lazy].
+- **`dlclose`.** glibc đếm tham chiếu thư viện và gỡ khi đếm về 0[^musl-dlclose-glibc]. musl nạp thư viện vĩnh viễn tới khi process thoát hoặc `exec`, và `dlclose` là no-op[^musl-dlclose]. Với constructor và destructor: glibc chạy destructor khi `dlclose` (nếu không còn tham chiếu) và lần mở lại sẽ chạy lại constructor; musl chỉ chạy constructor lần đầu và destructor khi thoát[^musl-dlclose-ctor]. Nhận xét của người soạn: plugin nạp bằng `dlopen` (`libloading`...) nên cân nhắc điều này, vì với musl hành vi quan sát được khi hot-reload plugin khác đi.
+- **Symbol versioning.** glibc hỗ trợ versioned symbol qua version table trong các section ELF riêng của GNU. musl chỉ hỗ trợ tập con cho phép chọn *version mặc định*[^musl-ver].
+- **DNS qua TCP.** resolver của musl chưa hỗ trợ DNS qua TCP trước phiên bản 1.2.4[^musl-dns-tcp].
+- **Kích thước.** musl nhắm tới độ nhỏ: binary tĩnh tối thiểu có thể dưới 10 kB mã, ngay cả khi có thread, và chương trình hữu ích có thể dưới 50 kB[^musl-small].
+- **Thứ tự và số lần nạp.** Shared object được nối vào process đúng một lần dù xuất hiện nhiều lần trong danh sách dependency[^gabi-once]. Dynamic linker tìm symbol theo thứ tự breadth-first, từ executable rồi tới các `DT_NEEDED` theo thứ tự[^gabi-bfs].
+- **Danh sách đầy đủ** các khác biệt glibc/musl nằm ở trang "Functional differences from glibc" của musl, xem phần Đọc thêm.
 
 </details>
 
-**Quay lại Q7:** tĩnh = thư viện chép vào file, không `ld.so`; động = `DT_NEEDED` + `ld.so`; symbol versioning làm binary động có thể từ chối khởi động nếu thiếu version cần; musl+tĩnh cho binary tự đủ nhưng DNS, dynamic loader và stack thread khác glibc.
+**Quay lại Q7:** tĩnh là thư viện chép vào file, không cần `ld.so`; động là `DT_NEEDED` cộng `ld.so`. Symbol versioning khiến binary động của `orders` có thể từ chối khởi động nếu image chạy thiếu version cần. musl kết hợp liên kết tĩnh cho binary tự đủ, nhưng DNS, dynamic loader và stack thread khác glibc.
 
 ## 8. Rust: crate type, target `*-musl`, `relocation-model`, `strip` (Q8)
 
-> **Trả lời ngắn.** rustc biên dịch crate thành object rồi gọi linker hệ thống (thường qua C compiler) để ra ELF[^rs-linker-cc]. *Crate type* quyết định loại artifact: `bin` → executable, `rlib` → file trung gian rustc đọc lại, `staticlib` → `.a` cho C, `cdylib` → `.so` cho ngôn ngữ khác, `dylib` → `.so` Rust, `proc-macro` → macro cho compiler. Target `x86_64-unknown-linux-musl` link libc tĩnh mặc định; target `*-gnu` link động mặc định. `-C relocation-model`, `-C relro-level`, `-C strip` điều khiển PIE, RELRO và việc gỡ symbol.
+> **Trả lời ngắn.** rustc biên dịch crate thành object rồi gọi linker hệ thống, thường qua C compiler, để ra file ELF[^rs-linker-cc]. *Crate type* quyết định loại artifact: `bin` ra executable, `rlib` ra file trung gian rustc đọc lại, `staticlib` ra `.a` cho C, `cdylib` ra `.so` cho ngôn ngữ khác, `dylib` ra `.so` Rust, `proc-macro` ra macro cho compiler. Target `x86_64-unknown-linux-musl` link libc tĩnh mặc định, còn target `*-gnu` link động mặc định. Ba cờ `-C relocation-model`, `-C relro-level` và `-C strip` điều khiển PIE, RELRO và việc gỡ symbol.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): rustc là xưởng sản xuất linh kiện, còn linker là xưởng lắp ráp. Crate type là *loại thành phẩm xưởng lắp ráp phải giao*: xe hoàn chỉnh (`bin`), bộ linh kiện đóng thùng cho nhà máy Rust khác (`rlib`), thùng tất-cả-trong-một cho nhà máy C (`staticlib`).
+*Với service `orders`.* Lệnh `cargo build --release` biến mã nguồn `orders` thành file ELF của mục 1. Những cờ nào của Cargo và rustc quyết định file đó là PIE hay không, tĩnh hay động, còn symbol hay đã gỡ? Mục này nối các mục trước vào ngôn ngữ của Rust.
 
-**Các crate type** (theo Rust Reference, mục Linkage). Một lần biên dịch có thể sinh nhiều artifact bằng cờ dòng lệnh hoặc thuộc tính `crate_type`; nếu có cờ dòng lệnh thì mọi thuộc tính `crate_type` bị bỏ qua[^rs-link-type]. Cargo đặt tương ứng qua trường `crate-type` của target; trường này chỉ chỉ định được cho library và example[^cargo-crate-type].
+### 8.1 Các crate type
+
+Một lần biên dịch có thể sinh nhiều artifact, bằng cờ dòng lệnh hoặc thuộc tính `crate_type`. Nếu có cờ dòng lệnh thì mọi thuộc tính `crate_type` bị bỏ qua[^rs-link-type]. Cargo đặt tương ứng qua trường `crate-type` của target, và trường này chỉ chỉ định được cho library và example[^cargo-crate-type]. `orders` là một `bin`; các loại còn lại xuất hiện khi service đưa code ra cho C hoặc ngôn ngữ khác.
 
 | Crate type | Sinh ra | Ghi chú (theo Reference) |
 |---|---|---|
@@ -402,19 +527,31 @@ Hình dung (nhận xét của người soạn): rustc là xưởng sản xuất 
 | `staticlib` | `.a` trên Linux | chứa mã crate cục bộ + mọi upstream; rustc không bao giờ link tới `staticlib`[^rs-link-staticlib] |
 | `proc-macro` | macro cho compiler | chỉ được export procedural macro; luôn biên dịch cho cùng target với compiler[^rs-link-procmacro] |
 
-**Rust chọn rlib hay dylib cho dependency?** Theo Reference, executable *không* có `-C prefer-dynamic` thì dependency được tìm trước ở dạng rlib[^rs-dep-prefer]; rustc book xác nhận: mặc định rustc ưu tiên link tĩnh các dependency[^rs-prefer-dynamic]. Hệ quả: một binary Rust thường chứa luôn code của `std` và crate khác (nhận xét của người soạn). Nếu tạo `staticlib`, mọi upstream phải có dạng rlib vì dynamic library không chuyển thành tĩnh được[^rs-dep-staticlib]. Mục tiêu của compiler: một thư viện không bao giờ xuất hiện hơn một lần trong artifact[^rs-single-copy].
+### 8.2 Dependency của `orders` được link tĩnh hay động
 
-**Libc: gnu hay musl?** Std "cố gắng" hỗ trợ cả C runtime liên kết tĩnh lẫn động tùy target; mỗi target có chế độ mặc định, thường là động, với ngoại lệ tĩnh như `x86_64-unknown-linux-musl`[^rs-crt-intro][^rs-crt-default]. Chọn bằng `-C target-feature=+crt-static` hoặc `-crt-static`[^rs-crt-flag]. Các target Linux Tier 1/2 đi kèm libc cụ thể: `x86_64-unknown-linux-gnu` cần kernel 3.2+ và glibc 2.17+; `x86_64-unknown-linux-musl` đi với musl 1.2.5[^rs-glibc217][^rs-musl-125]. Chi tiết đo kích thước image: [P8·08 mục 5](../08-containers/08-rust-trong-container.md).
+Khi tạo executable mà không có `-C prefer-dynamic`, dependency được tìm trước ở dạng rlib[^rs-dep-prefer]. Rustc book xác nhận điều này: mặc định rustc ưu tiên link tĩnh các dependency[^rs-prefer-dynamic]. Hệ quả là một binary Rust thường chứa luôn code của `std` và các crate khác (nhận xét của người soạn). Với `staticlib`, mọi upstream phải có dạng rlib, vì dynamic library không chuyển thành tĩnh được[^rs-dep-staticlib]. Mục tiêu của compiler là một thư viện không bao giờ xuất hiện hơn một lần trong artifact[^rs-single-copy].
 
-**PIE, RELRO, rpath** đã nói ở mục 5–6: `relocation-model=pic` là mặc định của đa số target[^rs-reloc-default]; target Linux dựa trên `base/linux.rs` đặt `position_independent_executables: true` và `relro_level: Full`[^rs-base-linux] (mỗi target có default riêng[^rs-relro-default]). `-C rpath` mặc định tắt; nếu bật, rustc thêm rpath tương đối vị trí đầu ra (`$ORIGIN` trên ELF) cho mọi dependency dạng dylib[^rs-rpath-off][^rs-rpath-on]. (`-C rpath` ảnh hưởng `DT_RUNPATH`/`DT_RPATH` ở mục 4 — nhận xét của người soạn.)
+### 8.3 Libc: `gnu` hay `musl`
 
-**Strip và kích thước.** `-C strip` điều khiển việc gỡ debuginfo và dữ liệu phụ trợ tương tự khỏi binary lúc link[^rs-strip-intro]. `none`: không đụng; `debuginfo`: gỡ section debuginfo và symbol debuginfo khỏi bảng symbol — backtrace gần như còn nguyên nhưng debugger như gdb/lldb kém tác dụng; `symbols`: như `debuginfo` và gỡ cả phần còn lại của bảng symbol tùy nền tảng[^rs-strip-values]. rustc cảnh báo `-C strip=symbols` có thể làm trace khó đọc ở nơi dựa vào bảng symbol; chương trình cần crash-reporting thường nên tránh nó[^rs-strip-warn]. Không thể dựa vào strip như một biện pháp bảo mật hay làm rối có ý nghĩa: disassembler và decompiler vẫn trích được nhiều thông tin dù không có symbol[^rs-strip-security]. Cargo: `strip` trong profile điều khiển cờ `-C strip` của rustc[^cargo-strip]. Kết quả đo giảm kích thước (4,8 MB → 595 kB) xem [P8·08 mục 6](../08-containers/08-rust-trong-container.md).
+Std cố gắng hỗ trợ cả C runtime liên kết tĩnh lẫn động tùy target[^rs-crt-intro]. Mỗi target có một chế độ mặc định, thường là động, với vài ngoại lệ tĩnh như `x86_64-unknown-linux-musl`[^rs-crt-default]. Bạn chọn bằng `-C target-feature=+crt-static` hoặc `-crt-static`[^rs-crt-flag]. Các target Linux Tier 1/2 đi kèm libc cụ thể. `x86_64-unknown-linux-gnu` cần kernel 3.2+ và glibc 2.17+[^rs-glibc217]. `x86_64-unknown-linux-musl` thì đi với musl 1.2.5[^rs-musl-125]. Chi tiết đo kích thước image nằm ở [P8·08 mục 5](../08-containers/08-rust-trong-container.md).
 
-Liên hệ với mục 1–2 (suy luận của người soạn): "strip symbols" nhắm tới bảng symbol và debug (`.symtab`, `.debug*`), là các section không cần để chạy (không có `SHF_ALLOC`[^elf-shf-alloc]); symbol động trong `.dynsym` cần cho liên kết động[^elf-dynsym] — nên binary vẫn chạy.
+### 8.4 PIE, RELRO, rpath
 
-**Symbol và `#[no_mangle]`.** `no_mangle` tắt mangling tên chuẩn: symbol là đúng tên identifier, và item được export công khai khỏi library/object file[^rs-no-mangle][^rs-no-mangle-export]; thuộc tính này `unsafe` vì symbol không mangle có thể đụng tên khác hoặc tên nổi tiếng gây UB[^rs-no-mangle-unsafe]. Đây là cách xuất hàm C ABI từ `cdylib`/`staticlib`. Định dạng mangling mặc định là "do compiler chọn, có thể đổi trong tương lai"[^rs-mangling-default], nên đừng dựa vào dạng tên `_ZN...`.
+PIE và RELRO đã nói ở mục 5–6. `relocation-model=pic` là mặc định của đa số target[^rs-reloc-default]. Target Linux dựa trên `base/linux.rs` đặt `position_independent_executables: true` và `relro_level: Full`[^rs-base-linux]. Mỗi target có default riêng[^rs-relro-default]. Cờ `-C rpath` mặc định tắt[^rs-rpath-off]. Nếu bật, rustc thêm rpath tương đối vị trí đầu ra (`$ORIGIN` trên ELF) cho mọi dependency dạng dylib[^rs-rpath-on]. Nhận xét của người soạn: `-C rpath` ảnh hưởng `DT_RUNPATH`/`DT_RPATH` ở mục 4.
 
-**Trộn Rust với C/C++.** Reference đưa hai hướng: dùng rustc để link (truyền thư viện non-Rust bằng `-L`, `-l` và/hoặc `#[link]`) hoặc dùng linker của bên ngoài với một `staticlib` Rust[^rs-foreign-linkers]. Với hướng thứ hai: chỉ một `staticlib` cho mỗi binary vì nhiều staticlib Rust có khả năng đụng nhau, và truyền rlib thẳng cho linker ngoài *chưa được hỗ trợ*[^rs-foreign-conflict]. Staticlib chứa mã của mọi dependency (kể cả `std`) và xuất mọi public symbol của chúng, nên khi link vào executable hay shared library có thể cần xử lý đặc biệt[^rs-staticlib-care]; với shared library, danh sách symbol xuất phải được giới hạn (ví dụ bằng linker hoặc symbol version script), và có thể bỏ phần không dùng bằng `--gc-sections`[^rs-staticlib-limit]. Dependency động của staticlib phải chỉ định tay; cờ `--print=native-static-libs` có thể giúp[^rs-staticlib-native]. Thuộc tính `#[link(name = "...", kind = "static")]` chọn thư viện native tĩnh; kind mặc định (`dylib`) là thư viện động[^rs-link-attr-dylib][^rs-link-attr-static].
+### 8.5 `strip` và kích thước
+
+`-C strip` điều khiển việc gỡ debuginfo và dữ liệu phụ trợ tương tự khỏi binary lúc link[^rs-strip-intro]. Có ba giá trị. `none` không đụng gì. `debuginfo` gỡ section debuginfo và symbol debuginfo khỏi bảng symbol, nên backtrace gần như còn nguyên nhưng debugger như gdb/lldb kém tác dụng. `symbols` làm như `debuginfo` và gỡ cả phần còn lại của bảng symbol, tùy nền tảng[^rs-strip-values]. rustc cảnh báo `-C strip=symbols` có thể làm trace khó đọc ở nơi dựa vào bảng symbol, và chương trình cần crash-reporting thường nên tránh nó[^rs-strip-warn]. Cũng không thể dựa vào strip như một biện pháp bảo mật hay làm rối có ý nghĩa, vì disassembler và decompiler vẫn trích được nhiều thông tin dù không có symbol[^rs-strip-security]. Trong Cargo, `strip` ở profile điều khiển cờ `-C strip` của rustc[^cargo-strip]. Kết quả đo giảm kích thước (4,8 MB → 595 kB) xem [P8·08 mục 6](../08-containers/08-rust-trong-container.md).
+
+Vì sao strip không làm `orders` chạy hỏng? Suy luận của người soạn dựa trên mục 1–2: "strip symbols" nhắm tới bảng symbol và debug (`.symtab`, `.debug*`), là các section không cần để chạy vì không có `SHF_ALLOC`[^elf-shf-alloc]. Symbol động nằm trong `.dynsym` và cần cho liên kết động[^elf-dynsym], nên binary vẫn chạy.
+
+### 8.6 Symbol và `#[no_mangle]`
+
+`no_mangle` tắt mangling tên chuẩn, nên symbol là đúng tên identifier[^rs-no-mangle]. Item đó cũng được export công khai khỏi library hay object file[^rs-no-mangle-export]. Thuộc tính này `unsafe`, vì một symbol không mangle có thể đụng tên khác, hoặc đụng một tên nổi tiếng và gây UB[^rs-no-mangle-unsafe]. Đây là cách xuất hàm C ABI từ `cdylib`/`staticlib`. Định dạng mangling mặc định "do compiler chọn, có thể đổi trong tương lai"[^rs-mangling-default], nên đừng dựa vào dạng tên `_ZN...`.
+
+### 8.7 Trộn Rust với C/C++
+
+Reference đưa hai hướng. Hướng thứ nhất là dùng rustc để link, truyền thư viện non-Rust bằng `-L`, `-l` và/hoặc `#[link]`. Hướng thứ hai là dùng linker bên ngoài với một `staticlib` Rust[^rs-foreign-linkers]. Với hướng thứ hai, mỗi binary chỉ nên có một `staticlib`, vì nhiều staticlib Rust có khả năng đụng nhau, và việc truyền rlib thẳng cho linker ngoài *chưa được hỗ trợ*[^rs-foreign-conflict]. Staticlib chứa mã của mọi dependency (kể cả `std`) và xuất mọi public symbol của chúng, nên khi link vào executable hay shared library có thể cần xử lý đặc biệt[^rs-staticlib-care]. Với shared library, danh sách symbol xuất phải được giới hạn (ví dụ bằng linker hoặc symbol version script), và có thể bỏ phần không dùng bằng `--gc-sections`[^rs-staticlib-limit]. Dependency động của staticlib phải chỉ định tay, và cờ `--print=native-static-libs` có thể giúp[^rs-staticlib-native]. Thuộc tính `#[link(name = "...", kind = "static")]` chọn thư viện native tĩnh[^rs-link-attr-static]. Kind mặc định là `dylib`, tức thư viện động[^rs-link-attr-dylib].
 
 <details><summary>Đi sâu: <code>Cargo.toml</code> mẫu, unwinding qua ranh giới, <code>dlopen</code>, quy ước đặt cờ</summary>
 
@@ -434,42 +571,42 @@ pub extern "C" fn add(a: i32, b: i32) -> i32 { a + b }
 
 Một số điểm bổ sung:
 
-- Nếu build tĩnh bằng musl: `rustup target add x86_64-unknown-linux-musl` rồi `cargo build --release --target x86_64-unknown-linux-musl` (lệnh minh họa); sau đó dùng `readelf -lW` để kiểm tra *không có* `PT_INTERP` và `readelf -d` không có `NEEDED` — Rust khuyên tự kiểm tra binary sau khi build vì target không hỗ trợ có thể bỏ qua cờ[^rs-crt-ineffective].
-- Ranh giới unwinding: nếu artifact "có thể unwind" thì mọi crate trong đó phải build với panic strategy `unwind`; nếu không, unwinding có thể gây UB. Khi *không* link bằng rustc (ví dụ `dlopen`), bạn tự bảo đảm điều này[^rs-unwind-prohibited][^rs-unwind-dlopen].
-- Với `dlopen` plugin viết bằng Rust: hai `cdylib` mỗi cái chứa bản sao `std` riêng (suy luận của người soạn: mỗi cdylib là artifact độc lập chứa đủ upstream, theo định nghĩa `staticlib`/`cdylib` ở trên); đừng truyền kiểu có layout Rust qua ranh giới, dùng `extern "C"` và kiểu `#[repr(C)]` (nhận xét của người soạn).
-- Cờ chuyển cho linker: `-C link-arg=...` (ví dụ `-Clink-arg=file.o` để link `.o`)[^rs-foreign-linkers]. Một ví dụ liên quan: musl hỗ trợ tăng stack thread mặc định qua program header `PT_GNU_STACK`, đặt lúc link bằng `-Wl,-z,stack-size=N`[^musl-stack-ptgnu]; chuyển nó qua `-C link-arg` là cách dùng (nhận xét của người soạn: nên đo trước khi áp dụng).
+- **Build tĩnh bằng musl.** Chạy `rustup target add x86_64-unknown-linux-musl` rồi `cargo build --release --target x86_64-unknown-linux-musl` (lệnh minh họa). Sau đó dùng `readelf -lW` để kiểm tra *không có* `PT_INTERP`, và `readelf -d` không có `NEEDED`. Rust khuyên tự kiểm tra binary sau khi build, vì target không hỗ trợ có thể bỏ qua cờ[^rs-crt-ineffective].
+- **Ranh giới unwinding.** Nếu artifact "có thể unwind" thì mọi crate trong đó phải build với panic strategy `unwind`; nếu không, unwinding có thể gây UB[^rs-unwind-prohibited]. Khi *không* link bằng rustc (ví dụ `dlopen`), bạn tự bảo đảm điều này[^rs-unwind-dlopen].
+- **Plugin `dlopen` viết bằng Rust.** Hai `cdylib` mỗi cái chứa bản sao `std` riêng (suy luận của người soạn: mỗi cdylib là artifact độc lập chứa đủ upstream, theo định nghĩa `staticlib`/`cdylib` ở trên). Đừng truyền kiểu có layout Rust qua ranh giới; dùng `extern "C"` và kiểu `#[repr(C)]` (nhận xét của người soạn).
+- **Cờ chuyển cho linker** là `-C link-arg=...`, ví dụ `-Clink-arg=file.o` để link một `.o`[^rs-foreign-linkers]. Một ví dụ liên quan: musl hỗ trợ tăng stack thread mặc định qua program header `PT_GNU_STACK`, đặt lúc link bằng `-Wl,-z,stack-size=N`[^musl-stack-ptgnu]. Chuyển nó qua `-C link-arg` là cách dùng (nhận xét của người soạn: nên đo trước khi áp dụng).
 
 </details>
 
-**Quay lại Q8:** crate type chọn *loại ELF* rustc giao (executable, rlib, staticlib, cdylib...); target quyết định libc và tĩnh/động; `relocation-model`, `relro-level`, `strip` là ba cờ điều khiển PIE, RELRO và lượng symbol trong file.
+**Quay lại Q8:** crate type chọn *loại ELF* rustc giao (executable, rlib, staticlib, cdylib...). Target quyết định libc và tĩnh/động. `relocation-model`, `relro-level`, `strip` là ba cờ điều khiển PIE, RELRO và lượng symbol trong file `orders`.
 
 ## Liên hệ với Rust (tổng hợp)
 
-Cả chương gắn với Rust ở mục 8; phần này gom lại thành checklist cho một service Rust triển khai trên Linux:
+Cả chương gắn với Rust ở mục 8. Phần này gom lại thành checklist cho một service Rust như `orders` triển khai trên Linux:
 
 1. *Libc*: chọn có chủ đích `*-gnu` (động, glibc; build ở môi trường glibc cũ nhất cần hỗ trợ) hay `*-musl` (tĩnh; chấp nhận khác biệt DNS và allocator; kiểm tra `PT_INTERP`/`NEEDED` sau khi build).
 2. *Hardening*: mặc định đã là PIE và Full RELRO; đừng hạ `relro-level` hay `relocation-model` nếu chưa có lý do đo được.
 3. *Kích thước và debug*: `strip` hợp cho image sản xuất nhưng giữ symbol cho crash-reporting; địa chỉ PIE đổi theo lần chạy nên cần base address khi symbolize.
 4. *Ranh giới C/Rust*: `cdylib`/`staticlib` + `#[unsafe(no_mangle)]` + `extern "C"`; một `staticlib` mỗi binary; không dựa vào định dạng mangling.
-5. *Vận hành*: khi service không khởi động được vì thiếu thư viện hay version, hãy nghĩ tới `ld.so` (mục 3–4) — dùng `ld.so --list` hoặc `LD_DEBUG=libs` để chẩn đoán; không dùng `ldd` với binary không tin cậy (nhận xét của người soạn).
+5. *Vận hành*: khi service không khởi động được vì thiếu thư viện hay version, hãy nghĩ tới `ld.so` (mục 3–4). Dùng `ld.so --list` hoặc `LD_DEBUG=libs` để chẩn đoán; không dùng `ldd` với binary không tin cậy (nhận xét của người soạn).
 
 ## Tóm tắt
 
-- ELF có header ở offset 0 và hai bảng mục lục: section (linker/công cụ) và segment (loader); file dùng để dựng process bắt buộc có program header table, còn section header table bắt buộc với file dùng lúc linking[^gabi-pht][^gabi-sht].
-- Relocation là bước nối tham chiếu symbol với định nghĩa[^gabi-reloc]; shared object để lại relocation động cho `ld.so` xử lý lúc chạy[^dr-relative][^dr-symreloc-cost].
-- `execve` đọc `PT_INTERP`, map chương trình và interpreter, dựng auxv và nhảy vào interpreter; `ld.so` nạp thư viện, relocate, khởi tạo rồi chạy chương trình[^dr-ptinterp][^dr-steps].
-- Thứ tự tìm thư viện: `DT_RPATH` (nếu không có `DT_RUNPATH`) → `LD_LIBRARY_PATH` → `DT_RUNPATH` → `ld.so.cache` → `/lib`, `/usr/lib`; `LD_LIBRARY_PATH` bị bỏ qua ở secure-execution[^ldso-order-rpath][^ldso-order-ldlp].
-- GOT là bảng địa chỉ ghi lúc chạy; PLT là stub; lazy binding bind hàm ở lần gọi đầu[^dr-plt-resolve]; RELRO + bind-now khóa GOT chỉ-đọc[^dr-relro][^dr-now].
-- PIE động = `ET_DYN` có interpreter, được kernel đặt lệch từ `ELF_ET_DYN_BASE` và ngẫu nhiên thêm khi `PF_RANDOMIZE` bật[^binfmt-pie][^binfmt-load-bias]; `randomize_va_space` 0/1/2 điều khiển mức ngẫu nhiên hóa[^aslr-0][^aslr-1][^aslr-2].
-- Binary tĩnh cổ điển không cần `ld.so`[^dr-static]; symbol versioning khiến binary động có thể không khởi động nếu thiếu version cần[^dr-ver-fail]; musl không có lazy binding và `dlclose` là no-op[^musl-lazy][^musl-dlclose].
-- Rust: `bin` mặc định *ưu tiên* liên kết tĩnh các dependency Rust (thiếu rlib thì rơi sang động)[^rs-prefer-dynamic]; `relocation-model=pic` là mặc định của đa số target[^rs-reloc-default]; `x86_64-unknown-linux-musl` tĩnh theo mặc định[^rs-crt-default]; không thể dựa vào `strip` như biện pháp bảo mật có ý nghĩa[^rs-strip-security].
+- ELF có header ở offset 0 và hai bảng mục lục: section (linker/công cụ) và segment (loader). File dùng để dựng process bắt buộc có program header table[^gabi-pht]. Section header table thì bắt buộc với file dùng lúc linking[^gabi-sht].
+- Relocation là bước nối tham chiếu symbol với định nghĩa[^gabi-reloc]. Shared object để lại relocation động cho `ld.so` xử lý lúc chạy[^dr-relative].
+- `execve` đọc `PT_INTERP`, map chương trình và interpreter, dựng auxv rồi nhảy vào interpreter[^dr-ptinterp]. `ld.so` nạp thư viện, relocate, khởi tạo rồi chạy chương trình[^dr-steps].
+- Thứ tự tìm thư viện: `DT_RPATH` (nếu không có `DT_RUNPATH`) → `LD_LIBRARY_PATH` → `DT_RUNPATH` → `ld.so.cache` → `/lib`, `/usr/lib`[^ldso-order-rpath]. `LD_LIBRARY_PATH` bị bỏ qua ở secure-execution[^ldso-order-ldlp].
+- GOT là bảng địa chỉ ghi lúc chạy, PLT là stub, và lazy binding bind hàm ở lần gọi đầu[^dr-plt-resolve]. RELRO kèm bind-now khóa GOT chỉ-đọc[^dr-relro].
+- PIE động là `ET_DYN` có interpreter, được kernel đặt lệch từ `ELF_ET_DYN_BASE` và ngẫu nhiên thêm khi `PF_RANDOMIZE` bật[^binfmt-load-bias]. `randomize_va_space` 0/1/2 điều khiển mức ngẫu nhiên hóa[^aslr-1].
+- Binary tĩnh cổ điển không cần `ld.so`[^dr-static]. Symbol versioning khiến binary động có thể không khởi động nếu thiếu version cần[^dr-ver-fail]. musl không có lazy binding[^musl-lazy]. `dlclose` của musl là no-op[^musl-dlclose].
+- Rust: `bin` mặc định *ưu tiên* liên kết tĩnh các dependency Rust (thiếu rlib thì rơi sang động)[^rs-prefer-dynamic]. `relocation-model=pic` là mặc định của đa số target[^rs-reloc-default]. `x86_64-unknown-linux-musl` tĩnh theo mặc định[^rs-crt-default]. Không thể dựa vào `strip` như biện pháp bảo mật có ý nghĩa[^rs-strip-security].
 
 ## Câu hỏi tự kiểm tra
 
 1. Section và segment khác nhau thế nào, và bảng nào *bắt buộc* với file để chạy?
 <details><summary>Đáp án</summary>
 
-Section (section header table) là đơn vị cho linker; segment (program header table) là đơn vị cho loader; một segment chứa một hoặc nhiều section[^elf-phdr]. File dùng để dựng process phải có program header table; section header table thì file dùng lúc linking mới bắt buộc[^gabi-pht][^gabi-sht].
+Section (section header table) là đơn vị cho linker; segment (program header table) là đơn vị cho loader; một segment chứa một hoặc nhiều section[^elf-phdr]. File dùng để dựng process phải có program header table[^gabi-pht]. Section header table thì file dùng lúc linking mới bắt buộc[^gabi-sht].
 
 </details>
 
@@ -497,21 +634,21 @@ Linker không cho phép nhiều định nghĩa `STB_GLOBAL` cùng tên; weak cù
 5. Kernel làm gì khi gặp `PT_INTERP`, và đưa cho `ld.so` thông tin bằng cách nào?
 <details><summary>Đáp án</summary>
 
-Đọc đường dẫn interpreter, mở file, map nó cùng chương trình[^binfmt-interp][^binfmt-open][^binfmt-interp-load]; đặt auxiliary vector (có `AT_PHDR`, `AT_BASE`, `AT_ENTRY`) lên stack[^dr-auxv][^binfmt-auxv]; rồi nhảy vào entry của interpreter[^dr-entry].
+Kernel đọc đường dẫn interpreter rồi mở file[^binfmt-open]. Sau đó nó map file này cùng chương trình[^binfmt-interp-load]. Nó đặt auxiliary vector (có `AT_PHDR`, `AT_BASE`, `AT_ENTRY`) lên stack[^binfmt-auxv]. Cuối cùng nó nhảy vào entry của interpreter[^dr-entry].
 
 </details>
 
 6. Binary có `DT_RUNPATH`, chạy với `LD_LIBRARY_PATH=/x`. Thư mục nào được thử trước? Và nếu binary là set-user-ID?
 <details><summary>Đáp án</summary>
 
-`LD_LIBRARY_PATH` trước `DT_RUNPATH`[^ldso-order-ldlp][^ldso-order-runpath]. Với set-user-ID (secure-execution mode) biến này bị bỏ qua[^ldso-order-ldlp][^ldso-secure]. `DT_RUNPATH` chỉ dùng cho dependency trực tiếp của object chứa nó[^ldso-order-runpath].
+`LD_LIBRARY_PATH` được thử trước `DT_RUNPATH`, theo thứ tự ở bảng mục 4.2[^ldso-order-ldlp]. Với set-user-ID (secure-execution mode) biến này bị bỏ qua[^ldso-secure]. `DT_RUNPATH` chỉ dùng cho dependency trực tiếp của object chứa nó[^ldso-order-runpath].
 
 </details>
 
 7. Mô tả bước lazy binding ở lần gọi hàm ngoài đầu tiên.
 <details><summary>Đáp án</summary>
 
-Gọi vào entry PLT → nhảy gián tiếp qua slot GOT, lúc đầu trỏ vào lệnh sau trong chính entry PLT → `push` offset relocation (IA-32; x86-64 đẩy index), nhảy PLT0, vào dynamic linker → tìm địa chỉ, ghi vào slot GOT, nhảy tới hàm; lần sau slot đã chứa địa chỉ thật[^dr-plt-first][^dr-plt0][^dr-plt-resolve][^psabi-index].
+Lời gọi vào entry PLT, lệnh đầu nhảy gián tiếp qua slot GOT, lúc đầu trỏ vào lệnh sau trong chính entry PLT[^dr-plt-first]. Lệnh `push` đẩy offset relocation (IA-32; x86-64 đẩy index)[^psabi-index]. Sau đó nó nhảy PLT0 vào dynamic linker[^dr-plt0]. Dynamic linker tìm địa chỉ, ghi vào slot GOT rồi nhảy tới hàm; lần sau slot đã chứa địa chỉ thật[^dr-plt-resolve].
 
 </details>
 
@@ -525,21 +662,21 @@ Partial: hàm vẫn phân giải lười, phần `.got.plt` ghi được còn `.
 9. Vì sao binary PIE phải có relative relocation còn executable truyền thống thì không?
 <details><summary>Đáp án</summary>
 
-Executable truyền thống có địa chỉ nạp biết lúc link nên static linker tự relocate[^dr-no-relative]. PIE động được kernel đặt ở địa chỉ nạp không biết trước lúc link (lệch từ `ELF_ET_DYN_BASE`, và ngẫu nhiên thêm khi ASLR bật)[^binfmt-load-bias], nên con trỏ tuyệt đối trong dữ liệu trỏ tới địa chỉ trong chính file phải được cộng địa chỉ nạp lúc chạy — việc của relative relocation[^dr-relative] (suy luận từ hai nguồn đó).
+Executable truyền thống có địa chỉ nạp biết lúc link nên static linker tự relocate[^dr-no-relative]. PIE động được kernel đặt ở địa chỉ nạp không biết trước lúc link (lệch từ `ELF_ET_DYN_BASE`, và ngẫu nhiên thêm khi ASLR bật)[^binfmt-load-bias]. Vì vậy con trỏ tuyệt đối trong dữ liệu trỏ tới địa chỉ trong chính file phải được cộng địa chỉ nạp lúc chạy, và đó là việc của relative relocation[^dr-relative]. (Phần suy ra này là suy luận từ hai nguồn đó.)
 
 </details>
 
 10. Vì sao binary build trên distro mới có thể không chạy trên distro cũ dù cùng kiến trúc, và musl tĩnh tránh điều đó thế nào?
 <details><summary>Đáp án</summary>
 
-Linker ghi vào binary danh sách version symbol cần; dynamic linker kiểm tra lúc khởi động và nếu không khớp thì không khởi động[^dr-ver-record][^dr-ver-fail]; glibc 2.36 cũng báo lỗi khi không tìm thấy version cần (trừ tham chiếu weak)[^glibc-ver-weak]. Việc binary build trên glibc mới ghi version mới hơn là suy luận của người soạn. musl tĩnh không có dependency ngoài[^musl-no-deps].
+Linker ghi vào binary danh sách version symbol cần[^dr-ver-record]. Dynamic linker kiểm tra lúc khởi động và nếu không khớp thì không khởi động[^dr-ver-fail]. glibc 2.36 cũng báo lỗi khi không tìm thấy version cần, trừ tham chiếu weak[^glibc-ver-weak]. Việc binary build trên glibc mới ghi version mới hơn là suy luận của người soạn. musl tĩnh không có dependency ngoài[^musl-no-deps].
 
 </details>
 
 11. Kể ba khác biệt hành vi giữa glibc và musl có thể ảnh hưởng một service Rust.
 <details><summary>Đáp án</summary>
 
-Resolver: musl hỏi song song mọi nameserver[^musl-dns-parallel] và xử lý `ndots`/`search` khác[^musl-dns-ndots]; dynamic loader: musl không có lazy binding và `dlclose` là no-op[^musl-lazy][^musl-dlclose]; thread stack mặc định 128k so với 2–10 MB của glibc[^musl-stack][^glibc-stack].
+Resolver: musl hỏi song song mọi nameserver[^musl-dns-parallel]. Musl cũng xử lý `ndots`/`search` khác glibc[^musl-dns-ndots]. Dynamic loader: musl không có lazy binding[^musl-lazy]. Ở musl, `dlclose` là no-op[^musl-dlclose]. Thread stack mặc định: musl 128k[^musl-stack]. glibc thì theo `RLIMIT_STACK`, thường 2–10 MB[^glibc-stack].
 
 </details>
 
@@ -722,7 +859,6 @@ Không nên coi là biện pháp bảo vệ: nguồn nói không thể dựa và
 [^binfmt-load-bias]: Linux v6.8, fs/binfmt_elf.c, load_elf_binary — <https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/binfmt_elf.c> — "if (interpreter) { load_bias = ELF_ET_DYN_BASE; if (current->flags & PF_RANDOMIZE) load_bias += arch_mmap_rnd();"
 [^binfmt-load-bias-init]: Linux v6.8, fs/binfmt_elf.c, load_elf_binary — <https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/binfmt_elf.c> — "unsigned long load_bias = 0, phdr_addr = 0;"
 [^binfmt-etexec]: Linux v6.8, fs/binfmt_elf.c, load_elf_binary — <https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/binfmt_elf.c> — "This logic is run once for the first LOAD Program Header for ET_EXEC binaries. No special handling is needed."
-[^aslr-0]: Linux kernel docs, admin-guide/sysctl/kernel, randomize_va_space — <https://docs.kernel.org/admin-guide/sysctl/kernel.html> — "Turn the process address space randomization off."
 [^aslr-2]: Linux kernel docs, admin-guide/sysctl/kernel, randomize_va_space — <https://docs.kernel.org/admin-guide/sysctl/kernel.html> — "Additionally enable heap randomization. This is the default if CONFIG_COMPAT_BRK is disabled."
 [^binfmt-pfrandomize]: Linux v6.8, fs/binfmt_elf.c, load_elf_binary — <https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/binfmt_elf.c> — "if (!(current->personality & ADDR_NO_RANDOMIZE) && randomize_va_space) current->flags |= PF_RANDOMIZE;"
 [^binfmt-stack-rnd]: Linux v6.8, fs/binfmt_elf.c, load_elf_binary — <https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/binfmt_elf.c> — "retval = setup_arg_pages(bprm, randomize_stack_top(STACK_TOP),"

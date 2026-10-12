@@ -1,6 +1,6 @@
 # P13 · Chương 03 — Trạng thái, hành vi và action
 
-> Nguồn chính: Lamport, *Specifying Systems* (viết tắt SS), chương 2–4 (đồng hồ giờ, giao diện bất đồng bộ, FIFO), chương 7 (lời khuyên viết spec) và chương 14 (TLC), bản PDF miễn phí trên trang của tác giả. Mã spec của sách dùng ở dạng ASCII, khớp với thư mục `specifications/SpecifyingSystems` của repo `tlaplus/Examples` tại commit `6a7b26a31c1a6aeec789b455e9bbfa3b3ad2728f`. Spec do **người soạn** tự viết được đánh dấu rõ. **Chương này không chạy TLC và không chạy code**: không có kết quả model checking nào được khẳng định, trừ chỗ nguồn nói rõ. Trang Learn TLA+ là trang sống (không có số phiên bản), trích tại thời điểm soạn.
+> Nguồn chính: Lamport, *Specifying Systems* (viết tắt SS), các chương 2–4 (đồng hồ giờ, giao diện bất đồng bộ, FIFO), chương 7 (lời khuyên viết spec) và chương 14 (TLC); đọc bản PDF miễn phí trên trang của tác giả. Spec của sách ở dạng ASCII, khớp với thư mục `specifications/SpecifyingSystems` của repo `tlaplus/Examples` tại commit `6a7b26a31c1a6aeec789b455e9bbfa3b3ad2728f`. Spec do **người soạn** tự viết được đánh dấu rõ. **Chương này không chạy TLC và không chạy code**: kết quả model checking chỉ được nêu khi nguồn nói rõ. Trang Learn TLA+ là trang sống (không có số phiên bản), trích tại thời điểm soạn.
 
 ## Bạn sẽ hiểu được gì
 
@@ -15,59 +15,64 @@
 
 ## Kiến thức cần trước
 
-- [Chương 02 — Toán nền tảng](02-toan-nen-tang.md): chương này dùng các ký hiệu sau; gặp ký hiệu lạ thì quay lại đúng mục — danh sách bullet `/\` `\/` và lượng từ `\E`, `\A` ở mục 1; tập hợp, `\in`, `..`, `=` và `#` ở mục 2; hàm `[x \in S |-> e]` và `EXCEPT` (kể cả `@`) ở mục 3; record `[a : S]`, tuple `<<a, b>>` và sequence (`Seq`, `Head`, `Tail`, `Append`, `Len`, `\o`) ở mục 4; `IF … THEN … ELSE` ở mục 6; module `Naturals`, `Sequences` ở mục 7; "TLA+ không có kiểu" ở mục 8.
+- [Chương 02 — Toán nền tảng](02-toan-nen-tang.md): chương này dùng các ký hiệu ở đó, nên gặp ký hiệu lạ thì quay lại đúng mục. Danh sách bullet `/\` `\/` và lượng từ `\E`, `\A` ở mục 1; tập hợp, `\in`, `..`, `=` và `#` ở mục 2; hàm `[x \in S |-> e]` và `EXCEPT` (kể cả `@`) ở mục 3; record `[a : S]`, tuple `<<a, b>>` và sequence (`Seq`, `Head`, `Tail`, `Append`, `Len`, `\o`) ở mục 4; `IF … THEN … ELSE` ở mục 6; module `Naturals`, `Sequences` ở mục 7; "TLA+ không có kiểu" ở mục 8.
 - [Chương 01 — Vì sao đặc tả hình thức](01-vi-sao-dac-ta-hinh-thuc.md): bối cảnh vì sao ta mô hình hóa thiết kế trước khi code.
+- Bạn đã dùng connection pool của một database client và biết request phải chờ khi pool hết connection; chương này lấy đúng tình huống đó làm ví dụ chạy suốt.
 
-(Cách TLC kiểm tra invariant ở [Chương 04](04-invariant-va-tlc.md); tính chất "rồi sẽ xảy ra" và fairness ở [Chương 05](05-liveness-va-fairness.md); PlusCal, cú pháp giống code, ở [Chương 06](06-pluscal.md). Chương này chỉ nói phần *an toàn* của spec: state, bước đi, và hình dạng chuẩn của một spec.)
+(Cách TLC kiểm invariant ở [Chương 04](04-invariant-va-tlc.md); tính chất "rồi sẽ xảy ra" và fairness ở [Chương 05](05-liveness-va-fairness.md); PlusCal, cú pháp giống code, ở [Chương 06](06-pluscal.md). Chương này chỉ nói phần *an toàn* của spec: state, bước đi, và hình dạng chuẩn của một spec.)
 
 ## 1. State, behavior và spec (Q1)
 
-> **Trả lời ngắn.** *State* là một phép gán giá trị cho các biến[^ss-behavior]. *Behavior* là một dãy state — mỗi bước là một cặp state liền nhau[^ss-step] — biểu diễn một lần thực thi của hệ[^ss-behavior]. *Đặc tả* (spec) là cách mô tả **tập** các behavior tương ứng với những lần thực thi đúng của hệ[^ss-spec-set].
+> **Trả lời ngắn.** *State* là một phép gán giá trị cho các biến, còn *behavior* là một dãy state, biểu diễn một lần thực thi của hệ[^ss-behavior]. Hai state liền nhau trong dãy tạo thành một *step* (bước)[^ss-step]. *Đặc tả* (spec) không mô tả một lần chạy cụ thể mà mô tả cả **tập** behavior ứng với những lần thực thi đúng của hệ[^ss-spec-set].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có log của một service, nhưng mỗi dòng log là ảnh chụp *toàn bộ* các biến quan tâm tại một thời điểm — số kết nối rảnh, độ dài hàng đợi, vai trò leader. Cả file log là một behavior; một dòng là một state; chuyển từ dòng này sang dòng kế là một bước. Spec không mô tả *một* file log mà mô tả *mọi* file log được phép.
+*Với service của bạn.* Giả sử `orders` là một service Rust có pool gồm `Size` connection tới database. Mỗi request lấy một connection, chạy query rồi trả lại; nếu pool hết connection thì request xếp hàng chờ. Ta sẽ bám theo pool này suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Để mô tả pool, ba con số là đủ: `free` (connection đang rảnh), `busy` (connection đang có request giữ) và `waiting` (số request đang chờ). Giả sử mỗi lần một trong ba số đổi, bạn ghi một dòng log chụp *cả ba*, kiểu `free=2 busy=1 waiting=0`. Khi đó mỗi dòng log là một state, cả file log là một behavior, và đi từ dòng này sang dòng kế là một step. Spec của pool không mô tả một file log cụ thể mà mô tả *mọi* file log mà một pool chạy đúng có thể ghi ra.
 
-*State.* Lamport định nghĩa state là phép gán giá trị cho biến. Ông nhấn mạnh biến ở đây là *tất cả* biến: một state có thể coi là trạng thái tiềm năng của cả vũ trụ[^ss-all-vars]. Trong thực hành ta chỉ khai báo vài biến, nhưng ý nghĩa vẫn vậy — spec chỉ "nhìn thấy" các biến đã khai báo (xem mục 4 về hệ quả).
+Pool giúp ta lấy cảm giác; còn khi cần đọc trọn một spec, ta dùng đồng hồ giờ của Lamport vì nó nhỏ nhất có thể. Hai ví dụ đi song song.
 
-*Behavior.* Sách đối chiếu với cách nhà khoa học mô tả hệ vật lý, rồi nhận xét máy tính khác ở chỗ ta có thể coi trạng thái đổi theo từng bước rời rạc[^ss-discrete]. Vì vậy một lần thực thi được biểu diễn bằng *dãy* state. Ví dụ đồng hồ giờ: hiển thị `hr` chạy 11 → 12 → 1 → 2…[^ss-hr-behavior]
+Hãy bắt đầu từ state. Lamport định nghĩa state là phép gán giá trị cho biến, và ông nhấn mạnh rằng "biến" ở đây là *tất cả* biến: một state có thể coi là trạng thái tiềm năng của cả vũ trụ[^ss-all-vars]. Thực tế ta chỉ khai báo vài biến, với pool là ba biến trên. Nhưng spec chỉ "nhìn thấy" đúng những biến đã khai báo, và mục 4 sẽ cho thấy điều đó kéo theo hệ quả gì.
+
+Từ state đến behavior. Sách mở đầu bằng cách nhà khoa học mô tả hệ vật lý, rồi nhận xét máy tính khác ở chỗ ta có thể coi trạng thái đổi theo từng bước rời rạc[^ss-discrete]. Nhờ vậy một lần thực thi biểu diễn được bằng *dãy* state. Với đồng hồ giờ, màn hình hiển thị `hr` chạy 11 → 12 → 1 → 2…[^ss-hr-behavior]
 
 ```mermaid
 flowchart LR
   s0["hr = 11"] --> s1["hr = 12"] --> s2["hr = 1"] --> s3["hr = 2"] --> s4["…"]
 ```
 
-*Step.* Một cặp state liền nhau gọi là một *step* (bước)[^ss-step]. Mọi thứ về "hệ đổi như thế nào" trong TLA+ đều là phát biểu về các step.
+Hai state liền nhau, như `hr = 1` rồi `hr = 2`, là một *step*[^ss-step]. Mọi điều TLA+ nói về việc hệ đổi thế nào đều là phát biểu về các step.
 
-*Spec là tập behavior.* Đặc tả một hệ nghĩa là chỉ ra một tập các behavior hợp lệ[^ss-spec-set]. Sách chốt: công thức `HC` là spec của đồng hồ vì nó được thỏa đúng bởi những behavior biểu diễn lịch sử mà đồng hồ chạy đúng[^ss-spec-exact].
+Còn spec là gì? Đặc tả một hệ nghĩa là chỉ ra một tập behavior hợp lệ[^ss-spec-set]. Với đồng hồ, sách chốt rằng công thức `HC` là spec vì đúng những behavior biểu diễn lịch sử trong đó đồng hồ chạy đúng thì thỏa nó[^ss-spec-exact]. Bảng dưới đặt bốn khái niệm cạnh nhau, kèm ví dụ ở cả hai hệ:
 
-| Khái niệm | Là gì | Ví dụ đồng hồ giờ |
-|---|---|---|
-| State | gán giá trị cho biến | `[hr = 11]` |
-| Step | cặp state liền nhau | `[hr = 1]` → `[hr = 2]` |
-| Behavior | dãy (vô hạn) state | `11 → 12 → 1 → 2 → …` |
-| Spec | công thức mà một tập behavior thỏa | tập mọi cách đồng hồ chạy đúng |
+| Khái niệm | Là gì | Đồng hồ giờ | Pool của `orders` |
+|---|---|---|---|
+| State | gán giá trị cho biến | `[hr = 11]` | `[free = 2, busy = 1, waiting = 0]` |
+| Step | cặp state liền nhau | `[hr = 1]` → `[hr = 2]` | `[free = 2, busy = 1, waiting = 0]` → `[free = 1, busy = 2, waiting = 0]` (một request lấy được connection) |
+| Behavior | dãy (vô hạn) state | `11 → 12 → 1 → 2 → …` | cả file log, coi như kéo dài mãi |
+| Spec | công thức mà một tập behavior thỏa | tập mọi cách đồng hồ chạy đúng | tập mọi file log mà pool chạy đúng có thể ghi ra |
 
 <details><summary>Đi sâu: behavior "sai", behavior hữu hạn, và đồng hồ không có đơn vị thời gian</summary>
 
-- State là phép gán *tùy ý*: tồn tại state gán `hr` một giá trị vô nghĩa — sách lấy ví dụ √−2 (căn bậc hai của −2; dấu căn bị mất khi trích PDF thành text), tức màn hình "thuần ảo", là "trạng thái sau khi bom rơi trúng đồng hồ", Lamport viết[^ss-silly-state]. Một behavior như `[hr = 11] → [hr = 77.2] → [hr = 78.2] → [hr = √−2] → …` (dãy (2.2) của sách) vẫn *là* một behavior (một dãy state), chỉ là không thỏa spec của đồng hồ[^ss-behavior-sat].
-- Mọi behavior của TLA+ là **vô hạn**: sách nói không cần behavior hữu hạn[^ss-infinite-only]. Một hệ kết thúc được biểu diễn bằng behavior vô hạn mà đuôi chỉ toàn bước "đứng yên" (mục 4)[^ss-terminating].
-- Behavior không có đơn vị thời gian: spec đồng hồ của sách "bỏ qua thời gian thực, không nói khi nào màn hình đổi"[^ss-realtime]. Thời gian thực chỉ vào spec nếu bạn tự mô hình hóa nó (SS có chương riêng; ngoài phạm vi chương này).
-- "Bước" là đơn vị nguyên tử của spec: bên trong một bước không có state trung gian. Chọn cái gì là một bước chính là quyết định *mức trừu tượng* của spec — mục 7.
+- **State là phép gán tùy ý, nên có cả behavior "sai".** Tồn tại state gán cho `hr` một giá trị vô nghĩa: sách lấy ví dụ √−2 (căn bậc hai của −2; dấu căn bị mất khi trích PDF thành text), tức màn hình "thuần ảo", mà Lamport gọi là "trạng thái sau khi bom rơi trúng đồng hồ"[^ss-silly-state]. Một dãy như `[hr = 11] → [hr = 77.2] → [hr = 78.2] → [hr = √−2] → …` (dãy (2.2) của sách) vẫn *là* một behavior, chỉ là không thỏa spec của đồng hồ[^ss-behavior-sat].
+- **Behavior luôn vô hạn.** Sách không cần behavior hữu hạn[^ss-infinite-only]. Hệ có kết thúc, như một job chạy xong, được biểu diễn bằng behavior vô hạn mà đuôi chỉ toàn bước "đứng yên" (mục 4)[^ss-terminating].
+- **Behavior không có đơn vị thời gian.** Spec đồng hồ của sách bỏ qua thời gian thực, không nói khi nào màn hình đổi[^ss-realtime]. Muốn có thời gian thực trong spec thì ta phải tự mô hình hóa nó (SS có chương riêng, ngoài phạm vi chương này).
+- **Bước là đơn vị nguyên tử.** Bên trong một bước không có state trung gian, nên chọn cái gì là một bước chính là chọn *mức trừu tượng* của spec (mục 7).
 
 </details>
 
-**Quay lại Q1:** state là phép gán giá trị cho biến, behavior là dãy state, và spec là mô tả tập các behavior đúng.
+**Quay lại Q1:** state là phép gán giá trị cho biến, behavior là dãy state, và spec là mô tả tập các behavior đúng; với `orders`, đó là mọi file log mà pool chạy đúng có thể ghi ra.
 
 ## 2. Action, biến primed, enabled và UNCHANGED (Q2)
 
-> **Trả lời ngắn.** *Action* là công thức có cả biến thường lẫn biến *primed*: `hr` là giá trị ở state cũ, `hr'` là giá trị ở state mới của một bước[^ss-action][^ss-prime]. Action không "chạy" — nó đúng hoặc sai trên một cặp state[^ss-not-exec]. Action *enabled* tại một state nếu từ đó có ít nhất một bước làm nó đúng[^ss-enabled]; biến không được action nhắc tới phải được viết rõ là giữ nguyên bằng `UNCHANGED`[^l-fully-describe], trong đó `UNCHANGED v` nghĩa là `v` có cùng giá trị ở state cũ và mới[^ss-unchanged-def].
+> **Trả lời ngắn.** *Action* là công thức chứa cả biến thường lẫn biến *primed*: `hr` là giá trị ở state cũ, `hr'` là giá trị ở state mới của một bước[^ss-prime]. Vì chỉ là công thức nên action không "chạy" như câu lệnh, nó đúng hoặc sai trên một cặp state[^ss-not-exec]. Action *enabled* tại một state nếu từ đó có ít nhất một bước làm nó đúng[^ss-enabled]. Biến nào action không đổi thì phải nói rõ bằng `UNCHANGED`, nghĩa là biểu thức có cùng giá trị ở state cũ và mới[^ss-unchanged-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): trong SQL, `UPDATE pool SET free = free - 1 WHERE free > 0`. Mệnh đề `WHERE` là điều kiện cho phép (guard); `SET` nói giá trị *mới* tính từ giá trị *cũ*. Khác biệt then chốt: SQL ngầm hiểu cột không nhắc tới thì giữ nguyên, còn TLA+ bắt bạn nói ra, vì action chỉ là một công thức — cái gì không bị ràng buộc thì được phép tùy ý.
+*Với service của bạn.* Pool của `orders` đổi trạng thái qua ba loại sự kiện: một request tới và phải chờ, một request lấy được connection, một request trả connection. Mỗi loại là một action. Chẳng hạn "lấy connection" chỉ xảy ra khi `free > 0`, và khi xảy ra thì `free` giảm 1, `busy` tăng 1. Mục này nói action viết ra thế nào, và vì sao ta phải kể cả những thứ *không* đổi.
 
-*Từ hàm "tính giá trị mới" sang "quan hệ giữa cũ và mới".* Đồng hồ giờ có `HCnxt == hr' = IF hr # 12 THEN hr + 1 ELSE 1` (`#` là "khác": [Chương 02 mục 2](02-toan-nen-tang.md); `IF … THEN … ELSE` là biểu thức điều kiện: [Chương 02 mục 6](02-toan-nen-tang.md)). Sách mô tả nó là công thức toán thông thường, chỉ khác ở chỗ chứa cả biến primed lẫn không primed, và gọi công thức loại đó là action; một action đúng hoặc sai trên một step[^ss-action]. Learn TLA+ nói cùng ý: dấu prime cho giá trị của biến ở state kế[^l-prime]; và một toán tử boolean chứa biến primed gọi là action[^l-action].
+Nếu quen SQL, bạn có thể đọc `UPDATE pool SET free = free - 1 WHERE free > 0`: `WHERE` là điều kiện cho phép (guard), `SET` tính giá trị *mới* từ giá trị *cũ*. Nhưng SQL ngầm hiểu cột không nhắc tới thì giữ nguyên, còn TLA+ bắt bạn nói ra, vì action chỉ là một công thức và cái gì công thức không ràng buộc thì được phép nhận giá trị tùy ý (nhận xét của người soạn).
+
+*Từ hàm "tính giá trị mới" sang "quan hệ giữa cũ và mới".* Đồng hồ giờ cho một ví dụ gọn: `HCnxt == hr' = IF hr # 12 THEN hr + 1 ELSE 1` (`#` là "khác": [Chương 02 mục 2](02-toan-nen-tang.md); `IF … THEN … ELSE` là biểu thức điều kiện: [Chương 02 mục 6](02-toan-nen-tang.md)). Nhìn nó giống một phép gán, nhưng sách mô tả nó là công thức toán thông thường, chỉ khác ở chỗ chứa cả biến primed lẫn không primed; công thức loại đó gọi là action, và một action đúng hoặc sai trên một step[^ss-action]. Learn TLA+ nói cùng ý: dấu prime cho giá trị của biến ở state kế[^l-prime]. Learn TLA+ cũng gọi toán tử boolean chứa biến primed là action[^l-action].
 
 Bảng dưới là cách đọc `HCnxt` trên vài cặp `(hr, hr')` (người soạn suy ra từ định nghĩa; một số cặp có trong sách và Learn TLA+):
 
@@ -79,51 +84,51 @@ Bảng dưới là cách đọc `HCnxt` trên vài cặp `(hr, hr')` (người s
 | 12 → 13 | sai | `hr = 12` đòi `hr' = 1` |
 | 24 → 25 | đúng | `HCnxt` không kiểm `hr` có trong 1..12 hay không[^ss-24-25] |
 
-*Action không phải lệnh gán.* `hr' = hr + 1` đọc là "giá trị mới của `hr` bằng giá trị cũ cộng 1" — một mệnh đề đúng/sai. Sách cảnh báo thẳng: có thể nói "action được thực thi", nhưng đừng coi thuật ngữ này quá nghiêm túc, vì action là công thức và công thức không được thực thi[^ss-not-exec]. Learn TLA+ nhấn mạnh điều này cho người từ PlusCal sang: trong TLA+ mọi thứ đều là so sánh, `x = 5` đúng nếu `x` là 5 ở state này, `x' = 5` đúng nếu `x` là 5 ở state kế[^l-all-comparison].
+*Action không phải lệnh gán.* `hr' = hr + 1` đọc là "giá trị mới của `hr` bằng giá trị cũ cộng 1", một mệnh đề đúng hoặc sai. Sách cảnh báo thẳng: nói "action được thực thi" cũng được, nhưng đừng coi thuật ngữ này quá nghiêm túc, vì action là công thức và công thức không được thực thi[^ss-not-exec]. Người từ PlusCal sang dễ vướng chỗ này, nên Learn TLA+ nhắc lại: trong TLA+ mọi thứ đều là so sánh, `x = 5` đúng nếu `x` là 5 ở state này, còn `x' = 5` đúng nếu `x` là 5 ở state kế[^l-all-comparison].
 
-*Enabled.* Sách định nghĩa: action `Send` là *enabled* ở một state nếu từ state đó có thể thực hiện một bước `Send`[^ss-enabled]. Câu hỏi đầu tiên khi viết action là "khi nào nó enabled?", cho nên định nghĩa action thường mở đầu bằng điều kiện enabled[^ss-enabled-first]. Ví dụ bên dưới (từ giao diện bất đồng bộ, mục 8), `rdy = ack` là điều kiện enabled:
+*Enabled.* Với pool, câu hỏi đầu tiên khi viết action là "khi nào nó xảy ra được?". Sách gọi đó là điều kiện *enabled*: action `Send` là enabled ở một state nếu từ state đó có thể thực hiện một bước `Send`[^ss-enabled]. Vì câu hỏi này luôn đến trước, định nghĩa action thường mở đầu bằng điều kiện enabled[^ss-enabled-first]. Action "trả connection" của pool (spec đầy đủ ở mục 5; người soạn tự viết) minh họa cả điều kiện enabled lẫn `UNCHANGED`:
 
 ```tla
-Send == /\ rdy = ack          \* điều kiện enabled (guard)
-        /\ val' \in Data      \* giá trị mới của val: bất kỳ phần tử nào của Data
-        /\ rdy' = 1 - rdy     \* rdy đảo bit
-        /\ UNCHANGED ack      \* ack giữ nguyên
+Release == /\ busy > 0          \* điều kiện enabled (guard): có connection đang bận
+           /\ busy' = busy - 1  \* busy giảm 1
+           /\ free' = free + 1  \* free tăng 1
+           /\ UNCHANGED waiting \* waiting giữ nguyên
 ```
 
-Cách đọc (cú pháp ở [Chương 02](02-toan-nen-tang.md)): các `/\` thẳng cột là danh sách bullet ghép các điều kiện bằng "và" (mục 1); `val' \in Data` nghĩa là "giá trị mới của `val` thuộc tập `Data`" (mục 2); `rdy' = 1 - rdy` là phép trừ số tự nhiên trên `0`/`1` (mục 7 về `Naturals`).
+Cách đọc (cú pháp ở [Chương 02](02-toan-nen-tang.md)): các `/\` thẳng cột là danh sách bullet ghép các điều kiện bằng "và" (mục 1). `busy' = busy - 1` là phép trừ trên số tự nhiên, do module `Naturals` cung cấp (mục 7). Dòng cuối là `UNCHANGED`, nói riêng ở đoạn tiếp theo.
 
-*UNCHANGED.* `UNCHANGED v` nghĩa là biểu thức `v` có cùng giá trị ở state cũ và mới[^ss-unchanged-def]. Với nhiều biến, viết `UNCHANGED <<x, y, z>>` để nói không biến nào trong ba biến đổi[^l-unchanged-tuple]. Vì sao bắt buộc? Learn TLA+ phát biểu như một quy tắc nền tảng: next-state action phải mô tả đầy đủ *tất cả* biến[^l-fully-describe]; nếu quên, TLC báo successor state chưa được xác định đầy đủ[^l-tlc-msg]. Lý do ở mức logic (suy luận của người soạn từ định nghĩa action): action chỉ ràng buộc những gì nó nhắc tới, nên biến bị bỏ sót ở state kế có thể mang *bất kỳ* giá trị nào.
+*UNCHANGED.* `UNCHANGED v` nghĩa là biểu thức `v` có cùng giá trị ở state cũ và mới[^ss-unchanged-def]. Với nhiều biến, viết `UNCHANGED <<x, y, z>>` để nói không biến nào trong ba biến đổi[^l-unchanged-tuple]. Vì sao bắt buộc? Learn TLA+ phát biểu đây là quy tắc nền tảng: next-state action phải mô tả đầy đủ *tất cả* biến[^l-fully-describe]. Nếu quên, TLC báo successor state chưa được xác định đầy đủ[^l-tlc-msg]. Lý do ở mức logic (suy luận của người soạn từ định nghĩa action): action chỉ ràng buộc những gì nó nhắc tới, nên biến bị bỏ sót ở state kế có thể mang *bất kỳ* giá trị nào. Nếu `Release` quên dòng `UNCHANGED waiting`, thì sau một lần trả connection `waiting` có thể bỗng thành 7, và spec vẫn cho phép.
 
 <details><summary>Đi sâu: nondeterminism, TLC biến công thức thành bước đi thế nào, và vài bẫy cú pháp</summary>
 
-- **Nondeterminism là tự nhiên.** `val' \in Data` không chọn giá trị cụ thể mà cho phép bất kỳ phần tử nào của `Data`. Sách dạng thứ hai viết `Send(d)` có tham số và hợp bằng lượng từ: `Next == (\E d \in Data : Send(d)) \/ Rcv`[^ss-send-d]. Hai cách này diễn tả cùng một việc: "hệ có nhiều lựa chọn; spec cho phép tất cả".
-- **Từ công thức đến bước đi: cách TLC đọc action.** TLC tính successor của state `s` bằng cách gán biến thường theo `s`, chưa gán biến primed nào, rồi đánh giá next-state action[^tlc-successor]. Khi gặp `x' = e` mà `x'` chưa có giá trị, TLC coi đó là phép gán[^tlc-assign]; còn `UNCHANGED x` được đánh giá như `x' = x`[^tlc-unchanged] (và `x' \in S` như lượng từ tồn tại, cùng đoạn SS 14.2.6). Nếu một vế hội đánh giá sai, nhánh đó không sinh state nào[^tlc-false-stop] — chính là "action không enabled". Nếu kết thúc mà còn biến primed chưa được gán, TLC báo lỗi[^tlc-unassigned]. Đây là lý do `UNCHANGED` không chỉ là phép lịch sự mà là điều kiện để TLC dựng được state kế.
-- **Thứ tự vế hội: logic không quan tâm, TLC có.** Hội (`/\`) giao hoán về mặt toán học, nhưng TLC đánh giá từ trái sang phải nên thứ tự có thể quyết định nó đánh giá được action hay báo lỗi[^tlc-order]. Quy ước thực dụng (nhận xét của người soạn): đặt điều kiện enabled lên đầu, rồi các phép gán `x' = …`, rồi `UNCHANGED`.
-- **Danh sách gạch đầu dòng.** Luật căn lề của `/\` và `\/` đã nêu ở [Chương 02 mục 1](02-toan-nen-tang.md); riêng `=>` theo cùng quy tắc thụt lề, nên hai dòng `/\ A`, `/\ B` rồi một dòng `=> C` thụt vào đọc là `A /\ (B => C)` chứ không phải `(A /\ B) => C` (Learn TLA+)[^l-implies-indent] — chính là cách `BNext` ở mục 8.3 được viết.
-- **Đừng "thông minh" quá.** Cách tốt nhất để nói giá trị mới của biến `v` là `v' = exp` hoặc `v' \in exp` với `exp` không chứa prime[^ss-v-prime-best]. Sách cho ví dụ cách viết gọn `q = <<h'>> \o q'` thay cho `h' = Head(q) /\ q' = Tail(q)` (`Head`, `Tail`, `\o` là toán tử trên sequence: [Chương 02 mục 4](02-toan-nen-tang.md)) và kết luận nó sai, vì nếu `h'` và `q'` không cùng là sequence thì ta không biết `\o` cho ra gì, nên không chắc `h' = Head(q)` và `q' = Tail(q)` là các giá trị duy nhất thỏa công thức[^ss-too-clever]. Sách cũng nhắc cẩn thận chỗ đặt dấu prime[^ss-prime-care].
-- **PlusCal làm hộ phần `UNCHANGED`.** Khi dịch PlusCal sang TLA+, trình dịch tự thêm `x' = x` cho biến không được lệnh nhắc tới; Learn TLA+ cho ví dụ[^l-translator-adds]. Chi tiết ở [Chương 06](06-pluscal.md).
-- **`ENABLED`.** Toán tử tích hợp `ENABLED A` nói "action `A` enabled"; sách dùng nó để diễn đạt "không deadlock" là tính chất bất biến `[]ENABLED Next`[^ss-enabled-next]. Mục 4 quay lại điểm này.
+- **Nondeterminism là tự nhiên.** `val' \in Data` không chọn giá trị cụ thể mà cho phép bất kỳ phần tử nào của `Data`. Sách còn viết dạng thứ hai: `Send(d)` có tham số, rồi hợp bằng lượng từ, `Next == (\E d \in Data : Send(d)) \/ Rcv`[^ss-send-d]. Hai cách diễn tả cùng một việc: hệ có nhiều lựa chọn, spec cho phép tất cả.
+- **Từ công thức đến bước đi: cách TLC đọc action.** TLC tính successor của state `s` bằng cách gán biến thường theo `s`, chưa gán biến primed nào, rồi đánh giá next-state action[^tlc-successor]. Khi gặp `x' = e` mà `x'` chưa có giá trị, TLC coi đó là phép gán[^tlc-assign]. `UNCHANGED x` được nó đánh giá như `x' = x`[^tlc-unchanged] (và `x' \in S` như lượng từ tồn tại, cùng đoạn SS 14.2.6). Nếu một vế hội đánh giá sai, nhánh đó không sinh state nào[^tlc-false-stop], và đó chính là "action không enabled". Nếu kết thúc mà còn biến primed chưa được gán, TLC báo lỗi[^tlc-unassigned]. Vì vậy `UNCHANGED` không chỉ là phép lịch sự: nó là điều kiện để TLC dựng được state kế.
+- **Thứ tự vế hội: logic không quan tâm, TLC có.** Về toán, hội (`/\`) giao hoán. Nhưng TLC đánh giá từ trái sang phải, nên thứ tự có thể quyết định nó đánh giá được action hay báo lỗi[^tlc-order]. Quy ước thực dụng (nhận xét của người soạn): đặt điều kiện enabled lên đầu, rồi các phép gán `x' = …`, rồi `UNCHANGED`.
+- **Danh sách gạch đầu dòng.** Luật căn lề của `/\` và `\/` đã nêu ở [Chương 02 mục 1](02-toan-nen-tang.md). Riêng `=>` theo cùng quy tắc thụt lề, nên hai dòng `/\ A`, `/\ B` rồi một dòng `=> C` thụt vào đọc là `A /\ (B => C)` chứ không phải `(A /\ B) => C` (Learn TLA+)[^l-implies-indent]. `BNext` ở mục 8.3 được viết đúng theo cách đó.
+- **Đừng "thông minh" quá.** Cách tốt nhất để nói giá trị mới của biến `v` là `v' = exp` hoặc `v' \in exp`, với `exp` không chứa prime[^ss-v-prime-best]. Sách cho ví dụ cách viết gọn `q = <<h'>> \o q'` thay cho `h' = Head(q) /\ q' = Tail(q)` (`Head`, `Tail`, `\o` là toán tử trên sequence: [Chương 02 mục 4](02-toan-nen-tang.md)) và kết luận nó sai. Lý do: nếu `h'` và `q'` không cùng là sequence thì ta không biết `\o` cho ra gì, nên không chắc `h' = Head(q)` và `q' = Tail(q)` là các giá trị duy nhất thỏa công thức[^ss-too-clever]. Sách cũng nhắc cẩn thận chỗ đặt dấu prime[^ss-prime-care].
+- **PlusCal làm hộ phần `UNCHANGED`.** Khi dịch PlusCal sang TLA+, trình dịch tự thêm `x' = x` cho biến mà lệnh không nhắc tới; Learn TLA+ có ví dụ[^l-translator-adds]. Chi tiết ở [Chương 06](06-pluscal.md).
+- **`ENABLED`.** Toán tử tích hợp `ENABLED A` nói "action `A` enabled". Sách dùng nó để diễn đạt "không deadlock" là tính chất bất biến `[]ENABLED Next`[^ss-enabled-next]. Mục 4 quay lại điểm này.
 
 </details>
 
-**Quay lại Q2:** action là công thức về cặp state (cũ không prime, mới có prime); nó đúng/sai chứ không "chạy"; enabled là có bước thỏa; và mọi biến không đổi phải nói rõ bằng `UNCHANGED`.
+**Quay lại Q2:** action là công thức về cặp state (cũ không prime, mới có prime); nó đúng/sai chứ không "chạy"; enabled là có bước thỏa; và mọi biến không đổi phải nói rõ bằng `UNCHANGED`, như `waiting` trong `Release` của pool.
 
 ## 3. Init, Next và Spec = Init /\ [][Next]_vars (Q3)
 
-> **Trả lời ngắn.** `Init` là vị từ mô tả các state đầu hợp lệ; `Next` là action mô tả mọi bước hợp lệ (thường là phép hợp của nhiều action con); `Spec` ghép lại: state đầu thỏa `Init` và *mọi* bước hoặc là bước `Next` hoặc là bước giữ nguyên các biến[^ss-init-next][^ss-spec-form]. Đồng hồ giờ là ví dụ nhỏ nhất đủ ba phần đó.
+> **Trả lời ngắn.** `Init` là vị từ mô tả các state đầu hợp lệ, còn `Next` là action mô tả mọi bước hợp lệ, thường là phép hợp của nhiều action con[^ss-init-next]. `Spec` ghép hai thứ đó lại: state đầu thỏa `Init`, và *mỗi* bước hoặc là bước `Next` hoặc là bước giữ nguyên các biến[^ss-spec-form]. Đồng hồ giờ là ví dụ nhỏ nhất có đủ cả ba phần.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một bảng chuyển trạng thái của state machine. Cột "trạng thái khởi tạo" là `Init`; các dòng "từ A có thể sang B nếu …" là `Next`; còn `Spec` là câu "hệ bắt đầu từ trạng thái khởi tạo và chỉ đi theo các dòng của bảng". Khác bảng thường ở chỗ `Init` và `Next` là *công thức* có thể cho phép nhiều lựa chọn.
+*Với service của bạn.* Pool của `orders` có `Init` (pool vừa khởi động: `Size` connection đều rảnh, không request nào chờ), `Next` (hợp của ba action: request tới, lấy connection, trả connection) và `Spec` ghép hai thứ lại. Nếu bạn quen vẽ state machine thì `Init` là trạng thái khởi tạo, `Next` là các mũi tên "từ trạng thái này sang trạng thái kia nếu …", còn `Spec` là câu "hệ bắt đầu từ trạng thái khởi tạo và chỉ đi theo các mũi tên" (nhận xét của người soạn). Điểm khác state machine vẽ tay là `Init` và `Next` là *công thức*, nên mỗi cái cho phép nhiều lựa chọn cùng lúc. Spec đầy đủ của pool nằm ở mục 5; ở đây ta xây từng phần trên đồng hồ giờ.
 
-Sách xây đồng hồ giờ theo trình tự sau.
+Sách xây đồng hồ giờ theo bốn bước.
 
-1. *Điều kiện đầu.* Không cần nói màn hình ban đầu hiển thị mấy giờ, nên `Init` chỉ đòi `hr` là một số trong 1..12[^ss-init-any-hour]; sách viết `HCini == hr \in (1 .. 12)`.
-2. *Quan hệ bước kế.* `Next` nói quan hệ giữa giá trị `hr` ở state cũ và state mới: `hr'` bằng `hr + 1`, trừ khi `hr = 12` thì `hr'` bằng 1[^ss-hcnxt-def]. Sách viết `HCnxt == hr' = IF hr # 12 THEN hr + 1 ELSE 1`.
-3. *Hợp lại bằng toán tử `[]` (đọc là "box").* Công thức `[]F` khẳng định `F` đúng mãi mãi[^ss-box]. `[]HCnxt` do đó nói *mọi* bước thỏa `HCnxt`. Ở đây sách ghép `HCini /\ []HCnxt`: state đầu thỏa `HCini` và mọi bước thỏa `HCnxt`[^ss-init-next].
-4. *Vá cho đúng: `[]HCnxt` thành `[][HCnxt]_hr`.* Công thức ở bước 3 chưa đủ vì không cho phép bước giữ nguyên `hr` — lý do ở mục 4. Sách thay bằng `HC == HCini /\ [][HCnxt]_hr`[^ss-hc-def]. Learn TLA+ khai triển ký hiệu: `[P]_x` là `P \/ UNCHANGED x`[^l-box-sub], nên `Spec == Init /\ [](Next \/ UNCHANGED vars)`; và quy ước là phần nằm ngoài toán tử thời gian được kiểm ở state đầu[^l-initial-convention].
+1. *Điều kiện đầu.* Ta không cần nói màn hình ban đầu hiển thị mấy giờ, giờ nào cũng được[^ss-init-any-hour]. Vì vậy `Init` chỉ đòi `hr` là một số trong 1..12, và sách viết `HCini == hr \in (1 .. 12)`.
+2. *Quan hệ bước kế.* `Next` nói giá trị `hr` ở state mới liên hệ thế nào với state cũ: `hr'` bằng `hr + 1`, trừ khi `hr = 12` thì `hr'` bằng 1[^ss-hcnxt-def]. Sách viết `HCnxt == hr' = IF hr # 12 THEN hr + 1 ELSE 1`.
+3. *Hợp lại bằng toán tử `[]` (đọc là "box").* Công thức `[]F` khẳng định `F` đúng mãi mãi[^ss-box]. Do đó `[]HCnxt` nói *mọi* bước thỏa `HCnxt`. Ghép với điều kiện đầu, `HCini /\ []HCnxt` đúng với một behavior khi state đầu thỏa `HCini` và mọi bước thỏa `HCnxt`[^ss-init-next].
+4. *Vá cho đúng: `[]HCnxt` thành `[][HCnxt]_hr`.* Công thức ở bước 3 chưa đủ vì nó không cho phép bước giữ nguyên `hr`; lý do ở mục 4. Sách thay bằng `HC == HCini /\ [][HCnxt]_hr`[^ss-hc-def]. Learn TLA+ khai triển ký hiệu này: `[P]_x` là `P \/ UNCHANGED x`[^l-box-sub], nên `Spec == Init /\ [](Next \/ UNCHANGED vars)`. Thêm một quy ước: phần nằm ngoài toán tử thời gian được kiểm ở state đầu[^l-initial-convention].
 
-Dạng `Init /\ [][Next]_vars` là dạng chuẩn: TLC xử lý các spec có dạng `Init /\ [][Next]_vars /\ Temporal`, trong đó `vars` là tuple của tất cả biến, còn `Temporal` thường là điều kiện liveness (chương 05)[^ss-tlc-form]. Bỏ `Temporal` thì được dạng của chương này.
+Dạng `Init /\ [][Next]_vars` là dạng chuẩn. TLC xử lý các spec có dạng `Init /\ [][Next]_vars /\ Temporal`, trong đó `vars` là tuple của tất cả biến, còn `Temporal` thường là điều kiện liveness (chương 05)[^ss-tlc-form]. Bỏ `Temporal` thì ta được dạng của chương này.
 
 Module hoàn chỉnh của sách (Hình 2.1) ở dạng ASCII, khớp với repo Examples, như sau.[^ex-hourclock]
 
@@ -143,8 +148,8 @@ THEOREM  HC => []HCini
 
 - `EXTENDS Naturals` nhập định nghĩa của `+`, `..`, `Nat`… vì các toán tử số học không có sẵn trong TLA+ mà do module định nghĩa[^ss-naturals-module].
 - `VARIABLE hr` khai báo biến[^ss-variable-decl].
-- `HCini`, `HCnxt`, `HC`: ba định nghĩa; `HC` mới là spec. Sách lưu ý về mặt hình thức không có gì trong module nói `HC` chứ không phải `HCini` là spec của đồng hồ; ý nghĩa gắn cho các định nghĩa nằm ngoài toán học[^ss-formally-nothing].
-- `THEOREM HC => []HCini` khẳng định: mọi behavior của `HC` luôn có `hr` trong 1..12 — tức là một "type correctness" (mục 6).
+- `HCini`, `HCnxt`, `HC` là ba định nghĩa, trong đó `HC` mới là spec. Về mặt hình thức, không có gì trong module nói `HC` chứ không phải `HCini` là spec của đồng hồ; ý nghĩa ta gắn cho các định nghĩa nằm ngoài toán học[^ss-formally-nothing].
+- `THEOREM HC => []HCini` khẳng định mọi behavior của `HC` luôn có `hr` trong 1..12, tức một dạng "type correctness" (mục 6).
 
 Hình dạng toàn bộ (nhận xét của người soạn):
 
@@ -159,18 +164,17 @@ flowchart LR
 
 <details><summary>Đi sâu: đặc tả thứ hai (HC2), hai cách viết cùng nghĩa và file cấu hình TLC</summary>
 
-- **Cùng một đồng hồ, hai công thức.** Toán tử `%` của `Naturals` cho phép viết `HCnxt2 == hr' = (hr % 12) + 1`[^ss-mod]. Hai action *không tương đương*: bước `24 → 25` thỏa `HCnxt` mà không thỏa `HCnxt2`, bước `24 → 1` thì ngược lại. Nhưng với `hr` trong 1..12 thì tương đương, nên `HC` và `HC2` là hai spec tương đương[^ss-hc-hc2]. Repo Examples có file `HourClock2.tla` kèm `THEOREM HC <=> HC2`[^ex-hourclock2].
-- **Bài học của Lamport:** có nhiều cách viết cùng một thứ; trước hết hãy chắc chúng tương đương, rồi chọn cách dễ hiểu nhất; nếu không tương đương thì phải quyết định mình muốn nghĩa nào[^ss-equivalent-choices].
-- **File `.cfg` cho TLC** (chi tiết ở [Chương 04](04-invariant-va-tlc.md)). Repo Examples kèm `HourClock.cfg` để kiểm `HCini` là invariant của `HC`[^ex-hourclock-cfg]. Nội dung rút gọn như sau.
+- **Cùng một đồng hồ, hai công thức.** Toán tử `%` của `Naturals` cho phép viết `HCnxt2 == hr' = (hr % 12) + 1`[^ss-mod]. Hai action *không tương đương*: bước `24 → 25` thỏa `HCnxt` mà không thỏa `HCnxt2`, còn bước `24 → 1` thì ngược lại[^ss-24-25]. Nhưng với `hr` trong 1..12 thì chúng tương đương, nên `HC` và `HC2` là hai spec tương đương[^ss-hc-hc2]. Repo Examples có file `HourClock2.tla` kèm `THEOREM HC <=> HC2`[^ex-hourclock2].
+- **Bài học của Lamport.** Một ý thường viết được bằng nhiều cách. Khi đó hãy chắc chúng tương đương, rồi chọn cách dễ hiểu nhất; nếu không tương đương thì phải quyết định mình muốn nghĩa nào[^ss-equivalent-choices].
+- **`Init` có thể có nhiều state.** `HCini` được 12 giá trị của `hr` thỏa, nên spec có 12 state đầu khả dĩ (suy ra từ định nghĩa). Nondeterminism ở state đầu tự nhiên như ở các bước sau.
+- **Spec này chỉ nói về an toàn.** Nó không đòi đồng hồ chạy mãi: sách nói rõ lúc này ta chấp nhận cả đồng hồ có thể dừng, còn cách đòi nó không dừng nằm ở chương 8 của sách[^ss-hc-may-stop]. Phần đó là [Chương 05](05-liveness-va-fairness.md).
+
+**File `.cfg` cho TLC** (chi tiết ở [Chương 04](04-invariant-va-tlc.md)). Repo Examples kèm `HourClock.cfg` để kiểm `HCini` là invariant của `HC`[^ex-hourclock-cfg]. Nội dung rút gọn như sau (bản gốc có thêm comment); chương này không khẳng định kết quả chạy.
 
 ```
 SPECIFICATION HC
 INVARIANT HCini
 ```
-
-  (Bản gốc có thêm comment; ở đây rút gọn.) Chương này không khẳng định kết quả chạy.
-- **`Init` có thể có nhiều state.** `HCini` thỏa bởi 12 giá trị của `hr` nên spec có 12 state đầu khả dĩ (suy ra từ định nghĩa). Nondeterminism ở state đầu cũng tự nhiên như ở các bước sau.
-- **Module có đủ gói chưa?** Spec này chỉ nói *an toàn*: không bắt đồng hồ phải chạy mãi — sách nói rõ lúc này ta chấp nhận cả đồng hồ có thể dừng, và chương 8 của sách mới nói cách đòi nó không dừng[^ss-hc-may-stop]. Phần đó là [Chương 05](05-liveness-va-fairness.md).
 
 </details>
 
@@ -178,15 +182,15 @@ INVARIANT HCini
 
 ## 4. Stuttering step và [Next]_vars (Q4)
 
-> **Trả lời ngắn.** *Stuttering step* là bước mà biến `vars` không đổi[^ss-stutter-def]. Spec phải cho phép những bước này vì khi đồng hồ là một phần của hệ lớn hơn (ví dụ trạm thời tiết hiển thị giờ và nhiệt độ), có những bước chỉ đổi phần khác còn `hr` giữ nguyên; behavior nhìn từ spec của ta chỉ thấy bước đứng yên[^ss-weather]. Ký hiệu `[Next]_vars` nghĩa là "bước `Next` *hoặc* bước đứng yên"[^l-box-sub].
+> **Trả lời ngắn.** *Stuttering step* là bước mà các biến của spec không đổi[^ss-stutter-def]. Spec phải cho phép bước này, vì đồng hồ thường là một phần của hệ lớn hơn, chẳng hạn trạm thời tiết hiển thị cả giờ lẫn nhiệt độ: có những bước chỉ đổi nhiệt độ còn `hr` đứng yên, và từ góc nhìn spec đồng hồ đó là bước đứng yên[^ss-weather]. Vì vậy ta viết `[Next]_vars`, nghĩa là "bước `Next` *hoặc* bước đứng yên"[^l-box-sub].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn viết spec cho một connection pool, còn hệ có thêm cache và scheduler với biến riêng. Lúc scheduler chạy, biến của pool không đổi. Nếu spec của pool đòi *mọi* bước đều là bước của pool, spec sẽ loại mất mọi lịch sử có thêm thành phần khác — nó không thể ghép vào hệ lớn hơn.
+*Với service của bạn.* Pool của `orders` không sống một mình: cùng process còn có cache và scheduler, mỗi thứ có biến riêng. Mỗi lần cache đổi, `free`, `busy` và `waiting` đứng yên. Nếu spec của pool đòi *mọi* bước đều là bước của pool, nó loại luôn mọi lịch sử có thêm bước của thành phần khác, và ta không ghép được nó vào hệ lớn hơn (nhận xét của người soạn).
 
-*Ví dụ trạm thời tiết của sách.* Hệ có hai biến `hr` và `tmp` (nhiệt độ). Ở hai bước giữa, `tmp` đổi còn `hr` giữ nguyên[^ss-weather-steps]; mà `[]HCnxt` đòi mọi bước đều tăng `hr`, nên spec đồng hồ ở dạng đó không mô tả được đồng hồ nằm trong trạm thời tiết[^ss-weather-fails]. Sách kết luận một spec đồng hồ phải cho phép cả bước `HCnxt` lẫn bước đứng yên[^ss-hc-allow-both]; và dùng ký hiệu `[HCnxt]_hr` thay cho `HCnxt \/ (hr' = hr)`[^ss-box-sub-def]. Cách đọc trên giấy: "square HCnxt sub hr".
+*Ví dụ trạm thời tiết của sách.* Hệ có hai biến `hr` và `tmp` (nhiệt độ). Ở hai bước giữa, `tmp` đổi còn `hr` giữ nguyên[^ss-weather-steps]. Vì `[]HCnxt` đòi mọi bước đều tăng `hr`, spec đồng hồ viết ở dạng đó không mô tả được đồng hồ nằm trong trạm thời tiết[^ss-weather-fails]. Sách kết luận spec của đồng hồ phải cho phép cả bước `HCnxt` lẫn bước đứng yên[^ss-hc-allow-both]. Ta viết gọn `HCnxt \/ (hr' = hr)` thành `[HCnxt]_hr`[^ss-box-sub-def]. Trên giấy, ký hiệu này đọc là "square HCnxt sub hr".
 
-*Hệ quả 1: dừng hẳn cũng là một behavior hợp lệ.* Spec `HCini /\ [][HCnxt]_hr` cho phép behavior `10 → 11 → 11 → 11 → …`: đồng hồ lên tới 11 rồi dừng mãi mãi[^ss-clock-stops]. Tổng quát, một lần thực thi *kết thúc* của hệ nào đó được biểu diễn bằng behavior vô hạn mà đuôi toàn bước đứng yên[^ss-terminating].
+*Hệ quả 1: dừng hẳn cũng là một behavior hợp lệ.* Spec `HCini /\ [][HCnxt]_hr` cho phép behavior `10 → 11 → 11 → 11 → …`: đồng hồ lên tới 11 rồi dừng mãi mãi[^ss-clock-stops]. Tổng quát hơn, một lần thực thi *kết thúc* của hệ nào đó được biểu diễn bằng behavior vô hạn mà đuôi toàn bước đứng yên[^ss-terminating].
 
 ```mermaid
 flowchart LR
@@ -194,53 +198,53 @@ flowchart LR
   b -.->|"đứng yên"| b
 ```
 
-*Hệ quả 2: bước đứng yên không bao giờ phá invariant.* Learn TLA+: bước đứng yên không đổi giá trị nào nên không thể làm sai một invariant[^l-stutter-invariant]. Nó chỉ phá được tính chất kiểu "rồi sẽ xảy ra", vì nó cho phép hệ đứng yên mãi — Learn TLA+ diễn giải TLA+ là ngôn ngữ của kịch bản xấu nhất, nên mặc định hệ có thể "crash" bất cứ lúc nào nếu ta không cấm[^l-worst-case]. Đó là lý do cần fairness ở [Chương 05](05-liveness-va-fairness.md).
+*Hệ quả 2: bước đứng yên không bao giờ phá invariant.* Learn TLA+ nói bước đứng yên không đổi giá trị nào nên không thể làm sai một invariant[^l-stutter-invariant]. Nó chỉ phá được tính chất kiểu "rồi sẽ xảy ra", vì nó cho phép hệ đứng yên mãi (suy luận của người soạn). Learn TLA+ diễn giải TLA+ là ngôn ngữ của kịch bản xấu nhất, nên mặc định hệ có thể "crash" bất cứ lúc nào nếu ta không cấm[^l-worst-case]. Đó là lý do cần fairness ở [Chương 05](05-liveness-va-fairness.md).
 
-*Hệ quả 3: vì sao công thức "hợp lệ".* Sách ở chương 8 giải thích: một công thức hữu ích phải *bất biến dưới stuttering* (thêm hay bớt bước đứng yên không đổi việc behavior có thỏa hay không)[^ss-stutter-invariant]; TLA chỉ cho phép viết công thức như vậy[^ss-stutter-only-legal]; `[][A]_v` có tính đó với mọi action `A` và state function `v`[^ss-box-sub-invariant], còn `[]A` với `A` tùy ý thì không.
+*Hệ quả 3: vì sao công thức "hợp lệ".* Sách ở chương 8 giải thích: một công thức hữu ích phải *bất biến dưới stuttering*, tức thêm hay bớt bước đứng yên không đổi việc behavior có thỏa hay không[^ss-stutter-invariant]. TLA chỉ cho phép viết công thức như vậy[^ss-stutter-only-legal]. `[][A]_v` có tính đó với mọi action `A` và state function `v`[^ss-box-sub-invariant], còn `[]A` với `A` tùy ý thì không.
 
-*Stuttering khác deadlock.* Về logic, bước đứng yên *luôn* có sẵn, nên spec không bao giờ "kẹt". Cái TLC gọi là deadlock là một chuyện khác: state mà `Next` không enabled, nên không còn bước *không đứng yên* nào[^ss-deadlock]. TLC mặc định kiểm điều này, nhưng có thể tắt vì với một số hệ, deadlock chỉ có nghĩa là kết thúc thành công[^ss-deadlock]. (Đừng nhầm với deadlock của lock trong [Chương 05 phase 4](../04-concurrency/05-concurrency-bug-va-deadlock.md): ở đó là các luồng chờ vòng tròn; ở đây là "không còn action nào enabled".)
+*Stuttering khác deadlock.* Về logic, bước đứng yên *luôn* có sẵn, nên spec không bao giờ "kẹt". Cái TLC gọi là deadlock là chuyện khác: một state mà `Next` không enabled, nên không còn bước *không đứng yên* nào[^ss-deadlock]. TLC mặc định kiểm điều này, nhưng có thể tắt, vì với một số hệ deadlock chỉ có nghĩa là kết thúc thành công[^ss-deadlock]. (Đừng nhầm với deadlock của lock trong [Chương 05 phase 4](../04-concurrency/05-concurrency-bug-va-deadlock.md): ở đó là các luồng chờ vòng tròn, còn ở đây là "không còn action nào enabled".)
 
 <details><summary>Đi sâu: vì sao <code>vars</code> phải đủ biến, TLC thấy stuttering ở đâu, và quan hệ với refinement</summary>
 
-- **Bỏ sót biến trong `vars` là lỗi ngầm (suy ra từ định nghĩa).** `[Next]_<<a>>` là `Next \/ UNCHANGED <<a>>`. Một bước làm `a` đứng yên nhưng đổi `b` thỏa vế thứ hai dù `b` đổi thế nào, nên mất mọi ràng buộc lên `b`. Sách mô tả `vars` trong dạng chuẩn là tuple của *tất cả* biến[^ss-tlc-form]. Quy ước thực dụng (nhận xét của người soạn): định nghĩa một lần `vars == <<x, y, z>>` rồi dùng cho cả `UNCHANGED vars` lẫn `[Next]_vars`; Learn TLA+ viết đúng như vậy cho đồng hồ giờ: `vars == << hr >>` và `Spec == Init /\ [][Next]_vars`[^l-vars-idiom].
-- **Đồ thị trạng thái của TLC có cạnh tự trỏ.** Trong thuật toán TLC ở chương 14 của sách, một bất biến của đồ thị `G` là với mọi state `s` trong `G`, cạnh `s → s` thuộc `G`[^tlc-self-loop]; các cạnh tới state *khác* mới được coi là successor[^tlc-successor-graph]. Cạnh tự trỏ chính là bước đứng yên (suy luận của người soạn). TLC chỉ báo deadlock khi tập successor rỗng và tùy chọn kiểm deadlock không bị tắt[^tlc-deadlock-step].
-- **Model hữu hạn kết thúc bằng stuttering.** Trong ví dụ `EvenSpec` của sách (spec có vô hạn state vì `x` cứ tăng thêm 2), để TLC dừng ta phải đưa ràng buộc giới hạn số state đạt tới[^tlc-constraint-finite]; mọi behavior vô hạn TLC sinh ra khi đó đều kết thúc bằng vô số bước đứng yên[^tlc-finite-stutter]. Hệ quả cho liveness: đó là một cái bẫy khi kiểm — xem [Chương 05](05-liveness-va-fairness.md).
-- **Refinement.** Cho phép stuttering là điều làm hai spec ở hai mức chi tiết khác nhau so sánh được: spec mịn có thêm bước nội bộ nhìn từ spec thô chỉ là bước đứng yên. Chi tiết ở [Chương 07](07-refinement.md); ở đây chỉ cần nhớ rằng `[Next]_vars` không phải thủ thuật cú pháp mà là điều kiện để các spec ghép được với nhau (suy luận của người soạn từ SS 8.1; chương 07 sẽ dẫn nguồn đầy đủ).
+- **Bỏ sót biến trong `vars` là lỗi ngầm (suy ra từ định nghĩa).** `[Next]_<<a>>` là `Next \/ UNCHANGED <<a>>`. Một bước làm `a` đứng yên nhưng đổi `b` thỏa vế thứ hai dù `b` đổi thế nào, nên spec mất mọi ràng buộc lên `b`. Sách mô tả `vars` trong dạng chuẩn là tuple của *tất cả* biến[^ss-tlc-form]. Quy ước thực dụng (nhận xét của người soạn): định nghĩa một lần `vars == <<x, y, z>>` rồi dùng cho cả `UNCHANGED vars` lẫn `[Next]_vars`. Learn TLA+ viết đúng như vậy cho đồng hồ giờ: `vars == << hr >>` và `Spec == Init /\ [][Next]_vars`[^l-vars-idiom].
+- **Đồ thị trạng thái của TLC có cạnh tự trỏ.** Trong thuật toán TLC ở chương 14 của sách, một bất biến của đồ thị `G` là với mọi state `s` trong `G`, cạnh `s → s` thuộc `G`[^tlc-self-loop]. Chỉ các cạnh tới state *khác* mới được coi là successor[^tlc-successor-graph]. Cạnh tự trỏ chính là bước đứng yên (suy luận của người soạn). TLC chỉ báo deadlock khi tập successor rỗng và tùy chọn kiểm deadlock không bị tắt[^tlc-deadlock-step].
+- **Model hữu hạn kết thúc bằng stuttering.** Ví dụ `EvenSpec` của sách có vô hạn state vì `x` cứ tăng thêm 2. Để TLC dừng, ta phải đưa vào một ràng buộc giới hạn số state đạt tới[^tlc-constraint-finite]. Khi đó mọi behavior vô hạn TLC sinh ra đều kết thúc bằng vô số bước đứng yên[^tlc-finite-stutter]. Với liveness đó là một cái bẫy khi kiểm: xem [Chương 05](05-liveness-va-fairness.md).
+- **Refinement.** Cho phép stuttering là điều làm hai spec ở hai mức chi tiết khác nhau so sánh được: spec mịn có thêm bước nội bộ, nhìn từ spec thô chỉ là bước đứng yên. Chi tiết ở [Chương 07](07-refinement.md); ở đây chỉ cần nhớ `[Next]_vars` không phải thủ thuật cú pháp mà là điều kiện để các spec ghép được với nhau (suy luận của người soạn từ SS 8.1; chương 07 sẽ dẫn nguồn đầy đủ).
 
 </details>
 
-**Quay lại Q4:** stuttering step là bước không đổi `vars`; `[Next]_vars` cho phép nó để spec ghép được vào hệ lớn hơn và biểu diễn được hệ kết thúc, đổi lại spec chỉ nói về an toàn.
+**Quay lại Q4:** stuttering step là bước không đổi `vars`; `[Next]_vars` cho phép nó để spec ghép được vào hệ lớn hơn và biểu diễn được hệ kết thúc, đổi lại spec chỉ nói về an toàn; với `orders`, đó là các bước mà chỉ cache hay scheduler đổi.
 
 ## 5. Module, EXTENDS, CONSTANT, VARIABLE, ASSUME (Q5)
 
-> **Trả lời ngắn.** Spec TLA+ được chia thành *module*; mỗi module mở bằng `MODULE tên`, có thể `EXTENDS` các module khác để dùng lại định nghĩa, khai báo tham số hằng bằng `CONSTANT(S)` và biến bằng `VARIABLE(S)`, rồi các định nghĩa, và kết thúc bằng một dòng `====`[^ss-module-intro][^ss-summary-module-lines][^sum-module-end]. Mọi ký hiệu dùng trong công thức phải là toán tử có sẵn hoặc được khai báo/định nghĩa[^ss-declared-or-defined]. TLC cần thêm một file `.cfg` để gán giá trị cho các hằng[^ex-asynch-cfg].
+> **Trả lời ngắn.** Spec TLA+ chia thành các *module*[^ss-module-intro]. Mỗi module mở bằng `MODULE tên`[^ss-summary-module-lines]. Module có thể `EXTENDS` các module khác để dùng lại định nghĩa, khai báo hằng bằng `CONSTANT(S)` và biến bằng `VARIABLE(S)`, rồi đến các định nghĩa, và đóng bằng một dòng `====`[^sum-module-end]. Mọi ký hiệu dùng trong công thức phải là toán tử có sẵn hoặc đã được khai báo hay định nghĩa[^ss-declared-or-defined]. Để chạy TLC, ta cần thêm một file `.cfg` gán giá trị cho các hằng[^ex-asynch-cfg].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): module giống một file mã nguồn có `import`, tham số cấu hình (constants — giống biến môi trường/config đọc lúc khởi động) và trạng thái chạy (variables).
+*Với service của bạn.* Viết pool của `orders` thành một module thì mọi thành phần tự tìm được chỗ đứng. Kích thước pool `Size` là hằng, giống tham số cấu hình đọc lúc khởi động (nhận xét của người soạn). `free`, `busy`, `waiting` là biến, giống trạng thái lúc chạy. Còn các action `Arrive`, `Acquire`, `Release` là định nghĩa. Phần "spec nhỏ" bên dưới viết đúng pool đó.
 
 | Cấu trúc | Ý nghĩa |
 |---|---|
 | `---- MODULE M ----` | mở module `M` |
 | `EXTENDS M1, M2` | nhập khai báo, định nghĩa, giả định và định lý của các module đó vào module hiện tại[^sum-extends] |
-| `CONSTANT(S) C1, C2` | tham số hằng của spec[^sum-constants]; `CONSTANT` và `CONSTANTS` đồng nghĩa[^ss-keyword-synonym] |
-| `VARIABLE(S) x, y` | biến của spec — tham số thay đổi theo state[^sum-variables] |
+| `CONSTANT(S) C1, C2` | tham số hằng của spec[^sum-constants] |
+| `VARIABLE(S) x, y` | biến của spec: tham số thay đổi theo state[^sum-variables] |
 | `ASSUME P` | khẳng định `P` là giả định[^sum-assume] |
 | `Id == exp` | định nghĩa |
 | `THEOREM P` | khẳng định `P` chứng minh được từ định nghĩa và giả định của module[^sum-theorem] |
 | `====` | hết module |
 
-*Hằng là tham số.* Sách không cố định tập giá trị dữ liệu của channel; giao thức handshake như nhau dù gửi số 32 bit hay 128 bit nên spec chỉ giả định có một tập `Data` nào đó, khai báo bằng `CONSTANT Data`[^ss-constant-data]. Đó cũng là điểm bạn "xoay núm" khi kiểm TLC: file `.cfg` gán `Data` một tập cụ thể, và TLC yêu cầu mọi hằng khai báo trong spec đều phải được gán giá trị ở đó[^ex-asynch-cfg].
+*Hằng là tham số.* Sách không cố định tập giá trị dữ liệu của channel: giao thức handshake như nhau dù gửi số 32 bit hay 128 bit, nên spec chỉ giả định có một tập `Data` nào đó, khai báo bằng `CONSTANT Data`[^ss-constant-data]. Với pool thì `Size` đóng vai đó: luật như nhau dù pool có 3 hay 300 connection. Hằng cũng là chỗ bạn "xoay núm" khi kiểm bằng TLC: file `.cfg` gán cho hằng một tập hoặc số cụ thể. TLC yêu cầu mọi hằng khai báo trong spec đều phải được gán giá trị ở đó[^ex-asynch-cfg].
 
-*Biến.* `VARIABLE` hay `VARIABLES` (sách nói `variable` và `variables` đồng nghĩa)[^ss-keyword-synonym] khai báo biến state — đây là các biến primed/không primed trong action.
+*Biến.* `VARIABLE` hay `VARIABLES` đều khai báo biến state, cũng như `CONSTANT` hay `CONSTANTS` đều khai báo hằng: mỗi cặp từ khóa đồng nghĩa[^ss-keyword-synonym]. Đây chính là các biến primed và không primed trong action.
 
-*`ASSUME` chỉ cho hằng.* Sách: dùng `ASSUME` chỉ để đưa giả định về hằng[^ss-assume-constants]; ví dụ `assume (N ∈ Nat) ∧ (N > 0)` ở FIFO có giới hạn[^ss-assume-n]. Đừng dùng nó để "khai báo kiểu biến" — mục 6.
+*`ASSUME` chỉ dành cho hằng.* Sách khuyên dùng `ASSUME` chỉ để đưa ra giả định về hằng[^ss-assume-constants]. Ví dụ ở FIFO có giới hạn là `assume (N ∈ Nat) ∧ (N > 0)`[^ss-assume-n]. Đừng dùng nó để "khai báo kiểu của biến": lý do ở mục 6.
 
-*Định nghĩa và phạm vi.* `Id == exp` làm `Id` đồng nghĩa với `exp`: thay một bên bằng bên kia không đổi nghĩa — việc thay phải thực hiện sau khi parse, chứ không phải trên chuỗi ký tự, nên `x == a + b` làm `x * c` bằng `(a + b) * c`[^ss-def-subst]. Phạm vi của khai báo hay định nghĩa là phần module *theo sau* nó[^ss-scope], do đó một ký hiệu phải được khai báo hoặc định nghĩa trước khi dùng[^ss-order]; vì thế `Spec` thường nằm cuối module dù người đọc muốn đọc từ trên xuống (khai báo, rồi `Spec`, rồi `Init`/`Next`, rồi các action con) — sách khuyên dùng comment để dẫn người đọc và chia module để chọn thứ tự đọc[^ss-reading-order]. Một ký hiệu không được khai báo lại khi đã có nghĩa, kể cả trong phạm vi của lượng từ lồng nhau[^ss-no-redeclare].
+*Định nghĩa và phạm vi.* `Id == exp` làm `Id` đồng nghĩa với `exp`: thay bên này bằng bên kia không đổi nghĩa. Việc thay phải làm sau khi parse chứ không làm trên chuỗi ký tự, nên `x == a + b` làm `x * c` bằng `(a + b) * c`[^ss-def-subst]. Phạm vi của một khai báo hay định nghĩa là phần module *theo sau* nó[^ss-scope]. Vì vậy ký hiệu phải được khai báo hoặc định nghĩa trước khi dùng[^ss-order]. Đó là lý do `Spec` thường nằm cuối module, dù người đọc muốn đọc từ trên xuống (khai báo, rồi `Spec`, rồi `Init`/`Next`, rồi các action con). Sách khuyên dùng comment để dẫn người đọc, và chia module để chọn thứ tự đọc[^ss-reading-order]. Một ký hiệu cũng không được khai báo lại khi đã có nghĩa, kể cả trong phạm vi của lượng từ lồng nhau[^ss-no-redeclare].
 
-*Comment.* `(* … *)` (có thể lồng nhau) và `\*` đến hết dòng; sách nhấn mạnh mỗi spec cần lời giải thích bằng văn xuôi, nằm trong comment hoặc tài liệu đi kèm[^ss-comments-prose][^ss-comments-syntax].
+*Comment.* Có hai kiểu: `(* … *)` (có thể lồng nhau) và `\*` đến hết dòng[^ss-comments-syntax]. Sách nhấn mạnh mỗi spec cần một lời giải thích bằng văn xuôi, nằm trong comment hoặc tài liệu đi kèm[^ss-comments-prose].
 
-*Spec nhỏ do người soạn tự viết (minh họa, chưa chạy TLC).* Một connection pool đủ ba loại thành phần — hằng, biến và định nghĩa — cộng một lớp `ASSUME` về hằng:
+*Spec nhỏ do người soạn tự viết (minh họa, chưa chạy TLC).* Đây là pool của `orders` ở dạng module, đủ ba loại thành phần (hằng, biến, định nghĩa) cộng một lớp `ASSUME` về hằng:
 
 ```tla
 ---------------------------- MODULE PoolMini ----------------------------
@@ -279,63 +283,67 @@ Spec == Init /\ [][Next]_vars
 =======================================================================
 ```
 
-Điểm cần để ý (đều suy ra từ định nghĩa, không từ kết quả chạy): mỗi action nêu *đủ* ba biến, hoặc gán, hoặc `UNCHANGED`; `MaxWait` làm số state hữu hạn — tương tự cách sách giới hạn độ dài hàng đợi để TLC chạy được ở mục 8; và "tổng `free + busy` luôn bằng `Size`" là loại tính chất ta muốn kiểm bằng TLC ở [Chương 04](04-invariant-va-tlc.md), không phải điều đã được chứng minh ở đây.
+Có ba điểm cần để ý, đều suy ra từ định nghĩa chứ không từ kết quả chạy. Một: mỗi action nêu *đủ* ba biến, hoặc gán, hoặc `UNCHANGED`. Hai: `MaxWait` làm số state hữu hạn, tương tự cách sách giới hạn độ dài hàng đợi để TLC chạy được ở mục 8. Ba: "tổng `free + busy` luôn bằng `Size`" là loại tính chất ta muốn kiểm bằng TLC ở [Chương 04](04-invariant-va-tlc.md); nó không phải điều đã được chứng minh ở đây.
 
 <details><summary>Đi sâu: cấu trúc file, <code>INSTANCE</code>, và các module chuẩn dùng trong chương</summary>
 
 - **Header module.** Theo phần cú pháp (mục 15.3, các lexeme) của SS, module bắt đầu bằng chuỗi từ bốn dấu gạch ngang trở lên, rồi `MODULE`[^ss-four-dashes]. Dòng gạch ngang giữa module (như ở `HourClock`) hoàn toàn mang tính thẩm mỹ, không có nghĩa[^ss-cosmetic-line].
 - **File ↔ module.** Với TLC, mỗi module `M` trong spec phải nằm trong file riêng tên `M.tla`[^ss-tlc-file].
-- **Các module chuẩn** (nguồn và chi tiết ở [Chương 02 mục 7](02-toan-nen-tang.md)). `Naturals` định nghĩa các toán tử số học như `+` và `%`[^ss-naturals-module][^ss-mod]; `Sequences` định nghĩa các toán tử trên dãy hữu hạn — `Seq`, `Head`, `Tail`, `Append`, `\o` (nối) và `Len`[^ss-sequences]. Bảng tóm tắt của sách ghi chú `Naturals` chỉ định nghĩa phép trừ hai ngôi[^sum-std-modules]; sách `EXTENDS Naturals` ở spec giao diện vì cần phép trừ (`1 - rdy`)[^ss-extends-minus].
-- **`INSTANCE`.** Một module có thể được "cài lại" với hằng/biến thay thế: `InChan == INSTANCE Channel WITH Data <- Message, chan <- in` làm mọi định nghĩa `Σ` của `Channel` có mặt dưới tên `InChan!Σ` với `Message` thay cho `Data` và `in` thay cho `chan`[^ss-instance]. Sách nói nó "hiếm khi dùng" ngoài một thành ngữ ẩn biến (dùng ở mục 8 của chương này, ứng với SS 4.3)[^ss-instance-rare]. Tham số của `INSTANCE` phải bao phủ *mọi* tham số của module được nhập; nếu một tham số không có phép thay thế rõ ràng thì mặc định là thay chính nó (`p <- p`), và khi đó ký hiệu `p` phải đã được khai báo ở nơi đặt `INSTANCE`[^ss-implicit-subst].
-- **`CONSTANT` dạng toán tử.** Cũng có thể khai báo hằng là toán tử với `n` đối số, ví dụ `C(_, _)`[^sum-constants]; sách dùng cách này để khai báo `Send` của giao diện bộ nhớ ở chương 5, khi cần một "tham số hành động"[^ss-constant-operator].
+- **Các module chuẩn** (nguồn và chi tiết ở [Chương 02 mục 7](02-toan-nen-tang.md)). `Naturals` cung cấp các toán tử số học như `+`[^ss-naturals-module]. Nó cũng định nghĩa phép chia lấy dư `%`[^ss-mod]. `Sequences` định nghĩa các toán tử trên dãy hữu hạn: `Seq`, `Head`, `Tail`, `Append`, `\o` (nối) và `Len`[^ss-sequences]. Bảng tóm tắt của sách ghi chú rằng `Naturals` chỉ định nghĩa phép trừ hai ngôi[^sum-std-modules]. Spec giao diện của sách `EXTENDS Naturals` vì cần phép trừ (`1 - rdy`)[^ss-extends-minus].
+- **`INSTANCE`.** Một module có thể được "cài lại" với hằng/biến thay thế: `InChan == INSTANCE Channel WITH Data <- Message, chan <- in` làm mọi định nghĩa σ của `Channel` có mặt dưới tên `InChan!σ`, với `Message` thay cho `Data` và `in` thay cho `chan`[^ss-instance]. Sách nói nó "hiếm khi dùng" ngoài một thành ngữ ẩn biến (dùng ở mục 8 của chương này, ứng với SS 4.3)[^ss-instance-rare]. Tham số của `INSTANCE` phải bao phủ *mọi* tham số của module được nhập; nếu một tham số không có phép thay thế rõ ràng thì mặc định là thay chính nó (`p <- p`), và khi đó ký hiệu `p` phải đã được khai báo ở nơi đặt `INSTANCE`[^ss-implicit-subst].
+- **`CONSTANT` dạng toán tử.** Cũng có thể khai báo hằng là toán tử với `n` đối số, ví dụ `C(_, _)`[^sum-constants]. Sách dùng cách này để khai báo `Send` của giao diện bộ nhớ ở chương 5, khi cần một "tham số hành động"[^ss-constant-operator].
 
 </details>
 
-**Quay lại Q5:** module = tiêu đề + `EXTENDS` + hằng/biến + định nghĩa + `====`; hằng là tham số do `.cfg` điền, biến là state, `ASSUME` chỉ cho hằng.
+**Quay lại Q5:** module = tiêu đề + `EXTENDS` + hằng/biến + định nghĩa + `====`; hằng là tham số do `.cfg` điền (như `Size` của pool), biến là state, `ASSUME` chỉ cho hằng.
 
 ## 6. TypeInvariant / TypeOK (Q6)
 
-> **Trả lời ngắn.** `TypeInvariant` là một *vị từ trên state* liệt kê tập giá trị mà mỗi biến được phép nhận, ví dụ `rdy \in {0, 1}`[^ss-type-def]. TLA+ **không có kiểu**: mọi biểu thức đúng cú pháp đều có nghĩa, và "đúng kiểu" chỉ là tên gọi của một tính chất bất biến mà spec *suy ra* chứ không phải điều ta *giả định*[^ss-untyped][^ss-typeinv-not-assumption].
+> **Trả lời ngắn.** `TypeInvariant` là một *vị từ trên state* liệt kê tập giá trị mà mỗi biến được phép nhận, chẳng hạn `rdy \in {0, 1}`[^ss-type-def]. TLA+ **không có kiểu**: mọi biểu thức đúng cú pháp đều có nghĩa, và "đúng kiểu" chỉ là tên gọi của một tính chất bất biến[^ss-untyped]. Tính chất này spec phải *suy ra* được, chứ ta không *giả định* nó[^ss-typeinv-not-assumption].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ràng buộc `CHECK (status IN ('open','closed'))` trong DB. Schema không ngăn ai viết một câu lệnh sai; ràng buộc mới là thứ bắt giá trị lạ lúc chạy. `TypeInvariant` là `CHECK` ấy, áp lên mọi state mà spec đi qua; nó không *tạo* ra kiểu mà *kiểm* spec không đẩy biến ra khỏi tập mong muốn.
+*Với service của bạn.* Với pool của `orders`, `TypeOK` nói `free` và `busy` nằm trong `0..Size`, còn `waiting` nằm trong `0..MaxWait`. Nó giống ràng buộc `CHECK (status IN ('open','closed'))` trong DB hơn là khai báo kiểu: nó không *tạo* ra kiểu, mà *kiểm* rằng spec không đẩy biến ra khỏi tập mong muốn, trên mọi state mà spec đi qua (nhận xét của người soạn). Ví dụ `Acquire` ở mục 5 mà quên điều kiện `free > 0` thì `free` rơi xuống dưới 0, và `TypeOK` sẽ bắt đúng chỗ đó.
 
-*Định nghĩa của sách.* Sách đặt bốn khái niệm theo thứ tự: state function là biểu thức thường (không prime, không `[]`) có thể chứa biến và hằng[^ss-state-function]; state predicate là state function có giá trị Boolean[^ss-state-function]; invariant `Inv` của `Spec` là state predicate sao cho `Spec => []Inv` là định lý; và biến `v` có kiểu `T` trong `Spec` khi `v \in T` là invariant của `Spec`[^ss-inv-def]. Ví dụ `rdy \in {0, 1}` là "kiểu" của `rdy`; sách gọi tập `{0, 1}` là kiểu của `rdy` và `TypeInvariant` là type invariant[^ss-type-def].
+*Định nghĩa của sách.* Sách đặt bốn khái niệm theo thứ tự. State function là biểu thức thường (không prime, không `[]`) có thể chứa biến và hằng, và state predicate là state function có giá trị Boolean[^ss-state-function]. Invariant `Inv` của `Spec` là state predicate sao cho `Spec => []Inv` là định lý, và biến `v` có kiểu `T` trong `Spec` khi `v \in T` là invariant của `Spec`[^ss-inv-def]. Chẳng hạn `rdy \in {0, 1}`: sách gọi tập `{0, 1}` là kiểu của `rdy`, và `TypeInvariant` là type invariant[^ss-type-def].
 
-*Nó không phải khai báo kiểu.* Vì state là phép gán tùy ý nên tồn tại state mà `hr` nhận giá trị ngoài 1..12 (sách lấy ví dụ √−2); "`hr` có kiểu 1..12" chỉ có nghĩa: trong *mọi behavior thỏa `HC`*, `hr` thuộc 1..12[^ss-type-not-restrict]. Sách giải thích tại sao không thêm hệ thống kiểu: chi phí của kiểu nặng hơn lợi ích khi viết spec[^ss-why-no-types]; và việc gắn tên `TypeInvariant` cho một công thức không cho nó địa vị đặc biệt nào[^ss-no-special-status].
+*Nó không phải khai báo kiểu.* Vì state là phép gán tùy ý, tồn tại state mà `hr` nhận giá trị ngoài 1..12 (sách lấy ví dụ √−2). Do đó "`hr` có kiểu 1..12" chỉ có nghĩa: trong *mọi behavior thỏa `HC`*, `hr` thuộc 1..12[^ss-type-not-restrict]. Vì sao sách không thêm hệ thống kiểu cho tiện? Vì với việc viết spec, chi phí của kiểu nặng hơn lợi ích[^ss-why-no-types]. Và gắn tên `TypeInvariant` cho một công thức cũng không cho nó địa vị đặc biệt nào[^ss-no-special-status].
 
-*Nó không phải giả định.* Ở bản `AsynchInterface`, sách nêu thẳng: công thức `TypeInvariant` không xuất hiện như một phần của đặc tả; ta không *giả định* nó là invariant mà spec phải *suy ra* được, và tính bất biến của nó được khẳng định thành định lý (`THEOREM Spec => []TypeInvariant`)[^ss-typeinv-not-assumption]. Hậu quả thực tiễn của việc nhầm hai thứ này nằm ở đoạn "Đi sâu" bên dưới.
+*Nó không phải giả định.* Ở bản `AsynchInterface`, sách nêu thẳng: công thức `TypeInvariant` không xuất hiện như một phần của đặc tả. Ta không *giả định* nó là invariant; spec phải *suy ra* được điều đó, và tính bất biến của nó được khẳng định thành định lý `THEOREM Spec => []TypeInvariant`[^ss-typeinv-not-assumption]. Hậu quả thực tế của việc nhầm hai thứ này nằm ở phần "Đi sâu" bên dưới.
 
-*Dùng ở đâu.* (1) Làm `INVARIANT` cho TLC: `.cfg` của sách kiểm `TypeInvariant` là invariant của `Spec` (cho `AsynchInterface`)[^ex-asynch-cfg-inv]. (2) Làm điều kiện đầu: trong module `Channel`, state đầu là record đúng kiểu mà `ack` bằng `rdy`, tức `Init == /\ TypeInvariant /\ chan.ack = chan.rdy`[^ss-channel-init]. (3) Làm tài liệu: người đọc thấy ngay biến nào nhận giá trị gì, mà không phải đọc cả spec[^ss-typeinv-readable].
+*Dùng ở đâu.* Có ba chỗ:
 
-Tên: sách dùng `TypeInvariant`; `TypeOK` là cách viết ngắn phổ biến trong cộng đồng (nhận xét của người soạn — không phải tên đặc biệt).
+- Làm `INVARIANT` cho TLC: `.cfg` của sách kiểm `TypeInvariant` là invariant của `Spec` (cho `AsynchInterface`)[^ex-asynch-cfg-inv].
+- Làm điều kiện đầu: trong module `Channel`, state đầu là record đúng kiểu mà `ack` bằng `rdy`, tức `Init == /\ TypeInvariant /\ chan.ack = chan.rdy`[^ss-channel-init].
+- Làm tài liệu: người đọc thấy ngay biến nào nhận giá trị gì, mà không phải đọc cả spec[^ss-typeinv-readable].
+
+Về tên: sách dùng `TypeInvariant`; `TypeOK` là cách viết ngắn phổ biến trong cộng đồng (nhận xét của người soạn, không phải tên đặc biệt).
 
 <details><summary>Đi sâu: vì sao <code>ASSUME q \in Seq(Message)</code> là sai, "kiểu" của action, và các giá trị khác loại</summary>
 
-- **Đừng `ASSUME` kiểu của biến.** Sách đã tính tới cám dỗ thêm vào `InnerFIFO` giả định `q \in Seq(Message)` và bác bỏ: nó khẳng định ở *mọi* state `q` là sequence, mà ta biết tồn tại state mà `q` có giá trị √−17 (căn bậc hai của −17, không phải sequence; dấu căn bị mất khi trích PDF thành text); giả định điều đó không tồn tại dẫn tới mâu thuẫn logic[^ss-assume-contradiction]. Sách còn chốt rằng type invariance là tính chất của spec chứ không phải giả định[^ss-type-property].
-- **Định nghĩa kiểu không tự ràng buộc action.** Nếu ta định nghĩa type invariant nói `n \in Nat`, conjunct `n' > 7` trong một action vẫn chỉ nói `n' > 7`; nghĩa của công thức không đổi chỉ vì ta định nghĩa type invariant[^ss-typedef-no-effect]. Khuyến nghị của sách: để next-state action *ngụ ý* giá trị mới thuộc một tập thích hợp, ví dụ `Next == (n' \in Nat) /\ (Action1 \/ Action2)`[^ss-n-in-nat]. Cách thường làm hơn là mỗi action gán `v' = exp` hay `v' \in exp` với `exp` rõ ràng thuộc tập đó (xem mục 2).
-- **Giá trị "trông khác nhau" chưa chắc khác nhau.** Luật TLA+ không suy ra `1 # "a"`; sách khuyên nếu một thông điệp có thể là chuỗi hoặc số thì biểu diễn bằng record có trường `type` và `value`, để biết hai giá trị khác nhau nhờ trường `type`[^ss-diff-values]. TLC cũng đòi các giá trị trong cùng tập phải "so sánh được" — chuỗi và số không so sánh được vì ngữ nghĩa TLA+ không nói `"abc"` có bằng 42 hay không[^tlc-comparable].
+- **Đừng `ASSUME` kiểu của biến.** Sách đã tính tới cám dỗ thêm vào `InnerFIFO` giả định `q \in Seq(Message)` và bác bỏ. Giả định đó khẳng định ở *mọi* state `q` là sequence, trong khi ta biết có state mà `q` mang giá trị √−17 (căn bậc hai của −17, không phải sequence; dấu căn bị mất khi trích PDF thành text); giả định rằng state như thế không tồn tại dẫn tới mâu thuẫn logic[^ss-assume-contradiction]. Sách còn chốt rằng type invariance là tính chất của spec chứ không phải giả định[^ss-type-property].
+- **Định nghĩa kiểu không tự ràng buộc action.** Nếu ta định nghĩa type invariant nói `n \in Nat`, conjunct `n' > 7` trong một action vẫn chỉ nói `n' > 7`: nghĩa của công thức không đổi chỉ vì ta định nghĩa type invariant[^ss-typedef-no-effect]. Sách khuyên để next-state action *ngụ ý* giá trị mới thuộc một tập thích hợp, ví dụ `Next == (n' \in Nat) /\ (Action1 \/ Action2)`[^ss-n-in-nat]. Cách thường làm hơn là mỗi action gán `v' = exp` hay `v' \in exp` với `exp` rõ ràng thuộc tập đó (xem mục 2).
+- **Giá trị "trông khác nhau" chưa chắc khác nhau.** Luật TLA+ không suy ra `1 # "a"`. Sách khuyên: nếu một thông điệp có thể là chuỗi hoặc số thì biểu diễn nó bằng record có trường `type` và `value`, để biết hai giá trị khác nhau nhờ trường `type`[^ss-diff-values]. TLC cũng đòi các giá trị trong cùng tập phải "so sánh được": chuỗi và số không so sánh được vì ngữ nghĩa TLA+ không nói `"abc"` có bằng 42 hay không[^tlc-comparable].
 - **Tập vô hạn.** `Message` và `Data` không cần hữu hạn; muốn giả định hữu hạn phải nói rõ bằng `IsFiniteSet` (module `FiniteSets`)[^ss-finite-assume]. Còn TLC chỉ duyệt được tập "hiển nhiên hữu hạn" khi cần liệt kê[^tlc-enumerate]; để mô hình hóa, ta gán hằng một tập hữu hạn cụ thể trong `.cfg`.
-- **TypeInvariant nhỏ gọn bằng `[... : ...]`.** Tập các record `[val : Data, rdy : {0, 1}, ack : {0, 1}]` là "kiểu" của channel trong mục 8; thứ tự trường không quan trọng[^ss-record-set].
+- **`TypeInvariant` gọn bằng `[... : ...]`.** Tập các record `[val : Data, rdy : {0, 1}, ack : {0, 1}]` là "kiểu" của channel ở mục 8; thứ tự trường không quan trọng[^ss-record-set].
 
 </details>
 
-**Quay lại Q6:** `TypeInvariant` liệt kê tập giá trị hợp lệ của từng biến; nó là *định lý* ta muốn spec thỏa, kiểm bằng TLC, chứ không phải giả định hay khai báo kiểu.
+**Quay lại Q6:** `TypeInvariant` liệt kê tập giá trị hợp lệ của từng biến; nó là *định lý* ta muốn spec thỏa và kiểm bằng TLC, chứ không phải giả định hay khai báo kiểu; với pool, đó là `free`, `busy` trong `0..Size`.
 
 ## 7. Chọn biến và mức trừu tượng (Q7)
 
-> **Trả lời ngắn.** Spec là một *mô hình toán học của một góc nhìn* lên một phần của hệ, không phải mô tả cả hệ[^ss-what-to-specify]. Bạn chọn *biến* nào đại diện state và *granularity* — việc nào của hệ được coi là một bước duy nhất[^ss-choose-abstraction][^ss-grain]. Sách khuyên bắt đầu bằng vài bước đầu của một hai behavior mẫu[^ss-sample-behaviors], và chọn phần hệ mà spec có khả năng bắt lỗi nhất; TLA+ đặc biệt hiệu quả với lỗi đồng thời giữa các thành phần bất đồng bộ[^ss-concurrency-errors].
+> **Trả lời ngắn.** Spec là một *mô hình toán học của một góc nhìn* lên một phần của hệ, không phải mô tả cả hệ[^ss-what-to-specify]. Viết spec nghĩa là chọn *biến* đại diện cho state và chọn *granularity*, tức việc nào của hệ được coi là một bước duy nhất[^ss-choose-abstraction]. Sách khuyên bắt đầu bằng vài bước đầu của một hai behavior mẫu[^ss-sample-behaviors]. Nên chọn phần hệ mà spec có khả năng bắt lỗi nhất, vì TLA+ đặc biệt hiệu quả với lỗi đồng thời giữa các thành phần bất đồng bộ[^ss-concurrency-errors].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): sơ đồ kiến trúc trên whiteboard bỏ qua cấu hình JVM và hệ điều hành để thấy luồng dữ liệu giữa các service. Mỗi hộp bỏ qua là một chỗ có thể giấu bug; Lamport nói đúng như vậy về spec: nó mô tả vài khía cạnh và bỏ qua phần còn lại[^ss-abstraction-def]. Càng bỏ qua nhiều, spec càng đơn giản, nhưng mỗi thứ bỏ qua là một nguồn lỗi tiềm tàng[^ss-omit-source].
+*Với service của bạn.* Khi mô hình hóa pool của `orders`, ta bỏ qua vô số thứ: cấu hình TLS của kết nối, nội dung query, độ trễ mạng; ta chỉ giữ ba con số. Mỗi thứ bỏ qua có thể giấu một bug, nhưng giữ hết thì spec rối đến mức không ai đọc nổi. Lamport nói đúng như vậy về spec: nó mô tả vài khía cạnh của hệ và bỏ qua phần còn lại[^ss-abstraction-def]. Càng bỏ qua nhiều, spec càng đơn giản, nhưng mỗi thứ bỏ qua là một nguồn lỗi tiềm tàng[^ss-omit-source].
 
-*Ví dụ trong chương 3 của sách.* Khi viết hành vi mẫu của giao diện handshake, Lamport quyết định `val` và `rdy` đổi trong *cùng một bước*[^ss-val-rdy-same-step]. Thực tế đó là điện áp trên các dây khác nhau, không đổi đúng cùng một lúc; ông chọn bỏ qua[^ss-ignore-voltage]. Giá phải trả được nói thẳng: spec đơn giản hơn, nhưng bỏ qua một chi tiết có thể quan trọng[^ss-lose-detail] — dây `rdy` chỉ nên đổi sau khi các dây `val` ổn định, mà người đọc spec không biết điều đó[^ss-rdy-stabilize]. Lamport nói nếu muốn spec truyền đạt yêu cầu ấy, ông sẽ viết behavior mà `val` và `rdy` đổi ở hai bước riêng[^ss-separate-steps]. Sách thừa nhận phần khó nhất của việc viết spec là chọn đúng mức trừu tượng[^ss-hardest], và rằng nghệ thuật trừu tượng chỉ học được qua kinh nghiệm[^ss-experience].
+*Một quyết định cụ thể trong sách.* Khi viết hành vi mẫu cho giao diện handshake ở chương 3, Lamport cho `val` và `rdy` đổi trong *cùng một bước*[^ss-val-rdy-same-step]. Ngoài đời, đó là điện áp trên các dây khác nhau và chúng không đổi đúng cùng lúc; ông chọn bỏ qua điều ấy[^ss-ignore-voltage]. Giá phải trả được nói thẳng: spec đơn giản hơn nhưng bỏ qua một chi tiết có thể quan trọng[^ss-lose-detail]. Cụ thể, dây `rdy` chỉ nên đổi sau khi các dây `val` ổn định, mà đọc spec thì không biết điều đó[^ss-rdy-stabilize]. Muốn spec truyền đạt yêu cầu ấy, ông sẽ viết behavior trong đó `val` và `rdy` đổi ở hai bước riêng[^ss-separate-steps]. Sách thừa nhận phần khó nhất khi viết spec là chọn đúng mức trừu tượng[^ss-hardest]. Còn nghệ thuật trừu tượng, theo sách, chỉ học được qua kinh nghiệm[^ss-experience].
 
-*Grain of atomicity.* Sách gọi tên nó: đây là khía cạnh quan trọng nhất của mức trừu tượng, tức là chọn thay đổi nào của hệ được biểu diễn thành một bước đơn của behavior[^ss-grain]. Gửi một thông điệp thật gồm nhiều thao tác con nhưng thường được coi một bước; ngược lại gửi và nhận thường là hai bước riêng khi mô tả hệ phân tán[^ss-grain-send]. Hạt thô gần như luôn làm spec đơn giản hơn; hạt mịn mô tả chính xác hơn hành vi thật; hạt thô có thể che mất chi tiết quan trọng[^ss-coarse-fine].
+*Grain of atomicity.* Đây là khía cạnh quan trọng nhất của mức trừu tượng: chọn thay đổi nào của hệ được biểu diễn thành một bước đơn của behavior[^ss-grain]. Gửi một thông điệp thật gồm nhiều thao tác con nhưng thường được coi là một bước; ngược lại, gửi và nhận thường là hai bước riêng khi mô tả hệ phân tán[^ss-grain-send]. Hạt thô gần như luôn làm spec đơn giản hơn hạt mịn, nhưng hạt mịn mô tả chính xác hơn hành vi thật, còn hạt thô có thể che mất chi tiết quan trọng[^ss-coarse-fine].
 
-*Sự đánh đổi trên một ví dụ đời backend (spec do người soạn tự viết, minh họa, chưa chạy TLC).* Hai tiến trình cùng tăng một counter. Bản hạt thô: một bước nguyên tử.
+*Sự đánh đổi trên một ví dụ backend (spec do người soạn tự viết, minh họa, chưa chạy TLC).* Hai handler thread của `orders` cùng tăng một counter, chẳng hạn số request đã phục vụ. Bản hạt thô coi cả lần tăng là một bước nguyên tử:
 
 ```tla
 ---------------------------- MODULE IncCoarse -----------------------------
@@ -356,7 +364,7 @@ Spec == Init /\ [][Next]_vars
 =======================================================================
 ```
 
-Bản hạt mịn: đọc và ghi là hai bước riêng, như `counter = counter + 1` thật trong code không nguyên tử.
+Bản hạt mịn tách đọc và ghi thành hai bước riêng, giống `counter = counter + 1` thật trong code không nguyên tử:
 
 ```tla
 ----------------------------- MODULE IncFine ------------------------------
@@ -384,33 +392,35 @@ Spec == Init /\ [][Next]_vars
 =======================================================================
 ```
 
-Suy ra bằng tay từ định nghĩa (không chạy TLC): với hai tiến trình `p1`, `p2`, chuỗi bước `Read(p1)`, `Read(p2)`, `Write(p1)`, `Write(p2)` là hợp lệ trong `IncFine`, và kết thúc với `counter = 1`, một lost update (vết tay: `Read(p1)` đặt `tmp[p1] = 0`, `Read(p2)` đặt `tmp[p2] = 0`, `Write(p1)` đặt `counter = 1`, `Write(p2)` đặt `counter = tmp[p2] + 1 = 1`). Trong `IncCoarse` không có chuỗi nào như vậy vì đọc và ghi nằm trong *một* bước. Chọn hạt nào là quyết định của người viết spec: nếu câu hỏi là "lost update có xảy ra không", bản thô che mất đúng chỗ ta cần soi; nếu ta chỉ cần xác nhận tổng, bản mịn là thừa. Lamport mô tả quan hệ này bằng toán tử hợp thành hành động `R·L` giữa bản mịn (hai bước) và bản thô (một bước)[^ss-composition]: bản thô yêu cầu mỗi bước `R` phải được theo ngay sau bởi bước `L`, còn bản mịn cho phép bước khác xen vào giữa[^ss-strengthened]. (Ở đây `R`, `L` là hai thao tác con nối tiếp, `R` làm `L` enabled; gán `R` = `Read(p)`, `L` = `Write(p)` cho ví dụ này là suy luận của người soạn.) Lost update cùng họ với atomicity violation — nhận xét của người soạn — ở [Chương 05 phase 4, mục 2](../04-concurrency/05-concurrency-bug-va-deadlock.md); lost update ở mức transaction của cơ sở dữ liệu ở [P12·07 mục 3](../12-he-thong-du-lieu/07-transaction.md); mô hình bộ nhớ ở tầng phần cứng, tức thứ tự thật mà một bước đơn che đi, ở [Chương 06 phase 4](../04-concurrency/06-memory-model.md).
+Ta thử suy ra bằng tay từ định nghĩa (không chạy TLC). Với hai tiến trình `p1`, `p2`, chuỗi bước `Read(p1)`, `Read(p2)`, `Write(p1)`, `Write(p2)` hợp lệ trong `IncFine` và kết thúc với `counter = 1`, tức một lost update. Vết tay: `Read(p1)` đặt `tmp[p1] = 0`, `Read(p2)` đặt `tmp[p2] = 0`, `Write(p1)` đặt `counter = 1`, `Write(p2)` đặt `counter = tmp[p2] + 1 = 1`. Trong `IncCoarse` không có chuỗi nào như vậy, vì đọc và ghi nằm trong *một* bước.
 
-Lưu ý TLC (suy luận của người soạn): ở `IncFine`, khi mọi tiến trình đạt `"done"` thì không action nào enabled; mặc định TLC báo đó là deadlock, còn ở đây "hết việc" là kết thúc bình thường — nên ta tắt kiểm deadlock, điều sách cho phép[^ss-deadlock].
+Vậy chọn hạt nào? Tùy câu hỏi bạn đặt cho spec. Nếu câu hỏi là "lost update có xảy ra không", bản thô che mất đúng chỗ cần soi; nếu ta chỉ cần xác nhận tổng, bản mịn là thừa. Lamport mô tả quan hệ giữa hai bản bằng toán tử hợp thành hành động `R·L`: bản mịn là spec mà thao tác chạy hai bước, bản thô là spec mà thao tác chạy như một bước `R·L`[^ss-composition]. Bản thô yêu cầu mỗi bước `R` phải được theo ngay sau bởi bước `L`, còn bản mịn cho phép bước khác xen vào giữa[^ss-strengthened]. (Ở đây `R`, `L` là hai thao tác con nối tiếp, `R` làm `L` enabled; gán `R` = `Read(p)`, `L` = `Write(p)` cho ví dụ này là suy luận của người soạn.) Lost update cùng họ với atomicity violation (nhận xét của người soạn), xem [Chương 05 phase 4, mục 2](../04-concurrency/05-concurrency-bug-va-deadlock.md). Lost update ở mức transaction của cơ sở dữ liệu nằm ở [P12·07 mục 3](../12-he-thong-du-lieu/07-transaction.md). Mô hình bộ nhớ ở tầng phần cứng, tức thứ tự thật mà một bước đơn che đi, nằm ở [Chương 06 phase 4](../04-concurrency/06-memory-model.md).
 
-*Đừng quá trừu tượng.* Sách khuyên ngược lại: với tương tác bàn phím, mô hình "nhấn phím a" thành một bước `KeyStroke` thì đơn giản, nhưng bỏ mất khả năng nhấn thêm `b` trước khi nhả `a`; biểu diễn cụ thể — hai bước nhấn và nhả — mô tả được cả trường hợp đó[^ss-too-abstract]. Quy tắc cuối của đoạn: khi còn nghi ngờ, chọn biểu diễn cụ thể mô tả hệ thật chính xác hơn, để ít bỏ sót vấn đề thật[^ss-when-in-doubt].
+Lưu ý TLC (suy luận của người soạn): ở `IncFine`, khi mọi tiến trình đạt `"done"` thì không action nào enabled; mặc định TLC báo đó là deadlock, còn ở đây "hết việc" là kết thúc bình thường, nên ta tắt kiểm deadlock, điều sách cho phép[^ss-deadlock].
 
-*Quy trình viết spec của sách.* Chọn biến, định nghĩa type invariant và điều kiện đầu[^ss-write-first]; rồi viết next-state action — phần chiếm đa số spec[^ss-write-steps]; phác vài behavior mẫu có thể giúp bắt đầu[^ss-sketch]; cuối cùng ghép thành công thức spec và thêm theorem, ít nhất là về type correctness[^ss-write-end]. Lamport cũng khuyên viết spec *trong lúc* thiết kế[^ss-when-and-how] và để nó ban đầu thiếu sót, thêm chức năng sau bằng cách thêm disjunct vào `Next`[^ss-incomplete].
+*Đừng quá trừu tượng.* Sách khuyên ngược lại ở chiều kia: với tương tác bàn phím, mô hình "nhấn phím a" thành một bước `KeyStroke` thì đơn giản, nhưng bỏ mất khả năng nhấn thêm `b` trước khi nhả `a`; biểu diễn cụ thể, gồm hai bước nhấn và nhả, mô tả được cả trường hợp đó[^ss-too-abstract]. Quy tắc cuối của đoạn: khi còn nghi ngờ, chọn biểu diễn cụ thể mô tả hệ thật chính xác hơn, để ít bỏ sót vấn đề thật[^ss-when-in-doubt].
+
+*Quy trình viết spec của sách.* Trước hết chọn biến, định nghĩa type invariant và điều kiện đầu[^ss-write-first]. Tiếp theo viết next-state action, phần chiếm đa số spec[^ss-write-steps]. Phác vài behavior mẫu có thể giúp bạn bắt đầu[^ss-sketch]. Cuối cùng ghép thành công thức spec và thêm theorem, ít nhất là về type correctness[^ss-write-end]. Lamport cũng khuyên viết spec *trong lúc* thiết kế[^ss-when-and-how]. Spec ban đầu thiếu sót cũng được: chức năng còn thiếu thêm sau bằng cách thêm disjunct vào `Next`[^ss-incomplete].
 
 <details><summary>Đi sâu: khi nào hai bước có thể gộp thành một (commutativity), và vài lời khuyên khác của chương 7</summary>
 
-- **Gộp bước chỉ khi chuyển hoán được.** Sách đặt câu hỏi: hành vi của spec hạt mịn có thể biến thành hành vi hạt thô tương ứng không? Hai action `A`, `B` *giao hoán* nếu thực hiện theo thứ tự nào cũng cho cùng kết quả; điều kiện đủ đơn giản là mỗi action không đổi biến mà action kia đổi, và cái này không làm enabled/disabled cái kia[^ss-commute]. Nếu các hành động khác xen giữa `R` và `L` đều giao hoán với `R` (hoặc với `L`), chuỗi bước có thể sắp lại để `R`, `L` liền nhau[^ss-commute-cases]. Sách cảnh báo: dù chuyển được, điều đó không có nghĩa spec hạt thô "tốt như" hạt mịn — nó phụ thuộc hệ và mục đích của spec[^ss-commute-warning].
+- **Gộp bước chỉ khi chuyển hoán được.** Sách đặt câu hỏi: hành vi của spec hạt mịn có thể biến thành hành vi hạt thô tương ứng không? Hai action `A`, `B` *giao hoán* nếu thực hiện theo thứ tự nào cũng cho cùng kết quả; điều kiện đủ đơn giản là mỗi action không đổi biến mà action kia đổi, và cái này không làm enabled/disabled cái kia[^ss-commute]. Nếu các hành động khác xen giữa `R` và `L` đều giao hoán với `R` (hoặc với `L`), chuỗi bước có thể sắp lại để `R`, `L` liền nhau[^ss-commute-cases]. Sách cảnh báo: dù chuyển được, điều đó không có nghĩa spec hạt thô "tốt như" hạt mịn, vì nó phụ thuộc hệ và mục đích của spec[^ss-commute-warning].
 - **Mức trừu tượng của cấu trúc dữ liệu.** Câu hỏi tương tự cho dữ liệu: spec có nên mô tả bố cục thật của tham số trong bộ nhớ không? Sách trả lời bằng mục đích: nếu spec nhằm bắt lỗi do các thành phần đồng thời tương tác không đồng bộ thì mô tả chi tiết cấu trúc dữ liệu chỉ là phức tạp thừa, nên nhiều khả năng bạn muốn dùng mô tả trừu tượng, mức cao[^ss-data-structures].
 - **Comment là comment.** Đừng đưa vào spec một disjunct kiểu `... /\ FALSE` chỉ để "ghi chú" rằng action không enabled ở một điều kiện nào đó; vế đó thừa về logic, nên hãy viết comment thật[^ss-comments-as-comments].
-- **Đưa lượng từ ra ngoài.** Thường dễ đọc hơn khi `\E` nằm ngoài phép hợp và `\A` nằm ngoài phép hội[^ss-quantifier-outside]; hai spec `IncCoarse` và `IncFine` trên viết đúng theo kiểu `Next == \E p \in Proc : …`.
-- **Chọn hệ và môi trường.** Spec FIFO ở mục 8 mô tả cả hệ lẫn môi trường — sách gọi là closed-system; open-system chỉ mô tả hệ[^ss-closed].
+- **Đưa lượng từ ra ngoài.** Thường dễ đọc hơn khi `\E` nằm ngoài phép hợp và `\A` nằm ngoài phép hội[^ss-quantifier-outside]. Hai spec `IncCoarse` và `IncFine` trên viết đúng theo kiểu `Next == \E p \in Proc : …`.
+- **Chọn hệ và môi trường.** Spec FIFO ở mục 8 mô tả cả hệ lẫn môi trường; sách gọi đó là closed-system, còn open-system chỉ mô tả hệ[^ss-closed].
 
 </details>
 
-**Quay lại Q7:** chọn biến và hạt của bước là chọn cái mình nhìn thấy và cái mình bỏ qua; bắt đầu bằng hành vi mẫu, và chỉ gộp bước khi biết chắc không che mất lỗi cần tìm.
+**Quay lại Q7:** chọn biến và hạt của bước là chọn cái mình nhìn thấy và cái mình bỏ qua; bắt đầu bằng hành vi mẫu, và chỉ gộp bước khi biết chắc không che mất lỗi cần tìm, như lost update ở counter của `orders`.
 
 ## 8. Đọc trọn một spec: handshake channel và FIFO (Q8)
 
-> **Trả lời ngắn.** Giao diện bất đồng bộ của sách có ba biến `val`, `rdy`, `ack` và hai action `Send`, `Rcv`[^ss-send-rcv-def]; `Send` enabled khi `rdy = ack`[^ss-send-enabled] và đảo `rdy`, còn `Rcv` enabled khi `rdy # ack` và đảo `ack`[^ss-rcv-def]. Sách gộp ba biến thành một record `chan`, rồi dựng FIFO từ hai channel `in`, `out` và một biến nội bộ `q`, với bốn loại bước không-đứng-yên: `SSend`, `BufRcv`, `BufSend`, `RRcv`[^ss-fifo-steps].
+> **Trả lời ngắn.** Giao diện bất đồng bộ của sách có ba biến `val`, `rdy`, `ack` và hai action `Send`, `Rcv`[^ss-send-rcv-def]. `Send` enabled khi `rdy = ack`[^ss-send-enabled] và đảo `rdy`. `Rcv` enabled khi `rdy # ack`, đảo `ack` và giữ nguyên `val`, `rdy`[^ss-rcv-def]. Sách gộp ba biến thành một record `chan`, rồi dựng FIFO từ hai channel `in`, `out` và một biến nội bộ `q`, với bốn loại bước không-đứng-yên: `SSend`, `BufRcv`, `BufSend`, `RRcv`[^ss-fifo-steps].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `rdy`/`ack` giống cặp cờ "có hàng" / "đã lấy hàng" của một ô nhớ dùng chung giữa producer và consumer: producer chỉ được đặt hàng mới khi consumer xác nhận hàng cũ.
+*Với service của bạn.* Giả sử một handler thread của `orders` đẩy job ghi DB cho một worker thread qua một ô nhớ dùng chung. Handshake `rdy`/`ack` là cách tối thiểu để bên gửi biết bên nhận đã lấy xong: `rdy` là cờ "có job mới", `ack` là cờ "đã lấy job", và handler chỉ được đặt job mới khi worker đã xác nhận job cũ (nhận xét của người soạn). Mở rộng ra, giữa handler và worker còn một hàng đợi các job đang chờ; hàng đợi đó chính là FIFO ở mục 8.3.
 
 ### 8.1. Giao diện bất đồng bộ — bản ba biến
 
@@ -449,9 +459,9 @@ THEOREM Spec => []TypeInvariant
 
 Đọc spec:
 
-- **Init.** `val` là bất kỳ phần tử của `Data`; `rdy` là 0 hoặc 1; `ack = rdy`. Sách giải thích: ban đầu `rdy` và `ack` có thể cùng 0 hoặc cùng 1[^ss-init-rdy-ack]. Giá trị ban đầu của `val` không quan trọng[^ss-val-initial].
+- **Init.** `val` là phần tử bất kỳ của `Data`, `rdy` là 0 hoặc 1, và `ack = rdy`. Ban đầu `rdy` và `ack` có thể cùng 0 hoặc cùng 1[^ss-init-rdy-ack]. Giá trị ban đầu của `val` không quan trọng[^ss-val-initial].
 - **Send.** Enabled khi `rdy = ack`[^ss-send-enabled]. Giá trị mới `val'` là *bất kỳ* phần tử `Data`; `rdy` đảo (`1 - rdy`, vì `1 = 1 - 0` và `0 = 1 - 1`); `ack` giữ nguyên[^ss-send-body].
-- **Rcv.** Enabled khi `rdy # ack`; đảo `ack`; `val` và `rdy` giữ nguyên, ghi là `UNCHANGED <<val, rdy>>` vì `UNCHANGED` trên tuple nghĩa là cả cặp không đổi[^ss-rcv-def].
+- **Rcv.** Enabled khi `rdy # ack`; đảo `ack`; `val` và `rdy` giữ nguyên. Ta ghi `UNCHANGED <<val, rdy>>` vì `UNCHANGED` trên tuple nghĩa là cả cặp không đổi[^ss-rcv-def].
 - **Next, Spec.** `Next == Send \/ Rcv`, và `Spec` có dạng chuẩn với subscript là tuple cả ba biến[^ss-spec-asynch].
 
 Bảng hành vi (người soạn suy ra từ định nghĩa; không phải output của TLC), với `Data = {d1, d2}`:
@@ -475,7 +485,7 @@ stateDiagram-v2
 
 ### 8.2. Bản dùng record — module Channel
 
-Bản ba biến bất tiện nếu hệ có nhiều channel: sách muốn tránh "nhân lên" biến. Ông thay ba biến bằng một biến `chan` là record với trường `val`, `rdy`, `ack`; dùng record thay vì tuple vì tuple dễ nhầm thứ tự thành phần[^ss-record-instead] (record, `chan.rdy` và tập record `[val : Data, …]`: [Chương 02 mục 4](02-toan-nen-tang.md)). `Send` trở thành `Send(d)` có tham số, và `Next` dùng lượng từ `\E d \in Data`[^ss-send-d]. Cập nhật một vài trường dùng `EXCEPT` ([Chương 02 mục 3](02-toan-nen-tang.md)): `[chan EXCEPT !.val = d, !.rdy = 1 - @]` đọc là "bản sao của `chan`, trừ `val` bằng `d` và `rdy` bằng `1 - @`", trong đó `@` là giá trị cũ của chính trường đó[^ss-except]; `!.c` là cách viết tắt của `!["c"]`[^ss-except-abbrev]. Spec ASCII (Hình 3.2) như sau.[^ex-channel-full]
+Bản ba biến bất tiện khi hệ có nhiều channel, vì biến cứ nhân lên theo. Vì vậy sách thay ba biến bằng một biến `chan` là record với các trường `val`, `rdy`, `ack`. Dùng record thay vì tuple vì tuple dễ nhầm thứ tự thành phần[^ss-record-instead] (về record, `chan.rdy` và tập record `[val : Data, …]`: [Chương 02 mục 4](02-toan-nen-tang.md)). `Send` trở thành `Send(d)` có tham số, và `Next` dùng lượng từ `\E d \in Data`[^ss-send-d]. Để cập nhật vài trường, ta dùng `EXCEPT` ([Chương 02 mục 3](02-toan-nen-tang.md)): `[chan EXCEPT !.val = d, !.rdy = 1 - @]` đọc là "bản sao của `chan`, trừ `val` bằng `d` và `rdy` bằng `1 - @`", trong đó `@` là giá trị cũ của chính trường đó[^ss-except]. Ký hiệu `!.c` là cách viết tắt của `!["c"]`[^ss-except-abbrev]. Spec ASCII (Hình 3.2) như sau.[^ex-channel-full]
 
 ```tla
 -------------------------- MODULE Channel -----------------------------
@@ -502,13 +512,13 @@ THEOREM Spec => []TypeInvariant
 =======================================================================
 ```
 
-Hai điểm mới: `Init` dùng `TypeInvariant` ngay (state đầu là record đúng kiểu có `ack = rdy`); và `Send(d)` chỉ ràng buộc `chan'` — vì chỉ có một biến nên không cần `UNCHANGED`.
+Hai điểm mới: `Init` dùng `TypeInvariant` ngay (state đầu là record đúng kiểu có `ack = rdy`); và `Send(d)` chỉ ràng buộc `chan'`, vì chỉ có một biến nên không cần `UNCHANGED`.
 
-Cấu hình TLC cho hai module (`AsynchInterface.cfg` và `Channel.cfg`) cùng gán `Data = {d1, d2, d3}` và đặt `TypeInvariant` làm invariant[^ex-asynch-cfg-inv][^ex-channel-cfg]; TLC đòi mọi hằng khai báo đều được gán ở đây[^ex-asynch-cfg].
+Về cấu hình TLC: cả `AsynchInterface.cfg` và `Channel.cfg` đều đặt `TypeInvariant` làm invariant[^ex-asynch-cfg-inv]. Hai file cùng gán `Data = {d1, d2, d3}`[^ex-channel-cfg]. TLC đòi mọi hằng khai báo đều được gán ở đây[^ex-asynch-cfg].
 
 ### 8.3. FIFO: hai channel và một hàng đợi
 
-Hệ FIFO của sách gồm bộ gửi, một buffer và bộ nhận, nối bởi hai channel `in` và `out` dùng chung giao thức handshake của `Channel`[^ss-fifo-intro]. Biến `q` là dãy các thông điệp đã được bộ gửi gửi nhưng chưa được bộ nhận nhận[^ss-fifo-q].
+Hệ FIFO của sách gồm bộ gửi, một buffer và bộ nhận, nối với nhau bằng hai channel `in` và `out` dùng chung giao thức handshake của `Channel`[^ss-fifo-intro]. Biến `q` là dãy các thông điệp mà bộ gửi đã gửi nhưng bộ nhận chưa nhận[^ss-fifo-q]. Trong ví dụ `orders`, `in` là chỗ handler thread đặt job, `q` là hàng đợi job đang chờ, `out` là chỗ worker thread lấy job ra (nhận xét của người soạn).
 
 ```mermaid
 flowchart LR
@@ -516,7 +526,7 @@ flowchart LR
   B -->|"channel out"| R["Receiver"]
 ```
 
-Sách dùng `INSTANCE` để dùng lại `Channel` hai lần: một lần với `chan` thay bằng `in`, một lần với `chan` thay bằng `out`, `Data` thay bằng `Message`[^ss-two-instances]. Các phép toán trên hàng đợi lấy từ `Sequences`: `Head`, `Tail`, `Append`, `Len`[^ss-sequences]. Spec ASCII của `InnerFIFO` (Hình 4.1) như sau.[^ex-innerfifo]
+Sách dùng `INSTANCE` để dùng lại `Channel` hai lần: một lần với `chan` thay bằng `in`, một lần với `chan` thay bằng `out`, và `Data` thay bằng `Message`[^ss-two-instances]. Các phép toán trên hàng đợi lấy từ `Sequences`: `Head`, `Tail`, `Append`, `Len`[^ss-sequences]. Spec ASCII của `InnerFIFO` (Hình 4.1) như sau.[^ex-innerfifo]
 
 ```tla
 ---------------------------- MODULE InnerFIFO -------------------------------
@@ -569,13 +579,13 @@ Bốn action (mô tả của sách):
 | `BufSend` | buffer lấy đầu `q` gửi lên `out` (enabled chỉ khi `q` không rỗng) | `out`, `q` | `in` |
 | `RRcv` | bộ nhận nhận từ `out` | `out` | `in`, `q` |
 
-Mỗi action nêu *đủ* ba biến `in`, `out`, `q` (đổi hoặc `UNCHANGED`) — quy tắc ở mục 2; người soạn đọc từ code trên — và `Spec` dùng tuple cả ba làm subscript[^ex-innerfifo]. Điều kiện enabled `q # << >>` của `BufSend` là điểm chặn "không lấy từ hàng rỗng": nó nằm ở đầu định nghĩa, theo đúng gợi ý của sách về action[^ss-enabled-first].
+Mỗi action nêu *đủ* ba biến `in`, `out`, `q` (đổi hoặc `UNCHANGED`), đúng quy tắc ở mục 2 (người soạn đọc từ code trên). `Spec` dùng tuple cả ba làm subscript[^ex-innerfifo]. Điều kiện enabled `q # << >>` của `BufSend` là điểm chặn "không lấy từ hàng rỗng". Nó nằm ở đầu định nghĩa, theo đúng gợi ý của sách về action[^ss-enabled-first].
 
-*Hệ và môi trường.* `Spec` mô tả cả hệ (buffer) lẫn môi trường (bộ gửi và bộ nhận) — sách gọi là *closed-system* (hay complete-system) specification[^ss-closed]. Cách chia `Next = SysNext \/ EnvNext` chỉ để dễ hiểu, không có ý nghĩa hình thức[^ss-sys-env]. Sách giải thích vì sao chọn closed-system: hơi dễ viết hơn, toán nền đơn giản hơn; chuyển sang open-system thường khá dễ nhưng trong thực tế hiếm khi cần[^ss-open-system].
+*Hệ và môi trường.* `Spec` mô tả cả hệ (buffer) lẫn môi trường (bộ gửi và bộ nhận): sách gọi đó là đặc tả *closed-system* (hay complete-system)[^ss-closed]. Cách chia `Next = SysNext \/ EnvNext` chỉ để dễ hiểu, không có ý nghĩa hình thức[^ss-sys-env]. Sách chọn closed-system vì nó hơi dễ viết hơn và toán nền đơn giản hơn; chuyển sang open-system thường khá dễ, nhưng trong thực tế hiếm khi cần[^ss-open-system].
 
 <details><summary>Đi sâu: FIFO có giới hạn, ẩn biến <code>q</code>, và kiểm bằng TLC với ràng buộc</summary>
 
-- **FIFO có giới hạn `N`.** Bản có giới hạn chỉ khác ở chỗ `BufRcv` không được enabled trừ khi hàng đợi có ít hơn `N` thông điệp[^ss-bounded]. Thay vì sao chép module, sách dùng lại `InnerFIFO` và định nghĩa `BNext == Next /\ (BufRcv => (Len(q) < N))`[^ss-bnext]. Chuyển sang ASCII (người soạn chuyển ký hiệu từ Hình 4.2; Examples không có file này):
+**FIFO có giới hạn `N`.** Bản có giới hạn chỉ khác ở chỗ `BufRcv` không được enabled trừ khi hàng đợi có ít hơn `N` thông điệp[^ss-bounded]. Thay vì sao chép module, sách dùng lại `InnerFIFO` và định nghĩa `BNext == Next /\ (BufRcv => (Len(q) < N))`[^ss-bnext]. Dưới đây là bản ASCII (người soạn chuyển ký hiệu từ Hình 4.2; Examples không có file này):
 
 ```tla
 ------------------------------ MODULE BoundedFIFO ------------------------------
@@ -593,19 +603,20 @@ Spec == \EE q : Inner(q)!Init /\ [][BNext(q)]_<<in, out, q>>
 ================================================================================
 ```
 
-  (Dòng `ASSUME` là điều sách thêm cho `N`[^ss-assume-n].) Quan hệ "đây chỉ là `InnerFIFO` cộng thêm một ràng buộc enabled" cho thấy lợi ích của cách viết action nhỏ có tên: `Inner(q)!BufRcv` dùng lại nguyên định nghĩa.
-- **Ẩn biến nội bộ.** Sách nói đặc tả FIFO chỉ nên mô tả giá trị gửi/nhận trên channel; `q` là biến *nội bộ*, ở bản cuối nên được ẩn[^ss-hide-q]. Ẩn dùng lượng từ tồn tại của logic thời gian — `\EE q : ...` trong ASCII — qua một instance có tham số: `Inner(q) == INSTANCE InnerFIFO` rồi `Spec == \EE q : Inner(q)!Spec`[^ex-fifo]. Sách khuyên bạn dùng thành ngữ này mà không cần hiểu sâu; trong phần lớn ứng dụng không cần ẩn biến — chỉ cần ghi chú trong comment biến nào là nội bộ[^ss-hide-optional]. Quan trọng với việc chạy TLC: theo sách (mục 14.1), TLC không xử lý toán tử ẩn `\EE`; để kiểm spec có biến ẩn thì kiểm spec nội bộ, nơi các biến đó hiện ra[^ss-tlc-hiding].
-- **FIFO không giới hạn là vô hạn state.** Repo Examples có `MCInnerFIFO.tla` nói thẳng: `Spec` của `InnerFIFO` có vô hạn state khả đạt vì `q` có thể dài tùy ý[^ex-mcfifo-unbounded], nên để TLC kiểm ta phải ràng buộc tập state được xét thành hữu hạn[^ex-mcfifo-constraint]. Ràng buộc đó là `qConstraint == Len(q) \leq qLen` trong chính file `.tla`[^ex-mcfifo-qconstraint]. File cấu hình khai báo hằng `Message = {m1, m2, m3}`, `qLen = 3`, đặt `SPECIFICATION Spec`, `CONSTRAINT qConstraint` và `INVARIANT TypeInvariant`; theo comment trong file, TLC sẽ không khám phá các state kế của một state không thỏa ràng buộc[^ex-mcfifo-cfg]. Chương này không nêu kết quả chạy.
-- **Tổ chức file khi chạy TLC.** Module `MCInnerFIFO` mở rộng `InnerFIFOInstanced` và thêm định nghĩa chỉ phục vụ TLC — comment trong file nói họ không muốn sửa module gốc "vì lợi ích của TLC"[^ex-mcfifo-purpose]. (README của thư mục ghi `InnerFIFOInstanced` là bản `InnerFIFO` bỏ các lệnh `INSTANCE`, dành cho TLC phiên bản 1[^ex-fifo-readme-instanced].) Cách tổ chức này — module spec sạch, module `MC…` bổ sung, và `.cfg` — lặp lại ở [Chương 04](04-invariant-va-tlc.md).
-- **Bài tập trong README của thư mục.** README của thư mục FIFO trong Examples (đi kèm chương "A FIFO"; sách không in các bài tập này) có bài tập: viết spec đồng hồ giờ gửi giờ qua một channel `chan`, dùng lại `Channel` và `HourClock` bằng `EXTENDS`[^ex-fifo-readme]; hai phiên bản — đồng hồ nhảy bất kỳ lúc nào, hoặc không nhảy giữa lúc gửi và lúc bộ nhận nhận[^ex-fifo-readme-versions]. (Nhận xét của người soạn:) đây là bài luyện tốt cho mục 7 (hạt của bước).
+Dòng `ASSUME` là điều sách thêm cho `N`[^ss-assume-n]. Quan hệ "đây chỉ là `InnerFIFO` cộng thêm một ràng buộc enabled" cho thấy lợi ích của cách viết action nhỏ có tên: `Inner(q)!BufRcv` dùng lại nguyên định nghĩa.
+
+- **Ẩn biến nội bộ.** Sách nói đặc tả FIFO chỉ nên mô tả giá trị gửi/nhận trên channel; `q` là biến *nội bộ*, nên ở bản cuối ta ẩn nó đi[^ss-hide-q]. Ẩn dùng lượng từ tồn tại của logic thời gian, viết `\EE q : ...` trong ASCII, qua một instance có tham số: `Inner(q) == INSTANCE InnerFIFO` rồi `Spec == \EE q : Inner(q)!Spec`[^ex-fifo]. Sách khuyên cứ dùng thành ngữ này mà không cần hiểu sâu; trong phần lớn ứng dụng không cần ẩn biến, chỉ cần ghi chú trong comment biến nào là nội bộ[^ss-hide-optional]. Điều quan trọng khi chạy TLC: theo sách (mục 14.1), TLC không xử lý toán tử ẩn `\EE`, nên muốn kiểm spec có biến ẩn thì kiểm spec nội bộ, nơi các biến đó hiện ra[^ss-tlc-hiding].
+- **FIFO không giới hạn là vô hạn state.** Repo Examples có `MCInnerFIFO.tla` nói thẳng: `Spec` của `InnerFIFO` có vô hạn state khả đạt vì `q` có thể dài tùy ý[^ex-mcfifo-unbounded]. Vì vậy để TLC kiểm, ta phải ràng buộc tập state được xét thành hữu hạn[^ex-mcfifo-constraint]. Ràng buộc đó là `qConstraint == Len(q) \leq qLen` ngay trong file `.tla`[^ex-mcfifo-qconstraint]. File cấu hình khai báo hằng `Message = {m1, m2, m3}`, `qLen = 3`, đặt `SPECIFICATION Spec`, `CONSTRAINT qConstraint` và `INVARIANT TypeInvariant`; theo comment trong file, TLC không khám phá các state kế của một state không thỏa ràng buộc[^ex-mcfifo-cfg]. Chương này không nêu kết quả chạy.
+- **Tổ chức file khi chạy TLC.** Module `MCInnerFIFO` mở rộng `InnerFIFOInstanced` và thêm định nghĩa chỉ phục vụ TLC: comment trong file nói họ không muốn sửa module gốc "vì lợi ích của TLC"[^ex-mcfifo-purpose]. README của thư mục ghi `InnerFIFOInstanced` là bản `InnerFIFO` bỏ các lệnh `INSTANCE`, dành cho TLC phiên bản 1[^ex-fifo-readme-instanced]. Cách tổ chức này, gồm module spec sạch, module `MC…` bổ sung và `.cfg`, lặp lại ở [Chương 04](04-invariant-va-tlc.md).
+- **Bài tập trong README của thư mục.** README của thư mục FIFO trong Examples (đi kèm chương "A FIFO"; sách không in các bài tập này) có bài tập: viết spec đồng hồ giờ gửi giờ qua một channel `chan`, dùng lại `Channel` và `HourClock` bằng `EXTENDS`[^ex-fifo-readme]. Có hai phiên bản: đồng hồ nhảy bất kỳ lúc nào, hoặc không nhảy giữa lúc gửi và lúc bộ nhận nhận[^ex-fifo-readme-versions]. Đây là bài luyện tốt cho mục 7, hạt của bước (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q8:** spec trọn vẹn gồm module, hằng, biến, `TypeInvariant`, `Init`, các action nhỏ có tên (mỗi action nêu đủ biến), `Next` là hợp của chúng và `Spec` ở dạng chuẩn — FIFO là ghép hai channel và một hàng đợi nội bộ.
+**Quay lại Q8:** spec trọn vẹn gồm module, hằng, biến, `TypeInvariant`, `Init`, các action nhỏ có tên (mỗi action nêu đủ biến), `Next` là hợp của chúng và `Spec` ở dạng chuẩn; FIFO là ghép hai channel và một hàng đợi nội bộ.
 
 ## Liên hệ với Rust và backend
 
-- **Struct và hàm.** Một state trong TLA+ tương ứng với một giá trị struct chứa mọi biến; một action tương ứng với một hàm trả về các state kế (hoặc rỗng nếu guard sai) — phép tương ứng này là nhận xét của người soạn. Đồng hồ giờ viết lại theo kiểu "hàm sinh state kế" (minh họa của người soạn, không biên dịch ở đây):
+- **Struct và hàm.** Một state trong TLA+ tương ứng với một giá trị struct chứa mọi biến, và một action tương ứng với một hàm trả về các state kế (hoặc rỗng nếu guard sai); phép tương ứng này là nhận xét của người soạn. Với pool của `orders`, ba biến `free`, `busy`, `waiting` là ba trường của một struct, và `Acquire` là hàm trả về state kế khi `waiting > 0` và `free > 0`, ngược lại trả về rỗng. Đồng hồ giờ viết lại theo kiểu "hàm sinh state kế" (minh họa của người soạn, không biên dịch ở đây):
 
 ```rust
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
@@ -627,9 +638,9 @@ impl HourClock {
 ```
 
   (Suy luận của người soạn) Bộ ba "state khởi tạo + hàm sinh state kế + hàm kiểm invariant" là phần tối thiểu mà một model checker cần từ spec; [Chương 10](10-tu-dac-ta-den-code-rust.md) xét việc nối spec với code Rust và các thư viện liên quan.
-- **Enum thay cho `pc` và các giá trị tag.** Trong Rust, `enum` cho biết giá trị chỉ có thể là một trong các variant của nó[^rust-enum]. Spec TLA+ cần `pc[p] \in {"read", "write", "done"}` hay record `[type |-> …]` vì không có kiểu; trong Rust, `enum` làm việc đó ngay trong hệ thống kiểu (nhận xét của người soạn). Nhưng ràng buộc *động* như "`free + busy = Size`" không biểu diễn bằng kiểu; chỗ đó cần `debug_assert!` hoặc test — theo tài liệu, `debug_assert!` chỉ bật ở bản build không tối ưu theo mặc định[^rust-debug-assert]. (Nhận xét của người soạn: `TypeInvariant` trong spec và `debug_assert!` trong code là hai lớp của cùng ý tưởng.)
-- **`mpsc` và FIFO có giới hạn.** `std::sync::mpsc` được tài liệu mô tả là các primitive giao tiếp qua hàng đợi FIFO nhiều-producer một-consumer[^rust-mpsc]. Với `sync_channel(bound)`, khi buffer đầy thì các lần gửi sau sẽ chờ buffer có chỗ[^rust-sync-channel]. (Suy luận của người soạn: đây là hành vi mà spec `BoundedFIFO` mô hình hóa bằng cách *tắt* action `BufRcv` khi `Len(q) >= N` — "bị chặn" trong code tương ứng "action không enabled" trong spec. Spec của sách chưa phải mô hình của `mpsc`: `BoundedFIFO` yêu cầu `N > 0` và dùng handshake `rdy`/`ack`.)
-- **Mô hình hóa lỗi mạng.** Spec FIFO của sách chưa có mất thông điệp hay crash node (đọc từ danh sách bốn action ở mục 8); hệ thật có. Cách thêm (nhận xét của người soạn) là thêm action vào `Next`, ví dụ một action làm mất một phần tử của `q`; chủ đề lỗi thật của hệ phân tán ở [P12·08 Sự cố hệ phân tán](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md), còn [Chương 08](08-dac-ta-giao-thuc-phan-tan.md) và [Chương 09](09-mo-hinh-hoa-he-backend.md) của phase này quay lại việc mô hình hóa chúng.
+- **Enum thay cho `pc` và các giá trị tag.** Trong Rust, `enum` cho biết giá trị chỉ có thể là một trong các variant của nó[^rust-enum]. Spec TLA+ cần `pc[p] \in {"read", "write", "done"}` hay record `[type |-> …]` vì không có kiểu; trong Rust, `enum` làm việc đó ngay trong hệ thống kiểu (nhận xét của người soạn). Nhưng ràng buộc *động* như "`free + busy = Size`" không biểu diễn được bằng kiểu; chỗ đó cần `debug_assert!` hoặc test. Theo tài liệu, `debug_assert!` chỉ bật ở bản build không tối ưu theo mặc định[^rust-debug-assert]. (Nhận xét của người soạn: `TypeInvariant` trong spec và `debug_assert!` trong code là hai lớp của cùng một ý tưởng.)
+- **`mpsc` và FIFO có giới hạn.** Tài liệu `std` mô tả `std::sync::mpsc` là các primitive giao tiếp qua hàng đợi FIFO nhiều producer, một consumer[^rust-mpsc]. Với `sync_channel(bound)`, khi buffer đầy thì các lần gửi sau sẽ chờ buffer có chỗ[^rust-sync-channel]. Suy luận của người soạn: đó là hành vi mà spec `BoundedFIFO` mô hình hóa bằng cách *tắt* action `BufRcv` khi `Len(q) >= N`; "bị chặn" trong code tương ứng "action không enabled" trong spec. Spec của sách chưa phải mô hình của `mpsc`: `BoundedFIFO` yêu cầu `N > 0` và dùng handshake `rdy`/`ack`.
+- **Mô hình hóa lỗi mạng.** Spec FIFO của sách chưa có mất thông điệp hay crash node (đọc từ danh sách bốn action ở mục 8), còn hệ thật thì có. Cách thêm (nhận xét của người soạn) là thêm action vào `Next`, ví dụ một action làm mất một phần tử của `q`. Chủ đề lỗi thật của hệ phân tán ở [P12·08 Sự cố hệ phân tán](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md), còn [Chương 08](08-dac-ta-giao-thuc-phan-tan.md) và [Chương 09](09-mo-hinh-hoa-he-backend.md) của phase này quay lại việc mô hình hóa chúng.
 
 ## Tóm tắt
 
@@ -660,17 +671,17 @@ impl HourClock {
 
 <details><summary>Đáp án</summary>
 
-1. State là phép gán giá trị cho biến; behavior là dãy (vô hạn) state[^ss-behavior][^ss-infinite-only]; step là cặp state liền nhau[^ss-step].
-2. Vì action là công thức về cặp state: `hr` là giá trị cũ, `hr'` giá trị mới; công thức đúng hoặc sai trên một step, và "formulas aren't executed"[^ss-action][^ss-not-exec]. `HCnxt` đúng ở `(1,2)`, `(12,1)` (người soạn tính từ định nghĩa) và `(24,25)` (không kiểm miền)[^ss-24-25]; sai ở `(1,1)`, `(12,13)` (người soạn tính từ định nghĩa).
+1. State là phép gán giá trị cho biến, còn behavior là dãy state[^ss-behavior]. Behavior luôn vô hạn[^ss-infinite-only]. Step là cặp state liền nhau[^ss-step].
+2. Vì action là công thức về cặp state: `hr` là giá trị cũ, `hr'` giá trị mới, và công thức đúng hoặc sai trên một step[^ss-action]. Công thức thì không được "thực thi"[^ss-not-exec]. `HCnxt` đúng ở `(1,2)`, `(12,1)` (người soạn tính từ định nghĩa) và `(24,25)` (không kiểm miền)[^ss-24-25]; sai ở `(1,1)`, `(12,13)` (người soạn tính từ định nghĩa).
 3. Có thể thực hiện một bước thỏa action từ state đó[^ss-enabled]. Vì câu hỏi đầu tiên với một action là "khi nào enabled", nên định nghĩa action thường mở đầu bằng điều kiện đó[^ss-enabled-first].
-4. Ở mức logic, `waiting'` bị bỏ không ràng buộc nên có thể là *bất kỳ* giá trị (suy luận từ định nghĩa action: action chỉ ràng buộc những biến nó nhắc tới). Ở mức TLC, TLC báo successor state chưa được xác định đầy đủ vì biến primed chưa gán[^l-tlc-msg][^tlc-unassigned].
-5. `[Next]_vars` là `Next \/ UNCHANGED vars`[^l-box-sub]. Ở trạm thời tiết `tmp` đổi còn `hr` giữ nguyên nên bước đó không thỏa `HCnxt`; `[]HCnxt` loại behavior ấy[^ss-weather-steps][^ss-weather-fails].
+4. Ở mức logic, `waiting'` bị bỏ không ràng buộc nên có thể là *bất kỳ* giá trị (suy luận từ định nghĩa action: action chỉ ràng buộc những biến nó nhắc tới). Ở mức TLC, biến primed còn lại chưa được gán nên TLC báo lỗi[^tlc-unassigned]. Thông báo Learn TLA+ ghi lại là successor state chưa được xác định đầy đủ[^l-tlc-msg].
+5. `[Next]_vars` là `Next \/ UNCHANGED vars`[^l-box-sub]. Ở trạm thời tiết có bước `tmp` đổi còn `hr` giữ nguyên[^ss-weather-steps], nên bước đó không thỏa `HCnxt`. Vì vậy `[]HCnxt` loại behavior ấy[^ss-weather-fails].
 6. Bước đứng yên luôn thỏa `Next \/ UNCHANGED vars`; còn deadlock của TLC là state không còn bước không-đứng-yên nào, tức `Next` không enabled[^ss-deadlock].
-7. Behavior dừng mãi ở một giá trị (`10 → 11 → 11 → …`); sách chấp nhận vì chương 2 chưa có cách đòi đồng hồ không dừng — chương 8 của sách mới có[^ss-clock-stops][^ss-hc-may-stop].
+7. Behavior dừng mãi ở một giá trị (`10 → 11 → 11 → …`)[^ss-clock-stops]. Sách chấp nhận điều đó vì chương 2 chưa có cách đòi đồng hồ không dừng; chương 8 của sách mới có[^ss-hc-may-stop].
 8. Vì nó khẳng định ở *mọi* state `q` là sequence trong khi tồn tại state mà `q` có giá trị √−17 (không phải sequence), dẫn tới mâu thuẫn[^ss-assume-contradiction]. Kiểm `q \in Seq(Message)` như một invariant (`TypeInvariant`) bằng TLC[^ex-mcfifo-cfg].
-9. `IncCoarse` gộp đọc-và-ghi trong một bước; `IncFine` tách `Read(p)` và `Write(p)`. Chuỗi `Read(p1)`, `Read(p2)`, `Write(p1)`, `Write(p2)` cho `counter = 1` (suy luận tay từ định nghĩa)[^ss-grain][^ss-composition].
-10. Không: conjunct đầu của `BufSend` là `q # << >>`, sai khi `q` rỗng nên không có bước `BufSend` nào[^ex-innerfifo-bufsend][^tlc-false-stop]. Các action còn lại có enabled hay không tùy trạng thái channel `in`/`out` (suy luận của người soạn).
-11. Vì `q` có thể dài tùy ý nên có vô hạn state khả đạt; `MCInnerFIFO.tla` trong Examples thêm ràng buộc `qConstraint == Len(q) \leq qLen` để giới hạn tập state TLC xét[^ex-mcfifo-unbounded][^ex-mcfifo-constraint][^ex-mcfifo-qconstraint].
+9. `IncCoarse` gộp đọc-và-ghi trong một bước, còn `IncFine` tách `Read(p)` và `Write(p)`: đó là hai grain khác nhau[^ss-grain]. Chuỗi `Read(p1)`, `Read(p2)`, `Write(p1)`, `Write(p2)` cho `counter = 1` (suy luận tay từ định nghĩa). Bản thô không có chuỗi này vì thao tác của nó chạy như một bước `R·L`[^ss-composition].
+10. Không: conjunct đầu của `BufSend` là `q # << >>`[^ex-innerfifo-bufsend]. Khi `q` rỗng conjunct đó sai, TLC dừng đánh giá nhánh này và không sinh state nào, nên không có bước `BufSend`[^tlc-false-stop]. Các action còn lại có enabled hay không tùy trạng thái channel `in`/`out` (suy luận của người soạn).
+11. Vì `q` có thể dài tùy ý nên FIFO không giới hạn có vô hạn state khả đạt[^ex-mcfifo-unbounded]. `MCInnerFIFO.tla` trong Examples thêm ràng buộc để giới hạn tập state TLC xét[^ex-mcfifo-constraint]. Ràng buộc đó là `qConstraint == Len(q) \leq qLen`[^ex-mcfifo-qconstraint].
 
 </details>
 

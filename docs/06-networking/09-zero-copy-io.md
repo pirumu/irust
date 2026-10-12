@@ -22,17 +22,28 @@
 
 ## 1. Đường đi của `read` + `write`, và zero-copy tránh cái gì (Q1)
 
-> **Trả lời ngắn.** Trong vòng lặp `read` rồi `write`, mỗi mẩu dữ liệu bị kernel chép *ra* buffer của process, rồi lại chép *vào* kernel khi `write`[^sf-more]. "Zero-copy" là nhóm syscall để kernel tự chuyển dữ liệu giữa hai fd mà không đưa nó lên user space[^sp-def]. Lợi ích kèm theo: gộp hai syscall thành một nên ít context switch hơn (cách nói của chú thích trong source `std`)[^rs-ctx].
+> **Trả lời ngắn.** Nếu đưa dữ liệu từ file ra socket bằng vòng lặp `read` rồi `write`, mỗi mẩu dữ liệu bị kernel chép lên buffer của process, rồi lại bị chép xuống kernel khi `write`[^sf-more]. "Zero-copy" là nhóm syscall để kernel tự chuyển dữ liệu giữa hai fd mà không đưa nó lên user space[^sp-def]. Cách này còn gộp hai syscall thành một nên ít context switch hơn, theo chú thích trong source `std`[^rs-ctx].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn là nhân viên kho cần chuyển hàng từ kho A sang xe tải B. Cách "read + write": khuân từng thùng từ kho A về bàn làm việc của mình, rồi từ bàn khuân ra xe. Cách zero-copy: chỉ đạo thẳng "thùng này đi từ kho sang xe" mà không đặt lên bàn mình. Việc khuân vẫn xảy ra ở đâu đó (kernel, DMA — cơ chế để thiết bị tự đọc/ghi RAM mà CPU không phải chép từng byte…), nhưng bạn không phải là chặng trung gian.
+*Với service của bạn.* Hãy hình dung `assets`, một service viết bằng Rust chạy trên Linux, phục vụ file tải xuống: ảnh, bản xuất báo cáo PDF, có khi vài trăm MB mỗi file. Client mở một kết nối TCP, xin một file, `assets` đọc file từ đĩa rồi đổ vào kết nối. Ta sẽ bám theo `assets` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Mỗi mục sau bắt đầu từ một việc `assets` phải làm, rồi xem syscall nào làm việc đó mà không kéo dữ liệu lên user space. Câu hỏi của mục này là câu nền: cách làm ngây thơ đã làm gì với từng byte, và zero-copy muốn bỏ chặng nào?
 
-*Chặng 1 — `read`.* `read(2)` đọc tối đa `count` byte từ fd *vào buffer bắt đầu tại `buf`*[^rd-def] — buffer đó là bộ nhớ của process. Nghĩa là dữ liệu của file (đang nằm trong page cache nếu đã được đọc — xem [P5·04](../05-storage/04-page-cache-va-direct-io.md)) bị chép sang bộ nhớ user.
+### 1.1 Vòng lặp `read` + `write`
 
-*Chặng 2 — `write`.* `write(2)` ghi tối đa `count` byte *từ buffer bắt đầu tại `buf`* vào fd[^wr-def] — lần này chiều chép ngược lại: từ bộ nhớ user vào kernel (với socket, vào hàng đợi gửi của nó; chi tiết hàng đợi ở [chương 07](07-socket-va-kernel.md)).
+Cách đơn giản nhất để `assets` gửi một file là đọc từng khúc vào một buffer, rồi ghi khúc đó ra socket. Code dưới đây chỉ để minh họa (của người soạn, không chạy, đã bỏ phần xử lý lỗi):
 
-Gộp lại, man page `sendfile(2)` mô tả tổ hợp này là việc "chuyển dữ liệu tới và từ user space"[^sf-more]. Mỗi vòng lặp còn tốn **hai syscall** (một `read`, một `write` — suy luận của người soạn từ cấu trúc vòng lặp), tức hai lần vào kernel (xem [P1·02](../01-linux/02-system-call.md)).
+```rust
+let mut buf = [0u8; 64 * 1024];
+loop {
+    let n = file.read(&mut buf)?;   // read(2): file -> buf
+    if n == 0 { break; }
+    conn.write_all(&buf[..n])?;     // write(2): buf -> socket
+}
+```
+
+Mỗi vòng lặp có hai chặng, và dữ liệu băng qua ranh giới user/kernel hai lần. Ở chặng đầu, `read(2)` đọc tối đa `count` byte từ fd vào buffer bắt đầu tại `buf`[^rd-def]. Buffer đó là bộ nhớ của process, nên dữ liệu của file bị chép từ kernel sang user space (nếu file đã được đọc, dữ liệu đang nằm trong page cache; xem [P5·04](../05-storage/04-page-cache-va-direct-io.md)). Ở chặng sau, `write(2)` ghi tối đa `count` byte từ buffer bắt đầu tại `buf` vào fd[^wr-def]. Lần này dữ liệu đi ngược lại, từ user space xuống kernel, và với socket thì nó vào hàng đợi gửi (hàng đợi này nằm ở [chương 07](07-socket-va-kernel.md)). Man page `sendfile(2)` mô tả đúng tổ hợp này là việc chuyển dữ liệu "tới và từ user space"[^sf-more]. Mỗi vòng còn tốn hai syscall, một `read` và một `write`, tức hai lần vào kernel (suy luận của người soạn từ cấu trúc vòng lặp; xem [P1·02](../01-linux/02-system-call.md)).
+
+Với `assets`, cái `buf` ở giữa chỉ là trạm trung chuyển: không dòng code nào đọc hay sửa byte trong đó. Vì vậy ta muốn bảo kernel "chuyển thẳng từ file sang socket" và bỏ trạm đó đi.
 
 ```mermaid
 flowchart LR
@@ -50,152 +61,200 @@ flowchart LR
 
 (Sơ đồ minh họa của người soạn: đường liền là vòng `read`+`write`, đường đứt là zero-copy; không thể hiện DMA/NIC.)
 
-Có bốn họ syscall chính trong chương (mục 6–7 bàn thêm `mmap` và kTLS), mỗi họ giải một bài toán khác nhau:
+### 1.2 Bốn họ syscall cho việc đó
 
-| Cơ chế | Chuyển dữ liệu giữa | Mục |
-|---|---|---|
-| `sendfile` | file → fd bất kỳ (trước Linux 2.6.33: chỉ ra socket)[^sf-in][^sf-out] | 2 |
-| `splice` / `tee` / `vmsplice` | fd ↔ pipe (pipe làm buffer kernel)[^sp-def] | 3 |
-| `copy_file_range` | file thường → file thường[^cfr-regular] | 4 |
-| `MSG_ZEROCOPY` | buffer của process → socket (tránh chép, nhưng chỉ là gợi ý)[^zc-others][^zc-hint] | 5 |
+Chương này có bốn họ syscall, mỗi họ hợp với một việc khác nhau của `assets` (mục 6–7 bàn thêm `mmap` và kTLS, hai chủ đề đứng cạnh zero-copy). Cột "Việc của `assets`" là gợi ý của người soạn:
 
-<details><summary>Đi sâu: vì sao có "context switch" lẫn "copy" trong cuộc nói chuyện, và nguồn nói gì</summary>
+| Cơ chế | Chuyển dữ liệu giữa | Việc của `assets` | Mục |
+|---|---|---|---|
+| `sendfile` | file → fd bất kỳ (trước Linux 2.6.33: chỉ ra socket)[^sf-out] | trả một file cho client | 2 |
+| `splice` / `tee` / `vmsplice` | fd ↔ pipe, pipe làm buffer kernel[^sp-def] | chuyển tiếp dữ liệu từ node khác, kèm một bản lưu | 3 |
+| `copy_file_range` | file thường → file thường[^cfr-regular] | chép file vừa upload sang kho lưu trữ | 4 |
+| `MSG_ZEROCOPY` | buffer của process → socket[^zc-others] | gửi blob đang nằm sẵn trong RAM | 5 |
 
-- Chú thích đầu module `kernel_copy` trong source `std` (không phải trang docs.rs) liệt kê lợi ích khi dùng các syscall offload: *ít context switch hơn vì read và write được gộp thành một syscall và mỗi syscall chuyển nhiều byte hơn*[^rs-ctx]. Cũng theo cùng đoạn, `sendfile` và `splice` *có thể* zero-copy "trong một số hoàn cảnh", trong khi vòng lặp ngây thơ chuyển *mọi byte qua CPU*[^rs-zc]. Đây là lời hứa yếu ("có thể… trong một số hoàn cảnh"), không phải bảo đảm.
-- Chương này **không** nêu số lần copy cụ thể (hai? bốn?) vì nguồn đã tải không đếm. Số lần copy phụ thuộc đường đi trong kernel và phần cứng (suy luận của người soạn); mục 5 trích nguồn cho thấy ngay cả `MSG_ZEROCOPY` cũng có thể bị biến thành copy ở sâu trong stack, ví dụ khi thiết bị thiếu scatter-gather hoặc phải tính checksum[^zc-sg].
-- `splice(2)` mô tả mình là "chuyển dữ liệu giữa hai fd mà không chép giữa không gian địa chỉ kernel và user"[^sp-def] — cách nói này chỉ cam kết việc *không băng qua ranh giới user/kernel*; nó không nói gì về chép nội bộ trong kernel (suy luận của người soạn từ câu chữ của man page).
+<details><summary>Đi sâu: vì sao chương này không đếm số lần copy</summary>
+
+- Chú thích đầu module `kernel_copy` trong source `std` (không phải trang docs.rs) kể ra lợi ích của các syscall offload: ít context switch hơn, vì read và write được gộp thành một syscall và mỗi syscall chuyển nhiều byte hơn[^rs-ctx]. Cũng đoạn đó nói `sendfile` và `splice` *có thể* zero-copy "trong một số hoàn cảnh"[^rs-zc]. Vế đối lập trong cùng đoạn là vòng lặp ngây thơ đưa mọi byte qua CPU[^s2-rs-naive]. Đó là lời hứa yếu ("có thể… trong một số hoàn cảnh"), không phải bảo đảm.
+- Chương này **không** nêu số lần copy cụ thể (hai? bốn?) vì nguồn đã tải không đếm. Số lần phụ thuộc đường đi trong kernel và phần cứng (suy luận của người soạn). Mục 5 sẽ cho thấy ngay cả `MSG_ZEROCOPY` cũng có thể bị biến thành copy ở sâu trong stack, ví dụ khi thiết bị thiếu scatter-gather hoặc phải tính checksum[^zc-sg].
+- `splice(2)` tự mô tả là chuyển dữ liệu giữa hai fd "mà không chép giữa không gian địa chỉ kernel và user"[^sp-def]. Câu đó chỉ cam kết việc *không băng qua ranh giới user/kernel*; nó không nói gì về chép nội bộ trong kernel (suy luận của người soạn từ câu chữ của man page).
 
 </details>
 
-**Quay lại Q1:** `read` kéo dữ liệu lên user space, `write` đẩy xuống lại — hai chặng chép và hai syscall mỗi vòng; zero-copy là các syscall để kernel tự chuyển, bỏ chặng trung gian ở user space.
+**Quay lại Q1:** `read` kéo dữ liệu lên user space, `write` đẩy xuống lại: hai chặng chép và hai syscall mỗi vòng. Zero-copy là các syscall để kernel tự chuyển, bỏ chặng trung gian ở user space.
 
 ## 2. `sendfile(2)`: file → socket trong một syscall (Q2)
 
-> **Trả lời ngắn.** `sendfile(out_fd, in_fd, offset, count)` bảo kernel chép `count` byte từ `in_fd` sang `out_fd` ngay trong kernel, hiệu quả hơn `read`+`write`[^sf-more]. `in_fd` phải là thứ "mmap được" (không phải socket)[^sf-in], còn `out_fd` từ Linux 2.6.33 có thể là file bất kỳ[^sf-out]. Hai bẫy: có thể gửi *ít hơn* yêu cầu và phải tự gọi lại[^sf-partial]; và nếu `out_fd` là socket/pipe có zero-copy, không được sửa phần file đã gửi cho tới khi bên nhận đọc xong[^sf-modify].
+> **Trả lời ngắn.** `sendfile(out_fd, in_fd, offset, count)` bảo kernel chép `count` byte từ `in_fd` sang `out_fd` ngay trong kernel, nên hiệu quả hơn `read`+`write`[^sf-more]. `in_fd` phải là thứ "mmap được", tức không phải socket[^sf-in]. Còn `out_fd` từ Linux 2.6.33 có thể là file bất kỳ[^sf-out]. Có hai bẫy. Lần gọi có thể gửi *ít hơn* yêu cầu nên bạn phải tự gọi lại[^sf-partial]. Và nếu `out_fd` là socket hoặc pipe có zero-copy thì không được sửa phần file đã gửi cho tới khi bên nhận đọc xong[^sf-modify].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): web server phục vụ file tĩnh (ảnh, video, tải xuống). Việc cần làm thuần túy là "đổ file này vào kết nối kia". Không có lý do để process giữ dữ liệu ở giữa — nó không xử lý gì nội dung. `sendfile` đúng cho mẫu việc đó.
+*Với service `assets`.* Việc chính của `assets` gói được trong một câu: đổ file này vào kết nối kia. Nó không parse hay biến đổi nội dung, nên kéo dữ liệu lên buffer chỉ để đẩy xuống lại là thừa; `sendfile` sinh ra cho đúng kiểu việc đó. Dưới đây là cách gọi, rồi ba chỗ `assets` dễ vấp: offset dùng chung, gửi thiếu, và file bị sửa khi đang gửi.
 
-Cú pháp: `ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count)`; `in_fd` mở để đọc, `out_fd` mở để ghi[^sf-desc].
+### 2.1 Cách gọi và hai đầu của lời gọi
 
-*Offset.* Nếu `offset` khác `NULL`, nó trỏ tới biến chứa vị trí bắt đầu đọc trong `in_fd`; `sendfile` **không** đổi file offset của `in_fd`, và khi trả về biến đó được cập nhật thành vị trí sau byte cuối đã đọc. Nếu `offset` là `NULL`, kernel đọc từ file offset hiện tại và *có* cập nhật nó[^sf-offset]. (Hệ quả (nhận xét của người soạn): server phục vụ nhiều client cùng một fd file nên truyền `offset` riêng để các kết nối không đạp lên offset chung của open file description (OFD) — xem [P1·04 mục 2](../01-linux/04-file-descriptor-va-vfs.md) về offset chia sẻ.)
+Chữ ký là `ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count)`, trong đó `in_fd` mở để đọc và `out_fd` mở để ghi[^sf-desc]. Với `assets`, `in_fd` là file cần gửi và `out_fd` là socket của client.
 
-*Kiểu của hai đầu.* `in_fd` phải tương ứng một file hỗ trợ thao tác kiểu `mmap(2)` — tức không thể là socket[^sf-in]. Trước Linux 2.6.33, `out_fd` bắt buộc là socket; từ 2.6.33 có thể là file bất kỳ[^sf-out]. Với `out_fd` là file thường thì file offset của nó được cập nhật tương ứng[^sf-out].
+Hai đầu có điều kiện riêng. `in_fd` phải ứng với một file hỗ trợ thao tác kiểu `mmap(2)`, nên nó không thể là socket[^sf-in]. `out_fd` thì trước Linux 2.6.33 bắt buộc là socket, từ 2.6.33 mới có thể là file bất kỳ[^sf-out]. Nếu `out_fd` là file thường, kernel cập nhật file offset của nó tương ứng[^sf-out].
 
-*Kết quả trả về.* Thành công trả về số byte đã ghi vào `out_fd`. Số này có thể **nhỏ hơn** `count`; người gọi phải sẵn sàng gọi lại với phần chưa gửi[^sf-partial]. Mỗi lần gọi chuyển tối đa `0x7ffff000` (2.147.479.552) byte, bất kể 32 hay 64 bit[^sf-max]. Cùng tinh thần với `write(2)`, vốn cũng có thể ghi ít hơn yêu cầu và khi đó người gọi gọi `write` lần nữa cho phần còn lại[^wr-partial]; vậy nên luôn lặp theo giá trị trả về.
+Điều kiện đầu có hệ quả cho `assets`: khi nguồn là một socket (chẳng hạn dữ liệu lấy từ node khác) thì `sendfile` không dùng được. Chỗ đó thuộc về `splice` ở mục 3 (nhận xét của người soạn).
 
-*Header trước nội dung.* Muốn gửi một ít header HTTP trước phần thân file qua TCP, man page khuyên dùng tùy chọn `TCP_CORK` để giảm số gói và tinh chỉnh hiệu năng[^sf-cork].
+### 2.2 `offset`: nhiều kết nối, một file
 
-*Bẫy sửa file khi đang gửi.* Nếu `out_fd` là socket hoặc pipe có hỗ trợ zero-copy, người gọi phải bảo đảm các phần file đã chuyển *không bị sửa* cho tới khi bên đọc ở đầu kia của `out_fd` đã tiêu thụ xong dữ liệu[^sf-modify]. (Suy luận của người soạn: lý do là kernel có thể giữ tham chiếu tới trang của file thay vì chép — cùng cơ chế "con trỏ tới trang" của pipe ở mục 3 — nên nội dung "đang bay" có thể đổi theo file.)
+Giả sử mười client cùng tải một file ảnh và `assets` dùng chung một fd cho file đó (ví dụ giả định). Nếu `offset` là `NULL`, kernel đọc từ file offset hiện tại và cập nhật nó, nên mười kết nối sẽ giẫm lên một vị trí chung. Nếu `offset` khác `NULL`, `sendfile` giữ nguyên file offset của `in_fd`[^sf-offset]. Lúc đó `offset` trỏ tới biến giữ vị trí bắt đầu đọc, và khi `sendfile` trả về, biến này chỉ vào byte nằm sau byte cuối đã đọc. Vì vậy `assets` nên truyền một `offset` riêng cho mỗi kết nối (nhận xét của người soạn). File offset chung nằm ở open file description, xem [P1·04 mục 2](../01-linux/04-file-descriptor-va-vfs.md).
 
-*Không portable.* `sendfile` không có trong POSIX; các Unix khác cài với ngữ nghĩa và prototype khác; không nên dùng trong chương trình cần portable[^sf-posix].
+### 2.3 Gửi thiếu
 
-<details><summary>Đi sâu: lỗi, fallback, lịch sử và chuyện offset 32-bit</summary>
+Lời gọi thành công trả về số byte đã ghi vào `out_fd`, và số này có thể nhỏ hơn `count`; người gọi phải sẵn sàng gọi lại cho phần chưa gửi[^sf-partial]. Ngoài ra mỗi lần gọi chuyển tối đa `0x7ffff000` (2.147.479.552) byte, trên cả hệ 32 lẫn 64 bit[^sf-max]. Với `assets` (nhận xét của người soạn), file lớn hơn mức đó chắc chắn phải gọi nhiều lần, và file nhỏ hơn cũng không có gì bảo đảm gửi trọn trong một lần. `write(2)` có cùng tính chất: nó có thể ghi ít hơn yêu cầu, và khi đó người gọi gọi `write` lần nữa cho phần còn lại[^wr-partial]. Vậy nên luôn lặp theo giá trị trả về.
 
-- Man page khuyên: khi `sendfile` lỗi với `EINVAL` hoặc `ENOSYS` thì ứng dụng có thể lùi về `read`+`write`[^sf-fallback]. `EINVAL` xuất hiện khi mô tả không hợp lệ/bị khóa, khi không có thao tác kiểu `mmap` cho `in_fd`, hoặc khi `count` âm[^sf-einval0]; cũng khi `out_fd` có `O_APPEND` (hiện chưa hỗ trợ)[^sf-einval]. `ESPIPE` khi `offset` khác `NULL` mà `in_fd` không seek được[^sf-espipe]. (Mục 8, phần Đi sâu: nhánh `sendfile`/`splice` trong `std` coi `EINVAL` là "fd này không hỗ trợ" rồi lùi về vòng lặp thường[^rs-einval], còn `ENOSYS`/`EPERM` khiến nó đánh dấu syscall là không dùng được[^rs-enosys].)
-- Với fd non-blocking: `EAGAIN` khi đã chọn `O_NONBLOCK` và ghi sẽ bị chặn[^sf-eagain]. Hệ quả (nhận xét của người soạn): trong event loop, `sendfile` trả `EAGAIN` giống `write` — chờ epoll báo socket ghi được rồi gọi lại với phần còn lại.
-- Linux 2.4 và trước đó `out_fd` có thể là file thường; khả năng này biến mất ở nhánh 2.6.x và được khôi phục ở 2.6.33[^sf-hist].
-- `sendfile` gốc không được thiết kế cho offset file lớn; Linux 2.4 thêm `sendfile64()`, và wrapper glibc xử lý trong suốt sự khác biệt[^sf-64].
-- Man page `sendfile(2)` chỉ ra `splice(2)` là lựa chọn Linux-specific cho trường hợp tổng quát hơn: truyền giữa các fd bất kỳ miễn một (hoặc cả hai) là pipe[^sf-splice] — mục 3.
-- Với kTLS, `sendfile` còn có nghĩa riêng: kernel mã hóa dữ liệu file thành TLS record — mục 7.
+### 2.4 Header HTTP đi trước thân file
+
+Response HTTP của `assets` có phần header đứng trước thân file. Muốn gửi một ít header trước nội dung file qua TCP, man page khuyên dùng tùy chọn `TCP_CORK` để giảm số gói và tinh chỉnh hiệu năng[^sf-cork].
+
+### 2.5 Sửa file khi đang gửi
+
+Bẫy này tinh tế hơn. Nếu `out_fd` là socket hoặc pipe có hỗ trợ zero-copy, người gọi phải bảo đảm các phần file đã chuyển *không bị sửa* cho tới khi bên đọc ở đầu kia của `out_fd` đã tiêu thụ xong dữ liệu[^sf-modify]. Lý do (suy luận của người soạn): kernel có thể giữ tham chiếu tới trang của file thay vì chép, cùng cơ chế "con trỏ tới trang" của pipe ở mục 3, nên nội dung đang bay có thể đổi theo file. Với `assets`, điều đó nghĩa là một job khác ghi đè file báo cáo đúng lúc nó đang được gửi thì dữ liệu đang bay có thể đổi theo (nhận xét của người soạn).
+
+### 2.6 Không portable
+
+`sendfile` không có trong POSIX; các Unix khác cài nó với ngữ nghĩa và prototype khác, nên không nên dùng trong chương trình cần portable[^sf-posix].
+
+<details><summary>Đi sâu: lỗi, fallback và chuyện offset khi non-blocking</summary>
+
+- Man page khuyên: khi `sendfile` lỗi với `EINVAL` hoặc `ENOSYS` thì ứng dụng có thể lùi về `read`+`write`[^sf-fallback].
+- `EINVAL` xuất hiện khi mô tả không hợp lệ hoặc bị khóa, khi không có thao tác kiểu `mmap` cho `in_fd`, hoặc khi `count` âm[^sf-einval0]. Nó cũng xuất hiện khi `out_fd` có `O_APPEND`, thứ mà hiện `sendfile` chưa hỗ trợ[^sf-einval].
+- `ESPIPE` xuất hiện khi `offset` khác `NULL` mà `in_fd` không seek được[^sf-espipe].
+- Mục 8 (phần Đi sâu) cho thấy nhánh `sendfile`/`splice` trong `std` coi `EINVAL` là "fd này không hỗ trợ" rồi lùi về vòng lặp thường[^rs-einval]. Còn `ENOSYS` hoặc `EPERM` khiến nó đánh dấu syscall là không dùng được[^rs-enosys].
+- Với fd non-blocking, `sendfile` trả `EAGAIN` khi đã chọn `O_NONBLOCK` và việc ghi sẽ bị chặn[^sf-eagain]. Hệ quả (nhận xét của người soạn): trong event loop, `sendfile` trả `EAGAIN` giống `write`, nên chờ epoll báo socket ghi được rồi gọi lại với phần còn lại.
+- Man page `sendfile(2)` chỉ ra `splice(2)` là lựa chọn Linux-specific cho trường hợp tổng quát hơn: truyền giữa các fd bất kỳ miễn một (hoặc cả hai) là pipe[^sf-splice]. Chuyện này ở mục 3.
+- Với kTLS, `sendfile` còn có nghĩa riêng: kernel mã hóa dữ liệu file thành TLS record. Chuyện này ở mục 7.
 
 </details>
 
-**Quay lại Q2:** `sendfile` là "đổ file vào fd" trong kernel; nhớ vòng lặp theo giá trị trả về, truyền `offset` khi nhiều kết nối chung fd, và đừng sửa file khi dữ liệu còn đang bay.
+**Quay lại Q2:** `sendfile` là "đổ file vào fd" ngay trong kernel. Nhớ lặp theo giá trị trả về, truyền `offset` riêng khi nhiều kết nối dùng chung một fd, và đừng sửa file khi dữ liệu còn đang bay.
 
 ## 3. `splice`, `tee`, `vmsplice`: pipe làm buffer kernel (Q3)
 
-> **Trả lời ngắn.** `splice(2)` chuyển dữ liệu giữa hai fd không qua user space, miễn có ít nhất một đầu là pipe[^sp-def]. Pipe ở đây đóng vai buffer trong kernel, thực chất là một tập con trỏ đếm tham chiếu tới trang bộ nhớ kernel, nên "chép" chỉ là chép con trỏ[^sp-refcount]. `tee(2)` nhân đôi dữ liệu giữa hai pipe mà không tiêu thụ nó[^tee-def]; `vmsplice(2)` đưa vùng nhớ user vào pipe[^vm-def].
+> **Trả lời ngắn.** `splice(2)` chuyển dữ liệu giữa hai fd mà không qua user space, miễn có ít nhất một đầu là pipe[^sp-def]. Pipe ở đây đóng vai buffer trong kernel: thực chất nó là một tập con trỏ đếm tham chiếu tới trang bộ nhớ kernel, nên "chép" chỉ là chép con trỏ[^sp-refcount]. `tee(2)` nhân đôi dữ liệu giữa hai pipe mà không tiêu thụ nó[^tee-def]. Còn `vmsplice(2)` đưa vùng nhớ user vào pipe[^vm-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `sendfile` là băng chuyền cố định từ kho ra xe. `splice` là bộ **khớp nối** cho phép bạn tự ráp băng chuyền: cắm kho vào ống (pipe), cắm ống vào xe — dữ liệu chạy qua ống mà bạn không phải chạm. Cái ống chỉ chứa *phiếu tham chiếu* tới các kiện hàng chứ không chứa hàng.
+*Với service `assets`.* Giả sử `assets` không giữ file trên đĩa local mà lấy từ một node lưu trữ khác. Khi client xin file, nó mở kết nối tới node đó, nhận byte về rồi chuyển tiếp cho client, và đồng thời muốn giữ một bản vào file để lần sau khỏi phải lấy lại (ví dụ giả định). Nguồn lúc này là một socket nên `sendfile` bó tay, vì `in_fd` không thể là socket (mục 2). Man page chỉ sang `splice(2)` cho trường hợp tổng quát hơn: truyền giữa các fd bất kỳ, miễn một trong hai là pipe[^sf-splice]. Để hiểu vì sao phải có pipe, ta cần biết pipe ở đây thực chất là gì.
 
-*Ba syscall, một mô hình.* Man page gom ba syscall: `splice()`, `vmsplice(2)` và `tee(2)` cho chương trình user quyền điều khiển đầy đủ trên một buffer kernel bất kỳ, cài bằng đúng loại buffer của pipe[^sp-notes]. Phân công: `splice()` chuyển dữ liệu từ buffer sang fd bất kỳ (hoặc ngược lại, hoặc từ buffer này sang buffer khác); `tee(2)` "chép" từ buffer này sang buffer khác; `vmsplice(2)` "chép" từ user space vào buffer[^sp-notes].
+### 3.1 Pipe là buffer của kernel
 
-*Vì sao "chép" bị đặt trong ngoặc kép.* Tuy gọi là chép, bản chất là hầu như tránh được chép thật: pipe buffer cài bằng tập con trỏ đếm tham chiếu tới trang bộ nhớ kernel; "chép" một trang trong buffer chỉ tạo con trỏ mới (cho buffer đầu ra) trỏ tới trang và tăng bộ đếm tham chiếu — chỉ con trỏ được chép, không chép trang[^sp-refcount].
+Man page gom ba syscall vào một mô hình. `splice()`, `vmsplice(2)` và `tee(2)` cho chương trình user toàn quyền điều khiển một buffer kernel bất kỳ, được cài bằng đúng loại buffer của pipe[^sp-notes]. Trong mô hình đó, `splice()` chuyển dữ liệu giữa buffer và fd bất kỳ (hoặc từ buffer này sang buffer khác), `tee(2)` "chép" từ buffer này sang buffer khác, còn `vmsplice(2)` "chép" từ user space vào buffer[^sp-notes].
+
+Chữ "chép" bị đặt trong ngoặc kép vì thực tế hầu như không có chép thật. Pipe buffer được cài bằng một tập con trỏ đếm tham chiếu tới các trang bộ nhớ kernel. "Chép" một trang trong buffer chỉ tạo một con trỏ mới (cho buffer đầu ra) trỏ tới trang đó và tăng bộ đếm tham chiếu của trang: chỉ con trỏ được chép, trang thì không[^sp-refcount]. Nên cái pipe không phải đường ống chứa byte mà là danh sách các "tay cầm" tới trang.
+
+Với `assets`, chuyển tiếp từ node lưu trữ ra client và giữ một bản lưu có thể trông như sau:
 
 ```mermaid
 flowchart LR
-  F["file<br/>(trang trong page cache)"] -- "splice #1" --> P(("pipe:<br/>mảng con trỏ<br/>tới trang"))
-  P -- "splice #2" --> S["socket"]
+  UP["socket nối tới node lưu trữ"] -- "splice #1" --> P(("pipe:<br/>mảng con trỏ<br/>tới trang"))
+  P -- "splice #2" --> C["socket của client"]
   P -- "tee: thêm con trỏ, KHÔNG tiêu thụ" --> P2(("pipe 2"))
-  P2 -- "splice" --> F2["file log"]
+  P2 -- "splice" --> F["file bản lưu"]
 ```
 
-(Sơ đồ minh họa của người soạn từ mô tả ở trên. "Trang trong page cache" là suy luận của người soạn: man page nói pipe buffer trỏ tới trang bộ nhớ kernel, không nói file nào.)
+(Sơ đồ minh họa của người soạn từ mô tả ở trên. Man page nói pipe buffer trỏ tới trang bộ nhớ kernel; nó không nói trang đó của file nào hay đến từ đâu.)
 
-*`splice` — luật.* Chuyển tối đa `len` byte từ `fd_in` sang `fd_out`, trong đó một trong hai phải là pipe[^sp-def]. Nếu `fd_in` là pipe thì `off_in` phải `NULL`[^sp-offs]; nếu `fd_in` không phải pipe và `off_in` là `NULL` thì đọc từ file offset hiện tại và cập nhật nó[^sp-offs2]. Từ Linux 2.6.31 cả hai đối số có thể đều là pipe (trước đó đúng một cái phải là pipe)[^sp-bothpipes]. Trả về `0` nghĩa là hết đầu vào[^sp-ret0]. Nếu hai fd đều không phải pipe[^sp-einval], hoặc filesystem đích không hỗ trợ splice[^sp-einval3], kết quả `EINVAL`.
+### 3.2 `splice`: các luật
 
-*Cờ.* `SPLICE_F_NONBLOCK` làm các thao tác pipe không chặn, nhưng `splice()` vẫn có thể chặn vì fd còn lại có thể chặn (trừ khi nó cũng `O_NONBLOCK`)[^sp-nb]. `SPLICE_F_MORE` là gợi ý "còn dữ liệu đến ở lần splice sau", hữu ích khi `fd_out` là socket[^sp-more]. `SPLICE_F_MOVE` từ Linux 2.6.21 là no-op (vẫn được phép truyền)[^sp-move].
+- Chuyển tối đa `len` byte từ `fd_in` sang `fd_out`, trong đó một trong hai phải là pipe[^sp-def].
+- Nếu `fd_in` là pipe thì `off_in` phải là `NULL`[^sp-offs]. Nếu `fd_in` không phải pipe và `off_in` là `NULL` thì kernel đọc từ file offset hiện tại và cập nhật nó[^sp-offs2].
+- Từ Linux 2.6.31, cả hai đối số có thể đều là pipe; trước đó đúng một cái phải là pipe[^sp-bothpipes].
+- Trả về `0` nghĩa là hết đầu vào[^sp-ret0]. Vòng lặp chuyển tiếp của `assets` dùng giá trị này để biết node lưu trữ đã gửi hết (nhận xét của người soạn).
+- Kết quả là `EINVAL` nếu hai fd đều không phải pipe[^sp-einval]. Nó cũng là `EINVAL` nếu filesystem đích không hỗ trợ splice[^sp-einval3].
 
-*`tee`.* Nhân đôi tối đa `len` byte từ pipe `fd_in` sang pipe `fd_out` và **không tiêu thụ** dữ liệu ở `fd_in`, nên dữ liệu đó vẫn có thể được `splice` ở bước sau[^tee-def]. Thực chất không có chép dữ liệu: `tee()` chỉ giữ một tham chiếu tới đầu vào để gán cho đầu ra[^tee-noreal]. Ví dụ trong chính man page cài chương trình `tee(1)` bằng syscall `tee`[^tee-ex], và mã mẫu `tee` stdin sang stdout rồi `splice` stdin vào file để tiêu thụ nó[^tee-ex2]. Với cả hai fd bắt buộc là pipe: nếu không, `EINVAL`[^tee-einval]. (Nhận xét của người soạn: ví dụ mẫu cho "vừa chuyển tiếp vừa ghi log" mà không để dữ liệu lên user space.)
+Về cờ: `SPLICE_F_NONBLOCK` làm các thao tác trên pipe không chặn, nhưng `splice()` vẫn có thể chặn vì fd còn lại có thể chặn (trừ khi nó cũng đặt `O_NONBLOCK`)[^sp-nb]. `SPLICE_F_MORE` là gợi ý "còn dữ liệu đến ở lần splice sau", hữu ích khi `fd_out` là socket[^sp-more]. `SPLICE_F_MOVE` từ Linux 2.6.21 là no-op, dù vẫn được phép truyền vào[^sp-move].
 
-*`vmsplice`.* Nếu fd mở để ghi, nó ánh xạ `nr_segs` vùng nhớ user (mô tả bởi mảng `iovec`) vào pipe; nếu fd mở để đọc, nó điền các vùng nhớ user từ pipe. fd phải là pipe[^vm-def]. Chỉ chiều user → pipe là splice thật; chiều ngược lại thực ra chỉ chép dữ liệu ra user space[^vm-read].
+### 3.3 `tee`: nhân đôi mà không tiêu thụ
 
-<details><summary>Đi sâu: sức chứa pipe, SPLICE_F_GIFT, vì sao splice cần vòng lặp</summary>
+`tee` nhân đôi tối đa `len` byte từ pipe `fd_in` sang pipe `fd_out` và **không tiêu thụ** dữ liệu ở `fd_in`, nên dữ liệu đó vẫn có thể được `splice` ở bước sau[^tee-def]. Thực chất không có chép dữ liệu: `tee()` chỉ giữ một tham chiếu tới đầu vào rồi gán cho đầu ra[^tee-noreal]. Cả hai fd bắt buộc là pipe, nếu không là `EINVAL`[^tee-einval].
 
-- Sức chứa pipe: từ Linux 2.6.11 là 16 trang (65.536 byte nếu trang 4096 byte)[^pipe-cap]; từ 2.6.35, mặc định vẫn là 16 trang nhưng có thể hỏi/đặt bằng `fcntl(2)` với `F_GETPIPE_SZ`/`F_SETPIPE_SZ`[^pipe-sz]. Man page cũng dặn ứng dụng *không nên dựa vào một sức chứa cụ thể*[^pipe-norely]. Hệ quả (suy luận của người soạn): một lần `splice` file → pipe không thể nhét quá sức chứa của pipe; chương trình chuyển file lớn cần vòng lặp "splice vào pipe → splice ra khỏi pipe" và coi mỗi lần là một đợt.
-- `SPLICE_F_GIFT` chỉ dành cho `vmsplice`: `splice(2)` và `tee(2)` đều ghi cờ này là không dùng[^sp-gift][^tee-gift]. Man page `vmsplice(2)` nói trang user là "quà tặng cho kernel" — ứng dụng *không bao giờ* được sửa vùng nhớ đó nữa, nếu không page cache và dữ liệu trên đĩa có thể lệch nhau; tặng trang nghĩa là `splice(2)` + `SPLICE_F_MOVE` sau đó *có thể* chuyển trang thành công, nếu không tặng thì phải chép; dữ liệu còn phải căn trang cả về địa chỉ lẫn độ dài[^vm-gift]. Nhưng cần đọc kèm: `SPLICE_F_MOVE` ở `splice(2)` hiện là no-op[^sp-move] và `vmsplice(2)` cũng ghi `SPLICE_F_MOVE` là không dùng[^vm-move], nên chỉ từ man page không suy ra được tác dụng thực tế của GIFT. Người soạn đọc thêm source kernel v6.1 (chỉ hai file `fs/splice.c` và `fs/fuse/dev.c`, không duyệt toàn cây): `vmsplice_to_pipe` đổi `SPLICE_F_GIFT` thành cờ `PIPE_BUF_FLAG_GIFT` trên buffer[^k-gift-set]; thao tác "lấy trang" (`try_steal`) của buffer chứa trang user từ chối nếu không có cờ đó[^k-gift-steal]; còn nơi gọi thao tác lấy trang trong hai file ấy là đường ghi của `/dev/fuse`[^k-fuse-steal], chỉ bật khi có `SPLICE_F_MOVE`[^k-fuse-move]. Suy luận của người soạn: trong hai file đã đọc, GIFT chỉ có tác dụng gắn với thao tác lấy trang kèm MOVE ở FUSE, không thấy đường `splice` ra file/socket nào dùng nó; các file khác và kernel khác chưa xác minh nên không khẳng định hơn.
-- `vmsplice` giới hạn số segment bằng `IOV_MAX` (hiện là 1024)[^vm-iovmax]; `EINVAL` nếu vượt hoặc bộ nhớ không căn trang khi có `SPLICE_F_GIFT`[^vm-einval].
-- Cả ba syscall là **Linux-specific** (đặc thù Linux)[^sp-linux]. Chương này chỉ xét Linux; (suy luận của người soạn từ chữ đặc thù Linux) đừng giả định chúng có trên macOS/BSD.
-- `EINVAL` cũng xuất hiện khi mục tiêu mở append[^sp-append] hoặc khi hai đầu là *cùng một* pipe[^sp-einval2].
+Đó chính là thứ `assets` cần ở sơ đồ trên: nhân đôi con trỏ sang pipe thứ hai để ghi bản lưu, trong khi pipe đầu vẫn được `splice` ra socket của client. Cả hai việc xảy ra mà dữ liệu không lên user space (nhận xét của người soạn).
+
+### 3.4 `vmsplice`: từ vùng nhớ user vào pipe
+
+Nếu fd mở để ghi, `vmsplice` ánh xạ `nr_segs` vùng nhớ user (mô tả bằng mảng `iovec`) vào pipe; nếu fd mở để đọc, nó điền các vùng nhớ user từ pipe. fd phải là pipe[^vm-def]. Chỉ chiều user → pipe là splice thật; chiều ngược lại thực ra chỉ chép dữ liệu ra user space[^vm-read].
+
+<details><summary>Đi sâu: sức chứa pipe, SPLICE_F_GIFT, các giới hạn khác</summary>
+
+- Sức chứa pipe từ Linux 2.6.11 là 16 trang (65.536 byte nếu trang 4096 byte)[^pipe-cap]. Từ 2.6.35, mặc định vẫn là 16 trang nhưng có thể hỏi và đặt bằng `fcntl(2)` với `F_GETPIPE_SZ`/`F_SETPIPE_SZ`[^pipe-sz]. Man page dặn ứng dụng *không nên dựa vào một sức chứa cụ thể*[^pipe-norely]. Hệ quả (suy luận của người soạn): một lần `splice` vào pipe không thể nhét quá sức chứa của pipe, nên chương trình chuyển file lớn cần vòng lặp "splice vào pipe → splice ra khỏi pipe" và coi mỗi lần là một đợt.
+- `SPLICE_F_GIFT` chỉ dành cho `vmsplice`: `splice(2)` ghi cờ này là không dùng[^sp-gift]. `tee(2)` cũng vậy[^tee-gift].
+- Man page `vmsplice(2)` gọi trang user là "quà tặng cho kernel": ứng dụng *không bao giờ* được sửa vùng nhớ đó nữa, nếu không page cache và dữ liệu trên đĩa có thể lệch nhau. Tặng trang nghĩa là `splice(2)` + `SPLICE_F_MOVE` sau đó *có thể* chuyển trang thành công, còn nếu không tặng thì phải chép. Dữ liệu còn phải căn trang cả về địa chỉ lẫn độ dài[^vm-gift].
+- Nhưng `SPLICE_F_MOVE` ở `splice(2)` hiện là no-op[^sp-move]. `vmsplice(2)` cũng ghi `SPLICE_F_MOVE` là không dùng[^vm-move], nên chỉ từ man page không suy ra được tác dụng thực tế của GIFT.
+- Người soạn đọc thêm source kernel v6.1, chỉ hai file `fs/splice.c` và `fs/fuse/dev.c`, không duyệt toàn cây. Trong đó `vmsplice_to_pipe` đổi `SPLICE_F_GIFT` thành cờ `PIPE_BUF_FLAG_GIFT` trên buffer[^k-gift-set]. Thao tác lấy trang (`try_steal`) của buffer chứa trang user từ chối nếu không có cờ đó[^k-gift-steal]. Nơi gọi thao tác lấy trang trong hai file ấy là đường ghi của `/dev/fuse`[^k-fuse-steal]. Đường đó chỉ bật khi có `SPLICE_F_MOVE`[^k-fuse-move]. Suy luận của người soạn: trong hai file đã đọc, GIFT chỉ có tác dụng gắn với thao tác lấy trang kèm MOVE ở FUSE, không thấy đường `splice` ra file hay socket nào dùng nó. Các file khác và kernel khác chưa xác minh nên không khẳng định hơn.
+- `vmsplice` giới hạn số segment bằng `IOV_MAX` (hiện là 1024)[^vm-iovmax]. Nó trả `EINVAL` nếu vượt giới hạn đó, hoặc nếu bộ nhớ không căn trang khi có `SPLICE_F_GIFT`[^vm-einval].
+- Cả ba syscall là **Linux-specific**, tức đặc thù Linux[^sp-linux]. Chương này chỉ xét Linux, và (suy luận của người soạn từ chữ đó) đừng giả định chúng có trên macOS/BSD.
+- `EINVAL` cũng xuất hiện khi mục tiêu mở append[^sp-append]. Nó còn xuất hiện khi hai đầu là *cùng một* pipe[^sp-einval2].
 
 </details>
 
-**Quay lại Q3:** pipe trong `splice` không phải đường ống chứa byte mà là mảng con trỏ đếm tham chiếu tới trang kernel; `splice` nối fd với pipe, `tee` nhân con trỏ, `vmsplice` đưa vùng nhớ user vào.
+**Quay lại Q3:** pipe trong `splice` không phải ống chứa byte mà là mảng con trỏ đếm tham chiếu tới trang kernel. `splice` nối fd với pipe, `tee` nhân con trỏ, `vmsplice` đưa vùng nhớ user vào.
 
 ## 4. `copy_file_range(2)`: file → file (Q4)
 
-> **Trả lời ngắn.** `copy_file_range` chép dữ liệu giữa hai fd *trong kernel*, không phải đi vòng qua user space và quay lại[^cfr-def]. Nó dành cho **file thường** ↔ file thường[^cfr-regular], và man page nói syscall này cho filesystem cơ hội áp dụng kỹ thuật tăng tốc chép, như reflink (chia sẻ block copy-on-write) hoặc server-side copy của NFS[^cfr-accel].
+> **Trả lời ngắn.** `copy_file_range` chép dữ liệu giữa hai fd *trong kernel*, không phải đi vòng qua user space rồi quay lại[^cfr-def]. Nó dành cho **file thường** ↔ file thường[^cfr-regular]. Man page nói syscall này cho filesystem cơ hội áp dụng kỹ thuật tăng tốc chép, như reflink (chia sẻ block copy-on-write) hoặc server-side copy của NFS[^cfr-accel].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `cp` file lớn. Nếu bạn khuân từng thùng qua bàn mình (`read`+`write`) thì mất công; nếu chỉ nói với kho "tạo bản sao phiếu tham chiếu tới các kiện y hệt" thì gần như tức thì. `copy_file_range` là lời nhờ "kho tự lo".
+*Với service `assets`.* Khi một client upload xong báo cáo, `assets` phải chép file đó từ thư mục tạm sang kho lưu trữ (ví dụ giả định). Không có socket nào ở đây: cả hai đầu đều là file. Nếu chép bằng vòng `read`+`write`, từng khúc vẫn phải lên rồi xuống user space, trong khi kernel và filesystem thấy được cả hai đầu và có thể làm gọn hơn nhiều. `copy_file_range` là lời nhờ "kernel tự lo việc chép" đó (nhận xét của người soạn).
 
-*Ngữ nghĩa.* Chép tối đa `len` byte từ `fd_in` sang `fd_out`, **ghi đè** mọi dữ liệu ở vùng đích tương ứng[^cfr-def]. Nếu `off_in` là `NULL` thì đọc từ file offset hiện tại và offset được cập nhật theo số byte đã chép; nếu khác `NULL` thì nó chỉ vị trí bắt đầu, file offset của `fd_in` không đổi còn `off_in` được cập nhật[^cfr-off]. `fd_in` và `fd_out` có thể là cùng file nhưng vùng nguồn/đích không được chồng lấn[^cfr-overlap]. Tham số `flags` dành cho mở rộng tương lai, hiện phải bằng 0[^cfr-flags].
+### 4.1 Ngữ nghĩa
 
-*Trả về.* Số byte đã chép, **có thể ít hơn** yêu cầu; nếu offset của `fd_in` ở/sau cuối file thì không chép gì và trả về 0[^cfr-ret]. Cũng như `sendfile`, phải lặp (mã mẫu trong man page cũng lặp tới khi hết `len` — quan sát của người soạn).
+`copy_file_range` chép tối đa `len` byte từ `fd_in` sang `fd_out`, **ghi đè** mọi dữ liệu có sẵn trong vùng đích tương ứng[^s2-cfr-copy]. Về offset, nếu `off_in` là `NULL` thì nó đọc từ file offset hiện tại và cập nhật file offset theo số byte đã chép[^s2-cfr-offnull]. Nếu `off_in` khác `NULL` thì nó chỉ vị trí bắt đầu đọc: file offset của `fd_in` không đổi còn `off_in` được cập nhật[^cfr-off]. `fd_in` và `fd_out` có thể là cùng một file, nhưng vùng nguồn và vùng đích không được chồng lấn[^cfr-overlap]. Tham số `flags` dành cho mở rộng tương lai và hiện phải bằng 0[^cfr-flags].
 
-*Chỉ file thường.* `EINVAL` nếu một trong hai không phải file thường[^cfr-regular]; vì thế `copy_file_range` không phải công cụ cho socket (đó là việc của `sendfile`/`splice`).
+### 4.2 Giá trị trả về
 
-*Khác `sendfile`* (nhận xét của người soạn). `sendfile` hướng tới việc truyền (thường ra socket); `copy_file_range` hướng tới *nhân bản dữ liệu file* và mở đường cho tăng tốc chép (copy acceleration) của filesystem[^cfr-accel] — có thể không chép byte nào (reflink; xem [P5·07](../05-storage/07-raid-va-copy-on-write-fs.md) về copy-on-write FS).
+Hàm trả về số byte đã chép, và số này **có thể ít hơn** yêu cầu. Nếu offset của `fd_in` ở cuối hoặc sau cuối file thì không chép gì và hàm trả về 0[^cfr-ret]. Cũng như `sendfile`, `assets` phải gọi lặp cho tới khi chép đủ (quan sát của người soạn: mã mẫu trong man page cũng lặp tới khi hết `len`).
+
+### 4.3 Chỉ file thường
+
+`EINVAL` nếu một trong hai fd không phải file thường[^cfr-regular]. Vì thế `copy_file_range` không phải công cụ cho socket; đó là việc của `sendfile` và `splice`.
+
+### 4.4 Khác `sendfile` chỗ nào
+
+`sendfile` hướng tới việc *truyền* dữ liệu, thường là ra socket. `copy_file_range` hướng tới *nhân bản dữ liệu file* và mở đường cho filesystem tăng tốc chép (copy acceleration)[^cfr-accel]. Nhờ đó nó có thể không chép byte nào, như với reflink; xem [P5·07](../05-storage/07-raid-va-copy-on-write-fs.md) về copy-on-write FS (nhận xét của người soạn).
 
 <details><summary>Đi sâu: phiên bản, EXDEV, lỗi "báo thành công mà không chép", file thưa</summary>
 
-- Xuất hiện từ Linux 4.5; glibc 2.27 có bản mô phỏng trong user space khi kernel chưa có[^cfr-ver]. Đây là phần mở rộng không chuẩn của Linux/GNU[^cfr-std].
-- Kernel 5.3 viết lại đáng kể phần cài đặt: các chỗ chưa rõ trong API được làm rõ và kiểm tra giới hạn chặt hơn[^cfr-rework]; ứng dụng nên nhắm hành vi của Linux 5.19 (đã backport về một số bản stable cũ hơn)[^cfr-target].
-- Chép *khác filesystem*: `EXDEV` trước Linux 5.3 khi hai file không cùng filesystem[^cfr-xdev-old]; từ 5.3 đến 5.18 kernel tự làm phần chép khác filesystem khi filesystem không tự hỗ trợ (kèm lỗi ở dòng sau)[^cfr-bug]; từ 5.19 có thể chép khi hai filesystem cùng loại và loại đó cài hỗ trợ — nếu khác loại hoặc không hỗ trợ thì vẫn `EXDEV`[^cfr-xdev]. `EOPNOTSUPP` (từ 5.19) khi filesystem không hỗ trợ thao tác[^cfr-eopnotsupp].
-- **Lỗi nổi tiếng:** Linux 5.3–5.18 có chép khác filesystem do kernel làm khi filesystem không tự hỗ trợ; trên một số filesystem ảo, lời gọi không chép được gì mà vẫn báo thành công[^cfr-bug]. (Nhận xét của người soạn: vì thế code dùng `copy_file_range` nên kiểm tra kích thước kết quả khi chạy trên filesystem lạ — mục 8 cho thấy `std` có đường lùi riêng cho trường hợp "trả 0 byte".)
-- File thưa: nếu `fd_in` là file thưa, `copy_file_range` có thể làm các lỗ thành vùng dữ liệu thật; có thể gọi trong vòng lặp cùng `lseek(2)` `SEEK_DATA`/`SEEK_HOLE` để tìm đoạn dữ liệu[^cfr-sparse].
-- Các `EBADF` khác: `fd_out` có `O_APPEND` cũng cho `EBADF`[^cfr-append].
+- `copy_file_range` xuất hiện từ Linux 4.5, và glibc 2.27 có bản mô phỏng trong user space khi kernel chưa có[^cfr-ver]. Đây là phần mở rộng không chuẩn của Linux/GNU[^cfr-std].
+- Kernel 5.3 viết lại đáng kể phần cài đặt: các chỗ chưa rõ trong API được làm rõ và kiểm tra giới hạn chặt hơn[^cfr-rework]. Ứng dụng nên nhắm hành vi của Linux 5.19, vốn đã được backport về một số bản stable cũ hơn[^cfr-target].
+- Chép *khác filesystem*: trước Linux 5.3, hai file không cùng filesystem cho `EXDEV`[^cfr-xdev-old]. Từ 5.19, kernel có thể chép khi hai filesystem cùng loại và loại đó cài hỗ trợ; nếu khác loại hoặc không hỗ trợ thì vẫn `EXDEV`[^cfr-xdev]. `EOPNOTSUPP` (từ 5.19) xuất hiện khi filesystem không hỗ trợ thao tác[^cfr-eopnotsupp].
+- **Lỗi nổi tiếng:** từ Linux 5.3 đến 5.18, khi filesystem không tự hỗ trợ chép khác filesystem thì kernel làm thay. Nhưng trên một số filesystem ảo, lời gọi không chép được gì mà vẫn báo thành công[^cfr-bug]. Vì thế (nhận xét của người soạn) code dùng `copy_file_range` nên kiểm tra kích thước kết quả khi chạy trên filesystem lạ. Mục 8 cho thấy `std` có đường lùi riêng cho trường hợp "trả 0 byte".
+- File thưa: nếu `fd_in` là file thưa, `copy_file_range` có thể làm các lỗ thành vùng dữ liệu thật. Có thể gọi nó trong vòng lặp cùng `lseek(2)` với `SEEK_DATA`/`SEEK_HOLE` để tìm đoạn dữ liệu[^cfr-sparse].
+- `EBADF` cũng xuất hiện khi `fd_out` có `O_APPEND`[^cfr-append].
 
 </details>
 
-**Quay lại Q4:** `copy_file_range` là bản "kernel tự lo" cho file → file; vì chỉ nhận file thường và cho filesystem cơ hội reflink/server-side copy, nó khác hẳn `sendfile` dùng để đổ file ra socket.
+**Quay lại Q4:** `copy_file_range` là bản "kernel tự lo" cho file → file. Vì chỉ nhận file thường và cho filesystem cơ hội reflink/server-side copy, nó khác hẳn `sendfile`, thứ dùng để đổ file ra socket.
 
 ## 5. `MSG_ZEROCOPY`: gửi thẳng buffer của process, và khi nào có lợi (Q5)
 
-> **Trả lời ngắn.** `MSG_ZEROCOPY` là cờ cho các lệnh gửi trên socket (TCP, UDP, và VSOCK với transport virtio) để kernel *tránh chép* dữ liệu[^zc-intro]; cách cài hiện tại là ghim (pin) trang của buffer thay vì chép[^zc-notfree]. Đổi lại, nó thay chi phí chép từng byte bằng chi phí kế toán trang và thông báo hoàn thành, nên chỉ thường có lợi khi mỗi lần ghi khoảng trên 10 KB[^zc-notfree]. Và vì buffer được chia sẻ tạm thời với network stack, bạn không được ghi đè nó cho tới khi nhận thông báo "xong"[^zc-share].
+> **Trả lời ngắn.** `MSG_ZEROCOPY` là cờ cho các lệnh gửi trên socket (TCP, UDP, và VSOCK với transport virtio) để kernel *tránh chép* dữ liệu[^zc-intro]. Cách cài hiện tại là ghim (pin) trang của buffer thay vì chép. Đổi lại, nó thay chi phí chép từng byte bằng chi phí kế toán trang và thông báo hoàn thành, nên thường chỉ có lợi khi mỗi lần ghi lớn hơn khoảng 10 KB[^zc-notfree]. Và vì buffer được chia sẻ tạm thời với network stack, bạn không được ghi đè nó cho tới khi nhận thông báo "xong"[^zc-share].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì photocopy tài liệu rồi giao bản sao (chép), bạn đưa *bản gốc* cho bưu tá và hứa không đụng tới nó cho tới khi bưu tá gọi "đã xong với tờ giấy của bạn". Tiết kiệm được photocopy — nhưng phải có quy trình gọi-báo, và tờ giấy mỏng (gói nhỏ) thì photocopy còn nhanh hơn làm thủ tục.
+*Với service `assets`.* Giả sử `assets` giữ trong RAM bản cache của những file hay được tải, hoặc vừa render xong một bản PDF vào bộ nhớ (ví dụ giả định). Dữ liệu lúc này nằm trong buffer của process, không phải trong một file hay pipe, nên `sendfile` và `splice` không áp dụng. `MSG_ZEROCOPY` mở rộng cơ chế tránh chép của hai syscall đó sang các lệnh gửi thông thường của socket (`send`, `sendto`, `sendmsg`, `sendmmsg`), tức nguồn có thể là *buffer bất kỳ của process*[^zc-others]. Nhưng nó đổi hợp đồng: buffer không còn thuộc riêng `assets` cho tới khi kernel báo xong. Phần còn lại của mục là ba bước dùng, rồi điều kiện để nó đáng dùng.
 
-*Không phải `sendfile`.* `sendfile`/`splice` lo nguồn là file hoặc pipe. `MSG_ZEROCOPY` mở rộng cơ chế tránh-chép ấy cho các lệnh gửi socket thông thường (`send`, `sendto`, `sendmsg`, `sendmmsg`), tức nguồn là *buffer bất kỳ của process*[^zc-others].
+### 5.1 Ba bước: opt-in, gửi, chờ thông báo
 
-*Bước 1 — opt-in.* Kernel khá dễ tính với cờ lạ: mặc định bỏ qua cờ không định nghĩa. Để tránh bật tránh-chép cho các process cũ lỡ truyền cờ này, process phải báo ý định trước bằng `setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, …)`[^zc-optin].
+*Bước 1: opt-in.* Kernel khá dễ tính với cờ lạ: mặc định nó bỏ qua cờ không định nghĩa. Để tránh bật chế độ tránh chép cho các process cũ lỡ truyền cờ này, process phải báo ý định trước bằng `setsockopt(fd, SOL_SOCKET, SO_ZEROCOPY, …)`[^zc-optin].
 
-*Bước 2 — gửi.* Thay đổi ở lệnh gửi chỉ là truyền thêm cờ `MSG_ZEROCOPY`[^zc-send]. Lỗi riêng: `-1` với `errno = ENOBUFS` khi socket vượt giới hạn optmem hoặc người dùng vượt `ulimit` số trang bị khóa[^zc-enobufs]. Trộn lệnh có cờ và không cờ trên cùng socket là an toàn[^zc-mix].
+*Bước 2: gửi.* Thay đổi ở lệnh gửi chỉ là truyền thêm cờ `MSG_ZEROCOPY`[^zc-send]. Chế độ này có một lỗi riêng: lệnh gửi trả `-1` với `errno = ENOBUFS` khi socket vượt giới hạn optmem hoặc người dùng vượt `ulimit` số trang bị khóa[^zc-enobufs]. Trộn lệnh có cờ và không cờ trên cùng socket là an toàn[^zc-mix].
 
-*Bước 3 — chờ thông báo hoàn thành.* Kernel phải báo khi nào *an toàn để dùng lại buffer*. Thông báo xếp vào **hàng đợi lỗi** (error queue) của socket, giống giao diện timestamp truyền[^zc-notif]. Mỗi socket giữ một bộ đếm 32 bit không dấu; mỗi lệnh gửi `MSG_ZEROCOPY` thành công làm tăng bộ đếm; bộ đếm đếm số lần gọi syscall, không đếm byte, và quấn vòng sau `UINT_MAX`[^zc-counter]. Cách đọc đơn giản: sau mỗi `send` thì `poll` (kernel đặt `POLLERR` vô điều kiện) rồi `recvmsg` với `MSG_ERRQUEUE`; đọc hàng đợi lỗi luôn không chặn[^zc-poll]. Tài liệu nói rõ ví dụ chỉ để minh họa: thực tế hiệu quả hơn là *không đợi*, cứ vài lệnh gửi lại đọc không chặn một lần[^zc-poll2]. Thông báo mang mã lỗi 0 để không chặn `send`/`recv` khác trên socket[^zc-errno0].
+*Bước 3: chờ thông báo hoàn thành.* Kernel phải báo khi nào *an toàn để dùng lại buffer*. Nó xếp thông báo vào **hàng đợi lỗi** (error queue) của socket, giống giao diện timestamp truyền[^zc-notif]. Mỗi socket giữ một bộ đếm 32 bit không dấu, tăng một đơn vị sau mỗi lệnh gửi `MSG_ZEROCOPY` thành công; bộ đếm này đếm số lần gọi syscall chứ không đếm byte, và quấn vòng sau `UINT_MAX`[^zc-counter]. Cách đọc đơn giản là sau mỗi `send` thì `poll` rồi `recvmsg` với `MSG_ERRQUEUE`: kernel luôn đặt `POLLERR` vô điều kiện, và đọc hàng đợi lỗi luôn không chặn[^zc-poll]. Trong thực tế, tài liệu nói hiệu quả hơn là không đợi, cứ vài lệnh gửi lại đọc không chặn một lần[^zc-poll2]. Thông báo mang mã lỗi 0 để không chặn các lệnh `send`/`recv` khác trên socket[^zc-errno0].
 
-*Gộp thông báo.* Mỗi thông báo mang một **khoảng** `[ee_info, ee_data]` (đóng hai đầu)[^zc-range], không phải một giá trị: kernel gộp các thông báo liên tiếp khi một cái còn chờ được đọc[^zc-batch]. Với giao thức xác nhận theo thứ tự như TCP, nhiều nhất một thông báo treo tại một thời điểm[^zc-inorder] — nhưng *thứ tự không được bảo đảm*: có thể đảo lộn khi retransmit và khi đóng socket[^zc-ooo].
+Với `assets`, quy tắc rút ra là: blob nào đã đưa cho kernel thì không được ghi đè, và không được trả về pool buffer, cho tới khi đọc được thông báo ứng với lần gửi đó (suy luận của người soạn từ yêu cầu ở trên).
+
+### 5.2 Thông báo là một khoảng
+
+Mỗi thông báo mang một **khoảng** `[ee_info, ee_data]`, đóng cả hai đầu[^zc-range], chứ không phải một giá trị đơn lẻ. Lý do là kernel gộp các thông báo liên tiếp khi một cái còn chờ được đọc[^zc-batch]. Với giao thức xác nhận theo thứ tự như TCP, nhiều nhất một thông báo treo tại một thời điểm[^zc-inorder]. Nhưng *thứ tự không được bảo đảm*: thông báo có thể đảo lộn khi retransmit và khi đóng socket[^zc-ooo]. Vì vậy `assets` không nên giả định thông báo đến đúng thứ tự gửi (suy luận của người soạn).
 
 ```mermaid
 sequenceDiagram
-  participant App as Process
+  participant App as Process (assets)
   participant K as Kernel / network stack
   App->>K: setsockopt(SO_ZEROCOPY)
   App->>K: send(buf, MSG_ZEROCOPY) — ghim trang
@@ -207,131 +266,176 @@ sequenceDiagram
 
 (Sơ đồ minh họa của người soạn, theo các bước nguồn mô tả ở trên.)
 
-*Khi nào có lợi.* Nguồn nói thẳng: tránh-chép **không phải bữa trưa miễn phí**. Với cách cài hiện tại (page pinning — ghim trang: giữ trang của buffer cố định để kernel tham chiếu; lỗi `ENOBUFS` ở trên cho thấy trang ghim bị tính vào giới hạn `ulimit` số trang bị khóa[^zc-enobufs]), nó thay chi phí chép từng byte bằng kế toán trang và thông báo hoàn thành, nên `MSG_ZEROCOPY` thường chỉ hiệu quả với lần ghi trên khoảng 10 KB[^zc-notfree]. Ngoài ra nó đổi ngữ nghĩa syscall: buffer bị chia sẻ tạm thời; khác với chép, process không thể ghi đè buffer ngay sau khi syscall trả về mà không có nguy cơ sửa dữ liệu đang bay; tính toàn vẹn của kernel không bị ảnh hưởng nhưng chương trình lỗi có thể tự làm hỏng luồng dữ liệu của mình[^zc-share]. Hệ quả: chuyển ứng dụng sang `MSG_ZEROCOPY` không đơn thuần là "thêm cờ"[^zc-notfree2].
+### 5.3 Khi nào đáng dùng
 
-*Khi nào không có lợi (hoặc bị chép ngầm).* Cờ chỉ là *gợi ý*, kèm cam kết kernel sẽ xếp thông báo hoàn thành; **không** bảo đảm việc chép được loại bỏ[^zc-hint]. Trường hợp không tránh được: thiết bị không hỗ trợ scatter-gather I/O (khả năng gửi một gói ghép từ nhiều mẩu bộ nhớ rời — header ở một nơi, dữ liệu ở nơi khác; giải nghĩa của người soạn) thì không gửi được gói gồm header giao thức do kernel tạo cộng dữ liệu user zero-copy; một gói cũng có thể phải đổi thành bản chép riêng ở sâu trong stack, ví dụ để tính checksum[^zc-sg]. Với **loopback** (TCP/UDP): mọi gói tạo bằng `MSG_ZEROCOPY` mà quay về socket cục bộ đều bị *chép trì hoãn*, gồm cả socket packet (tcpdump) và thiết bị tun, vì thời gian chờ thông báo không thể vô hạn nếu bên nhận không đọc[^zc-loop]; VSOCK thì ngoại lệ: đường dữ liệu tới socket cục bộ giống socket không cục bộ[^zc-vsock]. (Suy luận của người soạn: container cùng host thường nối nhau qua cặp `veth` giữa các network namespace; tài liệu kernel nói bài test chạy giữa một cặp process cục bộ, ví dụ qua cặp veth giữa các namespace, sẽ không cho thấy cải thiện[^zc-test] — nên đo trên cặp host thật khi quyết định.)
+Tránh chép không phải bữa trưa miễn phí. Với cách cài hiện tại, `MSG_ZEROCOPY` ghim trang (page pinning, tức giữ trang của buffer cố định để kernel tham chiếu) và thay chi phí chép từng byte bằng chi phí kế toán trang cộng thông báo hoàn thành[^zc-notfree]. Vì thế nó thường chỉ hiệu quả với lần ghi trên khoảng 10 KB[^zc-notfree]. Với `assets` (nhận xét của người soạn), một response JSON vài KB không đáng, còn blob lớn hơn 10 KB nhiều lần thì đáng thử. Trang bị ghim còn tính vào giới hạn `ulimit` số trang bị khóa, như lỗi `ENOBUFS` ở trên gợi ý (suy luận của người soạn)[^zc-enobufs].
+
+Ngoài chi phí, cờ này đổi ngữ nghĩa của syscall. Khác với chép, process không thể ghi đè buffer ngay sau khi syscall trả về mà không có nguy cơ sửa dữ liệu đang bay. Tính toàn vẹn của kernel không bị ảnh hưởng, nhưng một chương trình lỗi có thể tự làm hỏng luồng dữ liệu của chính nó[^zc-share]. Vì thế chuyển ứng dụng sang `MSG_ZEROCOPY` không đơn thuần là thêm cờ[^zc-notfree2].
+
+### 5.4 Khi nào không có lợi, hoặc bị chép ngầm
+
+Cờ chỉ là *gợi ý* kèm cam kết kernel sẽ xếp thông báo hoàn thành; nó **không** bảo đảm việc chép được loại bỏ[^zc-hint]. Có hai trường hợp không tránh được chép. Thứ nhất, thiết bị không hỗ trợ scatter-gather I/O (khả năng gửi một gói ghép từ nhiều mẩu bộ nhớ rời, như header ở một nơi và dữ liệu ở nơi khác; giải nghĩa của người soạn) thì không gửi được gói gồm header giao thức do kernel tạo cộng dữ liệu user zero-copy. Một gói cũng có thể phải đổi thành bản chép riêng ở sâu trong stack, ví dụ để tính checksum[^zc-sg].
+
+Thứ hai là **loopback** (TCP/UDP). Mọi gói tạo bằng `MSG_ZEROCOPY` mà quay về một socket cục bộ đều bị *chép trì hoãn*, kể cả khi quay về socket packet (như tcpdump) hay thiết bị tun. Lý do là thời gian chờ thông báo không thể vô hạn trong khi bên nhận cục bộ có thể không bao giờ đọc[^zc-loop]. VSOCK là ngoại lệ: đường dữ liệu tới socket cục bộ giống với socket không cục bộ[^zc-vsock].
+
+Điều này quan trọng với `assets` nếu client của nó nằm cùng máy. Container cùng host thường nối nhau qua cặp `veth` giữa các network namespace (suy luận của người soạn). Tài liệu kernel nói bài test chạy giữa một cặp process cục bộ, ví dụ qua cặp veth giữa các namespace, sẽ không cho thấy cải thiện[^zc-test]. Nên khi quyết định có dùng `MSG_ZEROCOPY` hay không, hãy đo trên cặp host thật chứ không đo trên máy dev (nhận xét của người soạn).
 
 <details><summary>Đi sâu: bản chép trì hoãn, cờ SO_EE_CODE_ZEROCOPY_COPIED, định dạng thông báo, tài liệu</summary>
 
-- Khi không thể tránh chép, kernel vẫn trả thông báo hoàn thành *khi nó thả tham chiếu tới trang chung*. Thông báo đó có thể đến *trước* khi dữ liệu (đã bị chép) được truyền hết; **thông báo hoàn thành zerocopy không phải thông báo hoàn thành truyền**[^zc-notxdone].
-- Chép trì hoãn có thể đắt hơn chép ngay trong syscall nếu dữ liệu không còn "ấm" trong cache; process còn trả chi phí xử lý thông báo mà không được lợi gì[^zc-deferred]. Vì thế kernel báo "đã chép" bằng cờ `SO_EE_CODE_ZEROCOPY_COPIED` ở trường `ee_code`; process có thể dùng tín hiệu đó để ngừng truyền `MSG_ZEROCOPY` cho các lệnh tiếp theo trên cùng socket[^zc-copied].
-- Thông báo dùng định dạng lỗi chuẩn `sock_extended_err`[^zc-parse]; `cmsg_level`/`cmsg_type` theo họ giao thức (`IP_RECVERR`/`IPV6_RECVERR` cho TCP/UDP; `SOL_VSOCK`/`VSOCK_RECVERR` cho VSOCK)[^zc-cmsg]; nguồn lỗi là `SO_EE_ORIGIN_ZEROCOPY`, `ee_errno` bằng 0[^zc-parse2]; các trường khác (trừ `ee_code`) phải coi là không xác định[^zc-undef].
+- Khi không thể tránh chép, kernel vẫn trả thông báo hoàn thành *khi nó thả tham chiếu tới trang chung*. Thông báo đó có thể đến *trước* khi dữ liệu (đã bị chép) được truyền hết, nên **thông báo hoàn thành zerocopy không phải thông báo hoàn thành truyền**[^zc-notxdone].
+- Chép trì hoãn có thể đắt hơn chép ngay trong syscall nếu dữ liệu không còn "ấm" trong cache; process còn trả chi phí xử lý thông báo mà không được lợi gì[^zc-deferred]. Vì thế kernel báo "đã chép" bằng cờ `SO_EE_CODE_ZEROCOPY_COPIED` ở trường `ee_code`, và process có thể dùng tín hiệu đó để ngừng truyền `MSG_ZEROCOPY` cho các lệnh tiếp theo trên cùng socket[^zc-copied].
+- Thông báo dùng định dạng lỗi chuẩn `sock_extended_err`[^zc-parse]. `cmsg_level`/`cmsg_type` theo họ giao thức: `IP_RECVERR`/`IPV6_RECVERR` cho TCP/UDP, `SOL_VSOCK`/`VSOCK_RECVERR` cho VSOCK[^zc-cmsg]. Nguồn lỗi là `SO_EE_ORIGIN_ZEROCOPY` và `ee_errno` bằng 0[^zc-parse2]. Các trường khác (trừ `ee_code`) phải coi là không xác định[^zc-undef].
 - Mã mẫu thật nằm ở `tools/testing/selftests/net/msg_zerocopy.c` trong source kernel[^zc-test0].
-- Bài báo gốc (netdev 2.1) và LWN là các tài liệu được kernel docs trỏ tới để đọc sâu[^zc-more].
-- io_uring: chương này không đi vào đường zero-copy gửi của io_uring vì chưa lấy được nguồn; mô hình completion queue của io_uring ở [P7·03](../07-io-async/03-kqueue-io-uring.md) — xem phần "sở hữu buffer" ở mục 5 chương đó, nơi chủ đề "ai giữ buffer trong khi kernel dùng" cũng xuất hiện (nhận xét của người soạn: cùng bài toán).
+- Bài báo gốc (netdev 2.1) và LWN là các tài liệu mà kernel docs trỏ tới để đọc sâu[^zc-more].
+- io_uring: chương này không đi vào đường zero-copy gửi của io_uring vì chưa lấy được nguồn. Mô hình completion queue của io_uring nằm ở [P7·03](../07-io-async/03-kqueue-io-uring.md); xem phần "sở hữu buffer" ở mục 5 chương đó, nơi chủ đề "ai giữ buffer trong khi kernel dùng" cũng xuất hiện (nhận xét của người soạn: cùng bài toán).
 
 </details>
 
-**Quay lại Q5:** `MSG_ZEROCOPY` cần opt-in `SO_ZEROCOPY`, gửi xong chưa được sửa buffer cho tới khi đọc thông báo từ error queue, và chỉ thường đáng khi mỗi lần ghi lớn (quanh 10 KB trở lên) và không đi qua loopback (với TCP/UDP).
+**Quay lại Q5:** `MSG_ZEROCOPY` cần opt-in `SO_ZEROCOPY`, và gửi xong chưa được sửa buffer cho tới khi đọc thông báo từ error queue. Nó chỉ thường đáng khi mỗi lần ghi lớn (quanh 10 KB trở lên) và không đi qua loopback (với TCP/UDP).
 
 ## 6. `mmap` cho I/O: tránh một số chép, trả giá bằng fault và rủi ro (Q6)
 
-> **Trả lời ngắn.** `mmap` ánh xạ file vào không gian địa chỉ của process nên bạn đọc/ghi file bằng truy cập bộ nhớ thay vì `read`/`write`[^mm-map]. Về chép: tài liệu kernel nói `read`, `write` và `mmap` thông thường đều đi qua page cache[^pcg], nên (suy luận của người soạn) truy cập ánh xạ bỏ được bước chép từ page cache sang buffer riêng của process — nhưng man page `mmap(2)` không nêu số lần chép hay so sánh tốc độ. Cái giá: lần chạm đầu có thể gây page fault[^mm-populate], chạm quá cuối file gây `SIGBUS`[^mm-sigbus], và ngữ nghĩa ghi/hiển thị thay đổi giữa `MAP_SHARED` và `MAP_PRIVATE`[^mm-shared][^mm-private].
+> **Trả lời ngắn.** `mmap` ánh xạ file vào không gian địa chỉ của process, nên bạn đọc và ghi file bằng truy cập bộ nhớ thay vì `read`/`write`[^mm-map]. Về chuyện chép: tài liệu kernel nói `read`, `write` và `mmap` thông thường đều đi qua page cache[^pcg], nên (suy luận của người soạn) truy cập ánh xạ bỏ được bước chép từ page cache sang buffer riêng của process; nhưng man page `mmap(2)` không nêu số lần chép hay so sánh tốc độ. Cái giá gồm ba thứ. Lần chạm đầu có thể gây page fault[^mm-populate]. Chạm quá cuối file gây `SIGBUS`[^mm-sigbus]. Và ngữ nghĩa ghi/hiển thị đổi giữa `MAP_SHARED` và `MAP_PRIVATE`[^mm-shared].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `read` là nhờ thủ thư photocopy trang sách đem về bàn bạn. `mmap` là mở thẳng cuốn sách trên giá — nhưng nếu cuốn sách ngắn hơn bạn tưởng (file bị cắt) thì bạn mở ra trang trống và bị ngã (`SIGBUS`), và nếu bạn sửa sách (MAP_SHARED) thì người khác thấy ngay.
+*Với service `assets`.* Ngoài việc đổ file ra socket, `assets` còn phải tra một file index lớn trên đĩa, một bảng từ tên file tới vị trí của nó trong kho, và tra đi tra lại theo kiểu truy cập ngẫu nhiên (ví dụ giả định). Việc này `sendfile` không giúp được, vì dữ liệu phải được chính process đọc thật. `mmap` là lựa chọn khác: ánh xạ file vào không gian địa chỉ rồi đọc như đọc bộ nhớ. Mục này xem nó bỏ được gì, và đổi lại `assets` phải gánh gì.
 
-*Cơ chế.* `mmap()` tạo một ánh xạ mới trong không gian địa chỉ ảo của process[^mm-map]. Sau khi `mmap` trả về có thể đóng ngay `fd` mà không làm mất ánh xạ[^mm-close]. Truy cập vùng ánh xạ là truy cập bộ nhớ thường, không cần syscall mỗi lần; trang được nạp khi chạm lần đầu (demand paging, xem [P3·04, mục 2](../03-memory/04-page-fault-va-swapping.md); bố cục `mmap`/copy-on-write/`brk` ở [P3·05, mục 4](../03-memory/05-bo-nho-tien-trinh-linux.md); page cache ở [P5·04](../05-storage/04-page-cache-va-direct-io.md)). Ứng dụng có thể hỏi trang nào của ánh xạ đang nằm trong page cache bằng `mincore(2)`[^mm-mincore].
+### 6.1 Cơ chế
 
-*Hai chế độ.* `MAP_SHARED`: cập nhật thấy được với các process khác cùng ánh xạ và (với file) được ghi xuống file; muốn kiểm soát chính xác lúc cập nhật xuống file phải dùng `msync(2)`[^mm-shared]. `MAP_PRIVATE`: bản sao copy-on-write riêng, cập nhật không thấy với người khác và không ghi xuống file; nếu file bị đổi sau khi `mmap` thì có thấy trong vùng ánh xạ hay không là **không xác định**[^mm-private].
+`mmap()` tạo một ánh xạ mới trong không gian địa chỉ ảo của process[^mm-map]. Sau khi `mmap` trả về, có thể đóng ngay `fd` mà không làm mất ánh xạ[^mm-close]. Truy cập vùng ánh xạ là truy cập bộ nhớ thường, không cần syscall mỗi lần. Trang được nạp khi chạm lần đầu (demand paging; xem [P3·04, mục 2](../03-memory/04-page-fault-va-swapping.md), bố cục `mmap`/copy-on-write/`brk` ở [P3·05, mục 4](../03-memory/05-bo-nho-tien-trinh-linux.md), và page cache ở [P5·04](../05-storage/04-page-cache-va-direct-io.md)). Ứng dụng có thể hỏi trang nào của ánh xạ đang nằm trong page cache bằng `mincore(2)`[^mm-mincore].
 
-*Cái giá.* (1) Truy cập vượt quá cuối file ánh xạ: `SIGBUS`[^mm-sigbus]. Hệ quả: file bị cắt ngắn bởi process khác trong lúc bạn đọc có thể làm cả process chết bằng tín hiệu, không phải trả `Err`; man page chỉ nói hiệu ứng của việc đổi kích thước file lên các trang thuộc vùng bị thêm/bớt là *không xác định*[^mm-resize]. Trường hợp này đã được đo ở [P3·05, mục 4](../03-memory/05-bo-nho-tien-trinh-linux.md) (Đi sâu): `mmap` file 8 KiB `MAP_SHARED`, `ftruncate` xuống 0, ghi byte 5000 → `Bus error`, exit 135 = 128 + SIGBUS (một lần chạy trên lab). (2) Ghi vào vùng ánh xạ chỉ-đọc: `SIGSEGV`[^mm-sigsegv]. (3) Lần chạm trang đầu tiên có thể chặn do page fault; cờ `MAP_POPULATE` prefault các bảng trang, với file nó gây read-ahead, giúp giảm chặn do fault về sau[^mm-populate].
+### 6.2 Hai chế độ
 
-*So với zero-copy mục 2–5.* Man page `mmap(2)` **không** nêu số lần chép hay so sánh tốc độ với `read`/`sendfile`; chương này cũng không khẳng định. Điều có nguồn: `sendfile` đòi `in_fd` là thứ hỗ trợ thao tác kiểu `mmap`[^sf-in], và ngược lại `sendfile` được mô tả hiệu quả hơn `read`+`write`[^sf-more]. (Nhận xét của người soạn: `mmap` hợp khi bạn thực sự cần truy cập ngẫu nhiên/nhiều lần vào dữ liệu trong process; nếu chỉ chuyển byte từ file ra socket thì `sendfile`/`splice` diễn đạt đúng ý hơn và không có rủi ro `SIGBUS` trong code của bạn.)
+`MAP_SHARED`: cập nhật vào vùng ánh xạ thấy được với các process khác cùng ánh xạ vùng đó, và (với file) được ghi xuống file. Muốn kiểm soát chính xác lúc cập nhật xuống file thì phải dùng `msync(2)`[^mm-shared]. `MAP_PRIVATE`: mỗi process có một bản sao copy-on-write riêng; cập nhật không thấy với người khác và không ghi xuống file. Nếu file bị đổi sau khi `mmap` thì thay đổi đó có hiện ra trong vùng ánh xạ hay không là **không xác định**[^mm-private].
 
-<details><summary>Đi sâu: thời gian sửa đổi, MAP_POPULATE vs fault, mmap trong Rust</summary>
+### 6.3 Cái giá
 
-- File ánh xạ `PROT_WRITE` + `MAP_SHARED`: `st_ctime`/`st_mtime` được cập nhật sau khi ghi vào vùng ánh xạ và trước lần `msync` kế tiếp (nếu có) với `MS_SYNC`/`MS_ASYNC`[^mm-times]; `st_atime` có thể cập nhật bất kỳ lúc nào giữa `mmap` và lúc hủy ánh xạ[^mm-times0].
+*Một là `SIGBUS`.* Truy cập vượt quá cuối file ánh xạ cho `SIGBUS`[^mm-sigbus]. Hệ quả với `assets` (nhận xét của người soạn): nếu một process khác cắt ngắn file index trong lúc `assets` đang tra, cả process có thể chết bằng tín hiệu thay vì nhận một `Err` để xử lý, và mọi kết nối đang phục vụ đứt theo. Man page chỉ nói hiệu ứng của việc đổi kích thước file lên các trang thuộc vùng bị thêm hoặc bớt là *không xác định*[^mm-resize]. Trường hợp này đã được đo ở [P3·05, mục 4](../03-memory/05-bo-nho-tien-trinh-linux.md) (Đi sâu): `mmap` file 8 KiB `MAP_SHARED`, `ftruncate` xuống 0, ghi byte 5000 → `Bus error`, exit 135 = 128 + SIGBUS (một lần chạy trên lab).
+
+*Hai là `SIGSEGV`.* Ghi vào vùng ánh xạ chỉ-đọc cho `SIGSEGV`[^mm-sigsegv].
+
+*Ba là page fault.* Lần chạm trang đầu tiên có thể chặn do page fault. Cờ `MAP_POPULATE` prefault các bảng trang và với file nó gây read-ahead, giúp giảm chặn do fault về sau[^mm-populate].
+
+### 6.4 So với zero-copy ở mục 2–5
+
+Man page `mmap(2)` **không** nêu số lần chép hay so sánh tốc độ với `read`/`sendfile`, và chương này cũng không khẳng định. Điều có nguồn: `sendfile` đòi `in_fd` là thứ hỗ trợ thao tác kiểu `mmap`[^sf-in]. Ngược lại, `sendfile` được mô tả là hiệu quả hơn `read`+`write`[^sf-more]. Nhận xét của người soạn: `mmap` hợp khi bạn thực sự cần truy cập ngẫu nhiên, nhiều lần, vào dữ liệu ngay trong process, như file index của `assets`. Còn nếu chỉ chuyển byte từ file ra socket thì `sendfile`/`splice` diễn đạt đúng ý hơn, và code của bạn không gánh rủi ro `SIGBUS`.
+
+<details><summary>Đi sâu: MAP_POPULATE và mmap trong Rust</summary>
+
 - `MAP_POPULATE` không làm `mmap` thất bại nếu không điền được trang (ví dụ giới hạn huge page)[^mm-populate2]. Đây là *gợi ý prefault*, không phải bảo đảm toàn bộ file đã nằm trong RAM (suy luận của người soạn).
-- Về Rust: danh sách mục của `std` 1.95.0 (`std/all.html`) không có tên nào chứa "mmap" (quan sát của người soạn khi tìm trong trang đó), nên đọc/ghi file kiểu mmap trong Rust dùng crate ngoài; chương [P5·08 mục 8](../05-storage/08-rust-va-luu-tru.md) dùng `memmap2`. Docs `memmap2` giải thích vì sao mọi constructor ánh xạ file đều `unsafe`: có thể có Undefined Behavior khi dùng ánh xạ nếu file nền bị sửa sau đó, trong hay ngoài process[^mm-safety]; cùng docs nói truy cập byte của buffer có thể gây page fault[^mm-pagefault]. (Nhận xét của người soạn: đây là mặt Rust của rủi ro "file đổi dưới chân" đã nêu ở trên, nhưng hai điều không đồng nhất — man page `mmap(2)` nói về tín hiệu `SIGBUS`, docs `memmap2` nói về UB.)
+- Về Rust: danh sách mục của `std` 1.95.0 (`std/all.html`) không có tên nào chứa "mmap" (quan sát của người soạn khi tìm trong trang đó), nên đọc/ghi file kiểu mmap trong Rust phải dùng crate ngoài. Chương [P5·08 mục 8](../05-storage/08-rust-va-luu-tru.md) dùng `memmap2`.
+- Docs `memmap2` giải thích vì sao mọi constructor ánh xạ file đều `unsafe`: có thể có Undefined Behavior khi dùng ánh xạ nếu file nền bị sửa sau đó, trong hay ngoài process[^mm-safety]. Cùng docs nói truy cập byte của buffer có thể gây page fault[^mm-pagefault].
+- Nhận xét của người soạn: đây là mặt Rust của rủi ro "file đổi dưới chân" đã nêu ở trên, nhưng hai điều không đồng nhất. Man page `mmap(2)` nói về tín hiệu `SIGBUS`, còn docs `memmap2` nói về UB.
 
 </details>
 
-**Quay lại Q6:** `mmap` đổi `read`/`write` thành truy cập bộ nhớ với page fault ở lần chạm đầu, đổi lại rủi ro `SIGBUS`/ngữ nghĩa chia sẻ; nó không thay thế `sendfile`/`splice` khi chỉ cần chuyển byte từ file ra fd khác.
+**Quay lại Q6:** `mmap` đổi `read`/`write` thành truy cập bộ nhớ, với page fault ở lần chạm đầu, đổi lại rủi ro `SIGBUS` và ngữ nghĩa chia sẻ. Nó không thay thế `sendfile`/`splice` khi chỉ cần chuyển byte từ file ra fd khác.
 
 ## 7. kTLS: mã hóa TLS ở kernel và `sendfile` (Q7)
 
-> **Trả lời ngắn.** Thông thường tầng record của TLS nằm trong thư viện user space — kernel TLS được mô tả là thứ thay thế tầng đó[^tls-record] — nên dữ liệu phải qua process để mã hóa, mâu thuẫn với ý tưởng `sendfile` (suy luận của người soạn). kTLS cho phép đẩy phần mã hóa đối xứng *của đường dữ liệu* xuống kernel sau khi handshake xong[^tls-sym], nhờ đó `sendfile` có thể gửi file qua TLS trong kernel[^tls-sendfile]. Zero-copy thật sự (đến tận NIC) cần thêm thiết bị hỗ trợ và một tùy chọn riêng[^tls-ro].
+> **Trả lời ngắn.** Bình thường tầng record của TLS nằm trong thư viện ở user space, và kernel TLS được mô tả là thứ thay thế đúng tầng đó[^tls-record]. Vì dữ liệu phải qua process mới mã hóa được, TLS làm mất ý nghĩa của `sendfile` (suy luận của người soạn). kTLS cho phép đẩy phần mã hóa đối xứng *của đường dữ liệu* xuống kernel sau khi handshake xong[^tls-sym]. Nhờ đó `sendfile` gửi được file qua TLS ngay trong kernel[^tls-sendfile]. Zero-copy thật sự, tới tận NIC, cần thêm thiết bị hỗ trợ và một tùy chọn riêng[^tls-ro].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `sendfile` nhanh vì dữ liệu không đi qua bàn bạn. Nhưng nếu hàng phải *niêm phong* (mã hóa) trước khi lên xe thì bắt buộc ai đó chạm vào hàng. Nếu bạn là người niêm phong ở bàn mình thì zero-copy hỏng. kTLS chuyển máy niêm phong ra kho (kernel) để hàng khỏi phải về bàn bạn.
+*Với service `assets`.* Trên thực tế `assets` phải phục vụ qua HTTPS. Nếu thư viện TLS ở user space mã hóa, mỗi byte của file phải lên buffer của process để được mã hóa rồi mới xuống socket, tức đúng cái vòng `read`+`write` mà `sendfile` định loại bỏ (suy luận của người soạn). Mục này xem kTLS gỡ mâu thuẫn đó thế nào, và còn gì ở lại user space.
 
-*Mô hình.* TLS ở đây là một ULP (Upper Layer Protocol — giao thức xếp trên socket TCP) chạy trên TCP[^tls-ulp]. Tạo socket TCP, `connect`, rồi đặt ULP `"tls"` bằng `setsockopt(…, TCP_ULP, "tls", …)`; sau đó đặt khóa bằng `setsockopt(SOL_TLS, TLS_TX/TLS_RX, …)` (theo đoạn mã mẫu trong tài liệu)[^tls-setup]. Hiện chỉ phần mã hóa *đối xứng* do kernel làm; handshake không do kernel làm nên nằm ở user space (suy luận của người soạn từ câu đó), xong handshake thì ta có đủ tham số để chuyển đường dữ liệu xuống kernel[^tls-sym]; truyền và nhận được chuyển riêng rẽ[^tls-sep]. Nói cách khác, kernel TLS ULP thay thế *record layer* (tầng cắt dữ liệu thành các record rồi mã hóa/xác thực từng record — giải nghĩa của người soạn; xem [chương 08](08-dns-http-tls.md)) của thư viện TLS ở user space[^tls-record].
+### 7.1 Chia việc giữa user space và kernel
 
-*Gửi.* Sau khi đặt `TLS_TX`, mọi dữ liệu ứng dụng gửi qua socket được mã hóa bằng tham số đã cung cấp[^tls-tx]. Với `send()`, dữ liệu được mã hóa trực tiếp từ buffer user vào buffer gửi đã-mã-hóa của kernel nếu có thể[^tls-send]. Với `sendfile`: file được gửi thành các TLS record có độ dài tối đa 2^14[^tls-sendfile].
+TLS ở đây là một ULP (Upper Layer Protocol, giao thức xếp trên socket TCP) chạy trên TCP[^tls-ulp]. Cách dựng theo đoạn mã mẫu trong tài liệu: tạo socket TCP, `connect`, đặt ULP `"tls"` bằng `setsockopt(…, TCP_ULP, "tls", …)`, rồi đặt khóa bằng `setsockopt(SOL_TLS, TLS_TX/TLS_RX, …)`[^tls-setup].
 
-*Nhận.* Sau `TLS_RX`, các lệnh `recv` được giải mã; phải nhận đủ một record mới giải mã được[^tls-rx]. Dữ liệu được giải mã thẳng vào buffer user nếu nó đủ lớn và không cấp phát thêm; nếu buffer user quá nhỏ, kernel giải mã trong kernel rồi mới chép ra user space[^tls-recv].
+Hiện chỉ phần mã hóa *đối xứng* do kernel làm. Nên handshake vẫn nằm ở user space (suy luận của người soạn từ câu đó), và xong handshake thì ta có đủ tham số để chuyển đường dữ liệu xuống kernel[^tls-sym]. Truyền và nhận được chuyển riêng rẽ, mỗi chiều một socket option[^tls-sep]. Nói cách khác, kernel TLS ULP thay thế *record layer* của thư viện TLS ở user space[^tls-record]. Record layer là tầng cắt dữ liệu thành các record rồi mã hóa và xác thực từng record (giải nghĩa của người soạn; xem [chương 08](08-dns-http-tls.md)). Với `assets`, thư viện TLS vẫn lo handshake, rồi giao đường dữ liệu cho kernel.
 
-*Zero-copy đến NIC.* `TLS_TX_ZEROCOPY_RO` chỉ dành cho **device offload** (NIC — card mạng — đảm nhận mã hóa): cho phép dữ liệu `sendfile()` truyền thẳng tới NIC mà không chép trong kernel — đó là zero-copy thật khi bật device offload; điều kiện là ứng dụng đảm bảo dữ liệu không bị sửa giữa lúc nộp và lúc truyền xong (nên hợp với dữ liệu chỉ-đọc)[^tls-ro]. Sửa dữ liệu có thể làm bản gửi lần đầu và bản retransmit khác nhau; phía nhận sẽ thấy như record bị giả mạo và lỗi xác thực[^tls-ro-warn]. Các tối ưu như vậy cần opt-in vì không phải lúc nào cũng có lợi hoặc có thể ảnh hưởng tính đúng đắn[^tls-optin].
+### 7.2 Gửi
 
-<details><summary>Đi sâu: record, KeyUpdate, trách nhiệm của user space</summary>
+Sau khi đặt `TLS_TX`, mọi dữ liệu ứng dụng gửi qua socket được mã hóa bằng tham số đã cung cấp[^tls-tx]. Với `send()`, dữ liệu được mã hóa trực tiếp từ buffer user vào buffer gửi đã-mã-hóa của kernel nếu có thể[^tls-send]. Với `sendfile`, file được gửi thành các TLS record có độ dài tối đa 2^14[^tls-sendfile]. Đây là chỗ `assets` lấy lại được `sendfile` khi phục vụ HTTPS.
 
-- Nếu `send()` trả `-ENOMEM` thì dữ liệu `MSG_MORE` từ lần gọi trước còn nằm trong buffer socket; kernel cấp buffer cho dữ liệu mã hóa ngay lúc `send()` để lệnh hoặc thành công trọn vẹn hoặc trả `-ENOMEM` (hay chặn chờ bộ nhớ)[^tls-enomem]. Record được tạo sau mỗi `send()` trừ khi có `MSG_MORE`[^tls-more].
-- Control message (alert loại 21, handshake loại 22…) gửi qua `sendmsg` kèm `cmsg` mang loại record[^tls-ctrl]; dữ liệu control được cung cấp *chưa mã hóa* và kernel mã hóa[^tls-ctrl2]. `recv` không bao giờ trả dữ liệu lẫn nhiều loại record[^tls-mixed].
-- TLS 1.3 KeyUpdate: thư viện user space đưa khóa mới qua `TLS_TX`/`TLS_RX`[^tls-keyupd0]; khi kernel nhận KeyUpdate nó tạm dừng giải mã cho tới khi có khóa mới; đọc trong khoảng đó lỗi `EKEYEXPIRED`; không có tạm dừng ở chiều truyền[^tls-keyupd]. Kernel **không kiểm tra tái sử dụng khóa/nonce** — việc đặt tham số đúng là của user space[^tls-noreuse].
-- `TLS_RX_EXPECT_NO_PAD` (TLS 1.3): kỳ vọng bên gửi không đệm record, cho phép giải mã thẳng vào buffer user; chỉ an toàn khi đầu kia đáng tin, vì nếu không nó là vector tấn công làm gấp đôi chi phí TLS[^tls-nopad]; nếu record hóa ra có đệm hoặc không phải data record thì giải mã lại vào buffer kernel (thống kê `TlsDecryptRetry`)[^tls-nopad2].
+### 7.3 Nhận
+
+Sau `TLS_RX`, các lệnh `recv` được giải mã, và phải nhận đủ một record thì mới giải mã được[^tls-rx]. Dữ liệu được giải mã thẳng vào buffer user nếu buffer đủ lớn và không cần cấp phát thêm. Nếu buffer user quá nhỏ, kernel giải mã trong kernel rồi mới chép ra user space[^tls-recv].
+
+### 7.4 Zero-copy tới NIC
+
+`TLS_TX_ZEROCOPY_RO` chỉ dành cho **device offload**, tức NIC (card mạng) đảm nhận việc mã hóa. Nó cho phép dữ liệu `sendfile()` truyền thẳng tới NIC mà không chép trong kernel; đó là zero-copy thật khi bật device offload[^tls-ro]. Điều kiện là ứng dụng phải đảm bảo dữ liệu không bị sửa giữa lúc nộp và lúc truyền xong[^s2-tls-mustnot]. Vì vậy nó hợp với dữ liệu chỉ-đọc như file báo cáo đã chốt của `assets` (nhận xét của người soạn). Nếu sửa dữ liệu, bản gửi lần đầu và bản retransmit có thể khác nhau[^tls-ro-warn]. Với bên nhận, chuyện đó trông như TLS record bị can thiệp và dẫn tới lỗi xác thực record[^s2-tls-tamper]. Các tối ưu như vậy cần opt-in vì không phải lúc nào cũng có lợi, hoặc có thể ảnh hưởng tính đúng đắn[^tls-optin].
+
+<details><summary>Đi sâu: KeyUpdate, trách nhiệm của user space</summary>
+
+- Nếu `send()` trả `-ENOMEM` thì dữ liệu `MSG_MORE` từ lần gọi trước vẫn nằm trong buffer socket. Kernel cấp buffer cho dữ liệu mã hóa ngay lúc `send()`, để lệnh hoặc thành công trọn vẹn hoặc trả `-ENOMEM` (hay chặn chờ bộ nhớ)[^tls-enomem]. Record được tạo sau mỗi `send()` trừ khi có `MSG_MORE`[^tls-more].
+- Control message (alert loại 21, handshake loại 22…) gửi qua `sendmsg` kèm `cmsg` mang loại record[^tls-ctrl]. Dữ liệu control được cung cấp *chưa mã hóa* và kernel mã hóa nó[^tls-ctrl2]. `recv` không bao giờ trả dữ liệu lẫn nhiều loại record[^tls-mixed].
+- TLS 1.3 KeyUpdate: thư viện user space đưa khóa mới qua `TLS_TX`/`TLS_RX`[^tls-keyupd0]. Khi kernel nhận KeyUpdate, nó tạm dừng giải mã cho tới khi có khóa mới, và đọc trong khoảng đó lỗi `EKEYEXPIRED`; chiều truyền không có tạm dừng[^tls-keyupd]. Kernel **không kiểm tra tái sử dụng khóa/nonce**, nên việc đặt tham số đúng là của user space[^tls-noreuse].
+- `TLS_RX_EXPECT_NO_PAD` (TLS 1.3): kỳ vọng bên gửi không đệm record, cho phép giải mã thẳng vào buffer user. Nó chỉ an toàn khi đầu kia đáng tin, vì nếu không thì nó là một vector tấn công làm gấp đôi chi phí TLS[^tls-nopad]. Nếu record hóa ra có đệm hoặc không phải data record thì kernel giải mã lại vào buffer kernel (thống kê `TlsDecryptRetry`)[^tls-nopad2].
 - (Nhận xét của người soạn: rustls/OpenSSL dùng kTLS thế nào nằm ngoài chương này; đọc [chương 08 — DNS, HTTP, TLS](08-dns-http-tls.md) cho phần TLS ở user space.)
 
 </details>
 
-**Quay lại Q7:** kTLS chuyển bước mã hóa đối xứng xuống kernel để `sendfile` không phải đưa dữ liệu lên user space chỉ vì TLS; zero-copy đến NIC còn cần device offload và opt-in `TLS_TX_ZEROCOPY_RO`.
+**Quay lại Q7:** kTLS chuyển bước mã hóa đối xứng xuống kernel để `sendfile` không phải đưa dữ liệu lên user space chỉ vì TLS. Zero-copy tới NIC còn cần device offload và opt-in `TLS_TX_ZEROCOPY_RO`.
 
 ## 8. Liên hệ với Rust: `std::io::copy` và `tokio::io::copy` (Q8)
 
-> **Trả lời ngắn.** Trên Linux, `std::io::copy` tự dùng `copy_file_range`, `sendfile` hoặc `splice` để chuyển dữ liệu thẳng giữa các fd khi có thể[^rs-doc], chỉ với các kiểu do chính `std` sở hữu (để code người dùng không quan sát được việc `Read`/`Write` không được gọi)[^rs-wholly]; nếu không syscall nào dùng được, nó lùi về vòng lặp đọc-ghi trong user space[^rs-fallback]. Đáng chú ý: source cố ý chặn cặp `File → socket` và `File → pipe` khỏi đường kernel[^rs-safe]. `tokio::io::copy` thì theo tài liệu là vòng lặp qua buffer heap 8 KB[^tk-doc], và file `copy.rs` của nó không gọi các syscall này (quan sát của người soạn).
+> **Trả lời ngắn.** Trên Linux, `std::io::copy` tự dùng `copy_file_range`, `sendfile` hoặc `splice` để chuyển dữ liệu thẳng giữa các fd khi có thể[^rs-doc]. Nó chỉ làm vậy với các kiểu do chính `std` sở hữu, để code người dùng không quan sát được việc `Read`/`Write` không được gọi[^rs-wholly]. Nếu không syscall nào dùng được, nó lùi về vòng lặp đọc-ghi trong user space[^rs-fallback]. Đáng chú ý là source cố ý chặn cặp `File → socket` và `File → pipe` khỏi đường kernel[^rs-safe]. `tokio::io::copy` thì theo tài liệu là vòng lặp qua buffer heap 8 KB[^tk-doc], và file `copy.rs` của nó không gọi các syscall này (quan sát của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên giao hàng thông minh: nhìn hai đầu, thấy cặp quen thuộc và an toàn (ví dụ file → file, hoặc socket → pipe) thì gọi đúng "băng chuyền" của kernel; thấy lạ (ví dụ bạn bọc stream vào một struct đếm tiến độ) thì lặng lẽ quay về khuân tay. Ngay cả cặp "file → socket" — ví dụ kinh điển của `sendfile` — cũng bị nhân viên này cố ý bỏ qua để giữ nguyên ngữ nghĩa `Read`/`Write` (xem mục *Vì sao có điều kiện "an toàn"* bên dưới). Bạn không phải biết, nhưng cũng không được trông chờ.
+*Với service `assets`.* Trong `assets` viết bằng Rust, hai việc ở các mục trước đều có thể được viết bằng `std::io::copy`: chép file upload sang kho lưu trữ (file → file, mục 4) và trả file cho client (file → socket, mục 2). Câu hỏi là hàm này có dùng `copy_file_range` và `sendfile` cho ta không. Câu trả lời khác nhau cho hai việc: việc đầu thì có, việc sau thì không, vì source cố ý chặn nó. Phần dưới giải thích lý do, rồi nói chuyện bản async của Tokio.
 
-*Quan hệ giữa hai nửa.* Hàm `io::copy` gọi `kernel_copy(reader, writer)`: nếu trả `Ended` thì xong; nếu trả `Fallback` thì tiếp tục bằng `generic_copy`, và cộng số byte đã chép được từ bước trước[^rs-copy]. `generic_copy` được mô tả là phiên bản vòng lặp đọc-ghi *ở user space* dùng khi OS không có offload hoặc không áp dụng được[^rs-generic].
+### 8.1 `std::io::copy` chọn syscall thế nào
 
-*Cách chọn syscall.* Module `kernel_copy` mô tả: sau khi gỡ các wrapper (`Take`, `BufReader`…) và lấy được fd thật, nó thử `copy_file_range(2)`, `sendfile(2)`, `splice(2)` *lần lượt* (dẫn dắt bởi gợi ý) vì các yêu cầu của syscall không kiểm tra trước được; không cái nào chạy thì rơi về vòng lặp đọc-ghi tổng quát[^rs-fallback]; một khi tìm được syscall dùng được cho cặp fd thì gọi trong vòng lặp tới khi xong[^rs-loop]. Trong mã, thứ tự thử là: cặp file thường → `copy_file_range`; nguồn có thể là nguồn `sendfile` và an toàn → `sendfile`; một đầu có thể là FIFO và an toàn → `splice`[^rs-order].
+Hàm `io::copy` gọi `kernel_copy(reader, writer)`. Nếu kết quả là `Ended` thì xong. Nếu là `Fallback` thì nó tiếp tục bằng `generic_copy` và cộng số byte đã chép được ở bước trước[^rs-copy]. `generic_copy` là phiên bản vòng lặp đọc-ghi *ở user space*, dùng khi OS không có offload hoặc không áp dụng được[^rs-generic].
 
-*Lợi/hại, theo chính source.* Lợi: ít context switch hơn[^rs-ctx]; `copy_file_range` tạo reflink trên filesystem CoW nên chuyển ít dữ liệu hơn và dùng ít đĩa hơn[^rs-reflink]; `sendfile` và `splice` có thể zero-copy "trong một số hoàn cảnh"[^rs-zc]. Hại: với thao tác nhỏ hơn buffer mặc định, đặc biệt trên kernel cũ, có thể tốn *nhiều* syscall hơn vòng lặp ngây thơ — chọn syscall dùng "gợi ý" để giảm khả năng đó, nhưng gợi ý không hoàn hảo[^rs-drawback]; tối ưu chỉ áp dụng cho kiểu của `std`, nên bọc thêm wrapper tự viết (ví dụ báo tiến độ) có thể rơi xuống "vách đá" hiệu năng[^rs-cliff].
+Module `kernel_copy` mô tả cách chọn như sau. Sau khi gỡ các wrapper (`Take`, `BufReader`…) và lấy được fd thật, nó thử `copy_file_range(2)`, `sendfile(2)`, `splice(2)` *lần lượt*, dẫn dắt bởi các gợi ý, vì yêu cầu của từng syscall không kiểm tra trước được. Nếu không cái nào chạy thì nó rơi về vòng lặp đọc-ghi tổng quát[^rs-fallback]. Một khi tìm được syscall dùng được cho cặp fd, nó gọi syscall đó trong vòng lặp tới khi xong[^rs-loop]. Trong mã, thứ tự thử là: cặp file thường → `copy_file_range`; nguồn có thể là nguồn `sendfile` và an toàn → `sendfile`; một đầu có thể là FIFO và an toàn → `splice`[^rs-order].
 
-*Vì sao có điều kiện "an toàn".* Source mô tả hàm `safe_kernel_copy` là phép kiểm tra: thay đổi ở nguồn sau lời gọi `sendfile`/`splice` có hiện ra ở đích hay không (hoặc nguồn đã chủ động chấp nhận hành vi đó); hàm này chặn các tối ưu `File → Pipe` và `File → Socket` để giữ ngữ nghĩa `Read`/`Write` của `io::copy`[^rs-safe]. Lý do trong chú thích: vấn đề "thay đổi sau này có thể hiện ra" chỉ xảy ra với trang nằm trong buffer gửi hoặc pipe[^rs-safe-sink]. Đó chính là bẫy "sửa file khi đang gửi" của `sendfile` (mục 2) được xử lý ở tầng thư viện (suy luận của người soạn, nối chú thích này với man page `sendfile`[^sf-modify]). Dữ liệu từ socket coi là an toàn vì bên gửi không sửa được buffer của socket nhận[^rs-safe-sock].
+### 8.2 Lợi và hại, theo chính source
 
-*Tokio.* `tokio::io::copy` là phiên bản bất đồng bộ của `std::io::copy`[^tk-async]; tạo một buffer heap 8 KB để đưa dữ liệu từ reader sang writer[^tk-doc]. Trong source 1.53.2 của file `copy.rs`, vòng lặp đọc vào buffer bằng `poll_read` rồi ghi từ buffer bằng `poll_write`[^tk-src][^tk-src2]; file đó chỉ import `AsyncRead`, `AsyncWrite`, `ReadBuf` từ `crate::io`[^tk-imp] và không chứa `sendfile` hay `splice` (quan sát của người soạn khi đọc source; chỉ nói về file `copy.rs`, không về toàn bộ tokio). (Suy luận của người soạn: hàm chỉ biết hai trait `AsyncRead`/`AsyncWrite` nên không có fd để gọi syscall; `std` làm được vì chuyên biệt hóa trên các kiểu cụ thể.) `copy_bidirectional` cũng dùng buffer: docs ghi mặc định hai buffer 8 KB, mỗi hướng một cái[^tk-bidi]. Vì vậy proxy viết bằng `tokio::io::copy`/`copy_bidirectional` có dữ liệu đi qua user space ở mỗi hướng (suy luận của người soạn; xem [P7·08 — tokio](../07-io-async/08-tokio.md)). Muốn dùng `sendfile` với socket tokio, bạn tự gọi syscall trong closure của `TcpStream::try_io`/`async_io`: docs bảo closure nên gọi trực tiếp syscall phù hợp và trả `WouldBlock` khi socket chưa thật sự sẵn sàng để tokio xóa cờ readiness[^tk-tryio].
+Về lợi: ít context switch hơn[^rs-ctx]. `copy_file_range` tạo reflink trên filesystem CoW nên chuyển ít dữ liệu hơn và dùng ít đĩa hơn[^rs-reflink]. `sendfile` và `splice` có thể zero-copy "trong một số hoàn cảnh"[^rs-zc]. Về hại: với thao tác nhỏ hơn buffer mặc định, đặc biệt trên kernel cũ, có thể tốn *nhiều* syscall hơn vòng lặp ngây thơ; source chọn syscall bằng "gợi ý" để giảm khả năng đó, nhưng gợi ý không hoàn hảo[^rs-drawback]. Hại thứ hai là tối ưu chỉ áp dụng cho kiểu của `std`, nên nếu `assets` bọc thêm wrapper tự viết (ví dụ để báo tiến độ tải) thì có thể rơi xuống "vách đá" hiệu năng[^rs-cliff].
+
+### 8.3 Vì sao `File → socket` bị chặn
+
+Source mô tả hàm `safe_kernel_copy` là phép kiểm tra: thay đổi ở nguồn sau lời gọi `sendfile`/`splice` có hiện ra ở đích hay không, hoặc nguồn đã chủ động chấp nhận hành vi đó. Hàm này chặn các tối ưu `File → Pipe` và `File → Socket` để giữ ngữ nghĩa `Read`/`Write` của `io::copy`[^rs-safe]. Lý do trong chú thích: vấn đề "thay đổi sau này có thể hiện ra" chỉ xảy ra với trang nằm trong buffer gửi hoặc pipe[^rs-safe-sink]. Đó chính là bẫy "sửa file khi đang gửi" của `sendfile` (mục 2), được xử lý ở tầng thư viện (suy luận của người soạn, nối chú thích này với man page `sendfile`[^sf-modify]). Ngược lại, dữ liệu từ socket được coi là an toàn vì bên gửi không sửa được buffer của socket nhận[^rs-safe-sock].
+
+Hệ quả cho `assets` (suy luận của người soạn khi đọc mã): `std::io::copy(&mut file, &mut conn)` với `conn` là `TcpStream` không đi đường kernel mà rơi về vòng lặp đọc-ghi. Muốn có `sendfile` cho việc trả file, bạn phải tự gọi syscall, ví dụ qua FFI.
+
+### 8.4 Tokio
+
+`tokio::io::copy` là phiên bản bất đồng bộ của `std::io::copy`[^tk-async]. Nó tạo một buffer heap 8 KB để đưa dữ liệu từ reader sang writer[^tk-doc]. Trong source 1.53.2 của file `copy.rs`, vòng lặp đọc vào buffer bằng `poll_read` rồi ghi từ buffer bằng `poll_write`[^tk-src]. Ở nhánh ghi, nó gọi `poll_write` trên đoạn `me.buf[me.pos..me.cap]`[^tk-src2]. File đó chỉ import `AsyncRead`, `AsyncWrite`, `ReadBuf` từ `crate::io`[^tk-imp] và không chứa `sendfile` hay `splice` (quan sát của người soạn khi đọc source; chỉ nói về file `copy.rs`, không nói về toàn bộ tokio). Lý do (suy luận của người soạn): hàm chỉ biết hai trait `AsyncRead`/`AsyncWrite` nên không có fd để gọi syscall, còn `std` làm được vì chuyên biệt hóa trên các kiểu cụ thể.
+
+`copy_bidirectional` cũng dùng buffer: docs ghi mặc định hai buffer 8 KB, mỗi hướng một cái[^tk-bidi]. Vì vậy một proxy viết bằng `tokio::io::copy`/`copy_bidirectional` có dữ liệu đi qua user space ở mỗi hướng (suy luận của người soạn; xem [P7·08 — tokio](../07-io-async/08-tokio.md)). Nếu `assets` chạy trên Tokio mà muốn `sendfile` với socket của nó, bạn tự gọi syscall trong closure của `TcpStream::try_io`/`async_io`. Docs bảo closure nên gọi trực tiếp syscall phù hợp, và trả `WouldBlock` khi socket chưa thật sự sẵn sàng để Tokio xóa cờ readiness[^tk-tryio].
 
 <details><summary>Đi sâu: các chi tiết trong source <code>std</code> 1.95.0</summary>
 
-- Vị trí source ở 1.95.0: `library/std/src/sys/io/kernel_copy/linux.rs` (module), `library/std/src/io/copy.rs` (hàm `copy`).
-- Chọn `sendfile` khi nguồn là file có độ dài > 0 hoặc block device; chú thích trong mã lý giải: procfs báo độ dài 0 cho file không rỗng nên không đáng thử khi `len == 0`[^rs-sf-src]. Chú thích khác: trên kernel hiện đại `sendfile` có thể chép từ mọi kiểu mmap-được tới fd ghi được bất kỳ; trên kernel cũ đầu ghi chỉ có thể là socket — vì thế cứ thử rồi lùi nếu cần[^rs-modern].
-- `copy_file_range` được cache khả năng dùng trong một biến toàn cục để khỏi gọi lại khi kernel không hỗ trợ — chú thích trong mã ghi "Kernel prior to 4.5 don't have copy_file_range"[^rs-45] (khớp với "first appeared in Linux 4.5" ở mục 4[^cfr-ver]).
-- Cắt khúc 1 GB: để khỏi `EOVERFLOW` khi offset hiện tại khác 0 và `max_len` là `u64::MAX`[^rs-1gb]. `sendfile` cắt khúc ở `0x7ffff000` với chú thích "theo man page đó là tối đa mỗi lời gọi"[^rs-chunk] — khớp mục 2[^sf-max].
-- Trả `0` byte ở lần đầu của `copy_file_range` được coi là *bất thường* và lùi về vòng lặp thường: source ghi lý do là các lỗi kernel khi đọc file ảo procfs trông như rỗng và khi chép từ overlay filesystem trong Docker[^rs-ovl] — (nhận xét của người soạn) liên quan đến lỗi "báo thành công mà không chép" ở mục 4[^cfr-bug].
-- Điều kiện chọn syscall, suy ra từ các `if` trong `SpecCopy::copy` và `match` trong `safe_kernel_copy` (suy luận của người soạn khi đọc mã, không chạy thử): `copy_file_range` khi cả hai đầu là file thường (nguồn dài > 0)[^rs-order]; `sendfile` khi nguồn là file dài > 0 hoặc block device và `safe_kernel_copy` đồng ý, tức đích không phải pipe/socket[^rs-safe-sink]; `splice` khi ít nhất một đầu có thể là FIFO và `safe_kernel_copy` đồng ý — ví dụ socket → pipe, pipe → socket, pipe → file — còn `File` → pipe thì bị chặn[^rs-safe]. Hệ quả: `File → TcpStream` (mẫu "phục vụ file tĩnh") không đi đường kernel mà rơi về vòng lặp đọc-ghi.
+- Vị trí source ở 1.95.0: `library/std/src/sys/io/kernel_copy/linux.rs` (module) và `library/std/src/io/copy.rs` (hàm `copy`).
+- `std` chọn `sendfile` khi nguồn là file có độ dài > 0 hoặc block device. Chú thích trong mã lý giải: procfs báo độ dài 0 cho file không rỗng, nên không đáng thử khi `len == 0`[^rs-sf-src]. Một chú thích khác nói trên kernel hiện đại `sendfile` có thể chép từ mọi kiểu mmap-được tới fd ghi được bất kỳ, còn trên kernel cũ đầu ghi chỉ có thể là socket, nên cứ thử rồi lùi nếu cần[^rs-modern].
+- `copy_file_range` được cache khả năng dùng trong một biến toàn cục để khỏi gọi lại khi kernel không hỗ trợ. Chú thích trong mã ghi "Kernel prior to 4.5 don't have copy_file_range"[^rs-45]. Điều này khớp với "first appeared in Linux 4.5" ở mục 4[^cfr-ver].
+- Cắt khúc 1 GB để khỏi `EOVERFLOW` khi offset hiện tại khác 0 và `max_len` là `u64::MAX`[^rs-1gb]. `sendfile` cắt khúc ở `0x7ffff000`, với chú thích "theo man page đó là tối đa mỗi lời gọi"[^rs-chunk]. Con số này khớp mục 2[^sf-max].
+- Trả `0` byte ở lần đầu của `copy_file_range` được coi là *bất thường* và `std` lùi về vòng lặp thường. Source ghi lý do là các lỗi kernel khi đọc file ảo procfs (trông như rỗng) và khi chép từ overlay filesystem trong Docker[^rs-ovl]. Nhận xét của người soạn: việc này liên quan đến lỗi "báo thành công mà không chép" ở mục 4[^cfr-bug].
+- Điều kiện chọn syscall được suy ra từ các `if` trong `SpecCopy::copy` và `match` trong `safe_kernel_copy` (suy luận của người soạn khi đọc mã, không chạy thử). `copy_file_range` được chọn khi cả hai đầu là file thường và nguồn dài > 0[^rs-order]. `sendfile` được chọn khi nguồn là file dài > 0 hoặc block device và `safe_kernel_copy` đồng ý, tức đích không phải pipe/socket[^rs-safe-sink]. `splice` được chọn khi ít nhất một đầu có thể là FIFO và `safe_kernel_copy` đồng ý, ví dụ socket → pipe, pipe → socket, pipe → file; còn `File` → pipe thì bị chặn[^rs-safe]. Hệ quả: `File → TcpStream`, mẫu "phục vụ file tĩnh", không đi đường kernel mà rơi về vòng lặp đọc-ghi.
 - `TcpStream` và `UnixStream` được coi là socket mà không cần `stat` ("fairly sure it's a socket")[^rs-tcp]; `File` thì gọi `metadata`.
 
 </details>
 
-**Quay lại Q8:** `std::io::copy` tự chọn `copy_file_range`/`sendfile`/`splice` trên Linux cho kiểu do `std` sở hữu (trừ cặp `File → socket/pipe`) và lùi về vòng lặp user space khi không được; `tokio::io::copy` không làm vậy, nên nhu cầu zero-copy trong async phải tự gọi syscall qua `try_io`/`async_io`.
+**Quay lại Q8:** `std::io::copy` tự chọn `copy_file_range`/`sendfile`/`splice` trên Linux cho kiểu do `std` sở hữu (trừ cặp `File → socket/pipe`) và lùi về vòng lặp user space khi không được. `tokio::io::copy` không làm vậy, nên nhu cầu zero-copy trong async phải tự gọi syscall qua `try_io`/`async_io`.
 
 ## Bảng chọn nhanh (nhận xét của người soạn, tổng hợp các mục trên)
 
-| Bạn cần | Cân nhắc | Điều phải nhớ |
-|---|---|---|
-| Đổ file tĩnh ra socket | `sendfile` | gửi thiếu phải lặp[^sf-partial]; đừng sửa file khi đang bay[^sf-modify] |
-| Chuyển socket ↔ socket / thêm bản log | `splice` + pipe, `tee` | cần một đầu là pipe[^sp-def]; pipe có sức chứa hữu hạn[^pipe-cap] |
-| Chép/nhân bản file lớn | `copy_file_range` | chỉ file thường[^cfr-regular]; xem lỗi 5.3–5.18[^cfr-bug] |
-| Gửi buffer lớn từ bộ nhớ process | `MSG_ZEROCOPY` | opt-in, chờ thông báo, thường chỉ đáng ≳ 10 KB[^zc-notfree], loopback (TCP/UDP) bị chép[^zc-loop] |
-| Truy cập ngẫu nhiên dữ liệu file | `mmap` | `SIGBUS` ngoài cuối file[^mm-sigbus] |
-| Gửi file qua TLS | kTLS + `sendfile` | handshake vẫn ở user space[^tls-sym] |
-| Viết code Rust chép file → file, hoặc socket/pipe → pipe | `std::io::copy` | chỉ kiểu của `std`[^rs-wholly]; `File` → socket bị loại khỏi đường kernel[^rs-safe]; wrapper làm mất tối ưu[^rs-cliff] |
+| Việc của `assets` | Cân nhắc | Điều cần nhớ | Bẫy chính |
+|---|---|---|---|
+| Đổ file tĩnh ra socket | `sendfile` | gửi thiếu phải lặp[^sf-partial] | đừng sửa file khi đang bay[^sf-modify] |
+| Chuyển tiếp socket ↔ socket, thêm bản lưu | `splice` + pipe, `tee` | cần một đầu là pipe[^sp-def] | pipe có sức chứa hữu hạn[^pipe-cap] |
+| Chép hoặc nhân bản file lớn | `copy_file_range` | chỉ file thường[^cfr-regular] | lỗi lịch sử trên Linux 5.3–5.18[^cfr-bug] |
+| Gửi buffer lớn từ bộ nhớ process | `MSG_ZEROCOPY` | thường chỉ đáng khi ghi trên khoảng 10 KB[^zc-notfree] | loopback (TCP/UDP) bị chép[^zc-loop] |
+| Truy cập ngẫu nhiên dữ liệu file | `mmap` | page fault ở lần chạm đầu[^mm-populate] | `SIGBUS` ngoài cuối file[^mm-sigbus] |
+| Gửi file qua TLS | kTLS + `sendfile` | handshake vẫn ở user space[^tls-sym] | zero-copy tới NIC cần device offload[^tls-ro] |
+| Viết code Rust chép file → file, hoặc socket/pipe → pipe | `std::io::copy` | chỉ áp cho kiểu của `std`[^rs-wholly] | `File` → socket bị loại khỏi đường kernel[^rs-safe] |
 
 ## Tóm tắt
 
-- `read`+`write` đưa dữ liệu lên user space rồi xuống lại, hai syscall mỗi vòng (suy luận của người soạn); zero-copy là các syscall để kernel tự chuyển giữa hai fd[^sf-more][^sp-def].
-- `sendfile` đổ file (hoặc thứ mmap-được) vào fd khác trong kernel; có thể gửi thiếu và phải lặp, trần 0x7ffff000 byte mỗi lần, không portable[^sf-partial][^sf-max][^sf-posix].
-- `splice`/`tee`/`vmsplice` dựng trên pipe buffer — tập con trỏ đếm tham chiếu tới trang; "chép" chỉ chép con trỏ[^sp-refcount]. `SPLICE_F_MOVE` là no-op từ 2.6.21[^sp-move].
-- `copy_file_range` chỉ cho file thường, mở đường reflink/server-side copy; có lỗi lịch sử trên Linux 5.3–5.18[^cfr-accel][^cfr-bug].
-- `MSG_ZEROCOPY`: opt-in bằng `SO_ZEROCOPY`, thông báo hoàn thành qua error queue, chỉ là gợi ý (có thể bị chép), thường chỉ hiệu quả ≳ 10 KB, loopback TCP/UDP luôn bị chép[^zc-optin][^zc-hint][^zc-notfree][^zc-loop].
-- `mmap` đổi chép bằng page fault và rủi ro `SIGBUS`/ngữ nghĩa chia sẻ[^mm-sigbus][^mm-shared].
-- kTLS chuyển mã hóa đối xứng xuống kernel để `sendfile` làm việc qua TLS; zero-copy tới NIC cần device offload[^tls-sym][^tls-ro].
-- `std::io::copy` tự chuyên biệt hóa trên Linux cho kiểu của `std`, trừ `File → socket/pipe`[^rs-doc][^rs-safe]; tokio `copy` thì dùng buffer 8 KB[^tk-doc].
+- `read`+`write` đưa dữ liệu lên user space rồi xuống lại, hai syscall mỗi vòng (suy luận của người soạn). Zero-copy là các syscall để kernel tự chuyển giữa hai fd[^sp-def].
+- `sendfile` đổ file (hoặc thứ mmap-được) vào fd khác trong kernel[^sf-more]. Nó có thể gửi thiếu và phải lặp[^sf-partial]. Trần mỗi lần gọi là `0x7ffff000` byte[^sf-max]. Và nó không portable[^sf-posix].
+- `splice`/`tee`/`vmsplice` dựng trên pipe buffer, tức một tập con trỏ đếm tham chiếu tới trang; "chép" chỉ chép con trỏ[^sp-refcount]. `SPLICE_F_MOVE` là no-op từ 2.6.21[^sp-move].
+- `copy_file_range` chỉ cho file thường và mở đường cho reflink/server-side copy[^cfr-accel]. Nó có lỗi lịch sử trên Linux 5.3–5.18[^cfr-bug].
+- `MSG_ZEROCOPY` cần opt-in bằng `SO_ZEROCOPY`[^zc-optin]. Nó báo hoàn thành qua error queue[^zc-notif]. Nó chỉ là gợi ý, có thể bị chép[^zc-hint]. Nó thường chỉ hiệu quả khi ghi trên khoảng 10 KB[^zc-notfree]. Còn loopback TCP/UDP luôn bị chép[^zc-loop].
+- `mmap` đổi chép bằng page fault và rủi ro `SIGBUS`[^mm-sigbus]. Ngữ nghĩa chia sẻ thì tùy `MAP_SHARED` hay `MAP_PRIVATE`[^mm-shared].
+- kTLS chuyển mã hóa đối xứng xuống kernel để `sendfile` làm việc qua TLS[^tls-sym]. Zero-copy tới NIC cần device offload[^tls-ro].
+- `std::io::copy` tự chuyên biệt hóa trên Linux cho kiểu của `std`[^rs-doc]. Cặp `File → socket/pipe` là ngoại lệ, bị chặn khỏi đường kernel[^rs-safe]. `tokio::io::copy` thì dùng buffer 8 KB[^tk-doc].
 
 ## Câu hỏi tự kiểm tra
 
@@ -339,7 +443,7 @@ Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên 
 2. `sendfile` trả về nhỏ hơn `count` thì phải làm gì? Trần mỗi lần gọi là bao nhiêu?
 3. Khi nào nên truyền `offset` khác `NULL` cho `sendfile`?
 4. Vì sao không được sửa file đã `sendfile` ra socket cho tới khi bên nhận đọc xong?
-5. Pipe buffer trong `splice` chứa gì — byte hay con trỏ? `tee` có tiêu thụ dữ liệu ở pipe nguồn không?
+5. Pipe buffer trong `splice` chứa gì, byte hay con trỏ? `tee` có tiêu thụ dữ liệu ở pipe nguồn không?
 6. `copy_file_range` chấp nhận loại fd nào, và nó cho filesystem cơ hội gì mà `read`+`write` không có?
 7. Nêu hai điều kiện/bước bắt buộc để dùng `MSG_ZEROCOPY` và cách biết khi nào được dùng lại buffer.
 8. Vì sao thông báo `MSG_ZEROCOPY` hoàn thành không có nghĩa dữ liệu đã tới bên nhận? Khi nào kernel vẫn chép ngầm?
@@ -350,18 +454,18 @@ Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên 
 
 <details><summary>Đáp án</summary>
 
-1. Hai syscall (một `read`, một `write` — suy luận từ cấu trúc vòng lặp, mục 1). Chiều: `read` đưa dữ liệu vào buffer của process, `write` lấy dữ liệu từ buffer đó[^rd-def][^wr-def]; man `sendfile` gọi là chuyển "tới và từ user space"[^sf-more].
-2. Phải gọi lại với phần chưa gửi[^sf-partial]; trần là `0x7ffff000` byte (2.147.479.552)[^sf-max].
-3. Khi nhiều lần gửi/kết nối dùng chung một fd file và không muốn chạm vào file offset chung: khi `offset` khác `NULL`, `sendfile` không đổi file offset của `in_fd`[^sf-offset].
-4. Với socket/pipe có zero-copy, kernel có thể còn tham chiếu tới dữ liệu file; man page yêu cầu giữ nguyên phần đã chuyển cho tới khi bên đọc tiêu thụ[^sf-modify]; `std` cũng chặn các tối ưu này khi nguồn có thể đổi[^rs-safe].
-5. Con trỏ đếm tham chiếu tới trang kernel[^sp-refcount]. `tee` không tiêu thụ dữ liệu đã nhân đôi từ `fd_in`[^tee-def].
-6. Chỉ file thường[^cfr-regular]. Cho filesystem cơ hội dùng reflink hoặc server-side copy của NFS[^cfr-accel].
-7. Đặt `SO_ZEROCOPY` rồi truyền cờ `MSG_ZEROCOPY`[^zc-optin][^zc-send]; đọc thông báo từ error queue (`recvmsg` với `MSG_ERRQUEUE`) — mỗi thông báo là một khoảng số lần gọi đã hoàn thành[^zc-poll][^zc-range].
-8. Đó là thông báo thả tham chiếu trang, không phải hoàn thành truyền[^zc-notxdone]. Chép ngầm khi thiết bị không hỗ trợ scatter-gather, khi cần checksum ở sâu trong stack, và với loopback[^zc-sg][^zc-loop].
-9. Không nên kỳ vọng cải thiện: gói loop về socket cục bộ (TCP/UDP) bị chép trì hoãn[^zc-loop]; tài liệu kernel nói test chạy giữa một cặp process cục bộ, ví dụ qua cặp veth giữa các namespace, không cho thấy cải thiện[^zc-test].
-10. `SIGBUS` khi truy cập trang vượt quá cuối file được ánh xạ[^mm-sigbus]; `SIGSEGV` khi ghi vào vùng ánh xạ chỉ-đọc[^mm-sigsegv].
-11. TLS thông thường cần user space chạm dữ liệu để mã hóa; kTLS đưa mã hóa đối xứng xuống kernel sau handshake nên `sendfile` gửi file thành TLS record trong kernel[^tls-sym][^tls-sendfile]. `TLS_TX_ZEROCOPY_RO` chỉ cho device offload, khi dữ liệu `sendfile` là chỉ-đọc[^tls-ro].
-12. Thứ tự trong mã: `copy_file_range` (file thường ↔ file thường), `sendfile`, rồi `splice`; không cái nào dùng được thì vòng lặp tổng quát[^rs-order][^rs-fallback]. Tối ưu chỉ áp cho kiểu `std`; wrapper tự viết gây "vách đá hiệu năng"[^rs-cliff]. Thêm nữa, `File → TcpStream`/pipe bị `safe_kernel_copy` chặn[^rs-safe].
+1. Hai syscall, một `read` và một `write` (suy luận từ cấu trúc vòng lặp, mục 1). Về chiều: `read` đưa dữ liệu vào buffer của process[^rd-def]. Còn `write` lấy dữ liệu từ buffer đó[^wr-def]. Man page `sendfile` gọi cả tổ hợp là chuyển dữ liệu "tới và từ user space"[^sf-more].
+2. Phải gọi lại với phần chưa gửi[^sf-partial]. Trần mỗi lần gọi là `0x7ffff000` byte (2.147.479.552)[^sf-max].
+3. Khi nhiều lần gửi hoặc nhiều kết nối dùng chung một fd file mà bạn không muốn chạm vào file offset chung. Khi `offset` khác `NULL`, `sendfile` không đổi file offset của `in_fd`[^sf-offset].
+4. Với socket/pipe có zero-copy, kernel có thể còn tham chiếu tới dữ liệu file. Man page yêu cầu giữ nguyên phần đã chuyển cho tới khi bên đọc tiêu thụ xong[^sf-modify]. `std` cũng chặn các tối ưu này khi nguồn có thể đổi[^rs-safe].
+5. Pipe buffer chứa con trỏ đếm tham chiếu tới trang kernel, không chứa byte[^sp-refcount]. `tee` không tiêu thụ dữ liệu đã nhân đôi từ `fd_in`[^tee-def].
+6. Chỉ file thường[^cfr-regular]. Nó cho filesystem cơ hội dùng reflink hoặc server-side copy của NFS[^cfr-accel].
+7. Đặt `SO_ZEROCOPY` rồi truyền cờ `MSG_ZEROCOPY` khi gửi[^zc-optin]. Để biết khi nào dùng lại buffer, đọc thông báo từ error queue bằng `recvmsg` với `MSG_ERRQUEUE`[^zc-poll]. Mỗi thông báo là một khoảng số lần gọi đã hoàn thành[^zc-range].
+8. Đó là thông báo thả tham chiếu trang, không phải thông báo hoàn thành truyền[^zc-notxdone]. Kernel vẫn chép ngầm khi thiết bị không hỗ trợ scatter-gather hoặc khi cần tính checksum ở sâu trong stack[^zc-sg]. Nó cũng chép ngầm với loopback[^zc-loop].
+9. Không nên kỳ vọng cải thiện: gói quay về socket cục bộ (TCP/UDP) bị chép trì hoãn[^zc-loop]. Tài liệu kernel nói bài test chạy giữa một cặp process cục bộ, ví dụ qua cặp veth giữa các namespace, không cho thấy cải thiện[^zc-test].
+10. `SIGBUS` khi truy cập trang vượt quá cuối file được ánh xạ[^mm-sigbus]. `SIGSEGV` khi ghi vào vùng ánh xạ chỉ-đọc[^mm-sigsegv].
+11. TLS thông thường cần user space chạm vào dữ liệu để mã hóa. kTLS đưa mã hóa đối xứng xuống kernel sau handshake[^tls-sym]. Nên `sendfile` gửi được file thành TLS record ngay trong kernel[^tls-sendfile]. `TLS_TX_ZEROCOPY_RO` chỉ dùng cho device offload, khi dữ liệu `sendfile` là chỉ-đọc[^tls-ro].
+12. Thứ tự trong mã: `copy_file_range` (file thường ↔ file thường), rồi `sendfile`, rồi `splice`[^rs-order]. Không cái nào dùng được thì nó rơi về vòng lặp tổng quát[^rs-fallback]. Tối ưu chỉ áp cho kiểu `std`, nên wrapper tự viết gây "vách đá hiệu năng"[^rs-cliff]. Thêm nữa, `File → TcpStream`/pipe bị `safe_kernel_copy` chặn[^rs-safe].
 
 </details>
 
@@ -370,7 +474,7 @@ Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên 
 - [Chương 07 — Socket API, phía kernel](07-socket-va-kernel.md): hàng đợi gửi/nhận, `SIGPIPE`/`MSG_NOSIGNAL`, nền để hiểu vì sao gửi có thể "thiếu" và `EAGAIN`.
 - [P5·04 — Page cache và direct I/O](../05-storage/04-page-cache-va-direct-io.md): file nằm ở đâu khi `sendfile`/`mmap` đọc nó.
 - [P5·07 — RAID và copy-on-write FS](../05-storage/07-raid-va-copy-on-write-fs.md): vì sao reflink của `copy_file_range` rẻ.
-- [P7·03 — kqueue, io_uring](../07-io-async/03-kqueue-io-uring.md): mô hình completion và vấn đề sở hữu buffer — cùng bài toán "ai giữ buffer khi kernel dùng" như mục 5.
+- [P7·03 — kqueue, io_uring](../07-io-async/03-kqueue-io-uring.md): mô hình completion và vấn đề sở hữu buffer, cùng bài toán "ai giữ buffer khi kernel dùng" như mục 5.
 - Tài liệu kernel `MSG_ZEROCOPY`: <https://docs.kernel.org/networking/msg_zerocopy.html> — nguồn chính mục 5, kèm trỏ tới bài báo netdev 2.1 và LWN.
 - Tài liệu kernel TLS: <https://docs.kernel.org/networking/tls.html> — giao diện `TCP_ULP`/`TLS_TX`/`TLS_RX` và các tối ưu opt-in.
 - Man page `splice(2)`: <https://manpages.debian.org/bookworm/manpages-dev/splice.2.en.html> — phần NOTES giải thích mô hình pipe buffer.
@@ -391,8 +495,6 @@ Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên 
 [^sf-einval]: sendfile(2), ERRORS — <https://manpages.debian.org/bookworm/manpages-dev/sendfile.2.en.html> — "out_fd has the O_APPEND flag set. This is not currently supported by sendfile()."
 [^sf-espipe]: sendfile(2), ERRORS — <https://manpages.debian.org/bookworm/manpages-dev/sendfile.2.en.html> — "offset is not NULL but the input file is not seekable."
 [^sf-eagain]: sendfile(2), ERRORS — <https://manpages.debian.org/bookworm/manpages-dev/sendfile.2.en.html> — "Nonblocking I/O has been selected using O_NONBLOCK and the write would block."
-[^sf-hist]: sendfile(2), NOTES — <https://manpages.debian.org/bookworm/manpages-dev/sendfile.2.en.html> — "In Linux 2.4 and earlier, out_fd could also refer to a regular file; this possibility went away in the Linux 2.6.x kernel series, but was restored in Linux 2.6.33."
-[^sf-64]: sendfile(2), NOTES — <https://manpages.debian.org/bookworm/manpages-dev/sendfile.2.en.html> — "The original Linux sendfile() system call was not designed to handle large file offsets. Consequently, Linux 2.4 added sendfile64(), with a wider type for the offset argument."
 [^sf-splice]: sendfile(2), NOTES — <https://manpages.debian.org/bookworm/manpages-dev/sendfile.2.en.html> — "The Linux-specific splice(2) call supports transferring data between arbitrary file descriptors provided one (or both) of them is a pipe."
 [^rd-def]: read(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/read.2.en.html> — "read() attempts to read up to count bytes from file descriptor fd into the buffer starting at buf."
 [^wr-def]: write(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/write.2.en.html> — "write() writes up to count bytes from the buffer starting at buf to the file referred to by the file descriptor fd."
@@ -415,8 +517,6 @@ Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên 
 [^sp-linux]: splice(2), STANDARDS — <https://manpages.debian.org/bookworm/manpages-dev/splice.2.en.html> — "This system call is Linux-specific."
 [^tee-def]: tee(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/tee.2.en.html> — "tee() duplicates up to len bytes of data from the pipe referred to by the file descriptor fd_in to the pipe referred to by the file descriptor fd_out. It does not consume the data that is duplicated from fd_in; therefore, that data can be copied by a subsequent splice(2)."
 [^tee-noreal]: tee(2), NOTES — <https://manpages.debian.org/bookworm/manpages-dev/tee.2.en.html> — "In reality no real data copying takes place though: under the covers, tee() assigns data to the output by merely grabbing a reference to the input."
-[^tee-ex]: tee(2), EXAMPLES — <https://manpages.debian.org/bookworm/manpages-dev/tee.2.en.html> — "The example below implements a basic tee(1) program using the tee() system call."
-[^tee-ex2]: tee(2), EXAMPLES — <https://manpages.debian.org/bookworm/manpages-dev/tee.2.en.html> — "Consume stdin by splicing it to a file."
 [^tee-gift]: tee(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/tee.2.en.html> — "Unused for tee(); see vmsplice(2)."
 [^tee-einval]: tee(2), ERRORS — <https://manpages.debian.org/bookworm/manpages-dev/tee.2.en.html> — "fd_in or fd_out does not refer to a pipe; or fd_in and fd_out refer to the same pipe."
 [^vm-def]: vmsplice(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/vmsplice.2.en.html> — "If fd is opened for writing, the vmsplice() system call maps nr_segs ranges of user memory described by iov into a pipe. If fd is opened for reading, the vmsplice() system call fills nr_segs ranges of user memory described by iov from a pipe. The file descriptor fd must refer to a pipe."
@@ -490,8 +590,6 @@ Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên 
 [^mm-sigsegv]: mmap(2), RETURN VALUE — <https://manpages.debian.org/bookworm/manpages-dev/mmap.2.en.html> — "SIGSEGV Attempted write into a region mapped as read-only."
 [^mm-populate]: mmap(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/mmap.2.en.html> — "Populate (prefault) page tables for a mapping. For a file mapping, this causes read-ahead on the file. This will help to reduce blocking on page faults later."
 [^mm-populate2]: mmap(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/mmap.2.en.html> — "The mmap() call doesn't fail if the mapping cannot be populated"
-[^mm-times]: mmap(2), NOTES — <https://manpages.debian.org/bookworm/manpages-dev/mmap.2.en.html> — "The st_ctime and st_mtime field for a file mapped with PROT_WRITE and MAP_SHARED will be updated after a write to the mapped region, and before a subsequent msync(2) with the MS_SYNC or MS_ASYNC flag, if one occurs."
-[^mm-times0]: mmap(2), NOTES — <https://manpages.debian.org/bookworm/manpages-dev/mmap.2.en.html> — "For file-backed mappings, the st_atime field for the mapped file may be updated at any time between the mmap() and the corresponding unmapping"
 [^mm-resize]: mmap(2), NOTES — <https://manpages.debian.org/bookworm/manpages-dev/mmap.2.en.html> — "The effect of changing the size of the underlying file of a mapping on the pages that correspond to added or removed regions of the file is unspecified."
 [^pcg]: Linux kernel docs, Page Cache — <https://docs.kernel.org/mm/page_cache.html> — "It can be bypassed (e.g. with O_DIRECT), but normal reads, writes and mmaps go through the page cache."
 [^mm-safety]: memmap2 0.9.11, Mmap, Safety — <https://docs.rs/memmap2/0.9.11/memmap2/struct.Mmap.html> — "All file-backed memory map constructors are marked unsafe because of the potential for Undefined Behavior (UB) using the map if the underlying file is subsequently modified, in or out of process."
@@ -550,3 +648,8 @@ Hình dung (nhận xét của người soạn): `std::io::copy` là nhân viên 
 [^tk-imp]: tokio 1.53.2, src/io/util/copy.rs — <https://docs.rs/tokio/1.53.2/src/tokio/io/util/copy.rs.html> — "crate::io::{AsyncRead, AsyncWrite, ReadBuf};"
 [^tk-bidi]: tokio 1.53.2, tokio::io::copy_bidirectional — <https://docs.rs/tokio/1.53.2/tokio/io/fn.copy_bidirectional.html> — "It uses two 8 KB buffers for transferring bytes between a and b by default."
 [^tk-tryio]: tokio 1.53.2, TcpStream::try_io — <https://docs.rs/tokio/1.53.2/tokio/net/struct.TcpStream.html> — "The closure should attempt to perform IO operation on the socket by manually calling the appropriate syscall. If the operation fails because the socket is not actually ready, then the closure should return a WouldBlock error and the readiness flag is cleared."
+[^s2-rs-naive]: rust-lang/rust tag 1.95.0, library/std/src/sys/io/kernel_copy/linux.rs — <https://raw.githubusercontent.com/rust-lang/rust/1.95.0/library/std/src/sys/io/kernel_copy/linux.rs> — "a naive copy loop would move every byte through the CPU."
+[^s2-cfr-copy]: copy_file_range(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/copy_file_range.2.en.html> — "It copies up to len bytes of data from the source file descriptor fd_in to the target file descriptor fd_out, overwriting any data that exists within the requested range of the target file."
+[^s2-cfr-offnull]: copy_file_range(2), DESCRIPTION — <https://manpages.debian.org/bookworm/manpages-dev/copy_file_range.2.en.html> — "If off_in is NULL, then bytes are read from fd_in starting from the file offset, and the file offset is adjusted by the number of bytes copied."
+[^s2-tls-mustnot]: Kernel TLS, TLS_TX_ZEROCOPY_RO — <https://docs.kernel.org/networking/tls.html> — "The application must make sure that the data is not modified between being submitted and transmission completing."
+[^s2-tls-tamper]: Kernel TLS, TLS_TX_ZEROCOPY_RO — <https://docs.kernel.org/networking/tls.html> — "To the receiver this will look like TLS records had been tampered with and will result in record authentication failures."

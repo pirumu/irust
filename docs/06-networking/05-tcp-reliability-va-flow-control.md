@@ -22,114 +22,130 @@ Các thí nghiệm do người soạn chạy trong container `./labs/linux.sh` (
 
 ## 1. Bài toán: dựng kênh tin cậy trên IP không tin cậy
 
-IP không có cơ chế nào để tăng cường độ tin cậy đầu-cuối, kiểm soát luồng hay đánh số thứ tự[^rfc791-unreliable]; TCP bù lại bằng dịch vụ byte stream tin cậy và đúng thứ tự cho ứng dụng[^rfc9293-reliable]. Chương này trả lời ba câu: sender biết byte nào đã tới (mục 2, 4), khi nào thôi chờ và gửi lại (mục 3, 4), được gửi nhanh đến mức nào so với *receiver* (mục 5, 6); cộng cách gửi gói nhỏ khỏi lãng phí (mục 7). Gửi nhanh đến mức nào so với *mạng* là congestion control, Chương 06.
+*Với service của bạn.* Hãy hình dung `orders`, một service Rust gọi sang service `inventory` để kiểm tra tồn kho. Hai bên nói chuyện qua vài kết nối TCP giữ sẵn trong một connection pool. Mỗi request, `orders` ghi một header rồi một body vào kết nối, sau đó đọc phản hồi. Ta sẽ bám theo cặp `orders` và `inventory` này suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo).
+
+Với `orders`, kết nối trông như một dòng byte liên tục và không bao giờ sai. Nhưng bên dưới là IP, và IP không hứa gì: nó không có cơ chế nào để tăng độ tin cậy đầu-cuối, kiểm soát luồng hay đánh số thứ tự[^rfc791-unreliable]. TCP đứng trên IP để bù những chỗ thiếu đó, và đưa cho ứng dụng một dịch vụ byte stream tin cậy, đúng thứ tự[^rfc9293-reliable].
+
+Muốn làm được vậy, TCP phải trả lời ba câu hỏi, và chương này đi theo từng câu:
+
+- Sender biết byte nào đã tới nơi bằng cách nào (mục 2, 4)?
+- Khi nào sender thôi chờ và gửi lại (mục 3, 4)?
+- Sender được gửi nhanh đến mức nào so với *receiver* (mục 5, 6)?
+
+Ngoài ba câu đó, mục 7 bàn chuyện gửi gói nhỏ sao cho không lãng phí. Còn gửi nhanh đến mức nào so với *mạng* là việc của congestion control, ở Chương 06.
 
 ## 2. Sequence number và cumulative ACK
 
 > **Trả lời ngắn.** TCP gán một số cho từng byte của luồng dữ liệu. Trường ACK ghi số của byte kế tiếp mà receiver đang chờ, nên một con số đủ để nói rằng mọi byte trước đó đã nhận xong[^rfc9293-cumulative].
 
-**Giải thích.** Hình dung đánh số trang một xấp giấy gửi qua bưu điện: người nhận chỉ cần nhắn "tôi đã có đến trang 1499, gửi tiếp từ trang 1500" (nhận xét của người soạn). Cơ chế dưới đây là đúng thứ đó, áp cho byte.
+**Giải thích.**
 
-TCP không đánh số segment mà đánh số **từng byte** (octet). Trường Sequence Number trong header chứa số thứ tự của byte dữ liệu đầu tiên trong segment (trừ khi cờ SYN bật)[^rfc9293-seqfield]. Trường Acknowledgment Number, khi cờ ACK bật, chứa số thứ tự kế tiếp mà bên gửi segment đó đang chờ nhận[^rfc9293-ackfield]. Cơ chế xác nhận là *cumulative*: ACK mang số X nghĩa là mọi octet đến trước X (không gồm X) đã được nhận[^rfc9293-cumulative].
+*Với `orders`.* Request của `orders` có thể to hơn một segment, và mạng có thể làm rớt một mẩu ở giữa. Để TCP biết phải gửi lại mẩu nào, `inventory` cần một cách gọn để nói "tôi đã nhận được tới đâu". Cách TCP chọn là đánh số byte.
 
-Ví dụ: sender gửi segment `seq=1000, len=500` (byte 1000–1499). Receiver trả `ack=1500`. Nếu sau đó segment `seq=1500, len=500` mất mà segment `seq=2000, len=500` đến, receiver **không** thể trả `ack=2500`; nó chỉ có thể lặp `ack=1500`, vì cumulative ACK chỉ nói về dãy liên tục từ đầu. Đây là gốc của duplicate ACK (mục 4).
+TCP không đánh số segment mà đánh số **từng byte** (octet). Trường Sequence Number trong header chứa số thứ tự của byte dữ liệu đầu tiên trong segment (trừ khi cờ SYN bật)[^rfc9293-seqfield]. Chiều ngược lại, khi cờ ACK bật, trường Acknowledgment Number chứa số thứ tự kế tiếp mà bên gửi segment đó đang chờ nhận[^rfc9293-ackfield]. Vì ACK luôn nói "tôi chờ byte số X", cơ chế xác nhận là *cumulative*: ACK mang số X nghĩa là mọi octet đến trước X (không gồm X) đã được nhận[^rfc9293-cumulative].
+
+Thử với `orders`: nó gửi segment `seq=1000, len=500` (byte 1000–1499) và `inventory` trả `ack=1500`. Giả sử segment `seq=1500, len=500` mất, còn segment `seq=2000, len=500` vẫn tới. `inventory` lúc này **không** thể trả `ack=2500`, vì như vậy là nói dối rằng đã nhận đủ tới byte 2499. Nó chỉ có thể lặp lại `ack=1500`, vì cumulative ACK chỉ nói về dãy liên tục tính từ đầu. Chuỗi ACK lặp này là gốc của duplicate ACK ở mục 4.
 
 <details><summary>Đi sâu: modulo 2^32, bốn vùng sequence và send window</summary>
 
-Không gian sequence number là hữu hạn nên mọi phép tính trên chúng là số học modulo 2^32[^rfc9293-modulo]; ở tốc độ truyền rất cao, RFC 7323 mô tả cơ chế PAWS dùng option Timestamps để bảo vệ khỏi các bản trùng cũ của cùng kết nối[^rfc7323-ts].
+Không gian sequence number là hữu hạn nên mọi phép tính trên chúng là số học modulo 2^32[^rfc9293-modulo]. Ở tốc độ truyền rất cao, RFC 7323 mô tả cơ chế PAWS dùng option Timestamps để chống các bản trùng cũ của cùng kết nối[^rfc7323-ts].
 
-Phía gửi, RFC 9293 chia không gian sequence thành bốn vùng: đã được ack, đã gửi chưa được ack, được phép gửi mới, và chưa được phép[^rfc9293-sndwnd]; các biên là `SND.UNA` (byte đầu tiên chưa được ack), `SND.NXT` (byte sẽ gửi tiếp) và `SND.UNA + SND.WND`.
+Phía gửi, RFC 9293 chia không gian sequence thành bốn vùng: đã được ack, đã gửi chưa được ack, được phép gửi mới, và chưa được phép[^rfc9293-sndwnd]. Các biên là `SND.UNA` (byte đầu tiên chưa được ack), `SND.NXT` (byte sẽ gửi tiếp) và `SND.UNA + SND.WND`.
 
 ```mermaid
 flowchart LR
   A["đã ack<br/>(&lt; SND.UNA)"] --- B["đã gửi, chưa ack<br/>[SND.UNA, SND.NXT)"] --- C["được phép gửi<br/>[SND.NXT, SND.UNA+SND.WND)"] --- D["chưa được phép<br/>(≥ SND.UNA+SND.WND)"]
 ```
 
-Send window là vùng 3 trong sơ đồ của RFC, tức vùng được phép gửi dữ liệu mới[^rfc9293-sndwnd-def]. ACK mới làm `SND.UNA` nhích phải nên cửa sổ "trượt" — sliding window (nhận xét của người soạn).
+Send window là vùng 3 trong sơ đồ của RFC, tức vùng được phép gửi dữ liệu mới[^rfc9293-sndwnd-def]. Mỗi ACK mới làm `SND.UNA` nhích sang phải nên cả cửa sổ "trượt" theo, và đó là lý do có tên sliding window (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q1:** một số ACK nói về cả dãy liên tục từ đầu, nên "next byte expected" là đủ.
+**Quay lại Q1:** một số ACK nói về cả dãy liên tục từ đầu, nên "byte kế tiếp đang chờ" là đủ. Chỗ hổng giữa chừng không tự nó biểu diễn được; mục 4 nói cách báo chỗ hổng.
 
 ## 3. Retransmission và RTO
 
-> **Trả lời ngắn.** Sender đặt đồng hồ chờ (RTO) dựa trên RTT đo được; hết giờ mà chưa có ACK thì gửi lại và nhân đôi thời gian chờ[^rfc6298-backoff]. Không lấy mẫu RTT từ segment đã gửi lại, vì không biết ACK trả lời bản nào[^rfc6298-karn].
+> **Trả lời ngắn.** Sender đặt đồng hồ chờ (RTO) dựa trên RTT đo được; hết giờ mà chưa có ACK thì gửi lại và nhân đôi thời gian chờ[^rfc6298-backoff]. Nó không lấy mẫu RTT từ segment đã gửi lại, vì không biết ACK trả lời bản nào[^rfc6298-karn].
 
-**Giải thích.** Giống timeout của một HTTP client: đặt theo độ trễ thường thấy cộng đệm cho độ nhiễu, và mỗi lần retry thì chờ lâu hơn (nhận xét của người soạn). Các mục 3.1–3.4 đi qua từng bước.
+**Giải thích.**
+
+*Với `orders`.* `orders` ghi request, nhưng ACK từ `inventory` mãi không về. Nó phải tự quyết định chờ bao lâu thì gửi lại. Bài toán giống việc đặt timeout cho một lời gọi sang `inventory`: nên dựa trên độ trễ thường thấy cộng thêm đệm cho độ nhiễu, và mỗi lần thử lại thì chờ lâu hơn (nhận xét của người soạn). Các mục 3.1–3.4 đi qua từng bước.
 
 ### 3.1 Vấn đề
 
-Sender chỉ biết ACK chưa về. Chờ quá ngắn thì gửi lại thừa (spurious retransmission) và làm nghẽn mạng; chờ quá dài thì stream đứng (nhận xét của người soạn). Vì RTT biến thiên, RFC 9293 nói RTO phải được xác định động[^rfc9293-rto].
+Sender chỉ thấy một điều: ACK chưa về. Chờ quá ngắn thì gửi lại thừa (spurious retransmission) và làm nghẽn mạng; chờ quá dài thì stream đứng, `orders` thấy request treo (nhận xét của người soạn). Vì RTT biến thiên, RTO phải được xác định động chứ không đặt cứng một con số[^rfc9293-rto].
 
 ### 3.2 Ước lượng SRTT, RTTVAR và RTO (RFC 6298)
 
-Sender giữ hai biến: SRTT (smoothed RTT) và RTTVAR (độ biến thiên RTT), cùng một độ chia đồng hồ G.
+Sender giữ hai biến: SRTT (smoothed RTT, RTT đã làm mượt) và RTTVAR (độ biến thiên của RTT), cùng một độ chia đồng hồ G. RTO được tính từ hai biến đó qua ba bước.
 
-1. Chưa có mẫu RTT nào: sender nên (SHOULD) đặt RTO = 1 giây[^rfc6298-init].
-2. Mẫu đầu tiên R: bên gửi phải (MUST) đặt SRTT = R, RTTVAR = R/2, RTO = SRTT + max(G, K·RTTVAR) với K = 4[^rfc6298-first].
-3. Mẫu tiếp theo R': `RTTVAR <- (1 - beta) * RTTVAR + beta * |SRTT - R'|`, rồi `SRTT <- (1 - alpha) * SRTT + alpha * R'`[^rfc6298-update]. RTTVAR phải (MUST) cập nhật trước SRTT: SRTT dùng để cập nhật RTTVAR là giá trị trước khi cập nhật[^rfc6298-order]; RFC nên (SHOULD) dùng alpha = 1/8, beta = 1/4[^rfc6298-ab].
+1. Khi chưa có mẫu RTT nào, sender nên (SHOULD) đặt RTO = 1 giây[^rfc6298-init].
+2. Khi có mẫu đầu tiên R, sender phải (MUST) đặt SRTT = R, RTTVAR = R/2 và RTO = SRTT + max(G, K·RTTVAR) với K = 4[^rfc6298-first].
+3. Với mỗi mẫu R' tiếp theo: `RTTVAR <- (1 - beta) * RTTVAR + beta * |SRTT - R'|`, rồi `SRTT <- (1 - alpha) * SRTT + alpha * R'`[^rfc6298-update]. Thứ tự này quan trọng: phải (MUST) cập nhật RTTVAR trước, và SRTT dùng để cập nhật RTTVAR là giá trị trước khi SRTT đổi[^rfc6298-order]. Hệ số nên (SHOULD) là alpha = 1/8 và beta = 1/4[^rfc6298-ab].
 
-**Ví dụ số.** Mẫu đầu R = 100 ms → SRTT = 100, RTTVAR = 50, RTO = 100 + 4·50 = 300 ms. Mẫu thứ hai R' = 140 ms → RTTVAR = 0,75·50 + 0,25·|100−140| = 47,5; SRTT = 0,875·100 + 0,125·140 = 105; RTO = 105 + 4·47,5 = 295 ms. (Phép tính của người soạn.) RTT càng nhiễu thì "đệm" 4·RTTVAR càng rộng.
+**Ví dụ số.** `orders` đo được mẫu đầu R = 100 ms, vậy SRTT = 100, RTTVAR = 50, RTO = 100 + 4·50 = 300 ms. Mẫu thứ hai R' = 140 ms cho RTTVAR = 0,75·50 + 0,25·|100−140| = 47,5; SRTT = 0,875·100 + 0,125·140 = 105; RTO = 105 + 4·47,5 = 295 ms (phép tính của người soạn). RTT càng nhiễu thì phần đệm 4·RTTVAR càng rộng.
 
-Timer: mỗi lần gửi gói có dữ liệu mà timer chưa chạy thì khởi động nó[^rfc6298-51]; khi mọi dữ liệu đã được ack thì tắt[^rfc6298-52].
+Về đồng hồ: mỗi lần gửi gói có dữ liệu mà timer chưa chạy thì khởi động nó[^rfc6298-51]. Khi mọi dữ liệu đã được ack thì tắt timer[^rfc6298-52].
 
 ### 3.3 Karn's algorithm
 
-Segment bị gửi lại rồi ACK về: ACK này trả lời bản gốc hay bản gửi lại? Karn's algorithm: không được (MUST NOT) lấy mẫu RTT từ các segment đã bị gửi lại[^rfc6298-karn]. Ngoại lệ: option Timestamps loại bỏ sự mơ hồ về việc bản nào của segment đã kích hoạt ACK[^rfc6298-karn-ts].
+Giả sử `orders` gửi một segment, hết giờ, gửi lại, rồi ACK về. ACK này trả lời bản gốc hay bản gửi lại? Không phân biệt được, nên Karn's algorithm cấm (MUST NOT) lấy mẫu RTT từ các segment đã bị gửi lại[^rfc6298-karn]. Có một ngoại lệ: option Timestamps xóa được sự mơ hồ này, vì nó cho biết bản nào của segment đã kích hoạt ACK[^rfc6298-karn-ts].
 
 ### 3.4 Exponential backoff
 
-Khi timer hết hạn, sender gửi lại segment chưa ack sớm nhất[^rfc6298-54] và phải (MUST) đặt RTO = RTO · 2[^rfc6298-backoff]. RFC cho phép (MAY) đặt trần cho RTO miễn trần đó ít nhất 60 giây[^rfc6298-max], và trần này có thể dùng làm cận trên cho phép nhân đôi[^rfc6298-ub]. Sau nhiều lần backoff, RFC cho phép (MAY) xóa SRTT/RTTVAR vì chúng có khả năng đã sai; khi đã xóa, chúng được khởi tạo lại từ mẫu RTT kế tiếp như ở mẫu đầu tiên[^rfc6298-clear].
+Khi timer hết hạn, sender gửi lại segment chưa ack sớm nhất[^rfc6298-54]. Rồi nó phải (MUST) đặt RTO = RTO · 2[^rfc6298-backoff]. RFC cho phép (MAY) đặt trần cho RTO, miễn trần đó ít nhất 60 giây[^rfc6298-max]. Trần này cũng có thể dùng làm cận trên cho phép nhân đôi[^rfc6298-ub]. Sau nhiều lần backoff, SRTT và RTTVAR có khả năng đã sai, nên RFC cho phép (MAY) xóa chúng[^rfc6298-clear]; khi đó chúng được khởi tạo lại từ mẫu RTT kế tiếp, như ở mẫu đầu tiên.
 
 <details><summary>Đi sâu: RTO trên Linux, backoff đo được, retries2</summary>
 
 ### 3.5 Số liệu thật trên Linux
 
-RFC khuyến nghị (SHOULD) làm tròn RTO nhỏ hơn 1 giây lên 1 giây[^rfc6298-min], với lý do nghiên cứu cho thấy cần một RTO tối thiểu lớn để giữ TCP thận trọng và tránh spurious retransmission[^rfc6298-minwhy]. **Linux không theo sàn 1 s đó**: header kernel v6.8 định nghĩa `TCP_RTO_MIN` = HZ/5, tức 200 ms[^linux-rto-min]; RTO ban đầu là 1 giây[^linux-rto-init] và trần là `TCP_RTO_MAX` = 120 giây[^linux-rto-max].
+RFC khuyến nghị (SHOULD) làm tròn RTO nhỏ hơn 1 giây lên 1 giây[^rfc6298-min]. Lý do là nghiên cứu cho thấy cần một RTO tối thiểu lớn để giữ TCP thận trọng và tránh spurious retransmission[^rfc6298-minwhy]. **Linux không theo sàn 1 s đó.** Header kernel v6.8 định nghĩa `TCP_RTO_MIN` = HZ/5, tức 200 ms[^linux-rto-min]. RTO ban đầu là 1 giây[^linux-rto-init]. Trần là `TCP_RTO_MAX` = 120 giây[^linux-rto-max].
 
-Còn công thức? Trong kernel v6.8, RTO được tính là `srtt + rttvar_us`[^linux-set-rto]. Ở mẫu RTT đầu tiên `rttvar_us` được khởi tạo bằng `max(mdev_us, tcp_rto_min_us(sk))`[^linux-rttvar-floor] (với `mdev_us = 2·R`), và ở các mẫu sau `mdev_max_us` cũng được đặt lại về `tcp_rto_min_us(sk)` mỗi cửa sổ — tức *thành phần phương sai* bị chặn dưới ở 200 ms, chứ không phải toàn bộ RTO (đọc từ source v6.8, chi tiết cài đặt có thể đổi). Thí nghiệm kiểm tra: thêm `tc qdisc add dev lo root netem delay 50ms` (RTT ≈ 100 ms), truyền vài request rồi chạy `ss -tin`:
+Còn công thức? Trong kernel v6.8, RTO được tính là `srtt + rttvar_us`[^linux-set-rto]. Ở mẫu RTT đầu tiên, `rttvar_us` được khởi tạo bằng `max(mdev_us, tcp_rto_min_us(sk))`[^linux-rttvar-floor] (với `mdev_us = 2·R`). Ở các mẫu sau, `mdev_max_us` cũng được đặt lại về `tcp_rto_min_us(sk)` mỗi cửa sổ. Nói cách khác, *thành phần phương sai* bị chặn dưới ở 200 ms, chứ không phải toàn bộ RTO (đọc từ source v6.8, chi tiết cài đặt có thể đổi). Để kiểm tra, thêm `tc qdisc add dev lo root netem delay 50ms` (RTT ≈ 100 ms), truyền vài request rồi chạy `ss -tin`:
 
 ```text
 ESTAB ... cubic wscale:7,7 rto:310 rtt:106.201/14.695 ...
 ```
 
-`rtt:106.2/14.7` là SRTT/mdev tính bằng ms. Theo công thức RFC, RTO = 106 + 4·14,7 ≈ 165 ms; kernel báo 310 ms ≈ 106 + 200 — khớp với phương sai bị chặn dưới 200 ms (suy luận từ source đã dẫn và số đo; đây là một lần chạy).
+`rtt:106.2/14.7` là SRTT/mdev tính bằng ms. Theo công thức RFC, RTO = 106 + 4·14,7 ≈ 165 ms. Kernel báo 310 ms ≈ 106 + 200, khớp với phương sai bị chặn dưới 200 ms (suy luận từ source đã dẫn và số đo; đây là một lần chạy).
 
-**Backoff quan sát được.** Người soạn thiết lập kết nối trên loopback, gắn `tc qdisc add dev lo ingress` kèm filter `u32` drop mọi gói tới cổng đích, gửi 100 byte và dùng `tcpdump` ghi thời điểm các lần gửi (s, từ lần đầu): 0,000 · 0,207 · 0,414 · 0,824 · 1,654 · 3,318 · 6,587 — các khoảng cách 0,207 · 0,207 · 0,410 · 0,830 · 1,664 · 3,269.
+**Backoff quan sát được.** Người soạn thiết lập kết nối trên loopback, gắn `tc qdisc add dev lo ingress` kèm filter `u32` drop mọi gói tới cổng đích, gửi 100 byte và dùng `tcpdump` ghi thời điểm các lần gửi (s, từ lần đầu): 0,000 · 0,207 · 0,414 · 0,824 · 1,654 · 3,318 · 6,587. Các khoảng cách là 0,207 · 0,207 · 0,410 · 0,830 · 1,664 · 3,269.
 
-Từ khoảng thứ ba trở đi khoảng cách gần đúng 0,2 · 2^k giây. Cuối thí nghiệm `ss -tin` báo `rto:6432 backoff:5`. Hai khoảng đầu bằng nhau vì bản gửi lại đầu là *tail loss probe* (TLP), chưa phải RTO: kernel docs mô tả TLP biến các RTO do mất gói ở đuôi luồng thành fast recovery (RFC 8985)[^kdoc-tlp]. Chạy lại thí nghiệm (kernel 6.8.0; kernel docs bản mới nhất ghi giá trị mặc định của `tcp_early_retrans` là 3, tức TLP bật[^kdoc-tlp-default]) và đọc `nstat`: 5 lần gửi lại ứng với `TcpExtTCPLossProbes` = 1 và `TcpExtTCPTimeouts` = 4; khoảng cách lần đó 0,21 · 0,21 · 0,41 · 0,83 · 1,66 s. Container không cho đổi `tcp_early_retrans`, nên chưa có đối chứng với TLP tắt.
+Từ khoảng thứ ba trở đi, khoảng cách gần đúng 0,2 · 2^k giây. Cuối thí nghiệm `ss -tin` báo `rto:6432 backoff:5`. Hai khoảng đầu bằng nhau vì bản gửi lại đầu là *tail loss probe* (TLP), chưa phải RTO. Kernel docs mô tả TLP biến các RTO do mất gói ở đuôi luồng thành fast recovery (RFC 8985)[^kdoc-tlp]. Người soạn chạy lại thí nghiệm trên kernel 6.8.0, và kernel docs bản mới nhất ghi giá trị mặc định của `tcp_early_retrans` là 3, tức TLP bật[^kdoc-tlp-default]. Đọc `nstat` thì 5 lần gửi lại ứng với `TcpExtTCPLossProbes` = 1 và `TcpExtTCPTimeouts` = 4; khoảng cách lần đó 0,21 · 0,21 · 0,41 · 0,83 · 1,66 s. Container không cho đổi `tcp_early_retrans`, nên chưa có đối chứng với TLP tắt.
 
-**Ý nghĩa với backend** (nhận xét của người soạn): mất gói liên tiếp làm độ trễ nhân đôi mỗi lần, nên timeout ứng dụng ngắn hơn chuỗi này sẽ báo lỗi khi TCP vẫn đang cố. Không đặt timeout thì thời gian TCP bỏ cuộc phụ thuộc `tcp_retries2`: mặc định 15, tương ứng khoảng 13 đến 30 phút tùy RTO[^tcp7-retries2]. Kernel docs cụ thể hơn: với RTO khởi điểm `TCP_RTO_MIN`, 15 cho một timeout giả định 924,6 giây, là cận dưới của timeout thực[^kdoc-retries2] — khớp phép tính của người soạn 0,2·(1+2+…+512) + 6·120 = 204,6 + 720 = 924,6 s (RTO bị chặn ở trần 120 s). RTO thực lớn hơn thì timeout dài hơn, nên tcp(7) nêu khoảng 13–30 phút tùy RTO. `TCP_USER_TIMEOUT` ép giới hạn: thời gian tối đa dữ liệu đã gửi chưa được ack, hoặc dữ liệu đã đệm chưa gửi được vì cửa sổ 0, trước khi đóng kết nối và trả `ETIMEDOUT`[^tcp7-usertimeout].
+**Ý nghĩa với backend** (nhận xét của người soạn): mất gói liên tiếp làm độ trễ nhân đôi mỗi lần, nên nếu timeout của `orders` ngắn hơn chuỗi này thì nó báo lỗi trong khi TCP vẫn đang cố. Còn nếu không đặt timeout, thời gian TCP bỏ cuộc phụ thuộc `tcp_retries2`: mặc định 15, tương ứng khoảng 13 đến 30 phút tùy RTO[^tcp7-retries2]. Kernel docs cụ thể hơn: với RTO khởi điểm `TCP_RTO_MIN`, giá trị 15 cho một timeout giả định 924,6 giây, và đó là cận dưới của timeout thực[^kdoc-retries2]. Con số này khớp phép tính của người soạn 0,2·(1+2+…+512) + 6·120 = 204,6 + 720 = 924,6 s (RTO bị chặn ở trần 120 s). RTO thực lớn hơn thì timeout dài hơn, nên tcp(7) nêu khoảng 13–30 phút tùy RTO. Muốn ép giới hạn thì dùng `TCP_USER_TIMEOUT`: nó quy định thời gian tối đa dữ liệu đã gửi mà chưa được ack, hoặc dữ liệu đã đệm mà chưa gửi được vì cửa sổ 0, trước khi đóng kết nối và trả `ETIMEDOUT`[^tcp7-usertimeout].
 
 </details>
 
-**Quay lại Q2:** RTO = ước lượng RTT cộng đệm phương sai, nhân đôi khi timeout, và Karn tránh lấy mẫu mơ hồ.
+**Quay lại Q2:** RTO = ước lượng RTT cộng đệm phương sai, nhân đôi mỗi lần hết giờ, và Karn tránh lấy mẫu mơ hồ.
 
 ## 4. Duplicate ACK và SACK
 
 > **Trả lời ngắn.** Duplicate ACK báo "tôi vẫn thiếu byte X"; ba cái liền nhau khiến sender gửi lại sớm, không đợi RTO[^rfc5681-fr]. SACK thêm danh sách các đoạn đã nhận phía sau chỗ hổng, nên sender chỉ gửi lại đúng đoạn thiếu[^rfc2018-selective].
 
-**Giải thích.** Giống nhận bưu kiện thiếu số 3: dup-ACK chỉ gọi "thiếu số 3", còn SACK nói thêm "nhưng tôi đã có 5 đến 7" (nhận xét của người soạn).
+**Giải thích.**
+
+*Với `orders`.* Giả sử `inventory` trả một response dài nhiều segment cho `orders`, và một segment giữa chừng mất. Các segment sau vẫn tới đều, nên nếu `orders` ngồi chờ hết RTO thì phí cả quãng thời gian mà dữ liệu thực ra đang về. Mục này nói TCP phát hiện mất gói sớm hơn RTO bằng cách nào, và làm sao chỉ gửi lại đúng đoạn thiếu.
 
 ### 4.1 Duplicate ACK và fast retransmit
 
-Chờ cả RTO cho mỗi gói mất là chậm khi các gói sau vẫn đang tới. RFC 5681 nói receiver nên (SHOULD) gửi ngay một duplicate ACK khi có segment đến sai thứ tự, với mục đích báo cho sender biết có segment đến sai thứ tự và đang chờ số thứ tự nào[^rfc5681-dup-purpose].
+Receiver nên (SHOULD) gửi ngay một duplicate ACK mỗi khi có segment đến sai thứ tự. Mục đích là báo cho sender biết có segment đến sai thứ tự và receiver đang chờ số thứ tự nào[^rfc5681-dup-purpose]. Một ACK được tính là "duplicate" khi, cùng các điều kiện khác, nó không mang dữ liệu và số acknowledgment bằng số ACK lớn nhất đã nhận trên kết nối[^rfc5681-dupdef].
 
-Một ACK được tính là "duplicate" khi, cùng các điều kiện khác, nó không mang dữ liệu và số acknowledgment bằng số ACK lớn nhất đã nhận trên kết nối[^rfc5681-dupdef]. Dup-ACK có thể do mất gói, nhưng cũng do mạng đổi thứ tự gói: RFC nói rõ nó có thể do mạng sắp xếp lại các data segment[^rfc5681-reorder]. Vì vậy sender không phản ứng với một dup-ACK mà đợi ba: fast retransmit dùng việc nhận 3 duplicate ACK làm dấu hiệu một segment đã mất, rồi gửi lại ngay mà không đợi timer[^rfc5681-fr]. Việc `cwnd`/`ssthresh` thay đổi thế nào sau đó thuộc [Chương 06](./06-congestion-control.md).
+Dup-ACK có thể do mất gói, nhưng cũng có thể do mạng đổi thứ tự gói[^rfc5681-reorder]. Vì vậy sender không phản ứng với một dup-ACK mà đợi ba. Fast retransmit dùng việc nhận 3 duplicate ACK làm dấu hiệu một segment đã mất, rồi gửi lại ngay mà không đợi timer[^rfc5681-fr]. Việc `cwnd` và `ssthresh` đổi thế nào sau đó thuộc [Chương 06](./06-congestion-control.md).
 
-Ví dụ: segment `1500..1999` mất, ba segment sau đó đến lần lượt; mỗi segment kích hoạt một ACK vẫn mang `ack 1500` (dup #1, #2, #3). Đến dup-ACK thứ ba sender gửi lại `1500..1999`; khi nó đến, receiver đã giữ sẵn dữ liệu phía sau nên ACK nhảy thẳng lên `3500` hoặc hơn.
+Ví dụ: segment `1500..1999` của response mất, ba segment sau đó đến lần lượt. Mỗi segment kích hoạt một ACK vẫn mang `ack 1500` (dup #1, #2, #3). Đến dup-ACK thứ ba, sender gửi lại `1500..1999`. Khi nó tới, receiver đã giữ sẵn dữ liệu phía sau nên ACK nhảy thẳng lên `3500` hoặc hơn.
 
 ### 4.2 Vì sao cumulative ACK chưa đủ: SACK (RFC 2018)
 
-Dup-ACK chỉ nói "tôi vẫn thiếu byte 1500", không nói đã có gì phía sau. RFC 2018 mô tả hạn chế: với thông tin ít ỏi từ cumulative ACK, sender chỉ biết được một gói mất mỗi round trip time[^rfc2018-limit], và đề xuất selective acknowledgment kết hợp selective repeat[^rfc2018-selective].
+Dup-ACK chỉ nói "tôi vẫn thiếu byte 1500", chứ không nói receiver đã có gì phía sau. Hạn chế này khiến sender, với thông tin ít ỏi từ cumulative ACK, chỉ biết được một gói mất mỗi round trip time[^rfc2018-limit]. RFC 2018 đề xuất selective acknowledgment kết hợp selective repeat để khắc phục[^rfc2018-selective].
 
-Cách hoạt động:
+SACK hoạt động như sau:
 
-- SACK phải được thỏa thuận: option "SACK-permitted" gửi trong SYN báo rằng option SACK có thể dùng sau khi kết nối được thiết lập[^rfc2018-permitted]. Linux bật mặc định: tcp(7) ghi `tcp_sack` là Boolean, mặc định enabled, bật SACK theo RFC 2018[^tcp7-sack].
-- Option SACK mang các block, mỗi block gồm biên trái (số sequence đầu) và biên phải (số sequence ngay sau byte cuối) của một đoạn byte liên tục receiver đang giữ[^rfc2018-block].
-- Block đầu tiên phải chứa segment vừa kích hoạt ACK này, trừ khi segment đó làm cumulative ACK tiến lên[^rfc2018-first], nhờ vậy ACK phản ánh thay đổi mới nhất.
-- Vùng option của TCP có 40 byte nên tối đa 4 block; nếu có cả option Timestamps thì còn tối đa 3[^rfc2018-4blocks][^rfc2018-3blocks].
-- SACK chỉ mang tính tư vấn (advisory): receiver được phép bỏ dữ liệu đã báo trong SACK[^rfc2018-advisory-def]; vì thế sender không được (MUST NOT) bỏ dữ liệu trước khi nó được xác nhận bằng trường Acknowledgment Number trong header TCP[^rfc2018-advisory].
+- SACK phải được thỏa thuận trước. Option "SACK-permitted" gửi trong SYN báo rằng option SACK có thể dùng sau khi kết nối được thiết lập[^rfc2018-permitted]. Linux bật mặc định: tcp(7) ghi `tcp_sack` là Boolean, mặc định enabled, bật SACK theo RFC 2018[^tcp7-sack].
+- Option SACK mang các block. Mỗi block gồm biên trái (số sequence đầu) và biên phải (số sequence ngay sau byte cuối) của một đoạn byte liên tục receiver đang giữ[^rfc2018-block].
+- Block đầu tiên phải chứa segment vừa kích hoạt ACK này, trừ khi segment đó làm cumulative ACK tiến lên[^rfc2018-first]. Nhờ vậy ACK luôn phản ánh thay đổi mới nhất.
+- Vùng option của TCP có 40 byte nên tối đa 4 block[^rfc2018-4blocks]. Nếu có cả option Timestamps thì chỉ còn tối đa 3[^rfc2018-3blocks].
+- SACK chỉ mang tính tư vấn (advisory): receiver được phép bỏ dữ liệu đã báo trong SACK[^rfc2018-advisory-def]. Vì thế sender không được (MUST NOT) bỏ dữ liệu trước khi nó được xác nhận bằng trường Acknowledgment Number trong header TCP[^rfc2018-advisory].
 
 <details><summary>Đi sâu: quan sát SACK trên tcpdump, RACK</summary>
 
@@ -142,9 +158,9 @@ ack 386705, win 7502, ... sack 2 {479377:618385}{418561:433041}
 ack 386705, win 8226, ... sack 2 {479377:664721}{418561:433041}
 ```
 
-Đọc: receiver thiếu byte từ 386705 nhưng đã có `418561–433041` (14.480 byte = 10 segment 1448 byte) và đoạn thứ hai `479377–…` đang dài ra; block mới nhất đứng đầu, khớp quy tắc "block đầu chứa segment vừa kích hoạt ACK". Trong lần chạy này 15 trên 69 gói bắt được là ACK có SACK; `ss -tin` cuối báo `bytes_retrans:124528` trên `bytes_sent:1124528`. Chỉ 69 gói cho 1 MB vì `tcpdump` trên `lo` thấy gói gộp (GSO): chạy lại thì bắt được gói dài tới 65160 byte với MSS 1448.
+Đọc: receiver thiếu byte từ 386705 nhưng đã có `418561–433041` (14.480 byte = 10 segment 1448 byte) và đoạn thứ hai `479377–…` đang dài ra. Block mới nhất đứng đầu, khớp quy tắc "block đầu chứa segment vừa kích hoạt ACK". Trong lần chạy này 15 trên 69 gói bắt được là ACK có SACK; `ss -tin` cuối báo `bytes_retrans:124528` trên `bytes_sent:1124528`. Chỉ có 69 gói cho 1 MB vì `tcpdump` trên `lo` thấy gói gộp (GSO): chạy lại thì bắt được gói dài tới 65160 byte với MSS 1448.
 
-Theo kernel docs (bản mới nhất, không ghim phiên bản), `tcp_recovery` bật RACK để phát hiện mất gói nhanh, kể cả retransmission bị mất và tail drop, và chịu được reordering; docs ghi hiện nay đặt bit này về 0 không có tác dụng vì RACK là thuật toán phát hiện mất gói duy nhất được hỗ trợ[^kdoc-rack]. Suy luận của người soạn: quy tắc "3 dup-ACK" ở trên là mô hình giáo khoa chứ không phải toàn bộ thuật toán của kernel.
+Theo kernel docs (bản mới nhất, không ghim phiên bản), `tcp_recovery` bật RACK để phát hiện mất gói nhanh, kể cả retransmission bị mất và tail drop, và chịu được reordering. Docs ghi hiện nay đặt bit này về 0 không có tác dụng vì RACK là thuật toán phát hiện mất gói duy nhất được hỗ trợ[^kdoc-rack]. Suy luận của người soạn: quy tắc "3 dup-ACK" ở trên là mô hình giáo khoa chứ không phải toàn bộ thuật toán của kernel.
 
 </details>
 
@@ -152,24 +168,26 @@ Theo kernel docs (bản mới nhất, không ghim phiên bản), `tcp_recovery` 
 
 ## 5. Flow control: sliding window và receive window
 
-> **Trả lời ngắn.** Receiver quảng bá trong mỗi ACK lượng dữ liệu nó còn nhận được; sender chỉ gửi dữ liệu mới trong vùng cửa sổ đó[^rfc9293-window][^rfc9293-sndwnd-def]. Cửa sổ về 0 thì sender vẫn phải định kỳ thăm dò[^rfc9293-zwp-def]; window scaling nới giới hạn 65.535 byte của trường Window[^hpbn-winscale][^rfc7323-purpose].
+> **Trả lời ngắn.** Receiver quảng bá trong mỗi ACK lượng dữ liệu nó còn nhận được. Sender chỉ gửi dữ liệu mới trong vùng cửa sổ đó[^rfc9293-window]. Cửa sổ về 0 thì sender vẫn phải định kỳ thăm dò[^rfc9293-zwp-def]. Trường Window chỉ rộng 16 bit nên chặn ở 65.535 byte[^hpbn-winscale]. Window scaling nới giới hạn ấy[^rfc7323-purpose].
 
-**Giải thích.** Giống hàng đợi có giới hạn giữa producer và consumer: consumer chậm làm hàng đợi đầy và producer bị chặn (nhận xét của người soạn). Các mục 5.1–5.3 mô tả từng bước.
+**Giải thích.**
+
+*Với `orders`.* Giả sử `orders` đẩy một batch lớn sang `inventory`, nhưng `inventory` đang bận nên đọc socket chậm. Dữ liệu cứ đổ vào thì buffer nhận của `inventory` đầy, và TCP không có chỗ nào để cất thêm. Flow control là cách `inventory` nói với `orders` "dừng, tôi chưa đọc kịp". Cơ chế này giống một channel có giới hạn giữa hai thread: consumer chậm làm channel đầy và producer bị chặn (nhận xét của người soạn). Các mục 5.1–5.3 mô tả từng bước.
 
 ### 5.1 Vấn đề
 
-Flow control bảo vệ *receiver*: đó là cơ chế ngăn sender làm ngập receiver bằng lượng dữ liệu nó có thể không xử lý nổi[^hpbn-flow]. Mỗi bên quảng bá receive window (rwnd), kích thước buffer còn trống[^hpbn-rwnd]. Trong header, trường Window là số octet, tính từ octet được chỉ ra trong trường acknowledgment, mà bên gửi segment này sẵn sàng nhận[^rfc9293-window]. Số sequence được phép gửi mới nằm trong send window, tức vùng giữa `SND.NXT` và `SND.UNA + SND.WND` ở mục 2[^rfc9293-sndwnd-def]; suy ra lượng dữ liệu chưa ack cộng dữ liệu mới không vượt quá cửa sổ nhận (suy luận của người soạn).
+Flow control bảo vệ *receiver*: nó ngăn sender làm ngập receiver bằng lượng dữ liệu mà receiver có thể không xử lý nổi[^hpbn-flow]. Mỗi bên quảng bá receive window (rwnd), tức kích thước buffer còn trống[^hpbn-rwnd]. Trong header, trường Window là số octet, tính từ octet được chỉ ra trong trường acknowledgment, mà bên gửi segment này sẵn sàng nhận[^rfc9293-window]. Số sequence được phép gửi mới nằm trong send window, tức vùng giữa `SND.NXT` và `SND.UNA + SND.WND` ở mục 2[^rfc9293-sndwnd-def]. Từ đó suy ra lượng dữ liệu chưa ack cộng dữ liệu mới không vượt quá cửa sổ nhận (suy luận của người soạn).
 
-HPBN gọi *bandwidth-delay product* (BDP) là tích dung lượng liên kết với độ trễ đầu-cuối, tức lượng dữ liệu chưa ack tối đa có thể đang bay tại một thời điểm[^hpbn-bdp]. Cửa sổ nhỏ hơn BDP thì đường ống không bao giờ đầy (nhận xét của người soạn).
+Có một con số liên quan là *bandwidth-delay product* (BDP), tích của dung lượng liên kết với độ trễ đầu-cuối, tức lượng dữ liệu chưa ack tối đa có thể đang bay tại một thời điểm[^hpbn-bdp]. Nếu cửa sổ nhỏ hơn BDP thì đường truyền không bao giờ đầy (nhận xét của người soạn).
 
 ### 5.2 Window scaling (RFC 7323)
 
-Trường Window rộng 16 bit nên chặn ở 65.535 byte[^hpbn-winscale]. RFC 7323 thêm option Window Scale để hỗ trợ cửa sổ nhận lớn hơn[^rfc7323-purpose]. Quy tắc:
+Trường Window rộng 16 bit nên chặn ở 65.535 byte[^hpbn-winscale]. RFC 7323 thêm option Window Scale để hỗ trợ cửa sổ nhận lớn hơn[^rfc7323-purpose]. Quy tắc của option này:
 
-- Option có thể (MAY) được gửi trong SYN đầu tiên; chỉ khi đã nhận option trong SYN đó thì mới có thể (MAY) gửi trong SYN-ACK; ở segment không có SYN, option phải (MUST) bị bỏ qua[^rfc7323-ignored].
-- Trường Window của chính segment SYN **không** được scale (MUST NOT)[^rfc7323-syn] — nên cửa sổ khởi điểm vẫn ≤ 65.535 byte (suy luận của người soạn).
+- Option có thể (MAY) được gửi trong SYN đầu tiên. Chỉ khi đã nhận option trong SYN đó thì mới có thể (MAY) gửi trong SYN-ACK. Ở segment không có SYN, option phải (MUST) bị bỏ qua[^rfc7323-ignored].
+- Trường Window của chính segment SYN **không** được scale (MUST NOT)[^rfc7323-syn]. Suy ra cửa sổ khởi điểm vẫn ≤ 65.535 byte (suy luận của người soạn).
 - Giá trị shift phải (MUST) được giới hạn ở 14, cho cửa sổ tối đa 2^30 = 1 GiB[^rfc7323-14].
-- HPBN: option được thỏa thuận trong bắt tay ba bước và mang số bit dịch trái của trường window 16 bit[^hpbn-ws-shift]; các nút trung gian, router, firewall có thể ghi đè hoặc thậm chí gỡ hẳn option này[^hpbn-ws-strip].
+- Option được thỏa thuận trong bắt tay ba bước và mang số bit dịch trái của trường window 16 bit[^hpbn-ws-shift]. Router, firewall hay các nút trung gian khác có thể ghi đè hoặc thậm chí gỡ hẳn option này[^hpbn-ws-strip].
 
 Linux bật mặc định: tcp(7) ghi `tcp_window_scaling` là Boolean, mặc định enabled, cho phép dùng cửa sổ lớn hơn 64 kB trên một kết nối nếu đầu kia hỗ trợ[^tcp7-wscale].
 
@@ -181,9 +199,11 @@ Linux bật mặc định: tcp(7) ghi `tcp_window_scaling` là Boolean, mặc đ
 
 ### 5.3 Zero window và window probe
 
-Receiver chậm đọc → buffer nhận đầy → quảng bá `win 0` → sender ngừng gửi dữ liệu. Đó là *backpressure* của TCP, và là lý do ứng dụng nhận chậm làm *sender* bị chặn trong `write` (nhận xét của người soạn; các điều kiện chặn `write` nằm ở [Chương 07](./07-socket-va-kernel.md), mục 4).
+Quay lại `inventory` đọc chậm. Buffer nhận đầy, nên `inventory` quảng bá `win 0` và `orders` ngừng gửi dữ liệu. Đó là *backpressure* của TCP, và là lý do ứng dụng nhận chậm làm *sender* bị chặn trong `write` (nhận xét của người soạn; các điều kiện chặn `write` nằm ở [Chương 07](./07-socket-va-kernel.md), mục 4).
 
-Nhưng ACK mở lại cửa sổ là ACK không dữ liệu, mà ACK loại này không được TCP truyền tin cậy[^rfc9293-ka-fail]; nếu nó mất thì hai bên có thể đợi nhau mãi (suy luận của người soạn). RFC 9293 nói sender phải (must) định kỳ gửi ít nhất một octet dữ liệu mới (nếu có), hoặc gửi lại, kể cả khi send window bằng 0[^rfc9293-zwp-def]; RFC giải thích việc gửi lại này là thiết yếu để việc mở lại cửa sổ được báo cáo tin cậy cho bên kia[^rfc9293-zwp-reopen] — *zero-window probing*, và việc hỗ trợ là bắt buộc (MUST-36)[^rfc9293-zwp-must]. Probe đầu tiên nên (SHOULD) gửi khi cửa sổ 0 đã kéo dài một RTO, và khoảng cách giữa các probe cũng nên (SHOULD) tăng theo cấp số nhân[^rfc9293-zwp]. Receiver được phép (MAY) giữ cửa sổ đóng vô hạn; miễn nó còn ACK các probe, sender phải (MUST) để kết nối mở[^rfc9293-zwp-open].
+Còn một chỗ dễ hỏng. Khi `inventory` đọc xong và mở lại cửa sổ, ACK báo mở cửa sổ là ACK không mang dữ liệu, mà ACK loại này không được TCP truyền tin cậy[^rfc9293-ka-fail]. Nếu nó mất thì hai bên có thể đợi nhau mãi: `orders` chờ cửa sổ mở, `inventory` chờ dữ liệu mới (suy luận của người soạn).
+
+Để tránh chuyện đó, sender phải (must) định kỳ gửi ít nhất một octet dữ liệu mới (nếu có), hoặc gửi lại, kể cả khi send window bằng 0[^rfc9293-zwp-def]. Việc gửi lại này là thiết yếu để việc mở lại cửa sổ được báo cáo tin cậy cho bên kia[^rfc9293-zwp-reopen]. Cách làm này gọi là *zero-window probing*, và việc hỗ trợ nó là bắt buộc (MUST-36)[^rfc9293-zwp-must]. Probe đầu tiên nên (SHOULD) được gửi khi cửa sổ 0 đã kéo dài một RTO, và khoảng cách giữa các probe cũng nên (SHOULD) tăng theo cấp số nhân[^rfc9293-zwp]. Receiver thì được phép (MAY) giữ cửa sổ đóng vô hạn; miễn nó còn ACK các probe, sender phải (MUST) để kết nối mở[^rfc9293-zwp-open].
 
 <details><summary>Đi sâu: quan sát zero window và probe</summary>
 
@@ -197,14 +217,16 @@ Khoảng giữa các lần: 0,22 → 0,43 → 0,86 → 1,73 s, đúng cấp số
 
 ## 6. Silly window syndrome
 
-> **Trả lời ngắn.** Silly window syndrome là khi cửa sổ co thành những mẩu rất nhỏ nên mạng chở toàn gói vài byte[^rfc9293-sws]. TCP chặn bằng cách receiver không quảng bá cửa sổ nhỏ[^rfc9293-sws-recv] và sender chờ gom đủ dữ liệu.
+> **Trả lời ngắn.** Silly window syndrome là khi cửa sổ co thành những mẩu rất nhỏ nên mạng chở toàn gói vài byte[^rfc9293-sws]. Để chặn, receiver không quảng bá cửa sổ nhỏ[^rfc9293-sws-recv]. Còn sender thì chờ gom đủ dữ liệu rồi mới gửi[^rfc9293-fs].
 
-**Giải thích.** Giống xe buýt chạy một chuyến cho mỗi hành khách: chở 1 người mà vẫn tốn nguyên chuyến (nhận xét của người soạn).
+**Giải thích.**
 
-RFC 9293 gọi SWS là một khuôn mẫu ổn định gồm những dịch chuyển nhỏ của cửa sổ, làm hiệu năng TCP cực kỳ tệ[^rfc9293-sws]. Minh họa của người soạn: receiver đọc 1 byte, quảng bá cửa sổ 1 byte, sender gửi segment 1 byte kèm 40 byte header (cùng cách tính với RFC 896 ở mục 7.1). Cả hai đầu đều phải tự bảo vệ (MUST-38 cho sender, MUST-39 cho receiver)[^rfc9293-sws-sender-must][^rfc9293-sws-recv-must].
+*Với `orders`.* Giả sử `inventory` đọc socket rất chậm, mỗi lần chỉ lấy ra 1 byte. Nếu mỗi lần đọc xong nó lại quảng bá "tôi còn trống 1 byte", thì `orders` sẽ gửi đúng 1 byte dữ liệu kèm 40 byte header, và cứ thế lặp đi lặp lại. Đây là minh họa của người soạn, tính theo cùng cách với RFC 896 ở mục 7.1. RFC 9293 gọi hiện tượng này là một khuôn mẫu ổn định gồm những dịch chuyển nhỏ của cửa sổ, làm hiệu năng TCP cực kỳ tệ[^rfc9293-sws].
 
-- **Receiver:** tránh nhích cạnh phải của cửa sổ `RCV.NXT+RCV.WND` theo từng bước nhỏ, kể cả khi dữ liệu từ mạng đến thành segment nhỏ[^rfc9293-sws-recv] — tức đừng quảng bá cửa sổ mới mỗi khi app đọc vài byte; đợi đến khi trống đủ lớn.
-- **Sender:** không biết buffer thật của receiver, nên dùng `Max(SND.WND)` (cửa sổ lớn nhất từng thấy) làm ước lượng `RCV.BUFF`[^rfc9293-maxwnd]. RFC khuyến nghị bộ quy tắc: gửi khi gửi được một segment đầy; hoặc khi dữ liệu đã PUSH và gửi hết được hàng đợi; hoặc khi gửi được ít nhất một phần Fs của `Max(SND.WND)` (Fs khuyến nghị 1/2); hoặc khi hết một timeout ghi đè, nên nằm trong khoảng 0,1–1,0 giây[^rfc9293-fs]. Timeout này cần để tránh deadlock khi receiver giảm `RCV.BUFF`[^rfc9293-sws-deadlock].
+Cả hai đầu đều phải tự bảo vệ. Sender phải có thuật toán tránh SWS (MUST-38)[^rfc9293-sws-sender-must]. Receiver cũng vậy (MUST-39)[^rfc9293-sws-recv-must].
+
+- **Receiver** tránh nhích cạnh phải của cửa sổ `RCV.NXT+RCV.WND` theo từng bước nhỏ, kể cả khi dữ liệu từ mạng đến thành segment nhỏ[^rfc9293-sws-recv]. Nói cách khác, đừng quảng bá cửa sổ mới mỗi khi app đọc vài byte; đợi đến khi chỗ trống đủ lớn.
+- **Sender** không biết buffer thật của receiver, nên dùng `Max(SND.WND)`, cửa sổ lớn nhất từng thấy trên kết nối, làm ước lượng cho `RCV.BUFF`[^rfc9293-maxwnd]. Trên cơ sở đó RFC khuyến nghị một bộ quy tắc: gửi khi gửi được một segment đầy; hoặc khi dữ liệu đã PUSH và gửi hết được hàng đợi; hoặc khi gửi được ít nhất một phần Fs của `Max(SND.WND)` (Fs khuyến nghị 1/2); hoặc khi hết một timeout ghi đè, nên nằm trong khoảng 0,1–1,0 giây[^rfc9293-fs]. Timeout này cần để tránh deadlock khi receiver giảm `RCV.BUFF`[^rfc9293-sws-deadlock].
 
 <details><summary>Đi sâu: quan sát trong thí nghiệm zero window</summary>
 
@@ -216,25 +238,42 @@ RFC 9293 gọi SWS là một khuôn mẫu ổn định gồm những dịch chuy
 
 ## 7. Nagle, delayed ACK và vì sao có "40 ms"
 
-> **Trả lời ngắn.** Nagle giữ write nhỏ thứ hai cho tới khi dữ liệu đã gửi được ACK[^rfc9293-nagle-desc], còn receiver có thể hoãn ACK để gộp; RFC 9293 thừa nhận có tương tác có vấn đề giữa hai cơ chế này[^rfc9293-nagle-delack] (cơ chế cụ thể ở mục 7.3 là suy luận của người soạn). Trên Linux độ hoãn tối thiểu là 40 ms[^linux-delack-min]. `TCP_NODELAY` tắt Nagle[^tcp7-nodelay].
+> **Trả lời ngắn.** Nagle giữ write nhỏ thứ hai cho tới khi dữ liệu đã gửi được ACK[^rfc9293-nagle-desc]. Về phía receiver, nó có thể hoãn ACK để gộp, và RFC 9293 thừa nhận hai cơ chế này có tương tác có vấn đề với nhau[^rfc9293-nagle-delack] (cơ chế cụ thể ở mục 7.3 là suy luận của người soạn). Trên Linux độ hoãn tối thiểu là 40 ms[^linux-delack-min]. `TCP_NODELAY` tắt Nagle[^tcp7-nodelay].
 
-**Giải thích.** Giống tài xế giao hàng không xuất phát khi chưa nhận được xác nhận gói trước, trong khi người nhận chờ có thêm hàng mới chịu xác nhận (nhận xét của người soạn).
+**Giải thích.**
+
+*Với `orders`.* Đây là chỗ `orders` dễ dính nhất. Mỗi request nó gọi `write_all(header)` rồi `write_all(body)`, cả hai đều nhỏ, và `inventory` chỉ trả lời khi đã nhận đủ cả hai. Kết quả: mỗi request chậm thêm khoảng 40 ms, dù mạng không mất gói. Nguyên nhân là hai cơ chế tốt riêng lẻ nhưng cản nhau khi ghép lại: Nagle ở phía gửi và delayed ACK ở phía nhận.
 
 ### 7.1 Nagle (RFC 896)
 
-Vấn đề *small-packet*: gõ từng ký tự tạo ra gói 41 byte (một byte dữ liệu, 40 byte header) cho mỗi byte hữu ích[^rfc896-small]. Lời giải của RFC 896: hoãn gửi dữ liệu mới nếu còn dữ liệu cũ chưa được ack[^rfc896-sol]. Mô tả hiện hành (RFC 9293 §3.7.4): nếu còn dữ liệu chưa ack, sender gom mọi dữ liệu người dùng cho tới khi dữ liệu đang bay được ack *hoặc* gom được một segment đầy (`Eff.snd.MSS` byte)[^rfc9293-nagle-desc]. Implementation nên (SHOULD) cài Nagle, nhưng phải (MUST) có cách để ứng dụng tắt Nagle trên từng kết nối[^rfc9293-nagle]. Trên Linux đó là `TCP_NODELAY`: segment luôn được gửi ngay khi có thể, dù chỉ có một lượng dữ liệu nhỏ[^tcp7-nodelay].
+Nagle sinh ra để giải bài toán *small-packet*. Khi người dùng gõ từng ký tự, mỗi ký tự thành một gói 41 byte (một byte dữ liệu, 40 byte header), tức mạng chở toàn header cho mỗi byte hữu ích[^rfc896-small]. Lời giải của RFC 896 là hoãn gửi dữ liệu mới nếu còn dữ liệu cũ chưa được ack[^rfc896-sol].
 
-Linux còn có `TCP_CORK`: không gửi các frame chưa đầy cho tới khi cờ được bỏ[^tcp7-cork-def]; kernel đặt trần 200 ms cho thời gian cork[^tcp7-cork].
+Mô tả hiện hành nằm ở RFC 9293 §3.7.4: nếu còn dữ liệu chưa ack, sender gom mọi dữ liệu người dùng cho tới khi dữ liệu đang bay được ack *hoặc* gom được một segment đầy (`Eff.snd.MSS` byte)[^rfc9293-nagle-desc]. Implementation nên (SHOULD) cài Nagle, nhưng phải (MUST) có cách để ứng dụng tắt Nagle trên từng kết nối[^rfc9293-nagle]. Trên Linux đó là `TCP_NODELAY`: segment luôn được gửi ngay khi có thể, dù chỉ có một lượng dữ liệu nhỏ[^tcp7-nodelay].
+
+Linux còn có `TCP_CORK`, không gửi các frame chưa đầy cho tới khi bỏ cờ[^tcp7-cork-def]. Kernel đặt trần 200 ms cho thời gian cork[^tcp7-cork].
 
 ### 7.2 Delayed ACK (RFC 1122/9293)
 
-Receiver gửi ít hơn một ACK trên mỗi data segment nhận được để tăng hiệu quả[^rfc9293-delack-def]. Implementation nên (SHOULD) có delayed ACK nhưng độ trễ phải (MUST) dưới 0,5 giây[^rfc9293-delack], và nên (SHOULD) ack ít nhất mỗi hai segment đầy đủ[^rfc9293-delack2]. Linux có `TCP_QUICKACK` để ack ngay[^tcp7-quickack]. Trong kernel v6.8, độ trễ nằm giữa `TCP_DELACK_MIN` = HZ/25 (40 ms)[^linux-delack-min] và `TCP_DELACK_MAX` = HZ/5 (200 ms)[^linux-delack-max].
+Phía nhận có nhu cầu ngược lại: ít ACK đi cho đỡ tốn gói. Delayed ACK là cách receiver gửi ít hơn một ACK trên mỗi data segment nhận được để tăng hiệu quả[^rfc9293-delack-def]. Implementation nên (SHOULD) có delayed ACK, nhưng độ trễ phải (MUST) dưới 0,5 giây[^rfc9293-delack]. Nó cũng nên (SHOULD) ack ít nhất mỗi hai segment đầy đủ[^rfc9293-delack2]. Linux có `TCP_QUICKACK` để ack ngay[^tcp7-quickack]. Trong kernel v6.8, độ trễ tối thiểu là `TCP_DELACK_MIN` = HZ/25 (40 ms)[^linux-delack-min]. Độ trễ tối đa là `TCP_DELACK_MAX` = HZ/5 (200 ms)[^linux-delack-max].
 
 ### 7.3 Tương tác
 
-RFC 9293 thừa nhận có những tương tác có vấn đề giữa thuật toán Nagle và delayed acknowledgment[^rfc9293-nagle-delack]. Ghép hai quy tắc trên (suy luận của người soạn): write #1 (5 byte) đi ngay vì chưa có gì chưa ack; write #2 (5 byte) bị Nagle giữ vì còn 5 byte chưa ack và chưa đủ một MSS; server nhận 5 byte, chưa đủ 10 byte để trả lời nên hoãn ACK; ≈ 40 ms sau timer delayed ACK hết hạn, ACK về, write #2 mới đi, rồi response mới được gửi.
+Đặt hai quy tắc cạnh nhau thì thấy chỗ vướng, và RFC 9293 cũng thừa nhận có những tương tác có vấn đề giữa thuật toán Nagle và delayed acknowledgment[^rfc9293-nagle-delack]. Với `orders`, chuyện xảy ra như sau (suy luận của người soạn, ghép từ hai quy tắc trên):
 
-**Cách xử lý (nhận xét của người soạn):** (1) *gộp thành một lần ghi* (`one_write`): hai write nhỏ vốn là một message logic, gộp loại bỏ cả tương tác lẫn một syscall[^std-bufwriter]; (2) `TCP_NODELAY` khi độ trễ từng gói quan trọng — cái giá là nhiều gói nhỏ hơn trên dây, đúng thứ Nagle sinh ra để ngăn, và nó chỉ che tác hại của việc ghi vụn; (3) `TCP_CORK` khi biết điểm kết thúc batch. Lưu ý: "40 ms" là delayed ACK, không phải RTT hay RTO.
+1. Write #1 (5 byte) đi ngay vì chưa có gì chưa ack.
+2. Write #2 (5 byte) bị Nagle giữ lại, vì còn 5 byte chưa ack và chưa đủ một MSS.
+3. `inventory` nhận 5 byte, chưa đủ 10 byte để trả lời, nên hoãn ACK.
+4. Khoảng 40 ms sau, timer delayed ACK hết hạn và ACK về. Lúc đó write #2 mới đi, rồi response mới được gửi.
+
+Hai bên đang chờ nhau: `orders` chờ ACK mới gửi tiếp, `inventory` chờ dữ liệu mới chịu ACK, và chỉ timer 40 ms phá được thế bí.
+
+**Cách xử lý (nhận xét của người soạn).**
+
+1. *Gộp thành một lần ghi* (`one_write`). Header và body vốn là một message logic, nên gộp loại bỏ cả tương tác này lẫn một syscall[^std-bufwriter].
+2. `TCP_NODELAY` khi độ trễ từng gói quan trọng. Cái giá là nhiều gói nhỏ hơn trên dây, đúng thứ Nagle sinh ra để ngăn, và nó chỉ che tác hại của việc ghi vụn.
+3. `TCP_CORK` khi biết điểm kết thúc batch.
+
+Lưu ý: "40 ms" là delayed ACK, không phải RTT hay RTO.
 
 <details><summary>Đi sâu: số đo Nagle × delayed ACK bằng Python và Rust</summary>
 
@@ -245,7 +284,7 @@ Nagle bật  : 0.07  45.49  45.73  44.78  45.47  46.01
 TCP_NODELAY: 0.10   0.06   0.05   0.05   0.05   0.05
 ```
 
-Lượt đầu nhanh vì kết nối mới: chạy lại, `nstat` cho `TcpExtDelayedACKs` = 0 sau lượt đầu rồi tăng đúng 1 mỗi lượt chậm (1, 2, 3, 4), `ss -tin` báo `ato:40` — ở lượt đầu không có ACK nào bị hoãn. [INFERENCE] kernel đang ở quickack mode lúc kết nối mới (tcp(7): ở chế độ này ACK được gửi ngay thay vì bị hoãn[^tcp7-quickack]); chưa đọc source kernel nên chưa chốt cơ chế. Từ lượt hai mỗi request chậm ≈ 45 ms, gần `TCP_DELACK_MIN` 40 ms cộng overhead (quan sát một lần chạy, không phải bảo đảm). Bản Rust (mục 10), năm lượt mỗi chế độ (ms):
+Lượt đầu nhanh vì kết nối mới: chạy lại, `nstat` cho `TcpExtDelayedACKs` = 0 sau lượt đầu rồi tăng đúng 1 mỗi lượt chậm (1, 2, 3, 4), `ss -tin` báo `ato:40`. Nghĩa là ở lượt đầu không có ACK nào bị hoãn. [INFERENCE] kernel đang ở quickack mode lúc kết nối mới (tcp(7): ở chế độ này ACK được gửi ngay thay vì bị hoãn[^tcp7-quickack]); chưa đọc source kernel nên chưa chốt cơ chế. Từ lượt hai mỗi request chậm ≈ 45 ms, gần `TCP_DELACK_MIN` 40 ms cộng overhead (quan sát một lần chạy, không phải bảo đảm). Bản Rust (mục 10), năm lượt mỗi chế độ (ms):
 
 ```text
 two_writes         : 0.10 45.04 41.33 41.85 46.04
@@ -261,19 +300,39 @@ Lần chạy thứ hai cho cùng hình.
 
 ## 8. Keepalive
 
-> **Trả lời ngắn.** Retransmission chỉ chạy khi có dữ liệu chưa ack[^rfc6298-52], còn keepalive gửi probe để xác nhận một kết nối rảnh vẫn còn sống[^rfc9293-ka-idle]. Mặc định Linux rất chậm: 7200 giây idle trước probe đầu[^tcp7-keepalive].
+> **Trả lời ngắn.** Retransmission chỉ chạy khi có dữ liệu chưa ack[^rfc6298-52]. Còn keepalive gửi probe để xác nhận một kết nối rảnh vẫn còn sống[^rfc9293-ka-idle]. Mặc định Linux rất chậm: 7200 giây idle trước probe đầu[^tcp7-keepalive].
 
-**Giải thích.** Giống ping định kỳ vào một đường dây im lặng để biết bên kia còn nghe không (nhận xét của người soạn).
+**Giải thích.**
 
-Retransmission chỉ chạy khi có dữ liệu chưa ack[^rfc6298-52]. Kết nối *idle* mà đầu kia sập (ví dụ của người soạn: mất điện, NAT hết hạn mapping) thì không có gì để gửi lại — không ai biết. Keepalive thăm dò kết nối rảnh[^rfc9293-ka-idle]. RFC 9293: nếu có keep-alive thì ứng dụng phải bật/tắt được theo từng kết nối và mặc định phải tắt (MUST-24, MUST-25)[^rfc9293-ka-off]; interval phải cấu hình được (MUST-27) và mặc định không được ngắn hơn hai giờ (MUST-28)[^rfc9293-ka-default]; vì ACK không dữ liệu không được truyền tin cậy, implementation không được (MUST NOT) coi việc không đáp lại một probe cụ thể là kết nối đã chết (MUST-29)[^rfc9293-ka-fail] — nên cần nhiều lần thử (suy luận của người soạn).
+*Với `orders`.* Connection pool của `orders` giữ sẵn nhiều kết nối tới `inventory`, và phần lớn thời gian chúng rảnh. Giả sử máy chạy `inventory` bị rút điện, hoặc NAT ở giữa hết hạn mapping (ví dụ của người soạn). Kết nối rảnh đó chẳng có byte nào chưa ack, nên retransmission không chạy, và không bên nào biết kết nối đã chết. Keepalive sinh ra để lấp chỗ này.
 
-(Nhận xét của người soạn:) keepalive chỉ cho biết TCP stack đầu kia còn trả lời, không cho biết ứng dụng còn xử lý được; nó không thay heartbeat ứng dụng.
+Cụ thể, retransmission chỉ chạy khi có dữ liệu chưa ack[^rfc6298-52], nên một kết nối *idle* mà đầu kia sập thì không có gì để gửi lại. Keepalive thăm dò kết nối rảnh bằng cách gửi một probe và chờ phản hồi[^rfc9293-ka-idle].
+
+RFC 9293 đặt ra mấy ràng buộc cho tính năng này:
+
+- Nếu có keep-alive thì ứng dụng phải bật/tắt được theo từng kết nối, và mặc định phải tắt (MUST-24, MUST-25)[^rfc9293-ka-off].
+- Interval phải cấu hình được (MUST-27) và mặc định không được ngắn hơn hai giờ (MUST-28)[^rfc9293-ka-default].
+- ACK không dữ liệu không được truyền tin cậy, nên implementation không được (MUST NOT) coi việc không đáp lại một probe cụ thể là kết nối đã chết (MUST-29)[^rfc9293-ka-fail]. Vì vậy phải thử nhiều lần mới kết luận (suy luận của người soạn).
+
+Nhận xét của người soạn: keepalive chỉ cho biết TCP stack đầu kia còn trả lời, không cho biết ứng dụng còn xử lý được. Nó không thay được heartbeat ở tầng ứng dụng.
 
 <details><summary>Đi sâu: tham số Linux và quan sát keepalive</summary>
 
-Linux: `SO_KEEPALIVE` bật tính năng[^socket7-keepalive]. `tcp_keepalive_time` mặc định 7200 s idle trước probe đầu, chỉ khi `SO_KEEPALIVE` bật[^tcp7-keepalive]; `tcp_keepalive_intvl` mặc định 75 s, là số giây giữa các probe keep-alive[^tcp7-intvl]; `tcp_keepalive_probes` mặc định 9: số probe tối đa trước khi giết kết nối[^tcp7-probes]. Theo từng socket có `TCP_KEEPIDLE` (thời gian tính bằng giây kết nối phải rảnh trước khi TCP bắt đầu gửi probe keepalive)[^tcp7-keepidle], `TCP_KEEPINTVL` (thời gian tính bằng giây giữa các probe)[^tcp7-keepintvl], `TCP_KEEPCNT` (số probe tối đa TCP nên gửi trước khi bỏ kết nối)[^tcp7-keepcnt]. Mặc định: 7200 + 9·75 = 7875 s ≈ 2 giờ 11 phút mới phát hiện chết (cộng của người soạn). `TCP_USER_TIMEOUT` không đổi khi nào probe được gửi[^tcp7-usertimeout-ka], nhưng khi dùng cùng keepalive thì nó ghi đè để quyết định khi nào đóng kết nối do keepalive fail[^tcp7-usertimeout-override].
+`SO_KEEPALIVE` bật tính năng này trên socket[^socket7-keepalive]. Với toàn hệ thống, Linux có ba sysctl:
 
-**Quan sát.** Đặt `TCP_KEEPIDLE=2`, `TCP_KEEPINTVL=1`, `TCP_KEEPCNT=3`; `ss -tno` hiện `timer:(keepalive,337ms,0)`. Peer trả lời probe đầu nên timer reset; sau đó người soạn drop gói tới peer. Probe kế tiếp cách 2,05 s, hai probe nữa mỗi ≈ 1 s (2,05 → 3,07 → 4,10 trong `tcpdump`), rồi `recv` trả `ETIMEDOUT` — ba probe không đáp, khớp `TCP_KEEPCNT=3`.
+- `tcp_keepalive_time` mặc định 7200 s idle trước probe đầu, chỉ khi `SO_KEEPALIVE` bật[^tcp7-keepalive].
+- `tcp_keepalive_intvl` mặc định 75 s, là số giây giữa các probe keep-alive[^tcp7-intvl].
+- `tcp_keepalive_probes` mặc định 9, là số probe tối đa trước khi giết kết nối[^tcp7-probes].
+
+Với từng socket có ba option tương ứng:
+
+- `TCP_KEEPIDLE`: thời gian tính bằng giây kết nối phải rảnh trước khi TCP bắt đầu gửi probe keepalive[^tcp7-keepidle].
+- `TCP_KEEPINTVL`: thời gian tính bằng giây giữa các probe[^tcp7-keepintvl].
+- `TCP_KEEPCNT`: số probe tối đa TCP nên gửi trước khi bỏ kết nối[^tcp7-keepcnt].
+
+Với mặc định, 7200 + 9·75 = 7875 s ≈ 2 giờ 11 phút mới phát hiện kết nối chết (phép cộng của người soạn). `TCP_USER_TIMEOUT` không đổi khi nào probe được gửi[^tcp7-usertimeout-ka]. Nhưng khi dùng cùng keepalive thì nó ghi đè để quyết định khi nào đóng kết nối do keepalive fail[^tcp7-usertimeout-override].
+
+**Quan sát.** Đặt `TCP_KEEPIDLE=2`, `TCP_KEEPINTVL=1`, `TCP_KEEPCNT=3`; `ss -tno` hiện `timer:(keepalive,337ms,0)`. Peer trả lời probe đầu nên timer reset; sau đó người soạn drop gói tới peer. Probe kế tiếp cách 2,05 s, hai probe nữa mỗi ≈ 1 s (2,05 → 3,07 → 4,10 trong `tcpdump`), rồi `recv` trả `ETIMEDOUT`. Ba probe không đáp, khớp `TCP_KEEPCNT=3`.
 
 </details>
 
@@ -283,15 +342,17 @@ Linux: `SO_KEEPALIVE` bật tính năng[^socket7-keepalive]. `tcp_keepalive_time
 
 > **Trả lời ngắn.** Mọi byte sau chỗ gói bị mất phải nằm chờ trong buffer của receiver cho tới khi gói gửi lại tới, dù chúng đã đến nơi[^hpbn-hol]. Ứng dụng chỉ thấy `read` trả về trễ.
 
-**Giải thích.** Giống hàng xe nối đuôi trên đường một làn: một xe hỏng thì mọi xe sau đều đứng (nhận xét của người soạn).
+**Giải thích.**
 
-TCP giao dữ liệu đúng thứ tự: nếu một gói bị mất trên đường tới receiver, mọi gói sau đó phải nằm trong buffer TCP của receiver cho tới khi gói mất được gửi lại và tới nơi[^hpbn-hol]. Mọi byte sau chỗ hổng — kể cả đã tới nơi, kể cả thuộc một "message" khác của ứng dụng — nằm trong buffer chờ. SACK ở mục 4.2 giúp sender gửi lại đúng chỗ, nhưng không giúp *giao* sớm các byte sau chỗ hổng cho ứng dụng: TCP chỉ trả byte đúng thứ tự (suy luận của người soạn từ đặc tính giao đúng thứ tự).
+*Với `orders`.* Giả sử một segment trong response của `inventory` bị mất. Các segment sau đó vẫn tới được máy `orders`, nhưng `read` của `orders` không trả về byte nào trong số đó. Chuyện này không phải bug mà là hệ quả của việc TCP giao dữ liệu đúng thứ tự.
+
+Nếu một gói bị mất trên đường tới receiver, mọi gói sau đó phải nằm trong buffer TCP của receiver cho tới khi gói mất được gửi lại và tới nơi[^hpbn-hol]. Mọi byte sau chỗ hổng đều bị giữ lại, kể cả đã tới nơi và kể cả thuộc một "message" khác của ứng dụng. SACK ở mục 4.2 giúp sender gửi lại đúng chỗ, nhưng không giúp *giao* sớm các byte sau chỗ hổng cho ứng dụng, vì TCP chỉ trả byte đúng thứ tự (suy luận của người soạn từ đặc tính giao đúng thứ tự).
 
 <details><summary>Đi sâu: ứng dụng không thấy retransmission, jitter, HOL ở HTTP/1.1</summary>
 
-Ứng dụng không nhìn thấy quá trình này: nó không thấy các lần retransmission của TCP hay các gói đang xếp hàng trong buffer[^hpbn-hol-invisible]; nó chỉ thấy `read` trả về trễ hơn. Cái giá của việc không phải tự sắp xếp lại là jitter, tức độ biến thiên khó đoán của thời gian gói đến[^hpbn-jitter].
+Ứng dụng không nhìn thấy quá trình này: nó không thấy các lần retransmission của TCP hay các gói đang xếp hàng trong buffer[^hpbn-hol-invisible]. Nó chỉ thấy `read` trả về trễ hơn. Cái giá của việc không phải tự sắp xếp lại là jitter, tức độ biến thiên khó đoán của thời gian gói đến[^hpbn-jitter].
 
-Hai tầng HOL khác nhau: HOL ở TCP (gói mất chặn mọi byte sau trên cùng kết nối) và HOL ở HTTP/1.1 (response phải trả đúng thứ tự request; nguồn ở [Chương 08](./08-dns-http-tls.md), mục 5); cách HTTP/2, QUIC và HTTP/3 xử lý ở Chương 08, mục 5–6. Với connection pool (nhận xét của người soạn): mỗi kết nối TCP độc lập có buffer riêng, nên gói mất chỉ làm chậm các request trên *kết nối đó*.
+Có hai tầng HOL khác nhau: HOL ở TCP (gói mất chặn mọi byte sau trên cùng kết nối) và HOL ở HTTP/1.1 (response phải trả đúng thứ tự request; nguồn ở [Chương 08](./08-dns-http-tls.md), mục 5). Cách HTTP/2, QUIC và HTTP/3 xử lý ở Chương 08, mục 5–6. Với connection pool của `orders` (nhận xét của người soạn): mỗi kết nối TCP độc lập có buffer riêng, nên gói mất chỉ làm chậm các request trên *kết nối đó*.
 
 </details>
 
@@ -299,11 +360,11 @@ Hai tầng HOL khác nhau: HOL ở TCP (gói mất chặn mọi byte sau trên c
 
 ## 10. Liên hệ với Rust
 
-`std::net::TcpStream` chỉ phơi một phần nhỏ các núm vặn của chương này. Grep `keepalive`, `KEEPIDLE`, `USER_TIMEOUT` (không phân biệt hoa thường) trên `library/std/src/net`, `library/std/src/sys/net` và các file `net`/`tcp` dưới `library/std/src/os` ở tag 1.95.0 không ra kết quả: std không có API keepalive hay `TCP_USER_TIMEOUT`; cần crate như `socket2` hoặc `libc`. Trong các option của chương này, chỉ `TCP_QUICKACK` được phơi (Linux/Android) qua `std::os::linux::net::TcpStreamExt::set_quickack`; doc ghi cờ này khiến Linux gửi ACK ngay và có thể bị kernel đặt lại sau các thao tác tiếp theo[^std-quickack].
+Với `orders` viết bằng Rust, `std::net::TcpStream` chỉ phơi một phần nhỏ các núm vặn của chương này. Người soạn grep `keepalive`, `KEEPIDLE`, `USER_TIMEOUT` (không phân biệt hoa thường) trên `library/std/src/net`, `library/std/src/sys/net` và các file `net`/`tcp` dưới `library/std/src/os` ở tag 1.95.0 và không ra kết quả. Nghĩa là std không có API keepalive hay `TCP_USER_TIMEOUT`, bạn cần crate như `socket2` hoặc `libc`. Trong các option của chương này, chỉ `TCP_QUICKACK` được phơi (Linux/Android), qua `std::os::linux::net::TcpStreamExt::set_quickack`. Doc ghi cờ này khiến Linux gửi ACK ngay và có thể bị kernel đặt lại sau các thao tác tiếp theo[^std-quickack].
 
-- **`set_nodelay(bool)` / `nodelay()`**: bật `TCP_NODELAY`; doc std: khi không bật, dữ liệu được đệm cho đến khi đủ lượng để gửi, nhờ đó tránh gửi gói nhỏ liên tục[^std-nodelay-off] — chính là Nagle ở mục 7.
-- **`write_all`**: lặp `write` cho đến khi hết dữ liệu[^std-writeall]; nó không gộp các lần gọi khác nhau. Hai `write_all` nhỏ là hai system call và hai lần đưa dữ liệu cho Nagle quyết định. Muốn gộp ở user space dùng `BufWriter`: doc nói với `TcpStream` mỗi lần gọi write dẫn đến một system call[^std-bufwriter]; nhớ `flush()` trước khi đợi response.
-- **`set_read_timeout`**: đặt `None` (không timeout) thì `read` chặn vô hạn[^std-readtimeout-none]; truyền `Duration` bằng 0 trả `Err`[^std-readtimeout-zero]; hết hạn thì Unix thường trả `WouldBlock`, Windows có thể trả `TimedOut`[^std-readtimeout]. Không đặt timeout thì `read` trên peer chết có thể chặn rất lâu (suy luận của người soạn: docs không nói rõ giá trị mặc định của socket mới).
+- **`set_nodelay(bool)` / `nodelay()`** bật `TCP_NODELAY`. Doc std ghi rằng khi không bật, dữ liệu được đệm cho đến khi đủ lượng để gửi, nhờ đó tránh gửi gói nhỏ liên tục[^std-nodelay-off]. Đó chính là Nagle ở mục 7.
+- **`write_all`** lặp `write` cho đến khi hết dữ liệu[^std-writeall], và không gộp các lần gọi khác nhau. Vì vậy `write_all(header)` rồi `write_all(body)` của `orders` là hai system call và hai lần đưa dữ liệu cho Nagle quyết định. Muốn gộp ở user space thì dùng `BufWriter`: doc nói với `TcpStream` mỗi lần gọi write dẫn đến một system call[^std-bufwriter]. Nhớ `flush()` trước khi đợi response.
+- **`set_read_timeout`**: đặt `None` (không timeout) thì `read` chặn vô hạn[^std-readtimeout-none]. Truyền `Duration` bằng 0 thì trả `Err`[^std-readtimeout-zero]. Khi hết hạn, Unix thường trả `WouldBlock` còn Windows có thể trả `TimedOut`[^std-readtimeout]. Vậy nếu không đặt timeout, `read` trên peer chết có thể chặn rất lâu (suy luận của người soạn: docs không nói rõ giá trị mặc định của socket mới).
 
 Phần vòng đo của thí nghiệm ở mục 7.3 (chương trình đầy đủ gồm server thread dùng `read_exact` rồi `write_all(b"ok")`, đã biên dịch bằng `rustc -O` trong container và chạy hai lần):
 
@@ -321,19 +382,19 @@ c.read_exact(&mut r).unwrap();
 
 ## Tóm tắt
 
-- ACK là cumulative; chỗ hổng chỉ biểu diễn được bằng ACK lặp hoặc SACK (tối đa 4 block, 3 nếu có Timestamps; chỉ tư vấn).
-- RTO = SRTT + max(G, 4·RTTVAR); Karn cấm lấy mẫu RTT từ segment đã gửi lại; mỗi lần hết hạn RTO nhân đôi. Linux: sàn 200 ms đặt trên thành phần phương sai (không phải sàn 1 s của RFC), trần 120 s.
+- ACK là cumulative nên chỗ hổng chỉ biểu diễn được bằng ACK lặp hoặc SACK (tối đa 4 block, 3 nếu có Timestamps; chỉ tư vấn).
+- RTO = SRTT + max(G, 4·RTTVAR). Karn cấm lấy mẫu RTT từ segment đã gửi lại, và mỗi lần hết hạn RTO nhân đôi. Linux có sàn 200 ms đặt trên thành phần phương sai (không phải sàn 1 s của RFC) và trần 120 s.
 - 3 duplicate ACK kích hoạt fast retransmit; dup-ACK cũng có thể do đổi thứ tự gói.
-- Receive window là flow control; Window Scale (shift ≤ 14) chỉ thỏa thuận trong SYN; cửa sổ 0 được giữ sống bằng zero-window probe, khoảng cách giữa các probe nên giãn theo cấp số nhân; SWS bị chặn ở cả hai đầu.
-- Nagle × delayed ACK cho ≈ 40–46 ms trên hai `write` nhỏ; ưu tiên gộp ghi, rồi mới `TCP_NODELAY`.
-- Keepalive mặc định chậm (7200 s + 9×75 s); HOL của TCP là hệ quả của giao đúng thứ tự trên một byte stream.
+- Receive window là flow control. Window Scale (shift ≤ 14) chỉ thỏa thuận trong SYN. Cửa sổ 0 được giữ sống bằng zero-window probe, khoảng cách giữa các probe nên giãn theo cấp số nhân. SWS bị chặn ở cả hai đầu.
+- Nagle × delayed ACK cho ≈ 40–46 ms trên hai `write` nhỏ của `orders`; ưu tiên gộp ghi, rồi mới `TCP_NODELAY`.
+- Keepalive mặc định chậm (7200 s + 9×75 s). HOL của TCP là hệ quả của việc giao đúng thứ tự trên một byte stream.
 
 ## Câu hỏi tự kiểm tra
 
-1. Receiver nhận byte 0–999 và 2000–2999. `ack` bằng bao nhiêu, và nếu có SACK thì block là gì?
+1. `inventory` nhận byte 0–999 và 2000–2999 từ `orders`. `ack` bằng bao nhiêu, và nếu có SACK thì block là gì?
 <details><summary>Đáp án</summary>
 
-`ack = 1000` (mọi octet trước X, không gồm X, đã nhận)[^rfc9293-cumulative]; block SACK `{2000:3000}`, biên phải là số ngay sau byte cuối[^rfc2018-block].
+`ack = 1000` (mọi octet trước X, không gồm X, đã nhận)[^rfc9293-cumulative]. Block SACK là `{2000:3000}`, vì biên phải là số ngay sau byte cuối[^rfc2018-block].
 
 </details>
 
@@ -347,42 +408,42 @@ SRTT = 80, RTTVAR = 40, RTO = 240 ms[^rfc6298-first]. Linux chặn phần phươ
 3. Vì sao không lấy mẫu RTT từ segment đã gửi lại, và gói mất liên tục thì sender gửi lại ở khoảng nào (RTO khởi điểm 200 ms)?
 <details><summary>Đáp án</summary>
 
-ACK có thể thuộc bản gốc hoặc bản gửi lại (Karn)[^rfc6298-karn]; Timestamps loại bỏ mơ hồ[^rfc6298-karn-ts]. Mỗi lần hết hạn RTO nhân đôi[^rfc6298-backoff]: khoảng 0,2, 0,4, 0,8, 1,6, 3,2 s — khớp mục 3.5 (khoảng đầu tiên 0,2 s thực ra là TLP, sau đó RTO đầu tiên cũng cách ≈ 0,2 s).
+ACK có thể thuộc bản gốc hoặc bản gửi lại (Karn)[^rfc6298-karn]. Timestamps loại bỏ sự mơ hồ đó[^rfc6298-karn-ts]. Mỗi lần hết hạn RTO nhân đôi[^rfc6298-backoff], nên các lần gửi lại cách nhau khoảng 0,2, 0,4, 0,8, 1,6, 3,2 s. Con số này khớp mục 3.5 (khoảng đầu tiên 0,2 s thực ra là TLP, sau đó RTO đầu tiên cũng cách ≈ 0,2 s).
 
 </details>
 
 4. Vì sao sender đợi 3 dup-ACK mới fast-retransmit, và SACK thêm gì?
 <details><summary>Đáp án</summary>
 
-Dup-ACK có thể do đổi thứ tự gói[^rfc5681-reorder]; 3 dup-ACK là dấu hiệu mất[^rfc5681-fr]. SACK báo đoạn đã tới nên sender chỉ gửi lại phần thiếu[^rfc2018-selective], nhưng chỉ tư vấn: chưa được giải phóng buffer tới khi Acknowledgment Number vượt qua[^rfc2018-advisory].
+Dup-ACK có thể do đổi thứ tự gói[^rfc5681-reorder]. Còn 3 dup-ACK mới là dấu hiệu mất[^rfc5681-fr]. SACK báo đoạn đã tới nên sender chỉ gửi lại phần thiếu[^rfc2018-selective]. Nhưng SACK chỉ tư vấn: sender chưa được giải phóng buffer tới khi Acknowledgment Number vượt qua[^rfc2018-advisory].
 
 </details>
 
 5. Liên kết 1 Gbit/s, RTT 40 ms, không có window scaling: thông lượng tối đa một kết nối?
 <details><summary>Đáp án</summary>
 
-Window ≤ 65.535 byte[^hpbn-winscale] ⇒ ≈ 65.535·8/0,04 ≈ 13 Mbit/s (phép tính của người soạn), dù BDP khoảng 5 MB[^hpbn-bdp]. Shift ≤ 14 nâng tới 1 GiB[^rfc7323-14].
+Window ≤ 65.535 byte[^hpbn-winscale], nên thông lượng ≈ 65.535·8/0,04 ≈ 13 Mbit/s (phép tính của người soạn). Trong khi đó BDP khoảng 5 MB[^hpbn-bdp]. Shift ≤ 14 nâng cửa sổ tới 1 GiB[^rfc7323-14].
 
 </details>
 
-6. Receiver quảng bá `win 0`: sender làm gì, và điều gì ngăn kết nối đứng vĩnh viễn nếu ACK mở cửa sổ bị mất?
+6. `inventory` quảng bá `win 0`: `orders` làm gì, và điều gì ngăn kết nối đứng vĩnh viễn nếu ACK mở cửa sổ bị mất?
 <details><summary>Đáp án</summary>
 
-Zero-window probe, khoảng cách giữa các probe nên tăng theo cấp số nhân[^rfc9293-zwp], việc hỗ trợ là bắt buộc[^rfc9293-zwp-must]; còn receiver ack probe thì kết nối giữ mở[^rfc9293-zwp-open].
+Sender gửi zero-window probe, và khoảng cách giữa các probe nên tăng theo cấp số nhân[^rfc9293-zwp]. Việc hỗ trợ probe là bắt buộc[^rfc9293-zwp-must]. Chỉ cần receiver còn ack probe thì kết nối giữ mở[^rfc9293-zwp-open].
 
 </details>
 
-7. Một service Rust gọi `write_all(header)` rồi `write_all(body)` (đều nhỏ), mỗi request thêm ≈ 40 ms. Nguyên nhân và hướng sửa?
+7. `orders` gọi `write_all(header)` rồi `write_all(body)` (đều nhỏ), mỗi request thêm ≈ 40 ms. Nguyên nhân và hướng sửa?
 <details><summary>Đáp án</summary>
 
-Nagle giữ write thứ hai chờ ACK[^rfc9293-nagle-desc] trong khi peer hoãn ACK[^rfc9293-delack][^rfc9293-nagle-delack]. Gộp một lần ghi hoặc `BufWriter` + `flush`[^std-bufwriter]; hoặc `set_nodelay(true)`[^std-nodelay-off] (người soạn: ưu tiên gộp).
+Nagle giữ write thứ hai chờ ACK[^rfc9293-nagle-desc]. Trong khi đó peer hoãn ACK[^rfc9293-delack]. Hai cơ chế này có tương tác có vấn đề[^rfc9293-nagle-delack]. Cách sửa là gộp một lần ghi, hoặc `BufWriter` rồi `flush`[^std-bufwriter]. Cách khác là `set_nodelay(true)`[^std-nodelay-off] (người soạn: ưu tiên gộp).
 
 </details>
 
 8. Peer idle bị rút điện: ở mặc định Linux TCP phát hiện sau bao lâu, và rút ngắn thế nào?
 <details><summary>Đáp án</summary>
 
-Retransmission không chạy (không có dữ liệu). Keepalive: idle 7200 s[^tcp7-keepalive] + tối đa 9 probe cách 75 s[^tcp7-intvl][^tcp7-probes] ≈ 2 giờ 11 phút, nếu `SO_KEEPALIVE` bật[^socket7-keepalive]. Rút ngắn bằng `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT`[^tcp7-keepidle], `TCP_USER_TIMEOUT`[^tcp7-usertimeout], hoặc heartbeat/timeout ứng dụng.
+Retransmission không chạy vì không có dữ liệu. Keepalive: idle 7200 s[^tcp7-keepalive]. Sau đó tối đa 9 probe cách nhau 75 s[^tcp7-probes], tổng ≈ 2 giờ 11 phút. Điều kiện là `SO_KEEPALIVE` bật[^socket7-keepalive]. Rút ngắn bằng `TCP_KEEPIDLE`/`TCP_KEEPINTVL`/`TCP_KEEPCNT`[^tcp7-keepidle]. Hoặc dùng `TCP_USER_TIMEOUT`[^tcp7-usertimeout], hay heartbeat/timeout ở ứng dụng.
 
 </details>
 

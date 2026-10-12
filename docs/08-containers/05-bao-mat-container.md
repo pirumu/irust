@@ -1,11 +1,11 @@
 # P8 · Chương 05 — Bảo mật container
 
-> Mọi khẳng định về kernel/syscall là về **Linux**. Các bảng "quan sát" là kết quả một lần chạy `docker run` trên Docker Engine 29.5.2, kernel VM `6.8.0-117-generic` (aarch64), image lab Debian có `capsh` và `unshare` — không phải bảo đảm của tài liệu. Trang docs Docker/Kubernetes không ghim phiên bản (là bản đang online lúc viết); man page và kernel docs có ghim.
+> Mọi khẳng định về kernel và syscall trong chương này là về **Linux**. Các bảng "quan sát" là kết quả một lần chạy `docker run` trên Docker Engine 29.5.2, kernel VM `6.8.0-117-generic` (aarch64), image lab Debian có `capsh` và `unshare`; đó không phải bảo đảm của tài liệu. Trang docs Docker và Kubernetes không ghim phiên bản (là bản đang online lúc viết); man page và kernel docs có ghim.
 
 ## Bạn sẽ hiểu được gì
 
 1. **Q1.** Vì sao một lỗ hổng kernel có thể biến thành "thoát container", và những lớp phòng thủ nào đứng giữa ứng dụng và kernel? → mục 1
-2. **Q2.** "Root trong container" khác "root trên host" ở đâu — và khi nào hai thứ này thực ra là một? → mục 2
+2. **Q2.** "Root trong container" khác "root trên host" ở đâu, và khi nào hai thứ này thực ra là một? → mục 2
 3. **Q3.** Docker giữ lại những capability nào theo mặc định; `--cap-drop`, `--cap-add`, `--privileged` thay đổi gì; tự kiểm chứng bằng `/proc/self/status` thế nào? → mục 3
 4. **Q4.** `no_new_privs` ngăn điều gì và không ngăn điều gì? → mục 4
 5. **Q5.** seccomp-bpf lọc syscall ra sao (các action `KILL`, `ERRNO`, `TRACE`, `ALLOW`…), profile mặc định của Docker chặn gì, và vì sao `unshare` thất bại trong container thường nhưng chạy được khi tắt seccomp? → mục 5
@@ -21,21 +21,19 @@
 
 ## 1. Container dùng chung kernel: lớp phòng thủ nào đứng giữa? (Q1)
 
-> **Trả lời ngắn.** Container là một process cô lập, và nhiều container cùng chạy thì dùng chung kernel[^share-kernel]; nên syscall của chúng đều đi vào cùng một kernel (suy luận của người soạn). Vì thế một lỗi kernel mà container gọi tới được có thể thành đường thoát (suy luận của người soạn); Docker thừa nhận tập capability và mount mặc định có thể cô lập chưa đầy đủ, riêng rẽ hoặc khi kết hợp với lỗ hổng kernel[^docker-incomplete]. Giữa ứng dụng và kernel ta xếp nhiều lớp giảm thiểu — chương này đi qua từng lớp.
+> **Trả lời ngắn.** Container thực chất là một process được cô lập, và các container chạy trên cùng một máy dùng chung một kernel[^share-kernel]. Vì vậy syscall của container nào cũng đi vào đúng kernel đó, và một lỗi kernel mà container gọi tới được có thể thành đường thoát khỏi container (suy luận của người soạn). Chính Docker cũng thừa nhận tập capability và mount mặc định có thể cô lập chưa đầy đủ, riêng rẽ hoặc khi kết hợp với lỗ hổng kernel[^docker-incomplete]. Cách đối phó là xếp nhiều lớp giảm thiểu giữa ứng dụng và kernel; chương này đi qua từng lớp.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): máy ảo giống nhà riêng có móng và đường ống riêng; container giống các căn hộ trong một chung cư — mỗi căn có khóa cửa riêng (namespace), nhưng chung móng và đường ống (kernel). Khóa tốt chặn khách tò mò; một lỗi ở đường ống chung thì căn nào cũng bị ảnh hưởng.
+*Với service của bạn.* Hãy hình dung `orders`, một service HTTP viết bằng Rust, đóng thành image và chạy trong một container Docker cùng máy với vài container khác. Giả sử kẻ tấn công tìm được một lỗ hổng trong code hoặc dependency của `orders` và chạy được lệnh tùy ý bên trong container (nhận xét của người soạn: đây là kịch bản giả định, không phải sự cố có thật). Ta sẽ bám theo tình huống đó suốt chương và hỏi một câu: từ chỗ đứng ấy, kẻ tấn công với tới được gì của host, và mỗi lớp phòng thủ cắt bớt được gì? Mục này dựng phần nền, tức vì sao ranh giới của container không giống ranh giới của máy ảo.
 
-Cơ chế, từng bước:
+Máy ảo chạy một hệ điều hành đầy đủ với kernel riêng. Container thì chỉ là một process cô lập, và các container cùng máy dùng chung kernel của host[^share-kernel]. Với `orders`, điều đó có nghĩa khi code của kẻ tấn công gọi `open`, `mount` hay `unshare`, bên trả lời là kernel của chính host. Nói cách khác, **bề mặt tấn công** (attack surface, tức tổng số chỗ kẻ tấn công có thể thử chạm vào) của container là toàn bộ giao diện syscall mà kernel mở ra cho process đó (nhận xét của người soạn). Docker cũng xếp "độ an toàn nội tại của kernel và phần hỗ trợ namespace/cgroup" là khu vực đầu tiên trong bốn khu vực cần xét khi đánh giá an ninh[^docker-four-areas].
 
-1. Máy ảo chạy hệ điều hành đầy đủ với kernel riêng; container là một process cô lập, và nhiều container cùng chạy thì dùng chung kernel[^share-kernel].
-2. Vì vậy **bề mặt tấn công** của container là toàn bộ giao diện syscall mà kernel phơi ra cho process đó (nhận xét của người soạn). Docker xếp "độ an toàn nội tại của kernel và phần hỗ trợ namespace/cgroup" là khu vực đầu tiên trong bốn khu vực cần xét khi đánh giá an ninh[^docker-four-areas].
-3. Các lớp giảm thiểu bên dưới đều làm một việc: thu hẹp phần giao diện đó mà process còn chạm được (nhận xét của người soạn). Ví dụ ở mục 5: Docker chặn họ syscall `io_uring` vì có lỗ hổng có thể bị khai thác để thoát container[^docker-tbl-iouring], và chặn `keyctl` vì keyring của kernel không được namespace hóa[^docker-tbl-keyctl].
+Các lớp phòng thủ ở những mục sau đều làm cùng một việc: thu hẹp phần giao diện đó mà `orders` còn chạm tới được (nhận xét của người soạn). Ví dụ ở mục 5, Docker chặn cả họ syscall `io_uring` vì có lỗ hổng có thể bị khai thác để thoát container[^docker-tbl-iouring]. Nó cũng chặn `keyctl` vì keyring của kernel không được namespace hóa[^docker-tbl-keyctl].
 
 ```mermaid
 flowchart TD
-    A[Process trong container] --> B[Namespaces + cgroups<br/>cô lập tầm nhìn / giới hạn tài nguyên]
+    A[Process orders trong container] --> B[Namespaces + cgroups<br/>cô lập tầm nhìn / giới hạn tài nguyên]
     B --> C[User / UID<br/>chạy non-root, user namespace]
     C --> D[Capabilities<br/>tách quyền root thành mảnh, bỏ bớt]
     D --> E[no_new_privs<br/>execve không cấp thêm quyền]
@@ -44,75 +42,74 @@ flowchart TD
     G --> H[(Kernel dùng chung)]
 ```
 
-Thứ tự vẽ chỉ để dễ hình dung, không phải thứ tự kernel đánh giá. Điều chắc chắn từ nguồn: danh sách LSM đang hoạt động phản ánh thứ tự kiểm tra, module capability luôn đứng đầu, rồi các LSM "minor", rồi LSM "major" (mục 6)[^lsm-checks].
+Thứ tự trong hình chỉ để dễ nhìn, không phải thứ tự kernel đánh giá. Điều chắc chắn từ nguồn là danh sách LSM đang hoạt động phản ánh thứ tự kiểm tra: module capability luôn đứng đầu, rồi các LSM "minor", rồi LSM "major" (mục 6)[^lsm-checks].
 
-Một nguyên tắc từ kernel docs về seccomp, áp dụng cho cả chương: lọc syscall không phải sandbox, mà là cơ chế *giảm bề mặt kernel bị lộ* và là công cụ cho người xây sandbox; chính sách hành vi nên kết hợp với biện pháp hardening khác và có thể một LSM[^seccomp-not-sandbox].
+Còn một nguyên tắc từ kernel docs về seccomp, áp dụng cho cả chương: lọc syscall không phải là sandbox. Nó là cơ chế giảm bề mặt kernel bị lộ, và là công cụ cho người xây sandbox; chính sách về hành vi nên kết hợp với các biện pháp hardening khác, có thể thêm một LSM[^seccomp-not-sandbox].
 
 <details><summary>Đi sâu: phạm vi chương và thứ tự LSM</summary>
 
-- Chương này dạy các **lớp giảm thiểu** mà kernel cung cấp và runtime bật lên; nó không khẳng định lỗ hổng cụ thể nào vì chưa có nguồn cho từng lỗ hổng.
+- Chương này dạy các **lớp giảm thiểu** mà kernel cung cấp và runtime bật lên. Nó không khẳng định lỗ hổng cụ thể nào vì chưa có nguồn cho từng lỗ hổng.
 - Quy tắc xếp tầng LSM: module capability luôn có mặt, theo sau là số lượng tùy ý LSM "minor" và tối đa một LSM "major"[^lsm-order]. Danh sách đang hoạt động đọc được ở `/sys/kernel/security/lsm`[^lsm-checks].
 
 </details>
 
-**Quay lại Q1:** container và host chung một kernel, nên an ninh container là chuyện thu hẹp những gì kernel đó phơi ra cho process — không phải ranh giới cứng như hypervisor.
+**Quay lại Q1:** container và host chung một kernel, nên an ninh container là chuyện thu hẹp những gì kernel đó phơi ra cho process, chứ không phải một ranh giới cứng như hypervisor; với `orders`, mỗi lớp ở các mục sau cắt bớt thứ kẻ tấn công với tới được.
 
 ## 2. Root trong container và root trên host (Q2)
 
-> **Trả lời ngắn.** Mặc định Docker *không* tách user namespace cho container[^docker-userns-default], nên UID 0 trong container chính là UID 0 của host về mặt định danh. Điều làm nó yếu hơn root thật không phải là UID mà là các lớp hạn chế bao quanh: capability bị cắt[^docker-reduced-root], seccomp[^docker-seccomp-sane], LSM[^docker-apparmor]. Muốn UID 0 chỉ là "giả" thì dùng user namespace (`userns-remap`, rootless); rẻ nhất là chạy ứng dụng bằng user không phải root[^docker-nonroot].
+> **Trả lời ngắn.** Mặc định Docker *không* tách user namespace cho container[^docker-userns-default], nên UID 0 trong container chính là UID 0 của host về mặt định danh. Thứ làm nó yếu hơn root thật là các lớp hạn chế bao quanh chứ không phải con số UID: trước hết là capability bị cắt bớt[^docker-reduced-root]. Seccomp chặn thêm một phần syscall[^docker-seccomp-sane], và Docker còn nạp sẵn profile AppArmor cho container[^docker-apparmor]. Muốn UID 0 chỉ còn là "giả" thì dùng user namespace (`userns-remap`, rootless); rẻ nhất là chạy ứng dụng bằng user không phải root[^docker-nonroot].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thẻ nhân viên mang số 0. Nếu tòa nhà dùng chung một bảng số thẻ với công ty mẹ thì thẻ "số 0" ở đâu cũng là thẻ số 0 thật; chỉ khi tòa nhà có bảng đánh số riêng (user namespace) thì "số 0" trong tòa nhà mới chỉ là bí danh của một thẻ thường bên ngoài.
+*Với service của bạn.* Giả sử process `orders` chạy với UID 0 trong container. Số 0 đó có nghĩa gì bên ngoài container? Nếu kẻ tấn công đang ở trong `orders`, đây là câu hỏi đầu tiên cần trả lời, vì nó quyết định "thoát container" là bước lên quyền root thật hay chỉ đáp xuống một UID vô hại. Mục này cho thấy mặc định là trường hợp thứ nhất, và những cách đổi sang trường hợp thứ hai.
 
-Cơ chế, từng bước:
+Cách trả lời là nhìn vào `/proc/self/uid_map`, file cho biết UID bên trong một namespace ứng với UID nào bên ngoài. Trong container mặc định, file này là ánh xạ đồng nhất trên toàn dải UID (kết quả bên dưới là quan sát):
 
-1. **Quan sát mặc định.** Trong container mặc định, `/proc/self/uid_map` là ánh xạ đồng nhất toàn dải (kết quả bên dưới là quan sát). `user_namespaces(7)` cho thấy chính dạng đó là thứ ta thấy ở initial user namespace[^userns-initial-map]. Suy ra (suy luận của người soạn): UID 0 trong container *là* UID 0 của initial user namespace.
+```text
+$ docker run --rm <image> cat /proc/self/uid_map
+         0          0 4294967295
+```
 
-   ```text
-   $ docker run --rm <image> cat /proc/self/uid_map
-            0          0 4294967295
-   ```
+`user_namespaces(7)` cho biết đây đúng là dạng ta thấy ở initial user namespace, tức namespace gốc của máy[^userns-initial-map]. Từ đó suy ra UID 0 trong container *là* UID 0 của initial user namespace (suy luận của người soạn).
 
-2. **User namespace tách định danh.** Một process có thể mang UID thường bên ngoài namespace nhưng UID 0 bên trong: toàn quyền cho thao tác trong namespace, không có quyền bên ngoài[^userns-isolate]. Một capability trong user namespace chỉ cho phép thao tác đặc quyền trên tài nguyên do các namespace (không phải user namespace) mà nó *sở hữu* quản lý[^userns-owns].
-3. **Docker có hai cách dùng ý tưởng này:**
-   - **`userns-remap`**: daemon vẫn chạy bằng root nhưng root trong container được ánh xạ vào dải UID phụ trong `/etc/subuid`, `/etc/subgid`; nếu process cố leo thang ra ngoài namespace thì trên host nó chỉ là một UID cao không đặc quyền[^docker-subuid].
-   - **Rootless mode**: chạy *cả daemon lẫn container* trong user namespace bằng user không phải root, để giảm thiểu lỗ hổng tiềm tàng của daemon và container runtime[^rootless-purpose][^rootless-how].
-4. **Rẻ nhất:** chạy ứng dụng bằng user không đặc quyền — Docker gọi đó là cách tốt nhất để chặn leo thang đặc quyền từ trong container[^docker-nonroot].
+Muốn UID 0 trong container thôi là root của host, cần user namespace để tách định danh. Với nó, một process có thể mang UID thường ở bên ngoài namespace nhưng UID 0 ở bên trong: toàn quyền với các thao tác trong namespace, không có quyền gì bên ngoài[^userns-isolate]. Lý do là một capability trong user namespace chỉ cho phép thao tác đặc quyền trên những tài nguyên do các namespace *sở hữu* (không tính user namespace) quản lý[^userns-owns].
+
+Docker dùng ý tưởng này theo hai cách:
+
+- **`userns-remap`**: daemon vẫn chạy bằng root, nhưng root trong container được ánh xạ vào dải UID phụ khai báo trong `/etc/subuid` và `/etc/subgid`. Nếu process cố leo thang ra ngoài namespace thì trên host nó chỉ là một UID cao, không đặc quyền[^docker-subuid].
+- **Rootless mode**: chạy *cả daemon lẫn container* trong user namespace, bằng một user không phải root. Mục đích là giảm thiểu lỗ hổng tiềm tàng của daemon và container runtime[^rootless-purpose]. Về cơ chế, cả daemon lẫn container đều chạy bên trong một user namespace[^rootless-how].
+
+Cách rẻ nhất thì không cần tính năng gì của Docker: cho `orders` chạy bằng user không đặc quyền. Docker gọi đó là cách tốt nhất để chặn leo thang đặc quyền từ trong container[^docker-nonroot].
 
 <details><summary>Đi sâu: <code>--user 1000:1000</code> và <code>execve</code></summary>
 
-- Quan sát (bảng mục 3): với `--user 1000:1000`, `CapEff` bằng 0 còn `CapBnd` vẫn là tập mặc định — UID non-root thu hẹp nguy cơ chứ không xóa nó.
-- Theo `capabilities(7)`, khi process có UID thực và hiệu dụng bằng 0 gọi `execve`, tập permitted mới được tính bằng inheritable OR bounding; man page nói công thức này cũng áp dụng khi process UID khác 0 chạy một chương trình setuid-root không gắn file capabilities[^cap-root-exec]. Nghĩa là user non-root vẫn có thể lấy lại capability (tối đa trong giới hạn bounding set) qua file setuid-root — đó là lý do cần `no_new_privs` (mục 4) (suy luận của người soạn từ man page).
+- Quan sát (bảng mục 3): với `--user 1000:1000`, `CapEff` bằng 0 còn `CapBnd` vẫn là tập mặc định. Nghĩa là UID non-root thu hẹp nguy cơ chứ không xóa nó.
+- Theo `capabilities(7)`, khi process có UID thực và hiệu dụng bằng 0 gọi `execve`, tập permitted mới được tính bằng inheritable OR bounding. Man page nói công thức này cũng áp dụng khi process UID khác 0 chạy một chương trình setuid-root không gắn file capabilities[^cap-root-exec]. Vậy user non-root vẫn có thể lấy lại capability (tối đa trong giới hạn bounding set) qua file setuid-root, và đó là lý do cần `no_new_privs` (mục 4); phần suy ra này là suy luận của người soạn từ man page.
 - Initial user namespace không có parent, nhưng kernel vẫn cung cấp file ánh xạ "giả" cho nó cho nhất quán[^userns-initial].
 
 </details>
 
-**Quay lại Q2:** mặc định "root trong container" là root thật theo nghĩa UID, chỉ bị kìm bởi capability/seccomp/LSM; user namespace hoặc chạy non-root mới đổi được bản chất đó.
+**Quay lại Q2:** mặc định "root trong container" là root thật theo nghĩa UID, chỉ bị kìm bởi capability, seccomp và LSM; user namespace hoặc chạy non-root mới đổi được bản chất đó.
 
 ## 3. Capabilities trong container (Q3)
 
-> **Trả lời ngắn.** Quyền root của Linux được chia thành nhiều "capability" riêng lẻ[^cap-divide]; Docker giữ lại một danh sách ngắn theo kiểu allowlist, bỏ phần còn lại[^docker-allowlist][^docker-default-list]. `--cap-drop`/`--cap-add` chỉnh danh sách đó, còn `--privileged` cho *tất cả* capability, mở mọi thiết bị host và nới AppArmor/SELinux[^docker-privileged]. Bạn tự đọc kết quả ở các trường `Cap*` của `/proc/self/status`[^proc-cap].
+> **Trả lời ngắn.** Quyền root của Linux được chia thành nhiều "capability" riêng lẻ[^cap-divide]. Docker giữ lại một danh sách ngắn theo kiểu allowlist và bỏ phần còn lại[^docker-allowlist]. Danh sách mặc định đó chỉnh được bằng `--cap-add` và `--cap-drop`[^docker-default-list]; còn `--privileged` cho *tất cả* capability, mở mọi thiết bị host và nới AppArmor/SELinux[^docker-privileged]. Muốn tự kiểm chứng, đọc các trường `Cap*` trong `/proc/self/status`[^proc-cap].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì một chìa khóa vạn năng, root là một chùm chìa khóa nhỏ — mở cổng thấp, đổi chủ file, gửi signal cho mọi process… Docker đưa cho container một chùm đã tháo bớt hầu hết chìa.
+*Với service của bạn.* Kẻ tấn công trong `orders` đang có UID 0, nhưng UID 0 chỉ là cái tên. Việc nó làm được hay không (đổi chủ file, gửi signal cho mọi process, mount filesystem…) là do capability của container quyết định. Mục này xem Docker để lại cho `orders` những capability nào, và làm sao bạn tự đọc ra điều đó. Hãy nhớ `orders` nghe ở cổng 8080, và thường không cần capability nào cả (nhận xét của người soạn); mọi capability còn lại chỉ có ích cho kẻ tấn công.
 
-Cơ chế, từng bước (khái niệm năm tập capability đã có ở [P1·06 §3](../01-linux/06-user-quyen-proc-sys.md); đây chỉ nhắc đủ để đọc số):
+Trước hết, capability là gì. Đặc quyền của superuser vốn là một khối; từ Linux 2.2, kernel chia khối đó thành các đơn vị riêng, và capability là thuộc tính của từng thread[^cap-divide]. Với mọi thao tác đặc quyền, kernel kiểm tra capability trong *effective set* của thread[^cap-effective]. Còn **bounding set** là cơ chế giới hạn những capability mà process có thể thu được qua `execve`[^cap-bounding]; runtime thu hẹp tập này để container không lấy lại quyền về sau (nhận xét của người soạn). Khái niệm năm tập capability đã có ở [P1·06 §3](../01-linux/06-user-quyen-proc-sys.md); ở đây chỉ nhắc đủ để đọc số.
 
-1. Từ Linux 2.2 kernel chia đặc quyền của superuser thành các đơn vị riêng; capability là thuộc tính của từng thread[^cap-divide].
-2. Với mọi thao tác đặc quyền, kernel kiểm tra capability trong *effective set* của thread[^cap-effective].
-3. **Bounding set** là cơ chế giới hạn những capability có thể thu được qua `execve`[^cap-bounding]; runtime thu hẹp nó để container không lấy lại quyền sau này (nhận xét của người soạn).
-4. Docker làm theo allowlist: mặc định bỏ hết capability trừ những cái cần[^docker-allowlist]; tài liệu `docker run` nói có thể tinh chỉnh bằng `--cap-add`/`--cap-drop` và Docker có danh sách mặc định được giữ lại[^docker-default-list]. Bảng của Docker liệt kê cả `NET_RAW` (dùng socket RAW/PACKET)[^docker-net-raw] và `NET_BIND_SERVICE` (bind cổng dưới 1024)[^docker-net-bind].
-5. Best practice của Docker: bỏ hết capability trừ những cái tiến trình thật sự cần[^docker-best-practice] — tức `--cap-drop=ALL` rồi chỉ `--cap-add` thứ cần.
-6. `CAP_SYS_ADMIN` là "túi tạp": man page, trong phần dành cho người phát triển kernel, khuyên đừng chọn nó nếu tránh được và nói có thể gọi nó là "root mới" vì phạm vi quyền rất rộng[^cap-sysadmin]. Vì vậy `--cap-add=SYS_ADMIN` cấp một quyền rất rộng, gần với `--privileged` hơn vẻ ngoài (nhận xét của người soạn).
-7. `--privileged` không chỉ "thêm capability": tài liệu Docker nói nó cho mọi capability, mở mọi thiết bị host và cấu hình lại AppArmor/SELinux để container gần như có quyền như process ngoài container[^docker-privileged].
+Docker xử lý theo allowlist: mặc định bỏ hết capability trừ những cái cần[^docker-allowlist]. Tài liệu `docker run` cho tinh chỉnh bằng `--cap-add` và `--cap-drop` quanh một danh sách mặc định được giữ lại[^docker-default-list]. Danh sách có `NET_RAW`, dùng cho socket RAW và PACKET[^docker-net-raw]. Nó cũng có `NET_BIND_SERVICE`, cho phép bind cổng dưới 1024[^docker-net-bind]. Best practice của Docker là bỏ hết capability trừ những cái tiến trình thật sự cần[^docker-best-practice], tức `--cap-drop=ALL` rồi chỉ `--cap-add` thứ cần.
+
+Có hai chỗ dễ nhầm khi thêm capability. Thứ nhất là `CAP_SYS_ADMIN`, một "túi tạp": trong phần dành cho người phát triển kernel, man page khuyên đừng chọn nó nếu tránh được và nói có thể gọi nó là "root mới" vì phạm vi quyền rất rộng[^cap-sysadmin]. Vì vậy `--cap-add=SYS_ADMIN` cấp một quyền rất rộng, gần với `--privileged` hơn vẻ ngoài (nhận xét của người soạn). Thứ hai là chính `--privileged`: nó không chỉ "thêm capability". Tài liệu Docker nói nó cho mọi capability, mở mọi thiết bị host và cấu hình lại AppArmor/SELinux để container gần như có quyền như process ngoài container[^docker-privileged].
 
 <details><summary>Đi sâu: giải mã <code>CapEff</code>, bảng so sánh các chế độ</summary>
 
 `CapEff` quan sát trong container mặc định là `00000000a80425fb`. `capsh --decode` giải ra đúng 14 capability (kết quả chạy thật): `cap_chown, cap_dac_override, cap_fowner, cap_fsetid, cap_kill, cap_setgid, cap_setuid, cap_setpcap, cap_net_bind_service, cap_net_raw, cap_sys_chroot, cap_mknod, cap_audit_write, cap_setfcap`. Những thứ **không** có: `CAP_SYS_ADMIN`, `CAP_NET_ADMIN`, `CAP_SYS_PTRACE`, `CAP_SYS_MODULE`, `CAP_SYS_TIME`…
 
-Cách đọc các trường: `CapInh/CapPrm/CapEff` là mask hex của các tập inheritable/permitted/effective, `CapBnd` là bounding set[^proc-cap]; `Seccomp` là `0` (disabled), `1` (strict) hoặc `2` (filter)[^proc-seccomp]; `NoNewPrivs` là bit `no_new_privs` (trường này có trong `/proc` từ Linux 4.10)[^proc-nnp].
+Cách đọc các trường: `CapInh`, `CapPrm`, `CapEff` là mask hex của các tập inheritable, permitted, effective, còn `CapBnd` là bounding set[^proc-cap]. `Seccomp` là `0` (disabled), `1` (strict) hoặc `2` (filter)[^proc-seccomp]. `NoNewPrivs` là bit `no_new_privs` (trường này có trong `/proc` từ Linux 4.10)[^proc-nnp].
 
 Lệnh dùng cho bảng:
 
@@ -136,23 +133,21 @@ Quan sát (mỗi dòng là một lần chạy):
 
 </details>
 
-**Quay lại Q3:** Docker giữ 14 capability (`CapEff = a80425fb`), `--cap-drop=ALL` về 0, `--privileged` bật tất cả và còn mở thiết bị, nới LSM.
+**Quay lại Q3:** Docker giữ 14 capability (`CapEff = a80425fb`), `--cap-drop=ALL` về 0, `--privileged` bật tất cả và còn mở thiết bị, nới LSM; với `orders`, 14 cái đó phần lớn là thừa.
 
 ## 4. `no_new_privs` (Q4)
 
-> **Trả lời ngắn.** `no_new_privs` là một bit mà process tự đặt; một khi đặt thì không gỡ được, và `execve` sau đó hứa không cấp đặc quyền nào mà process chưa có[^nnp-mechanism]. Nó chặn con đường "chạy chương trình setuid/có file capabilities để lấy lại quyền"[^nnp-problem]. Nó không chặn các thay đổi đặc quyền không đi qua `execve`[^nnp-limits].
+> **Trả lời ngắn.** `no_new_privs` là một bit mà process tự đặt cho mình. Đã đặt thì không gỡ được, và từ đó `execve` hứa không cấp cho chương trình mới đặc quyền nào mà process chưa có[^nnp-mechanism]. Bit này bịt con đường "chạy chương trình setuid hoặc có file capabilities để lấy lại quyền"[^nnp-problem]. Nó không chặn các thay đổi đặc quyền không đi qua `execve`[^nnp-limits].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đã bị tước bớt quyền ở cổng vào, nhưng trong phòng có tủ "mượn quyền" — mở tủ (chạy file setuid) là lấy lại quyền cũ. `no_new_privs` là khóa cái tủ đó lại, và khóa không mở được nữa.
+*Với service của bạn.* Giả sử ta đã cắt capability và chạy `orders` bằng user thường, nhưng trong image còn sót một chương trình setuid-root (nhận xét của người soạn: giả định). Kẻ tấn công chỉ cần chạy chương trình đó là lấy lại quyền vừa bị tước. Mục này nói bit `no_new_privs` khóa con đường ấy thế nào, và nó khóa được tới đâu.
 
-Cơ chế, từng bước:
+Gốc của vấn đề nằm ở `execve`: nó có thể cấp cho chương trình mới những đặc quyền mà process cha không có, rõ nhất là chương trình setuid/setgid và file capabilities[^nnp-problem]. `no_new_privs` (từ Linux 3.5) là cơ chế chung để cắt đường này[^nnp-since]. Task nào cũng đặt được bit, bit được thừa kế qua `fork`, `clone`, `execve` và không thể gỡ[^nnp-mechanism]. Khi bit đã đặt, bit setuid/setgid không còn đổi được uid/gid[^nnp-setuid]. Process tự đặt bằng `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`[^nnp-prctl].
 
-1. `execve` có thể cấp cho chương trình mới những đặc quyền mà cha nó không có; ví dụ rõ nhất là chương trình setuid/setgid và file capabilities[^nnp-problem].
-2. Bit `no_new_privs` (từ Linux 3.5[^nnp-since]) là cơ chế chung: task nào cũng đặt được, được thừa kế qua `fork`, `clone`, `execve`, và không thể gỡ[^nnp-mechanism].
-3. Khi bit đã đặt, bit setuid/setgid không còn đổi uid/gid[^nnp-setuid]. Đặt bằng `prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0)`[^nnp-prctl].
-4. Docker bật bằng `--security-opt no-new-privileges`[^docker-nnp-flag]; Kubernetes bằng `allowPrivilegeEscalation: false` (mục 7).
-5. Thí nghiệm (quan sát): trong container root, tạo bản sao `id` có bit setuid rồi chạy dưới UID 1000 bằng `setpriv`:
+Với container, runtime đặt bit giúp bạn. Docker bật bằng `--security-opt no-new-privileges`[^docker-nnp-flag], còn Kubernetes bằng `allowPrivilegeEscalation: false` (mục 7).
+
+Ta thử trong một container root: tạo bản sao `id` mang bit setuid rồi chạy dưới UID 1000 bằng `setpriv`. Kết quả (quan sát):
 
 | Chế độ | `NoNewPrivs` | `id -u` của file setuid-root chạy dưới UID 1000 |
 |---|---|---|
@@ -161,31 +156,33 @@ Cơ chế, từng bước:
 
 <details><summary>Đi sâu: giới hạn, tương tác với LSM và seccomp</summary>
 
-- Giới hạn: `no_new_privs` không ngăn thay đổi đặc quyền không qua `execve`; một task đủ quyền vẫn gọi được `setuid(2)` hoặc nhận `SCM_RIGHTS`[^nnp-limits].
-- LSM: khi `no_new_privs` đặt, LSM cũng có thể không siết thêm ràng buộc lúc `exec`; kernel docs cảnh báo điều này có thể cản sandbox dựa trên LSM nếu launcher đặt bit trước khi exec daemon[^nnp-lsm].
-- Liên hệ seccomp: để cài filter bằng `SECCOMP_SET_MODE_FILTER`, thread phải có `CAP_SYS_ADMIN` trong user namespace của nó *hoặc* đã đặt `no_new_privs`[^seccomp-setmode] — nên hai cơ chế hay đi cùng nhau (nhận xét của người soạn).
+- Giới hạn: `no_new_privs` không ngăn thay đổi đặc quyền không qua `execve`. Một task đủ quyền vẫn gọi được `setuid(2)` hoặc nhận `SCM_RIGHTS`[^nnp-limits].
+- LSM: khi `no_new_privs` đặt, LSM cũng có thể không siết thêm ràng buộc lúc `exec`. Kernel docs cảnh báo điều này có thể cản sandbox dựa trên LSM nếu launcher đặt bit trước khi exec daemon[^nnp-lsm].
+- Liên hệ seccomp: để cài filter bằng `SECCOMP_SET_MODE_FILTER`, thread phải có `CAP_SYS_ADMIN` trong user namespace của nó *hoặc* đã đặt `no_new_privs`[^seccomp-setmode]. Vì vậy hai cơ chế hay đi cùng nhau (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q4:** `no_new_privs` khóa con đường lấy lại quyền qua `execve` (setuid, file capabilities); nó không bịt các đường đổi quyền khác.
+**Quay lại Q4:** `no_new_privs` khóa con đường lấy lại quyền qua `execve` (setuid, file capabilities) và không bịt các đường đổi quyền khác; với `orders`, nó biến chương trình setuid sót trong image thành vô hại.
 
 ## 5. seccomp-bpf: lọc syscall (Q5)
 
-> **Trả lời ngắn.** seccomp cho process cài một bộ lọc nhỏ (chương trình BPF) xét từng syscall đến và đối số của nó[^kdoc-seccomp-intro]. Mỗi syscall nhận một action như từ chối với `errno`[^act-errno], giết process hay cho chạy. Profile mặc định của Docker là allowlist: syscall bị từ chối trừ danh sách được mở[^docker-seccomp-errno], và nhiều syscall nhạy cảm (`unshare`, `mount`…) chỉ được mở khi container có capability tương ứng (đọc từ JSON ghim tag, xem Đi sâu)[^moby-sysadmin] — nên `unshare` thất bại trong container thường và chạy được khi tắt seccomp.
+> **Trả lời ngắn.** seccomp cho một process cài bộ lọc nhỏ (chương trình BPF) để xét từng syscall đến cùng đối số của nó[^kdoc-seccomp-intro]. Mỗi syscall nhận một action, chẳng hạn từ chối với `errno`[^act-errno], giết process hoặc cho chạy. Profile mặc định của Docker là allowlist: syscall nào không nằm trong danh sách được mở thì bị từ chối[^docker-seccomp-errno]. Nhiều syscall nhạy cảm như `unshare` hay `mount` chỉ được mở khi container có capability tương ứng[^moby-sysadmin] (đọc từ JSON ghim tag, xem Đi sâu). Vì thế `unshare` thất bại trong container thường và chạy được khi tắt seccomp.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): capability là phiếu "bạn được làm loại việc nào"; seccomp là bảo vệ ở cửa kernel cầm danh sách tên syscall, xét từng syscall ngay khi nó tới — kể cả syscall không gắn capability nào.
+*Với service của bạn.* Capability chặn theo "loại việc"; nhưng kẻ tấn công trong `orders` còn có thể thử thẳng các syscall hiếm, ví dụ `unshare` để dựng namespace mới hay `io_uring`. Mục này cho thấy filter của seccomp chặn chúng thế nào, và giải thích một quan sát hay gây ngạc nhiên: `unshare -U` lỗi trong container Docker thường, trong khi kernel cho user thường làm việc đó.
 
-Cơ chế, từng bước:
+Cái cần cắt là bề mặt kernel bị lộ, nên ta cắt hẳn các syscall không cần[^seccomp-not-sandbox]. Bộ lọc là chương trình BPF xét số syscall và đối số của nó[^kdoc-seccomp-intro]. Man page nói nó có thể được thiết kế để lọc tùy ý syscall và đối số[^seccomp-filter-args].
 
-1. **Bài toán.** Để giảm bề mặt kernel bị lộ, ta cắt hẳn các syscall không cần[^seccomp-not-sandbox]. Bộ lọc là chương trình BPF xét số syscall và đối số[^kdoc-seccomp-intro]; nó có thể được thiết kế để lọc tùy ý syscall và đối số[^seccomp-filter-args].
-2. **Kế thừa.** Nếu filter cho phép `fork`/`clone` thì con chịu cùng filter; nếu cho phép `execve` thì filter được giữ qua `execve`[^seccomp-inherit]. Vì vậy filter do runtime cài trước khi `exec` ứng dụng áp dụng lên cả ứng dụng và con cháu (suy luận của người soạn).
-3. **Action.** Nhiều filter có thể xếp chồng; kết quả là action có ưu tiên cao nhất mà các filter trả về[^seccomp-precedence]. Ba cách phản ứng chính: giết process/thread[^act-kill-process][^act-kill-thread], trả `errno` mà không chạy syscall[^act-errno], hoặc cho chạy[^act-allow] (bảng đầy đủ ở phần Đi sâu).
-4. **Profile Docker là allowlist.** Docker nói profile mặc định chặn khoảng 44 trên hơn 300 syscall và "khá bảo vệ mà vẫn tương thích rộng"[^docker-seccomp-sane]. Nó đặt `defaultAction` là `SCMP_ACT_ERRNO` rồi ghi đè riêng cho từng syscall được cho phép; hiệu ứng là lỗi Permission Denied[^docker-seccomp-errno].
-5. **Phụ thuộc capability.** Nhiều khối trong profile có điều kiện `caps`. Ví dụ `unshare`, `mount`, `setns` chỉ được mở khi container có `CAP_SYS_ADMIN` (đọc từ JSON ghim, xem Đi sâu) — nên thêm capability cũng mở luôn các syscall này trong seccomp.
-6. **Vì sao `unshare` thất bại.** Theo man page, từ Linux 3.8 process không đặc quyền tạo được user namespace[^userns-unpriv]. Bảng quan sát ở Đi sâu cho thấy trên máy thí nghiệm `unshare -U` chạy được khi tắt seccomp hoặc khi có `SYS_ADMIN`, nên ở đó kernel không phải thủ phạm mà chính filter của Docker chặn nó (suy luận của người soạn, khớp với JSON).
-7. **Tắt seccomp:** `--security-opt seccomp=unconfined`[^docker-unconfined]. Lưu ý: `./labs/linux.sh` của dự án chạy với cờ này và thêm `SYS_PTRACE`, `NET_ADMIN`, `NET_RAW` (xem `labs/linux.sh`), nên container lab **không có seccomp** và khác container Docker mặc định.
+Filter cài một lần thì đi theo process mãi. Nếu filter cho phép `fork` hoặc `clone`, process con chịu cùng filter; nếu cho phép `execve`, filter được giữ qua `execve`[^seccomp-inherit]. Vì vậy filter do runtime cài trước khi `exec` ứng dụng áp dụng lên cả `orders` lẫn mọi process con cháu (suy luận của người soạn).
+
+Với mỗi syscall, kết quả là một *action*. Nhiều filter có thể xếp chồng, và action thắng là action có ưu tiên cao nhất mà các filter trả về[^seccomp-precedence]. Phản ứng nặng nhất là giết cả process, kèm core dump[^act-kill-process]. Nhẹ hơn là giết riêng thread gọi syscall[^act-kill-thread]. Filter cũng có thể trả `errno` mà không chạy syscall[^act-errno], hoặc cho syscall chạy[^act-allow]. Bảng đầy đủ nằm ở phần Đi sâu.
+
+Docker chọn kiểu allowlist. Profile mặc định chặn khoảng 44 trên hơn 300 syscall và được Docker mô tả là "khá bảo vệ mà vẫn tương thích rộng"[^docker-seccomp-sane]. Nó đặt `defaultAction` là `SCMP_ACT_ERRNO`, rồi ghi đè riêng cho từng syscall được phép; hiệu ứng là lỗi Permission Denied[^docker-seccomp-errno]. Nhiều khối trong profile còn có điều kiện `caps`: `unshare`, `mount`, `setns` chỉ được mở khi container có `CAP_SYS_ADMIN` (đọc từ JSON ghim, xem Đi sâu). Do đó thêm capability cũng mở luôn các syscall này trong seccomp.
+
+Giờ quay lại câu hỏi `unshare`. Kernel cho process không đặc quyền tạo user namespace từ Linux 3.8[^userns-unpriv]. Nhưng bảng quan sát ở Đi sâu cho thấy trên máy thí nghiệm, `unshare -U` chạy được khi tắt seccomp hoặc khi có `SYS_ADMIN`. Vậy kernel không phải thủ phạm; chính filter của Docker chặn nó (suy luận của người soạn, khớp với JSON).
+
+Muốn tắt seccomp thì dùng `--security-opt seccomp=unconfined`[^docker-unconfined]. Lưu ý: `./labs/linux.sh` của dự án chạy với cờ này và thêm `SYS_PTRACE`, `NET_ADMIN`, `NET_RAW` (xem `labs/linux.sh`), nên container lab **không có seccomp** và khác container Docker mặc định.
 
 <details><summary>Đi sâu: action, cấu trúc JSON ghim tag, bảng thí nghiệm, đối chiếu docs</summary>
 
@@ -199,18 +196,18 @@ Cơ chế, từng bước:
 | `SECCOMP_RET_TRACE` | thông báo tracer dùng ptrace; nếu không có tracer, syscall không chạy và trả `ENOSYS`[^act-trace] |
 | `SECCOMP_RET_ALLOW` | syscall được thực thi[^act-allow] |
 
-Còn `TRAP` (gửi `SIGSYS` cho thread gọi, syscall không chạy[^act-trap]), `USER_NOTIF` (từ 5.0; chuyển syscall cho tiến trình giám sát ở user space quyết định[^act-usernotif]), `LOG` (từ 4.14; ghi log rồi cho syscall chạy[^act-log]); action không nhận ra được xử lý như kill[^act-unknown]. Cạm bẫy lớn nhất theo kernel docs: lọc theo số syscall mà không kiểm kiến trúc — "luôn kiểm giá trị arch"[^kdoc-arch].
+Còn `TRAP` (gửi `SIGSYS` cho thread gọi, syscall không chạy[^act-trap]), `USER_NOTIF` (từ 5.0; chuyển syscall cho tiến trình giám sát ở user space quyết định[^act-usernotif]), `LOG` (từ 4.14; ghi log rồi cho syscall chạy[^act-log]); action không nhận ra được xử lý như kill[^act-unknown]. Cạm bẫy lớn nhất theo kernel docs: lọc theo số syscall mà không kiểm kiến trúc, nên "luôn kiểm giá trị arch"[^kdoc-arch].
 
-**Cấu trúc profile.** Để khỏi dựa vào trí nhớ về JSON, tôi tải file ghim tag Moby `v28.0.0` (`profiles/seccomp/default.json`) và đọc trực tiếp. *Lưu ý ghim:* đây là snapshot của tag `v28.0.0`; engine bạn chạy (máy thí nghiệm là Docker 29.5.2) có thể dùng JSON khác, và trang docs Docker (không ghim) cập nhật theo bản mới nhất — cần đối chiếu theo phiên bản.
+**Cấu trúc profile.** Để khỏi dựa vào trí nhớ về JSON, phần này đọc trực tiếp file `profiles/seccomp/default.json` ở tag Moby `v28.0.0`. *Lưu ý ghim:* đây là snapshot của tag `v28.0.0`; engine bạn chạy (máy thí nghiệm là Docker 29.5.2) có thể dùng JSON khác, và trang docs Docker (không ghim) cập nhật theo bản mới nhất, nên cần đối chiếu theo phiên bản.
 
-- Đầu file: `defaultAction: SCMP_ACT_ERRNO`, `defaultErrnoRet: 1` (EPERM, "Operation not permitted" theo `errno(3)`)[^moby-default][^errno-eperm], rồi `archMap` liệt kê kiến trúc (x86-64, AArch64, MIPS, s390x, RISC-V…).
+- Đầu file: `defaultAction: SCMP_ACT_ERRNO`, `defaultErrnoRet: 1` (EPERM, "Operation not permitted" theo `errno(3)`)[^moby-default]. Giá trị EPERM đối chiếu với `errno(3)`[^errno-eperm]. Tiếp theo là `archMap` liệt kê kiến trúc (x86-64, AArch64, MIPS, s390x, RISC-V…).
 - `syscalls`: danh sách khối `names` + `action`. Khối đầu (352 tên) là `SCMP_ACT_ALLOW` vô điều kiện (đếm bằng script trên file đó); các khối sau là ngoại lệ có điều kiện.
-- Điều kiện theo capability: khối `includes: caps: [CAP_SYS_ADMIN]` cho phép 23 syscall (gồm `unshare`, `mount`, `umount`, `umount2`, `setns`, `bpf`, `clone`, `clone3`, `perf_event_open`, `quotactl`, `sethostname`, `fsopen`/`fsmount`/`move_mount`…) **chỉ khi container có `CAP_SYS_ADMIN`**; tương tự `reboot` cần `CAP_SYS_BOOT`, `init_module`/`finit_module`/`delete_module` cần `CAP_SYS_MODULE`, `settimeofday`/`clock_settime` cần `CAP_SYS_TIME`, `ptrace` cần `CAP_SYS_PTRACE` (trừ kernel ≥ 4.8: khối `minKernel: 4.8` cho phép riêng `ptrace`, `process_vm_readv`, `process_vm_writev`). Hai syscall `bpf` và `perf_event_open` còn có **khối riêng** ở cuối file: `bpf` được mở khi container có `CAP_BPF`, `perf_event_open` được mở khi container có `CAP_PERFMON`[^moby-bpf-perf] — nên `--cap-add PERFMON` (hoặc `BPF`) đủ để seccomp mặc định cho qua syscall tương ứng, không cần `SYS_ADMIN` hay tắt seccomp (đọc từ JSON `v28.0.0`; engine khác có thể khác). Cách dùng cho perf/eBPF: [P11 · Chương 01, mục 8](../11-do-dac-va-go-loi/01-perf-va-sampling-profiler.md).
-- Điều kiện theo đối số: `socket` chỉ được phép nếu đối số 0 (domain) khác 40 (giá trị `AF_VSOCK` — suy luận của người soạn từ giá trị hằng số); `personality` chỉ cho vài giá trị; `clone` khi không có `CAP_SYS_ADMIN` chỉ được phép nếu cờ không chứa bit nào của mặt nạ `2114060288` (= `0x7E020000`; tôi tính là tổng 7 cờ `CLONE_NEWNS`, `CLONE_NEWCGROUP`, `CLONE_NEWUTS`, `CLONE_NEWIPC`, `CLONE_NEWUSER`, `CLONE_NEWPID`, `CLONE_NEWNET` — suy luận của người soạn từ giá trị các hằng số; mặt nạ này không gồm `CLONE_NEWTIME`).
-- `clone3` khi không có `CAP_SYS_ADMIN` trả `errnoRet: 38` — `ENOSYS`[^errno-enosys]. Lý do (suy luận của người soạn): `clone3` truyền cờ qua struct nên BPF không kiểm được cờ.
+- Điều kiện theo capability: khối `includes: caps: [CAP_SYS_ADMIN]` cho phép 23 syscall (gồm `unshare`, `mount`, `umount`, `umount2`, `setns`, `bpf`, `clone`, `clone3`, `perf_event_open`, `quotactl`, `sethostname`, `fsopen`/`fsmount`/`move_mount`…) **chỉ khi container có `CAP_SYS_ADMIN`**; tương tự `reboot` cần `CAP_SYS_BOOT`, `init_module`/`finit_module`/`delete_module` cần `CAP_SYS_MODULE`, `settimeofday`/`clock_settime` cần `CAP_SYS_TIME`, `ptrace` cần `CAP_SYS_PTRACE` (trừ kernel ≥ 4.8: khối `minKernel: 4.8` cho phép riêng `ptrace`, `process_vm_readv`, `process_vm_writev`). Hai syscall `bpf` và `perf_event_open` còn có **khối riêng** ở cuối file: `bpf` được mở khi container có `CAP_BPF`, `perf_event_open` được mở khi container có `CAP_PERFMON`[^moby-bpf-perf]. Nên `--cap-add PERFMON` (hoặc `BPF`) đủ để seccomp mặc định cho qua syscall tương ứng, không cần `SYS_ADMIN` hay tắt seccomp (đọc từ JSON `v28.0.0`; engine khác có thể khác). Cách dùng cho perf/eBPF: [P11 · Chương 01, mục 8](../11-do-dac-va-go-loi/01-perf-va-sampling-profiler.md).
+- Điều kiện theo đối số: `socket` chỉ được phép nếu đối số 0 (domain) khác 40 (giá trị `AF_VSOCK`; suy luận của người soạn từ giá trị hằng số). `personality` chỉ cho vài giá trị. `clone` khi không có `CAP_SYS_ADMIN` chỉ được phép nếu cờ không chứa bit nào của mặt nạ `2114060288` (= `0x7E020000`; suy luận của người soạn từ giá trị các hằng số: đây là tổng 7 cờ `CLONE_NEWNS`, `CLONE_NEWCGROUP`, `CLONE_NEWUTS`, `CLONE_NEWIPC`, `CLONE_NEWUSER`, `CLONE_NEWPID`, `CLONE_NEWNET`; mặt nạ này không gồm `CLONE_NEWTIME`).
+- `clone3` khi không có `CAP_SYS_ADMIN` trả `errnoRet: 38`, tức `ENOSYS`[^errno-enosys]. Lý do (suy luận của người soạn): `clone3` truyền cờ qua struct nên BPF không kiểm được cờ.
 - Không có trong allowlist nên bị `ERRNO`: `keyctl`, `add_key`, `kexec_load`, `userfaultfd`, `swapon`, `pivot_root`, và cả họ `io_uring_*` (grep file: không có chuỗi `io_uring`).
 
-**Đối chiếu bảng lý do của Docker** (trang không ghim): `keyctl`/`add_key`/`request_key` — chặn vì keyring không namespaced[^docker-tbl-keyctl]; `mount` — chặn, đã có `CAP_SYS_ADMIN` gác[^docker-tbl-mount]; `settimeofday` — thời gian không namespaced, còn có `CAP_SYS_TIME` gác[^docker-tbl-time]; họ `io_uring` — chặn vì lỗ hổng có thể bị khai thác để thoát container[^docker-tbl-iouring]. Với `unshare`, bảng ghi chặn cloning namespace mới, có `CAP_SYS_ADMIN` gác, ngoại lệ cho `unshare --user`[^docker-tbl-unshare], và với `clone` ghi ngoại lệ cho `CLONE_NEWUSER`[^docker-tbl-clone] — **lệch với quan sát** bên dưới (`unshare -U` bị chặn ở container mặc định) và với JSON `v28.0.0` (`unshare` chỉ nằm trong khối `CAP_SYS_ADMIN`; mặt nạ `clone` ở trên gồm cả `CLONE_NEWUSER` theo giá trị hằng số tôi tính); tôi không có nguồn để lý giải sự lệch này (có thể do khác phiên bản giữa trang docs và JSON). Nhiều syscall vừa bị seccomp vừa bị capability chặn (phòng thủ nhiều lớp); với `keyctl` bảng chỉ nêu lý do keyring không namespaced, không nêu capability nào gác (suy luận của người soạn: ở đó seccomp là lớp bảo vệ chính).
+**Đối chiếu bảng lý do của Docker** (trang không ghim): `keyctl`/`add_key`/`request_key` bị chặn vì keyring không namespaced[^docker-tbl-keyctl]; `mount` bị chặn, đã có `CAP_SYS_ADMIN` gác[^docker-tbl-mount]; `settimeofday` bị chặn vì thời gian không namespaced, còn có `CAP_SYS_TIME` gác[^docker-tbl-time]; họ `io_uring` bị chặn vì lỗ hổng có thể bị khai thác để thoát container[^docker-tbl-iouring]. Với `unshare`, bảng ghi chặn cloning namespace mới, có `CAP_SYS_ADMIN` gác, ngoại lệ cho `unshare --user`[^docker-tbl-unshare]. Với `clone`, bảng ghi ngoại lệ cho `CLONE_NEWUSER`[^docker-tbl-clone]. Cả hai ghi chú này **lệch với quan sát** bên dưới (`unshare -U` bị chặn ở container mặc định) và với JSON `v28.0.0` (`unshare` chỉ nằm trong khối `CAP_SYS_ADMIN`; mặt nạ `clone` ở trên gồm cả `CLONE_NEWUSER`, theo giá trị hằng số). Chương này chưa có nguồn để lý giải sự lệch đó (có thể do khác phiên bản giữa trang docs và JSON). Nhiều syscall vừa bị seccomp vừa bị capability chặn (phòng thủ nhiều lớp); với `keyctl` bảng chỉ nêu lý do keyring không namespaced, không nêu capability nào gác (suy luận của người soạn: ở đó seccomp là lớp bảo vệ chính).
 
 **Quan sát thao tác đặc quyền** (cùng image; `unshare -U`, `unshare -m`, `mount -t tmpfs`, `chown 1:1 file`):
 
@@ -223,7 +220,7 @@ Còn `TRAP` (gửi `SIGSYS` cho thread gọi, syscall không chạy[^act-trap]),
 | `--privileged` | ok | ok | ok | ok |
 | `--user 1000:1000` | Operation not permitted | Operation not permitted | `must be superuser` | Operation not permitted |
 
-Đối chiếu: (1) `unshare -U` chỉ chạy khi có `SYS_ADMIN` hoặc tắt seccomp — khớp JSON ghim, nơi `unshare` chỉ nằm trong khối `CAP_SYS_ADMIN`; kernel cho phép từ 3.8[^userns-unpriv]. Nói cách khác, việc `unshare -U` chạy được trong lab (xem [P8 · Chương 02](./02-namespaces.md)) không chỉ nhờ quy tắc kernel mà còn vì lab tắt seccomp (nhận xét của người soạn từ bảng trên). (2) `--cap-drop=ALL` làm `chown` lỗi vì mất `CAP_CHOWN`; `--user 1000:1000` có `CapEff` = 0 (mục 2). `unshare -m` vẫn lỗi khi chỉ tắt seccomp vì tạo mount namespace cần `CAP_SYS_ADMIN` trong user namespace của caller[^userns-unpriv]. (3) Với `--cap-add SYS_ADMIN` (seccomp cho phép `mount`), `mount -t tmpfs` vẫn thất bại; chỉ `--privileged` làm `mount` thành công. Chưa có log denial của kernel cho đúng lệnh này, nhưng quan sát ở [P8 · Chương 07, mục 2.3](./07-mang-container.md) cho thấy một thao tác mount khác (`mount --make-shared /run/netns`) vẫn lỗi khi có `SYS_ADMIN` với AppArmor mặc định và chỉ qua khi thêm `apparmor=unconfined` (thêm riêng `seccomp=unconfined` không đủ); nên nhiều khả năng profile AppArmor `docker-default` là lớp chặn ở đây (suy luận của người soạn từ quan sát đó).
+Đối chiếu: (1) `unshare -U` chỉ chạy khi có `SYS_ADMIN` hoặc tắt seccomp, khớp JSON ghim, nơi `unshare` chỉ nằm trong khối `CAP_SYS_ADMIN`; kernel cho phép từ 3.8[^userns-unpriv]. Nói cách khác, việc `unshare -U` chạy được trong lab (xem [P8 · Chương 02](./02-namespaces.md)) không chỉ nhờ quy tắc kernel mà còn vì lab tắt seccomp (nhận xét của người soạn từ bảng trên). (2) `--cap-drop=ALL` làm `chown` lỗi vì mất `CAP_CHOWN`; `--user 1000:1000` có `CapEff` = 0 (mục 2). `unshare -m` vẫn lỗi khi chỉ tắt seccomp vì tạo mount namespace cần `CAP_SYS_ADMIN` trong user namespace của caller[^userns-unpriv]. (3) Với `--cap-add SYS_ADMIN` (seccomp cho phép `mount`), `mount -t tmpfs` vẫn thất bại; chỉ `--privileged` làm `mount` thành công. Chưa có log denial của kernel cho đúng lệnh này, nhưng quan sát ở [P8 · Chương 07, mục 2.3](./07-mang-container.md) cho thấy một thao tác mount khác (`mount --make-shared /run/netns`) vẫn lỗi khi có `SYS_ADMIN` với AppArmor mặc định và chỉ qua khi thêm `apparmor=unconfined` (thêm riêng `seccomp=unconfined` không đủ); nên nhiều khả năng profile AppArmor `docker-default` là lớp chặn ở đây (suy luận của người soạn từ quan sát đó).
 
 </details>
 
@@ -231,51 +228,55 @@ Còn `TRAP` (gửi `SIGSYS` cho thread gọi, syscall không chạy[^act-trap]),
 
 ## 6. LSM (AppArmor/SELinux), rootfs read-only và `docker.sock` (Q6)
 
-> **Trả lời ngắn.** LSM là khung của kernel cho phép các module như AppArmor, SELinux áp chính sách truy cập bắt buộc (MAC)[^lsm-framework][^lsm-mac]; với AppArmor, đó là hạn chế vượt quá quyền DAC thông thường của Linux[^apparmor-policy]. Docker không thay thế chúng: nó tự nạp profile AppArmor `docker-default`, còn Red Hat có chính sách SELinux cho Docker[^docker-apparmor][^docker-templates]. Hai cấu hình ngoài kernel cũng quyết định an ninh: `--read-only` chặn ghi vào rootfs[^docker-ro]; còn mount `docker.sock` vào container ứng dụng tương đương trao quyền điều khiển daemon của host[^docker-sock-run].
+> **Trả lời ngắn.** LSM là khung để gắn thêm các kiểm tra an ninh vào kernel[^lsm-framework]. Module dùng khung này điển hình là AppArmor và SELinux, thuộc nhóm MAC (Mandatory Access Control, chính sách truy cập bắt buộc)[^lsm-mac]. Với AppArmor, chính sách đặt hạn chế vượt quá quyền DAC thông thường của Linux[^apparmor-policy]. Docker không thay thế các module này mà dùng chúng: nó nạp sẵn profile AppArmor `docker-default`[^docker-apparmor], còn Red Hat có chính sách SELinux cho Docker[^docker-templates]. Ngoài kernel, hai cấu hình khác cũng quyết định an ninh: `--read-only` chặn ghi vào rootfs[^docker-ro], còn mount `docker.sock` vào container ứng dụng tương đương trao quyền điều khiển daemon của host[^docker-sock-run].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): LSM là bảo vệ thứ hai đứng sau cổng kiểm của kernel, có sổ chính sách riêng ("process này chỉ được đụng các file này"); rootfs read-only là tủ khóa hồ sơ gốc; `docker.sock` là chìa khóa phòng điều khiển của tòa nhà — đưa nó cho một container là đưa luôn quyền điều khiển các căn khác.
+*Với service của bạn.* Giả sử kẻ tấn công trong `orders` đã đi qua hết capability và seccomp. Nó muốn hai thứ: thả một binary độc vào `/usr/bin` để chạy lại sau khi `orders` restart, và với tới daemon Docker của host. Mục này xem LSM, rootfs read-only và `docker.sock` liên quan thế nào tới hai việc đó.
 
-Cơ chế, từng bước:
+LSM (Linux Security Modules) là khung gắn thêm các kiểm tra an ninh vào kernel. Dù tên là "module", chúng không phải kernel module nạp động mà được chọn lúc build[^lsm-framework]. Người dùng chính của khung này là các extension MAC: SELinux, Smack, Tomoyo, AppArmor[^lsm-mac]. Lớp này thêm một vòng kiểm soát nữa, với chính sách riêng, ngoài capability và seccomp (nhận xét của người soạn).
 
-1. **Khung LSM.** Kernel cho nhiều kiểm tra an ninh được móc vào bởi các "extension" mới; dù gọi là module, chúng không phải kernel module nạp động mà chọn lúc build[^lsm-framework]. Người dùng chính là các extension MAC (Mandatory Access Control): SELinux, Smack, Tomoyo, AppArmor[^lsm-mac].
-2. **AppArmor.** Process không có profile chạy "unconfined", tương đương quyền DAC Linux thường[^apparmor-unconfined]; để AppArmor hạn chế vượt DAC, policy phải được nạp từ user space[^apparmor-policy].
-3. **Trong Docker.** Docker tự sinh và nạp profile `docker-default` cho container[^docker-apparmor].
-4. **Rootfs chỉ đọc.** `--read-only` mount root filesystem của container ở chế độ chỉ đọc, chỉ cho ghi vào các volume được chỉ định[^docker-ro]. Hiệu quả (nhận xét của người soạn): kẻ chiếm được tiến trình không thả được binary/script vào `/usr/bin`, `/etc`. Quan sát: với `--read-only`, `touch /etc/x` và `touch /tmp/x` đều báo `Read-only file system`; thêm `--tmpfs /tmp` thì `touch /tmp/x` thành công. Service cần ghi tạm thì khai báo rõ chỗ ghi (tmpfs/volume).
-5. **Đừng mount `/var/run/docker.sock`.** Docker daemon cần root trừ khi bật rootless[^docker-daemon-root] và chỉ user tin cậy mới nên được điều khiển nó[^docker-daemon-trusted], vì Docker cho phép chia sẻ thư mục host với container mà không hạn chế quyền: bạn có thể chạy container gắn `/` của host và container sửa filesystem host không giới hạn[^docker-host-mount]. Trang `docker run` nói thẳng: bind-mount socket Unix của Docker (cùng binary docker) là trao cho container toàn quyền tạo và thao tác trên daemon của host[^docker-sock-run]. Quan sát: mount `/var/run/docker.sock` vào container root rồi `curl --unix-socket … http://localhost/version` trả JSON phiên bản engine, còn `/containers/json` trả danh sách container của host.
+AppArmor chạy theo profile. Process nào không có profile thì ở trạng thái "unconfined", tương đương quyền DAC thường của Linux[^apparmor-unconfined]. Để AppArmor hạn chế được vượt quá DAC, policy phải được nạp từ user space[^apparmor-policy]. Với container, việc này Docker lo: nó tự sinh và nạp profile `docker-default`[^docker-apparmor].
+
+Rootfs chỉ đọc thì là cấu hình của runtime. `--read-only` mount root filesystem của container ở chế độ chỉ đọc, chỉ cho ghi vào các volume được chỉ định[^docker-ro]. Với `orders`, hiệu quả là kẻ chiếm được process không thả được binary hay script vào `/usr/bin` hay `/etc` (nhận xét của người soạn). Quan sát: với `--read-only`, `touch /etc/x` và `touch /tmp/x` đều báo `Read-only file system`; thêm `--tmpfs /tmp` thì `touch /tmp/x` thành công. Cái giá là service cần ghi tạm phải khai báo rõ chỗ ghi (tmpfs hoặc volume).
+
+Còn `docker.sock` là cửa sau lớn nhất. Daemon Docker cần quyền root trừ khi bật rootless[^docker-daemon-root], nên chỉ user tin cậy mới nên được điều khiển nó[^docker-daemon-trusted]. Lý do là Docker cho chia sẻ thư mục host với container mà không hạn chế quyền: ai điều khiển được daemon có thể chạy một container gắn `/` của host làm `/` của nó, rồi sửa filesystem host không giới hạn[^docker-host-mount]. Trang `docker run` nói thẳng rằng bind-mount socket Unix của Docker (cùng binary docker) là trao cho container toàn quyền tạo và thao tác trên daemon của host[^docker-sock-run]. Quan sát: mount `/var/run/docker.sock` vào container root rồi `curl --unix-socket … http://localhost/version` trả JSON phiên bản engine, còn `/containers/json` trả danh sách container của host. Nghĩa là nếu ai đó mount socket này vào `orders` cho tiện, kẻ tấn công trong `orders` điều khiển được cả daemon.
 
 <details><summary>Đi sâu: LSM trong quan sát và giới hạn của chương</summary>
 
 - Danh sách LSM đang hoạt động đọc ở `/sys/kernel/security/lsm`; thứ tự là thứ tự kiểm tra[^lsm-checks].
-- Quan sát ở mục 5 (`--cap-add SYS_ADMIN` rồi `mount -t tmpfs` vẫn lỗi): [P8 · Chương 07, mục 2.3](./07-mang-container.md) đã thử tách từng lớp với một thao tác mount khác và thấy AppArmor mặc định là lớp chặn (hết lỗi khi `apparmor=unconfined`); áp kết luận đó cho `mount -t tmpfs` là suy luận của người soạn vì chương này không đọc log denial của kernel.
-- "Mount `docker.sock` tương đương root trên host" là hệ quả đọc từ hai đoạn docs trên, và tôi không cho chạy một container đặc quyền để chứng minh.
+- Quan sát ở mục 5 (`--cap-add SYS_ADMIN` rồi `mount -t tmpfs` vẫn lỗi): [P8 · Chương 07, mục 2.3](./07-mang-container.md) đã thử tách từng lớp với một thao tác mount khác và thấy AppArmor mặc định là lớp chặn (hết lỗi khi `apparmor=unconfined`). Áp kết luận đó cho `mount -t tmpfs` là suy luận của người soạn vì chương này không đọc log denial của kernel.
+- "Mount `docker.sock` tương đương root trên host" là hệ quả đọc từ hai đoạn docs trên; chương này không chạy một container đặc quyền để chứng minh.
 
 </details>
 
-**Quay lại Q6:** LSM thêm một lớp MAC sau capability/seccomp; rootfs read-only thu hẹp chỗ ghi; còn `docker.sock` là cửa sau tới quyền điều khiển host nên không bao giờ nên đưa vào container ứng dụng.
+**Quay lại Q6:** LSM thêm một lớp MAC sau capability và seccomp; rootfs read-only thu hẹp chỗ ghi; còn `docker.sock` là cửa sau tới quyền điều khiển host nên không bao giờ nên đưa vào container ứng dụng như `orders`.
 
 ## 7. Kubernetes: `securityContext` và Pod Security Standards (Q7)
 
-> **Trả lời ngắn.** `securityContext` của Pod/Container gom đúng các cơ chế đã học: capability, seccomp, AppArmor, chạy privileged hay không[^k8s-sc-list]; `allowPrivilegeEscalation` chính là `no_new_privs` (giá trị đảo)[^k8s-ape]. Pod Security Standards (PSS) gom chúng thành ba cấp chính sách cộng dồn: Privileged, Baseline, Restricted[^pss-three].
+> **Trả lời ngắn.** `securityContext` của Pod hoặc Container gom đúng các cơ chế đã học: capability, seccomp, AppArmor, chạy privileged hay không[^k8s-sc-list]. Riêng `allowPrivilegeEscalation` điều khiển trực tiếp bit `no_new_privs` (giá trị đảo)[^k8s-ape]. Pod Security Standards (PSS) gom các thiết lập đó thành ba cấp chính sách cộng dồn: Privileged, Baseline, Restricted[^pss-three].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `securityContext` là phiếu khai trên từng cửa — "bỏ capability nào, bật seccomp nào" — còn PSS là bộ quy chế của tòa nhà, bảo cửa nào đạt chuẩn mới được vào cụm.
+*Với service của bạn.* Khi `orders` chạy trên Kubernetes, bạn không gõ `docker run --cap-drop=ALL`; bạn khai `securityContext` trong Pod spec của Deployment, và cluster có thể dùng PSS để từ chối Pod không đạt chuẩn. Mục này đối chiếu từng trường YAML với cơ chế kernel ở các mục 3–6. Nội dung Kubernetes ở đây lấy từ kubernetes.io, **không ghim phiên bản**; tên trường có thể đổi theo phiên bản cluster.
 
-Cơ chế, từng bước (nội dung K8s lấy từ kubernetes.io, **không ghim phiên bản**; tên trường có thể đổi theo phiên bản cluster):
+Trang cấu hình security context liệt kê đúng những cơ chế ta vừa học: quyền privileged, capability ("cho process một số đặc quyền, không phải toàn bộ đặc quyền của root"), AppArmor và seccomp ("lọc syscall của process")[^k8s-sc-list]. Đi từng trường:
 
-1. Trang cấu hình security context liệt kê các cơ chế: quyền privileged, capability ("cho process một số đặc quyền, không phải toàn bộ đặc quyền của root"), AppArmor, seccomp ("lọc syscall của process")[^k8s-sc-list].
-2. **`allowPrivilegeEscalation`** điều khiển trực tiếp việc cờ `no_new_privs` có được đặt trên process của container hay không — giá trị đảo: `true` thì `no_new_privs=false`; bỏ trống thì mặc định `true`[^k8s-ape]. Nó không nhất quán (không đặt được cùng) với container privileged hoặc có `CAP_SYS_ADMIN`[^k8s-ape-conflict].
-3. **`capabilities`**: thêm/bớt capability theo tên **không có tiền tố `CAP_`** — thêm `CAP_SYS_TIME` thì ghi `SYS_TIME`[^k8s-cap-name].
-4. **`seccompProfile`**: `type` có thể là `RuntimeDefault`, `Unconfined` hoặc `Localhost`[^k8s-seccomp].
-5. **`readOnlyRootFilesystem`**: mount root filesystem của container chỉ đọc[^k8s-ro] — tương đương `--read-only` (nhận xét của người soạn).
-6. **PSS** có ba cấp: Privileged (không hạn chế), Baseline (hạn chế tối thiểu, ngăn leo thang đặc quyền đã biết), Restricted (hạn chế chặt, theo thực hành hardening Pod hiện hành)[^pss-three].
+- **`allowPrivilegeEscalation`** điều khiển việc cờ `no_new_privs` có được đặt trên process của container hay không, với giá trị đảo: `true` thì `no_new_privs=false`, và bỏ trống thì mặc định `true`[^k8s-ape]. Trường này không nhất quán (không đặt được cùng) với container privileged hoặc container có `CAP_SYS_ADMIN`[^k8s-ape-conflict].
+- **`capabilities`** thêm hoặc bớt capability theo tên **không có tiền tố `CAP_`**: thêm `CAP_SYS_TIME` thì ghi `SYS_TIME`[^k8s-cap-name].
+- **`seccompProfile`** có `type` là `RuntimeDefault`, `Unconfined` hoặc `Localhost`[^k8s-seccomp].
+- **`readOnlyRootFilesystem`** mount root filesystem của container chỉ đọc[^k8s-ro], tương đương `--read-only` (nhận xét của người soạn).
+
+Ở tầng cluster, PSS có ba cấp: Privileged (không hạn chế), Baseline (hạn chế tối thiểu, ngăn leo thang đặc quyền đã biết) và Restricted (hạn chế chặt, theo thực hành hardening Pod hiện hành)[^pss-three].
 
 <details><summary>Đi sâu: Baseline vs Restricted, ví dụ YAML</summary>
 
-- **Baseline** cấm container privileged vì Pod privileged vô hiệu hóa phần lớn cơ chế bảo mật[^pss-priv], và cấm thêm capability ngoài một danh sách cho phép[^pss-baseline-caps]. Danh sách gồm 13 tên (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `SETGID`, `SETUID`, `SETPCAP`, `NET_BIND_SERVICE`, `SYS_CHROOT`, `MKNOD`, `SETFCAP`, `AUDIT_WRITE`)[^pss-baseline-list]; khác 14 capability mặc định của Docker ở chỗ **không có `NET_RAW`** (so sánh của người soạn).
-- **Restricted** gồm Baseline và thêm: `allowPrivilegeEscalation` phải là `false`[^pss-ape]; chạy non-root[^pss-nonroot]; seccomp phải đặt rõ — cả profile `Unconfined` lẫn việc không có profile đều bị cấm[^pss-seccomp]; phải drop ALL capability và chỉ được thêm lại `NET_BIND_SERVICE`[^pss-caps].
+- **Baseline** cấm container privileged vì Pod privileged vô hiệu hóa phần lớn cơ chế bảo mật[^pss-priv]. Nó cũng cấm thêm capability ngoài một danh sách cho phép[^pss-baseline-caps]. Danh sách gồm 13 tên (`CHOWN`, `DAC_OVERRIDE`, `FOWNER`, `FSETID`, `KILL`, `SETGID`, `SETUID`, `SETPCAP`, `NET_BIND_SERVICE`, `SYS_CHROOT`, `MKNOD`, `SETFCAP`, `AUDIT_WRITE`)[^pss-baseline-list]; khác 14 capability mặc định của Docker ở chỗ **không có `NET_RAW`** (so sánh của người soạn).
+- **Restricted** gồm Baseline và thêm bốn điều kiện:
+  - `allowPrivilegeEscalation` phải là `false`[^pss-ape].
+  - Phải chạy non-root[^pss-nonroot].
+  - Seccomp phải đặt rõ: cả profile `Unconfined` lẫn việc không có profile đều bị cấm[^pss-seccomp].
+  - Phải drop ALL capability và chỉ được thêm lại `NET_BIND_SERVICE`[^pss-caps].
 
 Ví dụ rút gọn (nhận xét của người soạn, tổng hợp từ các trường trên; chưa `kubectl apply` thử):
 
@@ -292,7 +293,7 @@ securityContext:
 
 </details>
 
-**Quay lại Q7:** `securityContext` là cách Kubernetes bật các cơ chế mục 3–6 từng container; PSS Restricted đòi cả bộ: non-root, `allowPrivilegeEscalation: false`, drop ALL, seccomp tường minh.
+**Quay lại Q7:** `securityContext` là cách Kubernetes bật các cơ chế mục 3–6 cho từng container của `orders`; PSS Restricted đòi cả bộ: non-root, `allowPrivilegeEscalation: false`, drop ALL, seccomp tường minh.
 
 ## 8. Checklist tối thiểu cho service Rust (Q8)
 
@@ -300,24 +301,24 @@ securityContext:
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì cấp cho service một chùm chìa khóa rồi tìm cách giấu bớt, hãy bắt đầu từ chùm rỗng và chỉ thêm chìa khi nó chứng minh được là cần.
+*Với service của bạn.* Đây là bản gom lại cho `orders`: nếu kẻ tấn công đã vào được container, mỗi mục dưới đây giảm bớt thứ nó dùng được. Tư duy chung (nhận xét của người soạn): đừng cấp cho service một chùm chìa khóa rồi tìm cách giấu bớt; hãy bắt đầu từ chùm rỗng và chỉ thêm chìa khi service chứng minh được là cần.
 
 Các bước (nhận xét của người soạn):
 
-1. **Không chạy root.** `USER` non-root trong Dockerfile hoặc `runAsNonRoot: true` (mục 2, 7). Binary Rust không cần root để lắng nghe cổng cao; dùng cổng ≥ 1024 và để Service/Ingress map cổng — theo bảng của Docker, bind cổng dưới 1024 cần `NET_BIND_SERVICE`[^docker-net-bind], nhưng ngưỡng này là sysctl `net.ipv4.ip_unprivileged_port_start` theo từng network namespace: ở [P1 · Chương 06, mục 3](../01-linux/06-user-quyen-proc-sys.md) một container Docker đã đo đọc ra `0` nên uid 1000 với `CapEff = 0` vẫn bind được cổng 80 (quan sát một lần chạy). Vẫn nên giữ khuyến nghị cổng ≥ 1024 vì không nên dựa vào sysctl đó (nhận xét của người soạn).
+1. **Không chạy root.** Đặt `USER` non-root trong Dockerfile hoặc `runAsNonRoot: true` (mục 2, 7). Binary Rust không cần root để lắng nghe cổng cao: dùng cổng ≥ 1024 và để Service/Ingress map cổng. Theo bảng của Docker, bind cổng dưới 1024 cần `NET_BIND_SERVICE`[^docker-net-bind]. Tuy vậy ngưỡng này là sysctl `net.ipv4.ip_unprivileged_port_start`, tính theo từng network namespace: ở [P1 · Chương 06, mục 3](../01-linux/06-user-quyen-proc-sys.md), một container Docker đã đo đọc ra `0`, nên uid 1000 với `CapEff = 0` vẫn bind được cổng 80 (quan sát một lần chạy). Ta vẫn nên giữ khuyến nghị cổng ≥ 1024 vì không nên dựa vào sysctl đó.
 2. **`--cap-drop=ALL`** (K8s: `capabilities.drop: [ALL]`), chỉ thêm lại thứ cần (mục 3, 7). Service HTTP bind cổng cao thường không cần capability nào.
 3. **`no-new-privileges` / `allowPrivilegeEscalation: false`** (mục 4).
-4. **Giữ seccomp mặc định**; trong K8s đặt tường minh `seccompProfile.type: RuntimeDefault` vì PSS Restricted cấm cả việc không có profile (mục 5, 7). Đừng dùng `seccomp=unconfined` ngoài debug.
-5. **Rootfs chỉ đọc**, ghi tạm vào `tmpfs`/volume khai báo rõ (mục 6); chú ý khi service ghi cache, file tạm hoặc socket.
+4. **Giữ seccomp mặc định.** Trong K8s đặt tường minh `seccompProfile.type: RuntimeDefault`, vì PSS Restricted cấm cả việc không có profile (mục 5, 7). Đừng dùng `seccomp=unconfined` ngoài lúc debug.
+5. **Rootfs chỉ đọc**, ghi tạm vào `tmpfs` hoặc volume khai báo rõ (mục 6). Chú ý khi service ghi cache, file tạm hoặc socket.
 6. **Không mount `docker.sock`**, không dùng `--privileged` cho service ứng dụng (mục 3, 6).
-7. **Rootless / user namespace** khi hạ tầng cho phép (mục 2) để lỗ hổng thoát container đáp xuống UID không đặc quyền của host.
-8. **Cập nhật kernel/runtime của host.** Vì kernel dùng chung (mục 1), bản vá kernel là một phần an ninh của container; code Rust an toàn không bù lại được.
+7. **Rootless / user namespace** khi hạ tầng cho phép (mục 2), để lỗ hổng thoát container đáp xuống một UID không đặc quyền của host.
+8. **Cập nhật kernel và runtime của host.** Vì kernel dùng chung (mục 1), bản vá kernel là một phần an ninh của container; code Rust an toàn không bù lại được.
 
 <details><summary>Đi sâu: vì sao mỗi mục dựa trên cơ chế nào</summary>
 
-- Mục 1–2 dựa trên việc UID 0 mặc định là UID 0 thật (mục 2) và `CAP_NET_BIND_SERVICE` là capability mà bảng của Docker gắn với việc bind cổng dưới 1024[^docker-net-bind] (ngưỡng thực tế còn phụ thuộc sysctl của namespace, xem bước 1 ở trên).
-- Mục 3–4 dựa trên `no_new_privs`/seccomp: filter được kế thừa qua `exec`[^seccomp-inherit], và PSS Restricted bắt buộc cả hai[^pss-ape][^pss-seccomp].
-- Mục 8: chương này không khẳng định lỗ hổng kernel cụ thể nào; cơ sở duy nhất là việc container dùng chung kernel[^share-kernel].
+- Bước 1–2 dựa trên việc UID 0 mặc định là UID 0 thật (mục 2) và `CAP_NET_BIND_SERVICE` là capability mà bảng của Docker gắn với việc bind cổng dưới 1024[^docker-net-bind] (ngưỡng thực tế còn phụ thuộc sysctl của namespace, xem bước 1 ở trên).
+- Bước 3–4 dựa trên `no_new_privs` và seccomp: filter được kế thừa qua `exec`[^seccomp-inherit], và PSS Restricted bắt buộc `allowPrivilegeEscalation: false`[^pss-ape]. Restricted cũng đòi seccomp đặt rõ[^pss-seccomp].
+- Bước 8: chương này không khẳng định lỗ hổng kernel cụ thể nào; cơ sở duy nhất là việc container dùng chung kernel[^share-kernel].
 
 </details>
 
@@ -339,14 +340,14 @@ Các bước (nhận xét của người soạn):
 1. Vì sao lỗ hổng trong một syscall hiếm dùng của kernel lại là vấn đề của container mà không phải của máy ảo?
 <details><summary>Đáp án</summary>
 
-Container dùng chung kernel với host[^share-kernel]; Docker xếp độ an toàn nội tại của kernel là khu vực đầu tiên cần xét[^docker-four-areas] và nói tập capability và mount mặc định có thể cô lập chưa đầy đủ, riêng rẽ hoặc khi kết hợp với lỗ hổng kernel[^docker-incomplete].
+Container dùng chung kernel với host[^share-kernel]. Docker xếp độ an toàn nội tại của kernel là khu vực đầu tiên cần xét[^docker-four-areas], và nói tập capability và mount mặc định có thể cô lập chưa đầy đủ, riêng rẽ hoặc khi kết hợp với lỗ hổng kernel[^docker-incomplete].
 
 </details>
 
 2. Trong `docker run` mặc định, `/proc/self/uid_map` cho thấy gì và nó ngụ ý gì về "root trong container"?
 <details><summary>Đáp án</summary>
 
-Quan sát `0 0 4294967295`, ánh xạ đồng nhất như initial user namespace[^userns-initial]; user namespace không được tách mặc định[^docker-userns-default], nên UID 0 là UID 0 thật, bị hạn chế bởi capability/seccomp/LSM[^docker-reduced-root].
+Quan sát `0 0 4294967295`, ánh xạ đồng nhất như initial user namespace[^userns-initial]. User namespace không được tách mặc định[^docker-userns-default], nên UID 0 là UID 0 thật, chỉ bị hạn chế bởi capability, seccomp và LSM[^docker-reduced-root].
 
 </details>
 
@@ -367,21 +368,21 @@ Quan sát `0 0 4294967295`, ánh xạ đồng nhất như initial user namespace
 5. `no_new_privs` ngăn điều gì, và điều gì nó không ngăn?
 <details><summary>Đáp án</summary>
 
-Ngăn `execve` cấp thêm đặc quyền (setuid/file capabilities)[^nnp-mechanism][^nnp-setuid]; không ngăn thay đổi đặc quyền không qua `execve`[^nnp-limits].
+Ngăn `execve` cấp thêm đặc quyền (setuid/file capabilities)[^nnp-setuid]. Nó không ngăn thay đổi đặc quyền không qua `execve`[^nnp-limits].
 
 </details>
 
 6. Kể các action seccomp và khác biệt giữa `KILL_PROCESS` và `KILL_THREAD`.
 <details><summary>Đáp án</summary>
 
-Xem bảng mục 5; `KILL_PROCESS` giết cả thread group, `KILL_THREAD` chỉ thread gọi[^act-kill-process][^act-kill-thread].
+Xem bảng mục 5; `KILL_PROCESS` giết cả process[^act-kill-process]. `KILL_THREAD` chỉ giết thread gọi syscall[^act-kill-thread].
 
 </details>
 
 7. Vì sao `unshare -U` thất bại trong container mặc định dù kernel cho user thường tạo user namespace?
 <details><summary>Đáp án</summary>
 
-Theo man page, kernel cho phép từ Linux 3.8[^userns-unpriv]; profile seccomp mặc định (JSON `v28.0.0`) chỉ cho `unshare` khi có `CAP_SYS_ADMIN`. Bảng của Docker lại ghi ngoại lệ `unshare --user`[^docker-tbl-unshare] — một chỗ lệch chưa lý giải được (mục 5, Đi sâu).
+Theo man page, kernel cho phép từ Linux 3.8[^userns-unpriv]; profile seccomp mặc định (JSON `v28.0.0`) chỉ cho `unshare` khi có `CAP_SYS_ADMIN`. Bảng của Docker lại ghi ngoại lệ `unshare --user`[^docker-tbl-unshare], một chỗ lệch chưa lý giải được (mục 5, Đi sâu).
 
 </details>
 
@@ -395,7 +396,7 @@ Nhiều khối trong JSON dùng `includes: caps`, nên thêm capability sẽ m�
 9. Vì sao không nên mount `docker.sock` vào container ứng dụng?
 <details><summary>Đáp án</summary>
 
-Điều khiển daemon cho phép chạy container gắn `/` của host, sửa host không hạn chế[^docker-host-mount][^docker-daemon-trusted]; trang `docker run` nói bind-mount socket là trao toàn quyền thao tác daemon[^docker-sock-run].
+Điều khiển daemon cho phép chạy container gắn `/` của host, sửa host không hạn chế[^docker-host-mount]. Vì vậy chỉ user tin cậy mới nên được điều khiển daemon[^docker-daemon-trusted]. Trang `docker run` nói bind-mount socket là trao toàn quyền thao tác daemon[^docker-sock-run].
 
 </details>
 

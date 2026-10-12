@@ -1,6 +1,6 @@
 # P13 · Chương 07 — Refinement, abstraction và implementation
 
-> Mọi khẳng định về TLA+ dựa trên *Specifying Systems* của Lamport (bản PDF trên trang tác giả), bài báo "The Temporal Logic of Actions" và kho `tlaplus/Examples` (ghim commit). Các đoạn spec trong chương là **minh họa**: người soạn không chạy TLC, không chạy code, nên chương **không** khẳng định kết quả model checking nào ngoài những gì nguồn tự ghi. Chỗ nào là lập luận tính tay của người soạn đều được ghi rõ.
+> Phạm vi: mọi khẳng định về TLA+ dựa trên *Specifying Systems* của Lamport (bản PDF trên trang tác giả), bài báo "The Temporal Logic of Actions" và kho `tlaplus/Examples` (ghim commit). Các đoạn spec trong chương là **minh họa**: người soạn không chạy TLC, không chạy code, nên chương **không** khẳng định kết quả model checking nào ngoài những gì nguồn tự ghi. Chỗ nào là lập luận tính tay của người soạn thì đều ghi rõ.
 
 ## Bạn sẽ hiểu được gì
 
@@ -23,21 +23,29 @@
 
 ## 1. Implementation là implication: `Impl => Spec` (Q1)
 
-> **Trả lời ngắn.** Trong TLA, "hệ thống Sys cài đặt đặc tả Spec" có nghĩa đúng một điều: công thức `Sys => Spec` là một định lý[^impl-impl]. Vì TLA không phân biệt "mô tả hệ thống" với "đặc tả" — cả hai chỉ là công thức[^no-distinction] — nên bạn có thể viết cả thiết kế chi tiết lẫn yêu cầu trừu tượng bằng cùng một ngôn ngữ rồi hỏi cái trước có kéo theo cái sau không. Nói cách khác: mọi hành vi mà thiết kế chi tiết cho phép đều phải nằm trong tập hành vi mà đặc tả trừu tượng cho phép[^kb-behaviors].
+> **Trả lời ngắn.** Trong TLA, nói hệ thống `Sys` cài đặt đặc tả `Spec` nghĩa là công thức `Sys => Spec` là một định lý[^impl-impl]. Điều này làm được vì TLA không phân biệt "mô tả hệ thống" với "đặc tả": cả hai chỉ là công thức[^no-distinction]. Ta viết thiết kế chi tiết và yêu cầu trừu tượng bằng cùng một ngôn ngữ rồi hỏi cái trước có kéo theo cái sau không. Nói cách khác, mọi hành vi mà thiết kế chi tiết cho phép đều phải nằm trong tập hành vi mà đặc tả trừu tượng cho phép[^kb-behaviors].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có file OpenAPI mô tả một dịch vụ và một codebase cài đặt dịch vụ đó. "Code đúng với hợp đồng" nghĩa là mọi cuộc hội thoại request/response mà code có thể sinh ra đều là cuộc hội thoại hợp đồng cho phép. Code được phép *chặt hơn* hợp đồng (ví dụ hợp đồng nói "có thể trả 503", code không bao giờ trả), nhưng không được *lỏng hơn*. `Impl => Spec` chính là phát biểu ấy, với "cuộc hội thoại" là một *behavior* (dãy trạng thái vô hạn, xem [chương 03](03-trang-thai-hanh-vi-action.md)).
+*Với service của bạn.* Hãy hình dung `flags`, một service nhỏ giữ một feature flag. API chỉ có hai thao tác: `Put(v)` đặt giá trị mới và `Get` đọc giá trị hiện tại. Để `Put` trả lời nhanh, `flags` không ghi thẳng xuống DB. Nó đẩy giá trị vào một buffer trong RAM, còn một background thread flush dần buffer xuống DB. Hợp đồng với client thì đơn giản: `Get` luôn trả về giá trị của lần `Put` gần nhất. Ta sẽ bám theo `flags` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này: "code của `flags` đúng với hợp đồng" nghĩa chính xác là gì, và nói điều đó bằng TLA+ thế nào?
 
-*Bước 1 — công thức là tập hành vi.* Một đặc tả TLA+ mô tả tập mọi hành vi hợp lệ (execution trace) của hệ thống[^amz-behaviors]. Công thức `Spec` đúng/sai trên từng behavior; tập behavior làm nó đúng chính là "ngữ nghĩa" của đặc tả.
+### 1.1 Cài đặt là bao hàm tập hành vi
 
-*Bước 2 — `=>` là bao hàm tập.* `Impl => Spec` đúng khi mọi behavior thỏa `Impl` cũng thỏa `Spec`. Ghi chú thực hành của extension VS Code của TLA+ phát biểu cùng ý: spec chi tiết refine spec cấp cao nếu mọi hành vi của bản chi tiết đều được bản cấp cao cho phép[^kb-behaviors]. Chiều mũi tên quan trọng: `Impl` có thể có *ít* hành vi hơn `Spec`, không được nhiều hơn.
+Một đặc tả TLA+ mô tả tập mọi hành vi hợp lệ (execution trace) của hệ thống[^amz-behaviors]. Hành vi (*behavior*) là một dãy trạng thái vô hạn, như đã nói ở [chương 03](03-trang-thai-hanh-vi-action.md). Với `flags`, một hành vi là chuỗi trạng thái sinh ra khi các lần `Put`, `Get` và flush xen kẽ nhau. Công thức `Spec` đúng hoặc sai trên từng hành vi, và tập các hành vi làm nó đúng chính là "ngữ nghĩa" của đặc tả.
 
-*Bước 3 — "refinement" và "implementation" là một.* Lamport viết rằng refinement cùng nghĩa với implementation: "Ψ refine Π" nghĩa là Ψ cài đặt Π[^ar-refine-impl]; và trong TLA, refinement là implication[^ar-refine-impl2]. Trong chương này hai từ dùng thay nhau.
+Từ đó `Impl => Spec` đọc rất tự nhiên: mọi hành vi thỏa `Impl` cũng phải thỏa `Spec`. Ghi chú thực hành của extension VS Code cho TLA+ cũng nói đúng ý này: spec chi tiết refine spec cấp cao nếu mọi hành vi của bản chi tiết đều được bản cấp cao cho phép[^kb-behaviors].
 
-*Bước 4 — vì sao đáng làm: thang trừu tượng.* Nhóm kỹ sư Amazon mô tả TLA+ như một thang trừu tượng: tính chất đúng đắn ở bậc cao, thiết kế và thuật toán ở giữa, code và phần cứng ở bậc thấp[^amz-ladder]; người thiết kế có thể mô tả hệ thống ở vài mức trung gian, mỗi mức phục vụ một mục đích, rồi kiểm từng mức đúng so với mức cao hơn[^amz-verify-level]. Bắc cầu cũng chạy theo: Lamport chỉ ra rằng nếu một thuật toán cài đặt bộ nhớ-cache trừu tượng, mà bộ nhớ-cache ấy cài đặt giao diện processor/memory, thì theo tính bắc cầu của implication thuật toán cài đặt luôn giao diện[^ar-transitivity].
+Chiều của mũi tên rất quan trọng. `Impl` được phép có *ít* hành vi hơn `Spec`. Ví dụ hợp đồng của `flags` cho phép `Get` đôi lúc trả 503, còn code của ta không bao giờ trả (nhận xét của người soạn). Nhưng `Impl` không được có *nhiều* hơn: nếu code sinh ra được một hành vi mà hợp đồng cấm, chẳng hạn `Get` trả giá trị cũ sau khi `Put` đã xong, thì nó không cài đặt hợp đồng.
 
-*Bước 5 — hai câu hỏi khác nhau.* (a) Đặc tả trừu tượng có thỏa các tính chất mong muốn không? — kiểm trên spec nhỏ, rẻ ([chương 04](04-invariant-va-tlc.md)). (b) Thiết kế chi tiết có `=>` đặc tả trừu tượng không? — đề tài của chương này. Nếu (a) và (b) cùng đúng thì tính chất của spec trừu tượng, miễn viết được bằng biến trừu tượng, đúng cho thiết kế chi tiết (suy luận của người soạn, từ bắc cầu của implication ở bước 4).
+Cũng nên biết hai từ "refinement" và "implementation" là một. Lamport viết rằng "Ψ refine Π" nghĩa là Ψ cài đặt Π[^ar-refine-impl]. Trong TLA, refinement chính là implication[^ar-refine-impl2]. Chương này dùng hai từ thay nhau.
+
+### 1.2 Vì sao đáng làm: thang trừu tượng
+
+Lợi ích lớn nhất là ta không phải kiểm mọi thứ ở một mức. Nhóm kỹ sư Amazon mô tả TLA+ như một thang trừu tượng: tính chất đúng đắn nằm ở bậc cao, thiết kế và thuật toán ở giữa, code và phần cứng ở bậc thấp[^amz-ladder]. Người thiết kế có thể mô tả hệ thống ở vài mức trung gian, mỗi mức phục vụ một mục đích, rồi kiểm từng mức đúng so với mức cao hơn[^amz-verify-level]. Với `flags`, hợp đồng "`Get` trả lần `Put` gần nhất" là bậc trên, còn thiết kế buffer cộng flush là bậc dưới (nhận xét của người soạn).
+
+Các bậc nối được với nhau nhờ implication có tính bắc cầu. Lamport dùng đúng lập luận này: nếu một thuật toán cài đặt bộ nhớ-cache trừu tượng, mà bộ nhớ-cache ấy cài đặt giao diện processor/memory, thì thuật toán cài đặt luôn giao diện đó[^ar-transitivity].
+
+Hệ quả thực hành là ta có hai câu hỏi tách bạch. Câu (a): đặc tả trừu tượng có thỏa các tính chất mong muốn không? Kiểm trên spec nhỏ thì rẻ ([chương 04](04-invariant-va-tlc.md)). Câu (b): thiết kế chi tiết có `=>` đặc tả trừu tượng không? Đó là đề tài của chương này. Nếu cả hai cùng đúng thì tính chất của spec trừu tượng, miễn viết được bằng biến trừu tượng, cũng đúng cho thiết kế chi tiết (suy luận của người soạn, từ bắc cầu của implication ở trên).
 
 ```mermaid
 flowchart BT
@@ -50,32 +58,38 @@ flowchart BT
   CODE -. "chương 10" .-> P
 ```
 
-(Hai mũi tên liền là hai refinement có trong kho Examples — xem mục 7. Mũi tên đứt là việc nằm ngoài chương này.)
+(Hai mũi tên liền là hai refinement có trong kho Examples, xem mục 7. Mũi tên đứt là việc nằm ngoài chương này.)
 
 <details><summary>Đi sâu: chiều của mũi tên, determinism và những gì refinement không nói</summary>
 
 - **Chiều.** `Impl => Spec` cho phép Impl chọn một nhánh duy nhất khi Spec có nhiều nhánh (Spec không-tất-định, Impl tất-định). Chiều ngược `Spec => Impl` hầu như không bao giờ đúng với thiết kế chi tiết, vì Impl có nhiều biến và nhiều ràng buộc hơn (nhận xét của người soạn).
-- **An toàn khác sống còn.** Một đặc tả chỉ có dạng `Init /\ [][Next]_vars` cho phép hành vi mà hệ thống không làm gì, nên một hệ thống không làm gì cũng thỏa nó[^safety-nothing]. `Impl => Spec` trên phần "safety" vì vậy chưa nói Impl có tiến triển; việc ấy cần fairness (mục 8).
-- **Đặc tả là công thức nên có thể so sánh hai spec bất kỳ.** Ghi chú của extension VS Code nhấn mạnh refinement là quan hệ về ngữ nghĩa (hành vi), không đòi hai spec chia sẻ biến hay module[^kb-semantic] — đó là lý do cần cơ chế ánh xạ ở mục 3 và 5.
-- **Kiểm "tính chất đúng ở bậc cao" không thay cho kiểm refinement.** Nếu thiết kế chi tiết thêm một hành vi mà spec cấp cao cấm, mọi invariant của spec cấp cao vẫn đúng *cho spec cấp cao* nhưng không còn đảm bảo gì cho thiết kế (suy luận của người soạn).
+- **An toàn khác sống còn.** Một đặc tả chỉ có dạng `Init /\ [][Next]_vars` cho phép hành vi mà hệ thống không làm gì, nên một hệ thống không làm gì cũng thỏa nó[^safety-nothing]. Vì vậy `Impl => Spec` trên phần "safety" chưa nói Impl có tiến triển; việc đó cần fairness (mục 8).
+- **Đặc tả là công thức nên so sánh được hai spec bất kỳ.** Ghi chú của extension VS Code nhấn mạnh refinement là quan hệ về ngữ nghĩa (hành vi), không đòi hai spec chia sẻ biến hay module[^kb-semantic]. Đó là lý do ta cần cơ chế ánh xạ ở mục 3 và 5.
+- **Kiểm "tính chất đúng ở bậc cao" không thay cho kiểm refinement.** Nếu thiết kế chi tiết thêm một hành vi mà spec cấp cao cấm, mọi invariant của spec cấp cao vẫn đúng *cho spec cấp cao* nhưng không còn bảo đảm gì cho thiết kế (suy luận của người soạn).
 
 </details>
 
-**Quay lại Q1:** "cài đặt" là `Impl => Spec`: mọi hành vi của thiết kế chi tiết phải là hành vi hợp lệ của đặc tả trừu tượng — một quan hệ giữa hai công thức, cùng ngôn ngữ, kiểm được từng mức.
+**Quay lại Q1:** "cài đặt" là `Impl => Spec`: mọi hành vi của thiết kế chi tiết phải là hành vi hợp lệ của đặc tả trừu tượng. Đó là quan hệ giữa hai công thức viết cùng một ngôn ngữ, nên kiểm được từng mức; với `flags`, mọi hành vi của code buffer cộng flush phải là hành vi hợp đồng cho phép.
 
 ## 2. Stuttering: vì sao refinement cần "bước đứng yên" (Q2)
 
-> **Trả lời ngắn.** Một *stuttering step* là bước không đổi biến nào của công thức đang xét. Dạng chuẩn của đặc tả TLA+ là `Init /\ [][Next]_vars` (dạng TLC xử lý[^tlc-std-form]), trong đó `[Next]_vars` *luôn cho phép* bước đứng yên — ví dụ đặc tả đồng hồ của sách là `HCini /\ [][HCnxt]_hr`[^stut-def]. Nhờ vậy khi thiết kế chi tiết làm nhiều bước nhỏ mà ở mức trừu tượng chỉ thấy một bước (hoặc không thấy gì), các bước nhỏ ấy được coi là stuttering của đặc tả trừu tượng, và `Impl => Spec` vẫn đúng. Lamport gọi đây là chìa khóa để tinh chỉnh độ hạt của nguyên tử (grain of atomicity)[^stut-grain].
+> **Trả lời ngắn.** Một *stuttering step* là bước không đổi biến nào của công thức đang xét. Dạng chuẩn của đặc tả TLA+ là `Init /\ [][Next]_vars` (dạng mà TLC xử lý[^tlc-std-form]), và `[Next]_vars` *luôn cho phép* bước đứng yên. Đặc tả đồng hồ trong sách, chẳng hạn, là `HCini /\ [][HCnxt]_hr`[^stut-def]. Nhờ vậy, khi thiết kế chi tiết làm nhiều bước nhỏ mà mức trừu tượng chỉ thấy một bước (hoặc không thấy gì), các bước nhỏ ấy là stuttering của đặc tả trừu tượng và `Impl => Spec` vẫn đúng. Lamport gọi đây là chìa khóa để tinh chỉnh độ hạt của nguyên tử (grain of atomicity)[^stut-grain].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hợp đồng API "ghi giá trị rồi đọc lại thì thấy giá trị mới" không quan tâm bên trong dịch vụ có một background thread flush buffer xuống đĩa hay đang rebalance connection pool. Với người gọi, mỗi lần flush là "không có gì xảy ra". Nếu hợp đồng bắt buộc *mỗi bước nội bộ* phải đổi một thứ nhìn thấy được, không cài đặt thực tế nào thỏa nổi.
+*Với service `flags`.* Mỗi lần background thread flush buffer xuống DB, client không thấy gì khác đi: `Get` vẫn trả đúng giá trị như ngay trước lúc flush. Với hợp đồng của `flags`, flush là "không có chuyện gì xảy ra". Nếu hợp đồng đòi *mỗi bước nội bộ* phải đổi một thứ nhìn thấy được thì không cài đặt thực tế nào thỏa nổi (nhận xét của người soạn). Mục này cho thấy TLA+ cho phép chuyện đó bằng cách nào.
 
-*Bước 1 — nhắc lại từ chương 03.* Đồng hồ giờ, trạm thời tiết và ký hiệu `[HCnxt]_hr` đã được trình bày ở [chương 03, mục 4](03-trang-thai-hanh-vi-action.md); chương này chỉ dùng lại hai điểm. Một: công thức mô tả đồng hồ phải cho phép bước giữ `hr` nguyên[^stut-clock], nên Lamport định nghĩa `[HCnxt]_hr` là `HCnxt \/ (hr' = hr)`[^stut-def]. Hai: một stuttering step biểu diễn thay đổi chỉ ở phần của hệ thống mà công thức không mô tả; thêm nó vào behavior không được làm đổi chân trị của công thức[^stut-meaning].
+### 2.1 Bước đứng yên là gì
 
-*Bước 2 — mọi công thức hợp lệ đều "bất biến dưới stuttering".* Công thức F là *invariant under stuttering* nếu thêm hay bớt bước đứng yên khỏi behavior không đổi việc behavior có thỏa F hay không. Một công thức hợp lý phải có tính chất đó, và TLA chỉ cho phép viết công thức thời gian bất biến dưới stuttering[^stut-sensible]. Hành động trần như `x' = x + 1` thì không bất biến dưới stuttering[^stut-action-not]; còn `[][A]_v` thì có, vì nó chỉ ràng buộc những bước thật sự đổi `v`[^stut-box]. (Chương 03 đã nói điều này; nhắc lại vì refinement dựa trực tiếp vào nó.)
+Đồng hồ giờ, trạm thời tiết và ký hiệu `[HCnxt]_hr` đã được trình bày ở [chương 03, mục 4](03-trang-thai-hanh-vi-action.md); ở đây ta chỉ dùng lại hai điểm. Thứ nhất, công thức mô tả một cái đồng hồ phải cho phép bước giữ `hr` nguyên[^stut-clock]. Vì vậy Lamport định nghĩa `[HCnxt]_hr` là `HCnxt \/ (hr' = hr)`[^stut-def]. Thứ hai, stuttering step biểu diễn thay đổi chỉ xảy ra ở phần của hệ thống mà công thức không mô tả; thêm nó vào behavior không được làm đổi chân trị của công thức[^stut-meaning].
 
-*Bước 3 — vì sao đây chính là điều kiện cho refinement.* Lamport lấy ví dụ hai chương trình: Program 2 mịn hơn Program 1, ba thao tác nguyên tử của mỗi vòng lặp ở Program 2 tương ứng với một thao tác nguyên tử ở Program 1[^stut-prog-fine]. Program 2 cài đặt Program 1 *chỉ vì* đặc tả của Program 1 cho phép các bước đứng yên không đổi `x` và `y`[^stut-prog]. Và ông nhận xét rằng hạn chế biểu đạt này không hẳn là bất lợi: TLA cho phép cài đặt mịn của đặc tả thô vì nó chỉ biểu diễn được các tính chất bất biến dưới stuttering[^stut-coarse].
+### 2.2 Mọi công thức hợp lệ đều bất biến dưới stuttering
+
+Công thức F là *invariant under stuttering* nếu thêm hay bớt bước đứng yên khỏi behavior không đổi việc behavior có thỏa F hay không. Một công thức hợp lý phải có tính chất đó, và TLA chỉ cho phép viết công thức thời gian bất biến dưới stuttering[^stut-sensible]. Hành động trần như `x' = x + 1` thì không bất biến[^stut-action-not]. Còn `[][A]_v` thì có, vì nó chỉ ràng buộc những bước thật sự đổi `v`[^stut-box]. Chương 03 đã nói điều này; ta nhắc lại vì refinement dựa trực tiếp vào nó.
+
+### 2.3 Đây chính là điều kiện cho refinement
+
+Lamport lấy ví dụ hai chương trình. Program 2 mịn hơn Program 1: ba thao tác nguyên tử của mỗi vòng lặp ở Program 2 tương ứng với một thao tác nguyên tử ở Program 1[^stut-prog-fine]. Program 2 cài đặt Program 1 *chỉ vì* đặc tả của Program 1 cho phép các bước đứng yên không đổi `x` và `y`[^stut-prog]. Ông còn nhận xét rằng hạn chế biểu đạt này không hẳn là bất lợi: TLA cho phép cài đặt mịn của đặc tả thô vì nó chỉ biểu diễn được các tính chất bất biến dưới stuttering[^stut-coarse]. Với `flags`, flush là một bước thật ở code nhưng là stuttering ở hợp đồng, và chính điều đó cho phép code mịn hơn hợp đồng mà vẫn cài đặt được nó.
 
 ```mermaid
 flowchart LR
@@ -95,32 +109,40 @@ flowchart LR
 
 <details><summary>Đi sâu: ví dụ stuttering trong cache; ∃ định nghĩa thế nào để vẫn bất biến dưới stuttering; fairness và bước đứng yên</summary>
 
-- **Evict là stuttering ngay trong spec cache.** Trong spec write-through cache của Lamport, nếu địa chỉ cần evict không có trong cache thì `cache[p][a]` đã bằng `NoVal` và bước `Evict(p, a)` là một bước đứng yên[^stut-evict]. Tức là stuttering không phải khái niệm xa vời: ngay trong một spec tay viết đã có action đôi khi trở thành "không làm gì".
-- **Ẩn biến và stuttering.** Định nghĩa trực quan của `\EE x : F` là: một behavior thỏa nó nếu tồn tại behavior thỏa `F` thu được bằng cách thêm/bớt stuttering step và đổi giá trị của `x`[^hide-semantic]. Bài báo TLA giải thích vì sao phải thêm stuttering *trước*: nếu chỉ đổi giá trị `x`, hai behavior chỉ khác nhau bởi bước đứng yên có thể một cái thỏa một cái không, và `∃ x : F` không còn bất biến dưới stuttering[^hide-paper-def].
-- **Fairness phải đếm bước *không đứng yên*.** Khẳng định rằng một bước đứng yên *sẽ xảy ra* vô nghĩa, vì nó không bất biến dưới stuttering; nên fairness viết trên `<<A>>_v` chứ không trên `A`[^wf-stutter] (chi tiết ở [chương 05](05-liveness-va-fairness.md)).
-- **Mặt trái.** Vì stuttering luôn được phép, một thiết kế có thể thỏa spec trừu tượng *chỉ* bằng cách làm vô hạn bước nội bộ mà mức trừu tượng không bao giờ tiến — refinement của phần safety không bắt được điều này (xem mục 8).
+- **Evict là stuttering ngay trong spec cache.** Trong spec write-through cache của Lamport, nếu địa chỉ cần evict không có trong cache thì `cache[p][a]` đã bằng `NoVal` và bước `Evict(p, a)` là một bước đứng yên[^stut-evict]. Nghĩa là stuttering không xa vời: ngay trong một spec viết tay cũng có action đôi khi hóa thành "không làm gì".
+- **Ẩn biến và stuttering.** Định nghĩa trực quan của `\EE x : F` là: một behavior thỏa nó nếu tồn tại behavior thỏa `F` thu được bằng cách thêm/bớt stuttering step và đổi giá trị của `x`[^hide-semantic]. Bài báo TLA giải thích vì sao phải thêm stuttering *trước*. Nếu chỉ đổi giá trị `x`, hai behavior chỉ khác nhau bởi bước đứng yên có thể một cái thỏa một cái không, và `∃ x : F` không còn bất biến dưới stuttering[^hide-paper-def].
+- **Fairness phải đếm bước *không đứng yên*.** Khẳng định rằng một bước đứng yên *sẽ xảy ra* là vô nghĩa, vì nó không bất biến dưới stuttering; nên fairness viết trên `<<A>>_v` chứ không trên `A`[^wf-stutter] (chi tiết ở [chương 05](05-liveness-va-fairness.md)).
+- **Mặt trái.** Vì stuttering luôn được phép, một thiết kế có thể thỏa spec trừu tượng *chỉ* bằng cách làm vô hạn bước nội bộ mà mức trừu tượng không bao giờ tiến. Refinement của phần safety không bắt được điều này (xem mục 8).
 
 </details>
 
-**Quay lại Q2:** mức trừu tượng không nhìn thấy bước nội bộ, nên đặc tả phải cho phép bước đứng yên; mọi công thức TLA đều bất biến dưới stuttering, và chính điều đó làm cho một thiết kế mịn (nhiều bước) có thể cài đặt một đặc tả thô (ít bước).
+**Quay lại Q2:** mức trừu tượng không nhìn thấy bước nội bộ, nên đặc tả phải cho phép bước đứng yên. Mọi công thức TLA đều bất biến dưới stuttering, và chính điều đó cho phép một thiết kế mịn (nhiều bước) cài đặt một đặc tả thô (ít bước); với `flags`, flush là bước nội bộ như thế.
 
 ## 3. `INSTANCE ... WITH`: thay thế để nối hai mức (Q3)
 
-> **Trả lời ngắn.** `M == INSTANCE Spec WITH p1 <- e1, ...` lấy mọi định nghĩa trong module `Spec`, thay mỗi tham số khai báo (hằng hoặc biến) `pi` bằng biểu thức `ei` của module hiện tại, và đặt kết quả vào tên có tiền tố `M!`[^sum-instance][^inst-prefix]. Vì `ei` có thể là *bất kỳ biểu thức nào*, kể cả một state function tính từ biến cụ thể, đây là chính cơ chế viết "đặc tả trừu tượng nhìn qua con mắt của thiết kế chi tiết".
+> **Trả lời ngắn.** `M == INSTANCE Spec WITH p1 <- e1, ...` lấy mọi định nghĩa trong module `Spec`, thay mỗi tham số khai báo (hằng hoặc biến) `pi` bằng biểu thức `ei` của module hiện tại[^sum-instance]. Kết quả nằm dưới tên có tiền tố `M!`[^inst-prefix]. Vì `ei` có thể là *bất kỳ biểu thức nào*, kể cả một state function tính từ biến cụ thể, đây chính là cơ chế để viết "đặc tả trừu tượng nhìn qua con mắt của thiết kế chi tiết".
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): module TLA+ giống một hàm generic có tham số kiểu *và* tham số trạng thái; `INSTANCE ... WITH` là cú pháp "đặc hóa" nó. Khác ở chỗ tham số trạng thái được thay bằng *biểu thức tính từ trạng thái cụ thể* — như một cái view trong SQL đặt lên bảng nội bộ.
+*Với service `flags`.* Hợp đồng của `flags` là một module `Register` viết bằng biến trừu tượng `val` (giá trị flag hiện tại) và `ret` (giá trị client đọc được). Code thật lại không có biến `val`: nó có `db` và `buf`. Muốn hỏi "code có đúng hợp đồng không" thì phải nối hai bên, và `INSTANCE ... WITH` là chỗ nối. Ta nói với `Register`: "`val` của hợp đồng chính là biểu thức này, tính từ `db` và `buf` của code".
 
-*Bước 1 — instantiation là phép thay thế.* Mỗi định nghĩa `d` trong module `M` có một "định nghĩa thật" chỉ gồm toán tử dựng sẵn và tham số của `M`; câu lệnh instance tạo định nghĩa mới bằng cách thay các tham số bằng biểu thức bạn đưa[^inst-real]. Ví dụ trong chương FIFO của sách: `InChan == INSTANCE Channel WITH Data <- Message, chan <- in` đặt `InChan!Send`, `InChan!Init`... có nghĩa như trong `Channel` nhưng với `Message` thay `Data` và `in` thay `chan`[^inst-prefix].
+### 3.1 Instantiation là phép thay thế
 
-*Bước 2 — phải thay đủ mọi tham số.* Định nghĩa của `IM!Σ` chỉ được chứa các tham số của module *hiện tại*, không chứa tham số của module được instance[^inst-params]. Do đó mọi tham số của module được instance đều phải được thay.
+Mỗi định nghĩa `d` trong module `M` có một "định nghĩa thật" chỉ gồm toán tử dựng sẵn và tham số của `M`. Câu lệnh instance tạo định nghĩa mới bằng cách thay các tham số bằng biểu thức bạn đưa[^inst-real]. Ví dụ trong chương FIFO của sách: `InChan == INSTANCE Channel WITH Data <- Message, chan <- in` đặt `InChan!Send`, `InChan!Init`... có nghĩa như trong `Channel`, chỉ khác là `Message` thay `Data` và `in` thay `chan`[^inst-prefix].
 
-*Bước 3 — thay ngầm khi cùng tên.* Nếu tham số `p` không có phép thay rõ ràng, TLA+ hiểu là `p <- p`; câu lệnh `INSTANCE` khi đó phải nằm trong phạm vi một khai báo *hoặc định nghĩa* của `p`[^inst-implicit]. Chữ "hoặc định nghĩa" là điểm mấu chốt cho refinement: nếu module cụ thể *định nghĩa* một state function tên `chosen`, thì `INSTANCE Consensus` tự nhận nó thay cho biến `chosen` của `Consensus`. Kho Examples dùng đúng cách này (xem mục 7), và ghi chú của extension VS Code cũng viết rằng khi tên trùng thì không cần `WITH`[^kb-implicit].
+Phải thay đủ mọi tham số. Định nghĩa của `IM!Σ` chỉ được chứa các tham số của module *hiện tại*, không chứa tham số của module được instance[^inst-params]. Do đó mọi tham số của module được instance đều phải có phép thay.
 
-*Bước 4 — thay bằng state function.* Ghi chú đó cũng nói: ánh xạ không giới hạn ở biến, có thể dùng bất kỳ state function nào[^kb-statefn]. Chính Lamport, trong spec Paxos của kho Examples, viết chú thích khi instance `Voting`: ông thay biến `maxBal` và state function `votes` định nghĩa sẵn trong module hiện tại vào các tham số cùng tên[^ex-inst-comment].
+### 3.2 Cùng tên thì thay ngầm
 
-*Bước 5 — tham số hóa instance để ẩn biến.* Sách nói instance có tham số (`Inner(q) == INSTANCE ...`) hầu như chỉ dùng trong idiom ẩn biến[^inst-param-hide]; mục 4 dùng nó.
+Nếu một tham số `p` không có phép thay rõ ràng, TLA+ hiểu là `p <- p`. Câu lệnh `INSTANCE` khi đó phải nằm trong phạm vi một khai báo *hoặc định nghĩa* của `p`[^inst-implicit]. Chữ "hoặc định nghĩa" là mấu chốt cho refinement: nếu module cụ thể *định nghĩa* một state function tên `val`, thì `INSTANCE Register` tự nhận nó thay cho biến `val` của `Register`. Với `flags`, `val` đúng là một state function tính từ `db` và `buf`. Kho Examples dùng đúng cách này (xem mục 7), và ghi chú của extension VS Code cũng viết rằng khi tên trùng thì không cần `WITH`[^kb-implicit].
+
+### 3.3 Thay bằng state function
+
+Ghi chú đó cũng nói rằng ánh xạ không giới hạn ở biến, ta có thể dùng bất kỳ state function nào[^kb-statefn]. Lamport làm đúng như vậy trong spec Paxos của kho Examples. Chú thích của ông ở chỗ instance `Voting` cho biết ông thay biến `maxBal` và state function `votes`, cả hai định nghĩa sẵn trong module hiện tại, vào các tham số cùng tên[^ex-inst-comment].
+
+### 3.4 Instance có tham số
+
+Sách nói instance có tham số (`Inner(q) == INSTANCE ...`) hầu như chỉ dùng trong idiom ẩn biến[^inst-param-hide]. Mục 4 dùng nó.
 
 ```tla
 (* Đoạn trích từ một module cụ thể (đầy đủ ở mục 7) — minh họa, chưa chạy.
@@ -141,30 +163,34 @@ AbsSpec == Abs!Spec                                \* đặc tả trừu tượn
 
 <details><summary>Đi sâu: tiền tố <code>!</code>, instance không đổi tên, và dạng "TLC version 1"</summary>
 
-- **Có hay không tiền tố.** Instance *có* đổi tên (`IM == INSTANCE ...`) là cần thiết khi dùng nhiều instance của module hoặc một instance tham số[^inst-rename]; còn `INSTANCE M WITH ...` đứng một mình nhập định nghĩa vào module hiện tại không đổi tên, và biểu thức thay phải thuộc phạm vi các khai báo/định nghĩa của module hiện tại[^inst-noren]. Trong refinement bạn gần như luôn dùng dạng có tên (`Abs!Spec`) để phân biệt với `Spec` của chính mình (nhận xét của người soạn).
+- **Có hay không tiền tố.** Instance *có* đổi tên (`IM == INSTANCE ...`) là cần thiết khi dùng nhiều instance của module hoặc một instance tham số[^inst-rename]. Còn `INSTANCE M WITH ...` đứng một mình thì nhập định nghĩa vào module hiện tại mà không đổi tên, và biểu thức thay phải thuộc phạm vi các khai báo/định nghĩa của module hiện tại[^inst-noren]. Trong refinement bạn gần như luôn dùng dạng có tên (`Abs!Spec`) để phân biệt với `Spec` của chính mình (nhận xét của người soạn).
 - **Tóm tắt cú pháp trong bản TLA+ summary.** Câu lệnh `INSTANCE M WITH p1 <- e1, ..., pm <- em` định nghĩa lại mỗi toán tử `F` của `M` bằng cách thay các hằng/biến khai báo `pj` bởi `ej`[^sum-instance].
-- **Lưu ý lịch sử về TLC.** File `MCWriteThroughCache.tla` trong kho Examples dùng module `WriteThroughCacheInstanced` thay cho `WriteThroughCache`, vì TLC "version 1" không xử lý được instantiation; module này khai triển tay các `INSTANCE` thành định nghĩa tương đương[^ex-v1][^ex-v1-equiv]. Sách (mục 14.1) mô tả cách làm khi dùng thẳng `instance`: thêm `instance ABCorrectness` vào module chạy TLC rồi đặt công thức đích vào `PROPERTIES` của file cấu hình[^book-inst-prop]. Ghi chú của extension VS Code cũng viết quy trình này: đặc tả trừu tượng là một `PROPERTY` của đặc tả cụ thể[^kb-howto]. Người soạn không đối chiếu thêm tài liệu TLC hiện hành, nên coi đây là hướng dẫn thực hành từ hai nguồn trên, không phải đặc tả của công cụ.
+- **Lưu ý lịch sử về TLC.** File `MCWriteThroughCache.tla` trong kho Examples dùng module `WriteThroughCacheInstanced` thay cho `WriteThroughCache`, vì TLC "version 1" không xử lý được instantiation[^ex-v1]. Module này khai triển tay các `INSTANCE` thành định nghĩa tương đương[^ex-v1-equiv]. Sách (mục 14.1) mô tả cách làm khi dùng thẳng `instance`: thêm `instance ABCorrectness` vào module chạy TLC rồi đặt công thức đích vào `PROPERTIES` của file cấu hình[^book-inst-prop]. Ghi chú của extension VS Code cũng viết quy trình này: đặc tả trừu tượng là một `PROPERTY` của đặc tả cụ thể[^kb-howto]. Người soạn không đối chiếu thêm tài liệu TLC hiện hành, nên hãy coi đây là hướng dẫn thực hành từ hai nguồn trên, không phải đặc tả của công cụ.
 
 </details>
 
-**Quay lại Q3:** `INSTANCE ... WITH` là phép thay thế tham số bằng biểu thức của module hiện tại; thay biến trừu tượng bằng một state function của trạng thái cụ thể biến đặc tả trừu tượng thành một công thức đọc được trên thiết kế chi tiết.
+**Quay lại Q3:** `INSTANCE ... WITH` là phép thay tham số bằng biểu thức của module hiện tại. Thay biến trừu tượng bằng một state function của trạng thái cụ thể thì đặc tả trừu tượng trở thành một công thức đọc được trên thiết kế chi tiết; với `flags`, đó là `val` tính từ `db` và `buf`.
 
 ## 4. Ẩn biến bằng `\EE` (Q4)
 
-> **Trả lời ngắn.** Biến trong spec dùng để *mô tả* hành vi (ví dụ hàng đợi `q` trong FIFO) thường là chi tiết nội bộ, không phải thứ người dùng hệ thống nhìn thấy. TLA+ ẩn biến đó bằng lượng từ tồn tại thời gian `\EE x : F` ("tồn tại một dãy giá trị cho `x` sao cho `F` đúng")[^hide-def]. Khi đặc tả cấp cao đã ẩn biến nội bộ thì "implementation là implication" đúng nguyên văn; nếu không ẩn thì cài đặt phải "cài đặt dưới một refinement mapping"[^hide-impl].
+> **Trả lời ngắn.** Spec thường có những biến chỉ để *mô tả* hành vi (ví dụ hàng đợi `q` trong FIFO) mà người dùng hệ thống không thấy. TLA+ ẩn chúng bằng lượng từ tồn tại thời gian `\EE x : F`, nghĩa là "tồn tại một dãy giá trị cho `x` sao cho `F` đúng"[^hide-def]. Khi đặc tả cấp cao đã ẩn biến nội bộ như vậy thì "implementation là implication" đúng nguyên văn. Nếu không ẩn thì cài đặt phải "cài đặt dưới một refinement mapping"[^hide-impl].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): lớp có field `private`. Người gọi chỉ thấy phương thức `pub`; hợp đồng chỉ nói về các phương thức này. Field private tồn tại để *giải thích* hành vi, nhưng hợp đồng không đòi hỏi cài đặt phải có field cùng tên, cùng kiểu. `\EE` là cách nói "tồn tại *một cách nào đó* gán giá trị cho field private để mọi thứ khớp".
+*Với service `flags`.* Client của `flags` chỉ nhìn thấy kết quả của `Get`, tức `ret`. Giá trị flag "hiện tại" `val` có mặt để giải thích vì sao `Get` trả giá trị ấy. Nhưng hợp đồng không đòi code có biến tên `val`, càng không đòi cùng kiểu: code của ta giữ `db` cộng `buf` thay vì một biến duy nhất. `\EE` là cách nói "tồn tại *một cách nào đó* gán giá trị cho `val` để mọi thứ khớp" (nhận xét của người soạn).
 
-*Bước 1 — vì sao phải có biến nội bộ.* Hàng đợi `q` trong FIFO của sách là chuỗi tin đã gửi nhưng chưa nhận; nó dùng để *đặc tả* giá trị nào được gửi và nhận. Hình vẽ của hệ thống chỉ có kênh `in` và `out`, nên `q` là biến nội bộ và trong đặc tả cuối nên bị ẩn[^hide-fifo].
+### 4.1 Vì sao spec có biến nội bộ
 
-*Bước 2 — `\EE x : F` nghĩa là gì.* Công thức đúng với một behavior nếu tồn tại một dãy giá trị — một giá trị cho mỗi trạng thái — gán được cho `x` làm `F` đúng[^hide-def]. Khác với `\E r : F` (một giá trị `r` duy nhất), `\EE x : F` khẳng định có *một giá trị của `x` trong từng trạng thái*[^hide-exists-seq]. Cho mục đích viết đặc tả, có thể hiểu đơn giản là "`F` với `x` bị ẩn"[^hide-think]. Bài báo TLA cũng mô tả cách này: ta muốn đặc tả chỉ cách các biến giao diện đổi, không quan tâm biến khác đổi ra sao, nên ẩn biến `memory`[^hide-paper].
+Hàng đợi `q` trong FIFO của sách là chuỗi tin đã gửi nhưng chưa nhận; ta dùng nó để *đặc tả* giá trị nào được gửi và nhận. Hình vẽ của hệ thống chỉ có kênh `in` và `out`, nên `q` là biến nội bộ và trong đặc tả cuối nó nên bị ẩn[^hide-fifo].
 
-*Bước 2b — idiom trong TLA+.* Không viết thẳng `\EE q : Spec` được trong module đã khai báo `q`, vì sẽ khai báo lại `q`; sách dùng một module mới và một instance có tham số[^hide-idiom]. Dạng ASCII của Figure 5.3 như sau.
+### 4.2 `\EE x : F` nghĩa là gì
+
+Công thức này đúng với một behavior nếu tồn tại một dãy giá trị, mỗi trạng thái một giá trị, gán được cho `x` để `F` đúng[^hide-def]. Khác với `\E r : F` (một giá trị `r` duy nhất), `\EE x : F` khẳng định có *một giá trị của `x` trong từng trạng thái*[^hide-exists-seq]. Cho mục đích viết đặc tả, bạn có thể hiểu đơn giản là "`F` với `x` bị ẩn"[^hide-think]. Bài báo TLA mô tả cùng cách nghĩ này: ta muốn đặc tả chỉ nói các biến giao diện đổi thế nào, không quan tâm biến khác đổi ra sao, nên ẩn biến `memory`[^hide-paper].
+
+Trong TLA+ có một vướng mắc khi viết ra. Ta không viết thẳng `\EE q : Spec` được trong module đã khai báo `q`, vì như vậy là khai báo lại `q`. Sách vòng qua bằng một module mới và một instance có tham số[^hide-idiom]. Dạng ASCII của Figure 5.3 trong sách như sau (với `flags`, module `RegisterSpec` ở mục 7 làm đúng việc này cho `val`).
 
 ```tla
-(* Theo Figure 5.3 của sách, viết lại bằng ASCII. *)
+(* Figure 5.3 của sách, viết lại bằng ASCII. *)
 ---------------------------- MODULE Memory ----------------------------
 EXTENDS MemoryInterface
 Inner(mem, ctl, buf) == INSTANCE InternalMemory
@@ -172,38 +198,54 @@ Spec == \EE mem, ctl, buf : Inner(mem, ctl, buf)!ISpec
 =======================================================================
 ```
 
-*Bước 3 — liên hệ với implementation.* Lamport nói rõ: hiding tường minh cho phép "implementation" là implication. Một đặc tả mức thấp chỉ có thể được kỳ vọng kéo theo đặc tả mức cao nếu biến nội bộ của mức cao — vốn có giá trị không quan trọng — được ẩn tường minh; nếu không thì implementation nghĩa là implementation dưới refinement mapping[^hide-impl]. Với ví dụ bộ nhớ, chứng minh `Spec => LM!Spec` được viết lại thành `Spec => \EE mem, ctl, buf : LM!Inner(mem, ctl, buf)!ISpec`, và theo quy tắc logic ta phải tìm "witness" cho `mem`, `ctl`, `buf`[^wit]. Các witness ấy chính là refinement mapping (mục 5).
+### 4.3 Liên hệ với implementation
 
-*Bước 4 — hệ quả thực hành.* TLC không xử lý toán tử ẩn biến; sách khuyên kiểm đặc tả với biến nội bộ để lộ ra (spec "internal")[^tlc-no-exists]. Và nếu chỉ có mục tiêu thực hành thì thường không cần ẩn biến, chỉ cần viết spec "inner" và chú thích biến nào là nội bộ[^hide-optional].
+Vậy vì sao phải ẩn? Lamport nói rõ rằng hiding tường minh làm cho "implementation" là implication. Một đặc tả mức thấp chỉ có thể kỳ vọng kéo theo đặc tả mức cao nếu biến nội bộ của mức cao, vốn có giá trị không quan trọng, được ẩn tường minh. Nếu không thì implementation nghĩa là implementation dưới refinement mapping[^hide-impl].
+
+Với ví dụ bộ nhớ của sách, chứng minh `Spec => LM!Spec` được viết lại thành `Spec => \EE mem, ctl, buf : LM!Inner(mem, ctl, buf)!ISpec`. Theo quy tắc logic, ta phải tìm "witness" cho `mem`, `ctl`, `buf`[^wit]. Các witness ấy chính là refinement mapping (mục 5).
+
+### 4.4 Hệ quả thực hành
+
+TLC không xử lý toán tử ẩn biến. Sách khuyên kiểm đặc tả với biến nội bộ để lộ ra (spec "internal")[^tlc-no-exists]. Và nếu chỉ có mục tiêu thực hành thì thường không cần ẩn biến, chỉ cần viết spec "inner" và chú thích biến nào là nội bộ[^hide-optional].
 
 <details><summary>Đi sâu: ∃ thời gian khác ∃ thường; TLC kiểm thế nào khi có biến ẩn; "ẩn" ở API và ở code</summary>
 
-- **Một dãy giá trị chứ không phải một giá trị.** Ví dụ trong sách: `\EE x : [](x \in y)` nói `y` luôn có phần tử nào đó, nhưng phần tử `x` có thể khác nhau ở các trạng thái khác nhau[^hide-example]. Người học dễ nhầm với `\E x : [](x \in y)`, mệnh đề mạnh hơn nhiều (suy luận của người soạn).
-- **Định nghĩa chính xác.** Bài báo định nghĩa `\EE x : F` thỏa bởi behavior σ khi có hai behavior ρ, τ sao cho `#σ = #ρ` (`#σ` là σ sau khi bỏ hết bước đứng yên, trừ phần đứng yên vô hạn ở cuối nếu có), ρ và τ chỉ khác nhau ở `x` (cách đọc ký hiệu `ρ =x τ` của người soạn), và τ thỏa `F`[^hide-paper-def][^hide-paper-formula]; vì thế nó bất biến dưới stuttering. Bài báo cũng nói `\EE` thật sự là lượng từ tồn tại vì nó tuân theo các luật thông thường[^hide-e1e2]; hai quy tắc E1/E2 của bài báo là chỗ để từ một witness (refinement mapping) suy ra công thức có `\EE` hai vế[^ar-memory-map].
-- **Cách TLC kiểm khi đích có biến ẩn.** Giả sử đích là `ABSpec => \EE h : AB(h)!ABCSpec`. Sách nói TLC không kiểm trực tiếp vì không xử lý `\EE`; ta kiểm theo cách giống chứng minh: định nghĩa state function `oh` từ biến của module cụ thể và kiểm `ABSpec => AB(oh)!ABCSpec`, tức dùng refinement mapping[^tlc-via-mapping].
+- **Một dãy giá trị chứ không phải một giá trị.** Ví dụ trong sách: `\EE x : [](x \in y)` nói `y` luôn có phần tử nào đó, nhưng phần tử `x` có thể khác nhau ở các trạng thái khác nhau[^hide-example]. Người học dễ nhầm với `\E x : [](x \in y)`, một mệnh đề mạnh hơn nhiều (suy luận của người soạn).
+- **Định nghĩa chính xác.** Bài báo định nghĩa `\EE x : F` thỏa bởi behavior σ khi có hai behavior ρ, τ sao cho `#σ = #ρ` (`#σ` là σ sau khi bỏ hết bước đứng yên, trừ phần đứng yên vô hạn ở cuối nếu có), ρ và τ chỉ khác nhau ở `x` (cách đọc ký hiệu `ρ =x τ` của người soạn), và τ thỏa `F`[^hide-paper-formula]. Vì thế nó bất biến dưới stuttering. Bài báo cũng nói `\EE` thật sự là lượng từ tồn tại vì nó tuân theo các luật thông thường[^hide-e1e2]. Hai quy tắc E1/E2 của bài báo là chỗ để từ một witness (refinement mapping) suy ra công thức có `\EE` hai vế[^ar-memory-map].
+- **Cách TLC kiểm khi đích có biến ẩn.** Giả sử đích là `ABSpec => \EE h : AB(h)!ABCSpec`. Sách nói TLC không kiểm trực tiếp được vì không xử lý `\EE`; ta kiểm theo cách giống chứng minh: định nghĩa state function `oh` từ biến của module cụ thể và kiểm `ABSpec => AB(oh)!ABCSpec`, tức dùng refinement mapping[^tlc-via-mapping].
 - **Ẩn ở code (nhận xét của người soạn).** Với Rust, "biến nội bộ" là field không `pub`; mục *Liên hệ với Rust* ở cuối chương khai thác phép so sánh này.
 
 </details>
 
-**Quay lại Q4:** `\EE x : F` ẩn `x` bằng cách đòi "tồn tại một dãy giá trị cho `x`"; việc kiểm `Impl => \EE x : ...` quy về việc đưa ra witness cho `x`, tức refinement mapping.
+**Quay lại Q4:** `\EE x : F` ẩn `x` bằng cách đòi "tồn tại một dãy giá trị cho `x`". Việc kiểm `Impl => \EE x : ...` quy về việc đưa ra witness cho `x`, tức refinement mapping; với `flags`, witness của `val` là phần tử cuối `buf`, hoặc `db` khi `buf` rỗng.
 
 ## 5. Refinement mapping và step simulation (Q5)
 
-> **Trả lời ngắn.** *Refinement mapping* là một bộ biểu thức (state function, không có dấu `'`) tính các biến trừu tượng bị ẩn từ biến của thiết kế cụ thể; chúng là các "witness" cho `\EE`[^wit][^rm-def]. Sau khi chọn mapping, `Impl => Spec` quy về ba kiểm tra: trạng thái đầu của Impl ánh xạ thành trạng thái đầu của Spec; và mỗi bước Next của Impl, bắt đầu từ trạng thái thỏa một invariant `Inv`, hoặc ánh xạ thành một bước Next của Spec, hoặc không làm các biến trừu tượng đổi (stuttering) — gọi là *step simulation*[^step-sim].
+> **Trả lời ngắn.** *Refinement mapping* là một bộ biểu thức (state function, không có dấu `'`) tính các biến trừu tượng bị ẩn từ biến của thiết kế cụ thể; chúng đóng vai "witness" cho `\EE`[^wit]. Ta nói `Spec` cài đặt `ISpec` *dưới* mapping ấy[^rm-def]. Chọn xong mapping thì `Impl => Spec` quy về ba việc: trạng thái đầu của Impl ánh xạ thành trạng thái đầu của Spec; tìm một invariant `Inv`; và mỗi bước `Next` của Impl, xuất phát từ trạng thái thỏa `Inv`, hoặc ánh xạ thành một bước `Next` của Spec, hoặc không làm các biến trừu tượng đổi (stuttering). Việc thứ ba gọi là *step simulation*[^step-sim].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có schema DB nội bộ phức tạp và một API model đơn giản. Viết một `VIEW` (hoặc hàm `to_api(&db_row)`) biến trạng thái DB thành trạng thái API. Kiểm tra "mỗi transaction trong DB hoặc làm view đổi đúng như một thao tác API cho phép, hoặc không làm view đổi" chính là step simulation. Refinement mapping là cái view đó.
+*Với service `flags`.* Client chỉ biết hợp đồng `Register`: một giá trị `val`. Code của `flags` có `db` và `buf`. Để so hai bên ta cần một hàm trả lời câu hỏi: "với `db` và `buf` hiện tại, giá trị flag mà client coi là hiện tại là gì?". Câu trả lời tự nhiên là phần tử cuối của `buf` nếu `buf` không rỗng, còn không thì là `db`, vì `Get` của `flags` đọc đúng như vậy (nhận xét của người soạn). Hàm đó là refinement mapping. Kiểm tra mỗi bước của code qua hàm đó, hoặc nó làm giá trị đổi đúng như một `Put` mà hợp đồng cho phép, hoặc nó không làm giá trị đổi, chính là step simulation.
 
-*Bước 1 — mapping là witness.* Muốn chứng minh một định lý dạng `Spec => \EE mem, ctl, buf : ...`, các quy tắc logic bắt ta tìm "witness" cho các biến bị lượng hóa[^wit]. Bộ witness gọi là refinement mapping; ta nói `Spec` cài đặt `ISpec` *dưới* mapping ấy[^rm-def].
+### 5.1 Mapping là witness
 
-*Bước 2 — công thức "gạch ngang".* Với công thức F của spec trừu tượng, ký hiệu `F̄` là F sau khi thế `mem`, `ctl`, `buf` bằng `omem`, `octl`, `obuf`[^rm-bar]. Phép thế phân phối qua `/\`, `[]`, `[...]_v`, tuple, nên `IInit /\ [][INext]_<<memInt,mem,ctl,buf>>` sau khi thế chỉ còn việc kiểm `Init /\ [][Next]_vars => IInit̄ /\ [][INext̄]_...`[^barring-distrib].
+Muốn chứng minh một định lý dạng `Spec => \EE mem, ctl, buf : ...`, các quy tắc logic bắt ta tìm "witness" cho các biến bị lượng hóa[^wit]. Bộ witness gọi là refinement mapping, và ta nói `Spec` cài đặt `ISpec` *dưới* mapping ấy[^rm-def].
 
-*Bước 3 — ba mệnh đề cần chứng minh.* Sách viết rằng công thức này được chứng minh bằng cách tìm một invariant `Inv` của `Spec` sao cho: `Init => IInit̄`, và `Inv /\ Next => INext̄ \/ UNCHANGED <<memInt, omem, octl, obuf>>`. Mệnh đề thứ hai tên *step simulation*: một bước Next xuất phát từ trạng thái thỏa Inv hoặc là một bước INext của spec trừu tượng (đổi bộ giá trị đã ánh xạ như INext đổi), hoặc để bộ đó nguyên[^step-sim][^step-rm-proof].
+### 5.2 Công thức "gạch ngang"
 
-*Bước 4 — vì sao cần `Inv`.* Một bước cụ thể xuất phát từ trạng thái *bất kỳ* (kể cả trạng thái không thể tới được) có thể không mô phỏng được (suy luận của người soạn; mục 6 có ví dụ của sách về một trạng thái như vậy với `Coherence`). `Inv` cắt bỏ trạng thái không tới được. Ở sách mục 5.7, `Inv` được tìm sao cho là bất biến của *chính action `Next`* — gọi là bất biến *quy nạp* (inductive) — chứ không chỉ của `Spec`[^inductive-def]. Còn cách tìm `Inv` thì sách nói thẳng là không bàn[^find-inv].
+Với công thức F của spec trừu tượng, ký hiệu `F̄` là F sau khi thế `mem`, `ctl`, `buf` bằng `omem`, `octl`, `obuf`[^rm-bar]. Phép thế phân phối qua `/\`, `[]`, `[...]_v` và tuple. Vì vậy `IInit /\ [][INext]_<<memInt,mem,ctl,buf>>` sau khi thế chỉ còn việc kiểm `Init /\ [][Next]_vars => IInit̄ /\ [][INext̄]_...`[^barring-distrib].
 
-*Bước 5 — chọn mapping cho bộ nhớ có cache.* Với bộ nhớ ghi xuyên, Lamport chọn `omem = vmem` (giá trị `wmem` sau khi mọi write còn trong hàng đợi được áp dụng), `octl[p]` bằng `ctl[p]` trừ khi là `"waiting"` thì bằng `"busy"`, và `obuf = buf`[^omem-def]. Mục 6 đi từng bước chứng minh vì sao các lựa chọn đó hợp lý.
+### 5.3 Ba mệnh đề cần chứng minh
+
+Công thức đó chứng minh được bằng cách tìm một invariant `Inv` của `Spec` sao cho hai điều sau đúng: `Init => IInit̄`, và `Inv /\ Next => INext̄ \/ UNCHANGED <<memInt, omem, octl, obuf>>`[^step-rm-proof]. Mệnh đề thứ hai tên *step simulation*. Một bước Next xuất phát từ trạng thái thỏa `Inv` hoặc là một bước INext của spec trừu tượng (đổi bộ giá trị đã ánh xạ như INext đổi), hoặc để bộ đó nguyên[^step-sim].
+
+### 5.4 Vì sao cần `Inv`
+
+Một bước cụ thể xuất phát từ trạng thái *bất kỳ*, kể cả trạng thái không thể tới được, có thể không mô phỏng được (suy luận của người soạn; mục 6 có ví dụ của sách về một trạng thái như vậy với `Coherence`). `Inv` cắt bỏ các trạng thái không tới được. Ở sách mục 5.7, `Inv` được tìm sao cho là bất biến của *chính action `Next`*, gọi là bất biến *quy nạp* (inductive), chứ không chỉ của `Spec`[^inductive-def]. Còn cách tìm `Inv` thì sách nói thẳng là không bàn[^find-inv].
+
+### 5.5 Mapping của bộ nhớ có cache
+
+Với bộ nhớ ghi xuyên, Lamport chọn `omem = vmem` (giá trị `wmem` sau khi mọi write còn trong hàng đợi được áp dụng), `octl[p]` bằng `ctl[p]` trừ khi `ctl[p]` là `"waiting"` thì bằng `"busy"`, và `obuf = buf`[^omem-def]. Mục 6 đi từng bước để thấy vì sao các lựa chọn đó hợp lý.
 
 ```mermaid
 flowchart LR
@@ -224,22 +266,26 @@ flowchart LR
 - **Dạng tổng quát.** Để chứng minh `(\EE x1..xm : Ψ) => (\EE y1..yn : Φ)`, ta định nghĩa các state function `ȳ1..ȳn` từ biến xuất hiện trong Ψ rồi chứng minh `Ψ => Φ̄`, với `Φ̄` là Φ thay `yi` bởi `ȳi`[^rm-general]. Sau đó suy ra công thức ban đầu từ các quy tắc E1 và E2[^rm-general].
 - **Ý nghĩa ngữ nghĩa.** `Ψ => Φ̄` khẳng định mọi dãy giá trị của các biến giao diện *và* của state function được ánh xạ mà Ψ cho phép cũng là dãy giá trị mà Φ cho phép cho các biến tương ứng[^rm-sem]. Có thể coi `memory` là state function "cụ thể" mà Ψ dùng để cài đặt biến "trừu tượng" `memory`[^rm-concrete].
 - **Gạch ngang không luôn phân phối.** Phép thế phân phối qua nhiều toán tử, nhưng không phân phối qua `ENABLED`, nên không phân phối tự động qua `WF`, `SF`[^enabled-bar]. Ghi chú này quan trọng khi spec có fairness (mục 8).
-- **TLC làm gì với ba việc trên.** Theo mô tả thuật toán của sách, với các thuộc tính (`PROPERTY`), TLC gom hai nhóm: `ImpliedInit` là hội các conjunct của thuộc tính là state predicate[^tlc-impliedinit], và `ImpliedAction` là hội các `[A]_v` mà một conjunct thuộc tính có dạng `[][A]_v`[^tlc-impliedaction]. Với mỗi trạng thái đầu, nó kiểm `ImpliedInit`[^tlc-init-check]; với mỗi bước `s -> t` sinh ra, nó kiểm `ImpliedAction`[^tlc-step-check]. Nếu `Abs!Spec == Abs!Init /\ [][Abs!Next]_<<...>>` thì đây chính xác là "Init ánh xạ đúng" và "mỗi bước mô phỏng được hoặc đứng yên" (suy luận của người soạn từ hai định nghĩa trên).
-- **Bẫy: TLC chỉ kiểm trên trạng thái tới được.** Mọi trạng thái trong đồ thị TLC dựng đều tới được từ một trạng thái đầu[^tlc-reachable], nên TLC không cần `Inv` để loại trạng thái vô lý (suy luận của người soạn từ câu trước); nhưng nó chỉ chắc chắn trong phạm vi model hữu hạn bạn cấu hình (hằng nhỏ). Bằng chứng toàn bộ cần chứng minh (mục 8).
+- **TLC làm gì với ba việc trên.** Với các `PROPERTY`, TLC gom thuộc tính thành hai nhóm. `ImpliedInit` là hội các conjunct của thuộc tính là state predicate[^tlc-impliedinit]. `ImpliedAction` là hội các `[A]_v` mà một conjunct thuộc tính có dạng `[][A]_v`[^tlc-impliedaction]. Với mỗi trạng thái đầu, TLC kiểm `ImpliedInit`[^tlc-init-check]. Với mỗi bước `s -> t` sinh ra, nó kiểm `ImpliedAction`[^tlc-step-check]. Nếu `Abs!Spec == Abs!Init /\ [][Abs!Next]_<<...>>` thì đây chính xác là "Init ánh xạ đúng" và "mỗi bước mô phỏng được hoặc đứng yên" (suy luận của người soạn từ các định nghĩa trên).
+- **Bẫy: TLC chỉ kiểm trên trạng thái tới được.** Mọi trạng thái trong đồ thị TLC dựng đều tới được từ một trạng thái đầu[^tlc-reachable], nên TLC không cần `Inv` để loại trạng thái vô lý (suy luận của người soạn từ câu trước). Nhưng nó chỉ chắc chắn trong phạm vi model hữu hạn bạn cấu hình (hằng nhỏ). Bằng chứng toàn bộ cần chứng minh (mục 8).
 
 </details>
 
-**Quay lại Q5:** refinement mapping là bộ state function đóng vai witness cho biến ẩn; kiểm `Impl => Spec` quy về `Init` ánh xạ đúng và step simulation (mỗi bước hoặc là một bước trừu tượng, hoặc đứng yên), cần một invariant quy nạp để loại trạng thái không tới được.
+**Quay lại Q5:** refinement mapping là bộ state function đóng vai witness cho biến ẩn. Kiểm `Impl => Spec` quy về `Init` ánh xạ đúng và step simulation (mỗi bước hoặc là một bước trừu tượng, hoặc đứng yên), với một invariant quy nạp để loại trạng thái không tới được; với `flags`, mapping là `val` và mỗi action của code (`Put`, `Flush`, `Get`) phải qua được phép thử đó.
 
 ## 6. Ví dụ: cache ghi xuyên refine bộ nhớ tuyến tính (Q6)
 
-> **Trả lời ngắn.** Chương 5 của Lamport đặc tả *bộ nhớ tuyến tính* (một chỗ nhớ `mem`, mỗi request truy cập `mem` ở một thời điểm nào đó giữa lúc gửi và lúc trả lời[^lin-mem]) rồi đặc tả một *cache ghi xuyên* với hàng đợi `memQ` và cache riêng cho từng processor, và khẳng định cache cài đặt bộ nhớ tuyến tính[^wt-impl][^thm-lm]. Chứng minh dùng refinement mapping `omem = vmem`: "bộ nhớ trừu tượng" là bộ nhớ chính *sau khi áp dụng mọi write đang xếp hàng*[^vmem-def].
+> **Trả lời ngắn.** Chương 5 của Lamport đặc tả *bộ nhớ tuyến tính*: một chỗ nhớ `mem`, và mỗi request truy cập `mem` ở một thời điểm nào đó giữa lúc gửi và lúc trả lời[^lin-mem]. Tiếp đó sách đặc tả một *cache ghi xuyên* với hàng đợi `memQ` và cache riêng cho từng processor[^wt-impl]. Sách khẳng định mọi behavior của cache cũng thỏa spec bộ nhớ tuyến tính[^thm-lm]. Chứng minh dùng refinement mapping `omem = vmem`: "bộ nhớ trừu tượng" là bộ nhớ chính *sau khi áp dụng mọi write đang xếp hàng*[^vmem-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có dịch vụ ghi vào hàng đợi tác vụ rồi worker đẩy xuống DB, cộng cache cục bộ ở từng instance. Với người dùng, "giá trị" của key là giá trị cuối mà một request *đã xong* đã ghi — kể cả khi worker chưa đẩy xuống DB. Giá trị "thật" của hệ thống không nằm ở DB mà ở DB + hàng đợi; đó chính là ý của `vmem`. (Phép so sánh chỉ để hình dung: spec của Lamport nói về cache của processor và bộ nhớ chính, không phải Redis.)
+*Với service `flags`.* Giờ cho `flags` chạy nhiều instance, mỗi instance có cache cục bộ, và mọi lần ghi đi qua một hàng đợi rồi mới xuống DB. Hình dạng đó khớp với spec của Lamport: instance ứng với processor, DB ứng với bộ nhớ chính `wmem`, hàng đợi ghi ứng với `memQ` (nhận xét của người soạn; phép so sánh chỉ để định hướng, spec của Lamport nói về cache của processor và bộ nhớ chính chứ không phải service). Với client, giá trị của flag là giá trị cuối mà một request *đã xong* đã ghi, kể cả khi hàng đợi chưa đẩy nó xuống DB. Nói cách khác, giá trị "thật" của hệ thống nằm ở DB cộng hàng đợi, không chỉ ở DB. Đó chính là ý của `vmem`.
 
-*Bước 1 — spec trừu tượng: `InternalMemory`.* Mỗi processor `p` có `ctl[p] ∈ {"rdy","busy","done"}` và `buf[p]` chứa request hoặc phản hồi. Ba action: `Req(p)` gửi request, `Do(p)` thực hiện truy cập bộ nhớ[^req-do-rsp], `Rsp(p)` trả lời[^rsp-def]. Việc đặt `mem` *chỉ đổi ở `Do(p)`* là thứ biến đặc tả thành bộ nhớ tuyến tính: Lamport để truy cập `mem` xảy ra vào bất kỳ lúc nào giữa request và response[^lin-mem]. (Các tên `memInt`, `Send`, `Reply`, `MReq`, `Adr`, `Val`, `Proc`, `NoVal` trong đoạn spec dưới đây đến từ module `MemoryInterface`[^mem-iface]; chương này không đi vào chúng — chỉ cần biết `memInt` là biến giao diện giữa processor và bộ nhớ.) (Suy luận của người soạn: `Do(p)` là *điểm tuyến tính hóa* theo ngôn ngữ của [P12·09, mục 1](../12-he-thong-du-lieu/09-consistency-va-consensus.md); sách dùng cụm "linearizable memory" nhưng người soạn không thấy sách dùng chữ "linearization point".)
+### 6.1 Spec trừu tượng: `InternalMemory`
+
+Mỗi processor `p` có `ctl[p] ∈ {"rdy","busy","done"}` và `buf[p]` chứa request hoặc phản hồi. Ba action của nó là: `Req(p)` gửi request và `Do(p)` thực hiện truy cập bộ nhớ[^req-do-rsp]. Còn `Rsp(p)` trả lời cho processor[^rsp-def]. `mem` *chỉ đổi ở `Do(p)`*, và đó là điều biến đặc tả này thành bộ nhớ tuyến tính: Lamport cho phép truy cập `mem` xảy ra vào bất kỳ lúc nào giữa request và response[^lin-mem].
+
+Các tên `memInt`, `Send`, `Reply`, `MReq`, `Adr`, `Val`, `Proc`, `NoVal` trong đoạn spec dưới đây đến từ module `MemoryInterface`[^mem-iface]. Chương này không đi vào chúng; chỉ cần biết `memInt` là biến giao diện giữa processor và bộ nhớ. (Suy luận của người soạn: `Do(p)` là *điểm tuyến tính hóa* theo ngôn ngữ của [P12·09, mục 1](../12-he-thong-du-lieu/09-consistency-va-consensus.md). Sách dùng cụm "linearizable memory" nhưng người soạn không thấy sách dùng chữ "linearization point".)
 
 ```tla
 (* Chép lại theo InternalMemory, Figure 5.2: bản ASCII dùng trong kho Examples. *)
@@ -274,7 +320,11 @@ INext == \E p \in Proc : Req(p) \/ Do(p) \/ Rsp(p)
 ISpec == IInit /\ [][INext]_<<memInt, mem, ctl, buf>>
 ```
 
-*Bước 2 — spec cụ thể: `WriteThroughCache`.* Mỗi processor có `cache[p]`; yêu cầu tới bộ nhớ chính `wmem` đi qua hàng đợi `memQ` có độ dài tối đa `QLen`; "ghi xuyên" nghĩa là mọi lệnh ghi đều cập nhật bộ nhớ chính[^wt-through]. `DoWr(p)` ghi vào cache của `p`, cập nhật mọi cache khác đang giữ địa chỉ ấy và nối request ghi vào `memQ`; trong thực tế bước này là một giao dịch trên bus, nhưng ở mức cao Lamport biểu diễn thành *một* bước[^dowr-atomic]. `MemQWr` lấy write ở đầu `memQ` ghi vào `wmem`. Khi `RdMiss(p)` đã xếp một request đọc vào `memQ` thì `MemQRd` phải đọc giá trị từ write *cuối cùng* tới địa chỉ đó còn trong `memQ`, không phải từ `wmem`, nếu không hai cache có thể giữ giá trị khác nhau cho cùng địa chỉ[^memqrd]. Ngoài ra, `ctl[p]` có thêm giá trị `"waiting"` mà bộ nhớ trừu tượng không có[^ctl-waiting].
+### 6.2 Spec cụ thể: `WriteThroughCache`
+
+Mỗi processor có `cache[p]`. Yêu cầu tới bộ nhớ chính `wmem` đi qua hàng đợi `memQ` có độ dài tối đa `QLen`. "Ghi xuyên" nghĩa là mọi lệnh ghi đều cập nhật bộ nhớ chính[^wt-through].
+
+`DoWr(p)` ghi vào cache của `p`, cập nhật mọi cache khác đang giữ địa chỉ ấy và nối request ghi vào `memQ`. Trong thực tế bước này là một giao dịch trên bus, nhưng ở mức cao Lamport biểu diễn thành *một* bước[^dowr-atomic]. `MemQWr` lấy write ở đầu `memQ` ghi vào `wmem`. Khi `RdMiss(p)` đã xếp một request đọc vào `memQ`, `MemQRd` phải đọc giá trị từ write *cuối cùng* tới địa chỉ đó còn trong `memQ`, không phải từ `wmem`; nếu không, hai cache có thể giữ giá trị khác nhau cho cùng địa chỉ[^memqrd]. Ngoài ra `ctl[p]` có thêm giá trị `"waiting"` mà bộ nhớ trừu tượng không có[^ctl-waiting].
 
 ```tla
 (* Các action then chốt của WriteThroughCache, chép từ WriteThroughCacheInstanced.tla trong Examples (bản đã khai triển INSTANCE; tên action đúng như trong WriteThroughCache.tla). *)
@@ -319,7 +369,9 @@ LM == INSTANCE Memory
 THEOREM Spec => LM!Spec        \* cache cài đặt bộ nhớ tuyến tính
 ```
 
-*Bước 3 — đi tay một đoạn thực thi (minh họa của người soạn, không phải kết quả TLC).* Lấy `Proc = {p1, p2}`, một địa chỉ `a`, `QLen ≥ 1`, `wmem[a] = v1`, mọi cache rỗng. Cột phải tính ánh xạ `omem[a]` và `octl`; bảng cho thấy cả hai loại bước mà step simulation cho phép — bước trừu tượng thật sự (`Req`, `Do`) và bước đứng yên (**stuttering**):
+### 6.3 Đi tay một đoạn thực thi
+
+Đây là minh họa của người soạn, không phải kết quả TLC. Lấy `Proc = {p1, p2}`, một địa chỉ `a`, `QLen ≥ 1`, `wmem[a] = v1`, mọi cache rỗng. Cột phải của bảng tính ánh xạ `omem[a]` và `octl`. Bảng cho thấy cả hai loại bước mà step simulation cho phép: bước trừu tượng thật sự (`Req`, `Do`) và bước đứng yên (**stuttering**).
 
 | Bước cụ thể | `wmem[a]` | `memQ` | `omem[a] = vmem[a]` | Bước ở mức trừu tượng |
 |---|---|---|---|---|
@@ -332,50 +384,43 @@ THEOREM Spec => LM!Spec        \* cache cài đặt bộ nhớ tuyến tính
 | `MemQRd` (nạp `vmem[a]` vào `cache[p2]`) | `v2` | rỗng | `v2` | **stuttering** (cache không được ánh xạ) |
 | `DoRd(p2)` | `v2` | rỗng | `v2` | `Do(p2)`: `buf[p2]` nhận `mem[a]` |
 
-Điểm đáng nhớ: bước `Do(p1)` ở mức trừu tượng xảy ra *ở `DoWr(p1)`*, khi `wmem` còn giữ giá trị cũ; còn `MemQWr` về sau, vốn là bước "thật sự ghi xuống bộ nhớ chính", lại là stuttering. Đó là lý do `omem` không thể là `wmem`.
+Điểm đáng nhớ: bước `Do(p1)` ở mức trừu tượng xảy ra *ở `DoWr(p1)`*, khi `wmem` còn giữ giá trị cũ. Còn `MemQWr` về sau, vốn là bước "thật sự ghi xuống bộ nhớ chính", lại là stuttering. Đó là lý do `omem` không thể là `wmem`. Với `flags`, `MemQWr` chính là lần flush: client đã thấy giá trị mới từ lúc `Put` vào hàng đợi, nên lúc flush không có gì mới để thấy.
 
 <details><summary>Đi sâu: <code>Coherence</code> là bất biến nhưng không quy nạp; điều Inv phải nói thêm; <code>Evict</code>; cache khác bộ nhớ phần cứng</summary>
 
-- **`Coherence` và `TypeInvariant`.** Spec cache khẳng định `[](TypeInvariant /\ Coherence)`: nếu hai processor cùng có bản sao của một địa chỉ thì hai bản sao bằng nhau[^coh-inv]. `TypeInvariant` là bất biến của action `Next` (một bất biến quy nạp)[^typeinv-inductive]; còn `Coherence` thì *không*, nên chứng minh nó cần một `Inv` mạnh hơn[^coh-not-inductive]. Sách dựng phản ví dụ: một trạng thái mà `cache[p1][a] = 1`, `wmem[a] = 2` và `memQ` chứa một request đọc của `p2` tại `a` thỏa `Coherence`, nhưng một bước `MemQRd` cho `cache[p2][a] = 2` khác `cache[p1][a] = 1`[^coh-cex]. Trạng thái xuất phát ấy không tới được từ `Init`, vì thế `Coherence` vẫn là bất biến của `Spec`[^coh-inv].
-- **Suy luận của người soạn về `Inv` cho step simulation.** Bước `DoRd(p)` ở mức trừu tượng phải gán `buf[p] = mem[buf[p].adr]` (xem `Do(p)` ở trên), mà ở mức cụ thể `buf[p]` nhận `cache[p][a]`. Vì vậy `Inv` cần khẳng định ít nhất rằng bản sao mà `DoRd(p)` sắp đọc bằng `vmem` tại địa chỉ đó; cách phát biểu gọn nhất (người soạn đoán, chưa kiểm) là "mọi bản sao có sẵn trong cache bằng `vmem` tại địa chỉ đó" — mạnh hơn `Coherence`, vốn chỉ khẳng định các bản sao bằng *nhau*. Sách không nêu `Inv` đầy đủ, nên coi đây là cách đọc, không phải trích dẫn.
-- **`Evict` không xuất hiện ở bên trái.** Lamport chủ ý để `Evict(p, a)` xảy ra bất kỳ lúc nào — trừ khi địa chỉ vừa được `MemQRd` nạp cho một request đọc mà `DoRd(p)` chưa chạy, tức `ctl[p] = "waiting"` và `buf[p].adr = a` — vì việc chọn *khi nào* evict là tối ưu hiệu năng, không ảnh hưởng đúng đắn thuật toán nên không nằm trong đặc tả[^evict-opt]. Với mapping trên, `Evict` không đổi `omem`, `octl`, `obuf`, nên luôn là stuttering (suy luận của người soạn từ định nghĩa).
-- **Ba mức của cùng một câu chuyện.** Bài báo TLA mô tả một "cache trừu tượng" cho phép mọi chính sách chuyển giá trị giữa cache và bộ nhớ chính và nói rằng, với một thuật toán cache cụ thể, ta chứng minh nó cài đặt cache trừu tượng này[^cached-abstract]; bắc cầu cho ra thuật toán cài đặt giao diện processor/memory[^ar-transitivity].
-- **Không nhầm với cache phần cứng.** [P4·06, mục 2](../04-concurrency/06-memory-model.md) giải thích cache coherence của phần cứng không thay thế memory ordering; thuộc tính `Coherence` ở đây là bất biến của một *thuật toán* trừu tượng, và nó *một mình* không đủ để nói thuật toán cài đặt bộ nhớ tuyến tính — cái đó là định lý `Spec => LM!Spec` (suy luận của người soạn).
+- **`Coherence` và `TypeInvariant`.** Spec cache khẳng định `[](TypeInvariant /\ Coherence)`: nếu hai processor cùng có bản sao của một địa chỉ thì hai bản sao bằng nhau[^coh-inv]. `TypeInvariant` là bất biến của action `Next` (một bất biến quy nạp)[^typeinv-inductive]. Còn `Coherence` thì *không*, nên chứng minh nó cần một `Inv` mạnh hơn[^coh-not-inductive]. Sách dựng phản ví dụ: một trạng thái mà `cache[p1][a] = 1`, `wmem[a] = 2` và `memQ` chứa một request đọc của `p2` tại `a` thì thỏa `Coherence`, nhưng một bước `MemQRd` cho `cache[p2][a] = 2` khác `cache[p1][a] = 1`[^coh-cex]. Trạng thái xuất phát ấy không tới được từ `Init`, vì thế `Coherence` vẫn là bất biến của `Spec`[^coh-inv].
+- **Suy luận của người soạn về `Inv` cho step simulation.** Bước `DoRd(p)` ở mức trừu tượng phải gán `buf[p] = mem[buf[p].adr]` (xem `Do(p)` ở trên), mà ở mức cụ thể `buf[p]` nhận `cache[p][a]`. Vì vậy `Inv` cần khẳng định ít nhất rằng bản sao mà `DoRd(p)` sắp đọc bằng `vmem` tại địa chỉ đó. Cách phát biểu gọn nhất (người soạn đoán, chưa kiểm) là "mọi bản sao có sẵn trong cache bằng `vmem` tại địa chỉ đó", mạnh hơn `Coherence` vốn chỉ khẳng định các bản sao bằng *nhau*. Sách không nêu `Inv` đầy đủ, nên hãy coi đây là một cách đọc chứ không phải trích dẫn.
+- **`Evict` không xuất hiện ở bên trái.** Lamport chủ ý để `Evict(p, a)` xảy ra bất kỳ lúc nào, trừ khi địa chỉ vừa được `MemQRd` nạp cho một request đọc mà `DoRd(p)` chưa chạy (tức `ctl[p] = "waiting"` và `buf[p].adr = a`). Lý do là việc chọn *khi nào* evict chỉ là tối ưu hiệu năng, không ảnh hưởng đúng đắn của thuật toán nên không nằm trong đặc tả[^evict-opt]. Với mapping trên, `Evict` không đổi `omem`, `octl`, `obuf`, nên luôn là stuttering (suy luận của người soạn từ định nghĩa).
+- **Ba mức của cùng một câu chuyện.** Bài báo TLA mô tả một "cache trừu tượng" cho phép mọi chính sách chuyển giá trị giữa cache và bộ nhớ chính, và nói rằng với một thuật toán cache cụ thể, ta chứng minh nó cài đặt cache trừu tượng này[^cached-abstract]. Bắc cầu cho ra thuật toán cài đặt giao diện processor/memory[^ar-transitivity].
+- **Không nhầm với cache phần cứng.** [P4·06, mục 2](../04-concurrency/06-memory-model.md) giải thích cache coherence của phần cứng không thay thế memory ordering. Thuộc tính `Coherence` ở đây là bất biến của một *thuật toán* trừu tượng, và nó *một mình* không đủ để nói thuật toán cài đặt bộ nhớ tuyến tính: việc đó là định lý `Spec => LM!Spec` (suy luận của người soạn).
 
 </details>
 
-**Quay lại Q6:** cache ghi xuyên cài đặt bộ nhớ tuyến tính dưới mapping `omem = vmem`, `octl` gộp `"waiting"` vào `"busy"`, `obuf = buf`; bước ghi xuống bộ nhớ chính và bước nạp cache đều là stuttering, còn `Do(p)` trừu tượng ứng với `DoWr(p)` hoặc `DoRd(p)` cụ thể.
+**Quay lại Q6:** cache ghi xuyên cài đặt bộ nhớ tuyến tính dưới mapping `omem = vmem`, `octl` gộp `"waiting"` vào `"busy"`, `obuf = buf`. Bước ghi xuống bộ nhớ chính và bước nạp cache đều là stuttering, còn `Do(p)` trừu tượng ứng với `DoWr(p)` hoặc `DoRd(p)` cụ thể.
 
 ## 7. Kiểm refinement bằng TLC: cấu hình, bẫy và ví dụ thật (Q7)
 
-> **Trả lời ngắn.** Làm theo ba bước: (1) viết (hoặc `INSTANCE`) đặc tả trừu tượng và chọn refinement mapping; (2) trong module cụ thể đặt tên cho công thức cần kiểm, ví dụ `AbsSpec == Abs!Spec`; (3) trong file `.cfg` khai `SPECIFICATION Spec` và `PROPERTY AbsSpec`. Kho Examples của Lamport kiểm cache ghi xuyên cùng tinh thần này, với định nghĩa đã khai triển tay vì lý do ở mục 3[^ex-readme][^ex-cfg-prop]; còn với Voting và Paxos, file cấu hình đặt đúng dạng `PROPERTY ...SpecBar`[^mcvoting-ident][^mcpaxos-prop].
+> **Trả lời ngắn.** Làm theo ba bước: (1) viết (hoặc `INSTANCE`) đặc tả trừu tượng và chọn refinement mapping; (2) trong module cụ thể, đặt tên cho công thức cần kiểm, ví dụ `AbsSpec == Abs!Spec`; (3) trong file `.cfg`, khai `SPECIFICATION Spec` và `PROPERTY AbsSpec`. Kho Examples của Lamport kiểm cache ghi xuyên theo đúng tinh thần này[^ex-readme]; bản trong kho dùng định nghĩa đã khai triển tay vì lý do ở mục 3. Còn với Voting và Paxos, file cấu hình đặt `PROPERTY` đúng dạng `...SpecBar`[^mcpaxos-prop].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): refinement check giống test "đối chiếu với mô hình tham chiếu": chạy implementation, sau mỗi bước hỏi "nhìn qua hàm `to_model`, bước này là thao tác hợp lệ của mô hình hay không đổi gì?". Khác ở chỗ TLC duyệt *mọi* thứ tự trong một model hữu hạn thay vì vài trace ngẫu nhiên.
+*Với service `flags`.* Ta có thể viết hẳn một model của `flags` rồi để TLC kiểm nó có cài đặt hợp đồng `Register` hay không. Phần lớn mục này đi theo đúng ví dụ đó: module `WriteBehind` (buffer cộng flush) với `PROPERTY AbsSpec`, và một biến thể có lỗi mà refinement check bắt được. Trước đó là cách cấu hình tổng quát; sau đó là hai ví dụ thật từ kho Examples. Khác với vài trace ngẫu nhiên trong một bài test, TLC duyệt *mọi* thứ tự trong một model hữu hạn (nhận xét của người soạn).
 
-*Bước 1 — công thức phải là một tên.* File cấu hình chỉ nhận định danh đơn. Trong `MCVoting.tla` Lamport giải thích: không đặt được `PROPERTY C!Spec` vào file cấu hình, nên định nghĩa `ConsensusSpecBar == C!Spec` rồi viết `PROPERTY ConsensusSpecBar`[^mcvoting-ident].
+### 7.1 Công thức phải là một cái tên
 
-*Bước 2 — TLC kiểm gì.* `PROPERTY` được TLC chia làm kiểm trạng thái đầu và kiểm từng bước (`ImpliedInit`, `ImpliedAction`, xem mục 5)[^tlc-impliedinit][^tlc-impliedaction]. Với spec có fairness, sách nói TLC không kiểm "đặc tả kéo theo thuộc tính" một mạch: nó kiểm riêng phần safety của đặc tả kéo theo phần safety của thuộc tính, và đặc tả kéo theo phần liveness của thuộc tính[^tlc-prop-split] (liveness ở mục 8).
+File cấu hình chỉ nhận định danh đơn. Trong `MCVoting.tla`, Lamport giải thích rằng không đặt được `PROPERTY C!Spec` vào file cấu hình. Vì vậy ông định nghĩa `ConsensusSpecBar == C!Spec` rồi viết `PROPERTY ConsensusSpecBar`[^mcvoting-ident].
 
-*Bước 3 — model nhỏ trước.* Cấu hình mẫu của Lamport cho cache ghi xuyên dùng hằng nhỏ: hai processor, một địa chỉ, hai giá trị, `QLen = 1`, với chú thích rằng đó là model rất nhỏ để TLC kiểm rất nhanh và nên tăng dần để thấy số trạng thái "bùng nổ" như thế nào[^ex-small-model]. Cấu hình cũng đặt `NoVal = NoVal` vì TLC không xử lý được `CHOOSE` không giới hạn trong định nghĩa của `NoVal`[^ex-noval]. Kho Examples cũng dùng cùng cấu hình để kiểm `TypeInvariant` và `Coherence` làm bất biến, rồi kiểm `LM_Inner_ISpec` làm `PROPERTY`[^ex-cfg-prop].
+### 7.2 TLC kiểm gì
 
-*Bước 4 — ví dụ thật: Consensus ← Voting ← Paxos.* Cấu trúc ba module và vai trò từng tầng được trình bày ở [chương 08, mục 4](08-dac-ta-giao-thuc-phan-tan.md); ở đây chỉ lấy phần liên quan đến refinement. Theo README của kho Examples (ghim commit), `Voting` là thuật toán đồng thuận rất trừu tượng kèm chứng minh mức cao rằng nó cài đặt `Consensus`, còn `Paxos` là thuật toán truyền tin cài đặt `Voting` và do đó cài đặt consensus[^paxos-voting-readme][^paxos-readme]. Đặc tả cấp cao nhất cực nhỏ: một tập `chosen`, tối đa một giá trị được chọn[^cons-spec]. Ở `Voting`, "được chọn" là có một quorum acceptor cùng bỏ phiếu cho giá trị ấy trong cùng một ballot[^voting-chosen], nên `chosen` là một *state function*, và `Voting` viết `C == INSTANCE Consensus` để thay biến `chosen` bằng nó[^inst-subst]. Phần chứng minh trong chính file gồm hai mệnh đề đúng theo mẫu mục 5[^voting-thm]. Ở `Paxos`, Lamport viết rõ phần "refinement mapping": `votes` được suy ra từ các tin nhắn loại `2b`, còn `V == INSTANCE Voting` thay `votes` và `maxBal`[^paxos-map][^paxos-votes]. Và để TLC kiểm, ông định nghĩa các công thức "gạch ngang": `ConsensusSpecBar == C!Spec` và `VotingSpecBar == V!Spec`, đặt chúng làm `PROPERTY` trong các file cấu hình `MCVoting.cfg` và `MCPaxos.cfg`[^mcvoting-ident][^mcpaxos-prop].
+TLC chia `PROPERTY` làm kiểm trạng thái đầu và kiểm từng bước (`ImpliedInit`, `ImpliedAction`, xem mục 5)[^tlc-impliedinit]. Với spec có fairness, sách nói TLC không kiểm "đặc tả kéo theo thuộc tính" một mạch. Nó kiểm riêng phần safety của đặc tả kéo theo phần safety của thuộc tính, và đặc tả kéo theo phần liveness của thuộc tính[^tlc-prop-split] (liveness ở mục 8).
 
-```tla
-(* Từ Paxos.tla, rút gọn: mapping là một state function, rồi INSTANCE. *)
-votes == [a \in Acceptor |->
-           {<<m.bal, m.val>> : m \in {mm \in msgs : /\ mm.type = "2b"
-                                                    /\ mm.acc = a}}]
+### 7.3 Model nhỏ trước
 
-V == INSTANCE Voting          \* thay ngầm maxBal <- maxBal, votes <- votes, ...
+Cấu hình mẫu của Lamport cho cache ghi xuyên dùng hằng nhỏ: hai processor, một địa chỉ, hai giá trị, `QLen = 1`. Chú thích ở đó nói đây là model rất nhỏ để TLC kiểm rất nhanh, và ta nên tăng dần để thấy số trạng thái "bùng nổ" thế nào[^ex-small-model]. Cấu hình cũng đặt `NoVal = NoVal` vì TLC không xử lý được `CHOOSE` không giới hạn trong định nghĩa của `NoVal`[^ex-noval]. Kho Examples dùng cùng cấu hình để kiểm `TypeInvariant` và `Coherence` làm bất biến, rồi kiểm `LM_Inner_ISpec` làm `PROPERTY`[^ex-cfg-prop].
 
-THEOREM Spec => V!Spec
-```
+### 7.4 `flags` từ đầu đến cuối
 
-*Bước 5 — kiểm từng bước từ một invariant (`MCISpec`).* Với `Paxos`, Lamport còn chuẩn bị sẵn công thức để TLC kiểm đúng mệnh đề step simulation: ông viết rằng để chứng minh `Spec` cài đặt `Spec` của `Voting` dưới mapping đã chọn, cần chứng minh `Inv /\ [Next]_vars => [V!Next]_<<votes, maxBal>>`[^mcpaxos-iprop]; với `Inv` quy nạp, điều này đúng khi và chỉ khi thuộc tính `MCIProp == [][V!Next]_<<votes, maxBal>>` được kéo theo bởi `MCISpec == IInv /\ [][Next]_vars`[^mcpaxos-iprop2]. Nói cách khác: lấy các trạng thái thỏa `IInv` (dạng viết lại của `Inv` để dùng làm vị từ đầu) làm trạng thái đầu, rồi cho TLC kiểm một bước `Next` mô phỏng được. (Trong `MCPaxos.cfg`, `MCIProp` nằm sau dấu chú thích `\*` bên cạnh `PROPERTY VotingSpecBar`, để người dùng bật khi cần[^mcpaxos-prop].)
-
-Bây giờ ví dụ tự dựng, hướng backend: **bộ đệm ghi trễ (write-behind) cài đặt một register nguyên tử** (mỗi `Put`/`Get` là một bước; đây là dạng đơn giản nhất của "bộ nhớ tuyến tính" ở mục 6, không có request/response tách rời). Đây là minh họa của người soạn, không phải spec trong nguồn, và chưa chạy TLC; lập luận đúng sai bên dưới là tính tay. Ba module dưới đây nằm trong *ba file riêng* `Register.tla`, `RegisterSpec.tla`, `WriteBehind.tla` (TLC đòi mỗi module một file cùng tên, như chương 03 đã nói); `RegisterSpec` chỉ để minh họa idiom ẩn biến của mục 4, `WriteBehind` mới là module chạy TLC.
+Ví dụ dưới đây là bản rút gọn của `flags`: **bộ đệm ghi trễ (write-behind) cài đặt một register nguyên tử**. Mỗi `Put`/`Get` là một bước; đây là dạng đơn giản nhất của "bộ nhớ tuyến tính" ở mục 6, không có request/response tách rời. Đây là minh họa của người soạn, không phải spec trong nguồn, và chưa chạy TLC; lập luận đúng sai bên dưới là tính tay. Ba module nằm trong *ba file riêng* `Register.tla`, `RegisterSpec.tla`, `WriteBehind.tla` (TLC đòi mỗi module một file cùng tên, như chương 03 đã nói). `RegisterSpec` chỉ để minh họa idiom ẩn biến của mục 4; `WriteBehind` mới là module chạy TLC.
 
 ```tla
 ------------------------------ MODULE Register ------------------------------
@@ -458,56 +503,86 @@ CONSTANTS
   N = 2
 ```
 
-Lập luận tính tay vì sao step simulation đúng (suy luận của người soạn): `Init` cho `val = db ∈ Value`, `ret = NoVal`, khớp `Abs!Init`. `Put(v)` đặt phần tử cuối của `buf` là `v` nên `val' = v`, `ret` giữ nguyên: khớp `Abs!Put(v)`. `Get` không đổi `db`, `buf` nên không đổi `val`, và đặt `ret' = val`: khớp `Abs!Get`. `Flush` đẩy đầu `buf` xuống `db`: nếu `buf` có ít nhất hai phần tử thì phần tử cuối không đổi; nếu chỉ có một thì `db'` bằng chính phần tử ấy; trong cả hai trường hợp `val` không đổi và `ret` không đổi, tức là stuttering của `Abs`.
+Lập luận tính tay vì sao step simulation đúng (suy luận của người soạn). `Init` cho `val = db ∈ Value` và `ret = NoVal`, khớp `Abs!Init`. `Put(v)` đặt phần tử cuối của `buf` là `v` nên `val' = v`, còn `ret` giữ nguyên: khớp `Abs!Put(v)`. `Get` không đổi `db`, `buf` nên không đổi `val`, và đặt `ret' = val`: khớp `Abs!Get`. `Flush` đẩy đầu `buf` xuống `db`. Nếu `buf` có ít nhất hai phần tử thì phần tử cuối không đổi; nếu chỉ có một thì `db'` bằng chính phần tử ấy. Trong cả hai trường hợp `val` không đổi và `ret` không đổi, tức là stuttering của `Abs`.
 
-Còn một biến thể có lỗi: thay `Get` bằng `GetStale == ret' = db /\ UNCHANGED <<db, buf>>` (đọc thẳng từ `db`, bỏ qua `buf`). Tính tay: từ `Init` với `db = v1`, bước `Put(v2)` cho `buf = <<v2>>` và `val = v2`; rồi `GetStale` đặt `ret' = v1` trong khi `val` vẫn là `v2` và `ret` đổi, nên bước đó không phải `Abs!Get` (đòi `ret' = v2`) cũng không phải stuttering — vi phạm refinement. Đây là dạng "đọc cũ sau khi ghi đã xong" mà [P12·09, mục 1](../12-he-thong-du-lieu/09-consistency-va-consensus.md) nói linearizability cấm; (nhận xét của người soạn) refinement check bắt đúng lỗi kiểu này nhờ `ret` là biến nhìn thấy được.
+Bây giờ thử một biến thể có lỗi: thay `Get` bằng `GetStale == ret' = db /\ UNCHANGED <<db, buf>>`, tức đọc thẳng từ `db` và bỏ qua `buf`. Tính tay: từ `Init` với `db = v1`, bước `Put(v2)` cho `buf = <<v2>>` và `val = v2`. Rồi `GetStale` đặt `ret' = v1` trong khi `val` vẫn là `v2` và `ret` đổi. Bước đó không phải `Abs!Get` (đòi `ret' = v2`), cũng không phải stuttering, nên vi phạm refinement. Đây là dạng "đọc cũ sau khi ghi đã xong" mà [P12·09, mục 1](../12-he-thong-du-lieu/09-consistency-va-consensus.md) nói linearizability cấm. Refinement check bắt đúng lỗi kiểu này nhờ `ret` là biến nhìn thấy được (nhận xét của người soạn).
+
+### 7.5 Ví dụ thật: Consensus ← Voting ← Paxos
+
+Cấu trúc ba module và vai trò từng tầng đã được trình bày ở [chương 08, mục 4](08-dac-ta-giao-thuc-phan-tan.md); ở đây ta chỉ lấy phần liên quan đến refinement. README của kho Examples (ghim commit) mô tả `Voting` là thuật toán đồng thuận rất trừu tượng, kèm chứng minh mức cao rằng nó cài đặt `Consensus`[^paxos-voting-readme]. `Paxos` là thuật toán truyền tin cài đặt `Voting`, và do đó cài đặt consensus[^paxos-readme].
+
+Đặc tả cấp cao nhất cực nhỏ: một tập `chosen`, tối đa một giá trị được chọn[^cons-spec]. Ở `Voting`, "được chọn" là có một quorum acceptor cùng bỏ phiếu cho giá trị ấy trong cùng một ballot[^voting-chosen]. Vì vậy `chosen` là một *state function*, và `Voting` viết `C == INSTANCE Consensus` để thay biến `chosen` bằng nó[^inst-subst]. Phần chứng minh trong chính file gồm hai mệnh đề đúng theo mẫu mục 5[^voting-thm].
+
+Ở `Paxos`, Lamport viết rõ phần "refinement mapping"[^paxos-map]. Hàm `votes` được suy ra từ các tin nhắn loại `2b`[^paxos-votes]. Còn `V == INSTANCE Voting` thay `votes` và `maxBal` vào các tham số cùng tên[^ex-inst-comment]. Để TLC kiểm được, ông định nghĩa các công thức "gạch ngang" `ConsensusSpecBar == C!Spec` và `VotingSpecBar == V!Spec`. Công thức thứ nhất nằm ở `MCVoting.tla`[^mcvoting-ident]. Công thức thứ hai được đặt làm `PROPERTY` trong `MCPaxos.cfg`[^mcpaxos-prop].
+
+```tla
+(* Từ Paxos.tla, rút gọn: mapping là một state function, rồi INSTANCE. *)
+votes == [a \in Acceptor |->
+           {<<m.bal, m.val>> : m \in {mm \in msgs : /\ mm.type = "2b"
+                                                    /\ mm.acc = a}}]
+
+V == INSTANCE Voting          \* thay ngầm maxBal <- maxBal, votes <- votes, ...
+
+THEOREM Spec => V!Spec
+```
+
+### 7.6 Kiểm từng bước từ một invariant (`MCISpec`)
+
+Với `Paxos`, Lamport còn chuẩn bị sẵn công thức để TLC kiểm đúng mệnh đề step simulation. Ông viết rằng để chứng minh `Spec` cài đặt `Spec` của `Voting` dưới mapping đã chọn, cần chứng minh `Inv /\ [Next]_vars => [V!Next]_<<votes, maxBal>>`[^mcpaxos-iprop]. Với `Inv` quy nạp, điều này đúng khi và chỉ khi thuộc tính `MCIProp == [][V!Next]_<<votes, maxBal>>` được kéo theo bởi `MCISpec == IInv /\ [][Next]_vars`[^mcpaxos-iprop2]. Nói cách khác: lấy các trạng thái thỏa `IInv` (dạng viết lại của `Inv` để dùng làm vị từ đầu) làm trạng thái đầu, rồi cho TLC kiểm một bước `Next` mô phỏng được. Trong `MCPaxos.cfg`, `MCIProp` nằm sau dấu chú thích `\*` bên cạnh `PROPERTY VotingSpecBar`, để người dùng bật khi cần[^mcpaxos-prop].
 
 <details><summary>Đi sâu: các bẫy khi cấu hình; model nhỏ; thời gian kiểm liveness; vì sao Examples dùng "bản đã khai triển"</summary>
 
-- **`PROPERTY` phải là tên đơn.** Xem bước 1 ở trên[^mcvoting-ident].
+- **`PROPERTY` phải là tên đơn.** Xem mục 7.1[^mcvoting-ident].
 - **Biến trừu tượng bị ẩn không phải biến của module cụ thể.** Ở ví dụ `WriteBehind`, `val` chỉ xuất hiện như state function; module cụ thể chỉ khai báo `db`, `buf`, `ret`. Đó là hệ quả của việc TLC không xử lý `\EE` nên ta kiểm bằng mapping thay vì bằng lượng từ[^tlc-no-exists].
 - **Kiểm liveness chậm hơn.** Sách khuyên chỉ kiểm thuộc tính liveness sau khi đã tìm hết lỗi bằng bất biến[^live-slow].
-- **Vì sao Examples dùng bản "đã khai triển".** Lý do được ghi trong `MCWriteThroughCache.tla`: TLC version 1 không xử lý được instantiation[^ex-v1]; module khai triển được mô tả là bản có các định nghĩa tương đương[^ex-v1-equiv]. Chi tiết ở mục 3.
-- **Độ khó của `Inv` quy nạp trên spec thật.** Ví dụ thật — README thư mục Paxos kể bản thử đầu của `Inv` đúng là bất biến nhưng không đủ mạnh để quy nạp — đã được kể ở [chương 08, mục 4](08-dac-ta-giao-thuc-phan-tan.md); không nhắc lại ở đây.
+- **Vì sao Examples dùng bản "đã khai triển".** Lý do ghi trong `MCWriteThroughCache.tla`: TLC version 1 không xử lý được instantiation[^ex-v1]. Module khai triển được mô tả là bản có các định nghĩa tương đương[^ex-v1-equiv]. Chi tiết ở mục 3.
+- **Độ khó của `Inv` quy nạp trên spec thật.** README thư mục Paxos kể bản thử đầu của `Inv` đúng là bất biến nhưng không đủ mạnh để quy nạp. Chuyện này đã được kể ở [chương 08, mục 4](08-dac-ta-giao-thuc-phan-tan.md), nên không nhắc lại ở đây.
 
 </details>
 
-**Quay lại Q7:** định nghĩa đặc tả trừu tượng đã được ánh xạ thành một công thức có tên (`Abs!Spec`), đặt nó làm `PROPERTY`; TLC kiểm trạng thái đầu và từng bước; thực hành thật là chuỗi `Paxos` → `Voting` → `Consensus` của Lamport.
+**Quay lại Q7:** đặc tả trừu tượng đã ánh xạ thành một công thức có tên (`Abs!Spec`) thì đặt nó làm `PROPERTY`; TLC kiểm trạng thái đầu và từng bước. Với `flags`, đó là `AbsSpec` trong `WriteBehind`; thực hành thật là chuỗi `Paxos` → `Voting` → `Consensus` của Lamport.
 
 ## 8. Giới hạn: biến phụ, liveness, và TLAPS (Q8)
 
-> **Trả lời ngắn.** Một refinement mapping không *luôn* tồn tại: Lamport nêu ví dụ hai chương trình có cùng tập hành vi nhìn thấy nhưng không có mapping nào đi được từ chương trình này sang chương trình kia, và cách chữa là thêm biến phụ (auxiliary variable)[^rm-need-not-exist][^aux-var]. Khi spec có fairness, phép thế "gạch ngang" không tự phân phối qua `ENABLED` nên phần liveness phải xử lý riêng[^enabled-bar]. Cuối cùng, kiểm bằng TLC chỉ đủ cho model hữu hạn; chứng minh bằng máy dùng TLAPS, với giới hạn về suy luận thời gian[^tlaps-safety][^tlaps-temporal].
+> **Trả lời ngắn.** Refinement mapping không *luôn* tồn tại. Lamport nêu ví dụ hai chương trình có cùng tập hành vi nhìn thấy nhưng không có mapping nào đi được từ chương trình này sang chương trình kia[^rm-need-not-exist]. Cách chữa là thêm biến phụ (auxiliary variable)[^aux-var]. Khi spec có fairness, phép thế "gạch ngang" không tự phân phối qua `ENABLED`, nên phần liveness phải xử lý riêng[^enabled-bar]. Cuối cùng, kiểm bằng TLC chỉ đủ cho model hữu hạn. Muốn chứng minh bằng máy thì dùng TLAPS, và bản hiện hành chưa làm suy luận thời gian[^tlaps-temporal].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): view SQL luôn tính được từ bảng hiện tại, nhưng nếu trạng thái trừu tượng cần một thông tin mà hiện tại cụ thể không còn giữ (ví dụ "lần ghi trước đó là gì"), thì không view nào đủ. Phải bổ sung cột "lịch sử" vào mô hình cụ thể — biến phụ — rồi mới viết được view.
+*Với service `flags`.* Mapping `val` ở mục 5 viết được dễ dàng vì `db` và `buf` còn giữ đủ thông tin để tính ra giá trị flag. Giả sử hợp đồng lại cần một thông tin mà code không còn giữ, chẳng hạn "giá trị trước lần `Put` gần nhất" trong khi code đã ghi đè nó. Khi đó không hàm nào của `db` và `buf` cho ra được thông tin ấy, nên không mapping nào tồn tại (nhận xét của người soạn). Cách chữa là thêm vào mô hình cụ thể một biến phụ ghi lại lịch sử, rồi mới viết được mapping. Mục này nói rõ giới hạn đó, cùng hai giới hạn nữa: liveness, và việc TLC chỉ phủ model hữu hạn.
 
-*Bước 1 — mapping không phải lúc nào cũng có.* Trong bài báo TLA, Φ chỉ có biến `x`, `y` và Ψ có thêm `sem`, `pc1`, `pc2`; hai công thức cho cùng dãy giá trị `x`, `y`, nhưng chiều `Φ => ∃ sem, pc1, pc2 : Ψ` không thể chứng minh bằng mapping, vì không suy ra được `sem`, `pc1`, `pc2` từ `x`, `y`[^rm-need-not-exist][^rm-cannot-infer]. Cách chữa: thêm biến phụ — biến thêm vào mà không đổi hành vi chương trình[^aux-var]. Định lý đầy đủ của Abadi–Lamport nói rằng, với giả thiết hợp lý, nếu kéo theo đúng thì về nguyên tắc thêm biến phụ cho phép tìm được mapping[^completeness].
+### 8.1 Mapping không phải lúc nào cũng có
 
-*Bước 2 — liveness và `ENABLED`.* Phép thế "gạch ngang" phân phối qua nhiều toán tử nhưng không phân phối qua `ENABLED`, do đó không tự phân phối qua `WF`/`SF`[^enabled-bar]. Sách nói thêm rằng với các spec và mapping gặp trong thực tế, thay từng `WF` bằng phiên bản đã gạch ngang thường cho kết quả đúng, nhưng bạn có thể khai triển định nghĩa `WF`, `SF` để khỏi phụ thuộc vào điều đó[^barring-practice]. Trong kho Examples, spec cache có phiên bản có liveness, và chú thích trong file kiểm của Lamport ghi rằng hai định nghĩa `LM_Inner_Liveness`, `LM_Inner_Liveness2` khá rắc rối[^live-tricky]. Hệ quả cho người dùng (nhận xét của người soạn): kiểm safety của refinement trước; liveness là bước riêng, sách nói kiểm liveness chậm hơn nhiều so với các kiểu kiểm khác[^live-slow], và dễ sai.
+Trong bài báo TLA, Φ chỉ có biến `x`, `y` còn Ψ có thêm `sem`, `pc1`, `pc2`. Hai công thức cho cùng dãy giá trị `x`, `y`, nhưng chiều `Φ => ∃ sem, pc1, pc2 : Ψ` không chứng minh được bằng mapping, vì không suy ra được `sem`, `pc1`, `pc2` từ `x`, `y`[^rm-cannot-infer]. Cách chữa là thêm biến phụ: biến thêm vào mà không đổi hành vi chương trình[^aux-var]. Định lý đầy đủ của Abadi–Lamport nói rằng, với giả thiết hợp lý, nếu kéo theo đúng thì về nguyên tắc thêm biến phụ cho phép tìm được mapping[^completeness].
 
-*Bước 3 — mục tiêu và giới hạn của "bằng chứng".* Lamport viết thẳng: bạn có thể sẽ không bao giờ phải chứng minh một spec cài đặt spec khác, nhưng nên hiểu refinement mapping và step simulation để dùng TLC kiểm điều đó[^never-prove]. Lý do: toán học của chứng minh cài đặt đơn giản, nhưng với đặc tả của hệ thống thật chứng minh có thể rất khó[^proof-hard].
+### 8.2 Liveness và `ENABLED`
 
-*Bước 4 — TLAPS.* Trang TLA+ của Lamport nêu hai công cụ chính: TLC (model checker) và TLAPS (hệ chứng minh)[^tla-tools]. Trang chủ TLAPS (trang sống; khi người soạn đọc hiển thị phiên bản 1.4.5) nói bản hiện hành không thực hiện suy luận thời gian và không xử lý một số tính năng của TLA+[^tlaps-temporal], nhưng đủ để kiểm chứng tính chất safety của thuật toán không tầm thường[^tlaps-safety]. Vì step simulation là mệnh đề safety (một bước), nó nằm trong phạm vi đó (suy luận của người soạn). Ví dụ thật: README thư mục Paxos nói chứng minh `Voting` cài đặt `Consensus` đã được Tristan mở rộng và kiểm bằng TLAPS (Lamport ghi "tôi tin rằng")[^paxos-voting-readme].
+Phép thế "gạch ngang" phân phối qua nhiều toán tử nhưng không phân phối qua `ENABLED`, do đó không tự phân phối qua `WF`/`SF`[^enabled-bar]. Sách nói thêm rằng với các spec và mapping gặp trong thực tế, thay từng `WF` bằng phiên bản đã gạch ngang thường cho kết quả đúng, nhưng bạn có thể khai triển định nghĩa `WF`, `SF` để khỏi phụ thuộc vào điều đó[^barring-practice]. Trong kho Examples, spec cache có phiên bản có liveness, và chú thích trong file kiểm của Lamport ghi rằng hai định nghĩa `LM_Inner_Liveness`, `LM_Inner_Liveness2` khá rắc rối[^live-tricky].
 
-*Bước 5 — tinh chỉnh cả giao diện (interface refinement).* Đôi khi mức thấp không chỉ thêm chi tiết bên trong mà còn *biểu diễn lại* biến nhìn thấy (ví dụ số nguyên gửi thành chuỗi bit). Sách gọi là *interface refinement*: cách lấy đặc tả mức thấp bằng cách tinh chỉnh các biến của đặc tả mức cao[^interface-ref]; khi đó ta nói LImpl cài đặt HSpec *dưới* interface refinement IR[^interface-impl]. Sách xếp đây vào các tình huống khá hiếm[^interface-rare] và khuyên khi viết từ đầu nên viết một đặc tả nguyên khối[^compose-mono].
+Hệ quả cho người dùng (nhận xét của người soạn): kiểm safety của refinement trước, còn liveness là bước riêng và dễ sai. Sách nói kiểm liveness chậm hơn nhiều so với các kiểu kiểm khác[^live-slow].
 
-<details><summary>Đi sâu: trình tự chứng minh của sách cho cache; liveness của Lamport; vì sao "đủ" không phải "đúng"</summary>
+### 8.3 Mục tiêu thực tế của "bằng chứng", và TLAPS
 
-- **Chứng minh `Ψ => Φ̄` cho bộ nhớ cache trừu tượng (bài báo TLA).** Lamport chứng minh ba phần: trạng thái đầu[^ar-proof-init], step simulation (quy tắc TLA2)[^ar-proof-outline] và fairness (quy tắc WF2)[^ar-proof-wf2]. Mapping trong bài báo cho `memory(m)` là cache nếu địa chỉ có trong cache, ngược lại là bộ nhớ chính[^ar-memory-def]; dùng quy tắc E1 rồi E2 để suy ra công thức có `\EE` hai vế[^ar-memory-map].
+Lamport viết thẳng: bạn có thể sẽ không bao giờ phải chứng minh một spec cài đặt spec khác, nhưng nên hiểu refinement mapping và step simulation để dùng TLC kiểm điều đó[^never-prove]. Lý do là toán học của chứng minh cài đặt đơn giản, nhưng với đặc tả của hệ thống thật thì chứng minh có thể rất khó[^proof-hard].
+
+Trang TLA+ của Lamport nêu hai công cụ chính: TLC (model checker) và TLAPS (hệ chứng minh)[^tla-tools]. Trang chủ TLAPS (trang sống; khi người soạn đọc hiển thị phiên bản 1.4.5) nói bản hiện hành không thực hiện suy luận thời gian và không xử lý một số tính năng của TLA+[^tlaps-temporal]. Tuy vậy nó đủ để kiểm chứng tính chất safety của thuật toán không tầm thường[^tlaps-safety]. Vì step simulation là mệnh đề safety (một bước), nó nằm trong phạm vi đó (suy luận của người soạn). Một ví dụ thật: README thư mục Paxos nói chứng minh `Voting` cài đặt `Consensus` đã được Tristan mở rộng và kiểm bằng TLAPS (Lamport ghi "tôi tin rằng")[^paxos-voting-readme].
+
+<details><summary>Đi sâu: tinh chỉnh giao diện, trình tự chứng minh của sách cho cache, liveness của Lamport, và vì sao "đã kiểm" không phải "đã chứng minh"</summary>
+
+- **Tinh chỉnh cả giao diện (interface refinement).** Đôi khi mức thấp không chỉ thêm chi tiết bên trong mà còn *biểu diễn lại* biến nhìn thấy (ví dụ số nguyên gửi thành chuỗi bit). Sách gọi đó là *interface refinement*: cách lấy đặc tả mức thấp bằng cách tinh chỉnh các biến của đặc tả mức cao[^interface-ref]. Khi đó ta nói LImpl cài đặt HSpec *dưới* interface refinement IR[^interface-impl]. Sách xếp đây vào các tình huống khá hiếm[^interface-rare]. Khi viết từ đầu, sách khuyên nên viết một đặc tả nguyên khối[^compose-mono].
+- **Chứng minh `Ψ => Φ̄` cho bộ nhớ cache trừu tượng (bài báo TLA).** Lamport chứng minh ba phần: trạng thái đầu, step simulation và fairness. Phần trạng thái đầu là chứng minh `Init Ψ` kéo theo `Init Φ`[^ar-proof-init]. Step simulation dùng quy tắc TLA2[^ar-proof-outline]. Fairness dùng quy tắc WF2[^ar-proof-wf2]. Mapping trong bài báo cho `memory(m)` là cache nếu địa chỉ có trong cache, ngược lại là bộ nhớ chính[^ar-memory-def]. Sau đó dùng quy tắc E1 rồi E2 để suy ra công thức có `\EE` hai vế[^ar-memory-map].
 - **Fairness của spec cache có liveness.** Trong Examples, `LiveWriteThroughCache` định nghĩa `Liveness` bằng `WF` cho `Rsp(p) \/ DoRd(p)`, `SF` cho `RdMiss(p) \/ DoWr(p)` với từng processor, và `WF` cho `(QCond /\ MemQWr) \/ MemQRd`[^ex-liveness]. Đây là ví dụ mà phần liveness của mapping cần kiểm riêng (người soạn chỉ chép định nghĩa, không đối chiếu lại với chương 8 của sách).
 - **Đừng nhầm "đã kiểm" với "đã chứng minh".** TLC trả lời cho model bạn cấu hình; Lamport cũng nhắc ngay trong cấu hình mẫu rằng model nhỏ để chạy nhanh và nên tăng dần[^ex-small-model]. Chỉ có chứng minh mới phủ mọi `Proc`, `Adr`, `Val` và `QLen` (nhận xét của người soạn).
-- **Ghép thành phần.** Chương 10 của sách bàn về đặc tả hệ thống như phép hội các đặc tả thành phần; kết luận của mục 10.9 là thường chẳng khác nhiều[^compose-little] và nên viết một khối khi viết từ đầu[^compose-mono]. Chương này vì vậy không đi sâu vào composition.
+- **Ghép thành phần.** Chương 10 của sách bàn về đặc tả hệ thống như phép hội các đặc tả thành phần. Kết luận của mục 10.9 là thường chẳng khác nhiều[^compose-little]. Khi viết từ đầu, nên viết một khối[^compose-mono]. Chương này vì vậy không đi sâu vào composition.
 
 </details>
 
-**Quay lại Q8:** refinement mapping có thể không tồn tại nếu thiếu thông tin (cần biến phụ), liveness và `ENABLED` cần xử lý riêng, TLC chỉ phủ model hữu hạn, và TLAPS chứng minh được phần safety (gồm step simulation) nhưng không làm suy luận thời gian.
+**Quay lại Q8:** refinement mapping có thể không tồn tại nếu thiếu thông tin (cần biến phụ), liveness và `ENABLED` cần xử lý riêng, TLC chỉ phủ model hữu hạn, và TLAPS chứng minh được phần safety (gồm step simulation) nhưng không làm suy luận thời gian; với `flags`, giới hạn đầu xuất hiện khi hợp đồng đòi một thông tin mà code đã ghi đè.
 
 ## Liên hệ với Rust và backend
 
-Phần này là nhận xét của người soạn; các câu có gắn chú thích chỉ để nêu sự kiện về công cụ. Ví dụ code chỉ minh họa, chưa biên dịch, không đi kèm kết quả chạy.
+Phần này là nhận xét của người soạn; các câu có gắn chú thích chỉ để nêu sự kiện về công cụ. Ví dụ code chỉ minh họa, chưa biên dịch, không đi kèm kết quả chạy. Ta vẫn theo `flags`: chương này không bắt bạn đổi dòng code nào của nó, mà cho bạn cách kiểm một thiết kế buffer cộng flush có đúng hợp đồng hay không.
 
-**1. Refinement mapping là một hàm thuần từ trạng thái cụ thể sang trạng thái trừu tượng.** Trong TLA+, mapping là state function không có dấu `'`[^kb-statefn]; trong Rust điều đó tương ứng với một hàm nhận `&self` và trả giá trị, không có tác dụng phụ. Field "nội bộ" (không `pub`) của cấu trúc là biến bị ẩn; hàm `abs_val` dưới đây là witness của `\EE`.
+**1. Refinement mapping là một hàm thuần từ trạng thái cụ thể sang trạng thái trừu tượng.** Trong TLA+, mapping là state function không có dấu `'`[^kb-statefn]. Trong Rust điều đó ứng với một hàm nhận `&self` và trả giá trị, không có tác dụng phụ. Field "nội bộ" (không `pub`) của cấu trúc là biến bị ẩn, và hàm `abs_val` dưới đây là witness của `\EE`.
 
 ```rust
 use std::collections::VecDeque;
@@ -537,7 +612,7 @@ impl WriteBehind {
 }
 ```
 
-**2. Step simulation thành một hàm kiểm tra, dùng trong test.** Mỗi lần áp một bước lên cài đặt, so `abs` trước và sau: hoặc bằng nhau (stuttering) hoặc là một bước hợp lệ của mô hình trừu tượng. Hình dạng này có thể ghép với bất kỳ bộ sinh bước nào (proptest, hay duyệt toàn bộ như một model checker).
+**2. Step simulation thành một hàm kiểm tra, dùng trong test.** Mỗi lần áp một bước lên cài đặt, so `abs` trước và sau: hoặc bằng nhau (stuttering), hoặc là một bước hợp lệ của mô hình trừu tượng. Hình dạng này ghép được với bất kỳ bộ sinh bước nào (proptest, hay duyệt toàn bộ như một model checker).
 
 ```rust
 fn check_step<I, A: PartialEq>(
@@ -553,23 +628,23 @@ fn check_step<I, A: PartialEq>(
 }
 ```
 
-**3. Dùng đúng trực giác "stuttering".** Một tác vụ nền (flush, compaction, health-check, retry nội bộ) *phải* không đổi `abs` — nếu không, đặc tả trừu tượng bị lộ chi tiết cài đặt. Khi cảm thấy phải sửa mô hình trừu tượng để tác vụ nền "hợp lệ", đó là dấu hiệu mức trừu tượng sai (nhận xét của người soạn).
+**3. Dùng đúng trực giác "stuttering".** Một tác vụ nền (flush, compaction, health-check, retry nội bộ) *phải* không đổi `abs`; nếu đổi thì đặc tả trừu tượng đã để lộ chi tiết cài đặt. Khi bạn thấy phải sửa mô hình trừu tượng để tác vụ nền "hợp lệ", đó là dấu hiệu mức trừu tượng sai (nhận xét của người soạn).
 
-**4. Với model checker bằng Rust.** Crate `stateright` mô hình hóa hệ thống không tất định bằng trait `Model` (`init_states`, `actions`, `next_state`)[^sr-model] và kiểm thuộc tính *always* — tức safety/invariant[^sr-always]. Người soạn không thấy trang tài liệu gốc của crate nhắc "refinement"; nếu dùng, bạn tự viết hàm `abs` và biểu diễn step simulation như thuộc tính `always` trên cặp (trạng thái trước, sau), tương tự cách Lamport dùng `MCIProp` ở mục 7. Chương 10 của phase này bàn kỹ hơn.
+**4. Với model checker bằng Rust.** Crate `stateright` mô hình hóa hệ thống không tất định bằng trait `Model` (`init_states`, `actions`, `next_state`)[^sr-model]. Nó kiểm thuộc tính *always*, tức safety/invariant[^sr-always]. Người soạn không thấy trang tài liệu gốc của crate nhắc "refinement". Nếu dùng, bạn tự viết hàm `abs` và biểu diễn step simulation như thuộc tính `always` trên cặp (trạng thái trước, sau), tương tự cách Lamport dùng `MCIProp` ở mục 7. Chương 10 của phase này bàn kỹ hơn.
 
-**5. Hướng backend.** Tư duy "nhiều mức" rất hợp với vận hành dịch vụ: mức 0 là hợp đồng API (hoặc yêu cầu consistency như register tuyến tính), mức 1 là thiết kế (leader, log, cache), mức 2 là code. Mỗi mức có thể kiểm với mức trên (nhận xét của người soạn). Nhóm Amazon cũng mô tả một cách làm gần ý này: một kỹ sư AWS viết và model-check spec ở hai mức độ concurrency cho một thiết kế replication chịu lỗi, và nhờ đó hiểu thiết kế đủ để đề xuất một tối ưu giảm mạnh write latency[^amz-two-levels] — nguồn không nói hai spec ấy có quan hệ refinement hình thức hay không. Về nội dung nền: [P12·05 (replication)](../12-he-thong-du-lieu/05-replication.md) mô tả các thiết kế mức 1; [P12·08 (sự cố phân tán)](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md) là loại sự kiện mà spec mức 1 nên nhúng vào `Next`; [P12·09](../12-he-thong-du-lieu/09-consistency-va-consensus.md) là yêu cầu mức 0 (linearizability). [P4·05](../04-concurrency/05-concurrency-bug-va-deadlock.md) và [P4·06](../04-concurrency/06-memory-model.md) nói về lỗi và mô hình ở cấp thread/phần cứng, nơi "độ hạt của nguyên tử" (mục 2) quyết định chương trình đúng hay sai.
+**5. Hướng backend.** Tư duy "nhiều mức" hợp với việc vận hành dịch vụ: mức 0 là hợp đồng API (hoặc yêu cầu consistency như register tuyến tính), mức 1 là thiết kế (leader, log, cache), mức 2 là code. Mỗi mức có thể kiểm với mức trên (nhận xét của người soạn). Nhóm Amazon mô tả một cách làm gần ý này: một kỹ sư AWS viết và model-check spec ở hai mức độ concurrency cho một thiết kế replication chịu lỗi, nhờ đó hiểu thiết kế đủ để đề xuất một tối ưu giảm mạnh write latency[^amz-two-levels]. Nguồn không nói hai spec ấy có quan hệ refinement hình thức hay không. Về nội dung nền: [P12·05 (replication)](../12-he-thong-du-lieu/05-replication.md) mô tả các thiết kế mức 1; [P12·08 (sự cố phân tán)](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md) là loại sự kiện mà spec mức 1 nên nhúng vào `Next`; [P12·09](../12-he-thong-du-lieu/09-consistency-va-consensus.md) là yêu cầu mức 0 (linearizability). [P4·05](../04-concurrency/05-concurrency-bug-va-deadlock.md) và [P4·06](../04-concurrency/06-memory-model.md) nói về lỗi và mô hình ở cấp thread/phần cứng, nơi "độ hạt của nguyên tử" (mục 2) quyết định chương trình đúng hay sai.
 
 ## Tóm tắt
 
-- Trong TLA, "cài đặt" là implication: `Impl => Spec`; nghĩa là mọi hành vi của Impl là hành vi hợp lệ của Spec; refinement và implementation là một.
+- Trong TLA, "cài đặt" là implication: `Impl => Spec`, nghĩa là mọi hành vi của Impl là hành vi hợp lệ của Spec. Refinement và implementation là một. Với `flags`: mọi hành vi của code buffer cộng flush phải là hành vi hợp đồng `Register` cho phép.
 - Nhờ implication bắc cầu, ta xếp được thang trừu tượng (yêu cầu → thiết kế → thuật toán) và kiểm từng bậc với bậc trên.
-- Mọi công thức thời gian của TLA đều bất biến dưới stuttering (và `[][Next]_vars` luôn cho phép bước đứng yên), nên các bước nội bộ mà mức trừu tượng không thấy là bước đứng yên; đó là điều làm refinement khả thi và cho phép "tinh chỉnh độ hạt nguyên tử".
-- `INSTANCE ... WITH` thay tham số của module bằng biểu thức của module hiện tại (kể cả state function); thay ngầm khi tên trùng; kết quả có tiền tố `M!`.
-- `\EE x : F` ẩn biến nội bộ: tồn tại một dãy giá trị cho `x`; với biến bị ẩn, "implementation là implication" đúng nguyên nghĩa, và việc chứng minh cần witness.
-- Witness chính là refinement mapping: bộ state function tính biến trừu tượng từ biến cụ thể; step simulation đòi mỗi bước Next (xuất phát từ `Inv`) hoặc ánh xạ thành bước trừu tượng hoặc để biến trừu tượng nguyên.
-- Cache ghi xuyên cài đặt bộ nhớ tuyến tính dưới `omem = vmem`, `octl` gộp `"waiting"` vào `"busy"`, `obuf = buf`; `Do(p)` ứng với `DoWr`/`DoRd`, còn `MemQWr`/`MemQRd`/`RdMiss`/`Evict` là stuttering (bảng ở mục 6 là tính tay của người soạn).
-- Với TLC: định nghĩa `Abs!Spec` thành tên đơn, đặt làm `PROPERTY`; TLC kiểm trạng thái đầu và từng bước; chuỗi `Consensus ← Voting ← Paxos` là ví dụ thật.
-- Giới hạn: mapping có thể không tồn tại (cần biến phụ), fairness làm phép thế khó, TLC chỉ phủ model hữu hạn; TLAPS chứng minh safety nhưng bản hiện hành không làm suy luận thời gian.
+- Mọi công thức thời gian của TLA đều bất biến dưới stuttering (và `[][Next]_vars` luôn cho phép bước đứng yên). Vì vậy các bước nội bộ mà mức trừu tượng không thấy, như flush của `flags`, là bước đứng yên; đó là điều làm refinement khả thi và cho phép "tinh chỉnh độ hạt nguyên tử".
+- `INSTANCE ... WITH` thay tham số của module bằng biểu thức của module hiện tại (kể cả state function), thay ngầm khi tên trùng, và đặt kết quả dưới tiền tố `M!`.
+- `\EE x : F` ẩn biến nội bộ: tồn tại một dãy giá trị cho `x`. Với biến bị ẩn, "implementation là implication" đúng nguyên nghĩa, và việc chứng minh cần witness.
+- Witness chính là refinement mapping: bộ state function tính biến trừu tượng từ biến cụ thể. Step simulation đòi mỗi bước Next (xuất phát từ `Inv`) hoặc ánh xạ thành bước trừu tượng, hoặc để biến trừu tượng nguyên.
+- Cache ghi xuyên cài đặt bộ nhớ tuyến tính dưới `omem = vmem`, `octl` gộp `"waiting"` vào `"busy"`, `obuf = buf`. `Do(p)` ứng với `DoWr`/`DoRd`, còn `MemQWr`/`MemQRd`/`RdMiss`/`Evict` là stuttering (bảng ở mục 6 là tính tay của người soạn).
+- Với TLC: định nghĩa `Abs!Spec` thành tên đơn rồi đặt làm `PROPERTY`; TLC kiểm trạng thái đầu và từng bước. Chuỗi `Consensus ← Voting ← Paxos` là ví dụ thật.
+- Giới hạn: mapping có thể không tồn tại (cần biến phụ), fairness làm phép thế khó, TLC chỉ phủ model hữu hạn. TLAPS chứng minh được safety nhưng bản hiện hành không làm suy luận thời gian.
 
 ## Câu hỏi tự kiểm tra
 
@@ -588,18 +663,18 @@ fn check_step<I, A: PartialEq>(
 
 <details><summary>Đáp án</summary>
 
-1. `Sys => Spec` là định lý[^impl-impl]; TLA coi cả hệ thống và đặc tả đều chỉ là công thức[^no-distinction].
-2. Ít hơn thì được (Impl chặt hơn Spec: ví dụ Spec cho phép "có thể trả 503", Impl không bao giờ trả); nhiều hơn thì không, vì khi đó có hành vi của Impl không thuộc Spec[^kb-behaviors]. Ví dụ là nhận xét của người soạn.
-3. Đồng hồ trong trạm thời tiết còn đổi nhiệt độ, nên có bước không đổi `hr`; đặc tả phải cho phép các bước đó[^stut-clock][^stut-def]. Tương tự, cài đặt mịn có bước nội bộ vô hình với mức thô, và Program 2 cài đặt Program 1 chỉ vì Program 1 cho phép các bước đứng yên[^stut-prog].
-4. `x' = x + 1` (hành động trần) không bất biến dưới stuttering[^stut-action-not]; `[][x' = x + 1]_x` thì bất biến, vì chỉ ràng buộc những bước đổi `x`[^stut-box].
+1. `Sys => Spec` là một định lý[^impl-impl]. TLA coi cả hệ thống và đặc tả đều chỉ là công thức[^no-distinction].
+2. Ít hơn thì được: Impl chặt hơn Spec, ví dụ Spec cho phép `Get` trả 503 còn Impl không bao giờ trả. Nhiều hơn thì không, vì khi đó có hành vi của Impl không thuộc Spec[^kb-behaviors]. Ví dụ là nhận xét của người soạn.
+3. Đồng hồ trong trạm thời tiết còn đổi nhiệt độ, nên có bước không đổi `hr`; đặc tả phải cho phép các bước đó[^stut-clock]. Lamport định nghĩa `[HCnxt]_hr` là `HCnxt \/ (hr' = hr)`[^stut-def]. Tương tự, cài đặt mịn có bước nội bộ vô hình với mức thô, và Program 2 cài đặt Program 1 chỉ vì Program 1 cho phép các bước đứng yên[^stut-prog].
+4. `x' = x + 1` (hành động trần) không bất biến dưới stuttering[^stut-action-not]. `[][x' = x + 1]_x` thì bất biến, vì chỉ ràng buộc những bước đổi `x`[^stut-box].
 5. `Value <- Value`, `NoVal <- NoVal`, `ret <- ret` (biến cụ thể cùng tên) và `val <- val` (state function ở trên), thay ngầm theo quy tắc `p <- p` trong phạm vi định nghĩa[^inst-implicit].
-6. `\EE x : F` khẳng định tồn tại một giá trị của `x` *trong từng trạng thái*, có thể thay đổi theo trạng thái[^hide-exists-seq]; còn `\E x : [](...)` đòi một giá trị cố định cho mọi trạng thái (suy luận của người soạn, từ định nghĩa trong chú thích).
-7. TLC không xử lý toán tử ẩn biến; cách kiểm là đưa ra state function `oh` (refinement mapping) và kiểm `ABSpec => AB(oh)!ABCSpec`[^tlc-via-mapping].
-8. Trạng thái đầu ánh xạ thành trạng thái đầu trừu tượng; step simulation; và `Inv` quy nạp[^step-sim]. `Inv` loại trạng thái không tới được; `Coherence` không phải bất biến của `Next`[^coh-not-inductive], và (suy luận) bước `DoRd` cần `Inv` nói rằng bản sao trong cache bằng `vmem`.
-9. `MemQWr` ghi vào `wmem` giá trị đã nằm sẵn trong `vmem` nên `vmem` không đổi; `DoWr(p1)` thêm một write vào `memQ` nên `vmem` đổi, ứng với `Do(p1)`[^vmem-def]. Bảng là tính tay của người soạn.
+6. `\EE x : F` khẳng định tồn tại một giá trị của `x` *trong từng trạng thái*, có thể thay đổi theo trạng thái[^hide-exists-seq]. Còn `\E x : [](...)` đòi một giá trị cố định cho mọi trạng thái (suy luận của người soạn, từ định nghĩa trong chú thích).
+7. TLC không xử lý toán tử ẩn biến. Cách kiểm là đưa ra state function `oh` (refinement mapping) và kiểm `ABSpec => AB(oh)!ABCSpec`[^tlc-via-mapping].
+8. Trạng thái đầu ánh xạ thành trạng thái đầu trừu tượng; step simulation; và `Inv` quy nạp[^step-sim]. `Inv` loại trạng thái không tới được. `Coherence` không phải bất biến của `Next`[^coh-not-inductive], và (suy luận) bước `DoRd` cần `Inv` nói rằng bản sao trong cache bằng `vmem`.
+9. `MemQWr` ghi vào `wmem` giá trị đã nằm sẵn trong `vmem` nên `vmem` không đổi. `DoWr(p1)` thêm một write vào `memQ` nên `vmem` đổi, ứng với `Do(p1)`[^vmem-def]. Bảng là tính tay của người soạn.
 10. Ở `GetStale` sau `Put(v2)`: nó đặt `ret' = v1` trong khi `val = v2`; không khớp `Abs!Get` cũng không đứng yên. Đó là đọc cũ sau ghi xong, loại lỗi mà linearizability cấm (P12·09, mục 1). Lập luận tính tay.
-11. Hai chương trình cùng dãy `x`, `y` nhưng `sem`, `pc1`, `pc2` không suy ra được từ `x`, `y`[^rm-cannot-infer]; thêm biến phụ không đổi hành vi, rồi mapping được phép phụ thuộc cả biến phụ[^aux-var][^completeness].
-12. Bản hiện hành không làm suy luận thời gian nhưng đủ để kiểm tính chất safety[^tlaps-temporal][^tlaps-safety]; step simulation là mệnh đề một bước, nên về nguyên tắc thuộc phía safety (suy luận của người soạn).
+11. Hai chương trình cùng dãy `x`, `y` nhưng `sem`, `pc1`, `pc2` không suy ra được từ `x`, `y`[^rm-cannot-infer]. Biến phụ là biến thêm vào mà không đổi hành vi, và mapping được phép phụ thuộc cả biến phụ[^aux-var]. Định lý đầy đủ của Abadi–Lamport bảo đảm điều đó về nguyên tắc dưới giả thiết hợp lý[^completeness].
+12. Bản hiện hành không làm suy luận thời gian[^tlaps-temporal]. Nó đủ để kiểm tính chất safety[^tlaps-safety]. Step simulation là mệnh đề một bước, nên về nguyên tắc thuộc phía safety (suy luận của người soạn).
 
 </details>
 

@@ -1,94 +1,121 @@
 # P8 · Chương 03 — cgroups v2
 
-> **Môi trường thí nghiệm.** Số liệu "quan sát" do tôi chạy thật: Docker 29.5.2 trên macOS (engine chạy trong VM Linux của Colima, như các chương khác của phase), VM Linux kernel `6.8.0-117-generic` (aarch64), 4 vCPU, `MemTotal` khoảng 5,8 GiB, cgroup v2, driver `cgroupfs`. Container lab `./labs/linux.sh` chạy root nhưng cgroup của nó **chỉ đọc** (mục 2). Để thử ghi file cgroup tôi dùng container dùng một lần `docker run --rm --privileged` với cùng image; để xem Docker cấu hình gì tôi chạy `docker run --memory/--cpus` rồi đọc file bên trong; mọi container đã xóa. Quan sát là một lần chạy trên một kernel, không phải bảo đảm.
+> **Môi trường thí nghiệm.** Các số liệu "quan sát" trong chương là kết quả chạy thật của người soạn: Docker 29.5.2 trên macOS (engine chạy trong VM Linux của Colima, như các chương khác của phase), VM chạy Linux kernel `6.8.0-117-generic` (aarch64), 4 vCPU, `MemTotal` khoảng 5,8 GiB, cgroup v2, driver `cgroupfs`. Container lab `./labs/linux.sh` chạy bằng root nhưng cgroup của nó **chỉ đọc** (mục 2), nên để thử ghi file cgroup, người soạn dùng container dùng một lần `docker run --rm --privileged` với cùng image. Để xem Docker cấu hình gì, người soạn chạy `docker run --memory/--cpus` rồi đọc file ngay bên trong container. Mọi container đều đã xóa. Quan sát là một lần chạy trên một kernel, không phải bảo đảm.
 
 ## Bạn sẽ hiểu được gì
 
-1. **Q1.** cgroup là gì, khác namespace ở đâu, và vì sao Docker/Kubernetes/systemd đều dựa vào nó? → mục 1
+1. **Q1.** cgroup là gì, khác namespace ở đâu, và vì sao Docker, Kubernetes, systemd đều dựa vào nó? → mục 1
 2. **Q2.** cgroup v1 sai ở đâu để phải có v2; "unified hierarchy" nghĩa là gì; `/sys/fs/cgroup` thực chất là cái gì; các file lõi `cgroup.*` làm gì? → mục 2
 3. **Q3.** Quy tắc "no internal process" và "delegation" là gì, và vì sao có lúc `echo +memory > cgroup.subtree_control` báo `Device or resource busy`? → mục 3
-4. **Q4.** Controller điều khiển theo kiểu *trọng số*, *giới hạn* hay *bảo vệ*; controller memory đưa ra file nào, đọc `memory.events` ra sao để biết giới hạn đã cắn chưa? → mục 4
-5. **Q5.** Controller cpu, io, pids: `cpu.weight` khác `cpu.max` thế nào, `cpu.stat` cho biết gì, io và pids giới hạn thế nào? → mục 5
+4. **Q4.** Controller điều khiển theo kiểu *trọng số*, *giới hạn* hay *bảo vệ*; controller memory đưa ra những file nào, và đọc `memory.events` thế nào để biết giới hạn đã cắn chưa? → mục 4
+5. **Q5.** Controller cpu, io, pids: `cpu.weight` khác `cpu.max` thế nào, `cpu.stat` cho biết gì, io và pids giới hạn ra sao? → mục 5
 6. **Q6.** PSI (pressure stall information) đo cái gì mà `memory.current` không đo được? → mục 6
 7. **Q7.** `docker run --memory 256m --cpus 1.5`, `resources.limits/requests` của Kubernetes và directive systemd biến thành file cgroup nào? → mục 7
 8. **Q8.** Vì sao `nproc` và `/proc/meminfo` trong container vẫn hiện số của máy host, và `std::thread::available_parallelism` của Rust làm gì để tránh bẫy đó? → mục 8 và phần Liên hệ với Rust
 
 ## Kiến thức cần trước
 
-- [Page fault, swapping và OOM](../03-memory/04-page-fault-va-swapping.md): chương này không lặp lại cơ chế reclaim/OOM, chỉ đào sâu cgroup như một hệ thống. Phần memory cgroup nhìn từ góc RSS (`RssAnon` so với `memory.current`) nằm ở [P3 · Chương 05, mục 8](../03-memory/05-bo-nho-tien-trinh-linux.md); danh sách file `memory.*` chuẩn của cả giáo trình là mục 4 của chương này.
-- [Scheduling](../04-concurrency/02-scheduling.md): `cpu.weight`/`cpu.max` đã được giới thiệu ở đó.
+- [Page fault, swapping và OOM](../03-memory/04-page-fault-va-swapping.md): chương này không nhắc lại cơ chế reclaim và OOM, chỉ đào sâu cgroup như một hệ thống. Phần memory cgroup nhìn từ góc RSS (`RssAnon` so với `memory.current`) nằm ở [P3 · Chương 05, mục 8](../03-memory/05-bo-nho-tien-trinh-linux.md); danh sách file `memory.*` chuẩn của cả giáo trình là mục 4 của chương này.
+- [Scheduling](../04-concurrency/02-scheduling.md): `cpu.weight` và `cpu.max` đã được giới thiệu ở đó.
 - [Container là gì](01-container-la-gi.md) và [Namespaces](02-namespaces.md): container = process + namespace (cái nhìn thấy) + cgroup (cái được dùng).
+
+---
 
 ## 1. cgroup giải quyết vấn đề gì (Q1)
 
-> **Trả lời ngắn.** Namespace quyết định process *nhìn thấy* gì; cgroup quyết định process *dùng được* bao nhiêu. Kernel doc định nghĩa cgroup là cơ chế tổ chức process thành cây và phân phối tài nguyên hệ thống dọc theo cây[^cg-what]. Vì mọi process con tự chịu giới hạn của cgroup chứa nó, runtime container chỉ cần một cgroup cho mỗi container (suy luận của người soạn).
+> **Trả lời ngắn.** Namespace quyết định process *nhìn thấy* gì, còn cgroup quyết định process *dùng được* bao nhiêu. Về bản chất, cgroup là cơ chế xếp process thành một cây rồi chia tài nguyên của hệ thống dọc theo cây đó[^cg-what]. Vì process con tự chịu giới hạn của cgroup chứa nó, runtime container chỉ cần tạo một cgroup cho mỗi container (suy luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): namespace là bức vách kính mờ giữa các văn phòng — mỗi công ty chỉ thấy phòng mình. Nhưng không ai ngăn một công ty bật hết điều hòa và ăn hết điện của tòa nhà. cgroup là đồng hồ điện và cầu dao riêng cho từng công ty.
+*Với service của bạn.* Hãy hình dung `orders`, một service Rust chạy trong container với 4 handler thread, được cấp `--memory 256m --cpus 1.5`. Đây là ví dụ giả định của người soạn, không phải code trong repo; các con số khớp với container đã quan sát ở mục 7. Ta sẽ bám theo `orders` suốt chương. Chương trước đã dùng namespace để `orders` chỉ thấy process của mình, nhưng namespace không hạn chế nó được dùng bao nhiêu. Chỉ cần một handler bị leak bộ nhớ hoặc kẹt trong vòng lặp bận là `orders` có thể ngốn hết RAM và CPU của máy host, kéo theo cả database nằm cùng máy (suy luận của người soạn). Vì vậy cgroup là nửa còn lại của container. Mục này nói cgroup tổ chức process thế nào; các mục sau chỉ ra giới hạn của `orders` nằm ở file nào.
 
-Một process trong PID namespace riêng vẫn có thể ăn hết RAM và CPU của máy nếu không có cgroup (suy luận của người soạn); cgroup là nửa còn lại của container. Hai phần: *core* lo tổ chức process thành cây, còn *controller* phân phối từng loại tài nguyên dọc theo cây (ví dụ CPU, memory, IO, số process ở các mục sau)[^cg-parts]. Ba quy tắc nền:
+### 1.1 Cây cgroup: core và controller
 
-1. Cgroup tạo thành cây và mỗi process thuộc một và chỉ một cgroup[^cg-one]; mặc định mọi thread của một process thuộc cùng cgroup (có thread mode cho một số controller, chương này không đi vào)[^cg-threads].
-2. Process mới sinh ra nằm trong cgroup của cha tại thời điểm fork[^cg-fork].
-3. Hierarchical: giới hạn đặt gần gốc không bị ghi đè từ xa hơn[^cg-hier]. Con không thể vượt trần của cha, dù tự cấu hình thế nào.
+cgroup gồm hai phần. *Core* lo việc xếp process thành cây; mỗi *controller* chia một loại tài nguyên (CPU, memory, IO, số process…) dọc theo cây đó[^cg-parts]. Có ba quy tắc nền.
 
-Vì vậy runtime container chỉ cần tạo một cgroup cho mỗi container, ghi giới hạn, rồi đưa process vào; mọi process con tự động chịu cùng giới hạn (suy luận của người soạn từ ba quy tắc).
+1. Mỗi process thuộc một và chỉ một cgroup, và mọi thread của process đó cùng thuộc cgroup ấy[^cg-one]. Vậy 4 handler thread của `orders` chịu chung một giới hạn.
+2. Process mới sinh ra nằm trong cgroup của process cha vào lúc fork[^cg-fork]. Nên process con mà `orders` tạo ra cũng ở cùng cgroup với nó.
+3. Giới hạn đặt gần gốc cây không bị ghi đè từ phía xa gốc hơn[^cg-hier]. Nói cách khác, cgroup con không vượt được trần của cgroup cha, dù tự cấu hình thế nào.
 
-<details><summary>Đi sâu: nguyên văn định nghĩa và hai phần core/controller</summary>
+Từ ba quy tắc này ta suy ra cách runtime làm việc: tạo một cgroup cho container, ghi giới hạn vào đó, rồi đưa process vào. Mọi process con sinh ra sau đó tự chịu cùng giới hạn (suy luận của người soạn).
 
-- Câu định nghĩa trong kernel doc v6.8 mở đầu mục "What is cgroup?": cgroup tổ chức process theo thứ bậc và phân phối tài nguyên "in a controlled and configurable manner".[^cg-what]
-- Core chịu trách nhiệm chính về việc tổ chức process theo thứ bậc.[^cg-parts]
+<details><summary>Đi sâu: cgroup theo từng thread</summary>
+
+Mặc định mọi thread của một process thuộc cùng một cgroup, như quy tắc 1 ở trên. Với một số controller, cgroup v2 còn có chế độ chia tài nguyên theo từng thread trong một nhóm process[^cg-threads]. Chương này không đi vào chế độ đó.
 
 </details>
 
-**Quay lại Q1:** namespace lo cái *nhìn thấy*, cgroup lo cái *được dùng*; một cgroup cho mỗi container là đủ vì giới hạn đi theo cây.
+**Quay lại Q1:** namespace lo cái *nhìn thấy*, cgroup lo cái *được dùng*; với `orders`, một cgroup cho cả container là đủ vì giới hạn đi theo cây.
+
+---
 
 ## 2. cgroup v2: cây duy nhất, `cgroupfs` và các file lõi (Q2)
 
-> **Trả lời ngắn.** v1 cho phép gắn các controller vào những cây riêng; v2 gom mọi controller vào *một* cây duy nhất[^cg7-unified]. Cgroup được tạo bằng cách tạo thư mục trong filesystem `cgroup2` (mount bằng `mount -t cgroup2`; trên máy quan sát là `/sys/fs/cgroup`)[^cg-mkdir][^cg-mount]. File `cgroup.procs` dùng để di chuyển process[^cg-procs], `cgroup.controllers` liệt kê controller có thể bật[^cg-ctrl-file] và `cgroup.subtree_control` bật/tắt chúng cho các con[^cg-subtree-file].
+> **Trả lời ngắn.** v1 cho phép gắn mỗi controller vào một cây riêng; v2 gom mọi controller vào *một* cây duy nhất[^cg7-unified]. Muốn tạo cgroup, bạn tạo một thư mục trong filesystem `cgroup2`[^cg-mkdir] (trên máy quan sát, filesystem này mount ở `/sys/fs/cgroup`). Có ba file lõi đáng nhớ. `cgroup.procs` dùng để di chuyển process[^cg-procs]. `cgroup.controllers` liệt kê các controller có thể bật[^cg-ctrl-file]. `cgroup.subtree_control` cho biết controller nào đang bật cho các cgroup con[^cg-subtree-file].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): v1 giống mỗi phòng ban có một sơ đồ tổ chức riêng (sơ đồ lương, sơ đồ điện, sơ đồ bàn ghế) và chúng không khớp nhau; v2 là một sơ đồ duy nhất, ai cũng nằm ở đúng một ô.
+*Với `orders`.* Muốn biết container `orders` đang bị giới hạn bao nhiêu CPU, bao nhiêu memory, bao nhiêu process, bạn không cần công cụ riêng: mọi thứ nằm trong *một* thư mục cgroup, và xem hay đổi giới hạn chỉ là đọc hay ghi file trong đó. Mục này giải thích vì sao v2 thiết kế như vậy và các file lõi có nghĩa gì.
 
-**v1 và v2.** Theo `cgroups(7)`, cgroup v1 ra từ Linux 2.6.24[^cg7-224]; các controller của v1 được phát triển gần như không phối hợp với nhau, dẫn tới nhiều bất nhất giữa controller và việc quản lý hierarchy trở nên phức tạp[^cg7-why]. V2 bắt đầu được làm từ Linux 3.10[^cg7-310] và chính thức từ Linux 4.5[^cg7-45]. Ở v1 mỗi controller có thể gắn vào một hierarchy riêng (cây `cpu` khác cây `memory`); `cgroups(7)` nói tính linh hoạt này kém hữu ích hơn dự kiến và nhiều khi chỉ thêm phức tạp, nên ở v2 mọi controller gắn vào một hierarchy duy nhất[^cg7-unified]. (Nhận xét của người soạn: nhờ vậy một container ở v2 có thể chỉ cần một đường dẫn cgroup cho mọi controller.)
+### 2.1 Từ v1 sang v2
 
-Ở v2 còn có hai thay đổi nền. Thứ nhất, nói đại khái, process chỉ được nằm ở nút lá (trừ root)[^cg7-nip]; quy tắc chính xác hơn ở mục 3[^cg7-nip-precise]. Thứ hai, controller chỉ bật được khi nằm trong `cgroup.controllers` của cgroup đó, qua việc ghi `cgroup.subtree_control`[^cg-ctrl-only]. Một controller không thể dùng đồng thời ở v1 và v2[^cg7-both].
+Ở v1, mỗi controller có thể gắn vào một hierarchy riêng, nên cây của `cpu` có thể khác cây của `memory`. Cách làm đó có vấn đề: các controller của v1 được phát triển gần như không phối hợp với nhau, nên giữa chúng nảy sinh nhiều chỗ bất nhất, và việc quản lý các hierarchy trở nên khá phức tạp[^cg7-why]. Sự linh hoạt kia hóa ra kém hữu ích hơn dự kiến, nhiều khi chỉ thêm phức tạp, nên ở v2 mọi controller được gắn vào một hierarchy duy nhất[^cg7-unified]. Cái lợi (nhận xét của người soạn): `orders` ở v2 chỉ cần một đường dẫn cgroup cho mọi controller.
 
-**`cgroupfs`: cây thư mục là API.** Doc kernel mô tả cgroup con được tạo bằng cách tạo thư mục con; tôi không thấy doc nhắc syscall riêng để tạo cgroup (suy luận của người soạn). Tạo thư mục = tạo cgroup; xóa thư mục = xóa cgroup (khi không còn con và process sống[^cg-rmdir]); đọc/ghi file = đọc/cấu hình. Ban đầu chỉ có cgroup gốc chứa mọi process; cgroup con được tạo bằng cách tạo thư mục con[^cg-mkdir]. Quan sát trong container lab: `stat -f -c %T /sys/fs/cgroup` in `cgroup2fs`; `mount` cho `cgroup on /sys/fs/cgroup type cgroup2 (ro,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot)`. Tức là `/sys/fs/cgroup` là một mount kiểu `cgroup2` chứ không phải thư mục thường.
+v2 còn đổi thêm ba điều nền:
 
-**Các file lõi (`cgroup.*`).**
+- Nói đại khái, process chỉ được nằm ở nút lá của cây (trừ root)[^cg7-nip]. Quy tắc chính xác hơn nằm ở mục 3[^cg7-nip-precise].
+- Controller chỉ bật được khi nó có trong `cgroup.controllers` của cgroup đó, và bật bằng cách ghi vào `cgroup.subtree_control`[^cg-ctrl-only].
+- Một controller không thể dùng đồng thời ở cả v1 và v2[^cg7-both].
 
-- `cgroup.procs`: đọc ra PID của các process thuộc cgroup, mỗi dòng một PID[^cg-procs-read]. Ghi một PID vào để di chuyển process: mỗi lần `write(2)` chỉ di chuyển một process, và ghi PID của một thread bất kỳ thì cả process (mọi thread) được di chuyển[^cg-procs].
-- `cgroup.controllers`: các controller mà cgroup *có thể bật cho con*[^cg-ctrl-file]; `cgroup.subtree_control`: những controller *đang* bật cho con[^cg-subtree-file]. Mặc định không controller nào được bật[^cg-nodef].
+### 2.2 `cgroupfs`: cây thư mục là API
 
-Nếu `A` có `+cpu +memory` trong `subtree_control` thì các file `cpu.*`, `memory.*` xuất hiện **trong thư mục con** của `A`: bật controller ở một cgroup nghĩa là việc phân phối tài nguyên cho các con *trực tiếp* của nó sẽ được điều khiển[^cg-enable], và file giao diện của controller (không bắt đầu bằng `cgroup.`) do cgroup *cha* sở hữu chứ không phải chính cgroup đó[^cg-owned]. Ràng buộc top-down: một cgroup chỉ phân phối tiếp tài nguyên nếu đã được cha phân phối cho, và không thể tắt controller khi một cgroup con còn bật nó[^cg-topdown].
+Giao diện của cgroup là một filesystem, nên cây thư mục chính là API. Lúc đầu chỉ có cgroup gốc, chứa mọi process; muốn có cgroup con thì tạo thư mục con[^cg-mkdir]. Doc kernel chỉ mô tả cách tạo thư mục chứ không nhắc syscall riêng nào để tạo cgroup (suy luận của người soạn từ việc đọc doc). Muốn xóa cgroup thì xóa thư mục, miễn là nó không còn con và không còn process sống[^cg-rmdir]. Đọc file để xem trạng thái, ghi file để cấu hình.
 
-**Cgroup trong container nhìn ra sao.** Trong container, `cat /proc/self/cgroup` in `0::/` — "tôi ở gốc". Khác biệt là **cgroup namespace**: nó ảo hóa cách nhìn cgroup của process[^cgns], mỗi namespace có thư mục gốc riêng và đường dẫn trong `/proc/pid/cgroup` được tính tương đối từ đó[^cgns-root]. Chi tiết ở [chương Namespaces](02-namespaces.md).
+Filesystem này là `cgroup2`, mount bằng lệnh `mount -t cgroup2`[^cg-mount]. Quan sát trong container lab: `stat -f -c %T /sys/fs/cgroup` in `cgroup2fs`, còn `mount` cho `cgroup on /sys/fs/cgroup type cgroup2 (ro,nosuid,nodev,noexec,relatime,nsdelegate,memory_recursiveprot)`. Tức `/sys/fs/cgroup` là một mount kiểu `cgroup2` chứ không phải thư mục thường.
 
-<details><summary>Đi sâu: tình trạng v1/Kubernetes, <code>nsdelegate</code>, quan sát cgroup chỉ đọc</summary>
+### 2.3 Các file lõi (`cgroup.*`)
 
-- `cgroups(7)` nói v1 vẫn còn tồn tại (vì tương thích nên khó bị gỡ) và v2 lúc đó chỉ cài một tập con controller của v1[^cg7-subset]. Kubernetes thì đã tuyên bố ngừng ủng hộ (deprecated) cgroup v1[^k8s-v1]. (docs Kubernetes không ghim phiên bản, đọc ở thời điểm soạn.)
-- Quan sát (container privileged): `lab/child/cgroup.controllers` trống cho tới khi ghi `+memory +cpu +pids` vào `lab/cgroup.subtree_control`; sau đó nó liệt kê `cpu memory pids` và có `memory.max`, `cpu.max`, `pids.max`.
-- Với Docker chạy `--cgroupns=host` (chỉ để quan sát), `cat /proc/self/cgroup` in `0::/docker/<64 ký tự id>`.
-- Mount có `nsdelegate`: theo kernel doc, đây là tùy chọn coi cgroup namespace là ranh giới của việc giao quyền (delegation)[^cg-nsdeleg]. Quan sát: container lab không đặc quyền thử `mkdir /sys/fs/cgroup/x` và `echo 1 > /sys/fs/cgroup/cpu.weight` đều trả `Read-only file system`; `mount -o remount,rw /sys/fs/cgroup` cũng bị từ chối (`cannot remount cgroup read-write, is write-protected`). Vậy ở lab này container (kể cả root) không tự nới giới hạn của mình.
+- `cgroup.procs`: đọc ra PID của các process thuộc cgroup, mỗi dòng một PID[^cg-procs-read]. Ghi một PID vào để di chuyển process, nhưng mỗi lần `write(2)` chỉ di chuyển được một process, và ghi PID của một thread bất kỳ thì cả process (mọi thread) đi theo[^cg-procs].
+- `cgroup.controllers`: các controller mà cgroup *có thể bật cho con*[^cg-ctrl-file].
+- `cgroup.subtree_control`: các controller *đang* bật cho con[^cg-subtree-file]. Mặc định không controller nào được bật[^cg-nodef].
+
+Bật controller có hệ quả hơi ngược trực giác. Giả sử `A` có `+cpu +memory` trong `subtree_control`. Khi đó các file `cpu.*` và `memory.*` xuất hiện **trong thư mục con** của `A`, không phải trong `A`. Lý do: bật controller ở một cgroup nghĩa là việc chia tài nguyên cho các con *trực tiếp* của nó sẽ được điều khiển[^cg-enable]. Vì vậy file giao diện của controller (những file không bắt đầu bằng `cgroup.`) thuộc về cgroup *cha*, không thuộc chính cgroup đó[^cg-owned]. Ràng buộc đi từ trên xuống: một cgroup chỉ chia tiếp tài nguyên nếu cha đã chia cho nó, và không tắt được controller khi còn cgroup con đang bật nó[^cg-topdown].
+
+Còn bên trong container thì `orders` thấy gì? `cat /proc/self/cgroup` in `0::/`, như thể process đang ở gốc. Đây là tác dụng của **cgroup namespace**: nó ảo hóa cách process nhìn cgroup của mình[^cgns]. Mỗi cgroup namespace có thư mục gốc riêng, và đường dẫn trong `/proc/pid/cgroup` được tính tương đối từ đó[^cgns-root]. Chi tiết ở [chương Namespaces](02-namespaces.md).
+
+<details><summary>Đi sâu: lịch sử v1/v2, tình trạng v1 và Kubernetes, <code>nsdelegate</code>, quan sát cgroup chỉ đọc</summary>
+
+**Lịch sử.** cgroup v1 xuất hiện lần đầu ở Linux 2.6.24[^cg7-224]. Từ Linux 3.10, người ta bắt đầu làm một cài đặt mới, trực giao với v1, để sửa các vấn đề trên[^cg7-310]. v2 chính thức ra mắt ở Linux 4.5[^cg7-45].
+
+**v1 chưa biến mất.** v1 vẫn còn tồn tại, và khi `cgroups(7)` được viết thì v2 mới cài một tập con các controller của v1[^cg7-subset]. Kubernetes thì đã tuyên bố ngừng ủng hộ (deprecated) cgroup v1[^k8s-v1] (docs Kubernetes không ghim phiên bản, đọc ở thời điểm soạn).
+
+**Quan sát với container privileged.** `lab/child/cgroup.controllers` trống cho tới khi ghi `+memory +cpu +pids` vào `lab/cgroup.subtree_control`. Sau đó nó liệt kê `cpu memory pids`, và thư mục con có thêm `memory.max`, `cpu.max`, `pids.max`. Với Docker chạy `--cgroupns=host` (chỉ để quan sát), `cat /proc/self/cgroup` in `0::/docker/<64 ký tự id>`.
+
+**`nsdelegate` và cgroup chỉ đọc.** Mount có `nsdelegate`: theo doc kernel, đây là tùy chọn coi cgroup namespace là ranh giới của việc giao quyền (delegation)[^cg-nsdeleg]. Quan sát: container lab không đặc quyền thử `mkdir /sys/fs/cgroup/x` và `echo 1 > /sys/fs/cgroup/cpu.weight` đều trả `Read-only file system`. `mount -o remount,rw /sys/fs/cgroup` cũng bị từ chối (`cannot remount cgroup read-write, is write-protected`). Vậy ở lab này, container (kể cả root) không tự nới giới hạn của mình.
 
 </details>
 
-**Quay lại Q2:** v2 là một cây duy nhất điều khiển qua filesystem `cgroup2`; `cgroup.procs` di chuyển process, `cgroup.subtree_control` bật controller cho con.
+**Quay lại Q2:** v2 là một cây duy nhất điều khiển qua filesystem `cgroup2`; `cgroup.procs` di chuyển process, `cgroup.subtree_control` bật controller cho các con.
+
+---
 
 ## 3. "No internal process" và delegation (Q3)
 
-> **Trả lời ngắn.** cgroup không phải root chỉ được chia tài nguyên cho con khi bản thân nó không có process nào[^cg-nip]. Vì vậy muốn bật controller ở một cgroup đang chứa process thì phải tạo cgroup con, chuyển hết process sang đó rồi mới bật controller[^cg-nip-how]; nếu làm sai thứ tự, thí nghiệm bên dưới cho `EBUSY` (quan sát, doc không nêu mã lỗi). Delegation là giao một nhánh cây cho kẻ kém quyền hơn, vẫn bị trần của cha khống chế[^cg-deleg-contain].
+> **Trả lời ngắn.** cgroup không phải root chỉ được chia tài nguyên cho con khi bản thân nó không có process nào[^cg-nip]. Vì vậy muốn bật controller ở một cgroup đang chứa process, bạn phải tạo cgroup con, chuyển hết process sang đó rồi mới bật[^cg-nip-how]. Làm sai thứ tự thì ghi `cgroup.subtree_control` báo `EBUSY` (quan sát ở thí nghiệm dưới; doc không nêu mã lỗi). Còn delegation là giao một nhánh cây cho bên ít quyền hơn, và nhánh đó vẫn nằm dưới trần của cgroup cha[^cg-deleg-contain].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một trưởng phòng muốn chia ngân sách cho các tổ thì bản thân ông không được vừa là thành viên đòi ngân sách cạnh tranh với các tổ; ông phải đưa mình vào một tổ riêng rồi mới đi chia.
+*Với `orders`.* Giả sử cgroup của container đang chứa `orders` cùng vài process phụ, và bạn muốn bật `memory` ở đúng cgroup đó để chia riêng bộ nhớ cho từng cgroup con. Lệnh `echo +memory > cgroup.subtree_control` sẽ trả `Device or resource busy`. Mục này giải thích lỗi đó đến từ đâu, và vì sao nhánh mà container được giao vẫn không tự nới được giới hạn.
 
-**No internal process.** Quy tắc: cgroup không phải root chỉ phân phối domain resource cho con khi không có process của chính nó[^cg-nip]. Mục đích: khi controller nhìn một đoạn cây, process luôn ở lá, không có cảnh con cạnh tranh với process của chính cha[^cg-nip-why]. Gốc (root) được miễn[^cg-root-exempt]. Quy tắc hẹp hơn câu "process chỉ ở lá": một cgroup không-root vẫn có thể vừa có process vừa có cgroup con, chỉ là phải dời process ra trước khi bật controller cho con[^cg7-nip-precise]. Cách làm đúng, theo doc: cgroup phải tạo con và chuyển mọi process sang con *trước khi* bật controller trong `cgroup.subtree_control` của nó[^cg-nip-how].
+### 3.1 No internal process
 
-Quan sát (container privileged, root của namespace chứa 3 process lúc đầu):
+Quy tắc như sau: cgroup không phải root chỉ chia *domain resource* cho con khi bản thân nó không có process nào[^cg-nip]. Lý do là để loại bỏ tình huống các cgroup con phải cạnh tranh với chính những process nằm trong cgroup cha[^cg-nip-why]. Riêng gốc (root) được miễn quy tắc này[^cg-root-exempt].
+
+Quy tắc hẹp hơn câu "process chỉ ở lá" ở mục 2. Một cgroup không phải root vẫn có thể vừa có process vừa có cgroup con, chỉ là phải dời process ra khỏi nó trước khi bật controller cho các con[^cg7-nip-precise]. Cách làm đúng theo doc: cgroup tạo con và chuyển mọi process sang con *trước khi* bật controller trong `cgroup.subtree_control` của chính nó[^cg-nip-how].
+
+### 3.2 Thí nghiệm: `EBUSY` ở cả hai chiều
+
+Quan sát trong container privileged, root của namespace lúc đầu chứa 3 process:
 
 ```text
 echo "+memory" > /sys/fs/cgroup/cgroup.subtree_control   # rc=1, Device or resource busy
@@ -98,85 +125,110 @@ mkdir lab; echo $$ > lab2/cgroup.procs; echo +memory > lab2/cgroup.subtree_contr
 echo $$ > lab/cgroup.procs   # khi lab đã có subtree_control: busy
 ```
 
-Cả hai chiều đều hiện ra: bật controller khi cgroup đang có process thì `EBUSY`; di chuyển process vào cgroup đã bật controller cho con cũng `EBUSY`. Mẫu "tạo cgroup `init`, dời mọi process vào đó, rồi mới bật controller" là cách vượt qua (kết quả thí nghiệm trên).
+Cả hai chiều đều hiện ra. Bật controller khi cgroup đang có process thì `EBUSY`. Chiều ngược lại cũng vậy: di chuyển process vào một cgroup đã bật controller cho con thì `EBUSY`. Còn mẫu "tạo cgroup `init`, dời mọi process vào đó, rồi mới bật controller" là cách vượt qua (kết quả thí nghiệm trên).
 
-**Delegation.** Một cgroup được giao theo hai cách: cấp quyền ghi vào thư mục cùng `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control` cho user ít đặc quyền, hoặc (mount có `nsdelegate`) tự động giao cho cgroup namespace lúc tạo namespace[^cg-deleg]. Phần còn lại tự do, nhưng không thứ gì trong nhánh được giao thoát khỏi các giới hạn tài nguyên mà cgroup cha áp lên[^cg-deleg-contain]. Người được giao cũng không di chuyển được process vào hay ra khỏi nhánh[^cg-deleg-contain2].
+### 3.3 Delegation
+
+Delegation là giao quyền quản lý một nhánh cây cho bên ít đặc quyền hơn, chẳng hạn một user thường hoặc chính container. Một cgroup có thể được giao theo hai cách[^cg-deleg]. Cách thứ nhất là cấp quyền ghi cho user ít đặc quyền vào thư mục cùng ba file `cgroup.procs`, `cgroup.threads`, `cgroup.subtree_control`. Cách thứ hai (mount có `nsdelegate`) là tự động giao cho cgroup namespace ngay lúc nó được tạo.
+
+Bên trong nhánh được giao, người nhận khá tự do, nhưng không thứ gì trong đó thoát được các giới hạn tài nguyên mà cgroup cha áp lên[^cg-deleg-contain]. Người nhận cũng không di chuyển được process vào hay ra khỏi nhánh[^cg-deleg-contain2]. Với `orders`, nghĩa là dù có được giao quyền quản lý nhánh, nó cũng không tự nới trần mà container đã nhận (suy luận của người soạn từ hai quy tắc trên).
 
 <details><summary>Đi sâu: delegation qua <code>nsdelegate</code> và systemd</summary>
 
-- Với cách giao thứ hai, kernel từ chối ghi mọi file ngoài `cgroup.procs` và `cgroup.subtree_control` ở gốc namespace từ bên trong[^cg-deleg-files], vì các file điều khiển đó quyết định phần chia *của cha*.
-- Systemd có khái niệm tương tự: người được giao (delegatee) có thể bật controller cho các con của mình khi cần.[^sd-deleg]
+- Với cách giao thứ hai, kernel từ chối ghi mọi file ngoài `cgroup.procs` và `cgroup.subtree_control` ở gốc namespace khi ghi từ bên trong[^cg-deleg-files]. Lý do: các file điều khiển còn lại quyết định phần chia của *cha* (suy luận của người soạn).
+- systemd có khái niệm tương tự: người được giao (delegatee) có thể bật controller cho các con của mình khi cần[^sd-deleg].
 
 </details>
 
-**Quay lại Q3:** `EBUSY` đến từ quy tắc "no internal process"; tạo con, dời process, rồi mới bật controller, và nhánh được giao vẫn nằm dưới trần của cha.
+**Quay lại Q3:** `EBUSY` đến từ quy tắc "no internal process": tạo con, dời process, rồi mới bật controller; còn nhánh được giao vẫn nằm dưới trần của cha.
+
+---
 
 ## 4. Ba kiểu điều khiển và controller memory (Q4)
 
-> **Trả lời ngắn.** Controller điều khiển tài nguyên theo ba kiểu: *weights* (chia theo tỉ lệ trọng số), *limits* (trần tuyệt đối) và *protections* (bảo vệ tối thiểu)[^cg-weights][^cg-limits][^cg-prot]. Controller memory tính cả page cache vào cgroup[^cg-stat-file]; vượt `memory.high` chỉ bị throttle và không bao giờ gọi OOM killer[^cg-high], còn `memory.max` khi mức dùng chạm trần mà không giảm được thì OOM killer chạy trong cgroup[^cg-max]. `memory.events` đếm các sự kiện như `high` (số lần bị throttle) và `oom_kill` (số process bị OOM killer giết)[^cg-ev-high][^cg-ev-kill].
+> **Trả lời ngắn.** Controller điều khiển tài nguyên theo ba kiểu: *weights* (chia theo tỉ lệ trọng số), *limits* (trần tuyệt đối) và *protections* (mức bảo vệ tối thiểu). Controller memory tính cả page cache vào cgroup[^cg-stat-file]. Vượt `memory.high` thì chỉ bị làm chậm (throttle) và không bao giờ gọi OOM killer[^cg-high]. Còn `memory.max` mà mức dùng chạm trần và không giảm được thì OOM killer chạy trong cgroup[^cg-max]. `memory.events` đếm các sự kiện đó. Trường `high` là số lần bị throttle[^cg-ev-high]. Trường `oom_kill` là số process bị OOM killer giết[^cg-ev-kill].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): trọng số giống chia phần pizza theo số người đang đói; limit giống khóa tủ lạnh của từng nhà; protection giống để dành phần ăn tối thiểu cho ai đó dù nhà khác có đói.
+*Với `orders`.* `orders` được `--memory 256m`. Hai câu hỏi thực tế là: 256 MiB đó tính những gì (chỉ heap của Rust, hay cả cache của các file nó đọc?), và khi chạm tới thì `orders` bị làm chậm hay bị giết? Để trả lời, ta cần ba kiểu điều khiển chung của mọi controller trước, rồi mới tới riêng memory.
 
-| Kiểu | Ý nghĩa | Ví dụ | Đặc điểm |
-|---|---|---|---|
-| Weights | chia theo tỉ lệ trọng số của các con *đang hoạt động*; "work-conserving"[^cg-weights] | `cpu.weight`, `io.weight` | khoảng [1, 10000], mặc định 100[^cg-w-def] |
-| Limits | trần tuyệt đối; có thể over-commit tổng[^cg-limits] | `cpu.max`, `memory.max`, `io.max`, `pids.max` | mặc định `max` (không giới hạn)[^cg-lim-def] |
-| Protections | bảo vệ tối thiểu; có thể over-commit | `memory.min`, `memory.low`[^cg-prot] | mặc định 0[^cg-prot-def] |
+### 4.1 Ba kiểu điều khiển
 
-Weight chỉ có ý nghĩa khi *tranh chấp*; limit có hiệu lực kể cả khi máy rảnh. Vì thế container với `--cpu-shares` thấp chạy một mình vẫn dùng hết CPU, còn `--cpus` thì không (suy luận của người soạn từ hai định nghĩa trên). Reclaim và OOM xem [chương page fault](../03-memory/04-page-fault-va-swapping.md).
+- **Weights**: chia tài nguyên theo tỉ lệ trọng số giữa các con *đang cần dùng* lúc đó, nên là kiểu "work-conserving" (không để tài nguyên nhàn rỗi)[^cg-weights]. Ví dụ `cpu.weight`, `io.weight`. Trọng số nằm trong khoảng [1, 10000], mặc định 100[^cg-w-def].
+- **Limits**: trần tuyệt đối. Tổng trần của các con được phép vượt lượng tài nguyên mà cha có (over-commit)[^cg-limits]. Ví dụ `cpu.max`, `memory.max`, `io.max`, `pids.max`. Mặc định là `max`, tức không giới hạn[^cg-lim-def].
+- **Protections**: mức bảo vệ tối thiểu, như `memory.min` và `memory.low`. Protection cũng over-commit được, nhưng khi đó chỉ phần cha có sẵn mới được bảo vệ chia cho các con[^cg-prot]. Mặc định là 0, tức không bảo vệ gì[^cg-prot-def].
 
-**Cái gì bị tính.** Kernel doc liệt kê loại bộ nhớ được theo dõi: bộ nhớ userland (page cache và anonymous memory), cấu trúc dữ liệu kernel như dentry/inode, và TCP socket buffers[^cg-tracked]. Điều đáng nhấn mạnh: **page cache được tính vào cgroup**. `memory.stat` định nghĩa `file` là bộ nhớ dùng để cache dữ liệu filesystem, gồm cả tmpfs và shared memory[^cg-stat-file]. Một process chỉ ghi file lớn cũng làm `memory.current` tăng (suy luận của người soạn từ định nghĩa `file`; thí nghiệm ở phần Đi sâu). Ai bị tính? Vùng nhớ bị tính cho cgroup đã khởi tạo nó và ở đó cho tới khi được giải phóng[^cg-charge], và chuyển process sang cgroup khác không chuyển phần đã tính[^cg-charge-move].
+Khác biệt cần nhớ là weight chỉ có nghĩa khi *tranh chấp*, còn limit có hiệu lực kể cả khi máy rảnh (suy luận của người soạn từ các định nghĩa trên). Vì thế một container đặt `--cpu-shares` thấp mà chạy một mình vẫn dùng được hết CPU, còn `--cpus` thì không. Cơ chế reclaim và OOM nằm ở [chương page fault](../03-memory/04-page-fault-va-swapping.md).
 
-**Các file.**
+### 4.2 Memory tính cái gì
 
-- `memory.current`: mức dùng hiện tại, gồm cả cgroup con[^cg-cur]; `memory.peak`: mức cao nhất từ khi tạo[^cg-peak].
-- `memory.min`: bảo vệ cứng, bộ nhớ của cgroup nằm trong ngưỡng min *hiệu lực* sẽ không bị reclaim trong bất kỳ điều kiện nào[^cg-min]; đặt bảo vệ vượt quá lượng bộ nhớ sẵn có bị khuyến cáo không nên và có thể dẫn tới OOM liên tục[^cg-min-over]. `memory.low`: bảo vệ mềm, chỉ bị reclaim khi không còn bộ nhớ reclaim được ở các cgroup không được bảo vệ[^cg-low].
-- `memory.high`: ngưỡng throttle, không bao giờ gọi OOM killer[^cg-high]. `memory.max`: trần cứng, không giảm được thì OOM killer chạy trong cgroup[^cg-max].
-- `memory.stat`: phân rã `anon`, `file`, `kernel`…; phải tra theo *key* vì có thể có mục mới chen vào giữa[^cg-stat-keys].
-- `memory.events`: `high` đếm số lần process bị throttle và buộc direct reclaim[^cg-ev-high]; `oom_kill` đếm số process của cgroup bị mọi loại OOM killer giết[^cg-ev-kill]. Mọi trường trong file này mang tính phân cấp (tính cả cgroup con)[^cg-ev-hier]; `memory.events.local` là bản chỉ tính riêng cgroup[^cg-ev-local].
+Doc kernel liệt kê các loại bộ nhớ được theo dõi: bộ nhớ userland (page cache và anonymous memory), cấu trúc dữ liệu của kernel như dentry và inode, và buffer của TCP socket[^cg-tracked]. Điều đáng nhấn mạnh là **page cache được tính vào cgroup**: `memory.stat` định nghĩa `file` là bộ nhớ dùng để cache dữ liệu filesystem, gồm cả tmpfs và shared memory[^cg-stat-file]. Với `orders`, nghĩa là ngay cả khi heap của nó nhỏ, việc đọc hay ghi file lớn cũng làm `memory.current` tăng (suy luận của người soạn từ định nghĩa `file`; thí nghiệm ở phần Đi sâu).
+
+Còn bộ nhớ tính cho ai? Vùng nhớ được tính cho cgroup đã khởi tạo nó và ở lại đó cho tới khi được giải phóng[^cg-charge]. Chuyển process sang cgroup khác không kéo phần đã tính theo[^cg-charge-move].
+
+### 4.3 Các file của memory controller
+
+- `memory.current`: mức dùng hiện tại, gồm cả cgroup con[^cg-cur]. `memory.peak`: mức cao nhất kể từ lúc cgroup được tạo[^cg-peak].
+- `memory.min`: bảo vệ cứng. Bộ nhớ của cgroup nằm trong ngưỡng min *hiệu lực* sẽ không bị reclaim trong bất kỳ điều kiện nào[^cg-min]. Doc khuyến cáo không nên đặt bảo vệ vượt quá lượng bộ nhớ sẵn có, vì có thể dẫn tới OOM liên tục[^cg-min-over].
+- `memory.low`: bảo vệ mềm. Bộ nhớ này chỉ bị reclaim khi các cgroup không được bảo vệ đã hết bộ nhớ để reclaim[^cg-low].
+- `memory.high`: ngưỡng throttle, vượt qua không bao giờ gọi OOM killer[^cg-high]. `memory.max`: trần cứng, mức dùng chạm trần mà không giảm được thì OOM killer chạy trong cgroup[^cg-max].
+- `memory.stat`: phân rã mức dùng thành `anon`, `file`, `kernel`… Phải tra theo *key*, vì có thể có mục mới chen vào giữa[^cg-stat-keys].
+- `memory.events`: bộ đếm sự kiện, giải thích ngay dưới.
+
+Để biết giới hạn của `orders` đã cắn chưa, đọc `memory.events`. Trường `high` đếm số lần process của cgroup bị throttle và buộc phải direct reclaim vì vượt ngưỡng `memory.high`[^cg-ev-high]. Trường `oom_kill` đếm số process của cgroup bị mọi loại OOM killer giết[^cg-ev-kill]. Vậy `high` tăng nghĩa là `orders` đang bị làm chậm, còn `oom_kill` tăng nghĩa là nó đã mất process (suy luận của người soạn). Mọi trường trong file này mang tính phân cấp, tức đã tính cả cgroup con[^cg-ev-hier]. Muốn số chỉ của riêng cgroup thì đọc `memory.events.local`[^cg-ev-local].
 
 <details><summary>Đi sâu: thí nghiệm ghi file lớn, OOM, <code>memory.oom.group</code>, <code>memory.high</code></summary>
 
-**Ghi file lớn trong cgroup 50 MiB.** Đặt `memory.max=50M`, chạy `dd if=/dev/zero of=/tmp/big bs=1M count=300` trong cgroup. `dd` thành công (300 MiB ghi, khoảng 0,32 s), không có OOM kill (`oom 0, oom_kill 0`), nhưng `memory.current = 51146752` (khoảng 48,8 MiB, sát trần), `memory.stat` có `file 48496640` và `file_dirty 6877184`, còn `memory.events` có `max 1015`. Page cache chiếm gần hết ngân sách; trường `max` đếm số lần mức dùng sắp vượt ngưỡng max và nếu direct reclaim không kéo xuống được thì cgroup mới sang trạng thái OOM[^cg-ev-max]. Ở đây page cache reclaim được nên không OOM (suy luận của người soạn từ doc và quan sát `oom 0`).
+**Ghi file lớn trong cgroup 50 MiB.** Đặt `memory.max=50M`, rồi chạy `dd if=/dev/zero of=/tmp/big bs=1M count=300` trong cgroup. `dd` thành công (300 MiB ghi, khoảng 0,32 s) và không có OOM kill (`oom 0, oom_kill 0`). `memory.current = 51146752` (khoảng 48,8 MiB, sát trần), `memory.stat` có `file 48496640` và `file_dirty 6877184`, còn `memory.events` có `max 1015`. Page cache chiếm gần hết ngân sách. Trường `max` đếm số lần mức dùng sắp vượt ngưỡng max; nếu direct reclaim không kéo xuống được thì cgroup mới sang trạng thái OOM[^cg-ev-max]. Ở đây page cache reclaim được nên không có OOM (suy luận của người soạn từ doc và quan sát `oom 0`).
 
-**OOM và `memory.oom.group`.** Chương trình Rust nhỏ `hog mem N` cấp phát và ghi N MiB; đặt `memory.max=64M`, `memory.swap.max=0` (không swap để reclaim không cứu được anonymous memory).
+**OOM và `memory.oom.group`.** Chương trình Rust nhỏ `hog mem N` cấp phát và ghi N MiB. Thí nghiệm đặt `memory.max=64M` và `memory.swap.max=0` (không swap, để reclaim không cứu được anonymous memory).
 
-- Cgroup A, `hog mem 200`: process bị giết (exit 137 = 128 + SIGKILL). `memory.events`: `max 38`, `oom 1`, `oom_kill 1`, `oom_group_kill 0`; `memory.peak = 67108864` = đúng 64 MiB dù chương trình đòi 200 MiB.
-- Cgroup B0 (`memory.oom.group=0`) và B1 (`=1`), mỗi cái có thêm một process "ngủ" cùng hog. B0: `oom_kill 1`, `oom_group_kill 0`. B1: `oom_kill 4`, `oom_group_kill 1`. Tức là với `group=1` kernel giết toàn bộ các process trong cgroup (4 process; có lẽ gồm cả subshell cha của hog, vì script của tôi không in được dòng "sleeper dead" — suy luận của người soạn) thay vì chọn một nạn nhân. Đúng với mô tả của doc: mọi task của cgroup bị giết cùng nhau hoặc không task nào bị giết[^cg-oomgroup].
+- Cgroup A, `hog mem 200`: process bị giết (exit 137 = 128 + SIGKILL). `memory.events` ghi `max 38`, `oom 1`, `oom_kill 1`, `oom_group_kill 0`. `memory.peak = 67108864`, đúng 64 MiB dù chương trình đòi 200 MiB.
+- Cgroup B0 (`memory.oom.group=0`) và B1 (`=1`), mỗi cái có thêm một process "ngủ" cạnh hog. B0: `oom_kill 1`, `oom_group_kill 0`. B1: `oom_kill 4`, `oom_group_kill 1`. Tức là với `group=1`, kernel giết toàn bộ process trong cgroup (4 process; có lẽ gồm cả subshell cha của hog, vì script không in được dòng "sleeper dead" — suy luận của người soạn) thay vì chỉ chọn một nạn nhân. Đúng với mô tả của doc: mọi task của cgroup bị giết cùng nhau, hoặc không task nào bị giết[^cg-oomgroup].
 
-**`memory.high` và throttle.** Đặt `memory.high=32M`, `memory.swap.max=0`, chạy `hog mem 48` với `timeout 25`. Quan sát: **không xong sau 25 giây** (exit 124 từ `timeout`), `memory.events` có `high 1245` và `oom 0`; `memory.pressure` ghi `some avg10=89.13 ... total=24264246` (khoảng 24,3 giây stall tích lũy trong 25 giây). Đây đúng là hành vi doc mô tả: vượt `high` thì process bị throttle và chịu áp lực reclaim nặng, không bị giết[^cg-high]. Anonymous memory không reclaim được (không swap) nên throttle làm tiến trình gần như đứng. (Nhận xét của người soạn: `memory.high` không có ai giám sát có thể tệ hơn OOM, vì tiến trình không chết mà đứng; doc cũng dặn dùng khi có bên ngoài theo dõi[^cg-high].)
+**`memory.high` và throttle.** Đặt `memory.high=32M`, `memory.swap.max=0`, chạy `hog mem 48` với `timeout 25`. Quan sát: **không xong sau 25 giây** (exit 124 từ `timeout`), `memory.events` có `high 1245` và `oom 0`. `memory.pressure` ghi `some avg10=89.13 ... total=24264246`, khoảng 24,3 giây stall tích lũy trong 25 giây. Đây đúng là hành vi doc mô tả: vượt `high` thì process bị throttle và chịu áp lực reclaim nặng chứ không bị giết[^cg-high]. Vì anonymous memory không reclaim được (không swap), throttle làm tiến trình gần như đứng. Nhận xét của người soạn: `memory.high` mà không có ai giám sát có thể tệ hơn OOM, vì tiến trình không chết mà đứng. Doc cũng dặn nên dùng nó khi có bên ngoài theo dõi[^cg-high].
 
 </details>
 
-**Quay lại Q4:** weights chia tỉ lệ, limits đặt trần, protections giữ phần tối thiểu; memory tính cả page cache, `high` làm chậm, `max` mới OOM, và `memory.events` cho biết cái nào đã xảy ra.
+**Quay lại Q4:** weights chia tỉ lệ, limits đặt trần, protections giữ phần tối thiểu. Với `orders`, memory tính cả page cache, `high` làm chậm, `max` mới OOM, và `memory.events` cho biết cái nào đã xảy ra.
+
+---
 
 ## 5. Controller cpu, io và pids (Q5)
 
-> **Trả lời ngắn.** `cpu.weight` chia CPU theo tỉ lệ giữa các cgroup con đang hoạt động[^cg-weights]; `cpu.max` là quota theo chu kỳ — dùng hết quota thì các thread bị chặn tới chu kỳ sau[^cg-cpu-max][^cg-bwc]. `cpu.stat` có `nr_throttled` cho biết bị chặn bao nhiêu lần[^cg-bwc-stat]. `io.max` giới hạn tốc độ/IOPS theo thiết bị[^cg-iomax] (doc v6.8 ghi hạn chế với thiết bị blk-mq, xem phần Đi sâu[^cg-io-blkmq]); `pids.max` làm `fork`/`clone` trả `-EAGAIN` khi sẽ vượt giới hạn[^cg-pids-eagain].
+> **Trả lời ngắn.** `cpu.weight` chia CPU theo tỉ lệ giữa các cgroup con đang hoạt động[^cg-weights]. `cpu.max` là quota theo chu kỳ: dùng hết quota thì các thread bị chặn tới chu kỳ sau[^cg-bwc]. `cpu.stat` có `nr_throttled` cho biết cgroup đã bị chặn bao nhiêu lần[^cg-bwc-stat]. `io.max` giới hạn tốc độ và IOPS theo thiết bị[^cg-iomax]. Doc v6.8 ghi hạn chế với thiết bị blk-mq (xem phần Đi sâu)[^cg-io-blkmq]. `pids.max` làm `fork`/`clone` trả `-EAGAIN` khi sẽ vượt giới hạn[^cg-pids-eagain].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `cpu.max` giống một thẻ phút gọi điện: 20 ms mỗi 100 ms; hết thẻ là cúp máy tới kỳ sau, dù bao nhiêu người cùng dùng chung thẻ.
+*Với `orders`.* `orders` có 4 handler thread bận rộn nhưng chỉ được `--cpus 1.5`. Câu hỏi của mục này: 1,5 CPU đó được thực thi bằng file nào, và khi 4 thread cùng đòi CPU thì chuyện gì xảy ra với request đang chờ? Sau CPU là hai tài nguyên còn lại mà `orders` đụng tới: đĩa (log, file dữ liệu) và số thread (mỗi request một thread chẳng hạn).
 
-**`cpu.weight`.** Khoảng [1, 10000], mặc định 100[^cg-cpu-weight]. Vì là weight kiểu work-conserving nên chỉ có ý nghĩa khi các cgroup tranh chấp CPU (suy luận của người soạn từ định nghĩa weights ở mục 4).
+### 5.1 `cpu.weight`: chia theo tỉ lệ
 
-**`cpu.max`: quota và period (CFS bandwidth).** Dạng `$MAX $PERIOD`, nghĩa là cgroup có thể dùng tới `$MAX` trong mỗi `$PERIOD`; `max` là không giới hạn[^cg-cpu-max]. Cơ chế (tài liệu CFS bandwidth control): trong mỗi period, nhóm được cấp tối đa `quota` micro giây CPU; quota được giao cho run queue từng CPU theo từng lát khi thread runnable; khi hết quota thì các thread bị throttle và không chạy lại được cho tới period sau, khi quota được nạp lại[^cg-bwc].
+Trọng số nằm trong khoảng [1, 10000], mặc định 100[^cg-cpu-weight]. Đây là weight kiểu work-conserving nên chỉ có nghĩa khi các cgroup tranh chấp CPU (suy luận của người soạn từ định nghĩa weights ở mục 4). Nếu `orders` là cgroup duy nhất đang cần CPU, trọng số của nó không giới hạn gì cả.
 
-Hệ quả (suy luận của người soạn từ cơ chế): quota tính theo *tổng CPU-time của mọi thread*, không theo số core. Quota `150000/100000` là 150 ms CPU mỗi 100 ms; 4 thread chạy song song hết quota sau 37,5 ms thời gian thực rồi tất cả bị chặn đến hết period; request đến đúng lúc đó phải chờ, nên đây là nguồn latency spike.
+### 5.2 `cpu.max`: quota và period
 
-`cpu.stat` cho thấy chuyện này xảy ra hay chưa: khi controller bật có `nr_periods`, `nr_throttled`, `throttled_usec`, `nr_bursts`, `burst_usec`[^cg-cpu-stat]. Tài liệu bandwidth: `nr_throttled` là số lần nhóm bị throttle/giới hạn[^cg-bwc-stat]; trang đó (mô tả theo tên file v1, `throttled_time` tính bằng nanosecond) nói thời gian throttle được tính trên các thực thể (entities) lập lịch của nhóm[^cg-bwc-time].
+`cpu.max` có dạng `$MAX $PERIOD`: cgroup được dùng tối đa `$MAX` trong mỗi khoảng `$PERIOD`; giá trị `max` nghĩa là không giới hạn[^cg-cpu-max]. Cơ chế đằng sau là CFS bandwidth control. Trong mỗi period, nhóm được cấp tối đa `quota` micro giây CPU. Quota được giao cho run queue của từng CPU theo từng lát, mỗi khi có thread runnable cần. Khi hết quota, các thread bị throttle và không chạy lại được cho tới period sau, lúc quota được nạp lại[^cg-bwc].
 
-**io.** `io.max` giới hạn tốc độ theo thiết bị, khóa bằng `$MAJ:$MIN`, với `rbps`, `wbps`, `riops`, `wiops`; BPS và IOPS đo theo từng chiều IO và IO bị trì hoãn khi chạm giới hạn[^cg-iomax]. `io.weight` là trọng số tương đối giữa anh em[^cg-ioweight]. Kernel doc nêu chuyện ghi buffered: page cache bị làm bẩn qua buffered write và mmap chung, nên cần cgroup-aware writeback — memory và io controller phối hợp[^cg-writeback].
+Hệ quả (suy luận của người soạn từ cơ chế): quota tính theo *tổng CPU-time của mọi thread*, không theo số core. Với `orders`, `--cpus 1.5` thành `150000 100000`, nghĩa là 150 ms CPU mỗi 100 ms. Bốn handler thread chạy song song sẽ dùng hết quota sau 37,5 ms thời gian thực, rồi cả bốn bị chặn đến hết period. Request nào đến đúng lúc đó phải chờ, và đó là một nguồn latency spike.
 
-**pids.** `pids.max` là giới hạn cứng số process[^cg-pidsmax]. Không thể vi phạm chính sách PID của cgroup qua `fork()` hay `clone()`; chúng trả `-EAGAIN`[^cg-pids-eagain].
+### 5.3 `cpu.stat`: xem throttle có xảy ra không
+
+Khi controller đã bật, `cpu.stat` có `nr_periods`, `nr_throttled`, `throttled_usec`, `nr_bursts`, `burst_usec`[^cg-cpu-stat]. Doc CFS bandwidth định nghĩa `nr_throttled` là số lần nhóm bị throttle hay giới hạn[^cg-bwc-stat]. Trang đó mô tả theo tên file của v1, nên `throttled_time` tính bằng nanosecond, và thời gian throttle được tính trên các thực thể (entities) lập lịch của nhóm[^cg-bwc-time]. Muốn biết latency đuôi của `orders` có do quota hay không, hãy đọc `nr_throttled`, đừng đoán từ biểu đồ CPU%.
+
+### 5.4 io
+
+`io.max` giới hạn theo thiết bị, khóa bằng `$MAJ:$MIN`, với các trường `rbps`, `wbps`, `riops`, `wiops`. BPS và IOPS được đo theo từng chiều IO, và IO bị trì hoãn khi chạm giới hạn[^cg-iomax]. `io.weight` là trọng số tương đối giữa các cgroup anh em[^cg-ioweight]. Chuyện ghi buffered phức tạp hơn một chút: page cache bị làm bẩn qua buffered write và shared mmap, rồi mới được ghi xuống filesystem bất đồng bộ. Vì vậy kernel doc nêu nhu cầu writeback nhận biết cgroup, tức memory controller và io controller phải phối hợp[^cg-writeback].
+
+### 5.5 pids
+
+`pids.max` là giới hạn cứng số process[^cg-pidsmax]. Không thể vượt chính sách PID của cgroup qua `fork()` hay `clone()`; chúng trả `-EAGAIN`[^cg-pids-eagain]. Nếu `orders` mở một thread cho mỗi request thì đây là trần sẽ chặn nó khi có quá nhiều request cùng lúc. Thí nghiệm ở phần Đi sâu cho thấy `spawn` của Rust nhận `Resource temporarily unavailable (os error 11)`.
 
 <details><summary>Đi sâu: các thí nghiệm weight, quota, io, pids và lưu ý blk-mq</summary>
 
-**`cpu.weight`.** Hai cgroup `w1` (weight 100) và `w2` (weight 400), mỗi cái chạy chương trình 4 thread quay vòng 3 giây trên VM 4 vCPU, tranh chấp hoàn toàn. `usage_usec` đọc được: `w1` 2.694.028, `w2` 9.191.331 — tỉ lệ khoảng 1 : 3,4, quanh mức 1 : 4 mong đợi từ 100 : 400.
+**`cpu.weight`.** Hai cgroup `w1` (weight 100) và `w2` (weight 400), mỗi cái chạy chương trình 4 thread quay vòng 3 giây trên VM 4 vCPU, tranh chấp hoàn toàn. `usage_usec` đọc được: `w1` 2.694.028, `w2` 9.191.331. Tỉ lệ khoảng 1 : 3,4, quanh mức 1 : 4 mong đợi từ 100 : 400.
 
-**`cpu.max`.** `cpu.max = "20000 100000"` (20% của một CPU), chương trình 4 thread quay vòng ~3 giây:
+**`cpu.max`.** Đặt `cpu.max = "20000 100000"` (20% của một CPU), chạy chương trình 4 thread quay vòng khoảng 3 giây:
 
 ```text
 usage_usec 623732
@@ -185,25 +237,27 @@ nr_throttled 31
 throttled_usec 11226380
 ```
 
-Cả 31 period đều bị throttle; CPU dùng 0,62 s ≈ 31 × 20 ms, đúng quota. `throttled_usec` ≈ 11,2 s lớn hơn thời gian thực vì cộng dồn theo các thread/CPU bị chặn (suy luận của người soạn, khớp với chữ "entities" trong doc).
+Cả 31 period đều bị throttle. CPU dùng 0,62 s ≈ 31 × 20 ms, đúng quota. `throttled_usec` ≈ 11,2 s lớn hơn thời gian thực vì được cộng dồn theo các thread/CPU bị chặn (suy luận của người soạn, khớp với chữ "entities" trong doc).
 
-**io.** `lsblk` cho `vda 253:0`, `vdb 253:16`. Tôi đọc 100 MiB từ `/dev/vdb` bằng `dd iflag=direct` trong cgroup: không giới hạn đạt 4,2 GB/s (0,025 s). Đặt `echo "253:16 rbps=10485760" > io.max` (10 MiB/s) rồi đọc 50 MiB: 5,0 giây, 10,5 MB/s. `io.stat` ghi `rbytes=157286400 rios=150`. Cách đọc thẳng (`O_DIRECT`) tránh page cache, nên giới hạn thấy rõ. Kernel doc v6.8 nói phân phối theo weight chỉ khả dụng khi dùng cfq-iosched và cả hai cách (weight, giới hạn tuyệt đối) đều không khả dụng cho thiết bị blk-mq[^cg-io-blkmq], nhưng ở đây `io.max` hoạt động; tôi chỉ khẳng định quan sát này.
+**io.** `lsblk` cho `vda 253:0`, `vdb 253:16`. Đọc 100 MiB từ `/dev/vdb` bằng `dd iflag=direct` trong cgroup: không giới hạn thì đạt 4,2 GB/s (0,025 s). Đặt `echo "253:16 rbps=10485760" > io.max` (10 MiB/s) rồi đọc 50 MiB: mất 5,0 giây, 10,5 MB/s. `io.stat` ghi `rbytes=157286400 rios=150`. Đọc thẳng (`O_DIRECT`) tránh page cache, nên giới hạn hiện ra rõ. Kernel doc v6.8 nói phân phối theo weight chỉ khả dụng khi dùng cfq-iosched, và cả hai cách (weight, giới hạn tuyệt đối) đều không khả dụng cho thiết bị blk-mq[^cg-io-blkmq]. Nhưng ở đây `io.max` vẫn hoạt động, và chương chỉ khẳng định quan sát này.
 
-**pids.** `pids.max=5`, chương trình Rust tạo tối đa 20 thread: tạo được 4 thread rồi `spawn error: Resource temporarily unavailable (os error 11)` (EAGAIN = 11); thread chính cộng 4 thread bằng 5 task; `pids.events` ghi `max 1`. Số đếm 5 = 1 + 4 phù hợp với việc thread cũng tính vào `pids.max`: kernel doc nói rõ "PID" của controller này là TID, tức ID mà kernel dùng cho từng task[^cg-pids-tid].
+**pids.** Đặt `pids.max=5`, chương trình Rust tạo tối đa 20 thread: tạo được 4 thread rồi nhận `spawn error: Resource temporarily unavailable (os error 11)` (EAGAIN = 11). Thread chính cộng 4 thread là 5 task, và `pids.events` ghi `max 1`. Số đếm 5 = 1 + 4 phù hợp với việc thread cũng tính vào `pids.max`: kernel doc nói rõ "PID" của controller này là TID, tức ID mà kernel dùng cho từng task[^cg-pids-tid].
 
 </details>
 
 **Quay lại Q5:** `cpu.weight` chỉ có nghĩa khi tranh chấp, `cpu.max` là quota theo period (xem `nr_throttled`), `io.max` đặt trần theo thiết bị, `pids.max` làm `fork` trả `EAGAIN`.
 
+---
+
 ## 6. PSI: đo sự nghẽn thay vì đo mức dùng (Q6)
 
-> **Trả lời ngắn.** `memory.current` cho biết bạn dùng bao nhiêu, nhưng không cho biết workload có đang *chờ* vì thiếu hay không. PSI đo ảnh hưởng về thời gian (stall) của việc tranh chấp CPU, memory hay IO lên workload[^psi-quant] và xuất ra file `cpu.pressure`, `memory.pressure`, `io.pressure` trong mỗi cgroup[^psi-cg].
+> **Trả lời ngắn.** `memory.current` cho biết bạn dùng bao nhiêu, nhưng không cho biết workload có đang *chờ* vì thiếu hay không. PSI đo ảnh hưởng về thời gian (stall) của việc tranh chấp CPU, memory hay IO lên workload[^psi-quant]. Kết quả xuất ra thành các file `cpu.pressure`, `memory.pressure`, `io.pressure` trong mỗi cgroup[^psi-cg].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `memory.current` là số khách trong quán; PSI là thời gian khách phải đứng chờ bàn. Quán vừa đầy vừa không ai chờ là ổn; quán chưa đầy mà ai cũng chờ là có vấn đề.
+*Với `orders`.* Giả sử `orders` đang chậm hẳn mà `memory.current` chỉ nằm ở 32 MiB. Con số đó không nói rằng các thread của nó đang đứng chờ bộ nhớ. Muốn biết điều đó, bạn cần một số đo về thời gian chờ chứ không phải về mức dùng, và PSI là số đo ấy.
 
-Khi CPU, memory hoặc IO bị tranh chấp, workload gặp latency spike, mất throughput, và có nguy cơ bị OOM kill[^psi-why]. Kernel xuất thông tin từng tài nguyên qua `/proc/pressure/{cpu,memory,io}`[^psi-proc]; với cgroup v2 thì mỗi thư mục con trong cgroupfs có `cpu.pressure`, `memory.pressure`, `io.pressure`[^psi-cg]. Định dạng:
+Khi CPU, memory hoặc IO bị tranh chấp, workload gặp latency spike, mất throughput, và có nguy cơ bị OOM kill[^psi-why]. Kernel xuất thông tin từng tài nguyên qua `/proc/pressure/{cpu,memory,io}`[^psi-proc]. Với cgroup v2, mỗi thư mục con trong cgroupfs có `cpu.pressure`, `memory.pressure`, `io.pressure`[^psi-cg]. Định dạng của mỗi file:
 
 ```text
 some avg10=0.00 avg60=0.00 avg300=0.00 total=0
@@ -211,40 +265,57 @@ full avg10=0.00 avg60=0.00 avg300=0.00 total=0
 ```
 
 - `some`: tỉ lệ thời gian mà *ít nhất một số* task bị stall vì tài nguyên đó[^psi-some].
-- `full`: tỉ lệ thời gian mà *mọi* task không idle cùng stall; trạng thái này nghĩa là chu kỳ CPU thực sự đang bị lãng phí và workload ở đó lâu là "thrashing"[^psi-full].
-- `avg10/60/300` là phần trăm trung bình theo 10/60/300 giây; `total` là micro giây stall tích lũy, để bắt spike mà trung bình làm mờ[^psi-avg].
+- `full`: tỉ lệ thời gian mà *mọi* task không idle cùng stall. Trạng thái này nghĩa là chu kỳ CPU thực sự đang bị lãng phí, và workload ở lâu trong đó là đang "thrashing"[^psi-full].
+- `avg10`, `avg60`, `avg300`: phần trăm trung bình theo 10, 60, 300 giây. `total`: số micro giây stall tích lũy, dùng để bắt spike mà các số trung bình làm mờ đi[^psi-avg].
 
 <details><summary>Đi sâu: PSI trong thí nghiệm <code>memory.high</code>, trigger/poll</summary>
 
-- Trong thí nghiệm `memory.high` (mục 4), dòng `some` của `memory.pressure` báo `avg10=89.13`: 89% thời gian 10 giây gần nhất có task chờ bộ nhớ; `memory.current` chỉ kẹt ở 32 MiB, không nói được thảm họa đó.
-- PSI còn có trigger/poll: ghi một ngưỡng như "some 150000 1000000" vào file pressure[^psi-trigger] (tôi không chạy; trang PSI trên docs.kernel.org không ghim phiên bản).
-- Dòng `full` của CPU ở cấp hệ thống không có định nghĩa; kernel vẫn xuất ra nhưng đặt bằng 0 để tương thích ngược[^psi-cpufull]. Doc này nói về `/proc/pressure/cpu`; với `cpu.pressure` của cgroup tôi không khẳng định thêm.
+- Trong thí nghiệm `memory.high` (mục 4), dòng `some` của `memory.pressure` báo `avg10=89.13`: 89% thời gian của 10 giây gần nhất có task chờ bộ nhớ. Trong khi đó `memory.current` chỉ kẹt ở 32 MiB, không nói được thảm họa này.
+- PSI còn có trigger/poll: ghi một ngưỡng như "some 150000 1000000" vào file pressure[^psi-trigger]. Người soạn chưa chạy thử; trang PSI trên docs.kernel.org không ghim phiên bản.
+- Dòng `full` của CPU ở cấp hệ thống không có định nghĩa; kernel vẫn xuất ra nhưng đặt bằng 0 để tương thích ngược[^psi-cpufull]. Doc này nói về `/proc/pressure/cpu`; với `cpu.pressure` của cgroup, chương không khẳng định thêm.
 
 </details>
 
 **Quay lại Q6:** PSI đo thời gian *chờ* (`some`/`full`), thứ mà số đo mức dùng như `memory.current` không cho thấy.
 
+---
+
 ## 7. systemd, Docker, Kubernetes → file cgroup (Q7)
 
-> **Trả lời ngắn.** Cả ba đều dẫn tới việc cấu hình file cgroup. Quan sát thật: Docker `--memory`→`memory.max`, `--cpus`→`cpu.max`, `--pids-limit`→`pids.max`, `--cpu-shares`→`cpu.weight`. systemd có directive tương ứng cho từng file[^sd-intro]. Kubernetes docs nói runtime cấu hình cgroup để áp giới hạn bạn khai báo[^k8s-cg]; docs không nêu tên file, nên ánh xạ sang tên file ở dưới là suy luận của người soạn.
+> **Trả lời ngắn.** Cả ba cuối cùng đều cấu hình file cgroup. systemd có directive tương ứng cho từng file[^sd-intro]. Docker thì quan sát được trực tiếp: `--memory` ra `memory.max`, `--cpus` ra `cpu.max`, `--pids-limit` ra `pids.max`, `--cpu-shares` ra `cpu.weight`. Docs Kubernetes nói container runtime cấu hình cgroup để áp giới hạn bạn khai báo[^k8s-cg], nhưng không nêu tên file, nên ánh xạ sang tên file ở dưới là suy luận của người soạn.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): các công cụ này là bảng điều khiển trên tường; mỗi nút bấm cuối cùng là ghi một con số vào một file trong `/sys/fs/cgroup`.
+*Với `orders`.* Bạn khai báo giới hạn của `orders` tùy nơi chạy: `docker run --memory 256m --cpus 1.5`, `resources.limits` trong manifest Kubernetes, hoặc `MemoryMax=` và `CPUQuota=` trong unit systemd. Cách viết khác nhau, nhưng điểm đến chung: một con số được ghi vào một file trong `/sys/fs/cgroup` (nhận xét của người soạn). Mục này đi từng công cụ để chỉ ra đó là file nào.
 
-**systemd.** Các unit (service, slice, scope, socket, mount, swap) dùng cgroup để quản lý tài nguyên của process mà chúng sinh ra, và directive trong unit file được dịch sang file cgroup[^sd-intro]. systemd chỉ ra lệnh cho kernel bật controller cho unit khi unit có cấu hình cho controller đó[^sd-enable].
+### 7.1 systemd
 
-| Directive systemd | File cgroup v2 | Nguồn |
+Các unit (service, slice, scope, socket, mount, swap) dùng cgroup để quản lý tài nguyên của process mà chúng sinh ra, và directive trong unit file được dịch sang file cgroup[^sd-intro]. Khi unit có cấu hình cho một controller, systemd ra lệnh cho kernel bật controller đó cho unit[^sd-enable]. Các ánh xạ chính:
+
+| Directive systemd | File cgroup v2 | Ghi chú |
 |---|---|---|
-| `CPUWeight=` | `cpu.weight` | [^sd-cpuweight] |
-| `CPUQuota=20%` | `cpu.max` (giá trị `>100%` để dùng nhiều CPU) | [^sd-cpuquota] |
-| `MemoryHigh=` | `memory.high`; dùng làm cơ chế chính | [^sd-memhigh][^sd-memhigh-file] |
-| `MemoryMax=` | `memory.max`; tuyến phòng thủ cuối | [^sd-memmax][^sd-memmax-file] |
-| `TasksMax=` | `pids.max` | [^sd-tasks] |
-| `IOWeight=` | `io.weight` (1–10000, mặc định 100) | [^sd-ioweight] |
-| `IOReadBandwidthMax=` | `io.max` (không work-conserving) | [^sd-iomax][^sd-iomax-file] |
+| `CPUWeight=` | `cpu.weight` | khoảng 1–10000[^sd-cpuweight] |
+| `CPUQuota=20%` | `cpu.max` | giá trị `>100%` để dùng nhiều CPU[^sd-cpuquota] |
+| `MemoryHigh=` | `memory.high` | ngưỡng throttle[^sd-memhigh-file] |
+| `MemoryMax=` | `memory.max` | trần cứng[^sd-memmax-file] |
+| `TasksMax=` | `pids.max` | số task tối đa[^sd-tasks] |
+| `IOWeight=` | `io.weight` | 1–10000, mặc định 100[^sd-ioweight] |
+| `IOReadBandwidthMax=` | `io.max` | nhiều thiết bị thì dùng nhiều lần option[^sd-iomax-file] |
 
-**Docker (quan sát thật).** Docs Docker (không ghim phiên bản) mô tả `--cpus` là lượng tài nguyên CPU khả dụng mà một container được dùng, tương đương `--cpu-period` + `--cpu-quota`[^dk-cpus]. `--memory-swap` là tổng memory+swap[^dk-swap-total]; bằng `--memory` (và `--memory` là số dương) thì container không được dùng swap[^dk-swap]; còn khi chỉ đặt `--memory` mà không đặt `--memory-swap`, container được dùng swap bằng đúng `--memory` nếu host có cấu hình swap (ví dụ `--memory=300m` → tổng 600m)[^dk-swap-default]; `--cpu-shares` mặc định 1024 và chỉ có hiệu lực khi CPU bị tranh chấp[^dk-shares]; `--memory` tối thiểu 6m[^dk-min]. Quan sát, chạy `docker run --memory 256m --memory-swap 512m --cpus 1.5 --pids-limit 100 --cpu-shares 512` rồi đọc bên trong:
+systemd coi `MemoryHigh=` là cơ chế chính để kiểm soát bộ nhớ của unit[^sd-memhigh]. `MemoryMax=` là tuyến phòng thủ cuối cùng[^sd-memmax]. Với `IOReadBandwidthMax=`, giới hạn này không work-conserving: process không được dùng quá mức đó dù thiết bị đang rảnh[^sd-iomax].
+
+### 7.2 Docker (quan sát thật)
+
+Docs Docker (không ghim phiên bản) nói về các cờ như sau:
+
+- `--cpus` là lượng CPU khả dụng mà một container được dùng, tương đương `--cpu-period` kết hợp `--cpu-quota`[^dk-cpus].
+- `--memory-swap` là tổng memory cộng swap[^dk-swap-total].
+- Nếu `--memory-swap` bằng `--memory` (và `--memory` là số dương) thì container không được dùng swap[^dk-swap].
+- Nếu chỉ đặt `--memory` mà không đặt `--memory-swap`, container được dùng swap bằng đúng `--memory` khi host có cấu hình swap[^dk-swap-default]. Ví dụ `--memory=300m` cho tổng 600m.
+- `--cpu-shares` mặc định 1024, và chỉ có hiệu lực khi CPU bị tranh chấp[^dk-shares].
+- `--memory` tối thiểu là 6m[^dk-min].
+
+Quan sát: chạy `docker run --memory 256m --memory-swap 512m --cpus 1.5 --pids-limit 100 --cpu-shares 512` rồi đọc file bên trong container:
 
 | Cờ Docker | File cgroup v2 | Giá trị đọc được |
 |---|---|---|
@@ -255,56 +326,76 @@ Hình dung (nhận xét của người soạn): các công cụ này là bảng 
 | `--pids-limit 100` | `pids.max` | `100` |
 | (không đặt) | `memory.high`, `memory.low`, `memory.min`, `memory.oom.group` | `max`, `0`, `0`, `0` |
 
-**Kubernetes (chỉ điều docs nói).** Docs Kubernetes (không ghim phiên bản, đọc ở thời điểm soạn): trên Linux, container runtime thường cấu hình kernel cgroup để áp và thực thi các giới hạn bạn khai báo[^k8s-cg].
+### 7.3 Kubernetes (chỉ điều docs nói)
 
-- CPU limit: trần cứng về thời gian CPU; kernel kiểm tra mỗi khoảng lập lịch và nếu vượt thì chờ trước khi cho cgroup chạy tiếp[^k8s-cpulimit]. Doc không nêu tên file, nhưng đây là hành vi của `cpu.max` ở mục 5 (suy luận của người soạn).
-- CPU request: thường định nghĩa một trọng số; khi tranh chấp, request lớn hơn được nhiều CPU hơn[^k8s-cpureq]. Đây là hành vi của `cpu.weight` (suy luận của người soạn; trang này không nêu tên file).
-- Memory limit: vượt thì OOM subsystem thường can thiệp bằng cách dừng một process trong container[^k8s-memlimit]; limit memory được thực thi *phản ứng* (reactively), chỉ khi kernel phát hiện áp lực[^k8s-reactive]. Docs không nêu tên file; đây là hành vi của `memory.max` (suy luận của người soạn).
-- Memory request: chủ yếu dùng khi lập lịch Pod; trên cgroup v2 runtime có thể dùng nó làm gợi ý để đặt `memory.min` và `memory.low`[^k8s-memreq].
+Docs Kubernetes (không ghim phiên bản, đọc ở thời điểm soạn) viết rằng trên Linux, container runtime thường cấu hình kernel cgroup để áp và thực thi các giới hạn bạn khai báo[^k8s-cg]. Docs không nêu tên file, nên các dòng "đây là file nào" bên dưới đều là suy luận của người soạn.
 
-Nhận xét của người soạn: CPU limit nhỏ hơn số thread song song là công thức dễ gây throttle và tail latency; xác nhận bằng `nr_throttled`/`throttled_usec` trong `cpu.stat`, không đoán từ biểu đồ CPU%.
+- **CPU limit** là trần cứng về thời gian CPU[^k8s-cpulimit]. Đây là hành vi của `cpu.max` ở mục 5.
+- **CPU request** thường định nghĩa một trọng số[^k8s-cpureq]. Khi tranh chấp, request lớn hơn được nhiều CPU hơn. Đây là hành vi của `cpu.weight`.
+- **Memory limit**: vượt giới hạn thì OOM subsystem của kernel thường can thiệp bằng cách dừng một process trong container đã xin cấp phát[^k8s-memlimit]. Giới hạn memory còn được thực thi *phản ứng* (reactively), tức chỉ khi kernel phát hiện áp lực[^k8s-reactive]. Đây là hành vi của `memory.max`.
+- **Memory request** chủ yếu dùng khi lập lịch Pod. Trên cgroup v2, runtime có thể dùng nó làm gợi ý để đặt `memory.min` và `memory.low`[^k8s-memreq].
+
+Một nhận xét của người soạn cho `orders`: CPU limit nhỏ hơn số thread chạy song song (ở đây 1,5 CPU cho 4 handler thread) là công thức dễ gây throttle và tail latency. Hãy xác nhận bằng `nr_throttled` và `throttled_usec` trong `cpu.stat`, đừng đoán từ biểu đồ CPU%.
 
 <details><summary>Đi sâu: <code>--cpu-shares 512</code> ra 59, <code>memory.high</code> của kubelet, quan sát <code>docker inspect</code></summary>
 
-- Với `--memory 128m --cpus 0.5`, `docker inspect` cho `HostConfig.Memory=134217728`, `NanoCpus=500000000`; từ ngoài (`--cgroupns=host`), cgroup của container là `/sys/fs/cgroup/docker/<id>` với `memory.max=134217728`, `cpu.max=50000 100000`. Docs nói `--memory-swap` bằng `--memory` thì không có swap[^dk-swap]; tôi không chạy tổ hợp đó.
-- Hai điểm bất ngờ: (1) `--cpu-shares 512` ra `cpu.weight=59`, không phải phép chia tuyến tính 512/1024×100 = 50: runtime áp một công thức chuyển đổi nào đó (tôi chỉ quan sát kết quả, không đọc source runtime); (2) `--memory` không đặt `memory.high`, nên Docker thuần chỉ có trần cứng `memory.max`, không có "vùng đệm throttle" của `memory.high` (suy luận của người soạn từ bảng quan sát và mục 4). Đừng suy ra từ đó rằng vượt `--memory` là OOM ngay: nếu chỉ đặt `--memory` mà không đặt `--memory-swap`, docs Docker cho container dùng thêm swap bằng đúng `--memory` khi host có swap[^dk-swap-default], nên anonymous memory có thể bị đẩy ra swap (chậm dần) trước khi OOM (suy luận của người soạn từ docs); quan sát ở [Chương 06, mục 3](06-runtime-oci.md): `--memory 20m` ra `memory.swap = 41943040` trong `config.json` và `memory.swap.max = 20971520` trong container. Muốn trần cứng không có swap thì đặt `--memory-swap` bằng `--memory`[^dk-swap]; các thí nghiệm OOM và `memory.high` ở mục 4 đặt `memory.swap.max=0` để loại yếu tố swap.
-- Docs QoS của Kubernetes nêu cấu hình tùy chọn của kubelet: mặc định kubelet không đặt `memory.high` (khi `memoryThrottlingFactor` còn nil)[^k8s-high], và nếu bật thì với Pod Burstable, `memory.high = requests + memoryThrottlingFactor * (limits - requests)`[^k8s-high-formula]. Với `memoryReservationPolicy: TieredReservation`, Guaranteed pod có `memory.min` bằng memory request[^k8s-tier]; mặc định `None` thì kubelet không đặt `memory.min`/`memory.low`[^k8s-tier-none]. Các điều này có thể đổi theo phiên bản; đối chiếu docs đúng phiên bản cụm của bạn.
+- Với `--memory 128m --cpus 0.5`, `docker inspect` cho `HostConfig.Memory=134217728` và `NanoCpus=500000000`. Nhìn từ ngoài (`--cgroupns=host`), cgroup của container là `/sys/fs/cgroup/docker/<id>` với `memory.max=134217728` và `cpu.max=50000 100000`. Docs nói `--memory-swap` bằng `--memory` thì không có swap[^dk-swap]; tổ hợp đó người soạn không chạy.
+- Hai điểm bất ngờ trong bảng Docker. (1) `--cpu-shares 512` ra `cpu.weight=59`, không phải phép chia tuyến tính 512/1024×100 = 50: runtime áp một công thức chuyển đổi nào đó (người soạn chỉ quan sát kết quả, không đọc source runtime). (2) `--memory` không đặt `memory.high`, nên Docker thuần chỉ có trần cứng `memory.max`, không có "vùng đệm throttle" của `memory.high` (suy luận của người soạn từ bảng quan sát và mục 4).
+- Đừng suy ra từ đó rằng vượt `--memory` là OOM ngay. Nếu chỉ đặt `--memory` mà không đặt `--memory-swap`, docs Docker cho container dùng thêm swap bằng đúng `--memory` khi host có swap[^dk-swap-default]. Khi đó anonymous memory có thể bị đẩy ra swap (chậm dần) trước khi OOM (suy luận của người soạn từ docs). Quan sát ở [Chương 06, mục 3](06-runtime-oci.md): `--memory 20m` ra `memory.swap = 41943040` trong `config.json` và `memory.swap.max = 20971520` trong container. Muốn trần cứng không có swap thì đặt `--memory-swap` bằng `--memory`[^dk-swap]. Các thí nghiệm OOM và `memory.high` ở mục 4 đặt `memory.swap.max=0` để loại yếu tố swap.
+- Docs QoS của Kubernetes nêu một cấu hình tùy chọn của kubelet: mặc định kubelet không đặt `memory.high` (khi `memoryThrottlingFactor` còn nil)[^k8s-high]. Nếu bật, thì với Pod Burstable, `memory.high = requests + memoryThrottlingFactor * (limits - requests)`[^k8s-high-formula]. Với `memoryReservationPolicy: TieredReservation`, Guaranteed pod có `memory.min` bằng memory request[^k8s-tier]. Mặc định `None` thì kubelet không đặt `memory.min` hay `memory.low`[^k8s-tier-none]. Các điều này có thể đổi theo phiên bản; hãy đối chiếu docs đúng phiên bản cụm của bạn.
 
 </details>
 
-**Quay lại Q7:** systemd và Docker (đã quan sát) ghi vào cùng một nhóm file (`cpu.max`, `cpu.weight`, `memory.max`, `pids.max`, `io.*`); Kubernetes nói runtime cấu hình cgroup (ánh xạ tên file là suy luận); hãy đọc file thật để biết giá trị hiệu lực.
+**Quay lại Q7:** systemd và Docker (đã quan sát) ghi vào cùng một nhóm file (`cpu.max`, `cpu.weight`, `memory.max`, `pids.max`, `io.*`). Kubernetes nói runtime cấu hình cgroup nhưng ánh xạ tên file là suy luận; hãy đọc file thật để biết giá trị hiệu lực của `orders`.
+
+---
 
 ## 8. Vì sao app thấy RAM/CPU của host (Q8)
 
-> **Trả lời ngắn.** Giới hạn cgroup là *giới hạn*, không phải *ảo hóa* các file thông tin: trong container `--memory 256m --cpus 1.5` ở máy này, `nproc` vẫn là 4 và `/proc/meminfo` vẫn báo RAM của VM. Thư viện nào tự đo tài nguyên bằng hai nguồn đó sẽ đoán sai (nhận xét của người soạn); runtime phải đọc thẳng `memory.max` và `cpu.max`, như `available_parallelism` của Rust làm cho CPU.
+> **Trả lời ngắn.** Giới hạn cgroup là *giới hạn*, không phải *ảo hóa* các file thông tin. Trong container `--memory 256m --cpus 1.5` ở máy quan sát, `nproc` vẫn là 4 và `/proc/meminfo` vẫn báo RAM của VM. Thư viện nào tự đo tài nguyên bằng hai nguồn đó sẽ đoán sai (nhận xét của người soạn). Runtime phải đọc thẳng `memory.max` và `cpu.max`, như `available_parallelism` của Rust làm cho CPU.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn thuê một tầng của tòa nhà và bị khóa cầu dao ở mức 20 kW, nhưng bảng thông tin ở sảnh vẫn ghi tổng công suất cả tòa. Ai đọc bảng sảnh để tự chia tải sẽ tính sai.
+*Với `orders`.* Khi khởi động, `orders` cần quyết định mở bao nhiêu worker thread và để cache bao nhiêu MB. Nếu nó hỏi `nproc` và `/proc/meminfo`, câu trả lời sẽ là số của cả máy chứ không phải 1,5 CPU và 256 MiB của container. Mục này cho thấy sai lệch đó, và vì sao runtime phải tự tính từ file cgroup.
 
-Quan sát: container `--memory 256m --cpus 1.5` vẫn cho `nproc = 4` và `/proc/meminfo` báo `MemTotal: 6052192 kB` (khoảng 5,8 GiB), giống VM, trong khi `memory.max=268435456` và `cpu.max=150000 100000`. `proc_meminfo(5)` định nghĩa `MemTotal` là tổng RAM khả dụng (RAM vật lý trừ vài phần dành riêng và mã nhị phân kernel)[^proc-memtotal]. Tức là ở máy này giới hạn cgroup không xuất hiện ở hai nguồn thông tin quen thuộc đó; chương này không đọc source kernel để giải thích sâu hơn.
+Quan sát: container `--memory 256m --cpus 1.5` vẫn cho `nproc = 4`, và `/proc/meminfo` báo `MemTotal: 6052192 kB` (khoảng 5,8 GiB), giống VM. Trong khi đó `memory.max=268435456` và `cpu.max=150000 100000`. `proc_meminfo(5)` định nghĩa `MemTotal` là tổng RAM khả dụng, tức RAM vật lý trừ vài phần dành riêng và mã nhị phân của kernel[^proc-memtotal]. Vậy ở máy này, giới hạn cgroup không xuất hiện ở hai nguồn quen thuộc đó. Chương không đọc source kernel để giải thích sâu hơn.
 
-Hệ quả (nhận xét của người soạn): thư viện tính kích thước pool/heap theo `/proc/meminfo` hoặc `nproc` có thể vượt giới hạn container và bị OOM-kill hoặc throttle. Runtime nên đọc thẳng `memory.max` cho bộ nhớ và `cpu.max` cho số worker thread, đúng như `available_parallelism` làm cho CPU (phần Liên hệ với Rust).
+Hệ quả (nhận xét của người soạn): thư viện tính kích thước pool hoặc heap theo `/proc/meminfo` hay `nproc` có thể vượt giới hạn container rồi bị OOM-kill hoặc throttle. Runtime nên đọc thẳng `memory.max` cho bộ nhớ và `cpu.max` cho số worker thread, đúng như `available_parallelism` làm cho CPU (phần Liên hệ với Rust).
 
 <details><summary>Đi sâu: phạm vi quan sát</summary>
 
-- Kết quả trên là một lần chạy ở một VM, kernel 6.8, Docker 29.5.2; chương không khẳng định rằng mọi kernel/runtime đều như vậy.
-- `proc_meminfo(5)` ở đây chỉ dùng để định nghĩa `MemTotal`; man page này không bàn về cgroup.[^proc-memtotal]
+- Kết quả trên là một lần chạy ở một VM, kernel 6.8, Docker 29.5.2. Chương không khẳng định mọi kernel hay runtime đều như vậy.
+- `proc_meminfo(5)` ở đây chỉ dùng để định nghĩa `MemTotal`; man page này không bàn về cgroup[^proc-memtotal].
 
 </details>
 
-**Quay lại Q8:** `nproc` và `/proc/meminfo` không phản ánh giới hạn cgroup; muốn đúng phải đọc `memory.max`/`cpu.max`.
+**Quay lại Q8:** `nproc` và `/proc/meminfo` không phản ánh giới hạn cgroup; muốn đúng thì phải đọc `memory.max` và `cpu.max`.
+
+---
 
 ## Liên hệ với Rust: `available_parallelism` và cgroup
 
-`std::thread::available_parallelism()` trả `io::Result<NonZero<usize>>`: một ước lượng về mức song song mặc định mà chương trình nên dùng[^rs-ap]. Docs 1.95.0 viết cụ thể về Linux: nó có thể đếm dư mức song song khả dụng khi bị giới hạn bởi affinity mask của process hoặc quota cgroup mà không truy vấn được `sched_getaffinity()` hay cgroup fs (ví dụ do sandbox)[^rs-over]. Từ câu đó và từ source bên dưới, tôi suy ra rằng khi truy vấn được thì hàm có tính cgroup quota (suy luận của người soạn); docs còn nêu các trường hợp đếm thiếu hoặc đếm dư khác, nên không nên đọc thành "chỉ sai khi không đọc được". Docs còn nêu: khi có cả giới hạn steady-state và burst thì dùng steady-state để độ trễ dễ dự đoán hơn[^rs-burst]; giá trị không được cache mà tính lại mỗi lần gọi, nên không nên gọi từ hot code[^rs-nocache]; và hàm không cố tính đến `ulimit` — nó không tính giới hạn `ulimit` về số thread[^rs-ulimit]. Với cgroup v1, docs nói hàm có thể phải quét các mountpoint để tìm controller cpu của v1; điều này không áp dụng cho cgroup v2[^rs-v1]. Docs không nhắc `pids.max`; việc hàm này không đọc `pids.max` là suy luận của người soạn từ source dưới đây.
+Với `orders`, câu hỏi cụ thể là pool worker nên có bao nhiêu thread khi container chỉ được 1,5 CPU trên máy 4 core. `std::thread::available_parallelism()` trả lời đúng câu đó, và nó đọc `cpu.max` để làm vậy.
 
-Source 1.95.0 (`library/std/src/sys/thread/unix.rs`, chi tiết cài đặt, có thể đổi) cho thấy cách hiểu quota:
+**Hàm này hứa gì.** `available_parallelism()` trả `io::Result<NonZero<usize>>`: một ước lượng về mức song song mặc định mà chương trình nên dùng[^rs-ap]. Docs 1.95.0 viết cụ thể về Linux: hàm có thể đếm dư mức song song khả dụng khi bị giới hạn bởi affinity mask của process hoặc quota cgroup, nếu không truy vấn được `sched_getaffinity()` hay cgroup fs (ví dụ do sandbox)[^rs-over]. Từ câu đó và từ source ở dưới, ta suy ra rằng khi truy vấn được thì hàm có tính quota cgroup (suy luận của người soạn). Docs còn nêu các trường hợp đếm thiếu hoặc đếm dư khác, nên đừng đọc thành "chỉ sai khi không đọc được".
 
-- Hàm `quota()` (theo comment trong source) trả quota CPU của cgroup tính theo "core tương đương", làm tròn xuống, hoặc `usize::MAX` nếu không xác định được hoặc không đặt quota[^rs-quota-doc].
-- Đọc `/proc/self/cgroup` để biết cgroup của process (field thứ hai rỗng là v2)[^rs-proc-cgroup], rồi với v2 đọc `cpu.max` tại mount cố định `/sys/fs/cgroup` (comment trong source gọi đây là vị trí mount chuẩn được định nghĩa trong man page `file-hierarchy(7)`)[^rs-mount]. Nó leo ngược lên các cgroup tổ tiên (`while path.starts_with(cgroup_mount)`)[^rs-walk] và lấy `quota.min(limit / period)`[^rs-min] — chia số nguyên, tức làm tròn xuống.
-- `quota().max(1)` rồi `count.min(quota)` với số CPU trong affinity mask[^rs-affinity]. Vậy kết quả = `min(affinity, floor(quota/period))`, tối thiểu 1.
-- Source ghi các trường hợp chưa hỗ trợ, trong đó có cgroup v2 ở mount point không chuẩn[^rs-notcovered].
+Vài điều docs nói thêm, đáng nhớ khi dùng trong service:
+
+- Khi có cả giới hạn steady-state và burst thì hàm dùng steady-state, để độ trễ dễ dự đoán hơn[^rs-burst].
+- Giá trị không được cache mà tính lại mỗi lần gọi, nên đừng gọi từ hot code[^rs-nocache].
+- Hàm không tính `ulimit` về số thread[^rs-ulimit].
+- Với cgroup v1, hàm có thể phải quét các mountpoint để tìm controller cpu của v1; điều này không áp dụng cho cgroup v2[^rs-v1].
+- Docs không nhắc `pids.max`. Việc hàm không đọc `pids.max` là suy luận của người soạn từ source dưới đây.
+
+**Source đọc quota thế nào.** Source 1.95.0 (`library/std/src/sys/thread/unix.rs`, chi tiết cài đặt, có thể đổi) cho thấy cách hiểu quota:
+
+- Hàm `quota()` trả quota CPU của cgroup tính theo "core tương đương", làm tròn xuống, hoặc `usize::MAX` nếu không xác định được hoặc không đặt quota[^rs-quota-doc].
+- Trước hết hàm đọc `/proc/self/cgroup` để biết cgroup của process; field thứ hai rỗng nghĩa là v2[^rs-proc-cgroup].
+- Với v2, hàm đọc `cpu.max` tại mount cố định `/sys/fs/cgroup`, mà comment trong source gọi là vị trí mount chuẩn, được định nghĩa trong man page `file-hierarchy(7)`[^rs-mount].
+- Hàm leo ngược lên các cgroup tổ tiên bằng `while path.starts_with(cgroup_mount)`[^rs-walk].
+- Ở mỗi cấp, hàm lấy `quota.min(limit / period)`[^rs-min]. Phép chia là chia số nguyên, tức làm tròn xuống.
+- Cuối cùng, `quota().max(1)` được gộp với số CPU trong affinity mask bằng `count.min(quota)`[^rs-affinity]. Vậy kết quả = `min(affinity, floor(quota/period))`, tối thiểu 1.
+- Source ghi rõ các trường hợp chưa hỗ trợ, trong đó có cgroup v2 ở mount point không chuẩn[^rs-notcovered].
 
 **Quan sát (chạy thật, binary Rust 1.95.0 gọi `available_parallelism`, VM 4 vCPU):**
 
@@ -317,90 +408,106 @@ Source 1.95.0 (`library/std/src/sys/thread/unix.rs`, chi tiết cài đặt, có
 | `--cpus 2` / `--cpus 3` | `Ok(2)` / `Ok(3)` | — |
 | `--cpuset-cpus 0,1` | `Ok(2)` (từ affinity) | 2 |
 
-Điểm cần ghi nhớ: `--cpus 1.5` cho `1`, không phải `2`, đúng như doc của `quota()` nói "rounded down". Muốn 2 thread thì phải tự chỉnh pool. Cách làm tròn xuống tránh throttle là lý do hợp lý (suy luận của người soạn). `available_parallelism` chỉ nói về CPU; docs của nó không đề cập giới hạn memory, nên heap/cache sizing của service Rust trong container phải tự đọc `memory.max`. Về thread pool lớn hơn quota, xem [chương Scheduling](../04-concurrency/02-scheduling.md).
+Điểm cần nhớ nhất là `--cpus 1.5` cho `1`, không phải `2`, đúng như doc của `quota()` nói "rounded down". Với `orders`, nếu muốn 2 worker thread thì phải tự chỉnh pool. Cách làm tròn xuống tránh được throttle, và đó là lý do hợp lý của nó (suy luận của người soạn). Hàm chỉ nói về CPU; docs của nó không đề cập giới hạn memory, nên heap hay cache của service Rust trong container phải tự đọc `memory.max`. Còn thread pool lớn hơn quota thì xem [chương Scheduling](../04-concurrency/02-scheduling.md).
+
+---
 
 ## Tóm tắt
 
-- cgroup tổ chức process thành cây và phân phối tài nguyên dọc cây; giới hạn gần gốc không bị vượt từ dưới[^cg-what][^cg-hier].
-- v2 có một hierarchy, giao diện là filesystem `cgroup2`; bật controller bằng `cgroup.subtree_control`[^cg7-unified][^cg-nodef].
+- cgroup xếp process thành cây và chia tài nguyên dọc theo cây[^cg-what]. Giới hạn đặt gần gốc không bị vượt từ phía dưới[^cg-hier].
+- v2 có một hierarchy duy nhất[^cg7-unified]. Bật controller bằng cách ghi `cgroup.subtree_control`, và mặc định không controller nào được bật[^cg-nodef].
 - "No internal process": cgroup không phải root chỉ chia tài nguyên cho con khi tự nó không có process; vi phạm cho `EBUSY` (đã quan sát)[^cg-nip].
-- Memory tính cả page cache; `memory.high` throttle, `memory.max` OOM trong cgroup; `memory.events` cho biết cái nào đã xảy ra[^cg-tracked][^cg-ev-kill].
-- `cpu.weight` chỉ có tác dụng khi tranh chấp; `cpu.max` là quota theo period và gây throttling (`nr_throttled`)[^cg-cpu-max][^cg-bwc].
-- `io.max` giới hạn BPS/IOPS theo thiết bị; `pids.max` làm `fork`/`clone` trả `EAGAIN`[^cg-iomax][^cg-pids-eagain]; PSI đo thời gian stall[^psi-why].
-- Docker `--memory/--cpus/--pids-limit` ra `memory.max`/`cpu.max`/`pids.max` (đã quan sát); `--cpu-shares 512` ra `cpu.weight=59`.
-- App vẫn thấy RAM/CPU host qua `/proc/meminfo`, `nproc`; Rust `available_parallelism` đọc `cpu.max`, làm tròn xuống, tối thiểu 1[^rs-quota-doc].
+- Memory tính cả page cache[^cg-tracked]. `memory.high` throttle còn `memory.max` OOM trong cgroup; `memory.events` cho biết cái nào đã xảy ra[^cg-ev-kill].
+- `cpu.weight` chỉ có tác dụng khi tranh chấp[^cg-weights]. `cpu.max` là quota theo period và gây throttling, đo bằng `nr_throttled`[^cg-bwc].
+- `io.max` giới hạn BPS và IOPS theo thiết bị[^cg-iomax]. `pids.max` làm `fork`/`clone` trả `EAGAIN`[^cg-pids-eagain]. PSI đo thời gian stall[^psi-why].
+- Docker `--memory`, `--cpus`, `--pids-limit` ra `memory.max`, `cpu.max`, `pids.max` (đã quan sát); `--cpu-shares 512` ra `cpu.weight=59`.
+- App vẫn thấy RAM và CPU của host qua `/proc/meminfo` và `nproc` (đã quan sát). `available_parallelism` của Rust đọc `cpu.max`, làm tròn xuống, tối thiểu 1[^rs-quota-doc].
+
+---
 
 ## Câu hỏi tự kiểm tra
 
-1. Namespace và cgroup khác nhau ở điểm nào?
+1. Namespace và cgroup khác nhau ở điểm nào? Hãy nói bằng `orders`.
+
 <details><summary>Đáp án</summary>
 
-Namespace quyết định process nhìn thấy gì; cgroup phân phối/giới hạn tài nguyên[^cg-what]. Ví dụ: `memory.max` giới hạn RAM[^cg-max].
+Namespace quyết định process nhìn thấy gì; cgroup phân phối và giới hạn tài nguyên[^cg-what]. Ví dụ `memory.max` giới hạn RAM của `orders`[^cg-max].
 
 </details>
 
-2. Vì sao `echo +memory > cgroup.subtree_control` trả `Device or resource busy` khi cgroup đang có process, và cách làm đúng?
+2. Vì sao `echo +memory > cgroup.subtree_control` trả `Device or resource busy` khi cgroup đang có process, và cách làm đúng là gì?
+
 <details><summary>Đáp án</summary>
 
-No internal process[^cg-nip]; tạo con và chuyển hết process sang con trước[^cg-nip-how].
+Vì quy tắc "no internal process"[^cg-nip]. Cách làm đúng là tạo con và chuyển hết process sang con trước khi bật controller[^cg-nip-how].
 
 </details>
 
 3. Ghi file 300 MiB trong cgroup `memory.max=50M` không bị OOM, nhưng `hog mem 200` thì bị. Vì sao?
+
 <details><summary>Đáp án</summary>
 
-Page cache được tính vào cgroup nhưng reclaim được (`max` tăng, không OOM); anonymous memory không có swap thì không reclaim được[^cg-tracked][^cg-max][^cg-ev-max].
+Page cache được tính vào cgroup nhưng reclaim được, nên `max` tăng mà không OOM[^cg-ev-max]. Anonymous memory mà không có swap thì không reclaim được, nên chạm trần là OOM killer chạy[^cg-max].
 
 </details>
 
 4. `memory.high` khác `memory.max` thế nào về hậu quả?
+
 <details><summary>Đáp án</summary>
 
-`high` throttle, không bao giờ gọi OOM killer; `max` là trần cứng, OOM trong cgroup[^cg-high][^cg-max].
+`high` chỉ throttle, không bao giờ gọi OOM killer[^cg-high]. `max` là trần cứng, chạm trần mà không giảm được thì OOM killer chạy trong cgroup[^cg-max].
 
 </details>
 
-5. `cpu.max` là `150000 100000`, ứng dụng có 4 thread busy. Điều gì xảy ra mỗi period?
+5. `cpu.max` là `150000 100000`, `orders` có 4 thread bận. Điều gì xảy ra mỗi period?
+
 <details><summary>Đáp án</summary>
 
-Quota 150 ms CPU mỗi 100 ms; 4 thread dùng hết sau ~37,5 ms rồi bị throttle tới period sau[^cg-bwc]; `nr_throttled` tăng[^cg-bwc-stat].
+Quota là 150 ms CPU mỗi 100 ms. Bốn thread dùng hết sau khoảng 37,5 ms rồi bị throttle tới period sau[^cg-bwc]. `nr_throttled` tăng sau mỗi lần như vậy[^cg-bwc-stat].
 
 </details>
 
 6. `cpu.weight` khác `cpu.max` thế nào khi máy rảnh?
+
 <details><summary>Đáp án</summary>
 
-Weight chia tỉ lệ giữa con đang hoạt động (work-conserving), nên một mình dùng hết CPU; max là trần cả khi rảnh[^cg-weights][^cg-limits].
+Weight chia tỉ lệ giữa các con đang hoạt động (work-conserving), nên một cgroup chạy một mình dùng hết CPU[^cg-weights]. `max` là trần tuyệt đối, có hiệu lực cả khi máy rảnh[^cg-limits].
 
 </details>
 
 7. PSI `some` và `full` khác nhau thế nào?
+
 <details><summary>Đáp án</summary>
 
-`some`: ít nhất một số task stall; `full`: mọi task non-idle cùng stall[^psi-some][^psi-full].
+`some` là tỉ lệ thời gian ít nhất một số task bị stall[^psi-some]. `full` là tỉ lệ thời gian mọi task không idle cùng stall[^psi-full].
 
 </details>
 
-8. Vì sao `/proc/meminfo` trong container `--memory 256m` vẫn báo ~5,8 GiB?
+8. Vì sao `/proc/meminfo` trong container `--memory 256m` vẫn báo khoảng 5,8 GiB?
+
 <details><summary>Đáp án</summary>
 
-Quan sát: giới hạn cgroup không xuất hiện ở file này; `MemTotal` được định nghĩa là RAM khả dụng của máy[^proc-memtotal]. Runtime phải đọc `memory.max`.
+Quan sát: giới hạn cgroup không xuất hiện ở file này. `MemTotal` được định nghĩa là RAM khả dụng của máy[^proc-memtotal]. Vì vậy runtime phải đọc `memory.max`.
 
 </details>
 
 9. `available_parallelism` với `--cpus 1.5` trên host 4 CPU trả gì, theo cơ chế nào?
+
 <details><summary>Đáp án</summary>
 
-`1`: `limit / period` chia số nguyên, min với affinity, tối thiểu 1[^rs-quota-doc][^rs-min][^rs-affinity].
+Trả `1`. Hàm lấy `limit / period` bằng chia số nguyên[^rs-min]. Sau đó nó lấy min với số CPU trong affinity[^rs-affinity]. Kết quả tối thiểu là 1[^rs-quota-doc].
 
 </details>
 
 10. Khi nào `available_parallelism` có thể trả quá lớn trong container?
+
 <details><summary>Đáp án</summary>
 
-Không đọc được `sched_getaffinity()` hay cgroup fs (sandbox), hoặc cgroup v2 ở mount không chuẩn[^rs-over][^rs-notcovered].
+Khi không đọc được `sched_getaffinity()` hay cgroup fs (sandbox)[^rs-over]. Hoặc khi cgroup v2 nằm ở mount không chuẩn[^rs-notcovered].
 
 </details>
+
+---
 
 ## Đọc thêm
 

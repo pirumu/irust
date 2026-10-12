@@ -14,27 +14,35 @@
 
 ## Kiến thức cần trước
 
-- [P2 · Chương 04 — Calling convention và stack frame](../02-cpu/04-calling-convention-va-stack-frame.md): ABI là hợp đồng về thanh ghi/stack (mục 1), frame và bảng unwind (mục 6), `extern "Rust"` so với `extern "C"` ở mức asm (mục 8). Chương này dùng lại các ý đó.
+- [P2 · Chương 04 — Calling convention và stack frame](../02-cpu/04-calling-convention-va-stack-frame.md): ABI là hợp đồng về thanh ghi và stack (mục 1), frame và bảng unwind (mục 6), `extern "Rust"` so với `extern "C"` ở mức asm (mục 8). Chương này dùng lại các ý đó.
 - [P9 · Chương 05 — Error handling](../09-rust-language/05-error-handling.md): khi nào dùng `Result`, khi nào `panic!` (mục 1 và 7). Chương này đào vào *cơ chế bên dưới* panic chứ không nhắc lại tiêu chí chọn.
-- [Chương 07 — unsafe, undefined behavior và Miri](07-unsafe-ub-miri.md): UB là gì và vì sao UB ở một phía FFI lan sang phía kia (mục 2). Chương này dùng khái niệm UB khi nói panic băng qua ranh giới FFI là abort hay UB (mục 6–7).
+- [Chương 07 — unsafe, undefined behavior và Miri](07-unsafe-ub-miri.md): UB là gì và vì sao UB ở một phía FFI lan sang phía kia (mục 2). Khi chương này nói panic băng qua ranh giới FFI thì abort hay UB (mục 6–7), nó dùng lại khái niệm đó.
+
+Bạn đã viết service Rust bằng `std` và `Cargo`, dùng `unwrap`, `Result`, `Mutex`; chưa cần từng viết FFI.
+
+---
 
 ## 1. Panic: dừng đường chạy hiện tại mà vẫn trả tài nguyên (Q1)
 
-> **Trả lời ngắn.** Panic là cách Rust báo "lỗi mà chỗ này không thể xử lý hợp lý": hàm không return bình thường nữa[^ref-panic-intro]. Với chiến lược unwind (mặc định ở đa số target[^ref-panic-default]), thread dừng chạy bình thường rồi *tháo* stack từng frame, gọi destructor như thể mọi hàm return ngay lập tức[^nomicon-unwind]. Nhờ vậy khi chương trình thoát khỏi vùng lỗi, các đối tượng đang giữ tài nguyên đã được dọn[^ref-panic-cleanup].
+> **Trả lời ngắn.** Panic là cách Rust nói "chỗ này gặp lỗi mà không thể xử lý hợp lý": hàm thôi không return bình thường nữa[^ref-panic-intro]. Mặc định ở đa số target là chiến lược unwind[^ref-panic-default]. Với chiến lược này, thread dừng chạy bình thường rồi tháo stack từng frame và gọi destructor như thể mọi hàm đều return ngay lập tức[^nomicon-unwind]. Nhờ vậy khi chương trình chạy tiếp, những object đang giữ tài nguyên đã được dọn[^ref-panic-cleanup].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đang xử lý một request HTTP, đi sâu qua năm lớp hàm, mỗi lớp mở một thứ (transaction DB, file tạm, lock). Gặp trạng thái không thể tiếp tục, bạn không thể tự chạy ngược năm lớp để đóng từng thứ. Unwinding là bộ máy làm đúng việc đó thay bạn: đi ngược từng lớp và đóng/trả những gì lớp đó đang giữ.
+*Với service `billing`.* Hãy hình dung `billing`, một service Rust nhận request tính hóa đơn (ví dụ giả định của người soạn, không phải code trong repo). Mỗi request chạy trên một worker thread của thread pool và đi qua vài lớp hàm: parse JSON, tra giá trong một `Mutex<PriceCache>` dùng chung, mở transaction DB, ghi file tạm. Giả sử ở lớp thứ tư có một `unwrap()` trên `None`. Lớp đó không thể tự chạy ngược lên để rollback transaction, xóa file tạm và nhả lock. Mục này cho thấy Rust làm hộ việc đó bằng cách nào và tính phí ra sao. Ba mục tiếp theo hỏi tiếp về `billing`: nên để cả service chết hay chỉ request đó (mục 2), request sau có dùng nhầm dữ liệu dở dang không (mục 3). Từ mục 4, `billing` gọi sang thư viện C và để C gọi ngược lại.
 
-*Panic xảy ra từ đâu.* Có thể gọi `panic!` tường minh[^ref-panic-macro], và có cấu trúc ngôn ngữ tự panic, ví dụ truy cập mảng ngoài biên[^ref-panic-lang]. Nomicon liệt kê thêm: `unwrap` trên `None`, chia cho 0, và (ở debug build) mọi phép số học có thể tràn; rồi kết luận rằng trừ khi bạn rất cẩn thận kiểm soát code nào chạy, gần như mọi thứ đều có thể unwind và bạn cần sẵn sàng cho điều đó[^nomicon-excsafe-everything].
+### 1.1 Panic xuất phát từ đâu
 
-*Panic nằm ở đâu trên thang xử lý lỗi.* Nomicon mô tả bốn bậc: `Option` cho cái có thể vắng, `Result` cho lỗi xử lý được, panic cho lỗi không xử lý hợp lý được, abort cho thảm họa[^nomicon-tiers].
+Bạn có thể gọi `panic!` tường minh[^ref-panic-macro]. Cũng có những cấu trúc ngôn ngữ tự panic, ví dụ truy cập mảng ngoài biên[^ref-panic-lang]. Nomicon kể thêm `unwrap` trên `None`, chia cho 0, và ở debug build là mọi phép số học có thể tràn. Từ đó nó kết luận: trừ khi bạn rất cẩn thận kiểm soát code nào chạy, gần như dòng nào cũng có thể unwind, và bạn phải sẵn sàng cho điều đó[^nomicon-excsafe-everything]. Với `billing`, `prices[idx]` hay `total / quantity` đều là chỗ có thể panic mà không cần dòng `panic!` nào (nhận xét của người soạn).
 
-*Trình tự một lần panic (với `panic=unwind`).*
+Trong bốn cách Rust xử lý một tình huống bất thường, panic đứng ở bậc thứ ba. Nomicon xếp như sau: `Option` cho cái có thể vắng; `Result` cho lỗi xử lý được; panic cho lỗi không thể xử lý hợp lý; abort cho thảm họa[^nomicon-tiers].
 
-1. **Panic hook chạy trước.** Hook được gọi khi thread panic, *trước khi* panic runtime được gọi, nên nó chạy với cả runtime unwind lẫn abort[^hook-before] (ngoại lệ: `-C panic=immediate-abort` của rustc không gọi hook, xem mục 2). Hook mặc định in thông điệp ra stderr và dựng backtrace nếu được yêu cầu[^hook-default].
-2. **Unwind.** Runtime đi qua các frame Rust giống như `throw` của C++ đi qua frame C++, cho tới điểm phục hồi (ví dụ ranh giới thread); trên đường đi, mọi đối tượng còn sống trong frame có `Drop` sẽ bị gọi `drop`[^ref-panic-unwind].
-3. **Dừng ở điểm phục hồi.** Thư viện chuẩn có hai cơ chế: `catch_unwind` (phục hồi ngay trong thread đang panic) và `thread::spawn` (tự thiết lập phục hồi cho thread con để các thread khác tiếp tục)[^ref-panic-recover]. Không có điểm phục hồi nào thì: thread thoát; panic có thể được thấy từ thread khác qua `join`; riêng main thread panic mà không bắt thì ứng dụng thoát với exit code khác 0[^thread-panic].
+### 1.2 Trình tự một lần panic
+
+Dưới đây là những gì xảy ra trên worker thread của `billing` khi chiến lược là unwind:
+
+1. **Panic hook chạy trước.** Hook được gọi khi thread panic, nhưng trước khi panic runtime được gọi, nên nó chạy với cả runtime unwind lẫn runtime abort[^hook-before]. Ngoại lệ là `-C panic=immediate-abort` của rustc: chế độ này không gọi hook[^rustc-panic-flag] (xem mục 2). Hook mặc định in thông điệp ra stderr, và dựng backtrace nếu bạn yêu cầu[^hook-default].
+2. **Unwind.** Runtime đi qua các frame Rust giống như `throw` của C++ đi qua frame C++, cho tới điểm phục hồi, ví dụ ranh giới thread. Trên đường đi, object nào còn sống trong frame và có `Drop` thì bị gọi `drop`[^ref-panic-unwind]. Đây là lúc transaction được rollback và file tạm bị xóa, nếu chúng được bọc trong struct có `Drop` (nhận xét của người soạn).
+3. **Dừng ở điểm phục hồi.** Thư viện chuẩn có hai cơ chế phục hồi: `catch_unwind` phục hồi ngay trong thread đang panic, còn `thread::spawn` tự dựng điểm phục hồi cho thread con để các thread khác chạy tiếp[^ref-panic-recover]. Nếu không ai bắt, thread thoát và thread khác có thể thấy panic qua `join`; riêng main thread panic mà không bắt thì cả ứng dụng thoát với exit code khác 0[^thread-panic].
 
 ```mermaid
 flowchart TD
@@ -49,103 +57,139 @@ flowchart TD
 
 (Sơ đồ là tóm tắt của người soạn từ các chú thích trong mục này và mục 2.)
 
-*Cái giá.* Cài đặt unwinding hiện tại được tối ưu cho trường hợp *không* unwind: chương trình không unwind thì không tốn chi phí runtime vì sẵn sàng unwind; đổi lại unwind thật sẽ đắt hơn (so với Java). Nomicon dặn đừng xây chương trình dựa vào unwind trong điều kiện bình thường[^nomicon-unwind-cost]. Lý do quay lại với thang lỗi: lỗi thường xuyên đi bằng `Result` (nhận xét của người soạn).
+### 1.3 Cái giá của unwind
+
+Cài đặt unwinding hiện tại được tối ưu cho trường hợp *không* unwind: chương trình không unwind thì không tốn chi phí runtime nào chỉ vì sẵn sàng unwind. Đổi lại, unwind thật sẽ đắt hơn so với, chẳng hạn, Java. Vì vậy Nomicon dặn đừng xây chương trình dựa vào unwind trong điều kiện bình thường[^nomicon-unwind-cost]. Điều này khớp với thang ở §1.1: lỗi xảy ra thường xuyên, như đơn hàng sai định dạng, nên đi bằng `Result`, còn panic để dành cho bug (nhận xét của người soạn).
 
 <details><summary>Đi sâu: lịch sử, payload, điểm tiếp giáp với MIR, "unwind" không bắt buộc dùng cơ chế của C++</summary>
 
-- Nomicon kể rằng Rust thuở đầu giống Erlang: task nhẹ, tự kết liễu bằng panic khi gặp trạng thái không chịu nổi[^nomicon-unwind-erlang]. Về sau task nhẹ nhường chỗ cho thread OS nặng; theo Nomicon, trên Rust stable tính đến 1.0 chỉ thread cha bắt được panic, tức bắt panic đòi dựng cả một thread OS, và `catch_unwind` là API cho phép bắt panic mà không cần dựng thread[^nomicon-unwind-hist]. (Đây là mô tả lịch sử trong Nomicon, không phải hành vi cần nhớ khi viết code.)
-- Reference nhấn vào hành vi *dọn dẹp*: miễn là bảo đảm dọn tài nguyên được giữ (các đối tượng không còn truy cập được đã được dọn như thể ra khỏi scope bình thường), unwinding có thể được cài đặt mà không dùng đúng cơ chế mà C++ dùng trên target đó[^ref-unwind-impl]. Vậy bảng unwind ở [P2 · Chương 04, mục 6](../02-cpu/04-calling-convention-va-stack-frame.md) là *một* cách cài đặt, không phải điều Reference bắt buộc (suy luận của người soạn từ câu trích).
-- Payload: `panic_any` cho phép panic với thông điệp thuộc *bất kỳ* kiểu `Any + Send`, không chỉ chuỗi[^panic-any]. `catch_unwind` trả `Err(cause)` với `cause` chính là đối tượng mà panic được khởi phát[^catch-ret].
-- Liên hệ MIR ([Chương 01, mục 4](01-pipeline-rustc.md)): rustc-dev-guide nói lời gọi hàm luôn là *terminator* vì có khả năng unwind[^dev-mir-call]; nên đồ thị luồng điều khiển có thêm đường dọn dẹp (suy luận của người soạn từ câu trích).
-- `std::thread::panicking()` cho biết thread hiện tại có đang unwind vì panic không; docs nêu cách dùng điển hình là *đầu độc* tài nguyên chung khi viết unsafe code, kiểm tra trong `drop`[^thread-panicking].
+- **Lịch sử.** Rust thuở đầu giống Erlang: có task nhẹ, và task tự kết liễu bằng panic khi gặp trạng thái không chịu nổi[^nomicon-unwind-erlang]. Về sau task nhẹ nhường chỗ cho thread OS nặng. Theo Nomicon, trên Rust stable tính đến 1.0 chỉ thread cha bắt được panic, tức bắt panic đòi dựng cả một thread OS; `catch_unwind` là API cho phép bắt panic mà không cần dựng thread[^nomicon-unwind-hist]. Đây là mô tả lịch sử trong Nomicon, không phải điều cần nhớ khi viết code.
+- **Unwind không nhất thiết là cơ chế của C++.** Reference nhấn vào hành vi *dọn dẹp*: miễn là bảo đảm dọn tài nguyên vẫn đúng (object không còn truy cập được đã được dọn như thể ra khỏi scope bình thường), unwinding có thể được cài đặt mà không dùng đúng cơ chế mà C++ dùng trên target đó[^ref-unwind-impl]. Vậy bảng unwind ở [P2 · Chương 04, mục 6](../02-cpu/04-calling-convention-va-stack-frame.md) chỉ là *một* cách cài đặt, không phải điều Reference bắt buộc (suy luận của người soạn từ câu trích).
+- **Payload.** `panic_any` cho phép panic với thông điệp thuộc *bất kỳ* kiểu `Any + Send`, không chỉ chuỗi[^panic-any]. `catch_unwind` trả `Err(cause)`, trong đó `cause` chính là object mà panic được khởi phát với nó[^catch-ret].
+- **MIR.** rustc-dev-guide nói lời gọi hàm luôn là *terminator* vì có khả năng unwind[^dev-mir-call]. Suy ra đồ thị luồng điều khiển phải có thêm đường dọn dẹp (suy luận của người soạn từ câu trích; về MIR xem [Chương 01, mục 4](01-pipeline-rustc.md)).
+- **`std::thread::panicking()`** cho biết thread hiện tại có đang unwind vì panic không. Docs nêu cách dùng điển hình là *đầu độc* tài nguyên chung khi viết unsafe code, bằng cách kiểm tra nó trong `drop`; code safe thường không cần vì mutex đã tự đầu độc khi thread panic lúc đang giữ lock[^thread-panicking].
 
 </details>
 
-**Quay lại Q1:** panic dừng đường chạy hiện tại; mặc định nó tháo stack và gọi `Drop`, và hook chạy trước cả hai.
+**Quay lại Q1:** panic dừng đường chạy hiện tại; mặc định nó tháo stack và gọi `Drop`, và hook chạy trước cả hai. Với `billing`, request panic được dọn sạch những gì nó đang giữ, nhưng phải trả giá bằng một lần unwind đắt.
+
+---
 
 ## 2. `unwind` hay `abort`: chọn chiến lược panic (Q2)
 
-> **Trả lời ngắn.** Chiến lược panic là một lựa chọn lúc build: `unwind` (tháo stack, có thể phục hồi) hoặc `abort` (kết thúc process, không phục hồi)[^ref-panic-kinds]. Với `abort` không thể `catch_unwind`[^catch-notall]; docs của `process::abort` nói process kết thúc kiểu đó không chạy destructor nào[^abort-doc], và dưới `panic=abort` thì `panic!` "tương tự" `abort`[^abort-similar]; Nomicon nói panic lúc đó abort process ngay lập tức[^nomicon-panic-abort-note] (suy ra panic cũng không chạy destructor: suy luận của người soạn, có quan sát chạy thật ở [P9 · Chương 05, mục 7](../09-rust-language/05-error-handling.md)). Đổi lại, trình tối ưu được phép giả định unwind không xảy ra, có thể giảm cỡ code và tăng tốc[^ref-panic-abort-opt].
+> **Trả lời ngắn.** Chiến lược panic là một lựa chọn lúc build: `unwind` tháo stack và có thể phục hồi, `abort` kết thúc process và không phục hồi[^ref-panic-kinds]. Với `abort` thì không thể `catch_unwind`[^catch-notall]. Process bị `process::abort` kết thúc không chạy destructor nào[^abort-doc]. Dưới `panic=abort`, `panic!` "tương tự" `abort`[^abort-similar]. Nomicon nói thẳng hơn: panic lúc đó abort process ngay lập tức[^nomicon-panic-abort-note]. Ghép các điều trên lại thì panic dưới `abort` cũng không chạy destructor (suy luận của người soạn; có quan sát chạy thật ở [P9 · Chương 05, mục 7](../09-rust-language/05-error-handling.md)). Đổi lại, trình tối ưu được phép giả định unwind không xảy ra, nên code có thể nhỏ hơn và nhanh hơn[^ref-panic-abort-opt].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): trong Kubernetes, bạn có hai chính sách khi một worker lỗi nặng: để nó tự dọn rồi tiếp tục phục vụ (unwind), hoặc cho container chết ngay để orchestrator dựng lại (abort). Cả hai hợp lý; điều cần là *biết mình đã chọn cái nào*.
+*Với service `billing`.* Một request của `billing` panic. Service có nên chết theo không? Nếu `billing` chạy trên Kubernetes thì có hai chính sách. Chính sách thứ nhất là để worker tự dọn rồi phục vụ tiếp: đó là `unwind`. Chính sách thứ hai là cho cả container chết ngay để orchestrator dựng lại: đó là `abort`. Cả hai đều hợp lý; điều cần là biết mình đã chọn cái nào, và biết cái giá, ví dụ log đang nằm trong buffer có mất không (nhận xét của người soạn).
 
-*Hai bộ xử lý panic của `std`.* Reference nói `std` cung cấp hai panic handler: `unwind` (tháo stack, có khả năng phục hồi) và `abort` (kết thúc process, không phục hồi)[^ref-panic-kinds]. Mặc định với đa số target là `unwind`[^ref-panic-default]. Không phải target nào cũng có handler `unwind`[^ref-panic-notall].
+### 2.1 Hai panic handler của `std`
 
-*Chọn bằng cờ hay bằng Cargo.* Cờ `-C panic` của rustc nhận `abort`, `immediate-abort` (kết thúc process và *không* gọi panic hook) hoặc `unwind`; không chỉ định thì mặc định tùy target[^rustc-panic-flag]. Cargo bọc cờ này bằng key `panic` trong profile, với hai giá trị `"unwind"` và `"abort"`[^cargo-panic]. Cả profile `dev` lẫn `release` mặc định đều là `'unwind'`[^cargo-defaults][^cargo-defaults-release] (bảng mặc định đầy đủ của các profile: [P9·08 mục 7](../09-rust-language/08-module-crate-cargo.md)). Ví dụ cấu hình:
+`std` cung cấp hai panic handler: `unwind` (tháo stack, có khả năng phục hồi) và `abort` (kết thúc process, không phục hồi)[^ref-panic-kinds]. Đa số target mặc định dùng `unwind`[^ref-panic-default]. Tuy vậy không phải target nào cũng có handler `unwind`[^ref-panic-notall].
+
+### 2.2 Chọn bằng cờ rustc hay bằng Cargo
+
+Cờ `-C panic` của rustc nhận `abort`, `immediate-abort` (kết thúc process và *không* gọi panic hook) hoặc `unwind`. Nếu bạn không chỉ định thì mặc định tùy target[^rustc-panic-flag]. Cargo bọc cờ này bằng key `panic` trong profile, với hai giá trị `"unwind"` và `"abort"`[^cargo-panic]. Profile `dev` mặc định là `'unwind'`[^cargo-defaults]. Profile `release` cũng vậy[^cargo-defaults-release] (bảng mặc định đầy đủ của các profile ở [P9·08 mục 7](../09-rust-language/08-module-crate-cargo.md)). Muốn `billing` abort ở bản release thì ghi:
 
 ```toml
 [profile.release]
 panic = "abort"
 ```
 
-*Ba ràng buộc dễ vấp.*
+### 2.3 Ba ràng buộc dễ vấp
 
-- **Đồ thị crate:** nếu *bất kỳ* crate nào trong đồ thị dùng `abort` thì binary cuối (bin, dylib, cdylib, staticlib) cũng phải `abort`[^rustc-panic-flag]. Reference nêu hệ quả: crate build với `unwind` dùng được handler `abort`, ngược lại thì không[^ref-panic-implication].
-- **Test:** Cargo bỏ qua `panic` cho test, benchmark, build script, proc macro; test harness hiện đòi hành vi unwind[^cargo-test-ignore]. Nghĩa là test chạy dưới `unwind` dù `release` đặt `abort` (suy luận của người soạn từ câu trích).
-- **Hook vẫn chạy:** dưới `panic=abort`, `panic!` và `process::abort` "tương tự", nhưng `panic!` vẫn gọi panic hook còn `abort` thì không[^abort-similar]. Đó là chỗ bạn log được lý do chết (nhận xét của người soạn).
+- **Đồ thị crate.** Nếu *bất kỳ* crate nào trong đồ thị dùng `abort` thì binary cuối (bin, dylib, cdylib, staticlib) cũng phải dùng `abort`[^rustc-panic-flag]. Chiều ngược lại thì Reference nêu hệ quả: crate build với `unwind` dùng được handler `abort`, còn crate build với `abort` không dùng được handler `unwind`[^ref-panic-implication].
+- **Test.** Cargo bỏ qua `panic` cho test, benchmark, build script và proc macro, vì test harness hiện đòi hành vi unwind[^cargo-test-ignore]. Nghĩa là test của `billing` vẫn chạy dưới `unwind` dù `release` đặt `abort` (suy luận của người soạn từ câu trích).
+- **Hook vẫn chạy.** Dưới `panic=abort`, `panic!` và `process::abort` "tương tự" nhau, nhưng `panic!` vẫn gọi panic hook còn `abort` thì không[^abort-similar]. Đó là chỗ để `billing` ghi lại lý do chết trước khi process bị kết thúc (nhận xét của người soạn).
 
-*Hệ quả cho code.* Dưới `abort` thì `catch_unwind` không có gì để bắt: nó chỉ bắt panic dạng unwind, không bắt panic làm process abort[^catch-notall]. Cách ly "một request panic không giết cả server" kiểu thread-per-request vì vậy phụ thuộc vào `unwind` (nhận xét của người soạn). Hành vi của từng runtime async cụ thể (ví dụ tokio) nằm ngoài các nguồn của chương này.
+### 2.4 Hệ quả cho code
 
-<details><summary>Đi sâu: <code>process::abort</code>, mất gì khi abort, <code>no_std</code>, đo cỡ binary</summary>
+Dưới `abort`, `catch_unwind` không còn gì để bắt: nó chỉ bắt panic dạng unwind, không bắt panic làm process abort[^catch-notall]. Vì vậy cách ly kiểu "một request panic không giết cả server" trong mô hình thread-per-request phụ thuộc vào `unwind` (nhận xét của người soạn). Hành vi của từng runtime async cụ thể, ví dụ Tokio, nằm ngoài các nguồn của chương này.
 
-- `process::abort` kết thúc process theo kiểu "bất thường": không destructor nào (trên stack hiện tại hay của thread khác) chạy, buffer IO của Rust (ví dụ `BufWriter`) không được flush, buffer C stdio thường cũng không[^abort-doc]. Trên Unix, process kết thúc bằng tín hiệu `SIGABRT`[^abort-sigabrt]. Nhận xét của người soạn: với service, hệ quả thực tế là mất log/dữ liệu đang nằm trong buffer; nếu cần thoát sạch thì chỉ gọi `abort` ở điểm không còn destructor nào cần chạy (docs khuyến nghị đúng như vậy[^abort-clean]).
-- Reference nêu lợi ích của `abort` là trình tối ưu có thể giả định unwinding qua frame Rust là không thể, từ đó cải thiện cả cỡ code lẫn tốc độ[^ref-panic-abort-opt]. Tài liệu không đưa con số; chương này **không đo** mức giảm, vì vậy không nêu số.
-- Reference còn nói *unwind handler không bảo đảm mọi panic đều phục hồi được*, chỉ bảo đảm panic qua `panic!` và cơ chế tương tự của thư viện chuẩn là phục hồi được[^ref-panic-notrecover].
-- Với `no_std` binary/dylib/cdylib/staticlib, phải tự cung cấp panic handler[^ref-panic-nostd] bằng attribute `panic_handler`[^ref-panic-handler-attr]; phải có đúng một trong đồ thị phụ thuộc[^ref-panic-handler-unique].
-- Khi chạy test với chiến lược abort (cờ `panic-abort-tests`, đang ở dạng unstable), Cargo ép mọi dependency build theo `unwind`[^cargo-abort-test].
+<details><summary>Đi sâu: <code>process::abort</code>, mất gì khi abort, <code>no_std</code>, test với abort</summary>
+
+- **`process::abort` kết thúc process theo kiểu "bất thường".** Không destructor nào chạy, dù trên stack hiện tại hay stack của thread khác. Buffer IO của Rust như `BufWriter` không được flush, và buffer C stdio thường cũng không[^abort-doc]. Trên Unix, process kết thúc bằng signal `SIGABRT`[^abort-sigabrt]. Với service, hệ quả thực tế là mất log hoặc dữ liệu đang nằm trong buffer (nhận xét của người soạn). Nếu cần thoát sạch thì chỉ gọi `abort` ở điểm không còn destructor nào cần chạy; docs khuyến nghị đúng như vậy[^abort-clean].
+- **Lợi ích với trình tối ưu.** Reference nói khi biên dịch với chiến lược `abort`, trình tối ưu có thể giả định unwinding qua frame Rust là không thể, và nhờ đó cải thiện cả cỡ code lẫn tốc độ[^ref-panic-abort-opt]. Tài liệu không đưa con số, và chương này **không đo** nên cũng không nêu số.
+- **Unwind handler không bảo đảm mọi panic phục hồi được.** Reference chỉ bảo đảm panic qua `panic!` và cơ chế tương tự của thư viện chuẩn là phục hồi được[^ref-panic-notrecover].
+- **`no_std`.** Với binary, dylib, cdylib hay staticlib kiểu `no_std`, bạn phải tự cung cấp panic handler[^ref-panic-nostd]. Cách làm là gắn attribute `panic_handler` lên một hàm[^ref-panic-handler-attr]. Trong đồ thị phụ thuộc chỉ được có đúng một hàm như vậy[^ref-panic-handler-unique].
+- **Test với abort.** Khi chạy test với chiến lược abort (cờ `panic-abort-tests`, đang ở dạng unstable), Cargo ép mọi dependency build theo `unwind`[^cargo-abort-test].
 
 </details>
 
-**Quay lại Q2:** `unwind` giữ dọn dẹp và khả năng cô lập panic; `abort` bỏ cả hai để lấy code đơn giản hơn cho trình tối ưu — chọn bằng `-C panic` hoặc `panic` trong profile.
+**Quay lại Q2:** `unwind` giữ dọn dẹp và khả năng cô lập panic; `abort` bỏ cả hai để lấy code đơn giản hơn cho trình tối ưu. Chọn bằng `-C panic` hoặc `panic` trong profile; với `billing` đó là quyết định "request panic thì cả container có chết theo không".
+
+---
 
 ## 3. `catch_unwind`, ranh giới thread, `UnwindSafe`, poisoning (Q3)
 
-> **Trả lời ngắn.** Panic dừng ở hai loại điểm: `thread::spawn` (cô lập cả thread con) và `catch_unwind` (bắt ngay trong thread)[^ref-panic-recover]. `catch_unwind` trả `Ok` nếu closure không panic, `Err(nguyên nhân)` nếu có[^catch-ret], nhưng docs không khuyên dùng nó làm cơ chế try/catch thông thường[^catch-notgeneral]. Vì sau khi bắt, dữ liệu có thể đang ở trạng thái dở dang, std có hai lớp cảnh báo: bound `UnwindSafe` (docs gọi là "speed bump")[^unwindsafe-speedbump] và mutex poisoning (docs: chỉ mang tính khuyến cáo)[^mutex-advisory].
+> **Trả lời ngắn.** Panic dừng ở hai loại điểm: `thread::spawn`, cô lập cả thread con, và `catch_unwind`, bắt ngay trong thread[^ref-panic-recover]. `catch_unwind` trả `Ok` nếu closure không panic và `Err(nguyên nhân)` nếu có[^catch-ret]. Docs không khuyên dùng nó làm cơ chế try/catch thông thường[^catch-notgeneral]. Sau khi bắt, dữ liệu có thể đang ở trạng thái dở dang, nên std đặt hai lớp cảnh báo. Một là bound `UnwindSafe`, mà docs gọi là "speed bump"[^unwindsafe-speedbump]. Hai là mutex poisoning, mà docs nói chỉ mang tính khuyến cáo[^mutex-advisory].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `catch_unwind` giống `try/catch` quanh một handler của web framework: nên đặt ở *biên* của một đơn vị công việc độc lập (một request, một task), không rải khắp code để điều khiển luồng. Phần luồng lỗi bình thường vẫn là `Result`.
+*Với service `billing`.* Nhiều worker thread của `billing` cùng dùng `Mutex<PriceCache>`. Giả sử một request panic đúng lúc đang giữ lock để cập nhật cache, và cache mới sửa được nửa chừng. Request tiếp theo lấy lock thì sao: nó có dùng nhầm dữ liệu dở dang không? Mục này trả lời hai việc: panic của một request dừng ở đâu, và std giúp request sau tránh dữ liệu hỏng đến mức nào.
 
-*Nó làm gì.* `catch_unwind` gọi closure; nếu không panic trả `Ok(kết quả)`, nếu panic trả `Err(cause)` với `cause` là đối tượng panic ban đầu[^catch-ret]. Docs nói rõ không nên dùng làm try/catch tổng quát: `Result` hợp hơn cho hàm có thể lỗi thường xuyên[^catch-notgeneral]; và nó có thể không bắt được mọi panic vì panic có thể cài bằng abort[^catch-notall]. Hook (nếu có) chạy *trước* khi panic bị bắt, tức trước khi unwind[^catch-hook].
+### 3.1 Đặt `catch_unwind` ở đâu
 
-*Vì sao có `UnwindSafe`.* Docs định nghĩa an toàn-khi-unwind qua hai thành phần: một cấu trúc dữ liệu đang ở trạng thái tạm thời không hợp lệ khi thread panic, và sau đó bất biến bị phá đó bị quan sát[^unwindsafe-two]. Điều quan trọng: nếu không có `unsafe`, panic không thể dẫn tới mất an toàn bộ nhớ[^unwindsafe-nomem]; thứ có thể hỏng là bất biến *logic*[^unwindsafe-logic]. `catch_unwind` đòi closure là `UnwindSafe` để mã hóa khái niệm này vào hệ kiểu[^catch-bound]. Trait này không phải `unsafe trait`, nên không có hợp đồng cứng; docs gọi nó là "speed bump" cảnh báo người dùng `catch_unwind`[^unwindsafe-speedbump]. Ví dụ không-unwind-safe: `&mut T` và `&RefCell<T>`, vì trạng thái khả biến chia sẻ ngang qua ranh giới dễ bị nhìn thấy khi đã hỏng[^unwindsafe-mut]. Muốn tắt gờ này thì bọc `AssertUnwindSafe`[^assertunwindsafe].
+Nên đặt `catch_unwind` ở *biên* của một đơn vị công việc độc lập (một request, một task), giống `try/catch` bao quanh một handler của web framework, chứ đừng rải khắp code để điều khiển luồng (nhận xét của người soạn). Luồng lỗi bình thường vẫn là `Result`.
 
-*Mutex poisoning.* Mutex của std "bị đầu độc" nếu nhận ra thread đang giữ nó đã panic[^mutex-poison-def]; sau đó `lock`/`try_lock` trả `Result` báo trạng thái, và phần lớn code chỉ `unwrap()` để lan panic giữa các thread, không cho thấy bất biến có thể sai[^mutex-poison]. Poisoning chỉ là khuyến cáo: `PoisonError::into_inner` vẫn trả được guard[^mutex-advisory]. Nomicon giải thích: mutex đầu độc không vì an toàn bộ nhớ[^nomicon-poison-mem], mà để không dùng mù quáng dữ liệu có thể đang bị sửa dở[^nomicon-poison-why]. Chi tiết `RwLock`, `Condvar` và kết quả chạy thật: [P4 · Chương 08, mục 6](../04-concurrency/08-rust-concurrency.md).
+### 3.2 Nó làm gì, và không làm gì
 
-*Hai tầng exception safety (Nomicon).* *Minimal*: trong unsafe code phải đủ exception safe để không phá an toàn bộ nhớ; *maximal*: trong safe code nên đủ để chương trình làm đúng[^nomicon-excsafe-levels].
+`catch_unwind` gọi closure. Nếu closure không panic, bạn nhận `Ok(kết quả)`; nếu panic, bạn nhận `Err(cause)`, trong đó `cause` là object mà panic được khởi phát với nó[^catch-ret]. Docs nói rõ không nên dùng nó làm try/catch tổng quát, vì `Result` hợp hơn cho hàm có thể lỗi thường xuyên[^catch-notgeneral]. Nó cũng có thể không bắt được mọi panic, vì panic có thể được cài bằng abort[^catch-notall]. Hook, nếu bạn đã đặt, chạy *trước* khi panic bị bắt, tức trước khi unwind[^catch-hook].
+
+### 3.3 Vì sao có `UnwindSafe`
+
+Vấn đề cần tránh nằm ở hai bước. Khi thread panic, một cấu trúc dữ liệu đang ở trạng thái tạm thời không hợp lệ; sau đó có người quan sát bất biến bị phá ấy[^unwindsafe-two]. Trong `billing`, đó là `PriceCache` mới ghi một nửa bản cập nhật. Điều cần nhớ là nếu không có `unsafe`, panic không thể dẫn tới mất an toàn bộ nhớ[^unwindsafe-nomem]. Thứ có thể hỏng là bất biến *logic*, và nó gây ra lỗi hành vi chứ không phải lỗi bộ nhớ[^unwindsafe-logic].
+
+Để đưa khái niệm này vào hệ kiểu, `catch_unwind` đòi closure phải là `UnwindSafe`[^catch-bound]. Trait này không phải `unsafe trait`, nên không có hợp đồng cứng; docs gọi nó là "speed bump" để nhắc người dùng `catch_unwind` rằng họ có thể thấy bất biến đã hỏng[^unwindsafe-speedbump]. Ví dụ kiểu không unwind safe là `&mut T` và `&RefCell<T>`: trạng thái khả biến chia sẻ ngang qua `catch_unwind` rất dễ bị nhìn thấy khi đã hỏng, vì dữ liệu cứ được truy cập như bình thường[^unwindsafe-mut]. Nếu bạn biết chắc mình đang làm gì và muốn tắt gờ này, hãy bọc closure bằng `AssertUnwindSafe`[^assertunwindsafe].
+
+### 3.4 Mutex poisoning
+
+Mutex của std dùng chiến lược gọi là poisoning (đầu độc): mutex bị "đầu độc" nếu nhận ra thread đang giữ nó đã panic[^mutex-poison-def]. Từ đó `lock` và `try_lock` trả về `Result` để báo mutex có bị đầu độc không, và phần lớn code chỉ `unwrap()` kết quả này. Nhờ vậy panic lan giữa các thread, và không ai thấy một bất biến có thể đã sai[^mutex-poison]. Với `billing`: worker panic khi đang giữ lock của `PriceCache` thì các worker sau gọi `lock().unwrap()` cũng panic, thay vì đọc cache dở dang (nhận xét của người soạn).
+
+Poisoning chỉ là khuyến cáo: `PoisonError::into_inner` vẫn trả về guard như thể lock thành công[^mutex-advisory]. Nomicon giải thích rằng mutex không đầu độc vì an toàn bộ nhớ[^nomicon-poison-mem]. Nó đầu độc để bạn không dùng mù quáng dữ liệu của một mutex đã chứng kiến panic lúc đang khóa[^nomicon-poison-why]. Chi tiết `RwLock`, `Condvar` và kết quả chạy thật nằm ở [P4 · Chương 08, mục 6](../04-concurrency/08-rust-concurrency.md).
+
+### 3.5 Hai tầng exception safety
+
+Nomicon chia exception safety thành hai tầng. Tầng *minimal*: trong unsafe code, phải đủ exception safe để không phá an toàn bộ nhớ. Tầng *maximal*: trong safe code, nên đủ exception safe để chương trình làm đúng[^nomicon-excsafe-levels].
 
 <details><summary>Đi sâu: ví dụ <code>Vec::push_all</code>, <code>resume_unwind</code>, hook toàn cục, bẫy khi drop payload</summary>
 
-- Ví dụ kinh điển của Nomicon: `push_all` đặt `len` trước rồi mới `clone` từng phần tử; `clone` là "quả bom panic" bị bỏ sót, nếu nó panic thì `Vec` có `len` lớn hơn số phần tử đã khởi tạo và việc nhìn/drop `Vec` sẽ đọc bộ nhớ chưa khởi tạo[^nomicon-pushall]. Bài học (nhận xét của người soạn): code unsafe không được để trạng thái bất hợp lệ tồn tại qua một lời gọi code lạ có thể panic.
-- `resume_unwind` kích hoạt panic *không* gọi hook; docs nói nó dành để dùng với `catch_unwind`, ví dụ mang một panic qua một lớp code C[^resume]. Nếu panic đang hiện thực bằng abort thì hàm này abort chứ không unwind[^resume-abort].
-- Hook là tài nguyên toàn cục[^hook-global], `set_hook` thay hook cũ[^hook-replace], `take_hook` lấy hook hiện tại và khôi phục hook mặc định[^hook-take]. `set_hook` panic nếu gọi từ thread đang panic[^hook-panics].
-- Cẩn thận khi drop kết quả `catch_unwind`: nếu là `Err`, nó chứa payload và drop payload có thể lại panic[^catch-drop].
-- Docs của `thread::panicking` nói code safe thường không cần tự đầu độc tài nguyên, vì mutex đã tự đầu độc khi thread panic lúc đang giữ lock[^thread-panicking].
+- **Ví dụ kinh điển của Nomicon.** `push_all` đặt `len` trước rồi mới `clone` từng phần tử. `clone` là "quả bom panic" bị bỏ sót: nếu nó panic thì `Vec` có `len` lớn hơn số phần tử đã khởi tạo, và việc nhìn hay drop `Vec` sẽ đọc bộ nhớ chưa khởi tạo[^nomicon-pushall]. Bài học (nhận xét của người soạn): code unsafe không được để trạng thái bất hợp lệ tồn tại qua một lời gọi tới code lạ có thể panic.
+- **`resume_unwind`** kích hoạt panic mà *không* gọi hook. Docs nói nó dành để dùng cùng `catch_unwind`, ví dụ để mang một panic qua một lớp code C[^resume]. Nếu panic đang được cài bằng abort thì hàm này abort chứ không unwind[^resume-abort].
+- **Hook là tài nguyên toàn cục**[^hook-global]. `set_hook` thay hook cũ[^hook-replace]. `take_hook` lấy hook hiện tại và khôi phục hook mặc định[^hook-take]. `set_hook` sẽ panic nếu gọi từ một thread đang panic[^hook-panics].
+- **Bẫy khi drop kết quả `catch_unwind`.** Nếu kết quả là `Err`, nó chứa payload, và drop payload có thể lại panic[^catch-drop].
 
 </details>
 
-**Quay lại Q3:** panic dừng ở ranh giới thread hoặc `catch_unwind`; và vì dữ liệu có thể dở dang, std chặn bằng `UnwindSafe` và poisoning — hai gờ giảm tốc, không phải bảo đảm tuyệt đối.
+**Quay lại Q3:** panic dừng ở ranh giới thread hoặc `catch_unwind`; và vì dữ liệu có thể dở dang, std chặn bằng `UnwindSafe` và poisoning, hai gờ giảm tốc chứ không phải bảo đảm tuyệt đối. Với `billing`, request panic không kéo theo request khác trừ khi chúng đụng cùng một mutex bị đầu độc.
+
+---
 
 ## 4. ABI là gì; `extern` khai báo và định nghĩa (Q4)
 
-> **Trả lời ngắn.** ABI quy định hàm gọi hàm bằng cách nào ở mức máy: tham số vào thanh ghi hay stack, trả giá trị ra sao, ai dọn stack[^ref-ext-abi-intro]. ABI `"Rust"` là mặc định và không có bảo đảm ổn định[^ref-abi-rust]; `"C"` khớp ABI mặc định của trình biên dịch C chủ đạo trên target[^ref-abi-c], nên là điểm chung để nói chuyện với code ngoài (Nomicon gọi C là ngôn ngữ chung của thế giới lập trình)[^nomicon-ffi-reprc].
+> **Trả lời ngắn.** ABI quy định hàm gọi hàm ra sao ở mức máy: tham số vào thanh ghi hay stack, giá trị trả về đi đường nào, ai dọn stack[^ref-ext-abi-intro]. ABI `"Rust"` là mặc định và không có bảo đảm ổn định[^ref-abi-rust]. ABI `"C"` khớp ABI mặc định của trình biên dịch C chủ đạo trên target[^ref-abi-c]. Vì vậy nó là điểm chung để nói chuyện với code ngoài: Nomicon gọi C là ngôn ngữ chung (lingua franca) của thế giới lập trình[^nomicon-ffi-reprc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ABI giống giao thức dây giữa hai microservice, nhưng ở mức thanh ghi: hai bên phải thống nhất "field nào ở byte nào". Nếu một bên tự ý đổi, gọi vẫn "thành công" ở tầng kết nối nhưng đọc ra rác. Ở đây không có schema registry để bắt lỗi.
+*Với service `billing`.* Từ mục này `billing` ra khỏi thế giới Rust thuần ở hai chiều. Chiều thứ nhất, `billing` gọi `libtax`, một thư viện C tính thuế. Chiều thứ hai, `billing` đóng gói phần tính giá thành `libpricing`, một thư viện chung để gateway C++ của đồng nghiệp gọi vào. Cả hai chuyện đều là một lời gọi hàm, nhưng hai bên phải thống nhất tham số nằm ở thanh ghi nào và ai dọn stack. Nếu hai bên hiểu khác nhau thì chương trình vẫn link được, chỉ là đọc sai giá trị (nhận xét của người soạn). Mục này nói ABI là gì và `extern` khai báo hai chiều ấy ra sao.
 
-*Nền: calling convention.* Chương [P2 · 04](../02-cpu/04-calling-convention-va-stack-frame.md) (mục 1) đã nói ABI là hợp đồng về thanh ghi và stack; Reference định nghĩa lại đúng ý đó cho `extern`: calling convention là giao diện mức thấp của hàm — tham số đặt ở thanh ghi hay stack, giá trị trả về ra sao, ai chịu trách nhiệm dọn stack[^ref-ext-abi-intro].
+### 4.1 Nền: calling convention
 
-*ABI `"Rust"`.* Hàm không ghi `extern` dùng ABI này; Reference nói rõ ABI Rust *không cam kết ổn định*[^ref-abi-rust]. Hệ quả (suy luận của người soạn): không bao giờ đặt hàm Rust thường vào thư viện chung rồi cho code ngoài gọi, vì layout gọi có thể đổi giữa các bản compiler. ([P2 · Chương 04, mục 8](../02-cpu/04-calling-convention-va-stack-frame.md) so sánh asm của cùng một hàm biên dịch theo hai ABI.)
+[P2 · 04](../02-cpu/04-calling-convention-va-stack-frame.md) (mục 1) đã nói ABI là hợp đồng về thanh ghi và stack. Reference nói lại đúng ý đó cho `extern`: calling convention là giao diện mức thấp của hàm, gồm tham số được đặt ở thanh ghi hay stack, giá trị trả về được truyền thế nào, và ai chịu trách nhiệm dọn stack[^ref-ext-abi-intro].
 
-*Các ABI chuẩn.* `"C"`[^ref-abi-c]; `"system"` tương đương `"C"` trừ Windows x86_32, nơi nó là `"stdcall"` cho hàm không variadic và `"C"` cho hàm variadic[^ref-ext-system]. Reference khuyên dùng `"system"` khi gọi API Windows không định nghĩa ABI tường minh[^ref-ext-system-win]. Còn có ABI riêng nền tảng (`"win64"`, `"sysv64"`, `"aapcs"`…); nhiều cái cũng có biến thể `-unwind`[^ref-ext-platform-unwind]. Cái nào là "C" thật trên máy bạn phụ thuộc target: `"sysv64"` là System V cho x86_64 và trùng `"C"` trên x86_64 không phải Windows[^ref-ext-sysv64].
+### 4.2 ABI `"Rust"` không ổn định
 
-*Hai hướng khai báo.*
+Hàm không ghi `extern` dùng ABI này, và Reference nói rõ ABI Rust *không cam kết ổn định*[^ref-abi-rust]. Hệ quả (suy luận của người soạn): đừng bao giờ đặt hàm Rust thường vào thư viện chung rồi cho code ngoài gọi, vì cách gọi có thể đổi giữa các bản compiler. [P2 · Chương 04, mục 8](../02-cpu/04-calling-convention-va-stack-frame.md) so sánh asm của cùng một hàm biên dịch theo hai ABI.
 
-- **Gọi vào ngoài:** khối `unsafe extern "C" { fn f(...); }`. `unsafe` được xem là bắt buộc về ngữ nghĩa trước từ khóa `extern` trên khối[^ref-ext-unsafe-required] (trước edition 2024 từ khóa này còn tùy chọn[^ref-ext-edition2024]). Hàm trong khối là `unsafe` ngầm trừ khi có qualifier `safe`[^ref-ext-unsafe]; compiler tự dịch giữa ABI Rust và ABI ngoài khi gọi[^ref-ext-foreign-abi]. Nomicon giải thích lý do: thư viện C hay không thread-safe và hầu như mọi hàm nhận con trỏ đều không hợp lệ với mọi đầu vào[^nomicon-ffi-unsafe] (ý chung đã nêu ở [Chương 07, mục 1](07-unsafe-ub-miri.md)). Compiler không kiểm được khai báo có đúng với phía C hay không, nên việc khai báo đúng là một phần của việc giữ binding đúng lúc chạy[^nomicon-ffi-decl]; gọi hàm với ABI sai là một mục trong danh sách UB của Reference[^ref-ub-call] ([Chương 07, mục 2](07-unsafe-ub-miri.md)).
-- **Để ngoài gọi vào:** `extern "C" fn` *định nghĩa* trong Rust, cho code ngoài gọi (ví dụ từ C)[^ref-fn-foreign-call]. Muốn ngoài thấy symbol tên đúng thì thêm `#[unsafe(no_mangle)]`, tắt mangling để symbol mang đúng tên định danh của item[^ref-no-mangle]; attribute này `unsafe` vì symbol không mangle có thể đụng tên symbol khác[^ref-no-mangle-unsafe].
+### 4.3 Các ABI chuẩn
+
+`"C"` khớp ABI mặc định của trình biên dịch C chủ đạo trên target[^ref-abi-c]. `"system"` tương đương `"C"` trừ Windows x86_32, nơi nó là `"stdcall"` cho hàm không variadic và `"C"` cho hàm variadic[^ref-ext-system]. Reference khuyên dùng `"system"` khi gọi API Windows không định nghĩa ABI tường minh[^ref-ext-system-win]. Ngoài ra còn các ABI riêng nền tảng như `"win64"`, `"sysv64"`, `"aapcs"`; nhiều cái trong số đó cũng có biến thể `-unwind`[^ref-ext-platform-unwind]. Cái nào là "C" thật trên máy bạn tùy target: `"sysv64"` là System V cho x86_64 và trùng `"C"` trên x86_64 không phải Windows[^ref-ext-sysv64].
+
+### 4.4 Hai hướng khai báo
+
+**`billing` gọi vào `libtax`.** Bạn khai báo hàm ngoài trong khối `unsafe extern "C" { fn f(...); }`. Từ khóa `unsafe` đứng trước `extern` là bắt buộc về mặt ngữ nghĩa[^ref-ext-unsafe-required]. Trước edition 2024, từ khóa này còn tùy chọn[^ref-ext-edition2024]. Mỗi hàm trong khối ngầm là `unsafe`, trừ khi bạn ghi qualifier `safe`[^ref-ext-unsafe]. Khi gọi, compiler tự dịch giữa ABI Rust và ABI ngoài[^ref-ext-foreign-abi]. Lý do cần `unsafe` thì Nomicon nói: thư viện C hay phơi giao diện không thread-safe, và hầu như hàm nào nhận con trỏ cũng không hợp lệ với mọi đầu vào, vì con trỏ có thể dangling[^nomicon-ffi-unsafe] (ý chung đã nêu ở [Chương 07, mục 1](07-unsafe-ub-miri.md)). Compiler không kiểm được khai báo của bạn có khớp với phía C hay không, nên việc khai báo đúng là một phần của việc giữ binding đúng lúc chạy[^nomicon-ffi-decl]. Gọi hàm với ABI sai là một mục trong danh sách UB của Reference[^ref-ub-call] (xem [Chương 07, mục 2](07-unsafe-ub-miri.md)).
+
+**Gateway C++ gọi vào `libpricing`.** Bạn *định nghĩa* trong Rust một hàm `extern "C" fn` để code ngoài, ví dụ C, gọi được[^ref-fn-foreign-call]. Muốn phía ngoài thấy symbol đúng tên, hãy thêm `#[unsafe(no_mangle)]`: nó tắt mangling để symbol mang đúng tên định danh của item[^ref-no-mangle]. Attribute này là `unsafe` vì một symbol không bị mangle có thể đụng tên với symbol khác[^ref-no-mangle-unsafe].
 
 ```rust
 // minh họa; chưa chạy
@@ -168,102 +212,129 @@ fn main() {
 
 <details><summary>Đi sâu: <code>link</code>, variadic, static ngoại, ABI mặc định khi bỏ chuỗi</summary>
 
-- Attribute `link` nêu tên thư viện native mà compiler cần liên kết cho các item trong khối `extern`[^ref-link-attr]; Nomicon bổ sung nó là "viên gạch cơ bản" để chỉ cho rustc cách link thư viện native[^nomicon-link].
-- Bỏ chuỗi ABI thì mặc định `"C"` (với khối `extern`)[^ref-ext-default]; Reference nói cú pháp bỏ ABI đang bị loại dần nên nên viết rõ[^ref-ext-default-phase].
-- Hàm variadic khai báo được trong khối `extern` bằng `...` ở tham số cuối[^ref-ext-variadic]; hàm Rust thường thì không variadic được[^nomicon-no-variadic]. Truyền sai số/kiểu đối số cho hàm variadic có thể gây UB[^ref-ext-variadic-ub], nên `safe` chỉ hợp khi hàm bảo đảm không đụng vào đối số variadic.
-- `static` khai báo trong khối `extern` mặc định `unsafe` để truy cập, vì không gì bảo đảm bit pattern ở đó hợp lệ với kiểu đã khai báo[^ref-ext-static].
-- Các attribute `no_mangle`/`export_name` mang cùng cảnh báo đụng tên[^ref-no-mangle-unsafe][^ref-export-name-unsafe]; từ edition 2024 phải viết dạng `unsafe(...)`, trước đó có thể không[^ref-no-mangle-ed][^ref-export-name-ed].
+- **`link`.** Attribute `link` cho compiler biết tên thư viện native cần liên kết với các item trong khối `extern`[^ref-link-attr]. Nomicon gọi nó là viên gạch cơ bản để chỉ cho rustc cách link thư viện native[^nomicon-link].
+- **Bỏ chuỗi ABI** thì mặc định là `"C"`[^ref-ext-default]. Tuy vậy Reference nói cú pháp bỏ ABI đang bị loại dần, nên bạn nên viết rõ[^ref-ext-default-phase].
+- **Hàm variadic.** Khối `extern` khai báo được hàm variadic bằng `...` ở tham số cuối[^ref-ext-variadic]. Hàm Rust thường thì không variadic được[^nomicon-no-variadic]. Truyền sai số hoặc sai kiểu đối số cho hàm variadic có thể gây UB, nên qualifier `safe` chỉ hợp khi hàm bảo đảm không đụng vào đối số variadic[^ref-ext-variadic-ub].
+- **`static` ngoại.** `static` khai báo trong khối `extern` mặc định là `unsafe` để truy cập, vì không gì bảo đảm bit pattern ở đó hợp lệ với kiểu đã khai báo[^ref-ext-static].
+- **`export_name`** mang cùng cảnh báo đụng tên như `no_mangle`[^ref-export-name-unsafe]. Từ edition 2024, `no_mangle` phải viết dạng `unsafe(...)`, trước đó thì không bắt buộc[^ref-no-mangle-ed]. `export_name` cũng vậy[^ref-export-name-ed].
 
 </details>
 
-**Quay lại Q4:** ABI là hợp đồng gọi hàm ở mức máy; `"Rust"` không ổn định, `"C"` là mẫu số chung, và `extern` khai báo hai chiều (gọi vào, bị gọi) đều không được compiler kiểm hộ.
+**Quay lại Q4:** ABI là hợp đồng gọi hàm ở mức máy; `"Rust"` không ổn định, `"C"` là mẫu số chung, và `extern` khai báo hai chiều (gọi vào, bị gọi) đều không được compiler kiểm hộ. Với `billing`, cả `libtax` lẫn `libpricing` đi qua `"C"`.
+
+---
 
 ## 5. Kiểu dữ liệu qua ranh giới FFI (Q5)
 
-> **Trả lời ngắn.** Kiểu đi qua FFI nên là `repr(C)`, vì C là "ngôn ngữ chung" của thế giới lập trình[^nomicon-ffi-reprc]. Con trỏ có thể null thì dùng `Option` quanh kiểu không-null (ví dụ `Option<extern "C" fn(c_int) -> c_int>`)[^nomicon-ffi-nullable], còn struct mà C giấu nội dung thì biểu diễn bằng kiểu *opaque*[^nomicon-ffi-opaque].
+> **Trả lời ngắn.** Kiểu đi qua FFI nên là `repr(C)`, vì C là ngôn ngữ chung của thế giới lập trình[^nomicon-ffi-reprc]. Con trỏ có thể null thì dùng `Option` quanh kiểu không-null, ví dụ `Option<extern "C" fn(c_int) -> c_int>`[^nomicon-ffi-nullable]. Struct mà C giấu nội dung thì biểu diễn bằng kiểu *opaque*[^nomicon-ffi-opaque].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): qua FFI bạn đang gửi thông điệp cho bên không đọc được schema Rust. Chỉ nên gửi kiểu có "định dạng dây" cố định: số nguyên/số thực kích thước biết trước, con trỏ, struct `repr(C)`. Cái gì Rust được tự do sắp xếp (như `repr(Rust)`) thì đừng gửi.
+*Với service `billing`.* Mỗi lần `billing` gọi `libtax`, nó gửi qua ranh giới một dãy thứ: số tiền, con trỏ tới buffer, một callback ghi log mà C có thể không truyền, và nhận lại một handle `TaxContext*` mà C không cho nhìn bên trong (các ví dụ này là giả định của người soạn). Mỗi thứ rơi vào một mục dưới đây.
 
-*Layout.* Nomicon nói: kiểu bạn định đưa qua FFI nên có `repr(C)`[^nomicon-ffi-reprc]. Chi tiết `repr(C)`, `repr(transparent)` và enum có `repr` kiểu nguyên nằm ở [Chương 02, mục 2–4](02-type-layout.md), không nhắc lại ở đây.
+### 5.1 Layout
 
-*Con trỏ không-null.* Nomicon nhắc: một số kiểu Rust được định nghĩa là không bao giờ null, gồm `&T`, `&mut T`, `Box<T>` và con trỏ hàm `extern "abi" fn()`[^nomicon-ffi-nonnull]. Tạo giá trị không hợp lệ đó là UB, nên với con trỏ C có thể null phải dùng `Option` thay vì ép (transmute)[^nomicon-ffi-nonnull-ub]. Đây là "nullable pointer optimization": enum có đúng hai biến thể, một biến thể không dữ liệu và biến thể kia chứa một trường thuộc các kiểu không-null vừa kể[^nomicon-ffi-nullable-def], được biểu diễn không thêm discriminant (biến thể rỗng là giá trị null)[^nomicon-ffi-nullable-nodisc]; tối ưu này *được bảo đảm* áp dụng cho kiểu đủ điều kiện[^nomicon-ffi-nullable-guar]. `Option<extern "C" fn(c_int) -> c_int>` là cách biểu diễn đúng cho con trỏ hàm C có thể null[^nomicon-ffi-nullable]. Danh sách kiểu mà std hứa `Option<T>` cùng size/ABI với `T`, và khái niệm niche đứng sau, nằm ở [Chương 02, mục 5–6](02-type-layout.md).
+Nomicon nói: kiểu bạn định đưa qua FFI nên có `repr(C)`[^nomicon-ffi-reprc]. Với `billing`, struct hóa đơn gửi cho `libtax` vì vậy nên là `repr(C)` (nhận xét của người soạn). Chi tiết `repr(C)`, `repr(transparent)` và enum có `repr` kiểu nguyên nằm ở [Chương 02, mục 2–4](02-type-layout.md), không nhắc lại ở đây.
 
-*Opaque.* Khi thư viện C không cho bạn thấy nội dung đối tượng[^nomicon-ffi-opaque], Nomicon đưa hai cách: dùng `void *`, biểu diễn trong Rust bằng `c_void`[^nomicon-ffi-cvoid] — cách này "hợp lệ" nhưng Nomicon nói còn làm tốt hơn được, vì struct opaque cho một mức an toàn kiểu nhất định[^nomicon-ffi-opaque-struct]; hoặc tạo kiểu `repr(C)` riêng cho mỗi struct opaque để có kiểu riêng[^nomicon-ffi-opaque-rust].
+### 5.2 Con trỏ có thể null
 
-*Ai sở hữu gì.* Thư viện ngoài thường *giao quyền sở hữu* tài nguyên cho code gọi; khi đó phải dùng destructor của Rust để bảo đảm tài nguyên được giải phóng, nhất là khi có panic[^nomicon-ffi-destructors]. Wrapper nên bọc API thô thành giao diện an toàn, giấu phần unsafe[^nomicon-ffi-wrap].
+Rust định nghĩa vài kiểu là không bao giờ null: `&T`, `&mut T`, `Box<T>` và con trỏ hàm `extern "abi" fn()`[^nomicon-ffi-nonnull]. Tạo hoặc làm việc với giá trị không hợp lệ đó là UB, nên khi con trỏ đến từ C có thể null, bạn phải dùng `Option` thay vì ép (transmute)[^nomicon-ffi-nonnull-ub]. Ví dụ trong `billing`: một con trỏ hàm log mà phía C có thể để null (nhận xét của người soạn).
 
-<details><summary>Đi sâu: vì sao UB ở một phía lây sang phía kia; <code>longjmp</code></summary>
+Cách này gọi là "nullable pointer optimization": một enum đủ điều kiện khi nó có đúng hai biến thể, một biến thể không chứa dữ liệu và biến thể kia chứa một trường thuộc các kiểu không-null vừa kể[^nomicon-ffi-nullable-def]. Enum như vậy không tốn thêm chỗ cho discriminant, vì biến thể rỗng được biểu diễn bằng giá trị null đặt vào trường không-null[^nomicon-ffi-nullable-nodisc]. Dù tên là "optimization", tối ưu này *được bảo đảm* áp dụng cho kiểu đủ điều kiện[^nomicon-ffi-nullable-guar]. Vì vậy `Option<extern "C" fn(c_int) -> c_int>` là cách biểu diễn đúng cho con trỏ hàm C có thể null[^nomicon-ffi-nullable]. Danh sách kiểu mà std hứa `Option<T>` cùng size/ABI với `T`, và khái niệm niche đứng sau, nằm ở [Chương 02, mục 5–6](02-type-layout.md).
 
-- UB không dừng ở biên ngôn ngữ: Reference nói UB của C làm cả chương trình có UB (kể cả phần Rust), và ngược lại UB trong Rust có thể ảnh hưởng code ngôn ngữ khác qua FFI[^ref-ub-ffi]; chi tiết ở [Chương 07, mục 2](07-unsafe-ub-miri.md). Đây là lý do mọi hàm `extern` đều là biên cần kiểm (nhận xét của người soạn).
-- Runtime Rust giả định frame Rust không bị giải phóng mà không chạy destructor của biến cục bộ; C như `longjmp` có thể vi phạm giả định đó[^ref-ub-runtime]. Nhận xét của người soạn: đừng để thư viện C `longjmp` qua frame Rust.
-- Nomicon có ví dụ callback: Rust có thể đưa một hàm do mình định nghĩa cho thư viện ngoài, miễn hàm đó được đánh dấu `extern` đúng calling convention; hàm callback được đăng ký qua một lời gọi vào thư viện C rồi được gọi lại từ đó[^nomicon-ffi-callback].
-- Nomicon nói thêm: Rust hiện không gọi thẳng được vào thư viện C++, nên ví dụ dùng thư viện có giao diện C[^nomicon-ffi-cpp].
+### 5.3 Opaque
+
+Thỉnh thoảng thư viện C đưa bạn một con trỏ tới một thứ mà nó không cho biết cấu trúc bên trong[^nomicon-ffi-opaque]. Handle `TaxContext*` của `libtax` thuộc loại này. Nomicon nêu hai cách xử lý. Cách thứ nhất là `void *`, biểu diễn trong Rust bằng `c_void`[^nomicon-ffi-cvoid]. Cách này hợp lệ, nhưng Nomicon nói còn làm tốt hơn được, vì struct opaque cho một mức an toàn kiểu nhất định[^nomicon-ffi-opaque-struct]. Cách thứ hai là tạo một kiểu `repr(C)` riêng cho mỗi struct opaque, để mỗi cái có kiểu riêng trong Rust[^nomicon-ffi-opaque-rust].
+
+### 5.4 Ai sở hữu gì
+
+Thư viện ngoài thường *giao quyền sở hữu* tài nguyên cho code gọi. Khi đó bạn phải dùng destructor của Rust để bảo đảm tài nguyên được giải phóng, nhất là khi có panic[^nomicon-ffi-destructors]. Với `TaxContext*`, nghĩa là bọc nó trong một struct có `Drop` gọi hàm giải phóng của C (nhận xét của người soạn). Ngoài ra, wrapper nên bọc API thô thành giao diện an toàn và giấu phần unsafe bên trong[^nomicon-ffi-wrap].
+
+<details><summary>Đi sâu: vì sao UB ở một phía lây sang phía kia; <code>longjmp</code>, callback, C++</summary>
+
+- **UB không dừng ở biên ngôn ngữ.** Reference nói UB của C làm cả chương trình có UB, kể cả phần Rust; ngược lại, UB trong Rust có thể ảnh hưởng code ngôn ngữ khác qua FFI[^ref-ub-ffi]. Chi tiết ở [Chương 07, mục 2](07-unsafe-ub-miri.md). Đây là lý do mọi hàm `extern` đều là biên cần kiểm (nhận xét của người soạn).
+- **`longjmp`.** Runtime Rust giả định frame Rust không bị giải phóng mà không chạy destructor của biến cục bộ; C như `longjmp` có thể vi phạm giả định đó[^ref-ub-runtime]. Nhận xét của người soạn: đừng để thư viện C `longjmp` qua frame Rust.
+- **Callback.** Rust có thể đưa một hàm do mình định nghĩa cho thư viện ngoài, miễn hàm đó được đánh dấu `extern` đúng calling convention. Hàm callback được đăng ký qua một lời gọi vào thư viện C, rồi sau đó được gọi lại từ chính thư viện đó[^nomicon-ffi-callback].
+- **C++.** Rust hiện không gọi thẳng được vào thư viện C++, nên ví dụ của Nomicon dùng thư viện có giao diện C[^nomicon-ffi-cpp].
 
 </details>
 
-**Quay lại Q5:** qua FFI chỉ gửi kiểu có layout cố định (`repr(C)`), dùng `Option<kiểu không-null>` cho con trỏ có thể null, opaque cho thứ C giấu, và nhớ ai sở hữu/giải phóng.
+**Quay lại Q5:** qua FFI chỉ gửi kiểu có layout cố định (`repr(C)`), dùng `Option<kiểu không-null>` cho con trỏ có thể null, opaque cho thứ C giấu, và nhớ ai sở hữu và giải phóng. Với `billing`, đó là struct hóa đơn, callback log và handle `TaxContext*`.
+
+---
 
 ## 6. Panic băng qua ranh giới FFI: `-unwind` ABI (Q6)
 
-> **Trả lời ngắn.** Mỗi ABI thuộc nhóm "cho phép unwind" hoặc "không"[^ref-fn-categories]. Panic Rust đi tới ranh giới không cho unwind thì process bị abort an toàn; exception ngoại lai (ví dụ C++) đi vào Rust qua ranh giới như vậy là UB[^nomicon-ffi-boundary]. Muốn panic hoặc exception đi xuyên ranh giới thì phải dùng biến thể `-unwind` của ABI, ví dụ `"C-unwind"`[^nomicon-ffi-unwind].
+> **Trả lời ngắn.** Mỗi ABI thuộc một trong hai nhóm: cho phép unwind hoặc không[^ref-fn-categories]. Nếu panic của Rust chạm ranh giới không cho unwind thì process bị abort an toàn; còn exception ngoại lai, ví dụ của C++, đi vào Rust qua ranh giới như vậy là UB[^nomicon-ffi-boundary]. Muốn panic hoặc exception xuyên qua ranh giới thì phải dùng biến thể `-unwind` của ABI, ví dụ `"C-unwind"`[^nomicon-ffi-unwind].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai tòa nhà dùng hai hệ thống báo cháy khác nhau. Nếu chuông của tòa Rust kêu và dây nối sang tòa C không hiểu tín hiệu đó, hoặc dừng lại ở cửa (abort an toàn) hoặc làm hỏng hệ thống tòa C. Biến thể `-unwind` là bản "dây nối hai hệ thống", chỉ dùng khi cả hai bên đã thiết kế để tương thích.
+*Với service `billing`.* Gateway C++ gọi `price_order` của `libpricing`, và hàm đó panic giữa chừng. Panic có chạy ngược vào frame C++ của gateway không? Ngược lại, nếu `billing` gọi `libtax` và `libtax` gọi lại một callback Rust rồi callback đó panic thì sao? Cơ chế unwind của Rust không được đặc tả để tương thích với cơ chế unwind của ngôn ngữ nào khác[^nomicon-unwinding-ffi], nên đến ranh giới hai bên phải có luật. Mục này là bộ luật đó; biến thể `-unwind` của ABI chỉ nên dùng khi cả hai bên cố ý thiết kế để unwind xuyên qua nhau (nhận xét của người soạn).
 
-*Ba quy tắc nền.*
+### 6.1 Ba quy tắc nền
 
-1. Hầu hết ABI có hai biến thể, có và không có hậu tố `-unwind`; ABI Rust *luôn* cho phép unwind nên không có "Rust-unwind"[^ref-fn-unwind-intro]. `"C-unwind"` giống `"C"` nhưng khác ở hành vi khi callee unwind (panic hoặc exception kiểu C++)[^ref-abi-unwind].
-2. Hành vi khi unwind chạm ranh giới được xác định bởi *ABI cộng với panic runtime*[^ref-fn-unwind-intro]. Reference tóm bằng một bảng về hành vi khi một thao tác unwind chạm từng loại ranh giới ABI[^ref-fn-table-intro]; người soạn chép lại bên dưới. Cột "panic" gồm cả `panic!` lẫn các thao tác Rust khác gây panic (chỉ số mảng ngoài biên, tràn số nguyên)[^ref-fn-panic-col]. Cột cuối là unwind "native" theo từng target (trên target hỗ trợ exception C++ thì là cơ chế cài đặt chúng); "forced unwinding" như `longjmp` trên Windows hay `pthread_exit` của glibc bị loại khỏi cột này[^ref-fn-native].
-3. Unwind vào Rust từ hàm ngoại gọi qua ABI không-unwind, hoặc gọi hàm Rust có thể unwind từ code không hỗ trợ unwind (như C biên dịch với `-fno-exceptions`), đều là UB[^ref-panic-ffi-undef1][^ref-panic-ffi-undef2].
+1. Hầu hết ABI có hai biến thể, có và không có hậu tố `-unwind`; ABI Rust *luôn* cho phép unwind nên không có "Rust-unwind"[^ref-fn-unwind-intro]. `"C-unwind"` giống `"C"` nhưng khác ở hành vi khi callee unwind, bằng panic hoặc bằng exception kiểu C++[^ref-abi-unwind].
+2. ABI cộng với panic runtime quyết định hành vi khi unwind chạm ranh giới[^ref-fn-unwind-intro]. Reference tóm tắt trong một bảng về hành vi khi một thao tác unwind chạm từng loại ranh giới ABI[^ref-fn-table-intro]; bảng được chép lại ở §6.2. Cột "panic" gồm cả `panic!` lẫn các thao tác Rust khác gây panic, như chỉ số mảng ngoài biên hay tràn số nguyên[^ref-fn-panic-col]. Cột cuối là unwind "native" theo từng target: trên target hỗ trợ exception C++ thì đó là cơ chế cài đặt chúng. "Forced unwinding" như `longjmp` trên Windows hay `pthread_exit` của glibc bị loại khỏi cột này[^ref-fn-native].
+3. Unwind vào Rust từ một hàm ngoại được gọi qua ABI không-unwind là UB[^ref-panic-ffi-undef1]. Gọi một hàm Rust có thể unwind từ code không hỗ trợ unwind, như C biên dịch với `-fno-exceptions`, cũng là UB[^ref-panic-ffi-undef2].
+
+### 6.2 Bảng hành vi
 
 | Panic runtime | ABI của ranh giới | Panic Rust tới đây | Exception ngoại lai (native, không cưỡng bức) tới đây | Nguồn |
 |---|---|---|---|---|
 | `panic=unwind` | unwinding (`"Rust"`, `"C-unwind"`, …) | unwind tiếp | unwind tiếp | [^ref-fn-row1] |
-| `panic=unwind` | không unwind (`"C"`, `"stdcall"`, …) | abort (xem ghi chú dưới bảng) | UB | [^ref-fn-row2][^ref-fn-abort] |
+| `panic=unwind` | không unwind (`"C"`, `"stdcall"`, …) | abort (xem ghi chú dưới bảng) | UB | [^ref-fn-row2] |
 | `panic=abort` | unwinding | abort, không unwind | abort | [^ref-fn-row3] |
 | `panic=abort` | không unwind | abort, không unwind | UB | [^ref-fn-row4] |
 
-(Bảng chép lại từ Reference, mỗi dòng có chú thích riêng ở cột cuối; cách phân nhóm ABI "unwinding"/"non-unwinding" theo định nghĩa của Reference[^ref-fn-categories].)
+(Bảng chép lại từ Reference, mỗi dòng có chú thích riêng ở cột cuối. Cách phân nhóm ABI "unwinding" và "non-unwinding" theo định nghĩa của Reference[^ref-fn-categories].)
 
-*Chi tiết cần nhớ.* Panic tới ranh giới không unwind: với `panic=unwind`, hoặc *không* destructor nào chạy, hoặc *tất cả* destructor tới ranh giới sẽ chạy — Reference nói *không xác định* trường hợp nào[^ref-fn-abort]. Đừng viết code phụ thuộc cái nào (nhận xét của người soạn). Còn `panic=abort` thì `panic!` abort ngay bất kể ABI của hàm đang panic[^nomicon-panic-abort-note].
+Hai điều cần nhớ khi đọc bảng. Thứ nhất, với `panic=unwind`, khi panic bị ranh giới không-unwind đổi thành abort thì hoặc *không* destructor nào chạy, hoặc *tất cả* destructor tới ranh giới sẽ chạy; Reference nói *không xác định* trường hợp nào[^ref-fn-abort]. Đừng viết code phụ thuộc vào cái nào (nhận xét của người soạn). Thứ hai, với `panic=abort`, `panic!` abort ngay bất kể ABI của hàm đang panic[^nomicon-panic-abort-note].
 
-*Hàm `extern "C"` panic thì abort an toàn, không phải UB.* Ví dụ Nomicon: `extern "C" fn assert_nonzero(input: u32)` với `assert!(input != 0)`; nếu gọi với 0, runtime *bảo đảm* abort an toàn dù có hay không biên dịch với `panic=abort`[^nomicon-ffi-abort]; dòng 2 của bảng (`panic=unwind`, ABI không unwind) cho cùng kết luận[^ref-fn-row2]. std cũng nói: hàm Rust sẽ bị code không hỗ trợ unwind gọi nên định nghĩa bằng `extern "C"`, vì khi đó panic được tự động bắt và process bị abort; muốn xử lý nhẹ nhàng hơn mới cần `catch_unwind`[^catch-extern-c].
+### 6.3 Hàm `extern "C"` panic thì abort an toàn, không phải UB
 
-*Đối chiếu với danh sách UB.* Danh sách UB của Reference có một mục "unwind qua frame không cho phép unwind", với ví dụ gọi hàm `"C-unwind"` bị import hoặc transmute thành `"C"`[^ref-ub-call]; Reference cũng xếp vào UB việc unwind từ code ngoại vào Rust qua ABI không-unwind (quy tắc 3 ở trên)[^ref-panic-ffi-undef1]. Hai điều này đọc được là không mâu thuẫn với "panic ⇒ abort an toàn" nếu phân biệt: UB là khi *ABI khai báo không khớp với hàm thật* hoặc khi *exception ngoại lai* đi vào Rust; còn panic của một hàm Rust *định nghĩa* bằng `extern "C"` là trường hợp bảng và Nomicon mô tả là abort (suy luận của người soạn: Reference không nối các đoạn này với nhau). Nguyên tắc thực hành: khai báo ABI phải khớp hàm thật ở cả hai phía; xem thêm [Chương 07, mục 2](07-unsafe-ub-miri.md).
+Ví dụ của Nomicon: `extern "C" fn assert_nonzero(input: u32)` chứa `assert!(input != 0)`. Gọi với 0 thì runtime *bảo đảm* abort process một cách an toàn, dù có biên dịch với `panic=abort` hay không[^nomicon-ffi-abort]. Dòng 2 của bảng cho cùng kết luận[^ref-fn-row2]. std cũng nói như vậy: hàm Rust sẽ bị code không hỗ trợ unwind gọi thì nên định nghĩa bằng `extern "C"`, vì khi đó panic tự động bị bắt và process bị abort; muốn xử lý nhẹ nhàng hơn thì mới cần `catch_unwind`[^catch-extern-c]. Với `billing`: `price_order` khai báo `extern "C"` mà panic thì process của gateway bị abort, chứ không phải runtime C++ của họ bị hỏng ngầm (nhận xét của người soạn).
 
-*Một trang Nomicon nói khác.* Trang Nomicon "Unwinding" (cùng bản 1.95.0) viết rằng unwind từ ngôn ngữ khác vào Rust, hoặc từ Rust sang ngôn ngữ khác, là UB và bạn phải bắt mọi panic ở ranh giới FFI[^nomicon-unwinding-ffi]. Đó là phát biểu chung, không phân biệt chuỗi ABI; trang FFI của cùng Nomicon và Reference thì phân biệt theo ABI (panic Rust chạm ranh giới không-unwind ⇒ abort an toàn[^nomicon-ffi-boundary]; `-unwind` cho phép panic xuyên ranh giới[^nomicon-ffi-cunwind]). Chương này theo Reference và trang FFI vì chúng chi tiết hơn và có bảng (nhận xét của người soạn). Điểm chung của mọi nguồn: đừng để panic băng qua FFI một cách vô ý — hoặc `catch_unwind`, hoặc chấp nhận abort, hoặc chủ động dùng `-unwind` ở cả hai phía.
+### 6.4 Đối chiếu với danh sách UB
 
-*Dùng `"C-unwind"` đúng chỗ.* Nomicon cho hai ví dụ: hàm Rust `extern "C-unwind"` panic thì được phép unwind qua frame C++[^nomicon-ffi-cunwind] (và nếu frame C++ có object, destructor của chúng sẽ chạy[^nomicon-ffi-cpp-dtor]); và hàm Rust `"C-unwind"` gọi hàm C++ có thể throw: nếu throw xảy ra thì `Box` cục bộ được drop, nếu không thì in giá trị bình thường[^nomicon-ffi-throw].
+Danh sách UB của Reference có một mục "unwind qua frame không cho phép unwind", với ví dụ gọi hàm `"C-unwind"` bị import hoặc transmute thành `"C"`[^ref-ub-call]. Reference cũng xếp vào UB việc unwind từ code ngoại vào Rust qua ABI không-unwind, tức quy tắc 3 ở trên[^ref-panic-ffi-undef1]. Hai điều này không mâu thuẫn với "panic ⇒ abort an toàn" nếu phân biệt hai trường hợp. UB xảy ra khi *ABI khai báo không khớp với hàm thật*, hoặc khi *exception ngoại lai* đi vào Rust. Còn panic của một hàm Rust *định nghĩa* bằng `extern "C"` là trường hợp mà bảng và Nomicon mô tả là abort (suy luận của người soạn: Reference không nối các đoạn này với nhau). Nguyên tắc thực hành: khai báo ABI phải khớp hàm thật ở cả hai phía; xem thêm [Chương 07, mục 2](07-unsafe-ub-miri.md).
 
-<details><summary>Đi sâu: bắt exception ngoại lai, "bản Rust khác" cũng là ngoại lai, hạn chế khi rethrow</summary>
+### 6.5 Dùng `"C-unwind"` đúng chỗ
 
-- Bắt exception ngoại lai bằng `catch_unwind`, `JoinHandle::join`, hoặc để nó lan ra ngoài `main`/gốc thread: kết quả là một trong hai và *không xác định* cái nào — process abort, hoặc hàm trả `Err` chứa kiểu opaque[^ref-panic-catch-foreign]. Docs `catch_unwind` nói cùng ý và thêm: nếu abort thì abort *sau khi* chạy mọi destructor của `f` và các hàm nó gọi[^catch-foreign].
-- Nomicon nhấn: tương tác của `catch_unwind` với exception ngoại lai là không xác định, cũng như tương tác của panic với cơ chế bắt exception của ngôn ngữ khác (đáng chú ý là `try/catch` của C++)[^nomicon-ffi-undef-catch].
-- Rust build/liên kết với *bản runtime Rust khác* cũng được coi là "ngoại lai": thư viện dùng `panic!` link với một bản `std`, được gọi từ ứng dụng dùng bản `std` khác, có thể làm cả ứng dụng abort dù chỉ dùng trong thread con[^ref-panic-other-rt].
-- Chưa có bảo đảm nào về việc runtime ngoại lai hủy hoặc rethrow payload panic của Rust: unwind sinh từ runtime Rust phải dẫn tới kết thúc process hoặc bị chính runtime đó bắt[^ref-panic-dispose].
-- Với `-unwind` ABI, lint `ffi_unwind_calls` đánh dấu mọi lời gọi tới hàm/con trỏ ngoại `-unwind`, hữu ích nếu muốn thư viện sound với mọi panic runtime lúc link[^ref-link-lint].
+Nomicon cho hai ví dụ. Ví dụ thứ nhất: hàm Rust `extern "C-unwind"` khi panic (biên dịch với `panic=unwind`) được phép unwind qua frame C++[^nomicon-ffi-cunwind]. Nếu frame C++ có object thì destructor của chúng sẽ được gọi[^nomicon-ffi-cpp-dtor]. Ví dụ thứ hai: hàm Rust `"C-unwind"` gọi một hàm C++ có thể throw. Nếu throw xảy ra thì `Box` cục bộ được drop, nếu không thì in giá trị bình thường[^nomicon-ffi-throw].
+
+<details><summary>Đi sâu: một trang Nomicon nói khác, bắt exception ngoại lai, "bản Rust khác" cũng là ngoại lai, hạn chế khi rethrow</summary>
+
+- **Một trang Nomicon nói khác.** Trang "Unwinding" của Nomicon (cùng bản 1.95.0) viết rằng unwind từ ngôn ngữ khác vào Rust, hoặc từ Rust sang ngôn ngữ khác, là UB và bạn phải bắt mọi panic ở ranh giới FFI[^nomicon-unwinding-ffi]. Đó là phát biểu chung, không phân biệt chuỗi ABI. Trang FFI của cùng Nomicon thì phân biệt theo ABI: panic Rust chạm ranh giới không-unwind ⇒ abort an toàn[^nomicon-ffi-boundary]. Cũng trang đó nói `-unwind` cho phép panic xuyên ranh giới[^nomicon-ffi-cunwind]. Chương này theo Reference và trang FFI vì chúng chi tiết hơn và có bảng (nhận xét của người soạn). Điểm chung của mọi nguồn là đừng để panic băng qua FFI một cách vô ý: hoặc `catch_unwind`, hoặc chấp nhận abort, hoặc chủ động dùng `-unwind` ở cả hai phía.
+- **Bắt exception ngoại lai.** Nếu bạn bắt bằng `catch_unwind`, bằng `JoinHandle::join`, hoặc để nó lan ra ngoài `main` hay gốc thread, kết quả là một trong hai và *không xác định* là cái nào: process abort, hoặc hàm trả `Err` chứa một kiểu opaque[^ref-panic-catch-foreign]. Docs `catch_unwind` nói cùng ý, và thêm rằng nếu abort thì abort *sau khi* chạy mọi destructor của `f` và các hàm nó gọi[^catch-foreign].
+- **Tương tác với cơ chế bắt của ngôn ngữ khác.** Nomicon nhấn: tương tác của `catch_unwind` với exception ngoại lai là không xác định, cũng như tương tác của panic với cơ chế bắt exception của ngôn ngữ khác, đáng chú ý là `try/catch` của C++[^nomicon-ffi-undef-catch].
+- **Một bản runtime Rust khác cũng là "ngoại lai".** Một thư viện dùng `panic!` và link với một bản `std`, nếu được gọi từ ứng dụng dùng bản `std` khác, có thể làm cả ứng dụng abort dù chỉ dùng trong thread con[^ref-panic-other-rt].
+- **Hủy hoặc rethrow payload.** Chưa có bảo đảm nào về việc runtime ngoại lai hủy hoặc rethrow payload panic của Rust. Nói cách khác, unwind sinh từ runtime Rust phải dẫn tới kết thúc process hoặc bị chính runtime đó bắt[^ref-panic-dispose].
+- **Lint.** Với `-unwind` ABI, lint `ffi_unwind_calls` đánh dấu mọi lời gọi tới hàm hay con trỏ ngoại `-unwind`, hữu ích nếu bạn muốn thư viện sound với mọi panic runtime lúc link[^ref-link-lint].
 
 </details>
 
-**Quay lại Q6:** ranh giới không cho unwind thì panic ⇒ abort, exception ngoại lai ⇒ UB; muốn xuyên ranh giới phải chọn `-unwind` ở cả hai phía.
+**Quay lại Q6:** ranh giới không cho unwind thì panic ⇒ abort, exception ngoại lai ⇒ UB; muốn xuyên ranh giới phải chọn `-unwind` ở cả hai phía. Với `billing`, `price_order` khai báo `"C"` sẽ abort process thay vì để panic chạy vào gateway C++.
+
+---
 
 ## 7. Mở API Rust cho C: tường chắn panic và quy tắc build (Q7)
 
-> **Trả lời ngắn.** Hàm `extern "C"` mà panic sẽ abort process an toàn[^nomicon-ffi-abort]; nếu bạn không muốn chết thì phải `catch_unwind` *trước* ranh giới và đổi thành mã lỗi[^nomicon-ffi-catch]. Ngoài ra, nếu artifact có khả năng unwind thì mọi crate trong nó phải build theo `unwind`, nếu không unwind có thể là UB[^ref-link-unwind-prohibited].
+> **Trả lời ngắn.** Hàm `extern "C"` mà panic sẽ abort process an toàn[^nomicon-ffi-abort]. Nếu bạn không muốn chết thì phải `catch_unwind` *trước* ranh giới và đổi thành mã lỗi[^nomicon-ffi-catch]. Ngoài ra, nếu artifact có khả năng unwind thì mọi crate trong nó phải build theo `unwind`, nếu không unwind có thể là UB[^ref-link-unwind-prohibited].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn viết thư viện Rust cho một service C/C++/Go (qua cgo) gọi. Từ phía họ, bạn là "hộp đen" giống một database driver: lỗi phải ra bằng mã lỗi hoặc `errno`, không bao giờ là một exception "chạy lung tung" trong runtime của họ.
+*Với service `billing`.* Gateway C++ gọi `price_order` của `libpricing` cho mỗi đơn hàng. Với gateway, `price_order` là hộp đen: lỗi phải về bằng mã lỗi, chứ không phải bằng một panic lan vào runtime của họ (nhận xét của người soạn). Mục này là ba bước để `billing` làm được điều đó: xuất symbol, chắn panic, và build đúng.
 
-*Bước 1 — xuất symbol.* Theo Nomicon, bạn cần `extern "C"` để hàm theo calling convention C, và `no_mangle` để symbol có tên xác định để link[^nomicon-ffi-callrust]. Biên dịch thành thư viện chung bằng `crate-type = ["cdylib"]` trong `Cargo.toml`[^nomicon-ffi-cdylib].
+### 7.1 Bước 1: xuất symbol
 
-*Bước 2 — chắn panic.* Chọn một trong hai:
+Nomicon nói bạn cần `extern "C"` để hàm theo calling convention C, và `no_mangle` để hàm có symbol với tên xác định mà bên kia link được[^nomicon-ffi-callrust]. Muốn biên dịch thành thư viện chung, đặt `crate-type = ["cdylib"]` trong `Cargo.toml`[^nomicon-ffi-cdylib].
 
-- **Chấp nhận abort.** Như ở mục 6, hàm `extern "C"` panic ⇒ process abort an toàn[^nomicon-ffi-abort]. Đơn giản và an toàn, nhưng một lỗi lập trình trong thư viện giết cả process gọi.
-- **Chuyển thành mã lỗi.** Nomicon: nếu code Rust có thể panic và bạn không muốn abort khi nó panic thì *phải* dùng `catch_unwind`[^nomicon-ffi-catch]. Ví dụ Nomicon dùng `catch_unwind` trả `0` nếu thành công và `1` nếu `Err`[^nomicon-ffi-catch-ex].
+### 7.2 Bước 2: chắn panic
+
+Bạn chọn một trong hai.
+
+- **Chấp nhận abort.** Như ở mục 6, hàm `extern "C"` panic thì process abort an toàn[^nomicon-ffi-abort]. Cách này đơn giản và an toàn, nhưng một bug trong `libpricing` sẽ giết cả process của gateway.
+- **Chuyển thành mã lỗi.** Nomicon nói nếu code Rust có thể panic và bạn không muốn abort khi nó panic thì *phải* dùng `catch_unwind`[^nomicon-ffi-catch]. Ví dụ của Nomicon dùng `catch_unwind` rồi trả `0` nếu thành công và `1` nếu `Err`[^nomicon-ffi-catch-ex]. Với `billing`, mã lỗi đó chính là thứ gateway đọc được.
 
 ```rust
 // minh họa; chưa chạy
@@ -283,45 +354,60 @@ fn risky(x: u32) -> i32 {
 }
 ```
 
-Hãy nhớ giới hạn: `catch_unwind` chỉ bắt panic dạng unwind, không bắt panic làm abort[^nomicon-catch-only]. Nên nếu build `panic=abort` thì "tường chắn" này không hoạt động, vì process đã abort ngay từ `panic!` (hệ quả của câu trích; nhận xét của người soạn).
+Cần nhớ giới hạn của cách này: `catch_unwind` chỉ bắt panic dạng unwind, không bắt panic làm abort[^nomicon-catch-only]. Vì vậy nếu bạn build `panic=abort` thì tường chắn này không hoạt động, vì process đã abort ngay từ `panic!` (hệ quả của câu trích; nhận xét của người soạn).
 
-*Bước 3 — quy tắc build.* Một artifact Rust là "có khả năng unwind" nếu dùng panic handler `unwind`, hoặc chứa crate build `unwind` gọi hàm qua ABI `-unwind`, hoặc gọi qua ABI `"Rust"` vào artifact Rust khác (có bản runtime riêng) mà cái đó có khả năng unwind[^ref-link-potential]. Nếu có khả năng unwind thì *mọi* crate của nó phải build chiến lược `unwind`, nếu không unwind có thể gây UB[^ref-link-unwind-prohibited]. Với `rustc` làm bước link, quy tắc được thực thi tự động; nếu link không qua rustc (kể cả `dlopen`) thì bạn tự lo[^ref-link-note].
+### 7.3 Bước 3: quy tắc build
+
+Một artifact Rust là "có khả năng unwind" nếu thỏa một trong ba điều kiện: nó dùng panic handler `unwind`; nó chứa một crate build `unwind` có gọi hàm qua ABI `-unwind`; hoặc nó gọi qua ABI `"Rust"` vào một artifact Rust khác, có bản runtime riêng, mà artifact kia có khả năng unwind[^ref-link-potential]. Nếu artifact có khả năng unwind thì *mọi* crate của nó phải build với chiến lược `unwind`, nếu không unwind có thể gây UB[^ref-link-unwind-prohibited]. Khi `rustc` làm bước link, quy tắc này được thực thi tự động; nếu link không qua rustc, kể cả `dlopen`, bạn phải tự bảo đảm[^ref-link-note].
 
 <details><summary>Đi sâu: khi nào dùng <code>"C-unwind"</code> thay vì chắn; thiết kế API; checklist</summary>
 
-- Hàm Rust *cố ý* để panic xuyên sang C++ (để C++ `catch`) thì dùng `"C-unwind"` và `panic=unwind`[^nomicon-ffi-cunwind]. Chỉ làm khi hai bên cùng hỗ trợ unwind; nếu phía gọi biên dịch kiểu `-fno-exceptions` thì gọi vào hàm Rust unwind được là UB[^ref-panic-ffi-undef2].
-- `resume_unwind` hữu ích để mang panic đã bắt qua một lớp code C rồi ném tiếp (docs gợi ý đúng ý này), vì nó không gọi lại hook[^resume].
-- Giữ ranh giới hẹp: nhận/trả kiểu `repr(C)`, con trỏ opaque, mã lỗi (mục 5). Nhận xét của người soạn: đặt wrapper an toàn phía Rust để phần `unsafe` nằm gọn một chỗ; Nomicon nói thư viện có thể chỉ phơi ra giao diện an toàn, cấp cao và giấu phần unsafe bên trong[^nomicon-ffi-wrap].
-- Không đặt panic hook làm cơ chế báo lỗi cho phía C (nhận xét của người soạn): hook là tài nguyên toàn cục của process[^hook-global] và chạy trước mọi bước (mục 1).
-- Checklist (nhận xét của người soạn, tổng hợp từ các mục trên): (1) mọi hàm xuất đều `extern "C"` hoặc `-unwind`, rõ ràng; (2) đã quyết định abort hay chuyển lỗi; (3) nếu artifact có khả năng unwind thì mọi crate trong nó build `unwind`; (4) kiểu qua ranh giới là `repr(C)`/opaque/`Option<kiểu không-null>`.
+- **Khi nào dùng `"C-unwind"`.** Nếu hàm Rust *cố ý* để panic xuyên sang C++ (để C++ `catch`) thì dùng `"C-unwind"` và `panic=unwind`[^nomicon-ffi-cunwind]. Chỉ làm vậy khi hai bên cùng hỗ trợ unwind: nếu phía gọi biên dịch kiểu `-fno-exceptions` thì việc gọi vào hàm Rust có thể unwind là UB[^ref-panic-ffi-undef2].
+- **`resume_unwind`** hữu ích để mang một panic đã bắt qua một lớp code C rồi ném tiếp (docs gợi ý đúng ý này), vì nó không gọi lại hook[^resume].
+- **Giữ ranh giới hẹp.** Nhận và trả kiểu `repr(C)`, con trỏ opaque, mã lỗi (mục 5). Nhận xét của người soạn: đặt wrapper an toàn phía Rust để phần `unsafe` nằm gọn một chỗ. Nomicon cũng nói một thư viện có thể chỉ phơi giao diện an toàn, cấp cao và giấu phần unsafe bên trong[^nomicon-ffi-wrap].
+- **Đừng dùng panic hook làm cơ chế báo lỗi cho phía C** (nhận xét của người soạn): hook là tài nguyên toàn cục của process[^hook-global], và nó chạy trước mọi bước (mục 1).
+- **Checklist** (nhận xét của người soạn, tổng hợp từ các mục trên): (1) mọi hàm xuất đều `extern "C"` hoặc `-unwind`, viết rõ; (2) đã quyết định abort hay chuyển lỗi; (3) nếu artifact có khả năng unwind thì mọi crate trong nó build `unwind`; (4) kiểu qua ranh giới là `repr(C)`, opaque hoặc `Option<kiểu không-null>`.
 
 </details>
 
-**Quay lại Q7:** panic mặc định abort ở `extern "C"`; muốn thành mã lỗi thì `catch_unwind` trong từng hàm xuất, và artifact có khả năng unwind phải build mọi crate theo `unwind`.
+**Quay lại Q7:** hàm `extern "C"` panic thì mặc định abort; muốn thành mã lỗi thì `catch_unwind` trong từng hàm xuất, và artifact có khả năng unwind phải build mọi crate theo `unwind`. Với `billing`, `price_order` bọc `catch_unwind` và trả mã lỗi cho gateway.
+
+---
 
 ## Liên hệ với Rust
 
-- **Hợp đồng ABI nằm trong ngôn ngữ.** Rust để bạn ghi ABI tường minh trên từng hàm (`extern "C"`, `"C-unwind"`, `"system"`); khai báo ABI không khớp hàm thật là UB[^ref-ub-call], và compiler không kiểm được khai báo ngoại[^nomicon-ffi-decl].
-- **Panic là một phần của `Result`?** Không: panic dành cho lỗi lập trình/trạng thái không phục hồi, `Result` cho lỗi thường xuyên. Docs `catch_unwind` nhắc lại đúng điều này[^catch-notgeneral]; tiêu chí chi tiết ở [P9 · 05](../09-rust-language/05-error-handling.md).
-- **Ba lớp "phanh" của panic (cách gọi của người soạn):** `Drop` (dọn dẹp khi unwind, do ngôn ngữ bảo đảm[^ref-panic-unwind]), poisoning (đừng dùng mù quáng dữ liệu dở dang) và `UnwindSafe` (cảnh báo ở `catch_unwind`). Hai lớp sau là cơ chế *thư viện/kiểu* chỉ mang tính cảnh báo: poisoning chỉ khuyến cáo[^mutex-advisory], `UnwindSafe` không phải `unsafe trait`[^unwindsafe-speedbump].
-- **Danh sách UB của Reference có đúng mục này:** gọi sai ABI hoặc unwind qua frame không cho unwind[^ref-ub-call]; mục đó không đồng nghĩa với "mọi panic chạm `extern "C"` là UB" (xem mục 6 và [Chương 07, mục 2](07-unsafe-ub-miri.md)).
-- **Chọn bằng Cargo:** `panic = "abort"` trong profile đổi chiến lược panic của build đó, còn test/bench/build script/proc macro bỏ qua cài đặt này và vẫn unwind[^cargo-test-ignore]; override theo từng package cũng không được đặt `panic`[^cargo-no-override]. Với service backend, quyết định này (nhận xét của người soạn) nên đi kèm câu hỏi "ai khởi động lại tiến trình, và có mất log đang buffer không" (mục 2).
+Với `billing`, chương này không đổi dòng code nào của bạn; nó cho bạn biết năm điều. ABI là thứ bạn ghi tường minh trên từng hàm. Panic không thay `Result`. Ba lớp "phanh" của panic đều là cảnh báo chứ không phải rào chắn cứng. Danh sách UB của Reference có đúng mục "gọi sai ABI". Và `panic = "abort"` là một quyết định vận hành chứ không chỉ là cờ build (nhận xét của người soạn).
+
+**Hợp đồng ABI nằm trong ngôn ngữ.** Rust cho bạn ghi ABI tường minh trên từng hàm (`extern "C"`, `"C-unwind"`, `"system"`). Khai báo ABI không khớp hàm thật là UB[^ref-ub-call]. Compiler thì không kiểm được khai báo ngoại[^nomicon-ffi-decl].
+
+**Panic không phải một phần của `Result`.** Panic dành cho lỗi lập trình hoặc trạng thái không phục hồi, `Result` dành cho lỗi thường xuyên. Docs `catch_unwind` nhắc lại đúng điều này[^catch-notgeneral]; tiêu chí chi tiết ở [P9 · 05](../09-rust-language/05-error-handling.md).
+
+**Ba lớp "phanh" của panic (cách gọi của người soạn).** Lớp thứ nhất là `Drop`, dọn dẹp khi unwind, do ngôn ngữ bảo đảm[^ref-panic-unwind]. Lớp thứ hai là poisoning, để đừng dùng mù quáng dữ liệu dở dang. Lớp thứ ba là `UnwindSafe`, cảnh báo ở `catch_unwind`. Hai lớp sau là cơ chế *thư viện và kiểu* chỉ mang tính cảnh báo. Poisoning chỉ khuyến cáo[^mutex-advisory]. `UnwindSafe` không phải `unsafe trait`[^unwindsafe-speedbump].
+
+**Danh sách UB của Reference có đúng mục này.** Gọi sai ABI hoặc unwind qua frame không cho unwind đều nằm trong danh sách[^ref-ub-call]. Mục đó không đồng nghĩa với "mọi panic chạm `extern "C"` là UB" (xem mục 6 và [Chương 07, mục 2](07-unsafe-ub-miri.md)).
+
+**Chọn bằng Cargo.** `panic = "abort"` trong profile đổi chiến lược panic của build đó, còn test, bench, build script và proc macro bỏ qua cài đặt này và vẫn unwind[^cargo-test-ignore]. Override theo từng package cũng không được đặt `panic`[^cargo-no-override]. Với service backend như `billing`, quyết định này nên đi kèm câu hỏi "ai khởi động lại tiến trình, và có mất log đang buffer không" (nhận xét của người soạn; xem mục 2).
+
+---
 
 ## Tóm tắt
 
-- Panic: hook chạy trước, rồi (với `unwind`) tháo stack gọi `Drop` cho tới điểm phục hồi (ranh giới thread, `catch_unwind`)[^hook-before][^ref-panic-unwind][^ref-panic-recover].
-- `-C panic` / `panic` trong profile chọn `unwind` hoặc `abort`; mặc định `unwind` ở đa số target[^ref-panic-default]; `abort` không phục hồi được nên `catch_unwind` vô tác dụng (và, theo suy luận ở mục 2, không chạy destructor), đổi lại trình tối ưu có thể làm code nhỏ/nhanh hơn[^rustc-panic-flag][^cargo-panic][^ref-panic-abort-opt].
-- Một crate `abort` trong đồ thị kéo cả binary thành `abort`; test vẫn unwind[^rustc-panic-flag][^cargo-test-ignore].
-- `catch_unwind` dành cho biên đơn vị công việc/FFI, không phải try/catch; `UnwindSafe` là "speed bump", còn poisoning chỉ mang tính khuyến cáo[^catch-notgeneral][^unwindsafe-speedbump][^mutex-advisory].
-- ABI `"Rust"` không ổn định; `"C"` khớp C compiler chủ đạo của target; `extern` hai chiều đều không được compiler kiểm hộ[^ref-abi-rust][^ref-abi-c][^nomicon-ffi-decl].
-- Qua FFI dùng `repr(C)`, `Option<kiểu không-null>` cho con trỏ có thể null, opaque cho thứ bị giấu[^nomicon-ffi-reprc][^nomicon-ffi-nullable][^nomicon-ffi-opaque].
-- Ranh giới không-unwind: panic ⇒ abort an toàn, exception ngoại lai ⇒ UB; muốn xuyên thì dùng `-unwind` ở cả hai phía[^nomicon-ffi-boundary][^nomicon-ffi-unwind]. Mục UB "unwind qua frame không cho unwind" trong danh sách của Reference có ví dụ là khai báo ABI không khớp hàm thật (gọi `"C-unwind"` như `"C"`)[^ref-ub-call].
-- `extern "C"` panic ⇒ abort; muốn mã lỗi thì `catch_unwind` trước ranh giới (chỉ có tác dụng với `panic=unwind`)[^nomicon-ffi-abort][^nomicon-ffi-catch][^nomicon-catch-only].
+- Panic: hook chạy trước[^hook-before]. Rồi với `unwind`, runtime tháo stack và gọi `Drop`[^ref-panic-unwind]. Quá trình dừng ở điểm phục hồi: ranh giới thread hoặc `catch_unwind`[^ref-panic-recover].
+- `-C panic` hoặc `panic` trong profile chọn `unwind` hay `abort`[^cargo-panic]. Mặc định là `unwind` ở đa số target[^ref-panic-default]. Với `abort`, `catch_unwind` vô tác dụng[^catch-notall], và theo suy luận ở mục 2 thì destructor cũng không chạy. Đổi lại, trình tối ưu có thể làm code nhỏ và nhanh hơn[^ref-panic-abort-opt].
+- Một crate `abort` trong đồ thị kéo cả binary thành `abort`[^rustc-panic-flag]. Test thì vẫn unwind[^cargo-test-ignore].
+- `catch_unwind` dành cho biên của đơn vị công việc hoặc FFI, không phải try/catch[^catch-notgeneral]. `UnwindSafe` là "speed bump"[^unwindsafe-speedbump]. Poisoning chỉ mang tính khuyến cáo[^mutex-advisory].
+- ABI `"Rust"` không ổn định[^ref-abi-rust]. `"C"` khớp C compiler chủ đạo của target[^ref-abi-c]. `extern` hai chiều đều không được compiler kiểm hộ[^nomicon-ffi-decl].
+- Qua FFI, dùng `repr(C)`[^nomicon-ffi-reprc]. Con trỏ có thể null thì dùng `Option<kiểu không-null>`[^nomicon-ffi-nullable]. Thứ bị giấu thì dùng opaque[^nomicon-ffi-opaque].
+- Ranh giới không-unwind: panic ⇒ abort an toàn, exception ngoại lai ⇒ UB[^nomicon-ffi-boundary]. Muốn xuyên qua thì dùng `-unwind` ở cả hai phía[^nomicon-ffi-unwind].
+- Mục UB "unwind qua frame không cho unwind" trong danh sách của Reference có ví dụ là khai báo ABI không khớp hàm thật, tức gọi `"C-unwind"` như `"C"`[^ref-ub-call].
+- `extern "C"` panic ⇒ abort[^nomicon-ffi-abort]. Muốn mã lỗi thì `catch_unwind` trước ranh giới[^nomicon-ffi-catch]. Cách này chỉ có tác dụng với `panic=unwind`[^nomicon-catch-only].
 - Artifact "có khả năng unwind" phải build mọi crate với `unwind`[^ref-link-unwind-prohibited].
+
+---
 
 ## Câu hỏi tự kiểm tra
 
-1. Panic hook chạy trước hay sau khi stack được unwind? Nó có chạy dưới `panic=abort` không?
+1. Trong `billing`, panic hook chạy trước hay sau khi stack được unwind? Nó có chạy dưới `panic=abort` không?
 2. `catch_unwind` có bắt được panic khi build `panic=abort` không? Vì sao?
 3. Đặt `panic = "abort"` trong `[profile.release]` thì `cargo test` hành xử thế nào với panic?
 4. Nếu một crate trong đồ thị dùng `abort` thì binary cuối phải thế nào?
@@ -336,20 +422,22 @@ Hãy nhớ giới hạn: `catch_unwind` chỉ bắt panic dạng unwind, không 
 
 <details><summary>Đáp án</summary>
 
-1. Trước. Hook chạy khi thread panic, trước khi panic runtime được gọi, nên chạy với cả runtime unwind và abort[^hook-before]; `abort` thuần (`process::abort`) thì không gọi hook, còn `panic!` dưới `panic=abort` thì có[^abort-similar]. Ngoại lệ: `immediate-abort` không gọi hook[^rustc-panic-flag].
-2. Không: `catch_unwind` chỉ bắt panic dạng unwind, không bắt panic làm process abort[^catch-notall][^nomicon-catch-only].
-3. Cargo bỏ qua `panic` cho test/bench/build script/proc macro; test harness đòi unwind[^cargo-test-ignore].
+1. Trước. Hook chạy khi thread panic, trước khi panic runtime được gọi, nên chạy với cả runtime unwind và abort[^hook-before]. `process::abort` thuần thì không gọi hook, còn `panic!` dưới `panic=abort` thì có[^abort-similar]. Ngoại lệ: `immediate-abort` không gọi hook[^rustc-panic-flag].
+2. Không: `catch_unwind` chỉ bắt panic dạng unwind, không bắt panic làm process abort[^catch-notall]. Nomicon nhắc lại điều đó ở trang FFI[^nomicon-catch-only].
+3. Cargo bỏ qua `panic` cho test, bench, build script và proc macro; test harness đòi unwind[^cargo-test-ignore].
 4. Phải `abort`[^rustc-panic-flag].
-5. Vì không có hợp đồng "chặt" (chỉ là cảnh báo); nó mã hóa khái niệm exception safety vào kiểu, như "speed bump" cho người dùng `catch_unwind`[^unwindsafe-speedbump][^catch-bound].
-6. Chống dùng mù quáng dữ liệu có thể đang sửa dở; không liên quan an toàn bộ nhớ (kiểu viết đúng thì vẫn không vi phạm bộ nhớ[^nomicon-poison-mem]); vượt được qua `into_inner`[^nomicon-poison-why][^mutex-advisory].
-7. ABI Rust không cam kết ổn định, còn `"C"` khớp C compiler chủ đạo của target[^ref-abi-rust][^ref-abi-c]. Vì thế hàm Rust thường không nên đưa cho code ngoài gọi: cách gọi của nó có thể đổi giữa các bản compiler (suy luận của người soạn từ việc ABI Rust không ổn định).
-8. Vì kiểu hàm `extern "abi" fn()` là không-null[^nomicon-ffi-nonnull], và enum hai biến thể (một rỗng, một chứa kiểu không-null) được biểu diễn `None` bằng null, không thêm discriminant[^nomicon-ffi-nullable-def][^nomicon-ffi-nullable-nodisc]; tối ưu này được bảo đảm cho kiểu đủ điều kiện[^nomicon-ffi-nullable-guar], và Nomicon nêu đúng `Option<extern "C" fn(c_int) -> c_int>` là cách biểu diễn con trỏ hàm C có thể null[^nomicon-ffi-nullable].
+5. Vì nó không có hợp đồng "chặt", chỉ là cảnh báo; nó mã hóa khái niệm exception safety vào kiểu, như một "speed bump" cho người dùng `catch_unwind`[^unwindsafe-speedbump]. Việc đưa khái niệm vào kiểu là mục đích của bound `UnwindSafe` trên `catch_unwind`[^catch-bound].
+6. Nó chống việc dùng mù quáng dữ liệu có thể đang sửa dở[^nomicon-poison-why]. Nó không liên quan an toàn bộ nhớ: kiểu viết đúng thì vẫn không vi phạm bộ nhớ[^nomicon-poison-mem]. Bạn vượt qua được bằng `into_inner`[^mutex-advisory].
+7. ABI Rust không cam kết ổn định[^ref-abi-rust]. `"C"` khớp C compiler chủ đạo của target[^ref-abi-c]. Vì thế hàm Rust thường không nên đưa cho code ngoài gọi: cách gọi của nó có thể đổi giữa các bản compiler (suy luận của người soạn từ việc ABI Rust không ổn định).
+8. Vì kiểu hàm `extern "abi" fn()` là không-null[^nomicon-ffi-nonnull]. Enum hai biến thể, một rỗng và một chứa kiểu không-null, biểu diễn `None` bằng null và không thêm discriminant[^nomicon-ffi-nullable-def]. Biến thể rỗng nằm ngay trong trường không-null[^nomicon-ffi-nullable-nodisc]. Tối ưu này được bảo đảm cho kiểu đủ điều kiện[^nomicon-ffi-nullable-guar]. Nomicon nêu đúng `Option<extern "C" fn(c_int) -> c_int>` là cách biểu diễn con trỏ hàm C có thể null[^nomicon-ffi-nullable].
 9. Panic ⇒ process abort an toàn; exception ngoại lai vào Rust ⇒ UB[^nomicon-ffi-boundary]. Với panic, destructor chạy hay không là không xác định[^ref-fn-abort].
-10. Bọc phần có thể panic trong `catch_unwind` và đổi `Err` thành mã lỗi[^nomicon-ffi-catch]; vô tác dụng khi build `panic=abort`[^nomicon-catch-only].
-11. Dùng handler `unwind`; hoặc có crate build `unwind` gọi hàm `-unwind`; hoặc gọi ABI `"Rust"` vào artifact Rust khác (runtime riêng) cũng có khả năng unwind[^ref-link-potential]. Hệ quả: mọi crate của artifact phải build `unwind`, nếu không có thể UB[^ref-link-unwind-prohibited].
-12. UB là khi ABI khai báo không khớp với hàm thật (ví dụ gọi một hàm `"C-unwind"` được import hoặc transmute thành `"C"`)[^ref-ub-call], hoặc khi exception ngoại lai đi vào Rust qua ABI không-unwind[^ref-panic-ffi-undef1][^nomicon-ffi-boundary]; panic của hàm Rust định nghĩa bằng `extern "C"` chạm ranh giới không-unwind là abort an toàn[^nomicon-ffi-abort][^ref-fn-row2]. Reference không nối các đoạn này với nhau; cách đọc trên là suy luận của người soạn (mục 6).
+10. Bọc phần có thể panic trong `catch_unwind` và đổi `Err` thành mã lỗi[^nomicon-ffi-catch]. Cách này vô tác dụng khi build `panic=abort`[^nomicon-catch-only].
+11. Dùng handler `unwind`; hoặc có crate build `unwind` gọi hàm `-unwind`; hoặc gọi ABI `"Rust"` vào artifact Rust khác (runtime riêng) mà artifact đó cũng có khả năng unwind[^ref-link-potential]. Hệ quả: mọi crate của artifact phải build `unwind`, nếu không có thể UB[^ref-link-unwind-prohibited].
+12. UB là khi ABI khai báo không khớp với hàm thật, ví dụ gọi một hàm `"C-unwind"` được import hoặc transmute thành `"C"`[^ref-ub-call]. UB cũng là khi exception ngoại lai đi vào Rust qua ABI không-unwind[^ref-panic-ffi-undef1]. Panic của hàm Rust định nghĩa bằng `extern "C"` chạm ranh giới không-unwind là abort an toàn[^nomicon-ffi-abort]. Reference không nối các đoạn này với nhau; cách đọc trên là suy luận của người soạn (mục 6).
 
 </details>
+
+---
 
 ## Đọc thêm
 

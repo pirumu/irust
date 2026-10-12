@@ -5,7 +5,7 @@
 1. **Q1.** Các phép `load`, `store`, `swap`, `fetch_add` và `compare_exchange` làm gì, và vì sao mọi primitive đồng bộ (mutex, condvar…) cuối cùng đều dựng trên chúng? → mục 1
 2. **Q2.** `compare_exchange` khác `compare_exchange_weak` ở đâu, một vòng CAS (compare-and-swap loop) trông thế nào, và khi nào nên chọn bản nào? → mục 2
 3. **Q3.** "Spurious failure" đến từ phần cứng nào, và rustc biến các phép atomic thành lệnh máy gì trên x86-64 và AArch64 (có và không có LSE)? → mục 3
-4. **Q4.** "Lock-free", "wait-free", "obstruction-free" nghĩa là gì — nguồn nào định nghĩa, và `std` hứa gì (và không hứa gì)? → mục 4
+4. **Q4.** "Lock-free", "wait-free", "obstruction-free" nghĩa là gì, nguồn nào định nghĩa, và `std` hứa gì (và không hứa gì)? → mục 4
 5. **Q5.** ABA problem là gì, vì sao giải phóng node rồi cấp phát lại cùng địa chỉ làm nó nguy hiểm, và hazard pointer / epoch-based reclamation giải quyết phần "thu hồi bộ nhớ" ra sao? → mục 5
 6. **Q6.** Futex cho "atomic wait/notify" thế nào, và vì sao fast path không cần syscall? → mục 6
 7. **Q7.** Khi nào *không* nên dùng lock-free? → mục 7
@@ -20,17 +20,19 @@
 
 ## 1. Atomic operation và các phép cơ bản (Q1)
 
-> **Trả lời ngắn.** Atomic operation là thao tác "không chia cắt được": nó xảy ra hoàn toàn trước hoặc hoàn toàn sau thao tác khác, không bao giờ nửa chừng[^atomics-intro]. Các phép cơ bản là load/store, swap, fetch-and-modify (như `fetch_add`) và compare-and-exchange[^atomics-types]. Mutex, condition variable và các primitive khác đều được cài bằng chính các phép này[^atomics-building-block].
+> **Trả lời ngắn.** Atomic operation là thao tác không chia cắt được: nó xảy ra trọn vẹn trước hoặc trọn vẹn sau thao tác của thread khác, không bao giờ dở dang[^atomics-intro]. Có bốn họ phép cơ bản: load/store, swap, fetch-and-modify (như `fetch_add`) và compare-and-exchange[^atomics-types]. Mutex, condition variable và các primitive đồng bộ khác đều được cài bằng chính những phép này[^atomics-building-block].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai request cùng tăng một bộ đếm lượt xem; nếu mỗi bên đọc số cũ, cộng một rồi ghi lại thì một lượt có thể bị mất. Atomic là cách buộc "đọc-cộng-ghi" thành một bước liền.
+*Với service của bạn.* Hãy hình dung `ingest`, một service Rust nhận event từ nhiều agent: mỗi kết nối có một handler thread, ngoài ra có vài worker thread xử lý job. Nó cần năm thứ chung giữa các thread: bộ đếm `requests_total`, bộ cấp ID cho job (có trần), một kho buffer dùng lại, hàng đợi job mà worker phải chờ, và một `Arc<Config>` mà thread nào cũng đọc. Ta sẽ bám theo `ingest` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Mục này bắt đầu từ thứ đơn giản nhất: đếm số request.
 
-**Vấn đề.** Nhiều thread đọc-sửa-ghi cùng một biến thông thường là data race, tức undefined behavior trong Rust[^std-datarace]; atomic operation cho phép nhiều thread đọc/sửa cùng một biến một cách an toàn vì mỗi thao tác "xảy ra hoàn toàn trước hoặc hoàn toàn sau" thao tác khác[^atomics-intro]. Mara Bos nhấn mạnh vai trò nền tảng: mọi primitive khác như mutex và condition variable đều được cài bằng atomic operation[^atomics-building-block]. Từ "atomic" là "không chia cắt được": thao tác hoặc đã xong hoàn toàn, hoặc chưa xảy ra[^atomics-intro].
+### 1.1 Vì sao bộ đếm thường không đủ
 
-Trong Rust, atomic là method của các kiểu `Atomic*` (`AtomicI32`, `AtomicUsize`…) trong `std::sync::atomic`, sửa được qua `&` nhờ interior mutability, với ba nhóm: load/store, fetch-and-modify, compare-and-exchange[^atomics-types]. Mỗi thao tác nhận một `Ordering` — chủ đề của [chương 06](06-memory-model.md); chương này chủ yếu dùng `Relaxed`.
+Nếu `requests_total` là một `u64` thường, hai handler thread cùng đọc-sửa-ghi nó là data race, tức undefined behavior trong Rust[^std-datarace]. Atomic giải chuyện này: nhiều thread đọc và sửa cùng một biến vẫn an toàn, vì mỗi thao tác xảy ra trọn vẹn trước hoặc trọn vẹn sau thao tác khác[^atomics-intro]. Cũng vì thế mà mutex hay condvar không cần phép màu nào riêng: chúng chỉ là code dựng trên các thao tác atomic[^atomics-building-block].
 
-**Bốn họ phép toán.**
+Trong Rust, các phép này là method của những kiểu `Atomic*` (`AtomicI32`, `AtomicUsize`…) trong `std::sync::atomic`. Gọi được qua `&` nhờ interior mutability, và chia thành ba nhóm: load/store, fetch-and-modify, compare-and-exchange[^atomics-types]. Mỗi thao tác nhận một `Ordering`, chủ đề của [chương 06](06-memory-model.md); chương này chủ yếu dùng `Relaxed`.
+
+### 1.2 Bốn họ phép toán
 
 | Họ | Phép | Ý nghĩa |
 |---|---|---|
@@ -39,13 +41,24 @@ Trong Rust, atomic là method của các kiểu `Atomic*` (`AtomicI32`, `AtomicU
 | Fetch-and-modify | `fetch_add`, `fetch_sub`, `fetch_or`, `fetch_and`, `fetch_xor`, `fetch_max`, `fetch_min`… | sửa rồi trả giá trị **trước** khi sửa, tất cả là một thao tác atomic[^atomics-fetch] |
 | Compare-and-exchange | `compare_exchange`, `compare_exchange_weak`, `fetch_update` | chỉ ghi nếu giá trị hiện tại bằng giá trị mong đợi[^atomics-cae] |
 
-**Trả giá trị cũ.** Họ `fetch_*` trả giá trị **trước** khi sửa. Sách minh họa: `a = 100`, `a.fetch_add(23)` trả `100`, và lần `load` kế tiếp thấy `123`[^atomics-fetch-demo].
+Họ `fetch_*` trả giá trị cũ chứ không phải giá trị mới. Sách minh họa bằng `a = 100`: `a.fetch_add(23)` trả `100`, và `load` kế tiếp thấy `123`[^atomics-fetch-demo].
 
-Một lỗi kinh điển: `x.store(x.load() + 1)` **không** phải thao tác atomic duy nhất, dù từng bước là atomic. Nó không phải data race theo định nghĩa của `std` (không có truy cập non-atomic; xem [chương 06, mục 3](06-memory-model.md))[^std-datarace] mà là race condition: giữa `load` và `store` có thread khác chen vào. `fetch_add` là một thao tác đọc-sửa-ghi duy nhất[^atomics-fetch].
+### 1.3 Đếm request cho đúng
+
+Giờ quay lại bộ đếm. Có một lỗi kinh điển: viết `x.store(x.load() + 1)` rồi tưởng là atomic, vì cả hai bước đều atomic.
+
+```rust
+// SAI: hai handler thread có thể cùng đọc N rồi cùng ghi N+1, mất một lượt đếm
+REQUESTS_TOTAL.store(REQUESTS_TOTAL.load(Relaxed) + 1, Relaxed);
+// ĐÚNG: một thao tác đọc-sửa-ghi duy nhất
+REQUESTS_TOTAL.fetch_add(1, Relaxed);
+```
+
+Dòng đầu không phải data race theo định nghĩa của `std`, vì không có truy cập non-atomic nào (xem [chương 06, mục 3](06-memory-model.md))[^std-datarace]. Nó là race condition: giữa `load` và `store` có thread khác chen vào, nên cập nhật của thread đó bị ghi đè. `fetch_add` tránh được chuyện này vì đọc, cộng và ghi diễn ra như một thao tác duy nhất[^atomics-fetch].
 
 <details><summary>Đi sâu: tràn số trong <code>fetch_*</code></summary>
 
-- **Tràn số thì wrap, không panic**[^atomics-wrap][^std-fetchadd-wrap]. Sách trình bày ba cách xử lý; cách thứ ba — mà sách gọi là "arguably the only truly correct one" — là ngăn hẳn phép cộng tràn xảy ra, và nó cần compare-and-exchange[^atomics-overflow-cae]. `Arc::clone` chọn abort khi refcount vượt ngưỡng (§8)[^atomics-arc-abort].
+`fetch_add` và `fetch_sub` khi tràn số thì wrap chứ không panic[^atomics-wrap]. Docs `std` ghi y như vậy cho `AtomicUsize::fetch_add`[^std-fetchadd-wrap]. Với bộ đếm `requests_total` thì không sao, nhưng nếu bạn cần chặn hẳn việc tràn thì phải dùng compare-and-exchange: sách liệt kê ba cách xử lý tràn số và gọi cách thứ ba, ngăn phép cộng xảy ra khi nó sẽ tràn, là cách "arguably the only truly correct one"[^atomics-overflow-cae]. `Arc::clone` trong `std` chọn abort khi refcount vượt ngưỡng (xem §8)[^atomics-arc-abort].
 
 </details>
 
@@ -53,15 +66,19 @@ Một lỗi kinh điển: `x.store(x.load() + 1)` **không** phải thao tác at
 
 ## 2. `compare_exchange`, CAS loop và bản weak (Q2)
 
-> **Trả lời ngắn.** `compare_exchange` chỉ ghi giá trị mới nếu giá trị hiện tại đúng bằng giá trị ta mong đợi, tất cả là một thao tác[^atomics-cae]. Muốn cập nhật có điều kiện thì bọc nó trong vòng lặp: đọc, tính, thử ghi, thất bại thì thử lại với giá trị mới nhất. Bản `compare_exchange_weak` được phép trả lỗi ngay cả khi giá trị khớp[^atomics-weak]; dùng nó khi một lần lỗi giả không đáng kể (như trong vòng lặp), còn không lặp thì dùng bản strong[^atomics-strong-when].
+> **Trả lời ngắn.** `compare_exchange` chỉ ghi giá trị mới nếu giá trị hiện tại đúng bằng giá trị ta mong đợi, tất cả trong một thao tác[^atomics-cae]. Muốn cập nhật có điều kiện thì bọc nó trong vòng lặp: đọc, tính, thử ghi, thất bại thì thử lại với giá trị mới nhất. Bản `compare_exchange_weak` được phép trả lỗi ngay cả khi giá trị khớp[^atomics-weak]. Dùng nó khi một lần lỗi giả không đáng kể (như trong vòng lặp), còn không lặp thì dùng bản strong[^atomics-strong-when].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): giống `UPDATE … WHERE version = ?` trong DB với optimistic locking: chỉ ghi nếu không ai đổi dòng đó kể từ lúc ta đọc; nếu không thì đọc lại và làm lại.
+*Với service `ingest`.* Mỗi job `ingest` nhận được cần một ID, và service chỉ chấp nhận tối đa 1000 job. `fetch_add` không làm được việc này: nó cộng rồi mới cho ta biết kết quả, nên khi phát hiện vượt trần thì ID đã bị cấp mất. Ta phải kiểm tra rồi mới ghi, mà hai bước đó phải thành một. Đó là việc của `compare_exchange`. (Nhận xét của người soạn: nó giống `UPDATE … WHERE version = ?` trong DB với optimistic locking. Chỉ ghi nếu chưa ai đổi dòng đó từ lúc ta đọc; nếu rồi thì đọc lại và làm lại.)
 
-`compare_exchange` kiểm tra giá trị atomic có bằng một giá trị cho trước không, và chỉ khi đúng mới thay bằng giá trị mới, tất cả là một thao tác[^atomics-cae]; OSTEP mô tả cùng ý[^ostep-cas]. Kết quả là `Result<T, T>`: `Ok(giá trị cũ)` khi thành công, `Err(giá trị thực đang có)` khi thất bại.
+### 2.1 `compare_exchange` và kết quả của nó
 
-**Mẫu CAS loop:** `load` giá trị hiện tại, tính giá trị mới *không quan tâm đến thay đổi đồng thời*, rồi `compare_exchange`; thất bại nghĩa là thread khác đã đổi biến, ta thử lại với giá trị mà `Err` trả về. Sách nói khoảng giữa load và update ngắn đến mức hiếm khi lặp quá vài vòng[^atomics-cas-loop].
+`compare_exchange` kiểm tra xem giá trị atomic có bằng một giá trị cho trước không, và chỉ khi đúng mới thay bằng giá trị mới, cả hai bước là một thao tác[^atomics-cae]. Sách giáo khoa hệ điều hành mô tả compare-and-swap y hệt như vậy[^ostep-cas]. Kết quả trả về là `Result<T, T>`: `Ok(giá trị cũ)` khi thành công, `Err(giá trị thực đang có)` khi thất bại.
+
+### 2.2 Mẫu CAS loop
+
+Gần như lúc nào `compare_exchange` cũng đi trong một vòng lặp. Ta `load` giá trị hiện tại, tính giá trị mới mà không cần để ý thread khác, rồi `compare_exchange`. Nếu thất bại thì thread khác đã đổi biến trong lúc ta tính; ta lấy luôn giá trị `Err` trả về và thử lại. Khoảng giữa `load` và lần ghi ngắn đến mức vòng này hiếm khi phải lặp quá vài lần[^atomics-cas-loop].
 
 ```mermaid
 flowchart TD
@@ -72,13 +89,17 @@ flowchart TD
   U --> C
 ```
 
-**Hai ordering và bản weak.** `compare_exchange` nhận hai ordering: `success` cho cả load-và-store khi so sánh đúng, `failure` chỉ cho load khi so sánh sai; failure chỉ có thể là `SeqCst`, `Acquire` hoặc `Relaxed`[^std-failure-order]. Ví dụ: fast path của `std::sync::Mutex` ghi `compare_exchange(UNLOCKED, LOCKED, Acquire, Relaxed)` ([Chương 03, mục 6](03-lock.md))[^std-futex-fast].
+Bộ cấp ID có trần của `ingest` chính là một CAS loop như thế; code đầy đủ và kết quả chạy nằm ở phần Đi sâu cuối mục.
 
-`compare_exchange_weak` được phép trả `Err` ngay cả khi giá trị khớp[^atomics-weak]; đổi lại có thể sinh code hiệu quả hơn trên một số nền tảng[^std-weak]. Sách: dùng weak khi hậu quả của một lần thất bại giả không đáng kể (như vòng tăng ở ví dụ dưới); dùng strong khi không lặp, ví dụ khởi tạo khóa lười `KEY.compare_exchange(0, new_key, …)`[^atomics-strong-when]. Vì sao có thất bại giả: xem §3.
+### 2.3 Hai ordering và bản weak
+
+`compare_exchange` nhận hai ordering. `success` áp dụng cho cả load lẫn store khi so sánh đúng, còn `failure` chỉ áp dụng cho load khi so sánh sai, và chỉ có thể là `SeqCst`, `Acquire` hoặc `Relaxed`[^std-failure-order]. Ví dụ thật: fast path của `std::sync::Mutex` là `compare_exchange(UNLOCKED, LOCKED, Acquire, Relaxed)` (xem [Chương 03, mục 6](03-lock.md))[^std-futex-fast].
+
+`compare_exchange_weak` được phép trả `Err` ngay cả khi giá trị khớp[^atomics-weak]. Đổi lại, trên một số nền tảng nó sinh code hiệu quả hơn[^std-weak]. Vậy chọn bản nào? Nếu đã nằm trong vòng lặp như bộ cấp ID, một lần thất bại giả chỉ làm ta lặp thêm một vòng, nên dùng weak. Nếu không lặp thì dùng strong, ví dụ khởi tạo khóa lười `KEY.compare_exchange(0, new_key, …)`, nơi ta không muốn thất bại giả làm hàm trả nhầm kết quả[^atomics-strong-when]. Thất bại giả đến từ đâu thì mục 3 trả lời.
 
 <details><summary>Đi sâu: bộ cấp ID có trần và <code>fetch_update</code></summary>
 
-Ví dụ đã chạy (rustc 1.95.0, tám thread, mỗi thread xin ID 500 lần, trần 1000): bộ cấp ID không bao giờ vượt trần — thứ `fetch_add` đơn thuần không làm được vì nó cộng trước khi kiểm tra.
+Ví dụ đã chạy (rustc 1.95.0, tám thread, mỗi thread xin ID 500 lần, trần 1000): bộ cấp ID không bao giờ vượt trần, điều mà `fetch_add` đơn thuần không làm được vì nó cộng trước khi kiểm tra.
 
 ```rust
 static NEXT_ID: AtomicU32 = AtomicU32::new(0);
@@ -95,7 +116,7 @@ fn allocate_new_id() -> Option<u32> {
 }
 ```
 
-Kết quả: `granted=1000 final=1000` (4000 lần xin, đúng 1000 được cấp). Cùng ý bằng `fetch_update` (sách gọi nó là tiện ích cho mẫu compare-and-exchange loop[^atomics-fetchupdate]): với `a` khởi đầu 998 và closure `|v| if v < 1000 { Some(v+1) } else { None }`, bốn lần gọi trả `Ok(998)`, `Ok(999)`, `Err(1000)`, `Err(1000)` (đã chạy). Docs std: nó "is not magic", không do phần cứng cung cấp, không phải critical section hay mutex, và chịu các nhược điểm thông thường của CAS, nhất là ABA[^std-fetchupdate-magic].
+Kết quả: `granted=1000 final=1000` (4000 lần xin, đúng 1000 được cấp). Cùng ý có thể viết bằng `fetch_update`, mà sách gọi là tiện ích cho mẫu compare-and-exchange loop[^atomics-fetchupdate]. Với `a` khởi đầu 998 và closure `|v| if v < 1000 { Some(v+1) } else { None }`, bốn lần gọi trả `Ok(998)`, `Ok(999)`, `Err(1000)`, `Err(1000)` (đã chạy). Docs `std` dặn rằng `fetch_update` "is not magic": phần cứng không cung cấp nó, nó không phải critical section hay mutex, và vẫn chịu các nhược điểm thông thường của CAS, nhất là ABA[^std-fetchupdate-magic].
 
 </details>
 
@@ -107,17 +128,29 @@ Kết quả: `granted=1000 final=1000` (4000 lần xin, đúng 1000 được c�
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): x86-64 giống khóa cả quầy giao dịch trong lúc làm một việc; LL/SC giống "đánh dấu ô nhớ, làm việc, rồi nộp — nếu ô bị ai đụng vào thì bị từ chối", và hệ thống theo dõi thô đến mức đôi khi từ chối oan.
+*Với service `ingest`.* Bạn build `ingest` ra binary cho server x86-64, và nhiều đội còn build thêm cho máy AArch64 (nhận xét của người soạn). Cùng dòng `REQUESTS_TOTAL.fetch_add(1, Relaxed)` hay `compare_exchange_weak` ở bộ cấp ID sẽ thành lệnh máy rất khác nhau tùy kiến trúc. Mục này xem từng kiến trúc làm gì, và qua đó thấy vì sao bản weak tồn tại.
 
-Mara Bos tóm vấn đề: lệnh `add` trên x86-64 bị bộ xử lý tách thành vi lệnh (load, cộng, store) nên *không* atomic khi nhiều core chạy song song, dù chỉ là một lệnh[^atomics-add-micro].
+### 3.1 x86-64: tiền tố `lock`
 
-*x86-64: tiền tố `lock`.* Intel thêm tiền tố `lock` để biến các lệnh như `add` thành atomic. Ban đầu nó chặn mọi core khác truy cập bộ nhớ trong suốt lệnh; bộ xử lý mới cài tinh vi hơn[^atomics-lock-prefix]. Tiền tố chỉ dùng được với một số lệnh (`add`, `sub`, `and`, `or`, `xor`…), còn `xchg` (tương ứng `swap`) có `lock` ngầm định[^atomics-xchg]; khi cần giá trị cũ thì dùng `xadd`[^atomics-xadd]. Phép không có lệnh đơn (như `fetch_or` nhiều bit, `fetch_max`) được compiler chuyển thành CAS loop trên `lock cmpxchg`[^atomics-cmpxchg-loop]. Trên x86-64 `compare_exchange` và `compare_exchange_weak` giống hệt nhau[^atomics-x86-weak].
+Vấn đề bắt đầu từ chỗ ngay cả một lệnh `add` cũng không atomic. Bộ xử lý tách nó thành vài vi lệnh (load giá trị, cộng, store kết quả), nên khi nhiều core chạy song song, thread khác có thể chen vào giữa các vi lệnh đó[^atomics-add-micro].
 
-*AArch64: load-exclusive/store-exclusive (LL/SC).* RISC dùng **load-linked/store-conditional**: một cặp lệnh cùng địa chỉ, trong đó store-conditional từ chối ghi nếu có ai ghi đè vùng nhớ đó kể từ lần load-linked[^atomics-llsc-def]. Để cài hiệu quả, phần cứng cho phép store-conditional có "false negative": thất bại dù vùng nhớ không đổi[^atomics-llsc-fn], vì độ chính xác theo dõi có thể thô (chunk 64 byte, kilobyte, thậm chí toàn bộ bộ nhớ)[^atomics-llsc-coarse]. **Đây là nguồn gốc của spurious failure** mà `compare_exchange_weak` được phép phơi ra. Trên ARM64, ít nhất ở ARMv8 bản đầu, không phép fetch-and-modify hay compare-and-exchange nào là một lệnh đơn; cặp lệnh là `ldxr`/`stxr`[^atomics-llsc]. Sách cảnh báo: giữ số lệnh giữa `ldxr` và `stxr` càng ít càng tốt[^atomics-llsc-few].
+Intel giải quyết bằng tiền tố `lock`, biến các lệnh như `add` thành atomic. Ban đầu tiền tố này chặn mọi core khác truy cập bộ nhớ trong suốt lệnh; các bộ xử lý mới cài tinh vi hơn[^atomics-lock-prefix]. Tiền tố chỉ dùng được với một số lệnh (`add`, `sub`, `and`, `or`, `xor`…). Riêng `xchg`, tương ứng với `swap`, có `lock` ngầm định[^atomics-xchg]. Khi cần giá trị cũ thì có `xadd`[^atomics-xadd]. Phép nào không có lệnh đơn, như `fetch_or` nhiều bit hay `fetch_max`, được compiler chuyển thành một CAS loop trên `lock cmpxchg`[^atomics-cmpxchg-loop]. Cuối cùng, `compare_exchange` và `compare_exchange_weak` trên x86-64 là một lệnh giống hệt nhau[^atomics-x86-weak].
 
-*ARMv8.1 LSE.* ARMv8.1 thêm lệnh atomic kiểu CISC: `ldadd` tương đương `fetch_add` không cần vòng LL/SC, có cả lệnh cho `fetch_max`, và `cas` ứng với `compare_exchange`; khi dùng `cas`, strong và weak không còn khác nhau, giống x86-64[^atomics-lse]. Sách nói chúng có thể nhanh hơn vì dễ tối ưu bằng phần cứng chuyên dụng[^atomics-lse-faster].
+### 3.2 AArch64: load-exclusive/store-exclusive
 
-Một `load` có thể rẻ hơn đáng kể so với `compare_exchange` thất bại, phần vì cái sau thường cần quyền truy cập độc quyền cache line[^atomics-cas-fail-cost] (MESI ở [P2 · Chương 06](../02-cpu/06-cache-va-numa.md)); vì vậy vòng spin của `std::sync::Mutex` chỉ dùng `load`[^std-futex-spin-load].
+Chip RISC như AArch64 đi hướng khác. Thay vì một lệnh atomic, nó có một cặp lệnh dùng cùng địa chỉ, gọi là **load-linked/store-conditional**. Store-conditional từ chối ghi nếu từ lần load-linked tới giờ có ai ghi đè vùng nhớ đó[^atomics-llsc-def].
+
+Để cài đặt cho hiệu quả, phần cứng cho phép store-conditional thất bại oan (false negative): nó có thể từ chối ghi dù không ai đụng vào vùng nhớ[^atomics-llsc-fn]. Lý do là độ chính xác khi theo dõi truy cập có thể thô: theo từng khối 64 byte, từng kilobyte, thậm chí cả bộ nhớ[^atomics-llsc-coarse]. **Đây là nguồn gốc của spurious failure** mà `compare_exchange_weak` được phép để lộ ra ngoài.
+
+Trên ARM64, ít nhất ở ARMv8 bản đầu, không phép fetch-and-modify hay compare-and-exchange nào là một lệnh đơn; thay vào đó là cặp `ldxr`/`stxr`[^atomics-llsc]. Compiler cố giữ số lệnh nằm giữa `ldxr` và `stxr` càng ít càng tốt[^atomics-llsc-few].
+
+### 3.3 ARMv8.1 LSE
+
+ARMv8.1 thêm lệnh atomic kiểu CISC. `ldadd` tương đương `fetch_add` mà không cần vòng LL/SC, có cả lệnh cho `fetch_max`, và `cas` ứng với `compare_exchange`. Khi dùng `cas`, strong và weak không còn khác nhau, giống x86-64[^atomics-lse]. Sách nói các lệnh này có thể nhanh hơn vì dễ tối ưu bằng phần cứng chuyên dụng[^atomics-lse-faster].
+
+### 3.4 Chi phí khi CAS thất bại
+
+Một `load` có thể rẻ hơn đáng kể so với một `compare_exchange` thất bại, phần vì `compare_exchange` thường đòi quyền truy cập độc quyền vào cache line[^atomics-cas-fail-cost] (MESI ở [P2 · Chương 06](../02-cpu/06-cache-va-numa.md)). Vì vậy vòng spin của `std::sync::Mutex` chỉ dùng `load`[^std-futex-spin-load]. Điều này cũng báo trước một ý ở mục 7: dưới tranh chấp cao, CAS thất bại liên tục không rẻ.
 
 <details><summary>Đi sâu: assembly rustc 1.95.0 sinh ra cho x86-64 và AArch64 (không/có LSE)</summary>
 
@@ -136,7 +169,7 @@ fo:  movl (%rdi), %eax            ; fetch_or(10): không có lệnh đơn → CA
      jne .L
 ```
 
-Ordering `AcqRel` và `Relaxed` cho cùng lệnh ở đây, phù hợp lời sách rằng trên x86-64 mọi thao tác bộ nhớ đã có ngữ nghĩa acquire/release[^atomics-x86-arm].
+Ordering `AcqRel` và `Relaxed` cho cùng lệnh ở đây, khớp lời sách rằng trên x86-64 mọi thao tác bộ nhớ đã có ngữ nghĩa acquire/release[^atomics-x86-arm].
 
 Tắt LSE (`-C target-feature=-lse`, target `aarch64-apple-darwin`) để thấy LL/SC thật:
 
@@ -146,9 +179,9 @@ _casw: ldaxr w1,[x0] ; cmp w1,#5 ; b.ne fail ; stlxr w9,w8,[x0]         ; MỘT 
 _cas:  ldaxr w1,[x0] ; cmp w1,#5 ; b.ne fail ; stlxr w9,w8,[x0] ; cbnz w9,_cas  ; strong phải lặp
 ```
 
-Bản `weak` chỉ có một `stlxr` và báo lỗi nếu nó thất bại; bản `strong` phải có `cbnz` để *che* thất bại giả. Đó là phần chi phí `weak` tiết kiệm khi đã nằm trong vòng lặp của người dùng (suy luận của người soạn từ asm trên; docs std nói gọn rằng weak cho phép compiler sinh assembly tốt hơn khi compare-and-swap được dùng trong vòng lặp[^std-weak-loop]). Hậu tố `a`/`l` trong `ldaxr`/`stlxr` xuất hiện khi dùng `AcqRel`; với `Relaxed` cùng mã sinh `ldxr`/`stxr` (đã chạy lại cả hai, quan sát trong asm).
+Bản `weak` chỉ có một `stlxr` và báo lỗi nếu nó thất bại; bản `strong` phải có `cbnz` để *che* thất bại giả. Đó là phần chi phí mà `weak` tiết kiệm được khi đã nằm trong vòng lặp của người dùng (suy luận của người soạn từ asm trên; docs `std` nói gọn rằng weak cho phép compiler sinh assembly tốt hơn khi compare-and-swap được dùng trong vòng lặp[^std-weak-loop]). Hậu tố `a`/`l` trong `ldaxr`/`stlxr` xuất hiện khi dùng `AcqRel`; với `Relaxed` cùng mã sinh `ldxr`/`stxr` (đã chạy lại cả hai, quan sát trong asm).
 
-Với `aarch64-apple-darwin` mặc định, `rustc --print cfg` báo `target_feature="lse"` bật sẵn, và cùng mã Rust với `AcqRel` sinh `ldaddal` (fetch_add), `swpal` (swap), `ldsetal` (fetch_or, không cần CAS loop), `casal` (cả strong lẫn weak); với `Relaxed` là `ldadd`, `swp`, `ldset`, `cas` — hậu tố `al` là acquire+release[^atomics-lse-al]. Các mnemonic này là output thật của rustc; sách chỉ nêu `ldadd` và `cas`. Cùng một dòng Rust cho mã khác hẳn tùy target feature (nhận xét của người soạn).
+Với `aarch64-apple-darwin` mặc định, `rustc --print cfg` báo `target_feature="lse"` bật sẵn, và cùng mã Rust với `AcqRel` sinh `ldaddal` (fetch_add), `swpal` (swap), `ldsetal` (fetch_or, không cần CAS loop), `casal` (cả strong lẫn weak). Với `Relaxed` là `ldadd`, `swp`, `ldset`, `cas`; hậu tố `al` là acquire+release[^atomics-lse-al]. Các mnemonic này là output thật của rustc; sách chỉ nêu `ldadd` và `cas`. Cùng một dòng Rust cho mã khác hẳn tùy target feature (nhận xét của người soạn).
 
 | Phép Rust | x86-64 | AArch64 không LSE | AArch64 có LSE |
 |---|---|---|---|
@@ -164,23 +197,33 @@ Với `aarch64-apple-darwin` mặc định, `rustc --print cfg` báo `target_fea
 
 ## 4. Lock-free, wait-free, obstruction-free (Q4)
 
-> **Trả lời ngắn.** Wait-free: mọi thread đều tiến triển dù thread khác bị trì hoãn hay hỏng[^hlm-waitfree]. Lock-free: chỉ đảm bảo *luôn có một thread nào đó* tiến triển[^hlm-lockfree]. Obstruction-free: chỉ đảm bảo cho thread chạy một mình, yếu hơn lock-free[^hlm-weaker]. `std` hứa các kiểu atomic là lock-free, nhưng không hứa wait-free[^std-lockfree][^std-not-waitfree].
+> **Trả lời ngắn.** Wait-free: mọi thread đều tiến triển dù thread khác bị trì hoãn hay hỏng[^hlm-waitfree]. Lock-free: chỉ đảm bảo *luôn có một thread nào đó* tiến triển[^hlm-lockfree]. Obstruction-free: chỉ đảm bảo cho thread chạy một mình, yếu hơn lock-free[^hlm-weaker]. `std` hứa các kiểu atomic là lock-free[^std-lockfree]. Nhưng nó không hứa wait-free[^std-not-waitfree].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một quầy thu ngân nhiều hàng. Wait-free: ai cũng được phục vụ trong thời gian hữu hạn. Lock-free: quầy luôn có ít nhất một khách được phục vụ, nhưng có thể có khách bị chen mãi. Obstruction-free: chỉ đảm bảo nếu những khách khác đứng yên thì bạn được phục vụ.
+*Với service `ingest`.* Giả sử worker của `ingest` lấy job từ một hàng đợi dùng chung. Nếu hàng đợi bảo vệ bằng mutex và worker đang giữ mutex bị OS cho ra khỏi CPU, mọi worker khác đứng chờ theo (nhận xét của người soạn). Ba thuật ngữ trong mục này mô tả chính xác mức độ một cấu trúc dữ liệu chịu được tình huống đó: thread khác bị hoãn thì các thread còn lại có tiến triển tiếp được không.
 
-Ba thuật ngữ về *progress guarantee* của cấu trúc dữ liệu đồng thời. Các định nghĩa dưới đây lấy từ hai bài báo (không phải từ docs Rust):
+### 4.1 Ba mức bảo đảm
+
+Cả ba là *progress guarantee* của cấu trúc dữ liệu đồng thời. Các định nghĩa dưới đây lấy từ hai bài báo, không phải từ docs Rust:
 
 | Thuật ngữ | Định nghĩa (theo nguồn) |
 |---|---|
 | **Wait-free** | đảm bảo mọi thread đều tiếp tục tiến triển dù các thread khác bị trì hoãn tùy ý (hoặc thậm chí hỏng)[^hlm-waitfree] |
 | **Lock-free** | chỉ đảm bảo rằng luôn có một thread nào đó tiến triển[^hlm-lockfree]; cách phát biểu chặt hơn của Michael: nếu một thread thực hiện một số hữu hạn bước hướng tới một thao tác, thì *một thread nào đó* (có thể khác) phải đã tiến triển trong các bước đó[^michael-lockfree] |
-| **Obstruction-free** | đảm bảo tiến triển cho mọi thread mà cuối cùng chạy "in isolation"[^hlm-of] — yếu hơn lock-free vì không đảm bảo tiến triển khi hai hay nhiều thread xung đột chạy đồng thời[^hlm-weaker] |
+| **Obstruction-free** | đảm bảo tiến triển cho mọi thread mà cuối cùng chạy "in isolation"[^hlm-of]; yếu hơn lock-free vì không đảm bảo tiến triển khi hai hay nhiều thread xung đột chạy đồng thời[^hlm-weaker] |
 
-Quan hệ giữa ba mức: bài báo nói thẳng obstruction-free yếu hơn lock-free[^hlm-weaker]; còn wait-free ⟹ lock-free là suy ra trực tiếp từ hai định nghĩa trên (mọi thread tiến triển thì có một thread tiến triển; suy luận của người soạn), khớp với cách bài báo gọi wait-free là hành vi lý tưởng còn lock-free thường là đủ tốt cho mục đích thực tế[^hlm-lockfree-enough]. Vậy wait-free ⟹ lock-free ⟹ obstruction-free; lock-free cho phép *một* thread bị bỏ đói. Michael viết cùng ý ở dạng lợi ích: đối tượng lock-free miễn nhiễm với deadlock khi thread lỗi và giữ hiệu năng ổn định khi thread bị trì hoãn[^michael-benefit]; riêng obstruction-free, bài báo nói nó bảo đảm không thread nào bị chặn bởi sự chậm trễ hay hỏng của thread khác[^hlm-nonblocking].
+### 4.2 Quan hệ giữa ba mức
 
-**`std` hứa gì?** Docs `std::sync::atomic`: mọi kiểu atomic trong module "guaranteed to be lock-free if they're available", tức chúng không nội bộ lấy một global mutex[^std-lockfree]; nhưng *không* hứa wait-free — ví dụ `fetch_or` có thể cài bằng vòng compare-and-swap[^std-not-waitfree]. Khớp với asm ở §3: `fetch_or` nhiều bit trên x86-64 là vòng `cmpxchg`, còn khi có LSE là `ldsetal` (hoặc `ldset`) một lệnh. Chữ "lock-free" ở đây nói về cách cài *một thao tác atomic đơn*, khác với "cấu trúc lock-free" là thuộc tính của cả thuật toán (nhận xét của người soạn).
+Bài báo về obstruction-free nói thẳng rằng nó yếu hơn lock-free[^hlm-weaker]. Còn wait-free thì mạnh hơn lock-free, và điều này suy ra trực tiếp từ hai định nghĩa: mọi thread tiến triển thì dĩ nhiên có một thread tiến triển (suy luận của người soạn). Bài báo cũng coi wait-free là hành vi lý tưởng, còn lock-free thường đã đủ tốt trong thực tế[^hlm-lockfree-enough]. Gộp lại: wait-free ⟹ lock-free ⟹ obstruction-free, và lock-free vẫn cho phép *một* thread bị bỏ đói.
+
+Với `ingest`, cái lợi của lock-free chính là tình huống ở đầu mục. Michael viết rằng đối tượng lock-free không bị deadlock khi thread lỗi, và giữ hiệu năng ổn định kể cả khi thread bị trì hoãn[^michael-benefit]. Riêng obstruction-free, bài báo nói nó bảo đảm không thread nào bị chặn bởi sự chậm trễ hay hỏng của thread khác[^hlm-nonblocking].
+
+### 4.3 `std` hứa gì?
+
+Docs `std::sync::atomic` nói mọi kiểu atomic trong module là "guaranteed to be lock-free if they're available", nghĩa là chúng không nội bộ lấy một global mutex[^std-lockfree]. Nhưng `std` *không* hứa wait-free: `fetch_or`, chẳng hạn, có thể được cài bằng một vòng compare-and-swap[^std-not-waitfree]. Điều này khớp với asm ở §3: `fetch_or` nhiều bit trên x86-64 là vòng `cmpxchg`, còn khi có LSE là một lệnh `ldsetal` (hoặc `ldset`).
+
+Cần phân biệt hai nghĩa của "lock-free". Ở `std`, nó nói về cách cài *một thao tác atomic đơn*. "Cấu trúc lock-free" thì là thuộc tính của cả thuật toán (nhận xét của người soạn).
 
 <details><summary>Đi sâu: nguồn không cho gì</summary>
 
@@ -192,15 +235,19 @@ Hai bài báo chỉ định nghĩa ở mức văn xuôi; không có định ngh�
 
 ## 5. ABA problem và thu hồi bộ nhớ (Q5)
 
-> **Trả lời ngắn.** CAS so sánh *giá trị*, không so sánh *lịch sử*: nếu biến đổi A→B→A giữa `load` và `compare_exchange`, thao tác vẫn thành công[^atomics-aba]. Cùng địa chỉ không có nghĩa là cùng một object[^std-aba], nên đặc biệt nguy hiểm khi node đã bị giải phóng rồi cấp phát lại cùng địa chỉ (suy luận của người soạn). Hazard pointer và epoch giải quyết phần thu hồi bộ nhớ: chỉ hủy node khi không thread nào còn tham chiếu được[^michael-hp-scan][^ce-mechanism].
+> **Trả lời ngắn.** CAS so sánh *giá trị*, không so sánh *lịch sử*: nếu biến đổi A→B→A giữa `load` và `compare_exchange`, thao tác vẫn thành công[^atomics-aba]. Cùng địa chỉ không có nghĩa là cùng một object[^std-aba], nên đặc biệt nguy hiểm khi node đã bị giải phóng rồi cấp phát lại cùng địa chỉ (suy luận của người soạn). Hazard pointer giải quyết phần thu hồi bộ nhớ: chỉ hủy node khi không thread nào còn tham chiếu được[^michael-hp-scan]. Epoch-based reclamation đi theo cùng hướng đó[^ce-mechanism].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn ghi lại biển số xe đỗ ở ô A để lát nữa đến lấy; trong lúc đi, xe đó bị dời đi và một xe khác cùng biển số... đúng hơn là một xe khác vào đỗ đúng ô đó. Nhìn ô thấy "vẫn là xe đó" nhưng trạng thái xung quanh đã khác hẳn.
+*Với service `ingest`.* Mỗi lần xử lý event, handler thread cần một buffer. Để khỏi cấp phát mỗi lần, `ingest` giữ một kho buffer tự do dưới dạng stack lock-free: lấy buffer là `pop`, trả buffer là `push`. Đây là ví dụ quen thuộc để thấy ABA, vì `pop` đọc hai thứ rồi mới CAS, và giữa hai bước đó stack có thể đổi nhiều thứ mà `head` vẫn quay về giá trị cũ.
 
-**Vấn đề.** CAS so sánh *giá trị*, không so sánh *lịch sử*. Nếu biến đổi từ A sang B rồi quay lại A sau `load` nhưng trước `compare_exchange`, thao tác vẫn thành công[^atomics-aba]; với bộ đếm thường không sao, nhưng có thuật toán — thường dùng atomic pointer — thì đây là vấn đề (cùng đoạn). Docs std: cùng địa chỉ không có nghĩa là cùng một object[^std-aba]. Michael: ABA do IBM nêu lần đầu trong tài liệu CAS trên System/370[^michael-aba] và, theo ông, ảnh hưởng hầu hết thuật toán lock-free[^michael-aba-almost].
+### 5.1 CAS không thấy lịch sử
 
-**Ví dụ cụ thể: pop trên lock-free stack.** Stack là danh sách liên kết, `head` là `AtomicPtr<Node>`. `pop` của thread 1: đọc `old = head`, đọc `next = old.next`, rồi `CAS(head, old, next)`. Kịch bản (đã chạy deterministic, một thread giả lập hai thread xen kẽ):
+CAS so sánh giá trị chứ không so sánh lịch sử. Nếu biến đổi từ A sang B rồi quay lại A sau `load` nhưng trước `compare_exchange`, thao tác vẫn thành công dù biến đã bị đổi (và đổi ngược lại)[^atomics-aba]. Với bộ đếm thông thường điều đó không sao. Nhưng có những thuật toán, thường là thuật toán dùng atomic pointer, mà đây là vấn đề thật. Docs `std` cũng cảnh báo rằng một con trỏ giữ cùng địa chỉ không có nghĩa là vẫn cùng một object ở địa chỉ đó[^std-aba]. Bài báo hazard pointer nói ABA ảnh hưởng hầu hết thuật toán lock-free[^michael-aba-almost].
+
+### 5.2 Ví dụ: `pop` trên stack buffer
+
+Stack là danh sách liên kết, `head` là `AtomicPtr<Node>`. `pop` của thread 1 làm ba bước: đọc `old = head`, đọc `next = old.next`, rồi `CAS(head, old, next)`. Kịch bản dưới đây đã chạy deterministic: một thread giả lập hai thread xen kẽ.
 
 ```mermaid
 sequenceDiagram
@@ -218,48 +265,42 @@ sequenceDiagram
   Note over H: head → B → C (B "sống lại", A biến mất)
 ```
 
-Mã giả lập dùng `AtomicPtr<Node>` và `compare_exchange` thật; in ra `CAS của thread 1: Ok(())` và `stack sau đó: B C`: CAS thành công nhưng B (đã bị thread 2 lấy ra) được gắn lại làm đỉnh và A biến mất. Trong hệ thống thật B có thể đã bị `free` và cấp phát lại — use-after-free. Docs std cảnh báo đúng chỗ này: load rồi `compare_exchange` thành công không bảo đảm rằng thread khác đã không đổi giá trị trong khoảng giữa hai bước[^std-aba].
+Mã giả lập dùng `AtomicPtr<Node>` và `compare_exchange` thật, và in ra `CAS của thread 1: Ok(())` cùng `stack sau đó: B C`. CAS thành công, nhưng B, buffer thread 2 đã lấy ra, lại được gắn làm đỉnh stack, còn A biến mất. Trong hệ thống thật B có thể đã bị `free` rồi cấp phát lại, tức use-after-free; còn nếu chưa bị free thì thread khác `pop` sẽ nhận lại đúng buffer mà thread 2 đang dùng (suy luận của người soạn). Docs `std` cảnh báo đúng chỗ này: `load` rồi `compare_exchange` thành công không bảo đảm rằng thread khác đã không đổi giá trị trong khoảng giữa hai bước[^std-aba].
 
-**Cách xử lý (chỉ điều nguồn nói):**
+### 5.3 Cách xử lý
 
-- **Tag / update counter** (phương pháp "IBM tag"): gắn một bộ đếm vào con trỏ để A-rồi-lại-A khác nhau. Michael nhận xét phương pháp này cản trở việc thu hồi bộ nhớ tùy ý và đòi lệnh double-width không có trên các bộ xử lý 64-bit[^michael-tag].
-- **Thu hồi bộ nhớ an toàn** (hazard pointer — phần "Thu hồi bộ nhớ" bên dưới): Michael viết rằng các lời giải cho thu hồi bộ nhớ, như GC và hazard pointer, thường ngăn ABA như một tác dụng phụ, với ít hoặc không tốn thêm chi phí[^michael-aba-side-effect].
+Chỉ kể những cách mà nguồn nói:
+
+- **Tag / update counter** (phương pháp "IBM tag"): gắn một bộ đếm vào con trỏ để "A rồi lại A" thành hai giá trị khác nhau. Michael nhận xét phương pháp này cản trở việc thu hồi bộ nhớ tùy ý và đòi lệnh double-width mà các bộ xử lý 64-bit không có[^michael-tag].
+- **Thu hồi bộ nhớ an toàn** (hazard pointer, xem 5.4): Michael viết rằng các lời giải cho thu hồi bộ nhớ, như GC và hazard pointer, thường ngăn luôn ABA như một tác dụng phụ, với ít hoặc không tốn thêm chi phí[^michael-aba-side-effect].
 - GC *không* tự động ngăn ABA trong mọi trường hợp: chương trình chuyển node qua lại giữa hai stack vẫn có ABA dù GC hoàn hảo[^michael-gc-misconception].
 
-*Thu hồi bộ nhớ (memory reclamation).*
+### 5.4 Thu hồi bộ nhớ (memory reclamation)
 
-**Vấn đề.** Khi thread 1 `pop` một node, thread 2 có thể vừa đọc con trỏ tới node đó và sắp truy cập nội dung. Nếu thread 1 `free` ngay, thread 2 có thể làm hỏng object, trả kết quả sai, hoặc dereference con trỏ không hợp lệ; nếu bộ nhớ trả về OS (`munmap`), truy cập có thể thành lỗi nghiêm trọng[^michael-reclaim-problem]. Trong cấu trúc dùng lock thì dễ đảm bảo không ai truy cập node đã gỡ; với cấu trúc lock-free điển hình trong môi trường không có GC thì không, vì để giữ tiến triển lock-free mỗi thread phải được tự do thao tác bất cứ lúc nào[^michael-reclaim-problem].
+Vấn đề thứ hai nằm ở chỗ nào được `free` node. Khi thread 1 `pop` một node, thread 2 có thể vừa đọc con trỏ tới node đó và sắp truy cập nội dung. Nếu thread 1 `free` ngay, thread 2 có thể làm hỏng object, trả kết quả sai, hoặc dereference con trỏ không hợp lệ; nếu bộ nhớ đã trả về OS (`munmap`), truy cập còn có thể thành lỗi nghiêm trọng[^michael-reclaim-problem]. Trong cấu trúc dùng lock thì dễ bảo đảm không ai truy cập node đã gỡ. Với cấu trúc lock-free điển hình trong môi trường không có GC thì không, vì để giữ tiến triển lock-free, mỗi thread phải được tự do thao tác bất cứ lúc nào[^michael-reclaim-problem].
 
-Các cách trước đó dựa trên reference counter tổng hợp hoặc timestamp theo thread đều *blocking* nếu thiếu hỗ trợ scheduler: một thread hỏng hay chậm có thể ngăn counter về 0 hoặc timestamp tiến lên, nên bộ nhớ không giới hạn không được tái sử dụng[^michael-three-groups].
+Các cách làm trước đó dựa trên reference counter tổng hợp hoặc timestamp theo từng thread. Chúng đều *blocking* nếu thiếu hỗ trợ từ scheduler: một thread hỏng hay chậm có thể giữ counter không về 0 hoặc timestamp không tiến lên, nên bộ nhớ không giới hạn không được tái sử dụng[^michael-three-groups].
 
-*Hazard pointer.*
+**Hazard pointer.** Ý tưởng của Michael: mỗi thread có một vài (thường một hoặc hai) *hazard pointer*. Chỉ chủ nhân ghi được vào nó, nhưng mọi thread đều đọc được; mỗi cái hoặc null, hoặc trỏ tới node mà thread có thể truy cập tiếp mà không validate lại[^michael-hp-core]. Thread gỡ node (retire) giữ nó trong danh sách riêng. Khi gom đủ R node, nó quét hazard pointer của các thread khác; node nào không bị ai chỉ tới thì thu hồi được[^michael-hp-scan]. Trên stack, `pop` cần hazard pointer (truy cập node ở dòng 10 nguy hiểm, CAS ở dòng 11 dễ dính ABA), còn `push` thì không[^michael-stack-hp]. Các thao tác lõi của kỹ thuật này chỉ cần đọc/ghi single-word[^michael-hp-waitfree].
 
-Ý tưởng của Michael: mỗi thread có một vài (thường một hoặc hai) *hazard pointer*; chỉ chủ nhân ghi được, mọi thread đọc được. Mỗi cái hoặc null hoặc trỏ tới node mà thread có thể truy cập tiếp mà không validate lại[^michael-hp-core]. Thread gỡ node (retire) giữ nó trong danh sách riêng; đủ R node thì quét hazard pointer của các thread khác, node nào không bị ai chỉ tới thì thu hồi được[^michael-hp-scan]. Trên stack, `pop` cần hazard pointer (truy cập node ở dòng 10 nguy hiểm, CAS ở dòng 11 dễ dính ABA), `push` thì không[^michael-stack-hp]. Các thao tác lõi chỉ cần đọc/ghi single-word[^michael-hp-waitfree].
-
-*Epoch-based reclamation (crossbeam-epoch).*
-
-Docs `crossbeam-epoch` 0.9.18 mô tả cùng vấn đề: thread gỡ phần tử khỏi map lock-free trong khi thread khác đang đọc nó phải chờ rồi mới được hủy[^ce-problem]; ngôn ngữ có garbage collector giải quyết "trivially"[^ce-gc]. Cơ chế epoch: phần tử bị gỡ vào đống rác gắn epoch hiện tại; mỗi lần thread truy cập collection, nó kiểm tra epoch, cố tăng epoch, và hủy rác đã đủ cũ để không thread nào còn tham chiếu được[^ce-mechanism]. Trước khi load một `Atomic`, participant phải được *pin*: tuyên bố rằng object nào bị gỡ từ lúc này chưa được hủy ngay[^ce-pin].
+**Epoch-based reclamation (crossbeam-epoch).** Docs `crossbeam-epoch` 0.9.18 mô tả cùng vấn đề: thread gỡ một phần tử khỏi map lock-free trong khi thread khác đang đọc nó thì phải chờ, rồi mới hủy được[^ce-problem]. Ngôn ngữ có garbage collector giải quyết chuyện này "trivially"[^ce-gc]. Cơ chế epoch hoạt động như sau: phần tử bị gỡ đi vào đống rác gắn epoch hiện tại; mỗi lần thread truy cập collection, nó kiểm tra epoch, cố tăng epoch, và hủy những rác đã đủ cũ để không thread nào còn tham chiếu tới[^ce-mechanism]. Trước khi load một `Atomic`, participant phải được *pin*, nghĩa là tuyên bố rằng object nào bị gỡ từ lúc này chưa được hủy ngay[^ce-pin].
 
 **So sánh (nhận xét của người soạn, suy luận):** hazard pointer bảo vệ *từng node* thread đang giữ; epoch bảo vệ *theo thời kỳ* (pin một lần cho cả đoạn truy cập, nhưng thread pin lâu giữ lại rác của mọi người). Docs crossbeam-epoch đã tải không so sánh hai cách.
 
 <details><summary>Đi sâu: stack, queue Michael–Scott và false sharing</summary>
 
-**Stack (IBM freelist).**
+**Lịch sử.** Michael cho biết ABA do IBM nêu lần đầu trong tài liệu về CAS trên System/370[^michael-aba].
 
-Michael trình bày stack lock-free dựa trên thuật toán IBM freelist[^michael-stack]. Dạng đơn giản: `head: AtomicPtr<Node>`.
+**Stack (IBM freelist).** Michael trình bày stack lock-free dựa trên thuật toán IBM freelist[^michael-stack]. Dạng đơn giản: `head: AtomicPtr<Node>`.
 
 - **push**: tạo node, đặt `node.next = head.load()`, rồi `CAS(head, old, node)`; nếu thất bại thì cập nhật `node.next = head hiện tại` và thử lại.
 - **pop**: `old = head.load()`, `next = old.next`, `CAS(head, old, next)`; thất bại thì lặp lại. Đây là chỗ ABA và use-after-free xuất hiện (§5).
 
-Ví dụ đã chạy: bốn thread, mỗi thread push 10 000 phần tử bằng `compare_exchange_weak(h, n, Release, Relaxed)` trên `AtomicPtr`; sau khi mọi push xong, một thread `pop` hết. Kết quả `pushed=40000 popped=40000 sum=799980000`, đúng bằng tổng 0..39999. Bản `pop` **cố ý không `free`** và chỉ chạy sau khi mọi `push` xong, nên né ABA và reclamation — hai chỗ khó. Đây là minh họa `AtomicPtr`, không phải mã nên dùng (§7).
+Ví dụ đã chạy: bốn thread, mỗi thread push 10 000 phần tử bằng `compare_exchange_weak(h, n, Release, Relaxed)` trên `AtomicPtr`; sau khi mọi push xong, một thread `pop` hết. Kết quả `pushed=40000 popped=40000 sum=799980000`, đúng bằng tổng 0..39999. Bản `pop` **cố ý không `free`** và chỉ chạy sau khi mọi `push` xong, nên né ABA và reclamation, hai chỗ khó. Đây là minh họa `AtomicPtr`, không phải mã nên dùng (§7).
 
-**Queue (Michael–Scott).**
+**Queue (Michael–Scott).** Michael dùng queue FIFO lock-free của Michael–Scott làm case study. Đó là danh sách liên kết đơn có node giả ở đầu. Enqueue gắn node vào cuối rồi cập nhật `Tail` (nếu `Tail` chưa trỏ đúng node cuối thì cập nhật nó trước); dequeue dịch `Head` sau khi đọc dữ liệu từ node thứ hai[^michael-queue]. Nếu một thread bị hoãn khi để đối tượng ở trạng thái chưa ổn định, thread khác đưa nó về ổn định rồi mới làm việc của mình[^michael-helping] ("helping"). Cơ chế này là lý do một thread bị hoãn không chặn thread khác (suy luận của người soạn, nối với §4). Với queue, Michael chỉ ra các CAS ở dòng 7, 8, 9 của enqueue đều là "ABA hazard"[^michael-queue-hazards]. Tức là enqueue cần hazard pointer cùng bước validate, khác `push` của stack vốn không cần hazard pointer (nhận xét của người soạn).
 
-Michael dùng queue FIFO lock-free của Michael–Scott làm case study: danh sách liên kết đơn có node giả ở đầu; enqueue gắn node vào cuối rồi cập nhật `Tail` (nếu `Tail` chưa trỏ đúng node cuối thì cập nhật nó trước); dequeue dịch `Head` sau khi đọc dữ liệu từ node thứ hai[^michael-queue]. Nếu một thread bị hoãn khi để đối tượng ở trạng thái chưa ổn định, thread khác đưa nó về ổn định rồi mới làm việc của mình[^michael-helping] ("helping"); cơ chế này là lý do một thread bị hoãn không chặn thread khác (suy luận của người soạn, nối với §4). Với queue, Michael chỉ ra các CAS ở dòng 7, 8, 9 của enqueue đều là "ABA hazard"[^michael-queue-hazards]; tức enqueue cần hazard pointer cùng bước validate, khác `push` của stack vốn không cần hazard pointer (nhận xét của người soạn).
-
-**False sharing.**
-
-Hai biến atomic không liên quan nằm chung cache line thì thao tác trên biến này làm chậm biến kia; tránh bằng cách đặt chúng xa nhau[^atomics-false-sharing], và tùy bộ xử lý có thể cần alignment 128 byte mới thấy hiệu ứng[^atomics-128]. Chi tiết ở [P2 · Chương 06](../02-cpu/06-cache-va-numa.md). Với queue, `Head` và `Tail` chung cache line sẽ làm enqueue và dequeue tranh nhau dù không tranh chấp logic (suy luận của người soạn).
+**False sharing.** Hai biến atomic không liên quan nằm chung một cache line thì thao tác trên biến này làm chậm biến kia; muốn tránh thì đặt chúng xa nhau[^atomics-false-sharing]. Tùy bộ xử lý, có thể cần alignment 128 byte mới thấy hiệu ứng[^atomics-128]. Chi tiết ở [P2 · Chương 06](../02-cpu/06-cache-va-numa.md). Với queue, `Head` và `Tail` chung cache line sẽ làm enqueue và dequeue tranh nhau dù không tranh chấp logic (suy luận của người soạn).
 
 </details>
 
@@ -271,13 +312,25 @@ Hai biến atomic không liên quan nằm chung cache line thì thao tác trên 
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn dán mảnh giấy "tôi đang chờ tại ô này, chỉ gọi khi ô còn là 0" cho bảo vệ; nếu lúc bạn đến ô đã khác 0, bảo vệ bảo "khỏi chờ" ngay.
+*Với service `ingest`.* Khi hàng đợi job trống, worker của `ingest` không có gì làm. Nó không thể quay trong CAS loop mãi, vì sẽ đốt CPU của cả máy cho việc chờ. Nó phải ngủ, và đến khi handler thread đẩy job vào thì được đánh thức. Mục này xem việc ngủ-và-đánh-thức ấy đứng trên atomic ra sao.
 
-CAS loop hợp với tranh chấp ngắn (nhận xét của người soạn); chờ lâu thì thread cần ngủ. Trên Linux các primitive pthread đều cài bằng syscall futex[^atomics-futex-linux]. Cơ chế `FUTEX_WAIT`/`FUTEX_WAKE`, phép so sánh-rồi-chặn nguyên tử trả `EAGAIN` để không mất wake-up, và state machine futex 0/1/2 của `std::sync::Mutex` (fast path `compare_exchange(UNLOCKED, LOCKED, Acquire, Relaxed)`, unlock `swap(UNLOCKED, Release)`) đã giải thích ở [Chương 03, mục 5 và 6](03-lock.md); phần dưới chỉ ghi các điểm riêng của góc nhìn atomic. Kernel nhớ thread nào chờ ở địa chỉ nào, còn giá trị trong biến do người dùng tự quản[^atomics-futex-kernel]. Futex wait có thể thức dậy giả nên thường nằm trong vòng lặp[^atomics-futex-spurious]. Nếu tự quản trạng thái trong biến atomic, bên báo hiệu bỏ qua `FUTEX_WAKE` khi không ai chờ — kernel chỉ bị gọi khi cần chặn, đó là lý do primitive dựa trên futex nhanh[^atomics-futex-fast].
+### 6.1 Vì sao CAS loop không đủ
+
+CAS loop hợp với những đoạn tranh chấp ngắn (nhận xét của người soạn). Chờ lâu thì thread cần ngủ, và trên Linux việc ngủ đi qua syscall futex: các primitive pthread đều được cài bằng nó[^atomics-futex-linux].
+
+Cơ chế `FUTEX_WAIT`/`FUTEX_WAKE`, phép so sánh-rồi-chặn nguyên tử trả `EAGAIN` để không mất wake-up, và state machine futex 0/1/2 của `std::sync::Mutex` (fast path `compare_exchange(UNLOCKED, LOCKED, Acquire, Relaxed)`, unlock `swap(UNLOCKED, Release)`) đã giải thích ở [Chương 03, mục 5 và 6](03-lock.md). Phần dưới chỉ ghi các điểm riêng của góc nhìn atomic.
+
+### 6.2 Kernel nhớ ai chờ, giá trị do bạn giữ
+
+Kernel chỉ nhớ thread nào đang chờ ở địa chỉ nào; còn giá trị trong biến atomic hoàn toàn do chương trình của bạn quản lý[^atomics-futex-kernel]. Vì vậy với worker của `ingest`, biến atomic có thể là số job đang chờ trong hàng đợi, và ý nghĩa của từng giá trị là do code `ingest` quy định, kernel không biết (nhận xét của người soạn). Một chi tiết cần nhớ: futex wait có thể thức dậy giả, nên worker thường phải bọc lệnh chờ trong một vòng lặp kiểm tra lại điều kiện[^atomics-futex-spurious].
+
+### 6.3 Fast path không cần syscall
+
+Chính vì trạng thái nằm trong biến atomic nên có đường nhanh. Bên báo hiệu (handler thread đẩy job) có thể bỏ qua `FUTEX_WAKE` khi không ai đang chờ, và kernel chỉ bị gọi khi thật sự cần chặn một thread. Đó là lý do các primitive dựa trên futex nhanh[^atomics-futex-fast].
 
 <details><summary>Đi sâu: chuẩn hóa và futex trong <code>std</code></summary>
 
-C++ năm 2020 thêm `atomic_wait` và `atomic_notify`[^atomics-cxx-wait]. Trong trang `AtomicUsize` docs 1.95.0 đã tải, danh sách method không có `wait`/`notify` (quan sát của người soạn; biên dịch `AtomicU32::new(0).wait(0)` bằng rustc 1.95.0 báo `no method named wait`); `std` dùng futex bên trong — lớp syscall (`SYS_futex` với `FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG`) nằm ở phần Đi sâu của [Chương 03, mục 6](03-lock.md).
+C++ năm 2020 thêm `atomic_wait` và `atomic_notify`[^atomics-cxx-wait]. Trong trang `AtomicUsize` docs 1.95.0 đã tải, danh sách method không có `wait`/`notify` (quan sát của người soạn; biên dịch `AtomicU32::new(0).wait(0)` bằng rustc 1.95.0 báo `no method named wait`). `std` dùng futex bên trong; lớp syscall (`SYS_futex` với `FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG`) nằm ở phần Đi sâu của [Chương 03, mục 6](03-lock.md).
 
 </details>
 
@@ -285,42 +338,43 @@ C++ năm 2020 thêm `atomic_wait` và `atomic_notify`[^atomics-cxx-wait]. Trong 
 
 ## 7. Khi nào *không* nên dùng lock-free (Q7)
 
-> **Trả lời ngắn.** Thường là không nên (nhận xét của người soạn): lock-free khó viết đúng, không tự động nhanh hơn lock — CAS thất bại tốn kém[^atomics-cas-fail-cost], còn fast path của mutex futex chỉ là một CAS[^std-futex-fast] — và vẫn không hứa wait-free[^std-not-waitfree].
+> **Trả lời ngắn.** Thường là không nên (nhận xét của người soạn). Lock-free khó viết đúng, và không tự động nhanh hơn lock: CAS thất bại tốn kém[^atomics-cas-fail-cost]. Còn fast path của mutex futex chỉ là một CAS[^std-futex-fast]. Nó cũng không hứa wait-free[^std-not-waitfree].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): giống tự viết connection pool thay vì dùng thư viện có sẵn — làm được, nhưng chỉ đáng khi đo thấy cần.
+*Với service `ingest`.* Sau khi biết stack lock-free, ABA và hazard pointer, bạn có thể muốn viết lại hàng đợi job của `ingest` thành lock-free cho "nhanh". Mục này giải thích vì sao thường không nên. Tất cả các ý dưới đây là nhận xét của người soạn; nguồn chỉ được dẫn ở chỗ có.
 
-Nhận xét của người soạn; nguồn chỉ được dẫn ở chỗ có.
-
-1. **Khó đúng.** Bài báo obstruction-free viết rằng CAS và LL/SC "an awkward match" với đồng bộ lock-free[^hlm-rare]; ta vừa thấy lý do cụ thể: ABA, thu hồi bộ nhớ và nhiều con trỏ phải nhất quán (§5).
-2. **Không tự động nhanh hơn.** CAS thất bại tốn kém[^atomics-cas-fail-cost]; dưới tranh chấp cao, nhiều thread cùng CAS một `head` có thể lãng phí chu kỳ (suy luận của người soạn). Dưới tranh chấp thấp, mutex futex đã rẻ: fast path chỉ là một CAS, không syscall[^std-futex-fast].
-3. **Lock-free ≠ không chờ.** Một thread vẫn có thể quay mãi trong CAS loop (§4); `std` không hứa wait-free[^std-not-waitfree].
+1. **Khó đúng.** Bài báo obstruction-free viết rằng CAS và LL/SC là "an awkward match" với đồng bộ lock-free[^hlm-rare]. Ta vừa thấy lý do cụ thể ở §5: ABA, thu hồi bộ nhớ, và nhiều con trỏ phải nhất quán với nhau.
+2. **Không tự động nhanh hơn.** CAS thất bại tốn kém[^atomics-cas-fail-cost]. Dưới tranh chấp cao, nhiều handler thread cùng CAS một `head` có thể lãng phí chu kỳ (suy luận của người soạn). Dưới tranh chấp thấp, mutex futex đã rẻ: fast path chỉ là một CAS, không syscall[^std-futex-fast].
+3. **Lock-free không có nghĩa là không chờ.** Một thread vẫn có thể quay mãi trong CAS loop (§4), và `std` không hứa wait-free[^std-not-waitfree].
 4. **Chi phí bảo trì.** Review, kiểm chứng và giải thích khó hơn `Mutex<T>` nhiều.
-5. **Thực tế cho backend:** hầu hết dịch vụ nên dùng `Mutex`, `RwLock`, channel hoặc bộ đếm `fetch_add`. Khi thật sự cần cấu trúc lock-free, dùng crate đã kiểm chứng như `crossbeam-epoch` (§5) thay vì tự viết thu hồi bộ nhớ, và đo trước khi chọn.
+5. **Thực tế cho backend.** Hầu hết service như `ingest` nên dùng `Mutex`, `RwLock`, channel hoặc bộ đếm `fetch_add`. Khi thật sự cần cấu trúc lock-free, dùng crate đã được kiểm chứng như `crossbeam-epoch` (§5) thay vì tự viết phần thu hồi bộ nhớ, và đo trước khi chọn.
 
 <details><summary>Đi sâu: số đo của Michael</summary>
 
-Michael đo lock-free dùng hazard pointer ngang lock khi không tranh chấp[^michael-perf] — kết quả trên máy IBM năm 2004, không phải bảo đảm cho phần cứng hiện nay.
+Michael đo lock-free dùng hazard pointer và thấy hiệu năng ngang lock khi không tranh chấp[^michael-perf]. Đó là kết quả trên máy IBM năm 2004, không phải bảo đảm cho phần cứng hiện nay.
 
 </details>
 
-**Quay lại Q7:** lock-free là công cụ chuyên dụng — khó đúng, không mặc định nhanh hơn; chọn nó sau khi đo.
-
+**Quay lại Q7:** lock-free là công cụ chuyên dụng, khó đúng và không mặc định nhanh hơn; chọn nó sau khi đo.
 
 ## 8. `Arc`: refcount atomic với ordering cụ thể (Q8)
 
-> **Trả lời ngắn.** `Arc::clone` chỉ cần `Relaxed` vì tham chiếu mới chỉ sinh ra từ một tham chiếu đã có[^arc-clone-relaxed]. `drop` trừ refcount bằng `Release`; tham chiếu cuối thêm fence `Acquire` để việc dùng dữ liệu không bị sắp xếp lại ra sau việc xóa[^arc-drop-sub][^arc-drop-fence].
+> **Trả lời ngắn.** `Arc::clone` chỉ cần `Relaxed` vì tham chiếu mới chỉ sinh ra từ một tham chiếu đã có[^arc-clone-relaxed]. `drop` trừ refcount bằng `Release`[^arc-drop-sub]. Tham chiếu cuối cùng thêm fence `Acquire` để việc dùng dữ liệu không bị sắp xếp lại ra sau việc xóa[^arc-drop-fence].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đếm số người đang cầm chìa khóa phòng; thêm người mới chỉ cần ghi số, nhưng người cuối cùng trả chìa phải chắc chắn đã thấy hết mọi thứ người trước để lại trong phòng trước khi dọn phòng.
+*Với service `ingest`.* `ingest` giữ cấu hình trong một `Arc<Config>`: đầu mỗi request, handler thread `clone` nó; cuối request thì `drop`. Mỗi request đụng refcount hai lần, nên ordering của hai thao tác này đáng để biết. Tham chiếu cuối cùng bị `drop` còn phải xóa `Config`, và lúc đó phải chắc rằng mọi thread khác đã dùng xong.
 
-Docs: `Arc` dùng phép atomic cho refcount nên thread-safe, khác `Rc`[^std-arc]. Source `library/alloc/src/sync.rs` Rust 1.95.0 cho thấy ordering cụ thể (chi tiết cài đặt, có thể đổi giữa các phiên bản).
+Docs `std` cho biết `Arc` dùng phép atomic cho refcount nên thread-safe, khác `Rc`[^std-arc]. Phần dưới đọc source `library/alloc/src/sync.rs` của Rust 1.95.0 để thấy ordering cụ thể (đây là chi tiết cài đặt, có thể đổi giữa các phiên bản).
 
-**`clone` = `fetch_add(1, Relaxed)`**[^arc-clone-fetchadd]. Comment trong source: tham chiếu mới chỉ sinh từ tham chiếu đã có, và việc chuyển tham chiếu giữa thread đã phải tự mang đồng bộ cần thiết, nên tăng refcount dùng relaxed được[^arc-clone-relaxed]. Sau đó source kiểm tra `if old_size > MAX_REFCOUNT { abort(); }` (`MAX_REFCOUNT = isize::MAX`) phòng người `mem::forget` Arc liên tục[^arc-clone-abort] — chính là cách "abort khi tràn" trong sách (§1)[^atomics-arc-abort].
+### 8.1 `clone` = `fetch_add(1, Relaxed)`
 
-**`drop` = `fetch_sub(1, Release)`, rồi fence `Acquire` nếu là tham chiếu cuối.**
+Source ghi `let old_size = self.inner().strong.fetch_add(1, Relaxed);`[^arc-clone-fetchadd]. Dùng `Relaxed` được là vì tham chiếu mới chỉ sinh ra từ một tham chiếu đã có, và việc chuyển tham chiếu giữa các thread đã phải tự mang đồng bộ cần thiết; comment trong source giải thích đúng như vậy[^arc-clone-relaxed]. Với `ingest`, handler thread chỉ clone được `Config` khi nó đã nắm một `Arc` rồi.
+
+Sau đó source kiểm tra `if old_size > MAX_REFCOUNT { abort(); }` (`MAX_REFCOUNT = isize::MAX`), phòng trường hợp ai đó `mem::forget` Arc liên tục[^arc-clone-abort]. Đây chính là cách "abort khi tràn" mà sách nhắc ở §1[^atomics-arc-abort].
+
+### 8.2 `drop` = `fetch_sub(1, Release)`, rồi fence `Acquire` nếu là tham chiếu cuối
 
 ```rust
 if self.inner().strong.fetch_sub(1, Release) != 1 { return; }
@@ -328,13 +382,13 @@ acquire!(self.inner().strong);   // atomic::fence(Acquire)
 // ... drop dữ liệu, giải phóng bộ nhớ
 ```
 
-Chưa phải tham chiếu cuối thì return ngay[^arc-drop-sub]. Với tham chiếu cuối, comment giải thích: fence `Acquire` ngăn sắp xếp lại giữa *dùng* và *xóa* dữ liệu; giảm refcount là `Release` nên đồng bộ với fence này — dùng dữ liệu xảy ra trước giảm refcount, trước fence, trước việc xóa[^arc-drop-fence]. Đây là mô hình Release/Acquire của [chương 06](06-memory-model.md).
+Chưa phải tham chiếu cuối thì `drop` return ngay[^arc-drop-sub]. Với tham chiếu cuối, comment trong source giải thích: fence `Acquire` ngăn việc sắp xếp lại giữa *dùng* và *xóa* dữ liệu. Giảm refcount là `Release` nên nó đồng bộ với fence này, tức việc dùng dữ liệu xảy ra trước giảm refcount, trước fence, trước việc xóa[^arc-drop-fence]. Đây chính là mô hình Release/Acquire của [chương 06](06-memory-model.md). Áp vào `ingest`: mọi lần đọc `Config` của các handler thread xảy ra trước lúc `Config` bị xóa.
 
 <details><summary>Đi sâu: macro <code>acquire!</code>, lý do với <code>Mutex&lt;T&gt;</code>, và CAS loop của <code>Weak</code></summary>
 
 `acquire!` là `atomic::fence(Acquire)`, hoặc `load(Acquire)` khi build với ThreadSanitizer vì TSan không hỗ trợ fence[^arc-acquire-macro]. Cần đến mức này vì nội dung `Arc` có thể có ghi nội bộ (như `Mutex<T>`), và mutex không được lock lúc bị drop nên không thể dựa vào đồng bộ của nó[^arc-drop-mutex].
 
-**`Weak::upgrade` và `Arc::downgrade` dùng CAS loop.** `upgrade` dùng `try_update(Acquire, Relaxed, checked_increment)` thay vì `fetch_add` vì không bao giờ được đưa refcount từ 0 lên 1[^arc-upgrade-cas]. `downgrade` lặp `compare_exchange_weak(cur, cur + 1, Acquire, Relaxed)` và coi `usize::MAX` ở weak count như một "khóa" tạm[^arc-downgrade-cas]. Đây là mẫu §2 trong std, với ràng buộc ("không đếm lên từ 0") mà `fetch_add` không diễn đạt được. ABA không đáng lo ở đây vì giá trị so sánh là bộ đếm, không phải identity của object (nhận xét của người soạn; sách cũng nói với bộ đếm thường không sao[^atomics-aba]).
+**`Weak::upgrade` và `Arc::downgrade` dùng CAS loop.** `upgrade` dùng `try_update(Acquire, Relaxed, checked_increment)` thay vì `fetch_add`, vì không bao giờ được đưa refcount từ 0 lên 1[^arc-upgrade-cas]. `downgrade` lặp `compare_exchange_weak(cur, cur + 1, Acquire, Relaxed)` và coi `usize::MAX` ở weak count như một "khóa" tạm[^arc-downgrade-cas]. Đây là mẫu của §2 trong `std`, với ràng buộc ("không đếm lên từ 0") mà `fetch_add` không diễn đạt được. ABA không đáng lo ở đây vì giá trị so sánh là bộ đếm, không phải identity của object (nhận xét của người soạn; sách cũng nói với bộ đếm thường thì không sao[^atomics-aba]).
 
 </details>
 
@@ -342,89 +396,91 @@ Chưa phải tham chiếu cuối thì return ngay[^arc-drop-sub]. Với tham chi
 
 ## Liên hệ với Rust
 
+Với `ingest` viết bằng Rust, các thao tác ở chương này đều có sẵn trong `std::sync::atomic`; ba điểm dưới đây là chỗ bạn dễ vấp khi dùng chúng.
+
 - `AtomicUsize` cùng kích thước và bit validity với `usize`, nhưng alignment luôn bằng kích thước, kể cả khi `usize` có alignment nhỏ hơn trên target đó[^std-au-align].
-- `AtomicPtr<T>` có cùng kích thước và bit validity với `*mut T`[^std-ap]; nó là viên gạch của stack/queue ở §5. Nó giữ **con trỏ**, không quản lý vòng đời: vấn đề ở §5 thuộc về bạn, và docs std cảnh báo trực tiếp về ABA[^std-aba].
-- Kiểu atomic là `Sync` nhưng không tự cung cấp cơ chế chia sẻ; thường đặt vào `Arc` hoặc `static`[^std-atomic-sync].
+- `AtomicPtr<T>` có cùng kích thước và bit validity với `*mut T`[^std-ap]. Nó là viên gạch của stack/queue ở §5, và nó chỉ giữ **con trỏ**, không quản lý vòng đời. Vì vậy vấn đề ở §5 thuộc về bạn: docs `std` cảnh báo trực tiếp về ABA[^std-aba].
+- Kiểu atomic là `Sync`, nhưng không tự cung cấp cơ chế chia sẻ[^std-atomic-sync]. Thường bạn đặt nó vào `Arc` hoặc `static`, như `REQUESTS_TOTAL` của `ingest`.
 
 ## Tóm tắt
 
-- Atomic operation là viên gạch dưới mọi primitive đồng bộ[^atomics-building-block]; `fetch_add`/`swap` là một thao tác đọc-sửa-ghi, còn `load` rồi `store` thì không. `fetch_add` wrap khi tràn[^std-fetchadd-wrap].
-- `compare_exchange_weak` được phép thất bại giả vì LL/SC có false negative[^atomics-llsc-fn]; asm AArch64 không LSE cho thấy weak chỉ một lần `stlxr`, strong có vòng.
-- x86-64: `lock xadd`, `xchg`, `lock cmpxchg`; AArch64: `ldxr/stxr` hoặc từ ARMv8.1 `ldadd/cas`[^atomics-lse].
-- Wait-free > lock-free > obstruction-free về độ mạnh; `std` hứa lock-free, không hứa wait-free[^std-lockfree][^std-not-waitfree]. Nguồn đã tải không có định nghĩa hình thức.
-- ABA: CAS thấy cùng giá trị nhưng lịch sử đã đổi[^atomics-aba]; thu hồi bộ nhớ (hazard pointer, epoch) là phần khó; theo Michael, hazard pointer và GC thường ngăn ABA như tác dụng phụ[^michael-aba-side-effect].
-- `Arc`: `clone` = `fetch_add(1, Relaxed)`, `drop` = `fetch_sub(1, Release)` + fence `Acquire` ở tham chiếu cuối[^arc-drop-sub][^arc-clone-fetchadd].
-- Futex = atomic compare-and-block; fast path không syscall là lý do các primitive dựa trên futex nhanh[^futex-cab][^atomics-futex-fast]. Lock-free không mặc định nhanh hơn lock.
+- Atomic operation là viên gạch dưới mọi primitive đồng bộ[^atomics-building-block]. `fetch_add`/`swap` là một thao tác đọc-sửa-ghi, còn `load` rồi `store` thì không. `fetch_add` wrap khi tràn[^std-fetchadd-wrap].
+- `compare_exchange_weak` được phép thất bại giả vì LL/SC có false negative[^atomics-llsc-fn]. Asm AArch64 không LSE cho thấy weak chỉ một lần `stlxr`, strong có vòng.
+- x86-64 dùng `lock xadd`, `xchg`, `lock cmpxchg`. AArch64 dùng `ldxr/stxr`, hoặc từ ARMv8.1 là `ldadd/cas`[^atomics-lse].
+- Wait-free mạnh hơn lock-free, lock-free mạnh hơn obstruction-free. `std` hứa lock-free[^std-lockfree]. `std` không hứa wait-free[^std-not-waitfree]. Nguồn đã tải không có định nghĩa hình thức.
+- ABA: CAS thấy cùng giá trị nhưng lịch sử đã đổi[^atomics-aba]. Thu hồi bộ nhớ (hazard pointer, epoch) là phần khó; theo Michael, hazard pointer và GC thường ngăn ABA như tác dụng phụ[^michael-aba-side-effect].
+- `Arc::clone` là `fetch_add(1, Relaxed)`[^arc-clone-fetchadd]. `drop` là `fetch_sub(1, Release)` rồi fence `Acquire` ở tham chiếu cuối[^arc-drop-sub].
+- Futex là atomic compare-and-block[^futex-cab]. Fast path không syscall là lý do các primitive dựa trên futex nhanh[^atomics-futex-fast]. Lock-free không mặc định nhanh hơn lock.
 
 ## Câu hỏi tự kiểm tra
 
-1. Vì sao `x.store(x.load(Relaxed) + 1, Relaxed)` có thể mất cập nhật? Đó có phải data race không?
+1. Vì sao `REQUESTS_TOTAL.store(REQUESTS_TOTAL.load(Relaxed) + 1, Relaxed)` của `ingest` có thể mất cập nhật? Đó có phải data race không?
 <details><summary>Đáp án</summary>
 
-Không phải data race (không có truy cập non-atomic)[^std-datarace]; là race condition vì giữa load và store có thể có thread khác chen vào. `fetch_add` là một thao tác đọc-sửa-ghi duy nhất[^atomics-fetch].
+Không phải data race, vì không có truy cập non-atomic[^std-datarace]. Đó là race condition: giữa load và store có thể có thread khác chen vào. `fetch_add` là một thao tác đọc-sửa-ghi duy nhất[^atomics-fetch].
 
 </details>
 
 2. `fetch_add(1, Relaxed)` trên `u32::MAX` làm gì? Cách nào ngăn hẳn việc tràn?
 <details><summary>Đáp án</summary>
 
-Wrap[^atomics-wrap][^std-fetchadd-wrap]; ngăn hẳn bằng compare-and-exchange[^atomics-overflow-cae].
+Nó wrap[^atomics-wrap]. Docs `std` cũng ghi vậy[^std-fetchadd-wrap]. Muốn ngăn hẳn thì dùng compare-and-exchange[^atomics-overflow-cae].
 
 </details>
 
 3. Vì sao `compare_exchange_weak` có thể thất bại dù giá trị khớp? Trên x86-64 có khác strong không?
 <details><summary>Đáp án</summary>
 
-LL/SC cho phép store-conditional thất bại giả[^atomics-llsc-fn]; docs std cho phép để sinh code tốt hơn[^std-weak]. Trên x86-64 cả hai là `lock cmpxchg`[^atomics-x86-weak].
+LL/SC cho phép store-conditional thất bại giả[^atomics-llsc-fn]. Docs `std` cho phép như vậy để sinh code tốt hơn[^std-weak]. Trên x86-64 cả hai là `lock cmpxchg`[^atomics-x86-weak].
 
 </details>
 
 4. Khi nào chọn `compare_exchange` strong?
 <details><summary>Đáp án</summary>
 
-Khi không nằm trong vòng lặp và không muốn một thất bại giả bị hiểu nhầm — ví dụ khởi tạo khóa lười[^atomics-strong-when].
+Khi không nằm trong vòng lặp và không muốn một thất bại giả bị hiểu nhầm, ví dụ khởi tạo khóa lười[^atomics-strong-when].
 
 </details>
 
 5. `fetch_add` trên `aarch64-apple-darwin` mặc định biên dịch thành gì, và khi tắt LSE?
 <details><summary>Đáp án</summary>
 
-`ldadd` khi có LSE[^atomics-lse]; vòng `ldaxr/add/stlxr/cbnz` (`AcqRel`; `ldxr/stxr` với `Relaxed`) khi tắt (asm ở §3), vì ARMv8 bản đầu không có lệnh đơn[^atomics-llsc].
+`ldadd` khi có LSE[^atomics-lse]. Khi tắt LSE là vòng `ldaxr/add/stlxr/cbnz` (`AcqRel`; `ldxr/stxr` với `Relaxed`, asm ở §3), vì ARMv8 bản đầu không có lệnh đơn[^atomics-llsc].
 
 </details>
 
 6. Lock-free khác wait-free thế nào? `std` hứa gì?
 <details><summary>Đáp án</summary>
 
-Wait-free: mọi thread tiến triển[^hlm-waitfree]; lock-free: luôn có thread tiến triển[^hlm-lockfree]. `std` hứa lock-free, không hứa wait-free[^std-lockfree][^std-not-waitfree].
+Wait-free: mọi thread tiến triển[^hlm-waitfree]. Lock-free: luôn có thread tiến triển[^hlm-lockfree]. `std` hứa lock-free[^std-lockfree]. `std` không hứa wait-free[^std-not-waitfree].
 
 </details>
 
-7. Mô tả ABA trên `pop` của stack và hai hướng xử lý.
+7. Mô tả ABA trên `pop` của stack buffer ở `ingest` và hai hướng xử lý.
 <details><summary>Đáp án</summary>
 
-Thread 1 đọc head=A, next=B; thread khác pop A, pop B, push A; CAS của thread 1 vẫn thành công[^atomics-aba][^std-aba]. Xử lý: tag/update counter (cần lệnh double-width)[^michael-tag]; thu hồi bộ nhớ an toàn như hazard pointer[^michael-aba-side-effect].
+Thread 1 đọc head=A, next=B. Thread khác pop A, pop B, rồi push A. CAS của thread 1 vẫn thành công[^atomics-aba]. Docs `std` cảnh báo đúng tình huống này[^std-aba]. Hướng thứ nhất là tag/update counter, cần lệnh double-width[^michael-tag]. Hướng thứ hai là thu hồi bộ nhớ an toàn như hazard pointer[^michael-aba-side-effect].
 
 </details>
 
 8. Hazard pointer khác epoch ở mức ý tưởng?
 <details><summary>Đáp án</summary>
 
-Hazard pointer: thread công bố con trỏ đang dùng, thread retire quét trước khi thu hồi[^michael-hp-core][^michael-hp-scan]. Epoch: pin participant, rác gắn epoch, chỉ hủy khi đủ cũ[^ce-pin][^ce-mechanism].
+Hazard pointer: thread công bố con trỏ đang dùng[^michael-hp-core]. Thread retire quét các con trỏ đó trước khi thu hồi[^michael-hp-scan]. Epoch: participant được pin[^ce-pin]. Rác gắn epoch và chỉ bị hủy khi đã đủ cũ[^ce-mechanism].
 
 </details>
 
 9. Vì sao `Arc::clone` dùng `Relaxed` còn `drop` dùng `Release` + fence `Acquire`?
 <details><summary>Đáp án</summary>
 
-Clone chỉ từ tham chiếu đã có[^arc-clone-relaxed]; drop phải bảo đảm mọi truy cập dữ liệu happens-before việc xóa ở thread khác[^arc-drop-fence].
+Clone chỉ sinh từ tham chiếu đã có[^arc-clone-relaxed]. Còn drop phải bảo đảm mọi truy cập dữ liệu happens-before việc xóa ở thread khác[^arc-drop-fence].
 
 </details>
 
 10. `FUTEX_WAIT` nhận giá trị mong đợi để làm gì?
 <details><summary>Đáp án</summary>
 
-Tránh lost wake-up: giá trị đã đổi thì thất bại ngay với `EAGAIN`[^futex-eagain]; đó là compare-and-block atomic[^futex-cab].
+Để tránh lost wake-up: nếu giá trị đã đổi thì lời gọi thất bại ngay với `EAGAIN`[^futex-eagain]. Nhờ đó nó là một phép compare-and-block atomic[^futex-cab].
 
 </details>
 

@@ -1,6 +1,6 @@
 # P3 · Chương 08 — Rust và bộ nhớ
 
-Bảy chương trước dựng nên nền: address space, page table, heap allocator, stack, alignment. Chương này là chương **thuần Rust**: Rust đặt những thứ đó vào hệ thống kiểu như thế nào, và vì sao nhờ vậy nó không cần garbage collector mà vẫn chặn được phần lớn lỗi bộ nhớ kinh điển của C.
+Bảy chương trước đã dựng xong nền: address space, page table, heap allocator, stack, alignment. Chương này là chương **thuần Rust**: ta xem Rust đặt những thứ đó vào hệ thống kiểu như thế nào, và vì sao nhờ vậy nó không cần garbage collector mà vẫn chặn được phần lớn lỗi bộ nhớ kinh điển của C.
 
 ## Bạn sẽ hiểu được gì
 
@@ -24,23 +24,25 @@ Mọi con số "chạy thật" đo bằng `rustc 1.95.0` trên macOS aarch64 (64
 
 ## 1. Bối cảnh: ai chịu trách nhiệm giải phóng?
 
-Quên `free` thì leak[^ostep-leak]; `free` hai lần là double free và kết quả là undefined[^ostep-doublefree]. Ngôn ngữ có garbage collector (GC) giải bài toán bằng một chương trình chạy nền, theo dõi bộ nhớ không còn dùng và dọn nó[^book-gc]. Rust chọn đường thứ ba: bộ nhớ được trả tự động khi biến sở hữu nó ra khỏi scope[^book-auto].
+Xuyên suốt chương ta bám theo `orders`, một service Rust nhận request HTTP. Mỗi request, `orders` đọc body vào một `String`, parse thành `Vec<Item>`, tra một cache dùng chung giữa các handler thread rồi trả kết quả (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). `String`, `Vec` và cache đều chiếm bộ nhớ, nên câu hỏi chung của cả chương là: ai trả lại chỗ nhớ đó, và vào lúc nào?
 
-Quyết định "khi nào free" vì thế do compiler đảm nhiệm, với một quy tắc đủ đơn giản để kiểm tra tĩnh: ownership.
+Trong C, người trả là lập trình viên. Quên `free` thì leak[^ostep-leak]. `free` hai lần là double free, và kết quả là undefined[^ostep-doublefree]. Một handler C chỉ cần quên `free` ở một nhánh lỗi là service rò bộ nhớ ở mọi request đi vào nhánh đó (nhận xét của người soạn).
+
+Ngôn ngữ có garbage collector (GC) giao việc này cho một chương trình chạy nền: nó theo dõi vùng nhớ nào không còn dùng rồi dọn đi[^book-gc]. Rust chọn đường thứ ba: bộ nhớ tự được trả khi biến sở hữu nó ra khỏi scope[^book-auto]. Nói cách khác, compiler quyết định "khi nào free", dựa trên một quy tắc đủ đơn giản để kiểm tra ngay lúc biên dịch: ownership. Mục 2 bắt đầu từ quy tắc đó.
 
 ## 2. Ownership và move: chuyện gì xảy ra với các bit? (Q1)
 
-> **Trả lời ngắn.** Ownership là ba quy tắc: mỗi giá trị có đúng một owner, và khi owner ra khỏi scope thì giá trị bị drop[^book-rules]. Nhờ vậy không ai free hai lần[^book-doublefree]. Khi `move`, chỉ "cái vỏ" nhỏ nằm trên stack (con trỏ, độ dài, capacity) được chuyển; dữ liệu heap không bị sao chép, còn biến cũ bị vô hiệu hóa[^book-move].
+> **Trả lời ngắn.** Ownership là ba quy tắc: mỗi giá trị có đúng một owner, một lúc chỉ có một owner, và khi owner ra khỏi scope thì giá trị bị drop[^book-rules]. Nhờ vậy không ai free hai lần[^book-doublefree]. Khi `move`, chỉ "cái vỏ" nhỏ nằm trên stack (con trỏ, độ dài, capacity) được chuyển; dữ liệu heap không bị sao chép, còn biến cũ bị vô hiệu hóa[^book-move].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): giá trị như chìa khóa một căn phòng thuê. Chỉ một người cầm chìa; đưa chìa cho người khác thì mình không còn vào được, và người cầm chìa cuối cùng có trách nhiệm trả phòng.
+*Với service `orders`.* Handler đọc body vào một `String`, rồi trao nó cho hàm parse. Từ lúc đó, ai giữ buffer heap của `String`: handler hay hàm parse? Và vì sao buffer ấy không bị free hai lần, một lần ở mỗi bên? Ba quy tắc ở trên trả lời cả hai câu. Ta xem chúng chạy ra sao với một `String`.
 
-**Từng bước với một `String`.** (1) `String::from("hello")` xin allocator một buffer heap và dựng "vỏ" ba từ trên stack; biến nhận giá trị là owner duy nhất của buffer đó. (2) Vì owner là duy nhất và biết được ngay lúc biên dịch, compiler biết chính xác chỗ owner ra khỏi scope và chèn lời gọi dọn dẹp (drop) ở đó[^book-drop-auto] (suy luận của người soạn từ ba quy tắc[^book-rules]; chi tiết drop ở mục 3). (3) Với một owner, buffer được free đúng một lần. Các bước dưới đây cho thấy điều gì sẽ hỏng nếu cho phép hai owner.
+**Từng bước với một `String`.** Trước hết, `String::from("hello")` xin allocator một buffer trên heap và dựng "vỏ" ba từ trên stack. Biến nhận giá trị này là owner duy nhất của buffer. Vì owner là duy nhất nên compiler biết chính xác chỗ nó ra khỏi scope, và chèn lời gọi dọn dẹp (drop) đúng chỗ đó[^book-drop-auto]. Từ ba quy tắc, ta suy ra buffer được free đúng một lần (suy luận của người soạn[^book-rules]); chi tiết drop ở mục 3.
 
-**Vì sao phải "chỉ một owner".** Nếu hai biến cùng sở hữu một `String` (cùng con trỏ), khi cả hai ra scope cả hai sẽ cố free cùng một vùng; Book gọi đó là double free và xếp vào các lỗi memory-safety[^book-doublefree]. Vì thế sau `let s2 = s1;`, Rust coi `s1` không còn hợp lệ. Book gọi thao tác này là **move** thay vì shallow copy, chính vì biến cũ bị vô hiệu hóa[^book-move].
+**Vì sao phải "chỉ một owner".** Thử cho hai biến cùng sở hữu một `String`, tức cùng trỏ vào một buffer. Khi cả hai ra scope, cả hai cùng cố free một vùng nhớ. Book gọi đó là double free và xếp nó vào các lỗi memory-safety[^book-doublefree]. Vì vậy sau `let s2 = s1;`, Rust coi `s1` không còn hợp lệ. Chính chuyện biến cũ bị vô hiệu hóa khiến thao tác này được gọi là **move**, thay vì shallow copy[^book-move].
 
-Chạy thật `let s1 = String::from("a"); let s2 = s1; println!("{s1} {s2}");` → `error[E0382]: borrow of moved value: s1`: Error index mô tả E0382 là biến được dùng sau khi nội dung đã bị chuyển đi nơi khác[^e0382].
+Thử với đoạn tối giản `let s1 = String::from("a"); let s2 = s1; println!("{s1} {s2}");` (chạy thật): compiler báo `error[E0382]: borrow of moved value: s1`. Error index mô tả E0382 là biến được dùng sau khi nội dung đã bị chuyển đi nơi khác[^e0382].
 
 ```mermaid
 flowchart LR
@@ -55,49 +57,55 @@ flowchart LR
   s2 --> buf
 ```
 
-**Move ở mức bit.** Book mô tả `String` gồm ba phần — con trỏ tới bộ nhớ chứa nội dung, độ dài, và capacity — và nhóm dữ liệu này nằm trên stack[^book-string]. Book mô tả move là việc sao chép con trỏ, độ dài, capacity *mà không sao chép dữ liệu*, rồi vô hiệu hóa biến cũ[^book-move]; tức buffer heap không bị đụng đến.
+**Move ở mức bit.** `String` gồm ba phần: con trỏ tới bộ nhớ chứa nội dung, độ dài và capacity. Cả nhóm này nằm trên stack[^book-string]. Move sao chép đúng ba thứ đó sang biến mới *mà không sao chép dữ liệu*, rồi vô hiệu hóa biến cũ[^book-move]. Buffer heap vì thế không bị đụng đến. Với `orders`, khi handler trao body cho hàm parse, thứ đi qua chỉ là ba từ này; nội dung body đứng yên trên heap (suy luận của người soạn từ hai đoạn trên).
 
 <details><summary>Đi sâu: Reference và docs <code>Copy</code> nói gì về move; kiểm chứng bằng allocator đếm</summary>
 
-The Rust Reference định nghĩa ở mức ngữ nghĩa, không nói đến memcpy: khi một place expression được dùng ở ngữ cảnh value expression (hoặc bind theo giá trị trong pattern) thì nó biểu thị giá trị đang nằm ở ô nhớ đó[^ref-move-intro]; nếu kiểu implement `Copy` thì giá trị được copy[^ref-move-copy]; ở các trường hợp còn lại, nếu kiểu là `Sized`, có thể move giá trị[^ref-move-sized]. Docs của `Copy` nói rõ hơn về phần cứng: về mặt bit, cả copy lẫn move đều có thể dẫn đến việc các bit được sao chép trong bộ nhớ, dù đôi khi bị tối ưu bỏ đi[^copy-bits]; trong hai ví dụ của docs đó, khác biệt duy nhất mà lập trình viên thấy là sau phép gán có được phép dùng biến cũ hay không.
+The Rust Reference mô tả move ở mức ngữ nghĩa và không nhắc đến memcpy. Khi một place expression được dùng ở ngữ cảnh value expression (hoặc bind theo giá trị trong pattern), nó biểu thị giá trị đang nằm ở ô nhớ đó[^ref-move-intro]. Nếu kiểu implement `Copy` thì giá trị được copy[^ref-move-copy]. Ở các trường hợp còn lại, nếu kiểu là `Sized`, có thể move giá trị[^ref-move-sized].
 
-Kiểm chứng bằng một allocator đếm lời gọi (mục 5): với `let s2 = s1;` trên `String::from("hello")`, số lần `alloc` không đổi (delta = 0), con trỏ heap (`as_ptr()`) giữ nguyên, còn địa chỉ biến `String` trên stack thì **khác** (`&s1 as *const _ != &s2 as *const _`). Tức dữ liệu heap đứng yên, chỉ "cái vỏ" ba từ được chuyển. Quan sát cả với `-O` lẫn không; đừng dựa vào địa chỉ stack cụ thể vì compiler được phép tối ưu.
+Docs của `Copy` nói sát phần cứng hơn: về mặt bit, cả copy lẫn move đều có thể khiến các bit bị sao chép trong bộ nhớ, dù đôi khi bị tối ưu bỏ đi[^copy-bits]. Trong hai ví dụ của docs đó, khác biệt duy nhất mà lập trình viên thấy là sau phép gán có được dùng lại biến cũ hay không.
+
+Để kiểm chứng, dùng một allocator đếm lời gọi (mục 5). Với `let s2 = s1;` trên `String::from("hello")`, số lần `alloc` không đổi (delta = 0), con trỏ heap (`as_ptr()`) giữ nguyên, còn địa chỉ biến `String` trên stack thì **khác** (`&s1 as *const _ != &s2 as *const _`). Tức dữ liệu heap đứng yên, chỉ "cái vỏ" ba từ được chuyển. Quan sát này đúng cả với `-O` lẫn không; đừng dựa vào địa chỉ stack cụ thể vì compiler được phép tối ưu.
 
 </details>
 
-**Quay lại Q1:** ownership là "một owner, ra scope thì drop"; move chỉ chuyển vỏ ba từ trên stack, dữ liệu heap đứng yên và biến cũ bị cấm dùng.
+**Quay lại Q1:** ownership là "một owner, ra scope thì drop"; move chỉ chuyển cái vỏ ba từ trên stack, dữ liệu heap (body của `orders`) đứng yên và biến cũ bị cấm dùng.
 
 ## 3. `Copy`, `Drop` và thứ tự drop (Q2)
 
-> **Trả lời ngắn.** Kiểu `Drop` quản lý một tài nguyên ngoài chính các byte của nó, nên sao chép bit sẽ nhân đôi quyền sở hữu; vì vậy kiểu có `Drop` không thể là `Copy`[^copy-doc-drop]. Compiler chèn lời gọi drop tự động khi giá trị ra khỏi scope[^book-drop-auto]; biến bị drop theo thứ tự ngược khai báo[^ref-drop-scope].
+> **Trả lời ngắn.** Kiểu có `Drop` quản lý một tài nguyên ngoài chính các byte của nó, nên sao chép bit sẽ nhân đôi quyền sở hữu tài nguyên đó; vì vậy kiểu có `Drop` không thể là `Copy`[^copy-doc-drop]. Compiler tự chèn lời gọi drop khi giá trị ra khỏi scope[^book-drop-auto]. Biến thì bị drop theo thứ tự ngược khai báo[^ref-drop-scope].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Copy` như photo một tờ giấy, thoải mái; còn kết nối DB hay file đang mở thì không photo được — phải có một chỗ duy nhất đóng nó.
+*Với service `orders`.* Khi xử lý một request, handler của `orders` nắm vài thứ phải dọn: socket của client đang mở, buffer chứa body. Hết handler thì mỗi thứ phải được dọn đúng một lần. Số nguyên thì chép thoải mái, nhưng "chép" một socket đang mở rồi để hai bản cùng đóng nó thì hỏng. Mục này nói Rust phân biệt hai loại giá trị đó bằng `Copy` và `Drop` ra sao, compiler dọn từng thứ vào lúc nào, và theo thứ tự nào.
 
-**`Copy` loại trừ `Drop`.** Kiểu `Copy` là kiểu có giá trị "nhân bản được chỉ bằng cách sao chép bit"[^copy-def]. Với kiểu đó, gán không làm biến cũ mất hiệu lực. Nhưng nếu bất kỳ phần nào của kiểu implement `Drop` thì kiểu không thể là `Copy`[^book-copy-drop]. Lý do theo docs của `Copy`: mọi kiểu `Drop` đều quản lý một tài nguyên ngoài chính `size_of::<T>` byte của nó, nên sao chép bit sẽ nhân đôi quyền sở hữu tài nguyên[^copy-doc-drop]. Compiler từ chối cả khi bạn cố làm vậy: chạy thật
+**`Copy` loại trừ `Drop`.** Kiểu `Copy` là kiểu có giá trị nhân bản được chỉ bằng cách sao chép bit[^copy-def]. Với kiểu như vậy, phép gán không làm biến cũ mất hiệu lực. Nhưng nếu kiểu đó, hoặc bất kỳ phần nào của nó, implement `Drop` thì nó không thể là `Copy`[^book-copy-drop]. Lý do nằm ở docs của `Copy`: mọi kiểu `Drop` đều quản lý một tài nguyên ngoài chính `size_of::<T>` byte của nó, nên sao chép bit sẽ nhân đôi quyền sở hữu tài nguyên[^copy-doc-drop]. Với một socket, nhân đôi quyền sở hữu nghĩa là hai bản cùng cố đóng nó (suy luận của người soạn).
+
+Compiler từ chối ngay cả khi bạn cố làm vậy. Chạy thật đoạn
 
 ```rust
 #[derive(Clone, Copy)] struct X(u8);
 impl Drop for X { fn drop(&mut self) {} }
 ```
 
-báo `error[E0184]: the trait Copy cannot be implemented for this type; the type has a destructor`, khớp mô tả error index[^e0184].
+thì compiler báo `error[E0184]: the trait Copy cannot be implemented for this type; the type has a destructor`, khớp mô tả của error index[^e0184].
 
-**`Drop`: destructor do compiler chèn.** Trait `Drop` cho phép tùy biến điều xảy ra khi giá trị sắp ra khỏi scope[^book-drop-trait]. Compiler chèn lời gọi tự động, nên không cần rải code dọn dẹp khắp chương trình[^book-drop-auto]. Bạn không được gọi `x.drop()` thủ công; muốn drop sớm phải dùng `std::mem::drop`[^book-drop-manual].
+**`Drop`: destructor do compiler chèn.** Trait `Drop` cho phép tùy biến điều xảy ra khi giá trị sắp ra khỏi scope[^book-drop-trait]. Compiler chèn lời gọi tự động, nên bạn không phải rải code dọn dẹp khắp chương trình[^book-drop-auto]. Đổi lại, bạn không được gọi `x.drop()` bằng tay; muốn drop sớm thì dùng `std::mem::drop`[^book-drop-manual].
 
-Một destructor gồm hai phần: gọi `Drop::drop` nếu kiểu có implement, rồi "drop glue" do compiler sinh, gọi đệ quy destructor của mọi field[^drop-two-parts][^drop-glue]. Reference ghi cùng ý ở dạng khác: destructor của `T` là gọi `<T as Drop>::drop` nếu `T: Drop`, rồi chạy đệ quy destructor của các field[^ref-destr-op]. Vì thế bạn hiếm khi phải tự viết `Drop`: struct chứa `Vec` tự động giải phóng buffer của vec.
+Một destructor gồm hai phần. Phần thứ nhất là gọi `Drop::drop` nếu kiểu có implement[^drop-two-parts]. Phần thứ hai là "drop glue" do compiler sinh, gọi đệ quy destructor của mọi field[^drop-glue]. Reference ghi cùng ý ở dạng khác: destructor của `T` là gọi `<T as Drop>::drop` nếu `T: Drop`, rồi chạy đệ quy destructor của các field[^ref-destr-op]. Nhờ vậy bạn hiếm khi phải tự viết `Drop`: struct chứa `Vec` tự giải phóng buffer của vec.
 
-Tài nguyên ở đây không chỉ là bộ nhớ: docs của `Drop` nêu rõ tài nguyên có thể là bộ nhớ, file descriptor hay network socket[^drop-resources]. Nomicon gọi mô hình này là "ownership-based resource management": tài nguyên lấy khi tạo đối tượng và nhả khi nó bị hủy[^nomicon-orm].
+Tài nguyên ở đây không chỉ là bộ nhớ. Docs của `Drop` nêu rõ tài nguyên có thể là bộ nhớ, file descriptor hay network socket[^drop-resources]. Nomicon gọi mô hình này là "ownership-based resource management": lấy tài nguyên khi tạo đối tượng và nhả khi nó bị hủy[^nomicon-orm].
 
-**Thứ tự drop.**
+**Thứ tự drop.** Một scope thường chứa nhiều giá trị, nên cần biết cái nào bị dọn trước. Bảng dưới tóm tắt (temporary là giá trị tạm sinh ra giữa chừng khi tính một biểu thức):
 
-| Đối tượng | Thứ tự drop | Nguồn |
-|---|---|---|
-| Biến trong một scope | ngược thứ tự khai báo (temporary: ngược thứ tự tạo) | [^ref-drop-scope] (Book: [^book-drop-order]) |
-| Field của struct | theo thứ tự khai báo | [^ref-drop-fields] |
-| Phần tử của tuple | theo thứ tự | [^ref-drop-tuple] |
-| Phần tử của array / owned slice | từ phần tử đầu đến cuối | [^ref-destr-array] |
+| Đối tượng | Thứ tự drop |
+|---|---|
+| Biến trong một scope | ngược thứ tự khai báo (temporary: ngược thứ tự tạo)[^ref-drop-scope] |
+| Field của struct | theo thứ tự khai báo[^ref-drop-fields] |
+| Phần tử của tuple | theo thứ tự[^ref-drop-tuple] |
+| Phần tử của array / owned slice | từ phần tử đầu đến cuối[^ref-destr-array] |
+
+Áp vào handler của `orders`: biến khai báo sau thì bị drop trước, nên thứ lấy sau cùng được nhả đầu tiên (suy ra từ dòng đầu của bảng).
 
 <details><summary>Đi sâu: ví dụ chạy thật in thứ tự drop, và <code>let _</code></summary>
 
@@ -115,31 +123,31 @@ Kết quả in ra: `t0 t1 s.a s.b y x`. Đọc từ dưới lên: `_t` khai báo
 
 </details>
 
-**Quay lại Q2:** `Copy` nhân đôi bit nên không đi với `Drop`; giá trị được drop tự động khi ra scope, biến theo thứ tự ngược khai báo còn field và tuple theo thứ tự xuôi.
+**Quay lại Q2:** `Copy` nhân đôi bit nên không đi với `Drop`; socket và buffer của handler được drop tự động khi ra scope, biến theo thứ tự ngược khai báo, còn field và tuple theo thứ tự xuôi.
 
 ## 4. `Box`, `Vec`, `String`: bố cục trong bộ nhớ (Q3)
 
-> **Trả lời ngắn.** `Box<T>` là một con trỏ sở hữu một vùng heap[^box-owns]. `Vec<T>` và `String` là bộ ba (con trỏ, capacity, length) nằm trên stack, trỏ tới buffer ở heap[^vec-triplet][^string-repr]. Docs không hứa chiến lược tăng capacity cụ thể, chỉ hứa `push` O(1) amortized[^vec-growth][^vec-amort]; "gấp đôi" là chi tiết của source 1.95.0.
+> **Trả lời ngắn.** `Box<T>` là một con trỏ sở hữu một vùng heap[^box-owns]. `Vec<T>` là bộ ba (con trỏ, capacity, length) nằm trên stack, trỏ tới buffer ở heap[^vec-triplet]. `String` cũng gồm ba thành phần như vậy[^string-repr]. Docs không hứa chiến lược tăng capacity cụ thể[^vec-growth]. Thứ duy nhất được hứa là `push` O(1) amortized[^vec-amort]; việc "gấp đôi" là chi tiết của source 1.95.0.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Vec` như phiếu ghi "kho ở địa chỉ nào, kho rộng bao nhiêu, đã chất bao nhiêu hàng"; phiếu nhỏ cầm trong tay, còn kho nằm ở nơi khác.
+*Với service `orders`.* Trên stack của một handler, `orders` giữ một `String` (body), một `Vec<Item>` (các dòng hàng) và có thể một `Box<Order>` cho đơn đã parse. Cả ba chỉ là cái vỏ nhỏ; dữ liệu thật nằm ở heap. Mục này xem cái vỏ gồm những gì. Cũng chính bố cục đó giải thích vì sao move rẻ (mục 2) và vì sao borrow checker phải canh mỗi lần `push` vào `Vec`.
 
 | Kiểu | Biểu diễn (theo docs) | Nằm ở đâu |
 |---|---|---|
-| `Box<T>` | con trỏ sở hữu duy nhất một heap allocation kiểu `T`[^box-owns] | con trỏ ở stack; `T` ở heap; `Box::new` không cấp phát nếu `T` kích thước 0[^box-zst] |
+| `Box<T>` | con trỏ sở hữu duy nhất một heap allocation kiểu `T`[^box-owns] | con trỏ ở stack, `T` ở heap; `Box::new` không cấp phát nếu `T` kích thước 0[^box-zst] |
 | `Vec<T>` | bộ ba (pointer, capacity, length)[^vec-triplet] | bộ ba nằm nơi `Vec` được đặt; nếu đã cấp phát thì vùng nó trỏ tới nằm trên heap theo allocator mặc định[^vec-heap] |
-| `String` | con trỏ tới byte, length, capacity[^string-repr]; sở hữu nội dung trong buffer cấp phát heap[^string-doc] | như `Vec<u8>` |
+| `String` | con trỏ tới byte, length, capacity[^string-repr] | như `Vec<u8>`: nội dung nằm trong buffer cấp phát trên heap, và `String` sở hữu buffer đó[^string-doc] |
 
-Đo thật (aarch64, 64-bit): `size_of::<Box<u64>>() = 8`, `Vec<u64> = 24`, `String = 24`. `Box<[u8]>` là 16 byte, và `&str` cũng 16 byte: con trỏ tới kiểu không biết kích thước lúc biên dịch (DST, như `[u8]` hay `str`) hiện có kích thước gấp đôi con trỏ tới kiểu `Sized` (con trỏ + độ dài), đúng như chương DST của Reference mô tả[^dst-fat]. Đây là con số quan sát được chứ không phải lời hứa: mục Type layout của Reference chỉ bảo đảm kích thước "ít nhất bằng" con trỏ thường và dặn không nên dựa vào "gấp đôi" (xem [P10·03, mục 2](../10-rust-internals/03-dst-fat-pointer-vtable.md)).
+Số đo trên aarch64 (64-bit): `size_of::<Box<u64>>()` là 8, còn `Vec<u64>` và `String` đều là 24. `Box<[u8]>` và `&str` mỗi cái 16 byte. Lý do là con trỏ tới kiểu không biết kích thước lúc biên dịch (DST, như `[u8]` hay `str`) lớn gấp đôi con trỏ tới kiểu `Sized` (con trỏ cộng độ dài), đúng như chương DST của Reference mô tả[^dst-fat]. Đây là con số quan sát chứ không phải lời hứa: mục Type layout của Reference chỉ bảo đảm kích thước "ít nhất bằng" con trỏ thường và dặn không nên dựa vào chuyện "gấp đôi" (xem [P10·03, mục 2](../10-rust-internals/03-dst-fat-pointer-vtable.md)).
 
 Con trỏ heap có kích thước cố định nên bản thân nó lưu trên stack được, còn dữ liệu thật phải đi theo con trỏ[^book-ptr-on-stack].
 
-**`Box`.** Book liệt kê ba tình huống dùng `Box`; hai trong số đó: khi kiểu có kích thước không biết lúc biên dịch mà ngữ cảnh đòi kích thước chính xác (kiểu đệ quy), và khi có dữ liệu lớn muốn chuyển ownership mà không copy[^book-box-unknown][^book-box-large]. `Box<T, A>` còn có tham số allocator (mục 5).
+**`Box`.** Hai tình huống điển hình để dùng `Box`. Một là kiểu có kích thước không biết lúc biên dịch mà ngữ cảnh lại đòi kích thước chính xác, như kiểu đệ quy[^book-box-unknown]. Hai là dữ liệu lớn mà bạn muốn chuyển ownership nhưng không muốn chép[^book-box-large]. `Box<T, A>` còn có tham số allocator (mục 5).
 
-**`Vec`: length, capacity.** Capacity là lượng chỗ đã cấp cho các phần tử sẽ thêm sau, khác với length[^vec-cap]. `Vec::new()` không cấp phát cho đến khi có phần tử được push[^vec-new]. Docs hứa chặt hơn: `Vec` cấp phát khi và chỉ khi `size_of::<T>() * capacity() > 0`[^vec-zst]. Lý do nằm ở Nomicon: allocator toàn cục không cho phép cấp khối kích thước 0 (UB), nên `Vec` rỗng không cấp phát và dùng con trỏ "dangling" thay chỗ[^nomicon-vec-empty].
+**`Vec`: length và capacity.** Capacity là lượng chỗ đã cấp cho các phần tử sẽ thêm vào sau, khác với length[^vec-cap]. `Vec::new()` chưa cấp phát gì cho đến khi có phần tử được push[^vec-new]. Docs hứa chặt hơn: `Vec` cấp phát khi và chỉ khi `size_of::<T>() * capacity() > 0`[^vec-zst]. Lý do nằm ở Nomicon: allocator toàn cục không cho cấp khối kích thước 0 (UB), nên `Vec` rỗng không cấp phát mà dùng con trỏ "dangling" thay chỗ[^nomicon-vec-empty].
 
-**Vì sao Rust bắt mình quan tâm.** Khi `Vec` đầy và realloc, buffer có thể bị dời sang chỗ khác; Book nói thêm phần tử có thể cần cấp phát bộ nhớ mới và chép phần tử cũ sang đó[^book-vec-realloc]. Cho nên tham chiếu vào phần tử cũ có thể trở thành treo — và borrow checker chặn việc đó lúc biên dịch. Chạy thật:
+**Vì sao realloc kéo borrow checker vào cuộc.** Khi `Vec` đầy, nó cần thêm chỗ: có thể phải cấp phát vùng nhớ mới rồi chép phần tử cũ sang đó[^book-vec-realloc]. Nghĩa là buffer có thể bị dời đi, và một tham chiếu vào phần tử cũ có thể thành treo. Trong `orders`, đây là tình huống handler giữ `&items[0]` rồi `push` thêm một item. Borrow checker chặn chuyện này ngay lúc biên dịch. Chạy thật đoạn tối giản:
 
 ```rust
 let mut v = vec![1]; let first = &v[0]; v.push(2); println!("{first}");
@@ -147,44 +155,44 @@ let mut v = vec![1]; let first = &v[0]; v.push(2); println!("{first}");
 
 → `error[E0502]: cannot borrow v as mutable because it is also borrowed as immutable`, khớp mô tả "đã mượn với một mutability rồi lại mượn với mutability khác"[^e0502]. Đây chính là use-after-free của C bị biến thành lỗi biên dịch (xem mục 8).
 
-*Liên hệ backend (nhận xét của người soạn):* khi biết trước số phần tử (số dòng kết quả truy vấn), `Vec::with_capacity(n)` tránh các lần realloc trung gian; docs cũng khuyên dùng khi có thể[^vec-recommend]. Cùng ý với cấp trước buffer trong connection/buffer pool.
+*Liên hệ backend (nhận xét của người soạn):* khi biết trước số phần tử, chẳng hạn số dòng kết quả của một truy vấn, `Vec::with_capacity(n)` tránh được các lần realloc trung gian; docs cũng khuyên dùng khi có thể[^vec-recommend]. Ý này giống việc cấp trước buffer trong connection/buffer pool.
 
 <details><summary>Đi sâu: chiến lược tăng capacity (docs hứa vs source), kiểm chứng allocator đếm, niche của <code>Option&lt;Box&gt;</code></summary>
 
 **Chiến lược tăng capacity: bảo đảm vs quan sát.**
 
-- *Bảo đảm (docs):* không có chiến lược tăng cụ thể nào được hứa khi đầy hay khi `reserve`[^vec-growth]; chỉ hứa `push` O(1) amortized[^vec-amort]; `with_capacity(n)` yêu cầu allocator đúng kích thước cho n phần tử[^vec-exact].
-- *Quan sát (source 1.95.0, chi tiết cài đặt, có thể đổi):* công thức tăng trưởng của `grow_amortized` và capacity tối thiểu theo cỡ phần tử được đọc từ source ở [P10·09, mục 2](../10-rust-internals/09-collections-internals.md). Chạy thật, push 40 phần tử vào `Vec<u64>` cho dãy capacity `4 8 16 32 64`, còn `Vec<u8>` cho `8 16 32 64` — khớp công thức đọc từ source đó, nhưng chương trình không được dựa vào điều đó.
+- *Bảo đảm (docs):* không có chiến lược tăng cụ thể nào được hứa khi đầy hay khi `reserve`[^vec-growth]. Chỉ có `push` O(1) amortized được hứa[^vec-amort]. Còn `with_capacity(n)` yêu cầu allocator đúng kích thước cho n phần tử[^vec-exact].
+- *Quan sát (source 1.95.0, chi tiết cài đặt, có thể đổi):* công thức tăng trưởng của `grow_amortized` và capacity tối thiểu theo cỡ phần tử được đọc từ source ở [P10·09, mục 2](../10-rust-internals/09-collections-internals.md). Chạy thật, push 40 phần tử vào `Vec<u64>` cho dãy capacity `4 8 16 32 64`, còn `Vec<u8>` cho `8 16 32 64`. Kết quả khớp công thức đọc từ source đó, nhưng chương trình không được dựa vào điều này.
 
 Kiểm chứng bằng allocator đếm: `Vec::<u64>::new()` làm số lần `alloc` tăng 0; `Vec::with_capacity(0)` rồi `push(1)` tăng 1; `vec![0u8; 1<<20]` tăng 1 lần, và `let moved = big;` tăng 0. Với `Vec<()>`, `capacity()` in ra `18446744073709551615` (= `usize::MAX`, quan sát) và `Box::new(())` không gọi allocator, khớp [^box-zst].
 
-Về niche, std bảo đảm `Option<Box<U>>` (chỉ với allocator `Global`) có cùng size, alignment và ABI với `Box<U>`[^opt-npo][^opt-box]; cách đọc bảng `std::option` và điều kiện `U: Sized` ở [P10·02, mục 6](../10-rust-internals/02-type-layout.md). Đo thật: `size_of::<Option<Box<u64>>>() = 8`.
+Về niche: std bảo đảm `Option<T>` có cùng size, alignment và ABI với `T` cho một số kiểu `T`[^opt-npo]. `Box<U>` nằm trong danh sách đó, nhưng chỉ khi allocator là `Global`[^opt-box]. Cách đọc bảng `std::option` và điều kiện `U: Sized` ở [P10·02, mục 6](../10-rust-internals/02-type-layout.md). Đo thật: `size_of::<Option<Box<u64>>>() = 8`.
 
 </details>
 
-**Quay lại Q3:** `Box` là một con trỏ; `Vec`/`String` là bộ ba (ptr, cap, len) trỏ vào heap; docs chỉ hứa `push` O(1) amortized, còn dãy capacity cụ thể là chi tiết source.
+**Quay lại Q3:** `Box` là một con trỏ; `Vec`/`String` là bộ ba (ptr, cap, len) trỏ vào heap (với `orders`, vỏ ở stack của handler, body và danh sách item ở heap); docs chỉ hứa `push` O(1) amortized, còn dãy capacity cụ thể là chi tiết source.
 
 ## 5. `GlobalAlloc`, `Layout` và allocator (Q4)
 
-> **Trả lời ngắn.** `Box` và `Vec` lấy bộ nhớ từ một allocator toàn cục của chương trình; allocator mặc định hiện chưa được chỉ định[^alloc-global], còn `System` là allocator do OS cung cấp[^std-system]. Muốn thay, bạn implement trait `GlobalAlloc` và đăng ký bằng `#[global_allocator]`[^globalalloc]. Allocator API tổng quát hơn (`Allocator`) vẫn chỉ có trên nightly[^allocator-unstable].
+> **Trả lời ngắn.** `Box` và `Vec` lấy bộ nhớ từ một allocator toàn cục của chương trình. Allocator mặc định hiện chưa được chỉ định[^alloc-global]; `System` là allocator do OS cung cấp[^std-system]. Muốn thay, bạn implement trait `GlobalAlloc` và đăng ký bằng `#[global_allocator]`[^globalalloc]. Allocator API tổng quát hơn (`Allocator`) vẫn chỉ có trên nightly[^allocator-unstable].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): allocator như bộ phận cấp phát kho của công ty; `Box`/`Vec` chỉ điền phiếu yêu cầu (size + alignment), và khi trả kho thì phải đưa lại đúng phiếu đó.
+*Với service `orders`.* `orders` không gọi `malloc` ở đâu cả, nhưng mỗi `String`, `Vec`, `Box` nó tạo đều xin bộ nhớ từ một allocator. Muốn đếm xem mỗi request cấp phát bao nhiêu lần, hay đổi sang một allocator khác, bạn phải biết allocator đó nằm ở đâu và hợp đồng với nó gồm những gì.
 
-**Global allocator.** Trong một chương trình, thư viện chuẩn có một allocator "toàn cục" được dùng bởi `Box<T>` và `Vec<T>`[^alloc-one]; allocator mặc định hiện **chưa được chỉ định** (unspecified)[^alloc-global]. `System` là allocator do OS cung cấp; trên Unix nó dựa trên `malloc`[^std-system] (cơ chế `malloc` ở [chương 06](06-heap-allocator.md); phần nhận diện global allocator ở [chương 06 mục 10](06-heap-allocator.md)).
+**Allocator toàn cục.** Thư viện chuẩn có một allocator "toàn cục", và `Box<T>`, `Vec<T>` dùng chính allocator này[^alloc-one]. Allocator mặc định hiện **chưa được chỉ định** (unspecified)[^alloc-global]. `System` là allocator do OS cung cấp, và trên Unix nó dựa trên `malloc`[^std-system]. Cơ chế `malloc` ở [chương 06](06-heap-allocator.md); phần nhận diện global allocator ở [chương 06 mục 10](06-heap-allocator.md).
 
-`GlobalAlloc` là trait cho allocator có thể được đăng ký làm mặc định bằng `#[global_allocator]`[^globalalloc]. Reference: thuộc tính này chỉ áp dụng được cho một `static` có kiểu implement `GlobalAlloc`[^ref-global-alloc].
+`GlobalAlloc` là trait cho allocator có thể đăng ký làm mặc định bằng `#[global_allocator]`[^globalalloc]. Thuộc tính này chỉ áp dụng được cho một `static` có kiểu implement `GlobalAlloc`[^ref-global-alloc].
 
-**`Layout` và hợp đồng của `GlobalAlloc`.** `Layout` mô tả một khối nhớ: size kèm alignment là lũy thừa của 2[^layout]; ràng buộc: size làm tròn lên bội của align không được tràn `isize::MAX`[^layout-isize]. Hợp đồng đáng nhớ khi tự viết allocator:
+**`Layout` và hợp đồng của `GlobalAlloc`.** `Layout` mô tả một khối nhớ bằng size và alignment, trong đó alignment là lũy thừa của 2[^layout]. Ràng buộc kèm theo: size làm tròn lên bội của align không được tràn `isize::MAX`[^layout-isize]. Khi tự viết allocator, bạn phải nhớ ba điều:
 
-- `alloc` với layout kích thước 0 là UB[^ga-zero] — vì vậy `Vec` rỗng và `Box::new(())` không gọi allocator.
+- `alloc` với layout kích thước 0 là UB[^ga-zero]. Vì vậy `Vec` rỗng và `Box::new(())` không gọi allocator.
 - Allocator mà unwind là UB[^ga-unwind].
 - `dealloc` phải nhận đúng `Layout` đã dùng để cấp khối đó, nếu không là UB[^ga-dealloc].
 
-Điểm cuối là khác biệt lớn với C. `free(ptr)` không nhận kích thước, nên allocator phải tự ghi nhớ (OSTEP minh họa bằng header đặt trước khối)[^ostep-header][^ostep-freesize]; cơ chế đầy đủ ở [chương 06 mục 2](06-heap-allocator.md). `dealloc` của Rust nhận lại `Layout`; `Vec` vốn biết capacity của mình nên truyền lại được, và allocator có thể không cần lưu kích thước mỗi khối (suy luận của người soạn từ hợp đồng).
+Điều cuối là khác biệt lớn nhất với C. `free(ptr)` không nhận tham số kích thước[^ostep-header]. Vì vậy allocator phải tự ghi nhớ kích thước từng vùng[^ostep-freesize]; cơ chế đầy đủ ở [chương 06 mục 2](06-heap-allocator.md). `dealloc` của Rust thì nhận lại `Layout`. `Vec` vốn biết capacity của mình nên truyền lại được, và allocator có thể không cần lưu kích thước của từng khối (suy luận của người soạn từ hợp đồng).
 
-**Allocator API: vẫn unstable.** Trait `Allocator` mô tả một allocator có thể cấp, nới, co và giải phóng các khối dữ liệu bất kỳ được mô tả bằng `Layout`[^allocator-doc]. Trong docs 1.95.0 nó được đánh dấu là API thử nghiệm chỉ có trên nightly (`allocator_api`, issue #32838)[^allocator-unstable]. Hệ quả (suy luận của người soạn): trên stable chỉ chọn được allocator toàn chương trình qua `#[global_allocator]`.
+**Allocator API: vẫn unstable.** Trait `Allocator` mô tả một allocator có thể cấp, nới, co và giải phóng các khối dữ liệu bất kỳ, được mô tả bằng `Layout`[^allocator-doc]. Trong docs 1.95.0, nó được đánh dấu là API thử nghiệm chỉ có trên nightly (`allocator_api`, issue #32838)[^allocator-unstable]. Hệ quả (suy luận của người soạn): trên stable, bạn chỉ chọn được allocator cho cả chương trình qua `#[global_allocator]`.
 
 <details><summary>Đi sâu: allocator đếm lời gọi đầy đủ, và lý do thiết kế theo RFC 1398</summary>
 
@@ -209,39 +217,41 @@ unsafe impl GlobalAlloc for Count {
 
 Mọi số "allocs delta" ở chương này đo bằng allocator kiểu này, lấy *hiệu* hai lần đọc (runtime đã cấp phát trước `main`).
 
-Docs của `GlobalAlloc` chỉ nêu hợp đồng, không nêu lý do; lý do ở mức thiết kế API allocator được RFC 1398 phát biểu: malloc buộc allocator tự theo dõi kích thước, trong khi client code thường đã biết, nên RFC muốn client cung cấp metadata như size và alignment cho cả hai lời gọi cấp phát và giải phóng[^rfc1398-why]. (Đây là RFC, không phải tài liệu hợp đồng của std 1.95.0.)
+Docs của `GlobalAlloc` chỉ nêu hợp đồng, không nêu lý do. Lý do ở mức thiết kế API được RFC 1398 phát biểu: malloc buộc allocator tự theo dõi kích thước, trong khi client code thường đã biết, nên RFC muốn client cung cấp metadata như size và alignment cho cả hai lời gọi cấp phát và giải phóng[^rfc1398-why]. (Đây là RFC, không phải tài liệu hợp đồng của std 1.95.0.)
 
 </details>
 
-**Quay lại Q4:** `Box`/`Vec` gọi allocator toàn cục; bạn thay nó bằng `GlobalAlloc` + `#[global_allocator]`, tuân hợp đồng `Layout` (khác 0, `dealloc` đúng layout), còn Allocator API vẫn là nightly.
+**Quay lại Q4:** `Box`/`Vec` của `orders` gọi allocator toàn cục; bạn thay nó bằng `GlobalAlloc` + `#[global_allocator]`, tuân hợp đồng `Layout` (khác 0, `dealloc` đúng layout), còn Allocator API vẫn là nightly.
 
 ## 6. `Rc`, `Arc`, `Weak`, vòng tham chiếu và leak (Q5)
 
-> **Trả lời ngắn.** `Rc`/`Arc` cho phép nhiều owner bằng cách đặt bộ đếm tham chiếu cạnh giá trị trong cùng một khối heap[^rc-inner][^arc-inner]; giá trị chỉ bị dọn khi bộ đếm mạnh về 0[^book-rc][^book-leak-rc]. Hai giá trị giữ `Rc` của nhau thì bộ đếm không bao giờ về 0 nên leak; `Weak` không biểu diễn sở hữu nên phá được vòng[^book-weak]. Leak vẫn là *safe* vì bảo đảm của Rust không gồm việc ngăn memory leak[^book-leak].
+> **Trả lời ngắn.** `Rc`/`Arc` cho phép nhiều owner bằng cách đặt bộ đếm tham chiếu cạnh giá trị, trong cùng một khối heap[^rc-inner]. Giá trị chỉ bị dọn khi bộ đếm mạnh về 0[^book-rc]. Hai giá trị giữ `Rc` của nhau thì bộ đếm không bao giờ về 0 nên leak[^book-leak-rc]; `Weak` không biểu diễn sở hữu nên phá được vòng[^book-weak]. Leak vẫn là *safe* vì bảo đảm của Rust không gồm việc ngăn memory leak[^book-leak].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Rc` như một phòng họp có nhiều người cầm thẻ; phòng chỉ được dọn khi người cuối cùng trả thẻ. Hai người mỗi bên giữ thẻ của nhau và không ai chịu trả trước thì phòng bị khóa mãi.
+*Với service `orders`.* Cache và cấu hình của `orders` được mọi handler thread dùng chung, nên "một owner" không đủ: phải có nhiều owner cùng giữ một giá trị, và giá trị chỉ được dọn khi owner cuối cùng buông tay. Đó là việc của `Arc`. Còn nếu một event loop đơn luồng giữ `Session` và `Conn` trỏ qua lại nhau bằng `Rc`, thì cả hai sẽ không bao giờ được dọn. Mục này giải thích hai chuyện đó, và vì sao Rust vẫn gọi chuyện thứ hai là safe (ví dụ giả định của người soạn).
 
-**Nhiều owner, trả bằng bộ đếm.** Ownership "một owner" không đủ cho đồ thị dữ liệu dùng chung. `Rc<T>` là con trỏ reference-counted đơn luồng[^rc-doc], nó đếm số tham chiếu để biết giá trị còn dùng không[^book-rc]. Trong source 1.95.0, nó cấp phát một `RcInner` chứa hai bộ đếm `strong` và `weak` cạnh `value`[^rc-inner]; `Arc` có `ArcInner` cùng dạng, bộ đếm là số nguyên atomic[^arc-inner].
+**Nhiều owner, trả bằng bộ đếm.** Ownership "một owner" không đủ cho dữ liệu dùng chung. `Rc<T>` là con trỏ reference-counted đơn luồng[^rc-doc]. Nó đếm số tham chiếu để biết giá trị còn dùng hay không[^book-rc]. Trong source 1.95.0, `Rc` cấp phát một `RcInner` chứa hai bộ đếm `strong` và `weak` cạnh `value`[^rc-inner]. `Arc` có `ArcInner` cùng dạng, nhưng bộ đếm là số nguyên atomic[^arc-inner].
 
-**Vì sao có hai kiểu.** `Rc` không thể `Send`: clone rồi chuyển clone sang thread khác thì hai thread có thể cập nhật bộ đếm cùng lúc[^book-rc-send]. `Arc` ("Atomically Reference Counted") là bản thread-safe[^arc-doc]; khi con trỏ cuối cùng bị hủy thì giá trị bên trong bị drop[^arc-last]. Book nói thẳng: an toàn luồng có giá về hiệu năng nên chỉ trả khi cần[^book-arc-cost]. Đây là chỗ Rust bước ra khỏi mô hình "một owner, kiểm tra lúc biên dịch" một cách *tường minh*: refcount là chi phí runtime để có nhiều owner (nhận xét của người soạn). Chi tiết `Rc`/`Arc` trong đa luồng ở [P4·08 mục 4](../04-concurrency/08-rust-concurrency.md); atomic và ordering của refcount ở [P4·07 mục 8](../04-concurrency/07-lock-free.md).
+**Vì sao có hai kiểu.** `Rc` không thể `Send`: nếu clone rồi chuyển clone sang thread khác, hai thread có thể cập nhật bộ đếm cùng lúc[^book-rc-send]. `Arc` ("Atomically Reference Counted") là bản thread-safe[^arc-doc]. Khi con trỏ `Arc` cuối cùng bị hủy thì giá trị bên trong bị drop[^arc-last]. Cái giá là hiệu năng, và Book nói thẳng rằng chỉ nên trả khi thật sự cần[^book-arc-cost]. Đây là chỗ Rust bước ra khỏi mô hình "một owner, kiểm tra lúc biên dịch" một cách *tường minh*: refcount là chi phí runtime để có nhiều owner (nhận xét của người soạn). Chi tiết `Rc`/`Arc` trong đa luồng ở [P4·08 mục 4](../04-concurrency/08-rust-concurrency.md); atomic và ordering của refcount ở [P4·07 mục 8](../04-concurrency/07-lock-free.md).
 
-**Vòng tham chiếu và `Weak`.** Book giải thích: `Rc` chỉ được dọn khi `strong_count` về 0; nếu hai giá trị giữ `Rc` của nhau thì bộ đếm không bao giờ về 0 và bộ nhớ leak. Book minh họa bằng `Rc<T>` kết hợp `RefCell<T>`[^book-leak-rc].
+**Vòng tham chiếu và `Weak`.** `Rc` chỉ được dọn khi `strong_count` về 0. Nếu hai giá trị giữ `Rc` của nhau thì bộ đếm không bao giờ về 0 và bộ nhớ leak. Book minh họa bằng `Rc<T>` kết hợp `RefCell<T>`[^book-leak-rc].
 
-Cách phá vòng: `Weak<T>`. Book: tham chiếu yếu không biểu diễn quan hệ sở hữu và số đếm của chúng không ảnh hưởng đến lúc `Rc` được dọn; `weak_count` không cần về 0[^book-weak][^book-weak-count]. Docs của `Weak`: nó không ngăn *giá trị* bị drop, nhưng ngăn *vùng cấp phát* (backing store) bị giải phóng[^weak-alloc]; vì thế `upgrade()` trả `Option<Rc<T>>` và có thể là `None`[^weak-upgrade]. Docs cũng nêu công dụng chặn vòng tham chiếu giữa các `Rc`[^weak-cycle].
+Cách phá vòng là `Weak<T>`. Tham chiếu yếu không biểu diễn quan hệ sở hữu, và số đếm của chúng không ảnh hưởng đến lúc `Rc` được dọn[^book-weak]. Nói cách khác, `weak_count` không cần về 0[^book-weak-count]. Với `Weak`, *giá trị* vẫn bị drop, nhưng *vùng cấp phát* (backing store) thì chưa được giải phóng[^weak-alloc]. Vì thế `upgrade()` trả `Option<Rc<T>>` và có thể là `None`[^weak-upgrade]. Docs cũng nêu công dụng chặn vòng tham chiếu giữa các `Rc`[^weak-cycle]. Trong ví dụ của `orders`, `Session` giữ `Rc<Conn>` còn `Conn` giữ `Weak<Session>`:
 
 ```mermaid
 flowchart LR
-  subgraph tree["Cây có con trỏ cha"]
-    P["parent: Rc"] -- "Rc (sở hữu)" --> C["child: Rc"]
-    C -- "Weak (không sở hữu)" --> P
+  subgraph pair["Session và connection của orders"]
+    S["Session"] -- "Rc (sở hữu)" --> C["Conn"]
+    C -- "Weak (không sở hữu)" --> S
   end
 ```
 
-**Leak là safe.** `mem::forget` nhận ownership và "quên" giá trị mà không chạy destructor[^forget]; mọi tài nguyên giá trị đó quản lý (heap, file handle) sẽ nằm lại mãi trạng thái không với tới được[^forget-linger]. Nó *không* `unsafe`, vì các bảo đảm an toàn của Rust không gồm việc destructor luôn chạy[^forget-safe]. Reference nói cùng ý: ngăn destructor chạy là safe, và kiểu không được dựa vào việc destructor chạy để giữ soundness (ngoài những chỗ Reference bảo đảm destructor chạy)[^ref-forget-sound]. `Box::leak` tiêu thụ Box và trả `&'a mut T`[^box-leak]; làm rơi tham chiếu đó gây leak[^box-leak-drop]. Chạy thật: `Box::leak(Box::new(vec![1,2,3]))` cho một `&'static mut Vec<i32>` dùng được đến hết chương trình.
+(Sơ đồ minh họa của người soạn.)
 
-Book kết luận: ngăn memory leak hoàn toàn không phải bảo đảm của Rust, tức leak là memory safe[^book-leak]. Nomicon thừa nhận niềm tin "Rust loại trừ rò rỉ tài nguyên" về cơ bản đúng trong thực tế nhưng không đúng về lý thuyết[^nomicon-leak].
+**Leak là safe.** `mem::forget` nhận ownership và "quên" giá trị mà không chạy destructor[^forget]. Mọi tài nguyên giá trị đó quản lý (heap, file handle) sẽ nằm lại mãi trong trạng thái không với tới được[^forget-linger]. Dù vậy `forget` *không* `unsafe`, vì các bảo đảm an toàn của Rust không gồm việc destructor luôn chạy[^forget-safe]. Reference nói cùng ý: ngăn destructor chạy là safe, và kiểu không được dựa vào việc destructor chạy để giữ soundness (ngoài những chỗ Reference bảo đảm destructor chạy)[^ref-forget-sound]. `Box::leak` tiêu thụ Box và trả `&'a mut T`[^box-leak]; làm rơi tham chiếu đó thì gây leak[^box-leak-drop]. Chạy thật: `Box::leak(Box::new(vec![1,2,3]))` cho một `&'static mut Vec<i32>` dùng được đến hết chương trình.
+
+Từ đó Book kết luận: ngăn memory leak hoàn toàn không phải bảo đảm của Rust, tức leak là memory safe[^book-leak]. Nomicon cũng thừa nhận niềm tin "Rust loại trừ rò rỉ tài nguyên" về cơ bản đúng trong thực tế nhưng không đúng về lý thuyết[^nomicon-leak].
 
 <details><summary>Đi sâu: số đo khối heap 24 byte, thí nghiệm vòng <code>Rc</code> và <code>Weak</code></summary>
 
@@ -253,21 +263,21 @@ Chạy thật với `Weak`: sau `Rc::downgrade`, `strong=1 weak=1`; `drop(r)` in
 
 </details>
 
-**Quay lại Q5:** `Rc`/`Arc` đếm owner bằng bộ đếm cạnh giá trị; vòng `Rc` không bao giờ về 0 nên leak, `Weak` phá vòng, và leak vẫn safe vì ngăn leak không nằm trong bảo đảm của Rust.
+**Quay lại Q5:** `Rc`/`Arc` đếm owner bằng bộ đếm cạnh giá trị (`Arc` cho cache dùng chung giữa các thread của `orders`); vòng `Rc` không bao giờ về 0 nên leak, `Weak` phá vòng, và leak vẫn safe vì ngăn leak không nằm trong bảo đảm của Rust.
 
 ## 7. `MaybeUninit`: bộ nhớ chưa khởi tạo trong hệ thống kiểu (Q6)
 
-> **Trả lời ngắn.** Compiler Rust giả định mọi biến luôn được khởi tạo đúng yêu cầu của kiểu nó[^maybe-invariant], nên "cứ để biến chưa khởi tạo" không được phép[^e0381]. `MaybeUninit<T>` là kiểu bao dùng để tạo thể hiện chưa khởi tạo của `T`[^maybe-doc], đồng thời báo cho compiler biết dữ liệu ở đó có thể chưa khởi tạo[^maybe-signal].
+> **Trả lời ngắn.** Compiler Rust giả định mọi biến luôn được khởi tạo đúng yêu cầu của kiểu nó[^maybe-invariant]. Vì vậy "cứ để biến chưa khởi tạo" không được phép[^e0381]. `MaybeUninit<T>` là kiểu bao dùng để tạo thể hiện chưa khởi tạo của `T`[^maybe-doc]. Nó đồng thời báo cho compiler biết dữ liệu ở đó có thể chưa khởi tạo[^maybe-signal].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `MaybeUninit` như ô "đang để trống" trên phiếu — ghi rõ chưa có gì, thay vì điền bừa một giá trị rác trông như hợp lệ.
+*Với service `orders`.* Để đọc body, handler cần một buffer lớn rồi gọi `read` để socket ghi dữ liệu vào. Lúc cấp phát, buffer đó chưa chứa gì có nghĩa; nếu phải điền số 0 vào trước chỉ để Rust yên tâm thì hơi thừa (nhận xét của người soạn). Muốn chừa buffer ở trạng thái "chưa khởi tạo" mà vẫn đúng luật, Rust cần một kiểu riêng. Đó là `MaybeUninit`.
 
-**Vấn đề.** `malloc` trả về bộ nhớ chưa khởi tạo[^malloc-man], và OSTEP xếp việc đọc vùng này vào các lỗi kinh điển: chương trình sẽ gặp một "uninitialized read" đọc dữ liệu không biết giá trị từ heap[^ostep-uninit]. Rust cấm dùng biến chưa khởi tạo ở safe code (mục 8), nhưng đôi khi bạn cần chính vùng nhớ chưa khởi tạo, ví dụ buffer vừa cấp phát và sắp được ghi vào (nhận xét của người soạn).
+**Vấn đề.** `malloc` trả về bộ nhớ chưa khởi tạo[^malloc-man]. Đọc vùng nhớ ấy là một trong các lỗi kinh điển: chương trình gặp một "uninitialized read", đọc từ heap dữ liệu không biết giá trị[^ostep-uninit]. Rust cấm dùng biến chưa khởi tạo ở safe code (mục 8), nhưng đôi khi bạn cần chính vùng nhớ chưa khởi tạo, như buffer vừa cấp phát và sắp được ghi vào (nhận xét của người soạn).
 
-**Vì sao không thể "cứ để trống".** Compiler giả định biến luôn được khởi tạo đúng yêu cầu của kiểu (ví dụ tham chiếu phải căn đúng và không null)[^maybe-invariant]; do đó khởi tạo một tham chiếu bằng 0 là UB tức thời, kể cả khi chưa dùng để truy cập bộ nhớ[^maybe-zeroed]. Docs còn cho biết compiler khai thác giả định này để tối ưu, như bỏ kiểm tra lúc chạy và tối ưu layout enum[^maybe-exploit]. Nghĩa là không có cách "giả vờ" một ô nhớ rác là một `T` mà không rủi ro.
+**Vì sao không thể "cứ để trống".** Compiler giả định biến luôn được khởi tạo đúng yêu cầu của kiểu, ví dụ tham chiếu phải căn đúng và không null[^maybe-invariant]. Vì thế khởi tạo một tham chiếu bằng 0 là UB tức thời, kể cả khi chưa dùng tham chiếu đó để truy cập bộ nhớ[^maybe-zeroed]. Compiler còn khai thác giả định này để tối ưu, chẳng hạn bỏ kiểm tra lúc chạy và tối ưu layout enum[^maybe-exploit]. Hệ quả là không có cách "giả vờ" một ô nhớ rác là một `T` mà không rủi ro.
 
-**Lời giải.** Đặt vùng chưa khởi tạo vào bên trong `MaybeUninit<T>`: thể hiện này không buộc phải thỏa yêu cầu hợp lệ của `T` (suy luận của người soạn từ docs về tín hiệu cho compiler[^maybe-signal]). Mẫu dùng: `uninit()`, `write` giá trị vào, chỉ `assume_init()` (là `unsafe`) khi chắc đã khởi tạo xong; chi tiết ở [P10·07 mục 6](../10-rust-internals/07-unsafe-ub-miri.md).
+**Lời giải.** Đặt vùng chưa khởi tạo vào bên trong `MaybeUninit<T>`. Thể hiện này không buộc phải thỏa yêu cầu hợp lệ của `T` (suy luận của người soạn từ docs về tín hiệu cho compiler[^maybe-signal]). Mẫu dùng là: `uninit()`, `write` giá trị vào, và chỉ `assume_init()` (là `unsafe`) khi chắc đã khởi tạo xong. Chi tiết ở [P10·07 mục 6](../10-rust-internals/07-unsafe-ub-miri.md).
 
 <details><summary>Đi sâu: bảo đảm layout của <code>MaybeUninit</code></summary>
 
@@ -275,36 +285,38 @@ Hình dung (nhận xét của người soạn): `MaybeUninit` như ô "đang đ�
 
 </details>
 
-**Quay lại Q6:** `MaybeUninit<T>` là kiểu bao dành cho bộ nhớ chưa khởi tạo, nên compiler không coi nó là một `T` đã hợp lệ[^maybe-signal]; chỉ `assume_init` khi đã chắc.
+**Quay lại Q6:** `MaybeUninit<T>` là kiểu bao dành cho bộ nhớ chưa khởi tạo, như buffer đọc body của `orders` trước khi `read` ghi vào, nên compiler không coi nó là một `T` đã hợp lệ[^maybe-signal]; chỉ `assume_init` khi đã chắc.
 
 ## 8. Lỗi bộ nhớ của C bị Rust chặn ra sao (Q7)
 
-> **Trả lời ngắn.** Rust không dùng GC: bộ nhớ được trả khi owner ra scope[^book-auto], và compiler quyết định lúc biên dịch. Nhờ ownership, borrow checker (phần của compiler kiểm tra việc mượn tham chiếu) và kiểm tra chỉ số, safe code chặn được use-after-free, double free, đọc vùng chưa khởi tạo, tràn buffer và data race. Leak thì *không* bị chặn[^book-leak].
+> **Trả lời ngắn.** Rust không dùng GC: bộ nhớ được trả khi owner ra scope[^book-auto], và compiler quyết định điều đó lúc biên dịch. Nhờ ownership, borrow checker (phần của compiler kiểm tra việc mượn tham chiếu) và kiểm tra chỉ số, safe code chặn được use-after-free, double free, đọc vùng chưa khởi tạo, tràn buffer và data race. Leak thì *không* bị chặn[^book-leak].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): các lỗi của C là những quy ước "nhớ làm"; Rust biến từng quy ước thành một kiểm tra mà compiler không cho bỏ qua.
+*Với service `orders`.* Giả sử bạn viết lại một handler C của `orders` bằng Rust. Những lỗi từng gây sự cố ở bản C (free rồi còn dùng, free hai lần, đọc buffer chưa ghi, ghi tràn, hai thread cùng sửa một biến) giờ hoặc không biên dịch được, hoặc panic ngay chỗ lỗi. Riêng một lỗi vẫn lọt qua: leak. Mục này đi qua từng lỗi (nhận xét của người soạn).
 
-Nomicon: ownership cho phép Rust hoàn toàn memory-safe và hiệu quả, đồng thời tránh garbage collection[^nomicon-nogc]. Hệ quả vận hành (nhận xét của người soạn): không có pause của GC, nhưng đổi lại thời điểm giải phóng là một phần ngữ nghĩa chương trình bạn phải hiểu (mục 3), và vòng `Rc` không được ai dọn.
+Nomicon nói ownership cho phép Rust hoàn toàn memory-safe và hiệu quả, đồng thời tránh được garbage collection[^nomicon-nogc]. Hệ quả vận hành (nhận xét của người soạn): service không có pause của GC, nhưng đổi lại thời điểm giải phóng là một phần ngữ nghĩa chương trình mà bạn phải hiểu (mục 3), và vòng `Rc` thì không ai dọn.
 
-Đối chiếu các lỗi mà OSTEP liệt kê cho C ([chương 01 mục 6](01-address-space.md); chương 01 mục 7 có bản tóm lược ngắn của bảng này, bảng dưới là bản đầy đủ) với cơ chế Rust:
+Bảng dưới đối chiếu các lỗi mà OSTEP liệt kê cho C ([chương 01 mục 6](01-address-space.md); chương 01 mục 7 có bản tóm lược ngắn của bảng này, còn bảng dưới là bản đầy đủ) với cơ chế của Rust:
 
 | Lỗi trong C | Rust chặn bằng | Bằng chứng |
 |---|---|---|
-| Dangling pointer / use-after-free: free rồi còn dùng[^ostep-dangling] | borrow checker: compiler bảo đảm dữ liệu không ra khỏi scope trước tham chiếu tới nó[^book-dangling]; mục đích chính của lifetime là chặn dangling reference[^book-lifetime-aim] | `let r; { let x = 5; r = &x; } println!("{r}");` → `E0597`: "giá trị bị drop khi vẫn đang được mượn"[^e0597] (chạy thật) |
+| Dangling pointer / use-after-free: free rồi còn dùng[^ostep-dangling] | borrow checker: compiler bảo đảm dữ liệu không ra khỏi scope trước tham chiếu tới nó[^book-dangling] | `let r; { let x = 5; r = &x; } println!("{r}");` → `E0597`: "giá trị bị drop khi vẫn đang được mượn"[^e0597] (chạy thật) |
 | Double free[^ostep-doublefree] | một owner; move vô hiệu hóa biến cũ[^book-doublefree] | `E0382` (mục 2) |
 | Quên khởi tạo, đọc rác[^ostep-uninit] | không cho dùng biến chưa khởi tạo[^e0381]; muốn bộ nhớ chưa khởi tạo phải qua `MaybeUninit` | mục 7 |
-| Tràn buffer / đọc quá cuối[^ostep-overflow] | chỉ số `[]` ngoài miền thì panic; C thì là UB và có thể thành lỗ hổng[^book-overread-c][^book-panic] | chạy thật: `v[10]` trên `Vec` 3 phần tử → `panicked ... index out of bounds: the len is 3 but the index is 10`, exit code 101 |
-| Data race | borrow checker: tại một thời điểm hoặc một `&mut` hoặc nhiều `&`[^book-ref-rule]; Book nói Rust từ chối biên dịch code có data race[^book-datarace] | Book 4.2; qua ranh giới thread còn có `Send`/`Sync`, xem [P4·08](../04-concurrency/08-rust-concurrency.md) |
-| Quên free (leak)[^ostep-leak] | **không chặn** — leak là safe[^book-leak] | mục 6 |
+| Tràn buffer / đọc quá cuối[^ostep-overflow] | chỉ số `[]` ngoài miền thì panic[^book-panic] | chạy thật: `v[10]` trên `Vec` 3 phần tử → `panicked ... index out of bounds: the len is 3 but the index is 10`, exit code 101 |
+| Data race | borrow checker: tại một thời điểm hoặc một `&mut` hoặc nhiều `&`[^book-ref-rule] | Rust từ chối biên dịch code có data race[^book-datarace]; qua ranh giới thread còn có `Send`/`Sync`, xem [P4·08](../04-concurrency/08-rust-concurrency.md) |
+| Quên free (leak)[^ostep-leak] | **không chặn**: leak là safe[^book-leak] | mục 6 |
+
+Hai lưu ý cho bảng. Một là mục đích chính của lifetime là chặn dangling reference[^book-lifetime-aim]. Hai là ở dòng tràn buffer, C không panic mà là UB, và đọc quá cuối cấu trúc dữ liệu có thể thành lỗ hổng bảo mật[^book-overread-c].
 
 <details><summary>Đi sâu: phạm vi bảo đảm của Rust — leak, tràn stack và <code>unsafe</code></summary>
 
-Bảo đảm của Rust là *safe code không gây UB* (nhận xét của người soạn, tổng hợp từ các nguồn trên); leak vẫn xảy ra được[^book-leak], và tràn stack vẫn xảy ra (mục 9; cơ chế ở [chương 07 mục 4](07-stack-alignment-padding.md)). Code `unsafe` (và allocator tự viết ở mục 5) là nơi bạn tự gánh các hợp đồng này.
+Bảo đảm của Rust là *safe code không gây UB* (nhận xét của người soạn, tổng hợp từ các nguồn trên). Leak vẫn xảy ra được[^book-leak], và tràn stack cũng vậy (mục 9; cơ chế ở [chương 07 mục 4](07-stack-alignment-padding.md)). Code `unsafe` (và allocator tự viết ở mục 5) là nơi bạn tự gánh các hợp đồng này.
 
 </details>
 
-**Quay lại Q7:** safe Rust chặn use-after-free, double free, đọc rác, tràn buffer và data race bằng kiểm tra lúc biên dịch hoặc panic; leak và tràn stack vẫn xảy ra được.
+**Quay lại Q7:** safe Rust chặn use-after-free, double free, đọc rác, tràn buffer và data race bằng kiểm tra lúc biên dịch hoặc panic; leak và tràn stack trong `orders` vẫn xảy ra được.
 
 ## 9. Chọn stack hay heap trong Rust (Q8)
 
@@ -312,13 +324,13 @@ Bảo đảm của Rust là *safe code không gây UB* (nhận xét của ngư�
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): stack như bàn làm việc — đồ nhỏ, biết trước thì để ngay trên bàn; heap như nhà kho — cần xin chỗ, và bàn chỉ giữ tờ phiếu ghi vị trí.
+*Với service `orders`.* Trong một request, `orders` giữ vài thứ có kích thước biết trước: id đơn hàng (một số nguyên), một struct `Item` nhỏ, một mảng cỡ cố định cho header. Nó cũng giữ vài thứ không biết trước: body request (độ dài do client quyết định) và danh sách item (số lượng tùy đơn). Vậy mỗi thứ nên đặt ở đâu? Hai tiêu chí chính là kích thước có biết trước không, và giá trị có cần sống lâu hơn hay chuyển ownership rẻ hơn không.
 
 **Hai con đường cấp chỗ cho một giá trị.**
 
-1. *Stack:* đẩy một giá trị lên stack nhanh hơn cấp phát heap vì không có allocator nào phải tìm chỗ[^book-push-faster]; đổi lại kích thước phải biết trước và cố định[^book-stack-fixed].
-2. *Heap:* allocator tìm một chỗ trống đủ lớn, đánh dấu đang dùng rồi trả về con trỏ[^book-heap-alloc]. Con trỏ có kích thước cố định nên lưu được trên stack, còn dữ liệu thật phải đi theo con trỏ[^book-ptr-on-stack].
-3. Vì thế `Vec`/`String`/`Box` là "vỏ" nhỏ trên stack trỏ tới dữ liệu ở heap (mục 4), và quyết định stack hay heap thực chất là quyết định *biết kích thước trước hay không* và *có cần sống lâu / chuyển ownership rẻ không*.
+1. *Stack.* Đẩy một giá trị lên stack nhanh hơn cấp phát heap vì không có allocator nào phải tìm chỗ[^book-push-faster]. Đổi lại, kích thước phải biết trước và cố định[^book-stack-fixed].
+2. *Heap.* Allocator tìm một chỗ trống đủ lớn, đánh dấu đang dùng rồi trả về con trỏ[^book-heap-alloc]. Con trỏ có kích thước cố định nên lưu được trên stack, còn dữ liệu thật phải đi theo con trỏ[^book-ptr-on-stack].
+3. Vì thế `Vec`/`String`/`Box` là cái vỏ nhỏ trên stack trỏ tới dữ liệu ở heap (mục 4). Quyết định stack hay heap thực chất là quyết định *có biết kích thước trước hay không* và *có cần sống lâu hoặc chuyển ownership rẻ không*.
 
 Bảng dưới là hướng dẫn chọn rút ra từ các tính chất trên (nhận xét của người soạn):
 
@@ -326,7 +338,7 @@ Bảng dưới là hướng dẫn chọn rút ra từ các tính chất trên (n
 |---|---|---|
 | Số nguyên, struct nhỏ, tuple, array cỡ cố định nhỏ | stack (mặc định) | kích thước biết trước; không gọi allocator |
 | Kích thước chỉ biết lúc chạy hoặc co giãn (danh sách, chuỗi) | `Vec`, `String` | dữ liệu ở heap, bản thân handle 3 từ ở stack (mục 4) |
-| Kiểu đệ quy, hoặc cần kiểu có kích thước cố định cho giá trị kích thước không rõ | `Box<T>` | Book: kích thước không biết lúc biên dịch[^book-box-unknown] |
+| Kiểu đệ quy, hoặc cần kiểu có kích thước cố định cho giá trị kích thước không rõ | `Box<T>` | kích thước không biết lúc biên dịch[^book-box-unknown] |
 | Dữ liệu lớn, muốn chuyển ownership mà không copy | `Box<T>`, hoặc `Vec` | chỉ chuyển con trỏ (mục 2)[^book-box-large] |
 | Nhiều owner, đơn luồng / đa luồng | `Rc<T>` / `Arc<T>` | trả bằng refcount (mục 6) |
 | Sống đến hết chương trình, cần `&'static` | `Box::leak` | leak có chủ đích (mục 6) |
@@ -337,16 +349,16 @@ Stack có giới hạn nên array rất lớn hoặc đệ quy sâu có thể l�
 
 </details>
 
-**Quay lại Q8:** kích thước biết trước và nhỏ thì stack; co giãn, đệ quy hoặc lớn thì heap qua `Box`/`Vec`/`String`; nhiều owner thì `Rc`/`Arc`.
+**Quay lại Q8:** với `orders`, id và struct nhỏ nằm ở stack; body và danh sách item co giãn nên ở heap qua `String`/`Vec`; cache dùng chung giữa các thread thì `Arc`. Quy tắc gọn: kích thước biết trước và nhỏ thì stack, co giãn, đệ quy hoặc lớn thì heap, nhiều owner thì `Rc`/`Arc`.
 
 ## Tóm tắt
 
-- Ownership: một owner, drop khi ra scope[^book-rules]; move chỉ copy "vỏ" ba từ của `String` (đo: 0 cấp phát thêm, con trỏ heap không đổi).
-- `Copy` và `Drop` loại trừ nhau[^copy-doc-drop]; thứ tự drop: biến ngược khai báo, field/tuple xuôi.
-- `Vec`/`String` là bộ ba (ptr, cap, len); docs chỉ hứa `push` O(1) amortized, "4, 8, 16…" là chi tiết source.
-- `GlobalAlloc` đòi layout khác 0 và `dealloc` nhận đúng `Layout`; allocator mặc định unspecified; Allocator API vẫn chỉ trên nightly.
-- `Rc`/`Arc` đặt bộ đếm cạnh giá trị (khối heap 24 byte cho `u64`); vòng `Rc` leak mà không gọi `Drop`; `Weak` phá vòng.
-- Leak là safe: `forget`, `Box::leak`, vòng `Rc` đều không cần `unsafe`; vì vậy code `unsafe` không được dựa vào việc destructor chạy.
+- Ownership: một owner, drop khi ra scope[^book-rules]. Move chỉ copy "vỏ" ba từ của `String` (đo: 0 cấp phát thêm, con trỏ heap không đổi), nên trao body của `orders` cho hàm parse là rẻ.
+- `Copy` và `Drop` loại trừ nhau[^copy-doc-drop]. Thứ tự drop: biến ngược khai báo, field và tuple xuôi.
+- `Vec`/`String` là bộ ba (ptr, cap, len). Docs chỉ hứa `push` O(1) amortized, còn "4, 8, 16…" là chi tiết source.
+- `GlobalAlloc` đòi layout khác 0 và `dealloc` nhận đúng `Layout`. Allocator mặc định là unspecified, và Allocator API vẫn chỉ trên nightly.
+- `Rc`/`Arc` đặt bộ đếm cạnh giá trị (khối heap 24 byte cho `u64`). Vòng `Rc` leak mà không gọi `Drop`, còn `Weak` phá vòng.
+- Leak là safe: `forget`, `Box::leak`, vòng `Rc` đều không cần `unsafe`. Vì vậy code `unsafe` không được dựa vào việc destructor chạy.
 - `MaybeUninit<T>` biểu diễn bộ nhớ chưa khởi tạo mà không vi phạm giả định của compiler.
 - Chọn stack cho dữ liệu cỡ cố định, nhỏ; heap (`Box`/`Vec`/`String`) cho dữ liệu co giãn, đệ quy hoặc lớn; `Rc`/`Arc` khi thật sự cần nhiều owner.
 
@@ -355,49 +367,49 @@ Stack có giới hạn nên array rất lớn hoặc đệ quy sâu có thể l�
 1. Ba quy tắc ownership là gì, và quy tắc nào chặn double free?
 <details><summary>Đáp án</summary>
 
-Mỗi giá trị có một owner, một owner tại một thời điểm, owner ra scope thì giá trị bị drop[^book-rules]. Quy tắc "một owner" chặn double free vì sau move biến cũ không còn hợp lệ[^book-doublefree][^book-move]; dùng lại nó là `E0382`[^e0382].
+Mỗi giá trị có một owner, một owner tại một thời điểm, và owner ra scope thì giá trị bị drop[^book-rules]. Quy tắc "một owner" chặn double free[^book-doublefree]. Sau move, biến cũ không còn hợp lệ[^book-move]. Dùng lại nó là lỗi `E0382`[^e0382].
 
 </details>
 
 2. Sau `let s2 = s1;` với `s1: String`, dữ liệu heap có bị sao chép không? Bằng chứng?
 <details><summary>Đáp án</summary>
 
-Không. Book: struct ba phần (ptr, len, cap) nằm trên stack được move[^book-string]. Đo thật bằng allocator đếm: số `alloc` không tăng và `as_ptr()` giữ nguyên (mục 2).
+Không. Thứ được move là struct ba phần (ptr, len, cap) nằm trên stack[^book-string]. Đo thật bằng allocator đếm: số `alloc` không tăng và `as_ptr()` giữ nguyên (mục 2).
 
 </details>
 
 3. Vì sao `#[derive(Clone, Copy)] struct X; impl Drop for X {…}` không biên dịch?
 <details><summary>Đáp án</summary>
 
-Kiểu `Drop` quản lý tài nguyên ngoài chính các byte của nó nên không thể `Copy`[^copy-doc-drop]; compiler báo `E0184`[^e0184].
+Kiểu `Drop` quản lý tài nguyên ngoài chính các byte của nó nên không thể `Copy`[^copy-doc-drop]. Compiler báo `E0184`[^e0184].
 
 </details>
 
 4. Đoán thứ tự in khi drop: `let _a = P("a"); let _b = (P("b0"), P("b1"));`.
 <details><summary>Đáp án</summary>
 
-`b0`, `b1`, rồi `a`. Biến drop ngược thứ tự khai báo[^ref-drop-scope]; phần tử tuple drop theo thứ tự[^ref-drop-tuple].
+`b0`, `b1`, rồi `a`. Biến drop ngược thứ tự khai báo[^ref-drop-scope]. Phần tử tuple thì drop theo thứ tự[^ref-drop-tuple].
 
 </details>
 
 5. Docs `Vec` hứa gì và không hứa gì về chiến lược tăng capacity?
 <details><summary>Đáp án</summary>
 
-Không hứa chiến lược cụ thể[^vec-growth]; chỉ hứa `push` O(1) amortized[^vec-amort] và `with_capacity(n)` yêu cầu đúng kích thước cho n phần tử[^vec-exact]. Cấp số nhân với capacity tối thiểu 4 hoặc 8 là chi tiết source 1.95.0 ([P10·09, mục 2](../10-rust-internals/09-collections-internals.md)).
+Docs không hứa chiến lược cụ thể[^vec-growth]. Chỉ có `push` O(1) amortized được hứa[^vec-amort]. `with_capacity(n)` thì yêu cầu đúng kích thước cho n phần tử[^vec-exact]. Cấp số nhân với capacity tối thiểu 4 hoặc 8 là chi tiết source 1.95.0 ([P10·09, mục 2](../10-rust-internals/09-collections-internals.md)).
 
 </details>
 
 6. `dealloc` của `GlobalAlloc` khác `free` của C ở điểm nào về tham số, và hợp đồng đi kèm?
 <details><summary>Đáp án</summary>
 
-`free(ptr)` không nhận kích thước nên allocator tự lưu[^ostep-freesize]; `dealloc` nhận `Layout` và phải là đúng layout đã dùng khi cấp, nếu không là UB[^ga-dealloc].
+`free(ptr)` không nhận kích thước nên allocator phải tự lưu[^ostep-freesize]. `dealloc` thì nhận `Layout`, và phải là đúng layout đã dùng khi cấp, nếu không là UB[^ga-dealloc].
 
 </details>
 
 7. Vì sao vòng `Rc` leak, và `Weak` sửa thế nào?
 <details><summary>Đáp án</summary>
 
-Mỗi `Rc` trong vòng giữ `strong_count` của cái kia nên không về 0[^book-leak-rc]. `Weak` không biểu diễn sở hữu và không ảnh hưởng lúc `Rc` được dọn[^book-weak]; `upgrade()` trả `Option` vì giá trị có thể đã bị drop[^weak-upgrade].
+Mỗi `Rc` trong vòng giữ `strong_count` của cái kia nên không về 0[^book-leak-rc]. `Weak` không biểu diễn sở hữu và không ảnh hưởng lúc `Rc` được dọn[^book-weak]. Vì thế `upgrade()` trả `Option`: giá trị có thể đã bị drop[^weak-upgrade].
 
 </details>
 
@@ -411,14 +423,14 @@ Không, vì bảo đảm an toàn của Rust không gồm việc destructor luô
 9. Vì sao `let r: &i32 = unsafe { MaybeUninit::zeroed().assume_init() };` là UB dù chưa đọc `*r`?
 <details><summary>Đáp án</summary>
 
-Compiler giả định tham chiếu luôn căn đúng và không null[^maybe-invariant]; zero-init một tham chiếu là UB tức thời, bất kể có dùng để truy cập hay không[^maybe-zeroed].
+Compiler giả định tham chiếu luôn căn đúng và không null[^maybe-invariant]. Zero-init một tham chiếu là UB tức thời, bất kể có dùng nó để truy cập bộ nhớ hay không[^maybe-zeroed].
 
 </details>
 
 10. Lỗi C nào Rust *không* chặn được ở safe code, và vì sao điều đó vẫn "safe"?
 <details><summary>Đáp án</summary>
 
-Leak: không nằm trong bảo đảm của Rust[^book-leak]; vùng nhớ không bao giờ được free không thể bị dùng sai, chỉ bị lãng phí (suy luận của người soạn).
+Leak: nó không nằm trong bảo đảm của Rust[^book-leak]. Vùng nhớ không bao giờ được free thì không thể bị dùng sai, chỉ bị lãng phí (suy luận của người soạn).
 
 </details>
 
@@ -458,7 +470,6 @@ Leak: không nằm trong bảo đảm của Rust[^book-leak]; vùng nhớ không
 [^drop-resources]: Rust std 1.95.0, trait `Drop` — <https://doc.rust-lang.org/1.95.0/std/ops/trait.Drop.html> — "That resource may be memory, it may be a file descriptor, it may be a network socket."
 [^nomicon-orm]: The Rustonomicon, Leaking — <https://doc.rust-lang.org/1.95.0/nomicon/leaking.html> — "You acquire resources when you create the object, and you release the resources when it gets destroyed."
 [^ref-drop-scope]: The Rust Reference, Destructors — <https://doc.rust-lang.org/1.95.0/reference/destructors.html> — "all variables associated to that scope are dropped in reverse order of declaration (for variables) or creation (for temporaries)."
-[^book-drop-order]: The Rust Programming Language, 15.3 Running Code on Cleanup with the Drop Trait — <https://doc.rust-lang.org/1.95.0/book/ch15-03-drop.html> — "Variables are dropped in the reverse order of their creation"
 [^ref-drop-fields]: The Rust Reference, Destructors — <https://doc.rust-lang.org/1.95.0/reference/destructors.html> — "The fields of a struct are dropped in declaration order."
 [^ref-drop-tuple]: The Rust Reference, Destructors — <https://doc.rust-lang.org/1.95.0/reference/destructors.html> — "The fields of a tuple are dropped in order."
 [^ref-destr-array]: The Rust Reference, Destructors — <https://doc.rust-lang.org/1.95.0/reference/destructors.html> — "The elements of an array or owned slice are dropped from the first element to the last."

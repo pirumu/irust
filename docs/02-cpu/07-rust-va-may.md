@@ -12,24 +12,28 @@
 
 ## Kiến thức cần trước
 
+Bạn đã viết service bằng Rust và quen với `cargo build --release`, nhưng chưa phải nhìn xuống mã máy mà `rustc` sinh ra. Chương này lấp chỗ đó, bằng cách đọc asm và đo thử trên máy thật. Cần ôn thì xem:
+
 - [Chương 03 — Assembly x86-64 và AArch64](03-assembly-x86-64-va-aarch64.md): đọc được vài lệnh cơ bản (`add`, `ldr`/`mov`, `cmp`, nhánh có điều kiện). Mục 7 của chương đó đã giới thiệu cách sinh asm bằng `--emit=asm`; mục 1 dưới đây chỉ nhắc lại ngắn gọn để thêm LLVM IR và `opt-level`.
-- [Chương 04 — Calling convention và stack frame](04-calling-convention-va-stack-frame.md): vì sao tham số nằm ở thanh ghi nào, vì sao hàm có prologue/epilogue.
-- [Chương 05 — Pipeline, branch prediction và speculative execution](05-pipeline-va-speculation.md) và [Chương 06 — Cache hierarchy và NUMA](06-cache-va-numa.md): cache line, coherence — cần cho mục false sharing. Mục 8 của chương 05 tóm tắt `std::hint`, `#[cold]`, `#[inline]`; chương này nhìn `black_box` và `#[inline]` từ góc "kiểm chứng bằng asm".
+- [Chương 04 — Calling convention và stack frame](04-calling-convention-va-stack-frame.md): tham số nằm ở thanh ghi nào, vì sao hàm có prologue/epilogue.
+- [Chương 05 — Pipeline, branch prediction và speculative execution](05-pipeline-va-speculation.md) và [Chương 06 — Cache hierarchy và NUMA](06-cache-va-numa.md): cache line và coherence, cần cho mục false sharing. Mục 8 của chương 05 tóm tắt `std::hint`, `#[cold]`, `#[inline]`; chương này nhìn `black_box` và `#[inline]` từ góc "kiểm chứng bằng asm".
 - Các giai đoạn trước LLVM: [P10 · Chương 01 — Pipeline của rustc](../10-rust-internals/01-pipeline-rustc.md). Layout kiểu dữ liệu: [P10 · Chương 02 — Type layout](../10-rust-internals/02-type-layout.md).
 
-**Về máy thử nghiệm.** Mọi asm và số đo được chạy thật bằng `rustc 1.95.0` trên Apple M3 Pro, `aarch64-apple-darwin`. Ví dụ x86-64 sinh bằng cross-compile (`--target x86_64-unknown-linux-gnu`), chỉ xem asm, không chạy. Số đo là quan sát trên một máy, mỗi phép đo chạy vài lần (số lần ghi ở từng chỗ); chúng minh họa hiện tượng, không phải con số để mang sang máy khác.
+**Về máy thử nghiệm.** Mọi asm và số đo trong chương được chạy thật bằng `rustc 1.95.0` trên Apple M3 Pro, `aarch64-apple-darwin`. Ví dụ x86-64 sinh bằng cross-compile (`--target x86_64-unknown-linux-gnu`), chỉ xem asm, không chạy. Số đo là quan sát trên một máy, mỗi phép đo chạy vài lần (số lần ghi ở từng chỗ). Chúng minh họa hiện tượng, không phải con số để mang sang máy khác.
 
 ---
 
 ## 1. Từ mã Rust đến mã máy, và `opt-level` (Q1)
 
-> **Trả lời ngắn.** `rustc` không tự sinh mã máy: nó giao việc đó cho một backend, thường là LLVM[^llvm-backend]. Hai cờ `--emit=llvm-ir` và `--emit=asm` cho bạn xem bản trung gian và bản assembly dạng chữ[^emit-ir][^emit-asm]. Cờ `-C opt-level` quyết định mức tối ưu[^opt-levels]; cùng một hàm ở `0` và `3` cho ra hai đoạn asm rất khác nhau (quan sát ở ví dụ dưới).
+> **Trả lời ngắn.** `rustc` không tự sinh mã máy mà giao việc đó cho một backend, thường là LLVM[^llvm-backend]. Cờ `--emit=llvm-ir` cho bạn xem bản trung gian[^emit-ir]. Cờ `--emit=asm` cho xem assembly dạng chữ[^emit-asm]. Cờ `-C opt-level` chọn mức tối ưu[^opt-levels], và cùng một hàm ở mức `0` với mức `3` cho ra hai đoạn asm rất khác nhau (quan sát ở ví dụ dưới).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `rustc` là biên tập viên, LLVM là nhà in. Biên tập viên giao bản thảo trung gian (LLVM IR); nhà in sắp chữ cho đúng loại máy in (kiến trúc đích) và tối ưu cách trình bày. Bạn muốn biết *CPU sẽ chạy gì* thì phải xem bản đã in.
+*Với service `ingest`.* Từ chương này ta bám theo `ingest`, một service Rust nhận từng lô (batch) sự kiện qua mạng, kiểm tra và cộng dồn từng lô rồi đẩy vào hàng đợi. Nó chạy vài worker thread, mỗi worker giữ bộ đếm riêng, và được deploy lên một node pool Kubernetes. Mỗi mục sau mở đầu bằng một câu hỏi về `ingest`. (Nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo. Các hàm nhỏ trong chương như `add`, `get`, `popc` là những mảnh cắt ra từ loại hot path này.) Câu hỏi của mục này đơn giản nhất: khi `ingest` chạy chậm, CPU thực sự đang chạy những lệnh nào, và làm sao bạn đọc được chúng?
 
-Đoạn cuối của đường ống biên dịch là sinh mã máy, và `rustc` không tự làm việc này[^llvm-backend]. LLVM nhận đầu vào là LLVM IR, về cơ bản là mã assembly có thêm kiểu dữ liệu mức thấp và chú thích; các chú thích đó giúp tối ưu hóa trên IR lẫn trên mã máy xuất ra[^llvm-ir].
+### 1.1 Ai sinh ra mã máy
+
+Bước cuối của việc biên dịch là sinh mã máy, và `rustc` không tự làm bước này[^llvm-backend]. Nó đưa chương trình sang LLVM IR rồi để LLVM lo phần còn lại. LLVM IR về cơ bản là assembly có thêm kiểu dữ liệu mức thấp và chú thích. Các chú thích đó giúp tối ưu hóa cả trên IR lẫn trên mã máy xuất ra[^llvm-ir].
 
 ```mermaid
 flowchart LR
@@ -40,30 +44,36 @@ flowchart LR
     E --> F[Linker → file thực thi]
 ```
 
-(Sơ đồ rút gọn; các giai đoạn trước LLVM, như HIR và MIR, là tên nội bộ của `rustc` và do [P10](../10-rust-internals/01-pipeline-rustc.md) mô tả.)
+(Sơ đồ rút gọn. Các giai đoạn trước LLVM, như HIR và MIR, là tên nội bộ của `rustc` và do [P10](../10-rust-internals/01-pipeline-rustc.md) mô tả.)
 
-Hai điểm dừng đáng xem là LLVM IR (đọc được) và asm (gắn với ISA cụ thể): `--emit=llvm-ir` sinh file chứa LLVM IR[^emit-ir], `--emit=asm` sinh file assembly của crate[^emit-asm]; liệt kê nhiều loại cách nhau dấu phẩy[^emit-list].
+Trên đường đó có hai điểm dừng đáng xem: LLVM IR, dễ đọc, và asm, gắn với một ISA cụ thể. `--emit=llvm-ir` sinh file chứa LLVM IR[^emit-ir]. `--emit=asm` sinh file assembly của crate[^emit-asm]. Muốn lấy nhiều loại cùng lúc thì liệt kê, cách nhau bằng dấu phẩy[^emit-list].
 
-Quy trình dùng xuyên suốt chương:
+### 1.2 Đọc asm của một hàm
+
+Lệnh dùng xuyên suốt chương:
 
 ```bash
 rustc --crate-type=lib -C opt-level=3 --emit=asm -o out.s file.rs
 ```
 
-Với `fn add(a: u64, b: u64) -> u64 { a + b }` (quan sát), IR sau tối ưu là `%_0 = add i64 %b, %a; ret i64 %_0` và asm AArch64 `opt-level=3` chỉ còn `add x0, x1, x0; ret` (tham số ở `x0`, `x1`, kết quả ở `x0`, xem [Chương 04](04-calling-convention-va-stack-frame.md)). Ở `opt-level=0`, cùng hàm sinh khoảng 17 dòng (bỏ `.cfi_*`): `sub sp, sp, #32; stp x29, x30, [sp, #16]; add x8, x0, x1; str x8, [sp, #8]; subs x8, x8, x0; b.lo …` (nhánh tới `bl …panic_const_add_overflow`), rồi `ldr x0, [sp, #8]; … ret`. Ví dụ `i64` ở [Chương 03 mục 7](03-assembly-x86-64-va-aarch64.md) kiểm tra tràn bằng cờ tràn có dấu; ở đây là `u64` nên đoạn kiểm tra trông khác (suy luận của người soạn: `subs` lấy tổng trừ `a`, và `b.lo` nhảy khi tổng nhỏ hơn `a`, tức đã tràn).
+Ta thử với hàm nhỏ nhất có thể, `fn add(a: u64, b: u64) -> u64 { a + b }` (quan sát). Sau tối ưu, IR chỉ còn `%_0 = add i64 %b, %a; ret i64 %_0`, và asm AArch64 ở `opt-level=3` chỉ còn `add x0, x1, x0; ret` (tham số ở `x0`, `x1`, kết quả ở `x0`, xem [Chương 04](04-calling-convention-va-stack-frame.md)). Ở `opt-level=0`, cùng hàm đó sinh khoảng 17 dòng (bỏ `.cfi_*`): `sub sp, sp, #32; stp x29, x30, [sp, #16]; add x8, x0, x1; str x8, [sp, #8]; subs x8, x8, x0; b.lo …` (nhánh tới `bl …panic_const_add_overflow`), rồi `ldr x0, [sp, #8]; … ret`. Ví dụ `i64` ở [Chương 03 mục 7](03-assembly-x86-64-va-aarch64.md) kiểm tra tràn bằng cờ tràn có dấu. Ở đây là `u64` nên đoạn kiểm tra trông khác (suy luận của người soạn: `subs` lấy tổng trừ `a`, và `b.lo` nhảy khi tổng nhỏ hơn `a`, tức đã tràn).
 
-Ba khác biệt đáng nhìn:
+### 1.3 Ba khác biệt giữa `-O0` và `-O3`
 
-1. **Biến sống trên stack.** Ở `-O0` kết quả bị `str` ra stack rồi `ldr` lại; ở `-O3` nó ở thanh ghi suốt.
-2. **Kiểm tra tràn số.** `-O0` sinh `subs` + nhánh tới `panic_const_add_overflow`; `-O3` chỉ `add`. Khớp với tài liệu: `opt-level=0` đồng thời bật `cfg(debug_assertions)`[^opt-levels] và debug assertions (nếu không chỉ định) chỉ tự bật khi opt-level là 0[^debug-assertions]; nếu không chỉ định `-C overflow-checks`, kiểm tra tràn số bật khi debug assertions bật[^overflow-flag]. Bàn kỹ hơn về tràn số debug/release ở [Chương 02 mục 3](02-bieu-dien-du-lieu.md).
-3. **Prologue/epilogue.** `-O0` lập frame (`stp x29, x30` …); `-O3` là *leaf function* (hàm không gọi hàm khác) không cần frame ([Chương 04 mục 6](04-calling-convention-va-stack-frame.md)).
+Đặt hai bản asm cạnh nhau, ba điểm khác nhau hiện ra ngay:
+
+1. **Biến sống trên stack.** Ở `-O0`, kết quả bị `str` ra stack rồi `ldr` lại. Ở `-O3`, nó nằm trong thanh ghi suốt.
+2. **Kiểm tra tràn số.** `-O0` sinh `subs` cùng nhánh tới `panic_const_add_overflow`; `-O3` chỉ còn `add`. Lý do nằm ở tài liệu: `opt-level=0` bật luôn `cfg(debug_assertions)`[^opt-levels]. Debug assertions, nếu bạn không chỉ định, chỉ tự bật khi opt-level là 0[^debug-assertions]. Còn kiểm tra tràn số, nếu không chỉ định `-C overflow-checks`, bật theo debug assertions[^overflow-flag]. Chuyện tràn số debug/release được bàn kỹ hơn ở [Chương 02 mục 3](02-bieu-dien-du-lieu.md).
+3. **Prologue/epilogue.** `-O0` lập frame (`stp x29, x30` …). `-O3` là *leaf function* (hàm không gọi hàm nào khác) nên không cần frame ([Chương 04 mục 6](04-calling-convention-va-stack-frame.md)).
+
+Với `ingest`, hệ quả thực tế là build debug của nó vừa dùng stack nhiều hơn, vừa có thêm kiểm tra tràn mà bản release không có. Vì vậy số đo lấy từ build debug không nói gì về `ingest` đang chạy thật (nhận xét của người soạn).
 
 <details><summary>Đi sâu: các giá trị <code>opt-level</code>, profile của Cargo, mẹo đặt tên symbol, và đo quy mô chênh lệch</summary>
 
-- `-C opt-level`: `0` là không tối ưu và đồng thời bật `cfg(debug_assertions)`, `1` cơ bản, `2` một phần, `3` toàn bộ, `s`/`z` tối ưu kích thước[^opt-levels]. `-O` là bí danh của `-C opt-level=3`, và giá trị mặc định khi không chỉ định là `0`[^opt-level].
-- Cargo đặt giá trị khác `rustc` trần: profile `dev` (mặc định của `cargo build`) dùng `opt-level = 0`, `debug-assertions = true`, `overflow-checks = true`[^cargo-dev]; profile `release` (khi có `--release`) dùng `opt-level = 3`, `debug-assertions = false`, `overflow-checks = false`[^cargo-release]. Bảng đầy đủ mọi khóa của hai profile (LTO, `codegen-units`, `strip`…) nằm ở [P9 · Chương 08, mục 7](../09-rust-language/08-module-crate-cargo.md).
-- Mẹo (nhận xét của người soạn): đặt `#[no_mangle] pub fn` cho hàm cần xem để tên symbol đúng bằng tên hàm (trên macOS có thêm `_` đằng trước). Lưu ý: attribute `inline` đặt trên chính hàm `no_mangle` bị bỏ qua (mục 2).
-- Một phép đo thô cho thấy quy mô: tổng 2²⁴ phần tử `u32` trong một `Vec` (hàm `sum` dùng `for i in 0..v.len() { s = s.wrapping_add(v[i]) }`, mỗi mức biên dịch chạy 3 lần, `black_box` bọc đầu vào):
+- `-C opt-level` nhận các giá trị sau: `0` là không tối ưu và bật luôn `cfg(debug_assertions)`, `1` là cơ bản, `2` là một phần, `3` là toàn bộ, `s`/`z` tối ưu kích thước[^opt-levels]. `-O` là bí danh của `-C opt-level=3`, và giá trị mặc định khi không chỉ định là `0`[^opt-level].
+- Cargo đặt giá trị khác với `rustc` trần. Profile `dev` (mặc định của `cargo build`) dùng `opt-level = 0`, `debug-assertions = true`, `overflow-checks = true`[^cargo-dev]. Profile `release` (khi có `--release`) dùng `opt-level = 3`, `debug-assertions = false`, `overflow-checks = false`[^cargo-release]. Bảng đầy đủ mọi khóa của hai profile (LTO, `codegen-units`, `strip`…) nằm ở [P9 · Chương 08, mục 7](../09-rust-language/08-module-crate-cargo.md).
+- Mẹo (nhận xét của người soạn): đặt `#[no_mangle] pub fn` cho hàm cần xem để tên symbol đúng bằng tên hàm (trên macOS có thêm `_` đằng trước). Lưu ý attribute `inline` đặt trên chính hàm `no_mangle` bị bỏ qua (mục 2).
+- Một phép đo thô cho thấy quy mô chênh lệch: tổng 2²⁴ phần tử `u32` trong một `Vec` (hàm `sum` dùng `for i in 0..v.len() { s = s.wrapping_add(v[i]) }`, mỗi mức biên dịch chạy 3 lần, `black_box` bọc đầu vào):
 
 | `opt-level` | thời gian mỗi lần (quan sát) |
 |---|---|
@@ -71,23 +81,27 @@ Ba khác biệt đáng nhìn:
 | 1 | ≈ 8,3–8,8 ms |
 | 3 | ≈ 0,86–1,46 ms |
 
-Quan sát: chênh cỡ 50–90 lần (≈ 75 ms so với 0,86–1,46 ms) cho vòng lặp đơn giản này; chương trình thật thường chênh ít hơn (nhận xét của người soạn). **Không bao giờ đo hiệu năng trên build debug.**
+Quan sát: chênh cỡ 50–90 lần (≈ 75 ms so với 0,86–1,46 ms) cho vòng lặp đơn giản này. Chương trình thật thường chênh ít hơn (nhận xét của người soạn). **Không bao giờ đo hiệu năng trên build debug.**
 
 </details>
 
-**Quay lại Q1:** `rustc` đưa IR cho LLVM; `--emit=llvm-ir`/`--emit=asm` cho bạn xem kết quả, và `opt-level` quyết định asm là bản "nhiều stack, nhiều kiểm tra" (`0`) hay gọn trong thanh ghi (`3`).
+**Quay lại Q1:** `rustc` đưa IR cho LLVM; `--emit=llvm-ir`/`--emit=asm` cho bạn xem kết quả, và `opt-level` quyết định asm là bản "nhiều stack, nhiều kiểm tra" (`0`) hay gọn trong thanh ghi (`3`). Với `ingest`, chỉ bản release mới đáng để đo và đọc.
 
 ## 2. Inlining (Q2)
 
-> **Trả lời ngắn.** `#[inline]` chỉ là gợi ý để compiler đặt một bản sao thân hàm vào chỗ gọi thay vì sinh lời gọi[^inline-suggest]; kể cả `#[inline(always)]` cũng chỉ là gợi ý, compiler được phép bỏ qua[^inline-hint]. Cách kiểm chứng trực tiếp (nhận xét của người soạn) là đọc asm của chỗ gọi và tìm lệnh `call`/`bl` tới hàm đó.
+> **Trả lời ngắn.** `#[inline]` chỉ là gợi ý để compiler đặt một bản sao thân hàm vào chỗ gọi thay vì sinh lời gọi[^inline-suggest]. Kể cả `#[inline(always)]` cũng chỉ là gợi ý, compiler được phép bỏ qua[^inline-hint]. Cách kiểm chứng trực tiếp (nhận xét của người soạn) là đọc asm của chỗ gọi và tìm lệnh `call`/`bl` tới hàm đó.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì ghi "xem trang 40 sách A" (lời gọi hàm), bạn photo trang 40 dán thẳng vào bài (inline). Dán thẳng cho phép bạn gạch bớt, gộp ý với đoạn xung quanh — nghĩa là tối ưu xuyên biên giới hàm, không chỉ bỏ `call`/`ret`.
+*Với service `ingest`.* Với mỗi sự kiện trong batch, `ingest` gọi vài hàm rất nhỏ, chẳng hạn đọc độ dài một trường hay kiểm tra byte đầu của header. Hàm nhỏ mà gọi hàng triệu lần thì phần đáng kể không còn là thân hàm mà là chính lời gọi. Inline bỏ lời gọi đó, và còn cho compiler nhìn thân hàm cùng đoạn code quanh nó để gộp, bỏ bớt lệnh, tức tối ưu xuyên ranh giới hàm chứ không chỉ tiết kiệm `call`/`ret` (nhận xét của người soạn). Câu hỏi của mục này: bạn bảo được compiler inline đến đâu, và biết hàm đã inline thật chưa bằng cách nào?
 
-Reference mô tả attribute `inline` là *gợi ý* về việc có đặt bản sao mã hàm vào caller hay không[^inline-suggest]. Có ba dạng: `#[inline]` gợi ý nên inline, `#[inline(always)]` gợi ý nên luôn inline, `#[inline(never)]` gợi ý không bao giờ inline[^inline-modes]; và ở mọi dạng đó, attribute chỉ là hint mà compiler có thể bỏ qua[^inline-hint]. Từ "gợi ý" quan trọng: compiler vẫn tự quyết.
+### 2.1 `#[inline]` hứa gì
 
-Ví dụ thấy tận mắt:
+Attribute `inline` là một *gợi ý* về việc có nên đặt bản sao mã hàm vào caller hay không[^inline-suggest]. Nó có ba dạng: `#[inline]` gợi ý nên inline, `#[inline(always)]` gợi ý nên luôn inline, `#[inline(never)]` gợi ý không bao giờ inline[^inline-modes]. Ở cả ba dạng nó vẫn chỉ là hint, và compiler có thể bỏ qua[^inline-hint]. Nói cách khác, quyền quyết định cuối cùng thuộc về compiler. Bạn ghi `#[inline(always)]` lên một hàm trong `ingest` thì hàm đó chưa chắc đã được inline.
+
+### 2.2 Kiểm chứng trong asm
+
+Vì attribute không bảo đảm gì, thứ đáng tin là asm. Ví dụ sau có một hàm bị gợi ý đừng inline và một hàm bị gợi ý luôn inline:
 
 ```rust
 #[inline(never)]  pub fn callee(x: u64)  -> u64 { x.wrapping_mul(3) + 1 }
@@ -95,28 +109,30 @@ Ví dụ thấy tận mắt:
 #[no_mangle] pub fn caller(x: u64) -> u64 { callee(x) + callee2(x) }
 ```
 
-Asm AArch64 `opt-level=3` của `caller` vẫn còn `bl` tới `callee` (không inline), trong khi thân `callee2` (`x*5 + 2`) nằm ngay trong `caller` dưới dạng `add x8, x19, x19, lsl #2` rồi `add x0, x8, #2` (quan sát). Muốn biết hàm đã inline chưa, đọc asm (tìm `call`/`bl`), đừng đọc attribute. ([Chương 05 mục 8](05-pipeline-va-speculation.md) tóm tắt thêm các gợi ý khác như `#[cold]`.)
+Asm AArch64 `opt-level=3` của `caller` vẫn còn `bl` tới `callee` (không inline). Còn thân `callee2` (`x*5 + 2`) nằm ngay trong `caller` dưới dạng `add x8, x19, x19, lsl #2` rồi `add x0, x8, #2` (quan sát). Muốn biết hàm đã inline chưa, đọc asm và tìm `call`/`bl`, đừng đọc attribute. ([Chương 05 mục 8](05-pipeline-va-speculation.md) tóm tắt thêm các gợi ý khác như `#[cold]`.)
 
 <details><summary>Đi sâu: cảnh báo của Reference, ngoại lệ với hàm export, và hệ quả phụ của lời gọi còn lại</summary>
 
 - Reference nhắc thêm: `rustc` tự inline khi thấy đáng, và quyết định inline tồi có thể làm chương trình chậm đi[^inline-careful].
-- Ngoại lệ: attribute `inline` bị bỏ qua nếu hàm được export ra ngoài bằng `no_mangle` hoặc `export_name`[^inline-noexport]. Vì vậy mẹo `#[no_mangle]` ở mục 1 (để dễ tìm symbol trong asm) làm `#[inline]` trên chính hàm đó mất tác dụng; trong ví dụ trên, `no_mangle` chỉ đặt ở `caller`, không đặt ở `callee`/`callee2`.
+- Ngoại lệ: attribute `inline` bị bỏ qua nếu hàm được export ra ngoài bằng `no_mangle` hoặc `export_name`[^inline-noexport]. Vì vậy mẹo `#[no_mangle]` ở mục 1 (để dễ tìm symbol trong asm) làm `#[inline]` trên chính hàm đó mất tác dụng. Trong ví dụ trên, `no_mangle` chỉ đặt ở `caller`, không đặt ở `callee`/`callee2`.
 - Hệ quả phụ trong ví dụ (quan sát): vì còn `bl`, `caller` phải lập frame và cất `x0` vào thanh ghi callee-saved `x19` ([Chương 04 mục 3](04-calling-convention-va-stack-frame.md)).
-- (Nhận xét của người soạn: đừng ép `#[inline(always)]` tràn lan; chỉ khi đã đo và đã đọc asm.)
+- (Nhận xét của người soạn: đừng ép `#[inline(always)]` tràn lan trong `ingest`; chỉ làm khi đã đo và đã đọc asm.)
 
 </details>
 
-**Quay lại Q2:** `inline` là gợi ý; sự thật nằm trong asm — còn `bl`/`call` là chưa inline.
+**Quay lại Q2:** `inline` là gợi ý, sự thật nằm trong asm: còn `bl`/`call` là chưa inline.
 
 ## 3. Bounds check và `get_unchecked` (Q3)
 
-> **Trả lời ngắn.** `v[i]` trên slice sinh một phép so sánh và một nhánh trước khi nạp dữ liệu (quan sát asm bên dưới); nếu chỉ số vượt biên thì thread panic[^bounds-ref]. Compiler đôi khi gộp hoặc bỏ kiểm tra khi chứng minh được chỉ số hợp lệ — đó là kết quả tối ưu, không phải quy tắc ngôn ngữ (nhận xét của người soạn). `get_unchecked` bỏ kiểm tra bằng cách chuyển trách nhiệm cho bạn; sai thì là undefined behavior (UB)[^get-unchecked].
+> **Trả lời ngắn.** `v[i]` trên slice sinh một phép so sánh và một nhánh trước khi nạp dữ liệu (quan sát asm bên dưới); nếu chỉ số vượt biên thì thread panic[^bounds-ref]. Compiler đôi khi gộp hoặc bỏ kiểm tra khi chứng minh được chỉ số hợp lệ. Đó là kết quả tối ưu chứ không phải quy tắc ngôn ngữ (nhận xét của người soạn). `get_unchecked` bỏ kiểm tra bằng cách chuyển trách nhiệm sang bạn, và nếu bạn sai thì là undefined behavior (UB)[^get-unchecked].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảo vệ tòa nhà kiểm số phòng trước khi cho bạn vào thang máy. Nếu bạn đi đúng danh sách đã duyệt (vòng lặp theo `len`), bảo vệ có thể bỏ kiểm tra từng người; nếu bạn tự đọc số phòng từ tờ giấy lạ, ông ấy vẫn phải kiểm tra.
+*Với service `ingest`.* Hot path của `ingest` đọc `batch[i]` cho từng sự kiện, và mỗi lần đọc như vậy Rust kiểm tra chỉ số trước. Ba câu hỏi theo thứ tự: kiểm tra đó tốn gì ở mức lệnh máy, khi nào compiler xóa được nó, và có nên dùng `get_unchecked` để bỏ hẳn không?
 
-Hợp đồng theo Reference: với giá trị kiểu array hoặc slice, một kiểm tra được thực hiện lúc chạy và đưa thread vào trạng thái panic nếu nó thất bại[^bounds-ref]; với kiểu khác tự cài trait `Index`, hợp đồng của `Index::index` là có thể panic khi chỉ số vượt biên[^index-panic]. Với `&[u32]`, phần cứng làm khá trực diện (quan sát). Hàm:
+### 3.1 Kiểm tra tốn gì
+
+Với array và slice, ngôn ngữ kiểm tra lúc chạy và đưa thread vào trạng thái panic nếu kiểm tra thất bại[^bounds-ref]. Kiểu tự cài trait `Index` thì có hợp đồng riêng: `Index::index` có thể panic khi chỉ số vượt biên[^index-panic]. Với `&[u32]`, phần cứng làm việc này khá trực diện (quan sát). Hàm:
 
 ```rust
 #[no_mangle] pub fn get(v: &[u32], i: usize) -> u32 { v[i] }
@@ -135,9 +151,15 @@ LBB1_2:
     bl    __RNvNtCsl8K0bEFm1U0_4core9panicking18panic_bounds_check
 ```
 
-Trên x86-64 (cross-compile, cú pháp AT&T — mặc định của asm do `rustc` in ra, xem [Chương 03 mục 1](03-assembly-x86-64-va-aarch64.md)) cũng vậy: `cmpq %rsi, %rdx; jae …; movl (%rdi,%rdx,4), %eax`. Cả hai kiến trúc: **một `cmp` + một nhánh** trước khi load; nhánh panic nằm ngoài đường thường chạy. (Nhận xét của người soạn: nhánh luôn không nhảy thường dự đoán tốt, xem [Chương 05 mục 3](05-pipeline-va-speculation.md); chi phí đáng kể hơn là thêm lệnh và việc có thể chặn vector hóa.)
+Trên x86-64 (cross-compile, cú pháp AT&T, mặc định của asm do `rustc` in ra, xem [Chương 03 mục 1](03-assembly-x86-64-va-aarch64.md)) cũng vậy: `cmpq %rsi, %rdx; jae …; movl (%rdi,%rdx,4), %eax`. Cả hai kiến trúc đều là **một `cmp` cộng một nhánh** trước khi load, và nhánh panic nằm ngoài đường thường chạy. (Nhận xét của người soạn: nhánh luôn không nhảy thường được dự đoán tốt, xem [Chương 05 mục 3](05-pipeline-va-speculation.md). Chi phí đáng kể hơn là thêm lệnh và việc kiểm tra có thể chặn vector hóa.)
 
-Việc compiler loại bỏ bounds check không phải điều ngôn ngữ hứa — Reference nêu kiểm tra lúc chạy, và kiểm tra lúc biên dịch khi chỉ số là hằng[^bounds-ref] — mà là *kết quả tối ưu* mà ta phải xác nhận bằng asm (nhận xét của người soạn). Ví dụ (quan sát): `sum_iter(v: &[u32])` chạy `for i in 0..v.len()`; asm `-O3` không chứa chữ `panic` nào (đã đếm: 0), vì `i < v.len()` chính là điều kiện vòng lặp (suy luận của người soạn). Ngược lại, khi chỉ số đến từ nơi compiler không biết gì (ví dụ mảng chỉ số ngẫu nhiên `idx: &[usize]`), compiler không có cơ sở chứng minh `idx[k] < len` nên kiểm tra còn trong vòng lặp (suy luận của người soạn).
+### 3.2 Khi nào kiểm tra biến mất
+
+Compiler bỏ được bounds check không phải vì ngôn ngữ hứa vậy. Ngôn ngữ chỉ nêu kiểm tra lúc chạy, và kiểm tra lúc biên dịch khi chỉ số là hằng[^bounds-ref]. Phần còn lại là *kết quả tối ưu* mà ta phải xác nhận bằng asm (nhận xét của người soạn).
+
+Hai ví dụ trái ngược nhau (quan sát). Hàm `sum_iter(v: &[u32])` chạy `for i in 0..v.len()`: asm `-O3` không chứa chữ `panic` nào (đã đếm: 0), vì `i < v.len()` chính là điều kiện vòng lặp (suy luận của người soạn). Ngược lại, khi chỉ số đến từ nơi compiler không biết gì, ví dụ mảng chỉ số ngẫu nhiên `idx: &[usize]`, compiler không có cơ sở chứng minh `idx[k] < len`, nên kiểm tra còn nguyên trong vòng lặp (suy luận của người soạn). Với `ingest`, bài học là duyệt batch theo `len` của chính nó thì thường không tốn kiểm tra, còn tra bảng bằng chỉ số lấy từ gói tin thì có.
+
+### 3.3 `get_unchecked`: bỏ kiểm tra, nhận lấy rủi ro
 
 `get_unchecked` là `unsafe` vì gọi nó với chỉ số ngoài biên là UB, kể cả khi tham chiếu kết quả không được dùng[^get-unchecked]. Asm của
 
@@ -146,12 +168,12 @@ Việc compiler loại bỏ bounds check không phải điều ngôn ngữ hứa
 pub fn get_unchecked(v: &[u32], i: usize) -> u32 { unsafe { *v.get_unchecked(i) } }
 ```
 
-AArch64 `-O3` chỉ còn `ldr w0, [x0, x2, lsl #2]; ret`; x86-64 là `movl (%rdi,%rdx,4), %eax; retq`.
+trên AArch64 `-O3` chỉ còn `ldr w0, [x0, x2, lsl #2]; ret`; trên x86-64 là `movl (%rdi,%rdx,4), %eax; retq`.
 
 <details><summary>Đi sâu: hoist bounds check ra khỏi vòng lặp, <code>llvm.assume</code>, và cái giá đo được</summary>
 
 - **Hoist (đưa ra ngoài vòng lặp).** `sum_idx(v: &[u32], n: usize)` cộng `v[i]` với `i in 0..n`. Trong asm AArch64 `-O3`, lời gọi `panic_bounds_check` xuất hiện **đúng một chỗ**, chỉ một nhánh dẫn tới nó, ngay trước vòng lặp (`sub x8, x2, #1; cmp x1, x8; b.ls …`: nếu `n-1 >= len` thì panic). Thân vòng lặp được vector hóa NEON: mỗi vòng nạp 16 phần tử (`ldp q4, q5, …`, `ldp q6, q7, …`) rồi `add.4s`. Tức LLVM thay n lần kiểm tra bằng một lần. Quan sát này chỉ đúng cho đúng hàm này, `rustc 1.95.0`, target này.
-- Trong LLVM IR của `get_unchecked`, thay cho nhánh, ta thấy `icmp ult i64 %i, %v.1` đưa vào `llvm.assume` (quan sát). Khớp với mã nguồn: với chỉ số `usize`, `get_unchecked` của slice gọi `intrinsics::assume(self < slice.len())`[^gu-assume]; intrinsic đó báo cho optimizer rằng điều kiện luôn đúng, và nếu điều kiện sai thì hành vi là undefined[^assume-doc]. Đây là chi tiết cài đặt của 1.95.0, có thể đổi giữa các bản.
+- Trong LLVM IR của `get_unchecked`, thay cho nhánh, ta thấy `icmp ult i64 %i, %v.1` đưa vào `llvm.assume` (quan sát). Khớp với mã nguồn: với chỉ số `usize`, `get_unchecked` của slice gọi `intrinsics::assume(self < slice.len())`[^gu-assume]. Intrinsic đó báo cho optimizer rằng điều kiện luôn đúng, và nếu điều kiện sai thì hành vi là undefined[^assume-doc]. Đây là chi tiết cài đặt của 1.95.0, có thể đổi giữa các bản.
 - Cái giá thực nghiệm: một benchmark tổng hợp 2²⁴ phần tử từ mảng 4096 phần tử theo chỉ số giả ngẫu nhiên (hàm `#[inline(never)]`, `black_box` bọc đầu vào, 3 lần chạy):
 
 | biến thể | thời gian (quan sát) |
@@ -159,24 +181,26 @@ AArch64 `-O3` chỉ còn `ldr w0, [x0, x2, lsl #2]; ret`; x86-64 là `movl (%rdi
 | `v[i]` | ≈ 5,1–5,5 ms |
 | `get_unchecked(i)` | ≈ 2,8–2,9 ms |
 
-Quan sát: unchecked nhanh khoảng 1,8–2,0 lần *trong vi benchmark này* (5,1–5,5 ÷ 2,8–2,9); không ngoại suy sang code thật, nơi load bộ nhớ thường chi phối ([Chương 06](06-cache-va-numa.md)) và compiler thường đã loại bỏ kiểm tra. (Nhận xét của người soạn: vì UB là cái giá, hãy (1) viết lại bằng iterator/`chunks`/`zip` để compiler thấy bất biến, (2) đo, (3) chỉ khi đó cân nhắc `unsafe`.)
+Quan sát: unchecked nhanh khoảng 1,8–2,0 lần *trong vi benchmark này* (5,1–5,5 ÷ 2,8–2,9). Đừng ngoại suy sang code thật, nơi load bộ nhớ thường chi phối ([Chương 06](06-cache-va-numa.md)) và compiler thường đã loại bỏ kiểm tra. (Nhận xét của người soạn: vì UB là cái giá, hãy (1) viết lại bằng iterator/`chunks`/`zip` để compiler thấy bất biến, (2) đo, (3) chỉ khi đó cân nhắc `unsafe`.)
 
 </details>
 
-**Quay lại Q3:** `v[i]` = một `cmp` + một nhánh; compiler có thể hoist hoặc loại bỏ khi chứng minh được, còn `get_unchecked` bỏ hẳn kiểm tra và đổi lại UB nếu bạn sai.
+**Quay lại Q3:** `v[i]` là một `cmp` cộng một nhánh; compiler có thể hoist hoặc loại bỏ khi chứng minh được, còn `get_unchecked` bỏ hẳn kiểm tra và đổi lại UB nếu bạn sai. Với `ingest`: duyệt theo `len` trước, đo rồi mới tính chuyện `unsafe`.
 
 ## 4. `target-cpu`, `target-feature`, `#[target_feature]` và phát hiện lúc chạy (Q4)
 
-> **Trả lời ngắn.** `-C target-cpu` và `-C target-feature` thay đổi loại CPU mà *cả* chương trình được biên dịch cho; binary chỉ chạy đúng trên máy có các tính năng đó[^arch-run-on]. Attribute `#[target_feature]` bật tính năng cho *một* hàm[^arch-attr], còn `is_*_feature_detected!` hỏi CPU thật lúc chạy để chọn đường đi[^arch-dyn].
+> **Trả lời ngắn.** `-C target-cpu` và `-C target-feature` đổi loại CPU mà *cả* chương trình được biên dịch cho, nên binary chỉ chạy đúng trên máy có các tính năng đó[^arch-run-on]. Attribute `#[target_feature]` chỉ bật tính năng cho *một* hàm[^arch-attr]. Còn `is_*_feature_detected!` hỏi CPU thật lúc chạy để chọn đường đi[^arch-dyn].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): build Docker image `linux/amd64` chung chạy trên mọi đời CPU, so với tối ưu riêng cho đúng một đời CPU rồi quên rằng node khác có thể cũ hơn.
+*Với service `ingest`.* Giả sử `ingest` được build trên máy CI đời mới, nhưng node pool Kubernetes chạy nó lại lẫn nhiều thế hệ CPU (nhận xét của người soạn: tình huống giả định). Build riêng cho CPU của máy CI thì hot path có thể nhanh hơn, nhưng node cũ có chạy nổi binary đó không? Mục này trả lời câu hỏi ấy và chỉ cách để một binary dùng lệnh mới mà vẫn chạy được trên máy cũ.
 
-Mặc định, `rustc` sinh mã cho một CPU "nền" của target[^target-cpu]. Với `x86_64-unknown-linux-gnu`, nền này không có `popcnt` (quan sát asm ngay dưới đây). Hai cờ nâng nền:
+### 4.1 "Nền" CPU của một build
+
+Mặc định, `rustc` sinh mã cho một CPU "nền" của target[^target-cpu]. Với `x86_64-unknown-linux-gnu`, nền này không có `popcnt` (quan sát asm ngay dưới đây). Hai cờ nâng nền lên:
 
 - `-C target-cpu`: chỉ thị cho `rustc` sinh mã riêng cho một bộ xử lý cụ thể. Giá trị đặc biệt: `native` dùng bộ xử lý của máy đang build; `generic` là một LLVM target có tính năng tối thiểu nhưng tinh chỉnh hiện đại[^target-cpu].
-- `-C target-feature`: bật `+x` / tắt `-x` từng tính năng[^target-feature-syntax]. Tài liệu cảnh báo cờ này là unsafe và có thể gây hành vi không xác định lúc chạy[^target-feature-flag]. Mỗi cặp target/CPU có tập tính năng mặc định riêng[^default-features].
+- `-C target-feature`: bật `+x` hoặc tắt `-x` từng tính năng[^target-feature-syntax]. Tài liệu cảnh báo cờ này là unsafe và có thể gây hành vi không xác định lúc chạy[^target-feature-flag]. Mỗi cặp target/CPU có tập tính năng mặc định riêng[^default-features].
 
 Ví dụ thấy được: `count_ones` trên x86-64.
 
@@ -184,43 +208,49 @@ Ví dụ thấy được: `count_ones` trên x86-64.
 #[no_mangle] pub fn popc(x: u64) -> u32 { x.count_ones() }
 ```
 
-Biên dịch cross cho `x86_64-unknown-linux-gnu`, `opt-level=3`, cú pháp Intel (khác với các đoạn AT&T ở mục 3; xem [Chương 03 mục 1](03-assembly-x86-64-va-aarch64.md)):
+Biên dịch cross cho `x86_64-unknown-linux-gnu`, `opt-level=3`, cú pháp Intel (khác với các đoạn AT&T ở mục 3, xem [Chương 03 mục 1](03-assembly-x86-64-va-aarch64.md)):
 
-- **Không có cờ** (quan sát): asm không dùng `popcnt` mà sinh thuật toán đếm bit bằng phép dịch/mask/nhân, 19 lệnh trước `ret` (`shr`, `and`, `sub`, `imul`, `shr rax, 56`…). Suy luận của người soạn: tập tính năng mặc định của target không gồm `popcnt`, nên compiler không được giả định nó.
+- **Không có cờ** (quan sát): asm không dùng `popcnt` mà sinh thuật toán đếm bit bằng phép dịch, mask và nhân, 19 lệnh trước `ret` (`shr`, `and`, `sub`, `imul`, `shr rax, 56`…). Suy luận của người soạn: tập tính năng mặc định của target không gồm `popcnt`, nên compiler không được giả định nó.
 - **Với `-C target-feature=+popcnt`:** chỉ còn `popcnt rax, rdi; ret`.
 
-Cái giá: binary build với tính năng thêm *chỉ chạy được trên máy có tính năng đó*. Tài liệu `std::arch` nhấn mạnh phải bảo đảm chỉ chạy binary trên hệ thống thỏa tập tính năng yêu cầu[^arch-run-on]; Reference của `#[target_feature]` nói chặt hơn: gọi hàm được biên dịch với tính năng mà nền tảng đang chạy không hỗ trợ là undefined behavior, trừ khi nền tảng ghi rõ là an toàn[^tf-ub]. (Suy luận của người soạn, liên hệ backend: build `target-cpu=native` trên máy CI mới rồi deploy lên node Kubernetes lẫn nhiều thế hệ CPU có thể gây crash bằng lệnh không hợp lệ theo từng node.)
+### 4.2 Cái giá khi deploy
 
-Muốn tính năng riêng cho đường nóng mà vẫn một binary, trang `std::arch` nêu hai hướng: phát hiện tĩnh (biên dịch có điều kiện bằng `cfg`) và phát hiện động (macro kiểm tra lúc chạy, kèm `#[target_feature]` để bật tính năng cho đúng một hàm). Tách ra, ta có ba mảnh ghép:
+Binary build với tính năng thêm *chỉ chạy được trên máy có tính năng đó*. Tài liệu `std::arch` nhấn mạnh phải bảo đảm chỉ chạy binary trên hệ thống thỏa tập tính năng yêu cầu[^arch-run-on]. Reference của `#[target_feature]` nói chặt hơn: gọi một hàm được biên dịch với tính năng mà nền tảng đang chạy không hỗ trợ là undefined behavior, trừ khi nền tảng ghi rõ là an toàn[^tf-ub]. Với `ingest`, nghĩa là build `target-cpu=native` trên máy CI mới rồi deploy lên node pool lẫn nhiều thế hệ CPU có thể làm process crash bằng lệnh không hợp lệ, và crash theo từng node (suy luận của người soạn).
+
+### 4.3 Một binary, nhiều đường chạy
+
+Vậy nếu chỉ hot path của `ingest` cần lệnh mới thì làm sao? Trang `std::arch` nêu hai hướng: phát hiện tĩnh (biên dịch có điều kiện bằng `cfg`) và phát hiện động (macro kiểm tra lúc chạy, kèm `#[target_feature]` để bật tính năng cho đúng một hàm). Tách ra, ta có ba mảnh ghép:
 
 1. **Tĩnh bằng `cfg`.** Tính năng CPU tương ứng với `cfg` `target_feature`[^arch-cfg], dùng cùng `-C target-cpu` / `-C target-feature`. Chương trình chỉ chạy được trên máy có tính năng.
-2. **Động.** `is_x86_feature_detected!` thực hiện phát hiện lúc chạy để xác định CPU đang chạy chương trình có hỗ trợ tính năng hay không[^arch-dyn]. Tương đương trên ARM64: `is_aarch64_feature_detected!`, kiểm tra sự hiện diện của một tính năng CPU lúc chạy[^a64-detect].
+2. **Động.** `is_x86_feature_detected!` kiểm tra lúc chạy xem CPU đang chạy chương trình có hỗ trợ tính năng hay không[^arch-dyn]. Trên ARM64, macro tương đương là `is_aarch64_feature_detected!`, kiểm tra sự hiện diện của một tính năng CPU lúc chạy[^a64-detect].
 3. **`#[target_feature(enable = "...")]` trên từng hàm.** Cờ biên dịch như `-C target-feature=+avx2` bật AVX2 cho toàn chương trình, còn attribute chỉ bật cho một hàm[^arch-attr].
 
-Mẫu thường dùng (cùng dạng với ví dụ trong trang `std::arch`): hàm `#[target_feature(enable = "avx2")] fn add4(a: __m256i, b: __m256i) -> __m256i { _mm256_add_epi64(a, b) }` và một hàm `sum` gọi nó trong `unsafe` chỉ sau `if is_x86_feature_detected!("avx2") { … } else { /* vòng lặp thường */ }`. Với hàm `#[target_feature]` an toàn, Reference đòi: chỉ được gọi an toàn từ caller đã bật mọi `target_feature` mà callee bật[^tf-safe]. Vì thế `add4` gọi từ `sum` phải nằm trong `unsafe`, và `is_x86_feature_detected!` ngay trước là điều biện minh cho nó.
+Mẫu thường dùng có cùng dạng với ví dụ trong trang `std::arch`: một hàm `#[target_feature(enable = "avx2")] fn add4(a: __m256i, b: __m256i) -> __m256i { _mm256_add_epi64(a, b) }`, và một hàm `sum` gọi nó trong `unsafe` chỉ sau `if is_x86_feature_detected!("avx2") { … } else { /* vòng lặp thường */ }`. Hàm `#[target_feature]` an toàn chỉ được gọi an toàn từ caller đã bật mọi `target_feature` mà callee bật[^tf-safe]. Vì thế `add4` gọi từ `sum` phải nằm trong `unsafe`, và `is_x86_feature_detected!` ngay trước là điều biện minh cho khối `unsafe` đó.
 
 <details><summary>Đi sâu: liệt kê CPU, AArch64 có "nền" khác, asm của mẫu dispatch, và lưu ý nền tảng</summary>
 
-- Liệt kê CPU bằng `rustc --print target-cpus`[^target-cpu]; trên máy soạn, dòng đầu là `native - Select the CPU of the current host (currently apple-m3)` (quan sát). Xem cấu hình `cfg` của một target bằng `rustc --print cfg --target $TARGET`[^print-cfg], trong đó mỗi tính năng nền tảng có sẵn hiện thành một dòng `target_feature="..."`[^cfg-target-feature].
-- Trên AArch64 (quan sát với target Apple), `count_ones` sinh `cnt.8b` + `addv.8b`, không cần cờ nào. Suy luận của người soạn: tập tính năng mặc định của target này đã có NEON. Hai ISA có "nền" khác nhau, nên cùng một dòng Rust ra mã khác nhau.
-- Mẫu dispatch trên đã biên dịch cross cho x86-64 và xem asm; không chạy được trên máy ARM của người soạn. Asm chứa `vpaddq (%rsi), %ymm0, %ymm0` (AVX2, cú pháp AT&T) cùng một lần đọc biến cache `std_detect::detect::cache::CACHE` (gọi `detect_and_initialize` ở lần đầu) — tức kiểm tra lúc chạy là đọc một biến cache, không phải `cpuid` mỗi lần gọi (quan sát từ asm; khớp với mô tả trong mã nguồn rằng kết quả phát hiện được lưu đệm để chỉ phải tính một lần[^sd-cache]; chi tiết cài đặt `std_detect`, có thể đổi giữa các bản).
+- Liệt kê CPU bằng `rustc --print target-cpus`[^target-cpu]; trên máy soạn, dòng đầu là `native - Select the CPU of the current host (currently apple-m3)` (quan sát). Xem cấu hình `cfg` của một target bằng `rustc --print cfg --target $TARGET`[^print-cfg]. Mỗi tính năng nền tảng có sẵn hiện thành một dòng `target_feature="..."`[^cfg-target-feature].
+- Trên AArch64 (quan sát với target Apple), `count_ones` sinh `cnt.8b` và `addv.8b`, không cần cờ nào. Suy luận của người soạn: tập tính năng mặc định của target này đã có NEON. Hai ISA có "nền" khác nhau, nên cùng một dòng Rust ra mã khác nhau.
+- Mẫu dispatch trên đã biên dịch cross cho x86-64 và xem asm; không chạy được trên máy ARM của người soạn. Asm chứa `vpaddq (%rsi), %ymm0, %ymm0` (AVX2, cú pháp AT&T) cùng một lần đọc biến cache `std_detect::detect::cache::CACHE` (gọi `detect_and_initialize` ở lần đầu). Tức kiểm tra lúc chạy là đọc một biến cache, không phải `cpuid` mỗi lần gọi (quan sát từ asm). Điều này khớp với mô tả trong mã nguồn rằng kết quả phát hiện được lưu đệm để chỉ phải tính một lần[^sd-cache]; đó là chi tiết cài đặt `std_detect`, có thể đổi giữa các bản.
 - Macro phụ thuộc kiến trúc: `is_x86_feature_detected!` mang tính nền tảng riêng, giống module `arch`, và tài liệu nói gọi nó trên ARM là lỗi biên dịch[^arch-platform]. Trên máy ARM của người soạn, lời gọi `is_x86_feature_detected!("avx2")` cho lỗi `This macro cannot be used on the current target` (quan sát), nên cần `#[cfg(target_arch = ...)]`.
-- Với ARM64: khi tính năng đã biết là bật lúc biên dịch (ví dụ qua `-Ctarget-feature`), macro mở rộng thành `true`[^a64-const]. Trang tài liệu của macro còn viết rằng hiện phần lớn tính năng chỉ được hỗ trợ trên nền tảng dựa trên Linux, và trên nền tảng khác kiểm tra lúc chạy luôn trả `false`[^a64-linux]. Nhưng mã nguồn `std_detect` ở 1.95.0 có backend riêng cho AArch64 của Apple: `mod.rs` chọn `os/darwin/aarch64.rs` khi `target_vendor = "apple"` và `target_arch = "aarch64"`[^sd-wiring], và file đó đọc tính năng bằng `sysctlbyname`[^sd-darwin]. Hai nguồn không khớp nhau (suy luận của người soạn: câu trong tài liệu macro chưa được cập nhật cho Apple; nhận xét của người soạn: với macOS, mã nguồn của đúng phiên bản đáng tin hơn lời văn tài liệu). Chương trình thử trên macOS in `neon=true sve=false crc=true lse=true`; vì vậy các `true` đó có thể đến từ tính năng đã bật lúc biên dịch **hoặc** từ phát hiện lúc chạy qua `sysctl`, và kết quả một mình không chứng minh gì về detection động. Muốn phân biệt, in thêm `cfg!(target_feature = "crc")` hoặc xem `rustc --print cfg`[^print-cfg] (người soạn chưa làm; cũng chưa chạy trường hợp Linux/AArch64).
-- Khi đối chiếu hai trang tài liệu: ví dụ trong trang `std::arch` viết rằng dùng `#[target_feature]` hiện đòi hàm phải `unsafe`[^arch-tf-old], trong khi Reference 1.95.0 có quy tắc cho hàm `#[target_feature]` *an toàn*[^tf-safe]. Chương này theo Reference (nhận xét của người soạn: hai trang chưa được cập nhật đồng bộ).
+- Với ARM64: khi tính năng đã biết là bật lúc biên dịch (ví dụ qua `-Ctarget-feature`), macro mở rộng thành `true`[^a64-const]. Trang tài liệu của macro còn viết rằng hiện phần lớn tính năng chỉ được hỗ trợ trên nền tảng dựa trên Linux, và trên nền tảng khác kiểm tra lúc chạy luôn trả `false`[^a64-linux]. Nhưng mã nguồn `std_detect` ở 1.95.0 có backend riêng cho AArch64 của Apple: `mod.rs` chọn `os/darwin/aarch64.rs` khi `target_vendor = "apple"` và `target_arch = "aarch64"`[^sd-wiring]. File đó đọc tính năng bằng `sysctlbyname`[^sd-darwin]. Hai nguồn không khớp nhau (suy luận của người soạn: câu trong tài liệu macro chưa được cập nhật cho Apple; nhận xét của người soạn: với macOS, mã nguồn của đúng phiên bản đáng tin hơn lời văn tài liệu). Chương trình thử trên macOS in `neon=true sve=false crc=true lse=true`. Các `true` đó có thể đến từ tính năng đã bật lúc biên dịch **hoặc** từ phát hiện lúc chạy qua `sysctl`, nên kết quả một mình không chứng minh gì về detection động. Muốn phân biệt, in thêm `cfg!(target_feature = "crc")` hoặc xem `rustc --print cfg`[^print-cfg] (người soạn chưa làm; cũng chưa chạy trường hợp Linux/AArch64).
+- Khi đối chiếu hai trang tài liệu: ví dụ trong trang `std::arch` viết rằng dùng `#[target_feature]` hiện đòi hàm phải `unsafe`[^arch-tf-old]. Reference 1.95.0 thì có quy tắc cho hàm `#[target_feature]` *an toàn*[^tf-safe]. Chương này theo Reference (nhận xét của người soạn: hai trang chưa được cập nhật đồng bộ).
 
 </details>
 
-**Quay lại Q4:** hai cờ đổi "nền" CPU cho cả build; attribute bật tính năng cho một hàm; macro `is_*_feature_detected!` kiểm tra lúc chạy — ba thứ ghép lại cho phép một binary dùng lệnh đặc biệt mà vẫn an toàn.
+**Quay lại Q4:** hai cờ đổi "nền" CPU cho cả build; attribute bật tính năng cho một hàm; macro `is_*_feature_detected!` kiểm tra lúc chạy. Ghép ba thứ lại, `ingest` có một binary dùng lệnh đặc biệt khi CPU có, và chạy đường thường khi CPU không có.
 
 ## 5. `std::arch` và `asm!` (Q5)
 
-> **Trả lời ngắn.** `std::arch` đưa ra các hàm intrinsic, thường ứng với một lệnh máy[^arch-overview]; chúng không portable giữa kiến trúc và về nguyên tắc `unsafe`[^arch-nonportable][^arch-unsafe]. `asm!` cho nhúng assembly viết tay, nhưng compiler coi nó là hộp đen và chỉ tin phần khai báo của bạn[^asm-blackbox]; vi phạm các quy tắc khai báo là UB[^asm-ub-rules].
+> **Trả lời ngắn.** `std::arch` đưa ra các hàm intrinsic, thường ứng với một lệnh máy[^arch-overview]. Chúng không portable giữa các kiến trúc[^arch-nonportable]. Về nguyên tắc chúng đều là `unsafe`[^arch-unsafe]. `asm!` cho nhúng assembly viết tay, nhưng compiler coi nó là hộp đen và chỉ tin phần khai báo của bạn[^asm-blackbox]. Vi phạm các quy tắc khai báo là UB[^asm-ub-rules].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): intrinsic là món có trong thực đơn bếp — bếp hiểu món đó và có thể sắp xếp lại thứ tự nấu. `asm!` là bạn tự vào bếp nấu; bếp trưởng không biết bạn làm gì, chỉ tin tờ phiếu bạn ghi (nguyên liệu vào, món ra, có động đến kho hay không).
+*Với service `ingest`.* Giả sử `ingest` tính checksum cho mỗi batch và bạn muốn dùng thẳng lệnh SIMD hay lệnh CRC của CPU, thứ mà compiler không tự sinh ra từ code Rust thường. Có hai cách: gọi hàm intrinsic của `std::arch`, hoặc tự viết assembly bằng `asm!`. Cả hai đều cho bạn quyền kiểm soát tối đa và đều bắt bạn giữ vài lời hứa với compiler. Mục này nói rõ đó là những lời hứa nào.
 
-`std::arch` là cổng vào các hàm intrinsic riêng cho từng kiến trúc, thường liên quan SIMD[^arch-gateway]. Nó không portable: có sẵn hay không phụ thuộc kiến trúc, và không phải máy nào của kiến trúc đó cũng có intrinsic[^arch-nonportable]. Tài liệu viết rằng mọi intrinsic trong module là unsafe và cần cẩn trọng khi gọi[^arch-unsafe] — vì gọi intrinsic mà CPU thiếu tính năng là UB (điều kiện ở mục 4). Mỗi intrinsic thường ứng với một lệnh máy[^arch-overview]. Ví dụ chạy thật trên AArch64: tính tổng bằng NEON.
+### 5.1 Intrinsic trong `std::arch`
+
+`std::arch` là cổng vào các hàm intrinsic riêng cho từng kiến trúc, thường liên quan SIMD[^arch-gateway]. Nó không portable: có sẵn hay không phụ thuộc kiến trúc, và không phải máy nào của kiến trúc đó cũng có intrinsic[^arch-nonportable]. Tài liệu viết rằng mọi intrinsic trong module là unsafe và cần cẩn trọng khi gọi[^arch-unsafe]. Lý do là gọi intrinsic mà CPU thiếu tính năng là UB (điều kiện ở mục 4). Mỗi intrinsic thường ứng với một lệnh máy[^arch-overview]. Ví dụ chạy thật trên AArch64: tính tổng bằng NEON.
 
 ```rust
 use std::arch::aarch64::*;
@@ -238,9 +268,11 @@ fn sum_neon(v: &[u32]) -> u32 {
 // sum_neon(&(1..=10).collect::<Vec<u32>>()) in ra 55
 ```
 
-Chương trình in `55` (đã chạy). Nhưng mục 3 cho thấy vòng `for` đơn giản đã được vector hóa thành `add.4s` mà không cần intrinsic. (Nhận xét của người soạn: intrinsic có lý khi compiler không tự vector hóa được hoặc cần lệnh đặc biệt.) Ví dụ lệnh đặc biệt: `core::arch::aarch64::__crc32w(x, y)` biên dịch thành đúng `crc32w w0, w0, w1; ret` (đã xem asm).
+Chương trình in `55` (đã chạy). Nhưng mục 3 cho thấy vòng `for` đơn giản đã được vector hóa thành `add.4s` mà không cần intrinsic. (Nhận xét của người soạn: intrinsic đáng dùng khi compiler không tự vector hóa được, hoặc khi bạn cần một lệnh đặc biệt.) Ví dụ lệnh đặc biệt cho checksum của `ingest`: `core::arch::aarch64::__crc32w(x, y)` biên dịch thành đúng `crc32w w0, w0, w1; ret` (đã xem asm).
 
-Khi `std::arch` không có intrinsic ổn định cho lệnh bạn cần, dùng inline assembly — ví dụ lệnh rào cản bộ nhớ `__dmb` của AArch64 ở 1.95.0 mới là API nightly[^dmb-nightly]. (Không phải lệnh nào cũng cần `asm!`: x86-64 có sẵn `_rdtsc` để đọc time-stamp counter của CPU[^rdtsc].) Reference: hỗ trợ qua các macro `asm!`, `naked_asm!`, `global_asm!`, dùng để nhúng assembly viết tay vào output compiler sinh ra[^asm-intro]. Ví dụ chạy thật (AArch64):
+### 5.2 `asm!`: tự viết lệnh, tự giữ lời hứa
+
+Khi `std::arch` chưa có intrinsic ổn định cho lệnh bạn cần thì dùng inline assembly. Chẳng hạn lệnh rào cản bộ nhớ `__dmb` của AArch64 ở 1.95.0 mới là API nightly[^dmb-nightly]. Không phải lệnh nào cũng cần `asm!`: x86-64 có sẵn `_rdtsc` để đọc time-stamp counter của CPU[^rdtsc]. Inline assembly được cung cấp qua các macro `asm!`, `naked_asm!`, `global_asm!`, và dùng để nhúng assembly viết tay vào output compiler sinh ra[^asm-intro]. Ví dụ chạy thật (AArch64):
 
 ```rust
 use std::arch::asm;
@@ -256,32 +288,37 @@ fn add_asm(a: u64, b: u64) -> u64 {
 }
 ```
 
-`add_asm(40, 2)` in `42` (đã chạy). Asm sinh ra: `add x8, x0, x1` nằm giữa hai dòng `InlineAsm Start/End`, rồi `mov x0, x8; ret` — compiler tự chọn thanh ghi cho `{r}`, `{a}`, `{b}` (quan sát). Compiler không được giả định các lệnh trong asm chính là thứ sẽ thực sự chạy; nó phải coi asm là hộp đen và chỉ dựa vào phần khai báo giao diện[^asm-blackbox]. Nghĩa là compiler *chỉ tin khai báo* (`in`, `out`, `options`), không đọc chuỗi asm. Một quy tắc cần để ý: thanh ghi không khai là output phải có cùng giá trị khi thoát khỏi asm như lúc vào, nếu không là UB[^asm-regs]. Vì vậy thanh ghi nháp mà asm ghi đè phải được khai là output bị bỏ giá trị (ví dụ `out("x9") _`)[^asm-out-underscore], hoặc dùng `clobber_abi` để áp sẵn một bộ clobber mặc định theo một calling convention[^asm-clobber-abi]. Unwind ra khỏi khối asm cũng là UB[^asm-unwind].
+`add_asm(40, 2)` in `42` (đã chạy). Asm sinh ra có `add x8, x0, x1` nằm giữa hai dòng `InlineAsm Start/End`, rồi `mov x0, x8; ret`. Compiler tự chọn thanh ghi cho `{r}`, `{a}`, `{b}` (quan sát).
 
-<details><summary>Đi sâu: <code>unsafe</code> của intrinsic trong 1.95.0, các <code>options</code>, kiến trúc ổn định</summary>
+Điều cần nhớ là compiler không được giả định các lệnh trong asm chính là thứ sẽ thực sự chạy. Nó phải coi asm là hộp đen và chỉ dựa vào phần khai báo giao diện[^asm-blackbox]. Nói cách khác, compiler *chỉ tin khai báo* (`in`, `out`, `options`) và không đọc chuỗi asm. Từ đó ra quy tắc quan trọng nhất: thanh ghi không khai là output phải có cùng giá trị khi thoát khỏi asm như lúc vào, nếu không là UB[^asm-regs]. Vì vậy thanh ghi nháp mà asm ghi đè phải được khai là output bị bỏ giá trị, ví dụ `out("x9") _`[^asm-out-underscore].
 
-- Trang `std::arch` viết mọi intrinsic là unsafe, nhưng trang tài liệu của từng hàm (`core::arch::aarch64`, 1.95.0) phân biệt hơn: `vdupq_n_u32` khai báo `pub fn` (không `unsafe`) kèm ghi chú chỉ có sẵn khi tính năng `neon` bật[^vdup-doc]; `__crc32w` cũng là `pub fn` với ghi chú tính năng `crc`[^crc32w-doc]; còn `vld1q_u32`, nhận con trỏ thô, khai báo `pub unsafe fn`[^vld1-doc].
-- Quan sát khi biên dịch bằng `rustc 1.95.0`: trên AArch64, gọi `vdupq_n_u32(3)` trong `fn main` bị từ chối với lỗi E0133 ("call to function … with `#[target_feature]` is unsafe"), kèm ghi chú rằng việc `neon` đã bật trong cấu hình build *không* thay thế việc khai báo `#[target_feature]` — đúng với ví dụ trong Reference: gọi hàm `#[target_feature]` từ nơi chưa khai báo tính năng vẫn là `unsafe`, dù tính năng đã bật mặc định hoặc bằng cờ biên dịch[^tf-flags-not-enough]. Ngược lại, trong một hàm *không* `unsafe` đánh dấu `#[target_feature(enable = "neon")]`, cùng lời gọi biên dịch được không cần `unsafe`; còn chính hàm đó, gọi từ `main`, lại đòi `unsafe`. Intrinsic nhận con trỏ thô (như `vld1q_u32`) có thêm lý do cần `unsafe` là con trỏ (suy luận của người soạn: `unsafe` ở đây biểu diễn lời hứa "CPU có tính năng này", khớp quy tắc của Reference ở mục 4). Vì vậy `unsafe` trong ví dụ `sum_neon` đúng với 1.95.0 chứ không thừa.
+<details><summary>Đi sâu: <code>unsafe</code> của intrinsic trong 1.95.0, các <code>options</code>, <code>clobber_abi</code>, kiến trúc ổn định</summary>
+
+- Trang `std::arch` viết mọi intrinsic là unsafe, nhưng trang tài liệu của từng hàm (`core::arch::aarch64`, 1.95.0) phân biệt hơn. `vdupq_n_u32` khai báo `pub fn` (không `unsafe`) kèm ghi chú chỉ có sẵn khi tính năng `neon` bật[^vdup-doc]. `__crc32w` cũng là `pub fn` với ghi chú tính năng `crc`[^crc32w-doc]. Còn `vld1q_u32`, nhận con trỏ thô, khai báo `pub unsafe fn`[^vld1-doc].
+- Quan sát khi biên dịch bằng `rustc 1.95.0`: trên AArch64, gọi `vdupq_n_u32(3)` trong `fn main` bị từ chối với lỗi E0133 ("call to function … with `#[target_feature]` is unsafe"), kèm ghi chú rằng việc `neon` đã bật trong cấu hình build *không* thay thế việc khai báo `#[target_feature]`. Điều này đúng với ví dụ trong Reference: gọi hàm `#[target_feature]` từ nơi chưa khai báo tính năng vẫn là `unsafe`, dù tính năng đã bật mặc định hoặc bằng cờ biên dịch[^tf-flags-not-enough]. Ngược lại, trong một hàm *không* `unsafe` đánh dấu `#[target_feature(enable = "neon")]`, cùng lời gọi biên dịch được không cần `unsafe`; còn chính hàm đó, gọi từ `main`, lại đòi `unsafe`. Intrinsic nhận con trỏ thô (như `vld1q_u32`) có thêm lý do cần `unsafe` là con trỏ (suy luận của người soạn: `unsafe` ở đây biểu diễn lời hứa "CPU có tính năng này", khớp quy tắc của Reference ở mục 4). Vì vậy `unsafe` trong ví dụ `sum_neon` đúng với 1.95.0 chứ không thừa.
+- Có thể dùng `clobber_abi` để áp sẵn một bộ clobber mặc định theo một calling convention, thay vì khai từng thanh ghi nháp[^asm-clobber-abi]. Unwind ra khỏi khối asm cũng là UB[^asm-unwind].
 - Inline assembly ổn định cho x86/x86-64, ARM, AArch64, RISC-V và một số kiến trúc khác[^asm-stable].
-- `options(pure)`: asm không có side effect, phải kết thúc, và output chỉ phụ thuộc vào input trực tiếp của nó (hoặc giá trị đọc từ bộ nhớ nếu không có `nomem`)[^asm-pure]. Nhờ vậy compiler được phép chạy nó ít lần hơn chương trình ghi — ví dụ đem ra khỏi vòng lặp — hoặc xóa hẳn nếu output không dùng; `pure` phải đi kèm `nomem` hoặc `readonly`, nếu không là lỗi biên dịch[^asm-pure-hoist].
+- `options(pure)`: asm không có side effect, phải kết thúc, và output chỉ phụ thuộc vào input trực tiếp của nó (hoặc giá trị đọc từ bộ nhớ nếu không có `nomem`)[^asm-pure]. Nhờ vậy compiler được phép chạy nó ít lần hơn chương trình ghi, ví dụ đem ra khỏi vòng lặp, hoặc xóa hẳn nếu output không dùng. `pure` phải đi kèm `nomem` hoặc `readonly`, nếu không là lỗi biên dịch[^asm-pure-hoist].
 - `options(nomem)`: asm không đọc/ghi bộ nhớ nào truy cập được từ ngoài asm; nhờ đó compiler có thể giữ giá trị biến toàn cục trong thanh ghi qua khối asm[^asm-nomem].
 - `options(nostack)`: asm không push dữ liệu lên stack hoặc ghi vào red-zone của stack (nếu target hỗ trợ)[^asm-nostack].
-- Khai báo sai làm hỏng giả định của compiler → UB, vì compiler chỉ tin khai báo. Reference minh họa đúng trường hợp `nomem` mà asm ghi bộ nhớ ngoài: đó là undefined behavior[^asm-nomem-ub].
+- Khai báo sai làm hỏng giả định của compiler nên là UB, vì compiler chỉ tin khai báo. Reference minh họa đúng trường hợp `nomem` mà asm ghi bộ nhớ ngoài: đó là undefined behavior[^asm-nomem-ub].
 - (Nhận xét của người soạn: ưu tiên intrinsic hơn `asm!` vì compiler hiểu ngữ nghĩa của chúng; `asm!` hầu như chỉ cần cho code hệ thống/embedded.)
 
 </details>
 
-**Quay lại Q5:** intrinsic là lệnh máy dưới dạng hàm Rust (cần giữ lời hứa "CPU có tính năng này"); `asm!` cho tự do tối đa nhưng bạn phải khai báo trung thực vì compiler không đọc nội dung.
+**Quay lại Q5:** intrinsic là lệnh máy dưới dạng hàm Rust (bạn phải giữ lời hứa "CPU có tính năng này"); `asm!` cho tự do tối đa nhưng bạn phải khai báo trung thực vì compiler không đọc nội dung. Với checksum của `ingest`, thử intrinsic trước, `asm!` là phương án cuối.
 
 ## 6. `black_box` và đo hiệu năng đúng (Q6)
 
-> **Trả lời ngắn.** Compiler có thể xóa hoặc tính trước thứ bạn định đo, khiến benchmark không còn phản ánh thực tế[^bb-why]. `std::hint::black_box` là hàm identity gợi ý compiler bi quan tối đa về nó[^bb-def], nên hữu ích khi không muốn một số tối ưu, như trong benchmark[^bb-bench]. Nó chỉ là nỗ lực tối đa (best-effort): chương trình không được dựa vào nó cho tính đúng đắn ngoài việc nó là identity[^bb-limits].
+> **Trả lời ngắn.** Compiler có thể xóa hoặc tính trước thứ bạn định đo, khiến benchmark không còn phản ánh thực tế[^bb-why]. `std::hint::black_box` là hàm identity gợi ý compiler bi quan tối đa về nó[^bb-def]. Vì vậy nó hữu ích khi bạn không muốn một số tối ưu, như trong benchmark[^bb-bench]. Nó chỉ là nỗ lực tối đa (best-effort): chương trình không được dựa vào nó cho tính đúng đắn ngoài việc nó là identity[^bb-limits].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn bấm giờ "nấu 1000 nồi cơm", nhưng bếp đã biết trước kết quả nên chỉ đọc con số ghi sẵn — đồng hồ dừng sau vài nano giây. `black_box` là che kết quả đi để bếp không thể đoán trước.
+*Với service `ingest`.* Bạn thêm vào CI một benchmark cho hàm tính toán của `ingest` để bắt ngay những commit làm nó chậm đi. Chạy lên, benchmark báo vài chục nano giây cho một khối việc mà bạn biết phải tốn cỡ mili giây. Con số đẹp đến mức đáng ngờ. Mục này giải thích vì sao, và `black_box` sửa được đến đâu.
 
-Benchmark ngây thơ:
+### 6.1 Benchmark ngây thơ
+
+Ta mô phỏng bằng một hàm tính tổng:
 
 ```rust
 fn work(n: u64) -> u64 { (1..=n).sum() }
@@ -293,35 +330,57 @@ fn main() {
 }
 ```
 
-Biên dịch `-O` và chạy: in thời gian khoảng **42 ns** cho "1000 lần tính tổng 1 triệu số" — không phải phép đo thật. Asm của hàm bọc tương đương vòng ngoài chỉ còn bốn lệnh `mov`/`movk` dựng hằng 64-bit rồi `ret`: compiler đã tính trước kết quả cuối (500000500000000). Bản thân `work` cũng không lặp 10⁶ lần: asm của nó dùng `mul`/`umulh` để tính công thức cấp số cộng.
+Biên dịch `-O` và chạy: chương trình in thời gian khoảng **42 ns** cho "1000 lần tính tổng 1 triệu số". Đây không phải phép đo thật. Asm của hàm bọc tương đương vòng ngoài chỉ còn bốn lệnh `mov`/`movk` dựng hằng 64-bit rồi `ret`: compiler đã tính trước kết quả cuối (500000500000000). Bản thân `work` cũng không lặp 10⁶ lần, vì asm của nó dùng `mul`/`umulh` để tính theo công thức cấp số cộng.
 
-Bọc đầu vào và đầu ra: `r += black_box(work(black_box(1_000_000)))`. Đây đúng là cách tài liệu của `black_box` khuyên: khi đo một hàm, thường nên bọc đầu vào để compiler không thực hiện những tối ưu phi thực tế[^bb-wrap-inputs]. Compiler không thể giả định gì về giá trị đi qua khối đó, nên vòng 1000 lần không bị gộp. Thời gian đo tăng từ ≈ 42 ns lên ≈ 0,8–1,1 µs (hai lần chạy). Con số này vẫn **không** phải chi phí cộng 10⁶ số thật, vì `work` vẫn được rút gọn thành công thức. Bài học: `black_box` chặn một số tối ưu cụ thể, không biến phép đo thành "đúng"; phải đọc asm để biết mình đang đo gì.
+Chuyện này chính là điều tài liệu cảnh báo: compiler hoàn toàn có thể thực hiện những tối ưu làm benchmark sai lệch nặng[^bb-why]. Với `ingest`, benchmark kiểu này sẽ không bao giờ bắt được commit làm chậm hot path, vì thứ nó đo đã không còn tồn tại trong binary.
 
-Danh sách kiểm (nhận xét của người soạn): release build; `black_box` đầu vào và đầu ra rồi mở asm kiểm tra thứ được đo còn đó; lặp lại và nhìn độ ồn (lần đầu thường chậm hơn: ở mục 1, `opt-level=3` đo 1,46 ms rồi 0,97 và 0,86 ms); phân biệt dữ liệu vừa cache với lớn hơn cache ([Chương 06](06-cache-va-numa.md)); và đừng đem số máy này sang máy khác.
+### 6.2 Bọc đầu vào và đầu ra
+
+Cách chữa là bọc đầu vào và đầu ra bằng `black_box`: `r += black_box(work(black_box(1_000_000)))`. Tài liệu của `black_box` cũng khuyên đúng như vậy: khi đo một hàm, thường nên bọc đầu vào để compiler không thực hiện những tối ưu phi thực tế[^bb-wrap-inputs]. Compiler không thể giả định gì về giá trị đi qua khối đó, nên vòng 1000 lần không bị gộp. Thời gian đo tăng từ ≈ 42 ns lên ≈ 0,8–1,1 µs (hai lần chạy).
+
+Con số mới vẫn **không** phải chi phí cộng 10⁶ số thật, vì `work` vẫn được rút gọn thành công thức. Bài học: `black_box` chặn một số tối ưu cụ thể chứ không biến phép đo thành "đúng", và bạn phải đọc asm để biết mình đang đo gì.
+
+### 6.3 Danh sách kiểm cho benchmark của `ingest`
+
+Danh sách này là nhận xét của người soạn:
+
+- Dùng release build.
+- `black_box` đầu vào và đầu ra, rồi mở asm kiểm tra thứ được đo còn đó.
+- Lặp lại và nhìn độ ồn. Lần đầu thường chậm hơn: ở mục 1, `opt-level=3` đo 1,46 ms rồi 0,97 và 0,86 ms.
+- Phân biệt dữ liệu vừa trong cache với dữ liệu lớn hơn cache ([Chương 06](06-cache-va-numa.md)).
+- Đừng đem số của máy này sang máy khác.
 
 <details><summary>Đi sâu: hai tác dụng của <code>black_box</code>, giới hạn, và asm của vòng ngoài</summary>
 
-- Tài liệu mô tả `black_box` có hai tác dụng trong thực tế: chặn các tối ưu dựa trên giá trị nó trả về, và buộc giá trị được truyền vào phải được tính ra dù kết quả không dùng[^bb-two]. Vì vậy bọc *đầu vào* (để compiler không biết giá trị) và bọc *kết quả* (để lời gọi không bị xóa) là hai việc khác nhau; `r += black_box(work(black_box(1_000_000)))` làm cả hai (nhận xét của người soạn).
+- Tài liệu mô tả `black_box` có hai tác dụng trong thực tế: chặn các tối ưu dựa trên giá trị nó trả về, và buộc giá trị được truyền vào phải được tính ra dù kết quả không dùng[^bb-two]. Vì vậy bọc *đầu vào* (để compiler không biết giá trị) và bọc *kết quả* (để lời gọi không bị xóa) là hai việc khác nhau. `r += black_box(work(black_box(1_000_000)))` làm cả hai (nhận xét của người soạn).
 - Giới hạn: tài liệu viết rõ `black_box` không đem lại bảo đảm nào cho mục đích mật mã hay bảo mật, và cả ngôn ngữ Rust không có cơ chế nào cung cấp bảo đảm cần cho mật mã thời gian hằng (constant-time)[^bb-crypto]. Bảng trạng thái các hàm khác của `std::hint` nằm ở [Chương 05 mục 8](05-pipeline-va-speculation.md).
 - Asm của vòng ngoài sau khi bọc: mỗi vòng có một `str` giá trị ra stack, một khối `InlineAsm` rỗng, rồi `ldr` lại (quan sát từ asm; chi tiết cài đặt, có thể đổi giữa các bản). Suy luận của người soạn: khối asm rỗng là cách `black_box` buộc compiler coi giá trị đi qua là không biết được.
 
 </details>
 
-**Quay lại Q6:** `black_box` giữ cho compiler không "biết trước" giá trị, nhưng không hứa gì ngoài việc là identity; đo xong vẫn phải đọc asm.
+**Quay lại Q6:** `black_box` giữ cho compiler không "biết trước" giá trị, nhưng không hứa gì ngoài việc là identity; đo xong vẫn phải đọc asm. Benchmark của `ingest` chỉ có giá trị khi thứ nó đo còn nằm trong asm.
 
 ## 7. False sharing, `#[repr(align)]` và `CachePadded` (Q7)
 
-> **Trả lời ngắn.** Khi nhiều thread ghi vào các biến *khác nhau* nhưng nằm chung một cache line, mỗi lần ghi làm line đó mất hiệu lực ở các core khác, nên chúng chậm đi dù không chia sẻ dữ liệu logic nào[^cp-why][^drep-fs]. Sửa bằng cách ép mỗi biến vào cache line riêng: `#[repr(align(N))]` hoặc kiểu `CachePadded` của crossbeam[^cp-def].
+> **Trả lời ngắn.** Khi nhiều thread ghi vào các biến *khác nhau* nhưng nằm chung một cache line, mỗi lần ghi làm line đó mất hiệu lực ở các core khác. Các thread vì thế chậm đi dù không chia sẻ dữ liệu logic nào[^cp-why]. Hiện tượng này vẫn xuất hiện khi các thread dùng những vị trí nhớ khác nhau và tưởng là độc lập[^drep-fs]. Sửa bằng cách ép mỗi biến vào cache line riêng: `#[repr(align(N))]` hoặc kiểu `CachePadded` của crossbeam[^cp-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bốn người cùng viết vào bốn ô khác nhau trên *cùng một tờ giấy*, mỗi lần chỉ một người được cầm tờ — họ không viết đè nhau nhưng phải chuyền tờ giấy liên tục. Đặt mỗi người một tờ riêng thì hết chờ.
+*Với service `ingest`.* Mỗi worker thread của `ingest` đếm số sự kiện đã xử lý vào một `AtomicU64` của riêng mình, và bạn gom bốn bộ đếm đó vào một `Vec<AtomicU64>` cho gọn (nhận xét của người soạn: kiểu bộ đếm metrics per-worker này là ứng viên điển hình của false sharing). Mỗi worker chỉ ghi vào ô của nó, không worker nào đọc ô của worker khác, nên code đúng và không có race. Vậy mà thêm worker lại làm `ingest` chậm đi. Mục này giải thích vì sao, và sửa bằng cách nào.
 
-Cơ chế (đã giải thích ở [Chương 06 mục 5](06-cache-va-numa.md) về coherence và [mục 6](06-cache-va-numa.md) về false sharing): coherence buộc line chuyền qua lại giữa các core khi nhiều core ghi vào nó. Dive into Systems mô tả: khi một thread cập nhật biến `g`, snoopy cache vô hiệu hóa không chỉ `g` mà cả cache line chứa `g`[^dis-fs]. Crossbeam mô tả tương tự: cập nhật một atomic làm mất hiệu lực cả cache line chứa nó, khiến lần truy cập kế tiếp vào cùng line chậm hơn với các core khác[^cp-why]. Drepper nêu thêm rằng vấn đề vẫn xuất hiện khi các thread dùng các vị trí nhớ *khác nhau* và tưởng là độc lập[^drep-fs].
+### 7.1 Vì sao ghi vào ô riêng vẫn chậm
 
-Giải pháp: `repr(align)`. Modifier `align` và `packed` dùng để nâng hoặc hạ alignment của struct/union[^repr-align]; nếu alignment chỉ định nhỏ hơn alignment tự nhiên của kiểu thì alignment không đổi[^repr-align-less]. Vì kích thước của một giá trị luôn là bội của alignment[^size-align], `#[repr(align(128))] struct Padded(AtomicU64)` phải có `size_of` là bội của 128; với một trường 8 byte, bội nhỏ nhất là 128 (suy luận của người soạn từ quy tắc trên, khớp kết quả đo bên dưới).
+Chương 06 đã giải thích cơ chế ([mục 5](06-cache-va-numa.md) về coherence, [mục 6](06-cache-va-numa.md) về false sharing). Ở đây ta chỉ cần nhắc ý chính: khi nhiều core cùng ghi vào một cache line, coherence buộc line đó chuyền qua lại giữa các core. Dive into Systems mô tả cùng hiện tượng ở mức ví dụ: khi một thread cập nhật biến `g`, snoopy cache vô hiệu hóa không chỉ `g` mà cả cache line chứa `g`[^dis-fs]. Crossbeam nói tương tự: cập nhật một atomic làm mất hiệu lực cả cache line chứa nó, khiến lần truy cập kế tiếp vào cùng line chậm hơn với các core khác[^cp-why].
 
-Thí nghiệm đã chạy (4 thread, mỗi thread gọi `fetch_add(1, Relaxed)` 20 triệu lần lên *atomic của riêng nó*; hai biến thể chỉ khác bố cục):
+Với `ingest`: bốn `AtomicU64` liền nhau chỉ chiếm 32 byte, nên bốn bộ đếm của bốn worker nhiều khả năng nằm chung một line. Mỗi lần worker này tăng bộ đếm của mình là line bị vô hiệu hóa ở core của ba worker còn lại.
+
+### 7.2 `repr(align)` đẩy mỗi biến sang line riêng
+
+Modifier `align` và `packed` dùng để nâng hoặc hạ alignment của struct/union[^repr-align]. Nếu alignment chỉ định nhỏ hơn alignment tự nhiên của kiểu thì alignment không đổi[^repr-align-less]. Kích thước của một giá trị luôn là bội của alignment[^size-align]. Vì vậy `#[repr(align(128))] struct Padded(AtomicU64)` phải có `size_of` là bội của 128; với một trường 8 byte, bội nhỏ nhất là 128 (suy luận của người soạn từ quy tắc trên, khớp kết quả đo bên dưới).
+
+### 7.3 Đo thử
+
+Thí nghiệm đã chạy: 4 thread, mỗi thread gọi `fetch_add(1, Relaxed)` 20 triệu lần lên *atomic của riêng nó*. Hai biến thể chỉ khác bố cục:
 
 ```rust
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
@@ -338,15 +397,19 @@ Kết quả: `size Plain=8 align=8 Padded=128 align=128`. Thời gian (3 lần):
 | `Plain` — 4 atomic liền nhau (32 byte tổng) | ≈ 494–503 ms (đợt 1), ≈ 524–597 ms (đợt 2) |
 | `Padded` — mỗi atomic 128 byte | ≈ 38,7–40,0 ms (cả hai đợt) |
 
-Quan sát: chênh ≈ 12–15 lần trên Apple M3 Pro (hai đợt, mỗi đợt 3 lần chạy; số tuyệt đối dao động giữa các lần nhưng tỉ lệ ổn định). `sysctl hw.cachelinesize` trên máy này báo 128 (quan sát), nên 4 atomic 8 byte liền nhau (khối 32 byte) nhiều khả năng chung một line — chỉ vắt qua hai line nếu khối cấp phát bắt đầu sát cuối một line (suy luận của người soạn); người soạn không khẳng định kích thước line trên máy khác. Các thread *không chia sẻ dữ liệu logic nào*, vậy mà chậm hơn một bậc độ lớn: logic đúng, chỉ bố cục bộ nhớ sai — khó thấy trong code review. (Nhận xét của người soạn, liên hệ backend: bộ đếm metrics per-worker gom thành `Vec<AtomicU64>` là ứng viên điển hình.)
+Quan sát: chênh ≈ 12–15 lần trên Apple M3 Pro (hai đợt, mỗi đợt 3 lần chạy; số tuyệt đối dao động giữa các lần nhưng tỉ lệ ổn định). `sysctl hw.cachelinesize` trên máy này báo 128 (quan sát), nên 4 atomic 8 byte liền nhau (khối 32 byte) nhiều khả năng chung một line. Khối đó chỉ vắt qua hai line nếu khối cấp phát bắt đầu sát cuối một line (suy luận của người soạn). Người soạn không khẳng định kích thước line trên máy khác.
 
-Con số này khác với cỡ 3 lần ở [Chương 06 mục 6](06-cache-va-numa.md) vì hai phép đo khác workload: ở đó 2 thread, mỗi thread `load` rồi `store` (không dùng `fetch_add`); ở đây 4 thread dùng `fetch_add`, là phép đọc-sửa-ghi nguyên tử. Số thread và loại phép toán đều có thể làm tranh chấp line nặng hơn (suy luận của người soạn, chưa đo tách từng yếu tố), nên đừng so hai con số trực tiếp; cả hai chỉ cho thấy cùng một chiều của hiện tượng.
+Các thread *không chia sẻ dữ liệu logic nào*, vậy mà chậm hơn một bậc độ lớn. Logic đúng, chỉ bố cục bộ nhớ sai, và loại lỗi này rất khó thấy trong code review.
 
-Thay vì tự canh số, crate `crossbeam-utils` (phiên bản 0.8.23) có `CachePadded<T>`: đệm và canh một giá trị theo độ dài cache line[^cp-def]. Dùng: `Vec<CachePadded<AtomicU64>>` với `CachePadded::new(AtomicU64::new(0))`.
+Con số này khác với cỡ 3 lần ở [Chương 06 mục 6](06-cache-va-numa.md) vì hai phép đo khác workload. Ở đó có 2 thread, mỗi thread `load` rồi `store` (không dùng `fetch_add`). Ở đây có 4 thread dùng `fetch_add`, là phép đọc-sửa-ghi nguyên tử. Số thread và loại phép toán đều có thể làm tranh chấp line nặng hơn (suy luận của người soạn, chưa đo tách từng yếu tố). Vì vậy đừng so hai con số trực tiếp; cả hai chỉ cho thấy cùng một chiều của hiện tượng.
+
+### 7.4 `CachePadded`: không phải tự canh số
+
+Thay vì tự canh số, crate `crossbeam-utils` (phiên bản 0.8.23) có `CachePadded<T>`: đệm và canh một giá trị theo độ dài cache line[^cp-def]. Với `ingest`, bạn đổi bộ đếm thành `Vec<CachePadded<AtomicU64>>` và tạo từng phần tử bằng `CachePadded::new(AtomicU64::new(0))`.
 
 <details><summary>Đi sâu: layout được bảo đảm gì, <code>N</code> của <code>CachePadded</code>, thứ tự duyệt mảng</summary>
 
-- Reference định nghĩa: giá trị có alignment n chỉ được lưu ở địa chỉ là bội của n[^align-def], và kích thước luôn là bội của alignment[^size-align]. Một mảng `[T; N]` có kích thước `size_of::<T>() * N` và cùng alignment với `T`[^array-layout] — nên các phần tử nằm liên tiếp trong bộ nhớ, và duyệt tuần tự thân thiện với cache và prefetcher (suy luận của người soạn; xem [Chương 06](06-cache-va-numa.md)).
+- Reference định nghĩa: giá trị có alignment n chỉ được lưu ở địa chỉ là bội của n[^align-def]. Kích thước thì luôn là bội của alignment[^size-align]. Một mảng `[T; N]` có kích thước `size_of::<T>() * N` và cùng alignment với `T`[^array-layout]. Nên các phần tử nằm liên tiếp trong bộ nhớ, và duyệt tuần tự thân thiện với cache và prefetcher (suy luận của người soạn; xem [Chương 06](06-cache-va-numa.md)).
 - Với struct không có `repr` (biểu diễn Rust), bảo đảm layout duy nhất là những gì cần cho soundness; ngoài ra không có bảo đảm nào khác[^repr-rust]. Thứ tự field trong bộ nhớ không nhất thiết trùng thứ tự khai báo[^repr-order], nên muốn kiểm soát thì dùng `repr(C)` (xem [P10 · Chương 02](../10-rust-internals/02-type-layout.md)).
 - Chọn 128 hay 64? `CachePadded` giả định kích thước line theo kiến trúc: trên x86-64, aarch64 và powerpc64, N = 128[^cp-n]. Lý do crate nêu cho CPU Intel hiện đại: prefetcher không gian kéo từng cặp line 64 byte một lúc, nên crate bi quan coi line dài 128 byte[^cp-why128]. Crate cảnh báo N chỉ là phỏng đoán hợp lý, không bảo đảm khớp độ dài cache line thật của máy đang chạy[^cp-guess]. Kích thước của `CachePadded<T>` là bội nhỏ nhất của N byte đủ chứa một giá trị `T`, và alignment của nó là max(N, alignment của `T`)[^cp-size].
 - Đã biên dịch và chạy trong một project cargo tạm với `crossbeam-utils = "=0.8.23"`: `size_of::<CachePadded<AtomicU64>>()` và `align_of` đều in `128` trên `aarch64-apple-darwin`, khớp quy tắc "N = 128" và "bội nhỏ nhất của N" ở trên (kích thước này là mặc định theo kiến trúc của crate, không phải đo từ phần cứng). Cái giá là bộ nhớ: mỗi phần tử tốn ≥128 byte.
@@ -354,98 +417,100 @@ Thay vì tự canh số, crate `crossbeam-utils` (phiên bản 0.8.23) có `Cach
 
 </details>
 
-**Quay lại Q7:** false sharing là lỗi bố cục bộ nhớ chứ không phải lỗi logic; `#[repr(align)]` hoặc `CachePadded` đặt mỗi biến nóng vào cache line riêng, đổi lại tốn bộ nhớ.
+**Quay lại Q7:** false sharing là lỗi bố cục bộ nhớ chứ không phải lỗi logic. `#[repr(align)]` hoặc `CachePadded` đặt mỗi biến nóng vào cache line riêng, đổi lại tốn bộ nhớ. Với `ingest`: bộ đếm per-worker nên là `Vec<CachePadded<AtomicU64>>`.
 
 ## Liên hệ với Rust
 
-Toàn chương là phần này, chia theo Q1–Q7 ở trên. Điểm chạm chính: mã máy đến từ LLVM, Rust cung cấp cờ và attribute để điều khiển; các cơ chế gần phần cứng (`std::arch`, `asm!`, `get_unchecked`, gọi hàm `#[target_feature]` từ nơi chưa bật tính năng đó) đều cần `unsafe` vì mỗi cái có lời hứa người gọi phải giữ. Compiler *hứa* ít (layout ở mức soundness[^repr-rust], `black_box` là identity[^bb-limits], `inline` là gợi ý[^inline-hint]) nhưng *làm* nhiều (inline, vector hóa, hoist bounds check) — phần sau chỉ biết bằng cách đọc asm đúng phiên bản và target.
+Toàn chương là phần này, chia theo Q1–Q7 ở trên. Với `ingest`, thông điệp chung là: mã máy đến từ LLVM, còn Rust cho bạn cờ và attribute để điều khiển nó. Các cơ chế gần phần cứng (`std::arch`, `asm!`, `get_unchecked`, gọi hàm `#[target_feature]` từ nơi chưa bật tính năng đó) đều cần `unsafe`, vì mỗi cái kèm một lời hứa mà người gọi phải giữ.
+
+Compiler *hứa* rất ít. Layout chỉ được bảo đảm ở mức soundness[^repr-rust]. `black_box` chỉ là identity[^bb-limits]. `inline` chỉ là gợi ý[^inline-hint]. Nhưng nó *làm* rất nhiều: inline, vector hóa, hoist bounds check. Phần "làm" đó bạn chỉ biết được bằng cách đọc asm đúng phiên bản và đúng target, nên mỗi lần sửa hot path của `ingest` hãy mở asm ra xem.
 
 ## Tóm tắt
 
-- `rustc` sinh LLVM IR, LLVM sinh mã máy[^llvm-backend]; `--emit=asm`/`llvm-ir` cho xem cả hai.
-- `opt-level=0` giữ biến trên stack và có kiểm tra tràn; `opt-level=3` dùng thanh ghi và vector hóa (quan sát) — không bao giờ đo bản debug.
-- `#[inline]` chỉ là gợi ý, kể cả `inline(always)`[^inline-hint]; kiểm tra bằng `call`/`bl` trong asm.
-- `v[i]` = một `cmp` + một nhánh (quan sát); compiler có thể hoist/loại bỏ khi chứng minh được (tối ưu, không bảo đảm). `get_unchecked` chuyển trách nhiệm sang người gọi, sai là UB[^get-unchecked].
-- `target-cpu`/`target-feature` mở khóa lệnh mới nhưng binary không chạy được trên CPU cũ[^arch-run-on]; dùng `#[target_feature]` + `is_*_feature_detected!` để dispatch lúc chạy.
-- `std::arch` là intrinsic thường ứng với một lệnh máy và `unsafe`[^arch-overview]; `asm!` là hộp đen với compiler[^asm-blackbox]; `black_box` chỉ là identity "best-effort"[^bb-limits].
-- False sharing là lỗi bố cục bộ nhớ: `#[repr(align)]`/`CachePadded` sửa; trên máy soạn chênh ≈ 13 lần với workload này.
+- `rustc` sinh LLVM IR, LLVM sinh mã máy[^llvm-backend]. `--emit=asm` và `--emit=llvm-ir` cho xem cả hai.
+- `opt-level=0` giữ biến trên stack và có kiểm tra tràn; `opt-level=3` dùng thanh ghi và vector hóa (quan sát). Không bao giờ đo bản debug.
+- `#[inline]` chỉ là gợi ý, kể cả `inline(always)`[^inline-hint]. Kiểm tra bằng `call`/`bl` trong asm.
+- `v[i]` là một `cmp` cộng một nhánh (quan sát). Compiler có thể hoist hoặc loại bỏ kiểm tra khi chứng minh được (tối ưu, không bảo đảm). `get_unchecked` chuyển trách nhiệm sang người gọi, sai là UB[^get-unchecked].
+- `target-cpu`/`target-feature` mở khóa lệnh mới nhưng binary không chạy được trên CPU cũ[^arch-run-on]. Muốn một binary chạy mọi nơi, dùng `#[target_feature]` cùng `is_*_feature_detected!` để dispatch lúc chạy.
+- `std::arch` là intrinsic, thường ứng với một lệnh máy và `unsafe`[^arch-overview]. `asm!` là hộp đen với compiler[^asm-blackbox]. `black_box` chỉ là identity "best-effort"[^bb-limits].
+- False sharing là lỗi bố cục bộ nhớ, sửa bằng `#[repr(align)]`/`CachePadded`. Trên máy soạn, workload ở mục 7 chênh ≈ 13 lần.
 
 ## Câu hỏi tự kiểm tra
 
 1. Hai cờ `rustc` nào cho phép xem LLVM IR và asm của một crate? Đầu ra mặc định được đặt tên thế nào?
 <details><summary>Đáp án</summary>
 
-`--emit=llvm-ir` và `--emit=asm`; tên mặc định `CRATE_NAME.ll` và `CRATE_NAME.s`[^emit-ir][^emit-asm].
+Là `--emit=llvm-ir` và `--emit=asm`. `--emit=llvm-ir` ra file `CRATE_NAME.ll` theo mặc định[^emit-ir]. `--emit=asm` ra file `CRATE_NAME.s`[^emit-asm].
 
 </details>
 
 2. `#[inline(always)]` có bảo đảm hàm được inline không? Làm sao kiểm tra?
 <details><summary>Đáp án</summary>
 
-Không: Reference ghi rằng ở mọi dạng, attribute chỉ là hint và compiler có thể bỏ qua[^inline-hint]; `inline` được mô tả là gợi ý[^inline-suggest]. Kiểm tra bằng cách đọc asm xem còn `call`/`bl` hay không (mục 2). Với hàm export bằng `no_mangle`, attribute còn bị bỏ qua hẳn[^inline-noexport].
+Không. Reference ghi rằng ở mọi dạng, attribute chỉ là hint và compiler có thể bỏ qua[^inline-hint]. Kiểm tra bằng cách đọc asm xem còn `call`/`bl` hay không (mục 2). Với hàm export bằng `no_mangle`, attribute còn bị bỏ qua hẳn[^inline-noexport].
 
 </details>
 
 3. Vì sao `sum_idx(v, n)` có một bounds check nhưng `sum_iter(v)` không có cái nào?
 <details><summary>Đáp án</summary>
 
-Quan sát asm: ở `sum_idx` LLVM gom kiểm tra thành một so sánh `n-1` với `len` trước vòng lặp; ở `sum_iter` chỉ số bị chặn bởi chính `v.len()` nên kiểm tra thừa (suy luận từ asm). Đây là kết quả tối ưu, không phải bảo đảm ngôn ngữ (mục 3).
+Quan sát asm: ở `sum_idx`, LLVM gom kiểm tra thành một phép so sánh `n-1` với `len` trước vòng lặp. Ở `sum_iter`, chỉ số bị chặn bởi chính `v.len()` nên kiểm tra thừa (suy luận từ asm). Đây là kết quả tối ưu, không phải bảo đảm ngôn ngữ (mục 3).
 
 </details>
 
-4. Vì sao `x.count_ones()` ra hơn chục lệnh trên `x86_64-unknown-linux-gnu` mặc định nhưng 1 lệnh `popcnt` khi bật `+popcnt`? Hệ quả khi deploy?
+4. Vì sao `x.count_ones()` ra hơn chục lệnh trên `x86_64-unknown-linux-gnu` mặc định nhưng chỉ 1 lệnh `popcnt` khi bật `+popcnt`? Hệ quả khi deploy?
 <details><summary>Đáp án</summary>
 
-Mỗi target có tập tính năng mặc định riêng[^default-features] và asm quan sát được không dùng `popcnt` ở nền mặc định; bật feature cho phép dùng lệnh, nhưng binary chỉ chạy đúng trên CPU có nó[^arch-run-on][^tf-ub] (mục 4).
+Mỗi target có tập tính năng mặc định riêng[^default-features], và asm quan sát được không dùng `popcnt` ở nền mặc định. Bật feature thì compiler được dùng lệnh đó, nhưng binary chỉ chạy đúng trên CPU có nó[^arch-run-on]. Chạy trên CPU thiếu tính năng là UB[^tf-ub] (mục 4).
 
 </details>
 
 5. Trên macOS/AArch64, `is_aarch64_feature_detected!("crc")` trả `true`. Có thể kết luận gì về phát hiện động?
 <details><summary>Đáp án</summary>
 
-Không kết luận được gì nếu chưa biết tính năng đó đã bật lúc biên dịch hay chưa: khi đã bật, macro mở rộng thành `true` mà không cần hỏi CPU[^a64-const]. Đừng dựa vào câu "nền tảng khác Linux luôn trả `false`" của trang tài liệu[^a64-linux]: mã `std_detect` 1.95.0 có backend Apple AArch64 đọc tính năng bằng `sysctlbyname`[^sd-wiring][^sd-darwin], nên một `true` trên macOS có thể đến từ lúc biên dịch hoặc từ `sysctl` (mục 4).
+Không kết luận được gì nếu chưa biết tính năng đó đã bật lúc biên dịch hay chưa: khi đã bật, macro mở rộng thành `true` mà không cần hỏi CPU[^a64-const]. Đừng dựa vào câu "nền tảng khác Linux luôn trả `false`" của trang tài liệu[^a64-linux]. Mã `std_detect` 1.95.0 có backend Apple AArch64[^sd-wiring]. Backend đó đọc tính năng bằng `sysctlbyname`[^sd-darwin], nên một `true` trên macOS có thể đến từ lúc biên dịch hoặc từ `sysctl` (mục 4).
 
 </details>
 
 6. Với `asm!`, compiler có đọc chuỗi lệnh của bạn để tối ưu không? Hệ quả của `options(nomem)` khi asm thực sự ghi bộ nhớ?
 <details><summary>Đáp án</summary>
 
-Không, compiler chỉ tin phần khai báo[^asm-blackbox]. `nomem` nghĩa là asm không đọc/ghi bộ nhớ ngoài[^asm-nomem]; khai báo sai vi phạm hợp đồng và là undefined behavior[^asm-nomem-ub] (mục 5).
+Không, compiler chỉ tin phần khai báo[^asm-blackbox]. `nomem` nghĩa là asm không đọc/ghi bộ nhớ ngoài[^asm-nomem]. Khai báo sai vi phạm hợp đồng và là undefined behavior[^asm-nomem-ub] (mục 5).
 
 </details>
 
 7. Vì sao benchmark ngây thơ báo 42 ns cho 1000 lần cộng 10⁶ số? `black_box` giải quyết được bao nhiêu?
 <details><summary>Đáp án</summary>
 
-Compiler tính trước toàn bộ ra hằng số (và thay vòng lặp bằng công thức); tài liệu cũng nêu khả năng compiler tối ưu mất phần code cần đo[^bb-why]. `black_box` chặn việc tính trước vòng ngoài nhưng `work` vẫn bị rút gọn thành công thức; nó chỉ là identity nỗ lực tối đa nên phải kiểm bằng asm[^bb-limits] (mục 6).
+Compiler tính trước toàn bộ ra hằng số và thay vòng lặp bằng công thức; tài liệu cũng nêu khả năng compiler tối ưu mất phần code cần đo[^bb-why]. `black_box` chặn việc tính trước vòng ngoài, nhưng `work` vẫn bị rút gọn thành công thức. Nó chỉ là identity nỗ lực tối đa nên phải kiểm bằng asm[^bb-limits] (mục 6).
 
 </details>
 
 8. Vì sao `size_of::<Padded>() == 128` với `#[repr(align(128))] struct Padded(AtomicU64)`?
 <details><summary>Đáp án</summary>
 
-`align` nâng alignment[^repr-align]; kích thước luôn là bội của alignment[^size-align]; bội nhỏ nhất của 128 đủ chứa 8 byte là 128 (suy luận của người soạn, khớp kết quả đo).
+`align` nâng alignment[^repr-align]. Kích thước luôn là bội của alignment[^size-align]. Bội nhỏ nhất của 128 đủ chứa 8 byte là 128 (suy luận của người soạn, khớp kết quả đo).
 
 </details>
 
 9. Vì sao `get_unchecked` là `unsafe`, và bản `usize` của nó báo gì cho optimizer?
 <details><summary>Đáp án</summary>
 
-Gọi với chỉ số ngoài biên là UB, kể cả khi không dùng tham chiếu kết quả[^get-unchecked]. Mã nguồn 1.95.0 dùng `intrinsics::assume(self < slice.len())`[^gu-assume] để báo optimizer điều kiện luôn đúng; nếu sai thì hành vi undefined[^assume-doc] (mục 3).
+Gọi với chỉ số ngoài biên là UB, kể cả khi không dùng tham chiếu kết quả[^get-unchecked]. Mã nguồn 1.95.0 dùng `intrinsics::assume(self < slice.len())`[^gu-assume] để báo optimizer điều kiện luôn đúng. Nếu điều kiện sai thì hành vi undefined[^assume-doc] (mục 3).
 
 </details>
 
 10. Hai thread ghi hai `AtomicU64` riêng nhưng nằm cùng cache line. Vì sao chậm dù không chia sẻ dữ liệu, và sửa thế nào?
 <details><summary>Đáp án</summary>
 
-Cập nhật một atomic làm mất hiệu lực cả cache line chứa nó, nên lần truy cập kế tiếp của core khác chậm hơn[^cp-why]. Sửa bằng cách đặt mỗi biến trên line riêng: `#[repr(align(N))]` hoặc `CachePadded`[^cp-def]; đổi lại tốn bộ nhớ (mục 7).
+Cập nhật một atomic làm mất hiệu lực cả cache line chứa nó, nên lần truy cập kế tiếp của core khác chậm hơn[^cp-why]. Sửa bằng cách đặt mỗi biến trên line riêng: `#[repr(align(N))]` hoặc `CachePadded`[^cp-def]. Đổi lại tốn bộ nhớ (mục 7).
 
 </details>
 
 11. `#[target_feature(enable = "avx2")]` trên một hàm khác `-C target-feature=+avx2` ở đâu? Vì sao gọi hàm đó thường vẫn cần `unsafe`?
 <details><summary>Đáp án</summary>
 
-Cờ bật AVX2 cho cả chương trình, attribute chỉ bật cho một hàm[^arch-attr]. Hàm `#[target_feature]` an toàn chỉ được gọi an toàn từ caller đã bật mọi `target_feature` mà nó bật[^tf-safe]; nếu không thì phải `unsafe` và tự bảo đảm CPU có tính năng, thường bằng `is_x86_feature_detected!` ngay trước[^arch-dyn] (mục 4).
+Cờ bật AVX2 cho cả chương trình, còn attribute chỉ bật cho một hàm[^arch-attr]. Hàm `#[target_feature]` an toàn chỉ được gọi an toàn từ caller đã bật mọi `target_feature` mà nó bật[^tf-safe]. Nếu không thì phải `unsafe` và tự bảo đảm CPU có tính năng, thường bằng `is_x86_feature_detected!` ngay trước[^arch-dyn] (mục 4).
 
 </details>
 

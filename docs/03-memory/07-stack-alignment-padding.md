@@ -17,23 +17,27 @@
 - [P3 · Chương 05 — Bộ nhớ của tiến trình trên Linux](05-bo-nho-tien-trinh-linux.md): bố cục text/data/heap/mmap/stack, `/proc/self/maps` (mục 3).
 - Nên biết qua [P3 · Chương 04 — Page fault, demand paging và swapping](04-page-fault-va-swapping.md) (mục 2: demand paging, tức page chỉ được cấp khi bị chạm), và [P2 · Chương 06 — Cache hierarchy và NUMA](../02-cpu/06-cache-va-numa.md) (mục 2: cache line) cho phần cache line.
 
+Ví dụ chạy suốt chương là `ingest`, một service Rust giả định, giới thiệu ở mục 1.
+
 ## 1. Bối cảnh: stack giải quyết vấn đề gì
 
-Mỗi lời gọi hàm cần một chỗ cho biến cục bộ, tham số, giá trị trả về và địa chỉ quay lại. Stack giải quyết việc này mà không cần ai gọi allocator: compiler tự cấp và giải phóng, nên OSTEP gọi đó là "automatic memory"[^ostep-stackmem]. The Rust Book chỉ ra hệ quả về tốc độ: đẩy dữ liệu lên stack nhanh hơn cấp phát heap vì allocator không bao giờ phải đi tìm chỗ[^book-push-faster]. Cái giá là mọi dữ liệu trên stack phải có kích thước biết trước và cố định[^book-stack-fixed].
+*Với service `ingest`.* Hãy hình dung `ingest`, một service Rust nhận event từ client qua TCP rồi giao cho một pool worker thread xử lý. Event có hai dạng: JSON lồng nhau và frame nhị phân với header cố định. Ngoài ra service giữ vài triệu record trong RAM. Ta sẽ bám theo `ingest` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Các câu hỏi gom thành hai nhóm. Nhóm stack: worker gọi hàm lồng nhau thì dùng bao nhiêu chỗ, và hết chỗ thì chuyện gì xảy ra (mục 2–4 và 9). Nhóm layout: một record nằm trong bộ nhớ ra sao, và vì sao giữa các field có byte đệm (mục 5–8).
 
-Nhắc lại từ [chương 04 của phase P2 — Calling convention và stack frame](../02-cpu/04-calling-convention-va-stack-frame.md): mỗi lần gọi hàm tạo ra một **stack frame** — vùng nhỏ trên stack giữ dữ liệu của lần gọi đó — và khi hàm trả về, frame bị bỏ. Chi tiết frame gồm những gì (thanh ghi callee-saved, địa chỉ trả về, frame pointer…) phụ thuộc ABI của từng kiến trúc và thuộc chương đó; ở đây ta chỉ cần hai tính chất: (1) frame của lần gọi sâu hơn nằm *kề* frame của lần gọi cha, (2) tổng kích thước các frame đang sống chính là mức dùng stack hiện tại.
+Khi một worker parse event, nó gọi hàm này rồi hàm kia, và mỗi lần gọi cần chỗ cho biến cục bộ, tham số, giá trị trả về và địa chỉ quay lại. Stack lo chỗ đó mà không cần ai gọi allocator: compiler tự cấp rồi tự giải phóng, nên người ta còn gọi nó là "automatic memory"[^ostep-stackmem]. Vì allocator không phải đi tìm chỗ, đẩy dữ liệu lên stack nhanh hơn cấp phát trên heap[^book-push-faster]. Cái giá là dữ liệu trên stack phải có kích thước biết trước và cố định[^book-stack-fixed].
+
+Nhắc lại từ [chương 04 của phase P2 — Calling convention và stack frame](../02-cpu/04-calling-convention-va-stack-frame.md): mỗi lần gọi hàm tạo ra một **stack frame**, tức vùng nhỏ trên stack giữ dữ liệu của lần gọi đó, và khi hàm trả về thì frame bị bỏ. Frame gồm chính xác những gì (thanh ghi callee-saved, địa chỉ trả về, frame pointer…) tùy ABI của từng kiến trúc, nên đó là chuyện của chương kia. Ở đây ta chỉ cần hai tính chất: frame của lần gọi sâu hơn nằm *kề* frame của lần gọi cha, và tổng kích thước các frame đang sống chính là mức dùng stack hiện tại.
 
 ## 2. Hướng tăng của stack (Q1)
 
-> **Trả lời ngắn.** Hai nguồn của chương chỉ mô tả trường hợp "xuống" mà không hứa mọi máy đều thế: ví dụ trong sách OSTEP cho stack mọc về phía địa chỉ thấp[^ostep-seg-stack], và Linux có cờ `MAP_GROWSDOWN` cho vùng nhớ mở rộng xuống phía thấp[^mmap-growsdown]. Cách chắc chắn là tự đo: gọi hàm lồng nhau rồi so địa chỉ biến cục bộ ở tầng nông với tầng sâu; địa chỉ nhỏ đi nghĩa là stack mọc xuống.
+> **Trả lời ngắn.** Không nguồn nào của chương hứa mọi máy đều giống nhau, nên cách chắc chắn là tự đo: gọi hàm lồng nhau rồi so địa chỉ một biến cục bộ ở tầng nông với tầng sâu; địa chỉ nhỏ đi nghĩa là stack mọc xuống. Hai nguồn ta có đều mô tả trường hợp "xuống". Ví dụ trong sách OSTEP cho stack mọc về phía địa chỉ thấp[^ostep-seg-stack]. Linux thì có cờ `MAP_GROWSDOWN` cho vùng nhớ mở rộng xuống phía thấp[^mmap-growsdown].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): stack giống chồng đĩa, đĩa mới đặt lên trên cùng; câu hỏi chỉ là "trên cùng" ứng với địa chỉ lớn hay nhỏ.
+*Với `ingest`.* Parser JSON của `ingest` gọi đệ quy cho mỗi tầng lồng, và mỗi tầng thêm một frame kề frame của tầng cha (mục 1). Vậy frame mới nằm ở địa chỉ cao hơn hay thấp hơn frame cũ? Mục này trả lời bằng cách đo, không dựa vào một mô tả có sẵn.
 
-Phép đo gồm ba bước. (1) Một hàm đệ quy gọi chính nó; mỗi lần gọi tạo một frame mới nằm kề frame của lần gọi cha (mục 1). (2) Mỗi tầng ghi lại địa chỉ của một biến cục bộ; biến đó nằm trong frame của tầng ấy nên địa chỉ của nó đại diện cho vị trí frame. (3) So sánh: tầng gọi sau (sâu hơn) có địa chỉ nhỏ hơn thì stack mọc về phía thấp, lớn hơn thì mọc về phía cao. Thí nghiệm trong phần Đi sâu làm đúng ba bước này.
+Phép đo gồm ba bước. Bước một, viết một hàm đệ quy gọi chính nó; mỗi lần gọi tạo một frame mới nằm kề frame của lần gọi cha. Bước hai, mỗi tầng ghi lại địa chỉ của một biến cục bộ; biến đó nằm trong frame của tầng ấy nên địa chỉ của nó đại diện cho vị trí frame. Bước ba, so sánh: tầng gọi sau (sâu hơn) có địa chỉ nhỏ hơn thì stack mọc về phía thấp, lớn hơn thì mọc về phía cao. Thí nghiệm trong phần Đi sâu làm đúng ba bước này.
 
-Vì sao phải đo thay vì tin một mô tả? Trong mô hình segmentation của OSTEP, phần cứng cần thêm một bit cho mỗi segment để biết nó mọc theo chiều dương hay âm[^ostep-seg-growbit]; nghĩa là hướng mọc là một thuộc tính phải khai báo, không tự hiển nhiên (nhận xét của người soạn). Phía Linux, `MAP_GROWSDOWN` của `mmap(2)` được mô tả là dùng cho stack và báo cho hệ thống bộ nhớ ảo của kernel rằng mapping nên mở rộng xuống phía địa chỉ thấp[^mmap-growsdown]. Đó là hai mô tả riêng lẻ (một mô hình sách giáo khoa, một cờ mmap), không phải lời hứa "mọi kiến trúc đều thế".
+Vì sao phải đo mà không tin một mô tả có sẵn? Trong mô hình segmentation của OSTEP, phần cứng cần thêm một bit cho mỗi segment để biết nó mọc theo chiều dương hay chiều âm[^ostep-seg-growbit]. Nói cách khác, chiều mọc là một thuộc tính phải khai báo, không hiển nhiên (nhận xét của người soạn). Phía Linux, man page `mmap(2)` ghi rằng `MAP_GROWSDOWN` dùng cho stack và báo cho hệ thống bộ nhớ ảo của kernel rằng mapping nên mở rộng xuống phía địa chỉ thấp[^mmap-growsdown]. Đó là hai mô tả riêng lẻ, một mô hình trong sách giáo khoa và một cờ của mmap, chứ không phải lời hứa rằng kiến trúc nào cũng thế.
 
 <details><summary>Đi sâu: thí nghiệm đo hướng tăng bằng đệ quy</summary>
 
@@ -61,21 +65,29 @@ Biên dịch `rustc -C opt-level=0` rồi chạy trong container Linux aarch64 c
 
 ## 3. Stack của process và của thread (Q2)
 
-> **Trả lời ngắn.** Stack của main thread (thread đầu tiên của process) là một vùng nhớ của process[^proc-stack]; kích thước tối đa của nó bị giới hạn bởi `RLIMIT_STACK`, vượt quá thì kernel gửi tín hiệu lỗi bộ nhớ `SIGSEGV`[^rlimit-stack]. Mỗi thread con có stack riêng do thư viện luồng cấp lúc tạo thread; với glibc/NPTL, kích thước mặc định lấy từ `RLIMIT_STACK` lúc chương trình khởi động, hoặc do chương trình đặt tường minh[^pthread-default].
+> **Trả lời ngắn.** Main thread (thread đầu tiên của process) dùng một vùng stack nằm trong address space của process[^proc-stack]. Kích thước tối đa của nó bị `RLIMIT_STACK` chặn, và vượt trần thì kernel gửi tín hiệu lỗi bộ nhớ `SIGSEGV`[^rlimit-stack]. Mỗi thread con có stack riêng do thư viện luồng cấp lúc tạo thread. Với glibc/NPTL, khi soft limit `RLIMIT_STACK` lúc khởi động không phải "unlimited" thì nó quyết định kích thước mặc định của stack đó, còn chương trình cũng có thể đặt tường minh[^pthread-default].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): main thread như căn phòng có sẵn với hạn mức do hệ điều hành đặt; thread con như phòng thuê thêm, do bên cho thuê (thư viện luồng) cấp theo cỡ bạn chọn.
+*Với `ingest`.* `ingest` có hai loại thread: main thread nhận kết nối, và một pool worker do chương trình tạo ra để xử lý event. Stack của hai loại đến từ hai nơi khác nhau, nên giới hạn của chúng cũng khác nhau. Mục này trả lời: ai cấp stack cho từng loại, ai quyết định kích thước, và vì sao con số bộ nhớ mà container báo có thể lệch xa tổng stack bạn nghĩ mình đã khai.
 
-Stack của **main thread** là một vùng trong address space của process, thấy được trong `/proc/self/maps` dưới nhãn `[stack]`[^proc-stack] (xem [mục 3 chương 05](05-bo-nho-tien-trinh-linux.md)). Kích thước tối đa của nó bị giới hạn bởi resource limit `RLIMIT_STACK`: theo `getrlimit(2)`, đó là "the maximum size of the process stack, in bytes" và khi chạm giới hạn, kernel sinh tín hiệu `SIGSEGV`[^rlimit-stack]. Cũng theo man page, muốn xử lý tín hiệu này process phải dùng một *alternate signal stack* (`sigaltstack(2)`)[^rlimit-altstack] — man page `sigaltstack(2)` nói thẳng lý do: handler của `SIGSEGV` do hết chỗ stack thường không thể chạy trên stack thường, nên muốn bắt nó phải dùng alternate signal stack[^sigaltstack-why].
+### 3.1 Stack của main thread
 
-Giới hạn có hai mức: *soft* (`rlim_cur`, mức đang áp dụng) và *hard* (`rlim_max`, trần mà soft có thể nâng lên)[^rlimit-soft-hard]. Đọc nó bằng `getrlimit(RLIMIT_STACK, &r)`.
+Stack của main thread là một vùng trong address space của process; bạn thấy nó trong `/proc/self/maps` dưới nhãn `[stack]`[^proc-stack] (xem [mục 3 chương 05](05-bo-nho-tien-trinh-linux.md)). Kích thước tối đa của vùng này bị chặn bởi resource limit `RLIMIT_STACK`, tức kích thước tối đa của stack process tính bằng byte; chạm trần thì kernel sinh `SIGSEGV`[^rlimit-stack]. Muốn xử lý tín hiệu này, process phải dùng một *alternate signal stack* (`sigaltstack(2)`)[^rlimit-altstack]. Lý do là handler của `SIGSEGV` do hết chỗ stack thường không chạy được trên chính cái stack đã hết chỗ, nên muốn bắt nó thì phải có một stack riêng cho handler[^sigaltstack-why].
 
-Thread khác main thread: mỗi native thread có stack và trạng thái cục bộ riêng[^std-thread-model]. Stack của thread con do thư viện luồng (pthread) cấp lúc `pthread_create`; kích thước nằm trong *thuộc tính thread*, và `pthread_attr_setstacksize(3)` ghi rằng thuộc tính này xác định kích thước tối thiểu được cấp cho các thread tạo từ nó[^pthread-attr-stacksize]. Với glibc/NPTL, `pthread_create(3)` ghi thêm: nếu soft limit `RLIMIT_STACK` lúc chương trình khởi động có giá trị khác "unlimited" thì nó quyết định kích thước stack mặc định của thread mới, và có thể đặt tường minh qua `pthread_attr_setstacksize(3)`[^pthread-default]. Nếu limit là "unlimited", dùng một giá trị theo kiến trúc[^pthread-x86] (bảng trong man page liệt kê, chẳng hạn, x86_64 là 2 MB[^pthread-x86-table]).
+Giới hạn có hai mức: *soft* (`rlim_cur`) là mức đang áp dụng, còn *hard* (`rlim_max`) là trần mà soft có thể nâng lên[^rlimit-soft-hard]. Đọc nó bằng `getrlimit(RLIMIT_STACK, &r)`.
 
-Điều đó có hệ quả cho backend (nhận xét của người soạn): một thread pool 200 thread với stack 8 MiB mỗi thread *dành* 200 × 8 = 1600 MiB (khoảng 1,56 GiB) không gian địa chỉ ảo, nhưng chỉ phần đã chạm mới tốn RAM thật (demand paging — [mục 2 chương 04](04-page-fault-va-swapping.md)). Nên giới hạn "ảo" và "RSS" cần tách bạch khi đọc số liệu container.
+### 3.2 Stack của thread con
 
-<details><summary>Đi sâu: đo <code>RLIMIT_STACK</code>, mapping <code>[stack]</code> tăng dần, VmSize của 50 thread</summary>
+Thread con thì khác: mỗi native thread có stack và trạng thái cục bộ riêng[^std-thread-model]. Stack này do thư viện luồng (pthread) cấp lúc `pthread_create`, và kích thước nằm trong *thuộc tính thread*. Man page `pthread_attr_setstacksize(3)` ghi rằng thuộc tính đó xác định kích thước tối thiểu cấp cho các thread tạo từ nó[^pthread-attr-stacksize]. Khi chương trình không đặt gì, glibc/NPTL dùng `RLIMIT_STACK`: nếu soft limit lúc khởi động khác "unlimited" thì nó quyết định kích thước stack mặc định của thread mới, và chương trình vẫn đặt tường minh được qua `pthread_attr_setstacksize(3)`[^pthread-default]. Trường hợp limit là "unlimited" nằm ở phần Đi sâu cuối mục.
+
+### 3.3 Hệ quả cho `ingest`
+
+Giả sử pool của `ingest` có 200 worker, mỗi worker một stack 8 MiB. Tổng không gian địa chỉ ảo *dành sẵn* là 200 × 8 = 1600 MiB (khoảng 1,56 GiB), nhưng chỉ phần stack mà worker thực sự chạm tới mới tốn RAM thật nhờ demand paging ([mục 2 chương 04](04-page-fault-va-swapping.md)). Vì vậy khi đọc số liệu của container, phải tách con số "ảo" (VmSize) khỏi RSS (nhận xét của người soạn).
+
+<details><summary>Đi sâu: khi <code>RLIMIT_STACK</code> là unlimited, đo <code>RLIMIT_STACK</code>, mapping <code>[stack]</code> tăng dần, VmSize của 50 thread</summary>
+
+**Khi `RLIMIT_STACK` là unlimited.** Man page `pthread_create(3)` ghi rằng khi đó glibc dùng một giá trị theo kiến trúc[^pthread-x86]. Bảng trong man page liệt kê, chẳng hạn, x86_64 là 2 MB[^pthread-x86-table].
 
 **Thí nghiệm (đã chạy)** trong container Linux của repo: chương trình C gọi `getrlimit(RLIMIT_STACK)` in `cur=8388608 max=18446744073709551615` (tức soft 8 MiB, hard không giới hạn), và `ulimit -s` của shell in `8192` (đơn vị KiB). Sau `ulimit -s 1024`, cùng chương trình in `cur=1048576 max=1048576`: `ulimit -s` hạ cả soft lẫn hard. Đây là giá trị mặc định của container này, máy/distro/Kubernetes pod khác có thể khác.
 
@@ -85,21 +97,21 @@ Một quan sát bổ sung (cũng từ container, trên tiến trình `bash`): d�
 
 </details>
 
-**Quay lại Q2:** main thread bị chặn bởi `RLIMIT_STACK`; thread con có stack riêng do thư viện luồng cấp, nên "ảo" (VmSize) và RSS phải tách bạch khi đọc số liệu.
+**Quay lại Q2:** main thread bị `RLIMIT_STACK` chặn; thread con có stack riêng do thư viện luồng cấp, nên khi đọc số liệu phải tách "ảo" (VmSize) khỏi RSS.
 
 ## 4. Guard page và tràn stack (Q3)
 
-> **Trả lời ngắn.** Guard page là một vùng địa chỉ chương trình không được dùng, đặt ngay cuối stack[^pthread-guard]; stack mà lấn vào đó thì bị lỗi truy cập (tín hiệu `SIGSEGV`) ngay[^mmap-growsdown-guard], chứ không âm thầm ghi đè vùng nhớ kề bên (mục đích — nhận xét của người soạn). Rust std bắt tín hiệu đó, in thông báo tràn stack rồi dừng hẳn process (`abort`)[^std-guard][^std-handler-purpose]; vì đi đường `abort` nên không có panic nào để `catch_unwind` bắt lại[^std-rtabort-macro].
+> **Trả lời ngắn.** Guard page là một vùng địa chỉ chương trình không được dùng, đặt ngay cuối stack[^pthread-guard]. Stack lấn vào đó thì lỗi truy cập (tín hiệu `SIGSEGV`) nổ ngay[^mmap-growsdown-guard], thay vì âm thầm ghi đè vùng nhớ kề bên (đó là mục đích của guard page, nhận xét của người soạn). Rust std cài một signal handler bắt tín hiệu này[^std-guard]. Handler in thông báo tràn stack rồi `abort` cả process[^std-fault-in-guard]. Vì đây là `abort` chứ không phải panic, không có gì để `catch_unwind` bắt[^std-rtabort-macro].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): guard page như dải lan can đặt sát mép vực: chạm vào là có báo động, thay vì rơi xuống vùng nhớ của người khác.
+*Với `ingest`.* Parser JSON của worker đệ quy theo độ sâu của input, mà input do client gửi. Một client gửi mảng lồng hàng chục nghìn tầng thì mỗi tầng thêm một frame, và stack của worker cạn. Câu hỏi của mục này: stack cạn rồi thì chuyện gì xảy ra, và chuyện đó dừng ở một request hay kéo cả service xuống.
 
-**Vấn đề.** Nếu stack tràn qua đầu của nó, chương trình sẽ ghi đè lên bất cứ thứ gì nằm kề (một stack khác, heap, mapping khác) — lỗi âm thầm và nguy hiểm (nhận xét của người soạn). Giải pháp: đặt giữa stack và hàng xóm một vùng địa chỉ **không truy cập được**, để chạm vào là bị phần cứng/kernel báo lỗi ngay.
+**Vấn đề.** Nếu stack tràn qua đầu của nó, chương trình sẽ ghi đè lên bất cứ thứ gì nằm kề: một stack khác, heap hay một mapping khác. Đó là lỗi âm thầm và nguy hiểm (nhận xét của người soạn). Giải pháp là đặt giữa stack và hàng xóm một vùng địa chỉ **không truy cập được**, để chạm vào là phần cứng và kernel báo lỗi ngay.
 
-**Cơ chế ở mức pthread.** Với thread POSIX, nếu `guardsize` > 0 thì hệ thống cấp thêm một vùng ít nhất `guardsize` byte ở cuối stack làm *guard area*; nếu `guardsize` = 0 thì không có guard area; kích thước mặc định bằng page size của hệ thống[^pthread-guard].
+**Cơ chế ở mức pthread.** Với thread POSIX, nếu `guardsize` lớn hơn 0 thì hệ thống cấp thêm một vùng ít nhất `guardsize` byte ở cuối stack làm *guard area*; nếu `guardsize` bằng 0 thì thread không có guard area. Kích thước mặc định bằng page size của hệ thống[^pthread-guard].
 
-**Cơ chế ở mức mmap.** Với mapping `MAP_GROWSDOWN`, kernel dùng một "guard page" ngay dưới mapping: chạm vào nó khiến mapping nở thêm một page, lặp lại cho tới khi mapping sát tới mapping thấp kế tiếp, lúc đó chạm vào guard page sinh `SIGSEGV`[^mmap-growsdown-guard].
+**Cơ chế ở mức mmap.** Với mapping `MAP_GROWSDOWN`, kernel dùng một "guard page" ngay dưới mapping. Chạm vào nó thì mapping nở thêm một page, và việc này lặp lại cho tới khi mapping sát mapping thấp kế tiếp. Lúc đó chạm vào guard page sinh `SIGSEGV`[^mmap-growsdown-guard].
 
 ```mermaid
 flowchart TB
@@ -110,19 +122,19 @@ flowchart TB
   E --> F["rtabort!: process::abort()<br/>không chạy destructor"]
 ```
 
-Source `library/std/src/sys/pal/unix/stack_overflow.rs` cho thấy Rust không tự đo độ sâu stack; nó cài *signal handler* (hàm được gọi khi process nhận một tín hiệu) cho `SIGSEGV`/`SIGBUS`. Comment trong source nói rằng cuối stack của mỗi thread có guard page (trang không được map), nên thread nào chạy vào guard page sẽ kích hoạt handler này[^std-guard]. Mỗi lần handler chạy, nó đi qua các bước sau:
+Rust không tự đo độ sâu stack. Source `library/std/src/sys/pal/unix/stack_overflow.rs` cho thấy nó cài một *signal handler* (hàm được gọi khi process nhận một tín hiệu) cho `SIGSEGV` và `SIGBUS`. Comment trong source ghi rằng cuối stack của mỗi thread có guard page (trang không được map), nên thread nào chạy vào guard page sẽ kích hoạt handler này[^std-guard]. Mỗi lần handler chạy, nó làm ba việc:
 
 1. Lấy địa chỉ gây lỗi và so với khoảng guard page của thread hiện tại; nếu nằm trong đó thì in thông báo rồi `abort`[^std-fault-in-guard].
-2. Thông báo có dạng `thread '{name}' ... has overflowed its stack`, tiếp theo là `rtabort!("stack overflow")`[^std-rtabort-call]. Macro `rtabort!` in `fatal runtime error: ..., aborting` rồi gọi `crate::process::abort()`[^std-rtabort-macro].
-3. Nếu `SIGSEGV` không phải do guard page, handler gỡ chính nó (trả về `SIG_DFL`) rồi return để tín hiệu gốc được phát lại[^std-handler-unreg]. Đây là điểm khác với lỗi truy cập bộ nhớ thông thường: chỉ lỗi trúng guard page mới bị dán nhãn "stack overflow"; mọi `SIGSEGV` khác đi theo đường mặc định.
+2. Thông báo có dạng `thread '{name}' ... has overflowed its stack`, rồi `rtabort!("stack overflow")`[^std-rtabort-call]. Macro `rtabort!` in `fatal runtime error: ..., aborting` rồi gọi `crate::process::abort()`[^std-rtabort-macro].
+3. Nếu `SIGSEGV` không do guard page, handler gỡ chính nó (trả về `SIG_DFL`) rồi return để tín hiệu gốc được phát lại[^std-handler-unreg]. Đây là điểm khác với lỗi truy cập bộ nhớ thông thường: chỉ lỗi trúng guard page mới bị dán nhãn "stack overflow", còn mọi `SIGSEGV` khác đi theo đường mặc định.
 
-Vì sao `abort` thay vì để `SIGSEGV` đi tiếp: handler chỉ có mục đích in thông báo hữu ích[^std-handler-purpose], rồi `abort` để thoát với dấu hiệu crash, tránh một `SIGSEGV` dễ làm người dùng tưởng `unsafe` code truy cập con trỏ sai; source ghi rằng `SIGSEGV` do tràn stack là điều "dự kiến" và có định nghĩa rõ ràng[^std-handler-abort]. Và `abort` thì không chạy destructor nào, trên stack hiện tại lẫn stack của thread khác[^std-process-abort] — nên tràn stack **không phải panic có thể unwind**, `Drop` không chạy, `catch_unwind` không bắt được.
+Vì sao `abort` mà không để `SIGSEGV` đi tiếp? Handler chỉ tồn tại để in một thông báo hữu ích[^std-handler-purpose]. Sau đó nó `abort` để process thoát với dấu hiệu crash chứ không để lộ một `SIGSEGV` trần, vì `SIGSEGV` trần dễ làm người dùng tưởng `unsafe` code truy cập con trỏ sai: source ghi rằng `SIGSEGV` do tràn stack là điều "dự kiến" và có định nghĩa rõ ràng[^std-handler-abort]. Còn `abort` thì không chạy destructor nào, trên stack hiện tại lẫn stack của thread khác[^std-process-abort]. Vì vậy tràn stack **không phải panic có thể unwind**: `Drop` không chạy và `catch_unwind` không bắt được.
 
-Handler chạy trên **alternate signal stack** (`sigaltstack`), vì stack thường đã hết chỗ — std tự `mmap` một vùng riêng cho việc này và đặt guard page cho cả vùng đó (`get_stack` trong cùng file, dùng `mprotect(..., PROT_NONE)`)[^std-altstack-guard].
+Handler chạy trên **alternate signal stack** (`sigaltstack`), vì stack thường đã hết chỗ. Std tự `mmap` một vùng riêng cho việc này và đặt guard page cho cả vùng đó (hàm `get_stack` trong cùng file, dùng `mprotect(..., PROT_NONE)`)[^std-altstack-guard].
 
-**Hiểu lầm phổ biến.** "Stack overflow ném panic nên `catch_unwind` bắt được" — sai theo source ở trên: đường đi là `abort`, không unwind[^std-rtabort-macro][^std-process-abort].
+**Hiểu lầm phổ biến.** "Tràn stack ném panic nên `catch_unwind` bắt được." Sai theo source ở trên: đường đi là `abort`, không unwind[^std-rtabort-macro]. Và `abort` không chạy destructor nào[^std-process-abort].
 
-*Liên hệ backend (nhận xét của người soạn):* parser/serializer đệ quy trên input do client kiểm soát (JSON lồng sâu) là vector tràn stack kinh điển; vì tràn stack là `abort` toàn process, một request độc hại có thể hạ cả service. Đặt giới hạn độ sâu ở parser, đừng chỉ tăng stack.
+**Với `ingest` (nhận xét của người soạn).** Parser hay serializer đệ quy trên input do client kiểm soát (JSON lồng sâu) là vector tràn stack kinh điển. Vì tràn stack là `abort` cả process, một request độc hại có thể hạ cả service, kể cả các request của client khác đang chạy trên worker khác. Cách chặn là đặt giới hạn độ sâu ở parser, đừng chỉ tăng stack.
 
 <details><summary>Đi sâu: main thread trên Linux và thí nghiệm tràn stack</summary>
 
@@ -146,23 +158,31 @@ Handler chạy trên **alternate signal stack** (`sigaltstack`), vì stack thư�
 
 ## 5. Alignment: phần cứng muốn gì (Q4)
 
-> **Trả lời ngắn.** Alignment là quy tắc: giá trị có alignment n chỉ được đặt ở địa chỉ chia hết cho n[^ref-align]. Phần cứng quan tâm vì một lệnh đọc/ghi nhiều byte tại địa chỉ không chia hết cho kích thước của nó (gọi là unaligned access) có thể chạy chậm, phải nhờ exception sửa với giá hiệu năng lớn, không sửa được, hoặc thậm chí âm thầm truy cập sai chỗ, tùy kiến trúc[^kdoc-transparent][^kdoc-trap-fix][^kdoc-silent].
+> **Trả lời ngắn.** Alignment là quy tắc: giá trị có alignment n chỉ được đặt ở địa chỉ chia hết cho n[^ref-align]. Phần cứng quan tâm vì một lệnh đọc/ghi nhiều byte tại địa chỉ không chia hết cho kích thước của nó (gọi là *unaligned access*) cho kết quả khác nhau tùy kiến trúc. Có kiến trúc làm được nhưng chậm[^kdoc-transparent]. Có kiến trúc phát exception rồi sửa, với giá hiệu năng lớn[^kdoc-trap-fix]. Có kiến trúc còn âm thầm truy cập sai chỗ[^kdoc-silent].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như kệ có ô vừa khít từng cỡ hộp; hộp đặt vắt qua ranh giới hai ô thì lấy ra khó hơn.
+*Với `ingest`.* `ingest` đụng alignment ở hai chỗ. Một là struct record trong RAM: compiler tự lo cho field căn đúng (mục 6). Hai là frame nhị phân từ client: parser phải đọc số nguyên 4 byte ra từ một buffer byte, và ở đây chính ta, chứ không phải compiler, chọn địa chỉ để đọc (§5.3 và mục 8). Mục này nói alignment là gì và phần cứng phản ứng thế nào khi nó bị vi phạm.
 
-**Bước 1 — một truy cập là một lệnh máy.** Tài liệu kernel Linux đặt khái niệm ở mức lệnh máy: có những lệnh đọc hoặc ghi một số byte cố định từ/vào bộ nhớ, ví dụ `movb`, `movw`, `movl` trong assembly x86[^kdoc-machine-level].
+### 5.1 Một truy cập là một lệnh máy
 
-**Bước 2 — aligned hay unaligned.** Khi truy cập N byte, địa chỉ nền phải chia hết cho N: đó là *natural alignment*[^kdoc-natural]. Vi phạm (`addr % N != 0`) là unaligned access; ví dụ trong tài liệu: đọc 4 byte từ `0x10004` là ổn, từ `0x10005` thì không[^kdoc-unaligned-def]. Truy cập 1 byte không bao giờ unaligned vì mọi địa chỉ đều chia hết cho 1[^kdoc-byte]. Phía Rust, alignment của một kiểu cũng đo bằng byte, tối thiểu 1 và luôn là lũy thừa của 2[^ref-align-pow2].
+Tài liệu kernel Linux đặt khái niệm này ở mức lệnh máy: có những lệnh đọc hoặc ghi một số byte cố định từ hoặc vào bộ nhớ, ví dụ `movb`, `movw`, `movl` trong assembly x86[^kdoc-machine-level]. Alignment là quy tắc về địa chỉ mà các lệnh đó dùng.
 
-**Bước 3 — compiler giữ cho truy cập field luôn aligned.** Tài liệu kernel lấy ví dụ struct C gồm `u16`, `u32`, `u8`: nếu `field2` (4 byte) nằm ngay sau `field1` (2 byte) thì nó ở offset 2, không chia hết cho 4, nên compiler chèn 2 byte padding giữa hai field[^kdoc-compiler-pad]. Đó chính là padding của mục 6.
+### 5.2 Aligned và unaligned
 
-**Bước 4 — unaligned vẫn xảy ra khi ta tự tính địa chỉ.** Tài liệu liệt kê hai tình huống chính: ép con trỏ sang kiểu có độ dài khác[^kdoc-cast], và cộng/trừ con trỏ rồi truy cập ít nhất 2 byte[^kdoc-ptr-arith]. Parser đọc một số 4 byte từ buffer byte ở offset lẻ là ví dụ điển hình (nhận xét của người soạn; cách đọc an toàn ở mục 8).
+Khi truy cập N byte, địa chỉ nền phải chia hết cho N; đó là *natural alignment*[^kdoc-natural]. Vi phạm (`addr % N != 0`) là unaligned access. Ví dụ trong tài liệu: đọc 4 byte từ `0x10004` thì ổn, từ `0x10005` thì không[^kdoc-unaligned-def]. Truy cập 1 byte không bao giờ unaligned, vì mọi địa chỉ đều chia hết cho 1[^kdoc-byte]. Phía Rust, alignment của một kiểu cũng đo bằng byte, tối thiểu 1 và luôn là lũy thừa của 2[^ref-align-pow2].
 
-**Bước 5 — phần cứng xử lý theo bốn kiểu, tùy kiến trúc.** Theo tài liệu kernel, có kiến trúc: (a) làm được một cách trong suốt nhưng thường chậm đáng kể[^kdoc-transparent]; (b) phát processor exception (ngoại lệ do CPU báo) và handler sửa được truy cập, với giá hiệu năng lớn[^kdoc-trap-fix]; (c) phát exception nhưng thông tin không đủ để sửa[^kdoc-trap-nofix]; (d) không làm được và âm thầm thực hiện một truy cập khác với yêu cầu, gây lỗi khó phát hiện[^kdoc-silent]. Tài liệu cũng nhấn mạnh rằng thực tế chỉ vài kiến trúc đòi natural alignment cho mọi kích thước truy cập, nhưng code phải tính đến *mọi* kiến trúc được hỗ trợ[^kdoc-few-arch].
+### 5.3 Compiler giữ field aligned, còn con trỏ tự tính thì không
 
-Lý do vật lý của chi phí (suy luận của người soạn, không có nguồn ở đây): một lần đọc rộng có thể bắc qua ranh giới cache line — xem [mục 2 của chương P2·06 — Cache hierarchy và NUMA](../02-cpu/06-cache-va-numa.md).
+Với field của struct, compiler lo việc này. Tài liệu kernel lấy ví dụ struct C gồm `u16`, `u32`, `u8`: nếu `field2` (4 byte) nằm ngay sau `field1` (2 byte) thì nó ở offset 2, không chia hết cho 4, nên compiler chèn 2 byte padding giữa hai field[^kdoc-compiler-pad]. Đó chính là padding của mục 6.
+
+Unaligned vẫn xảy ra khi ta tự tính địa chỉ. Tài liệu kể hai tình huống chính. Một là ép con trỏ sang kiểu có độ dài khác[^kdoc-cast]. Hai là cộng hoặc trừ con trỏ rồi truy cập ít nhất 2 byte[^kdoc-ptr-arith]. Với `ingest`, parser đọc một số 4 byte từ buffer byte ở offset lẻ là ví dụ điển hình (nhận xét của người soạn; cách đọc an toàn ở mục 8).
+
+### 5.4 Phần cứng xử lý theo bốn kiểu
+
+Tài liệu kernel chia thành bốn kiểu, tùy kiến trúc. Kiểu (a) làm được một cách trong suốt nhưng thường chậm đáng kể[^kdoc-transparent]. Kiểu (b) phát processor exception (ngoại lệ do CPU báo), và handler sửa được truy cập với giá hiệu năng lớn[^kdoc-trap-fix]. Kiểu (c) cũng phát exception nhưng thông tin không đủ để sửa[^kdoc-trap-nofix]. Kiểu (d) không làm được và âm thầm thực hiện một truy cập khác với yêu cầu, gây lỗi khó phát hiện[^kdoc-silent]. Thực tế chỉ vài kiến trúc đòi natural alignment cho mọi kích thước truy cập, nhưng code phải tính đến *mọi* kiến trúc được hỗ trợ[^kdoc-few-arch].
+
+Còn vì sao chi phí có thật? Lý do vật lý (suy luận của người soạn, không có nguồn ở đây): một lần đọc rộng có thể bắc qua ranh giới cache line; xem [mục 2 của chương P2·06 — Cache hierarchy và NUMA](../02-cpu/06-cache-va-numa.md).
 
 <details><summary>Đi sâu: alignment của allocator, <code>Layout</code> và size của kiểu</summary>
 
@@ -178,15 +198,15 @@ Hệ quả quan trọng của bullet cuối: vì size là bội của alignment,
 
 ## 6. Padding trong struct và cách tính (Q5)
 
-> **Trả lời ngắn.** Padding là các byte đệm do compiler chèn giữa các field (để field sau bắt đầu ở địa chỉ đúng alignment) và ở cuối struct (để size là bội của alignment)[^ref-c-algo][^sizeof-pad]. Tính tay theo thuật toán của `repr(C)` (cách bố trí field đúng thứ tự khai báo): căn offset, đặt field, cộng size, cuối cùng làm tròn size.
+> **Trả lời ngắn.** Padding là các byte đệm compiler chèn vào struct ở hai chỗ. Giữa các field, để field sau bắt đầu ở địa chỉ đúng alignment[^sizeof-pad]. Ở cuối struct, để size là bội của alignment[^ref-c-algo]. Tính tay theo thuật toán của `repr(C)` (cách bố trí field đúng thứ tự khai báo): căn offset, đặt field, cộng size, cuối cùng làm tròn size.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như xếp hành lý vào các ngăn có kích thước cố định; món nhỏ đặt trước món lớn thì để trống phần còn lại của ngăn.
+*Với `ingest`.* Mỗi record `ingest` giữ trong RAM là một struct gồm vài field có kích thước khác nhau (cờ trạng thái, id, loại, cổng, timestamp). Vài triệu record nhân với số byte đệm trong mỗi cái là một con số đáng kể (mục 7). Mục này cho bạn cách tính tay xem padding nằm ở đâu và bao nhiêu byte.
 
-Reference định nghĩa layout `repr(C)` bằng một thuật toán[^ref-c-algo] gồm các bước sau. Bắt đầu offset hiện tại = 0; với mỗi field theo thứ tự khai báo, nếu offset chưa là bội của alignment của field thì thêm byte padding cho tới khi là bội; đó là offset của field; rồi cộng size của field vào offset. Cuối cùng size của struct là offset hiện tại làm tròn lên bội của alignment của struct. Alignment của struct là alignment lớn nhất trong các field[^ref-c-align].
+Thuật toán layout của `repr(C)` đi như sau. Bắt đầu với offset hiện tại bằng 0. Với mỗi field theo thứ tự khai báo, nếu offset chưa là bội của alignment của field thì thêm byte padding cho tới khi là bội; đó là offset của field, rồi cộng size của field vào offset. Cuối cùng, size của struct là offset hiện tại làm tròn lên bội của alignment của struct[^ref-c-algo]. Còn alignment của struct là alignment lớn nhất trong các field[^ref-c-align].
 
-Padding sinh ra ở hai nơi vì hai lý do khác nhau. Giữa field: để offset của field kế tiếp chia hết cho alignment của nó — `std::mem::size_of` mô tả cùng quy tắc, làm tròn size hiện tại lên bội alignment của field kế tiếp[^sizeof-pad]. Ở cuối struct: `size_of` là khoảng cách byte giữa hai phần tử liên tiếp của mảng[^sizeof], và Reference nói size luôn là bội của alignment[^ref-size]; nếu không đệm cuối thì phần tử thứ hai của mảng sẽ rơi vào địa chỉ không chia hết cho alignment của struct (suy ra từ hai định nghĩa trên).
+Padding sinh ra ở hai nơi vì hai lý do khác nhau. Giữa các field, nó để offset của field kế tiếp chia hết cho alignment của nó; `std::mem::size_of` mô tả cùng quy tắc, là làm tròn size hiện tại lên bội alignment của field kế tiếp[^sizeof-pad]. Ở cuối struct, lý do đến từ mảng: `size_of` là khoảng cách byte giữa hai phần tử liên tiếp của mảng[^sizeof]. Mặt khác size luôn là bội của alignment[^ref-size]. Nếu không đệm cuối thì phần tử thứ hai của mảng sẽ rơi vào địa chỉ không chia hết cho alignment của struct (suy ra từ hai định nghĩa trên).
 
 ```mermaid
 flowchart LR
@@ -236,21 +256,21 @@ Tổng padding = 3 + 1 + 4 = 8 byte trên 24 byte, tức một phần ba.
 
 ## 7. Sắp xếp field và `repr(Rust)` (Q6)
 
-> **Trả lời ngắn.** Với `repr(C)`, xếp field theo alignment giảm dần thường bỏ được padding giữa field (struct `C` trong thí nghiệm giảm từ 24 xuống 16 byte). Với `repr(Rust)` (biểu diễn mặc định), Reference cho phép compiler tự đổi thứ tự field[^ref-rust-order] và chỉ bảo đảm những gì cần cho tính đúng đắn của code an toàn, chẳng hạn field căn đúng và không chồng nhau[^ref-rust-guar].
+> **Trả lời ngắn.** Với `repr(C)`, xếp field theo alignment giảm dần thường bỏ được padding giữa field (struct `C` trong thí nghiệm giảm từ 24 xuống 16 byte). Với `repr(Rust)`, biểu diễn mặc định, Reference cho phép compiler tự đổi thứ tự field[^ref-rust-order]. Reference chỉ bảo đảm những gì cần cho tính đúng đắn của code an toàn, chẳng hạn field căn đúng và không chồng nhau[^ref-rust-guar].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như xếp vali vào cốp xe: xếp món to trước thì ít khoảng trống hơn; câu hỏi là ai được quyền xếp, bạn hay compiler.
+*Với `ingest`.* Giả sử `ingest` giữ vài triệu record dạng struct `C` ở mục 6, mỗi record 24 byte mà 8 byte là padding. Có hai câu hỏi: tự xếp lại field để bỏ padding có đáng không, và nếu không làm gì thì compiler có tự xếp giúp không?
 
-Quy tắc kinh nghiệm: xếp field theo alignment giảm dần. Với `repr(C)`, thứ tự khai báo là thứ tự layout, nên việc sắp xếp là của người viết. Cùng các field của `C` nhưng khai báo `{ e: u64, b: u32, d: u16, a: u8, c: u8 }` (đặt tên `D`): chạy thật cho `size 16, align 8`, offset `e0 b8 d12 a14 c15`. Không còn padding giữa field, vì mỗi field bắt đầu đúng ở bội alignment của nó; tổng 8+4+2+1+1 = 16 vốn đã là bội của 8.
+Quy tắc kinh nghiệm là xếp field theo alignment giảm dần. Với `repr(C)`, thứ tự khai báo chính là thứ tự layout, nên việc sắp xếp thuộc về người viết. Lấy các field của `C` nhưng khai báo lại `{ e: u64, b: u32, d: u16, a: u8, c: u8 }` (đặt tên `D`). Chạy thật cho `size 16, align 8`, offset `e0 b8 d12 a14 c15`. Không còn padding giữa field, vì mỗi field bắt đầu đúng ở bội alignment của nó; tổng 8+4+2+1+1 = 16 vốn đã là bội của 8.
 
-Tiết kiệm 8 byte/struct (24 → 16). Ví dụ số học (không đo): mảng một triệu phần tử `C` chiếm 24 MB, `D` chiếm 16 MB. 
+Mỗi struct tiết kiệm 8 byte (24 → 16). Tính số học, không đo: mảng một triệu record `C` chiếm 24 MB, còn `D` chiếm 16 MB.
 
-**Trade-off (nhận xét của người soạn).** Sắp xếp theo alignment có thể phá nhóm field đi chung (hot/cold); với `repr(C)` dùng cho FFI, thứ tự do ABI phía bên kia quy định. Chỉ tối ưu khi struct xuất hiện hàng triệu lần hoặc nằm trên đường nóng.
+**Đánh đổi (nhận xét của người soạn).** Sắp xếp theo alignment có thể phá nhóm field hay dùng chung (hot/cold). Với `repr(C)` dùng cho FFI thì thứ tự do ABI phía bên kia quy định. Vì vậy chỉ tối ưu khi struct xuất hiện hàng triệu lần hoặc nằm trên đường nóng.
 
 **`repr(Rust)` được phép sắp xếp lại field.**
 
-Biểu diễn mặc định (không có attribute `repr`) hứa rất ít. Reference: các bảo đảm duy nhất là những cái cần cho tính đúng đắn (soundness): các field căn đúng, không chồng lấn, và alignment của kiểu ít nhất bằng alignment lớn nhất của các field[^ref-rust-guar][^ref-rust-guar-list]. Về thứ tự, Reference nói rõ thứ tự layout của field không nhất thiết trùng thứ tự khai báo[^ref-rust-order], và biểu diễn này không đưa ra bảo đảm layout nào khác[^ref-rust-unspec]. Tuple cũng dùng biểu diễn Rust[^ref-tuple].
+Biểu diễn mặc định (không có attribute `repr`) hứa rất ít. Các bảo đảm duy nhất là những gì cần cho tính đúng đắn (soundness): field căn đúng, không chồng lấn, và alignment của kiểu ít nhất bằng alignment lớn nhất của các field[^ref-rust-guar-list]. Về thứ tự, thứ tự layout của field không nhất thiết trùng thứ tự khai báo[^ref-rust-order]. Biểu diễn này không đưa ra bảo đảm layout nào khác[^ref-rust-unspec]. Tuple cũng dùng biểu diễn Rust[^ref-tuple].
 
 **Quan sát (không phải bảo đảm).** Struct `R { a: u8, b: u32, c: u8, d: u16, e: u64 }` — cùng thứ tự field với `C` nhưng không có `repr(C)`. Chạy thật bằng `rustc 1.95.0` trên aarch64 cho `size 16, align 8`, offset `a14 b8 c15 d12 e0`: compiler đã tự sắp xếp thành chính thứ tự "alignment giảm dần" ở trên. Tuple `(u8, u32, u8)` cho `size_of` = 8 trên cùng máy. Reference không hứa điều này; bản compiler khác có thể khác. Việc phải làm: không dựa vào offset của `repr(Rust)`; cần layout xác định (FFI, đọc/ghi file nhị phân, `unsafe` ép kiểu con trỏ) thì dùng `repr(C)`.
 
@@ -272,18 +292,18 @@ Chi tiết về `repr(transparent)`, niche và ZST trong layout (đọc từ Ref
 
 ## 8. Liên hệ với Rust: API để đo layout và đọc dữ liệu không căn (Q7)
 
-> **Trả lời ngắn.** Hỏi thẳng compiler bằng `size_of`, `align_of`, `offset_of!` và `Layout` thay vì đoán[^sizeof][^alignof][^offset-of][^layout]. Dữ liệu không căn thì đọc bằng `ptr::read_unaligned`, không deref con trỏ lệch[^read-unaligned].
+> **Trả lời ngắn.** `size_of`, `align_of`, `offset_of!` và `Layout` cho phép hỏi thẳng compiler thay vì đoán layout. Dữ liệu không căn thì đọc bằng `ptr::read_unaligned`, đừng deref con trỏ lệch[^read-unaligned].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như dùng thước đo thay vì ước lượng bằng mắt; các hàm dưới đây là các loại thước.
+*Với `ingest`.* Chương này để lại cho `ingest` hai thói quen. Thứ nhất, muốn biết một record chiếm bao nhiêu byte thì hỏi compiler bằng bốn công cụ dưới đây, đừng tự nhẩm. Thứ hai, khi parse frame nhị phân từ buffer byte của client thì đừng ép con trỏ sang `*const u32`.
 
-- `size_of::<T>()`: khoảng cách tính bằng byte giữa các phần tử liên tiếp của một mảng kiểu đó, đã gồm padding căn lề[^sizeof].
-- `align_of::<T>()`: alignment tối thiểu mà ABI yêu cầu cho kiểu, tính bằng byte[^alignof].
-- `offset_of!(Type, field)`: offset tính bằng byte của một field so với đầu kiểu đã cho[^offset-of], trả về `usize`[^offset-of-usize]. `Type` có thể là struct, enum, union hoặc tuple[^offset-of-types], nên dùng được cả với `repr(Rust)`: nó cho biết layout compiler chọn, nhưng đó là giá trị của lần biên dịch này vì Reference không bảo đảm layout đó (suy luận của người soạn).
-- `Layout` gồm size và alignment lũy thừa 2[^layout]. `Layout::extend(next)` trả `(layout, offset)` của `next` (bọc trong `Result`), có chèn padding để `next` căn đúng nhưng **không** có padding cuối[^layout-extend-pad]; để khớp `repr(C)` phải gọi thêm `pad_to_align` sau khi `extend` tất cả field[^layout-extend]. `pad_to_align` làm tròn size lên bội của alignment[^layout-pad]. Doc cũng nói thẳng: không có cách khớp layout `repr(Rust)` vì nó unspecified[^layout-extend].
+- `size_of::<T>()` cho khoảng cách tính bằng byte giữa các phần tử liên tiếp của một mảng kiểu đó, đã gồm padding căn lề[^sizeof].
+- `align_of::<T>()` cho alignment tối thiểu mà ABI yêu cầu cho kiểu, tính bằng byte[^alignof].
+- `offset_of!(Type, field)` cho offset tính bằng byte của một field so với đầu kiểu đã cho[^offset-of]. Nó trả về `usize`[^offset-of-usize]. `Type` có thể là struct, enum, union hoặc tuple[^offset-of-types], nên dùng được cả với `repr(Rust)`. Khi đó nó cho biết layout compiler chọn, nhưng đó chỉ là giá trị của lần biên dịch này vì Reference không bảo đảm layout đó (suy luận của người soạn).
+- `Layout` gồm size và alignment lũy thừa 2[^layout]. `Layout::extend(next)` trả `(layout, offset)` của `next` (bọc trong `Result`), có chèn padding để `next` căn đúng nhưng **không** có padding cuối[^layout-extend-pad]. Để khớp `repr(C)`, phải gọi thêm `pad_to_align` sau khi `extend` tất cả field[^layout-extend]. `pad_to_align` làm tròn size lên bội của alignment[^layout-pad]. Doc cũng nói thẳng: không có cách khớp layout `repr(Rust)` vì nó unspecified[^layout-extend].
 
-Parser giao thức nhị phân đọc header từ buffer `&[u8]` (không đảm bảo căn) nên dùng `u32::from_le_bytes(...)` (dựng số nguyên từ mảng byte little endian, không cần con trỏ căn[^u32-from-le]) hoặc `read_unaligned`, đừng ép con trỏ (nhận xét của người soạn).
+Với parser frame nhị phân của `ingest`, buffer là `&[u8]` nên không bảo đảm căn. Hãy dựng số nguyên bằng `u32::from_le_bytes(...)` (dựng số từ mảng byte little endian, không cần con trỏ căn[^u32-from-le]) hoặc `read_unaligned`, đừng ép con trỏ (nhận xét của người soạn).
 
 <details><summary>Đi sâu: kết quả chạy thật và <code>read_unaligned</code></summary>
 
@@ -297,17 +317,17 @@ Chạy thật: `Layout::new::<C>()` in `Layout { size: 24, align: 8 (1 << 3) }`;
 
 ## 9. Chỉnh stack của thread con: `Builder::stack_size` và `RUST_MIN_STACK` (Q8)
 
-> **Trả lời ngắn.** Đổi kích thước stack của thread con bằng `thread::Builder::stack_size` hoặc biến môi trường `RUST_MIN_STACK`; nếu có cả hai thì `Builder::stack_size` thắng[^std-thread-stack]. Stack của main thread không do Rust quyết định[^std-thread-main].
+> **Trả lời ngắn.** Đổi kích thước stack của thread con bằng `thread::Builder::stack_size` hoặc biến môi trường `RUST_MIN_STACK`; nếu có cả hai thì `Builder::stack_size` thắng[^std-thread-stack]. Stack của main thread thì không do Rust quyết định[^std-thread-main].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như xin bàn làm việc cho từng nhân viên mới: mặc định cỡ vừa, ai cần bàn to thì xin riêng.
+*Với `ingest`.* Pool worker của `ingest` chủ yếu chạy việc nhẹ, nhưng có thể một nhóm riêng parse JSON lồng sâu và cần stack lớn hơn. Mục này cho thấy cách chỉnh stack cho riêng nhóm đó, thay vì tăng cho cả pool.
 
-Chọn stack cho thread con là chọn *một con số* trước khi thread được tạo, theo thứ tự ưu tiên sau. (1) Nếu gọi `Builder::stack_size(n)` thì giá trị này thắng mọi thứ khác[^std-thread-stack]. (2) Nếu không, dùng biến môi trường `RUST_MIN_STACK` (số byte) khi nó được đặt[^std-thread-stack]. (3) Nếu không có cả hai, dùng mặc định của nền tảng: docs nói giá trị này phụ thuộc nền tảng, có thể đổi, và hiện là 2 MiB trên mọi nền tảng Tier-1[^std-thread-2mib].
+Chọn stack cho thread con là chọn *một con số* trước khi thread được tạo, theo thứ tự ưu tiên sau. Một, nếu gọi `Builder::stack_size(n)` thì giá trị này thắng mọi thứ khác[^std-thread-stack]. Hai, nếu không thì dùng biến môi trường `RUST_MIN_STACK` (số byte) khi nó được đặt[^std-thread-stack]. Ba, nếu không có cả hai thì dùng mặc định của nền tảng: docs ghi giá trị này phụ thuộc nền tảng, có thể đổi, và hiện là 2 MiB trên mọi nền tảng Tier-1[^std-thread-2mib].
 
-Doc cảnh báo thay đổi `RUST_MIN_STACK` có thể bị bỏ qua sau khi chương trình đã khởi động[^std-thread-stack-late]. Doc không nêu cơ chế; đọc source 1.95.0 thì thấy giá trị đọc từ biến môi trường được lưu vào một biến `static` sau lần đọc đầu và các lần spawn sau dùng lại bản lưu[^std-min-cache] (suy luận của người soạn từ source). Stack của main thread thì không do Rust quyết định[^std-thread-main] (nó do hệ điều hành/`RLIMIT_STACK` — mục 3).
+Docs cảnh báo rằng thay đổi `RUST_MIN_STACK` có thể bị bỏ qua sau khi chương trình đã khởi động[^std-thread-stack-late]. Docs không nêu cơ chế. Đọc source 1.95.0 thì thấy giá trị đọc từ biến môi trường được lưu vào một biến `static` sau lần đọc đầu, và các lần spawn sau dùng lại bản lưu[^std-min-cache] (suy luận của người soạn từ source). Còn stack của main thread thì không do Rust quyết định[^std-thread-main]; nó do hệ điều hành và `RLIMIT_STACK` (mục 3).
 
-*Liên hệ backend (nhận xét của người soạn):* stack to cho mọi worker nhân với số worker thành chi phí không gian địa chỉ ảo; chỉ tăng cho thread thực sự đệ quy sâu, tách riêng bằng `Builder`.
+**Với `ingest` (nhận xét của người soạn).** Stack to cho mọi worker nhân với số worker thành chi phí không gian địa chỉ ảo (mục 3). Vì vậy chỉ tăng stack cho thread thực sự đệ quy sâu, tách riêng bằng `Builder`.
 
 <details><summary>Đi sâu: giá trị mặc định trong source, ví dụ <code>Builder</code> và đặt tên thread</summary>
 
@@ -343,21 +363,21 @@ let h = thread::Builder::new()
 1. Hai thread trong cùng một process Rust: stack của chúng đến từ đâu, và ai quyết định kích thước từng cái?
 <details><summary>Đáp án</summary>
 
-Main thread: do OS, trần là <code>RLIMIT_STACK</code> (mục 3)[^rlimit-stack]; Rust không quyết định[^std-thread-main]. Thread con: mỗi native thread có stack riêng[^std-thread-model]; kích thước đặt qua <code>Builder::stack_size</code> hoặc <code>RUST_MIN_STACK</code>[^std-thread-stack].
+Main thread: stack do OS cấp, trần là `RLIMIT_STACK` (mục 3)[^rlimit-stack]. Rust không quyết định stack của nó[^std-thread-main]. Thread con: mỗi native thread có stack riêng[^std-thread-model]. Kích thước đặt qua `Builder::stack_size` hoặc `RUST_MIN_STACK`[^std-thread-stack].
 
 </details>
 
 2. Chạm <code>RLIMIT_STACK</code> thì kernel làm gì, và vì sao muốn bắt tín hiệu cần <code>sigaltstack</code>?
 <details><summary>Đáp án</summary>
 
-Gửi <code>SIGSEGV</code>[^rlimit-stack]; handler phải chạy trên alternate signal stack[^rlimit-altstack] vì stack thường đã hết chỗ, <code>sigaltstack(2)</code> nói thẳng như vậy[^sigaltstack-why]. Rust std làm đúng vậy[^std-altstack-guard].
+Gửi `SIGSEGV`[^rlimit-stack]. Handler phải chạy trên alternate signal stack[^rlimit-altstack]. Lý do là stack thường đã hết chỗ, và `sigaltstack(2)` nói thẳng như vậy[^sigaltstack-why]. Rust std làm đúng vậy[^std-altstack-guard].
 
 </details>
 
 3. Tràn stack trong một thread con của chương trình Rust có thể bị <code>catch_unwind</code> bắt không? Hậu quả với process?
 <details><summary>Đáp án</summary>
 
-Không. Handler gọi <code>rtabort!</code> → <code>process::abort()</code>[^std-rtabort-call][^std-rtabort-macro], không chạy destructor nào[^std-process-abort]. Thí nghiệm: tràn ở thread con → exit 134 cho cả process.
+Không. Handler gọi `rtabort!("stack overflow")`[^std-rtabort-call]. Macro này gọi `process::abort()`[^std-rtabort-macro]. Abort không chạy destructor nào[^std-process-abort]. Thí nghiệm: tràn ở thread con → exit 134 cho cả process.
 
 </details>
 
@@ -378,28 +398,28 @@ Theo thuật toán[^ref-c-algo], a@0, b@2 (1 byte padding), c@4, d@8 (3 byte pad
 6. Vì sao đảo thứ tự <code>A { a: u8, b: u64 }</code> thành <code>B { b: u64, a: u8 }</code> không giảm size?
 <details><summary>Đáp án</summary>
 
-Size phải là bội của alignment struct (8)[^ref-c-algo][^ref-size]; padding chỉ chuyển từ giữa xuống cuối: cả hai 16 byte (mục 6).
+Size của struct phải là bội của alignment của nó (8)[^ref-size]. Thuật toán `repr(C)` làm tròn size cuối cùng lên bội đó[^ref-c-algo]. Vì vậy padding chỉ chuyển từ giữa xuống cuối: cả hai 16 byte (mục 6).
 
 </details>
 
 7. Rust có hứa <code>struct { a: u8, b: u32 }</code> (không <code>repr</code>) đặt <code>a</code> trước <code>b</code> không?
 <details><summary>Đáp án</summary>
 
-Không. Chỉ hứa các bảo đảm soundness; thứ tự có thể khác khai báo[^ref-rust-guar][^ref-rust-order][^ref-rust-unspec]. Cần layout xác định → <code>repr(C)</code>.
+Không. Chỉ có các bảo đảm về soundness[^ref-rust-guar]. Thứ tự có thể khác khai báo[^ref-rust-order]. Ngoài ra không có bảo đảm layout nào khác[^ref-rust-unspec]. Cần layout xác định → `repr(C)`.
 
 </details>
 
 8. Truy cập unaligned: nó luôn crash không?
 <details><summary>Đáp án</summary>
 
-Không; phần cứng khác nhau: có nơi làm trong suốt nhưng chậm, có nơi trap rồi sửa với giá cao, có nơi không sửa được[^kdoc-transparent][^kdoc-trap-fix]. Trong Rust, deref con trỏ lệch là UB[^ref-ub-misaligned], dùng <code>read_unaligned</code>[^read-unaligned].
+Không; mỗi phần cứng một kiểu. Có nơi làm trong suốt nhưng chậm[^kdoc-transparent]. Có nơi trap rồi sửa với giá cao[^kdoc-trap-fix]. Có nơi không sửa được. Trong Rust, deref con trỏ lệch là UB[^ref-ub-misaligned]. Vì vậy nên dùng `read_unaligned`[^read-unaligned].
 
 </details>
 
 9. <code>Layout::extend</code> có cho layout giống <code>repr(C)</code> không?
 <details><summary>Đáp án</summary>
 
-Chỉ khi gọi thêm <code>pad_to_align</code> sau khi extend mọi field vì <code>extend</code> không thêm padding cuối[^layout-extend][^layout-pad].
+Chỉ khi gọi thêm `pad_to_align` sau khi extend mọi field[^layout-extend]. Lý do: `extend` không thêm padding cuối, còn `pad_to_align` làm tròn size lên bội của alignment[^layout-pad].
 
 </details>
 

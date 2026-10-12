@@ -12,124 +12,147 @@
 
 ## Kiến thức cần trước
 
-Chương mở đầu của phase Networking nên không cần chương mạng nào trước; chỉ cần khái niệm syscall và socket ở mức người dùng ([P1 — Linux](../01-linux/00-tong-quan.md)). Các chương sau đào sâu từng tầng: [02-link-layer](02-link-layer.md), [03-ip](03-ip.md), [04-udp-va-tcp-co-ban](04-udp-va-tcp-co-ban.md), [05-tcp-reliability-va-flow-control](05-tcp-reliability-va-flow-control.md), [06-congestion-control](06-congestion-control.md), [07-socket-va-kernel](07-socket-va-kernel.md), [08-dns-http-tls](08-dns-http-tls.md).
+Đây là chương mở đầu của phase Networking nên không cần chương mạng nào trước. Bạn chỉ cần biết syscall và socket ở mức người dùng, tức là đã từng `bind`/`accept`/`read` trên một socket ([P1 — Linux](../01-linux/00-tong-quan.md)). Các chương sau đào sâu từng tầng: [02-link-layer](02-link-layer.md), [03-ip](03-ip.md), [04-udp-va-tcp-co-ban](04-udp-va-tcp-co-ban.md), [05-tcp-reliability-va-flow-control](05-tcp-reliability-va-flow-control.md), [06-congestion-control](06-congestion-control.md), [07-socket-va-kernel](07-socket-va-kernel.md), [08-dns-http-tls](08-dns-http-tls.md).
+
+Cả chương bám theo một tình huống quen thuộc của backend: service `orders` viết bằng Rust, mỗi lần khách đặt hàng lại gọi service `payments` bằng một HTTP request `POST /charge` để trừ tiền. Mỗi mục sẽ hỏi: request đó đi qua chỗ nào, và `orders` cần biết gì về chuyện ấy.
 
 ---
 
 ## 1. Vì sao phải phân tầng (Q1)
 
-> **Trả lời ngắn.** Phân tầng là cách giấu chi tiết cài đặt sau một interface rõ ràng để quản lý độ phức tạp[^sa-abstraction]. Mỗi giao thức có một interface với tầng trên cùng máy, và một thỏa thuận với *peer* (thực thể cùng tầng ở máy bên kia) về hình dạng và ý nghĩa của message[^sa-peers]. Nhờ vậy đổi Ethernet sang Wi-Fi không buộc phải viết lại trình duyệt.
+> **Trả lời ngắn.** Phân tầng là cách giấu chi tiết cài đặt sau một interface rõ ràng để quản lý độ phức tạp[^sa-abstraction]. Mỗi giao thức vừa có interface với tầng trên cùng máy, vừa có thỏa thuận với *peer* (thực thể cùng tầng ở máy bên kia) về hình dạng và ý nghĩa của message[^sa-peers]. Nhờ vậy đổi Ethernet sang Wi-Fi không buộc phải viết lại trình duyệt (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): gửi hàng qua bưu điện. Bạn chỉ đưa gói cho quầy nhận (interface) mà không cần biết xe nào chở; còn hai bưu cục ở hai đầu thống nhất với nhau về khuôn dạng phiếu gửi (thỏa thuận với peer).
+*Với service của bạn.* Trong code của `orders`, việc gọi `payments` chỉ có vài dòng: mở một `TcpStream`, `write` request, `read` response. Nhưng giữa hai dòng đó, byte phải rời card mạng của máy chạy `orders`, qua vài switch và router, rồi mới tới máy chạy `payments`; chặng này đi trên Ethernet, chặng kia có thể là Wi-Fi hay cáp quang. `orders` không biết, cũng không cần biết. Mục này trả lời: mạng làm thế nào để `orders` được ngây thơ như vậy. Ta sẽ dùng lại cặp `orders`/`payments` ở mọi mục sau (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo).
 
-Mạng gồm rất nhiều việc khác nhau: đẩy bit lên dây hoặc sóng vô tuyến, đóng bit thành frame, chọn đường qua nhiều mạng, truyền tin cậy, rồi mới đến chuyện "tải một trang web". Nếu mỗi ứng dụng phải biết mọi chi tiết, đổi từ Ethernet sang Wi-Fi sẽ phải viết lại trình duyệt. Sách *Computer Networks: A Systems Approach* (SA) trả lời bằng abstraction: giấu chi tiết cài đặt sau một interface được định nghĩa rõ ràng là công cụ nền để người thiết kế hệ thống quản lý độ phức tạp[^sa-abstraction].
+### 1.1 Vì sao không để ứng dụng tự lo
 
-Trong kiến trúc phân tầng, mỗi giao thức có hai "mặt":
+Mạng gồm rất nhiều việc khác nhau: đẩy bit lên dây hoặc sóng vô tuyến, đóng bit thành frame, chọn đường qua nhiều mạng, truyền cho tin cậy, rồi mới đến chuyện "tải một trang web". Nếu `orders` phải biết hết, mỗi lần máy đổi từ Ethernet sang Wi-Fi thì code của nó cũng phải sửa theo. Cách người thiết kế hệ thống tránh chuyện đó là abstraction: giấu chi tiết cài đặt sau một interface định nghĩa rõ ràng. Sách *Computer Networks: A Systems Approach* (SA) gọi đây là công cụ nền để quản lý độ phức tạp[^sa-abstraction]. Mạng phân tầng áp dụng đúng ý ấy: mỗi tầng giấu cách làm của mình sau interface mà tầng trên gọi.
 
-- **Interface** với tầng trên (và dưới) trên cùng một máy: một dịch vụ mà tầng trên gọi.
-- **Thỏa thuận với peer** — thực thể cùng tầng ở máy bên kia — về hình dạng và ý nghĩa của các message trao đổi giữa các protocol peer[^sa-peers].
+### 1.2 Hai mặt của một giao thức
 
-Ví dụ với backend: bạn gọi `write()` trên socket (interface), còn TCP hai máy nói chuyện bằng segment có định dạng cố định (thỏa thuận peer); ứng dụng không thấy segment, TCP không biết byte là JSON hay ảnh (nhận xét của người soạn).
+Trong kiến trúc phân tầng, mỗi giao thức quay ra hai phía:
+
+- **Interface** với tầng trên (và tầng dưới) trên cùng một máy: một dịch vụ mà tầng trên gọi.
+- **Thỏa thuận với peer**, tức thực thể cùng tầng ở máy bên kia: hai bên chốt với nhau hình dạng và ý nghĩa của các message trao đổi giữa các protocol peer[^sa-peers].
+
+Với `orders` thì hai mặt đó cụ thể như sau. `write()` trên socket là interface. Còn TCP của máy `orders` và TCP của máy `payments` nói chuyện với nhau bằng segment có định dạng cố định: đó là thỏa thuận peer. Vì vậy ứng dụng không thấy segment, và TCP không biết các byte nó chở là JSON hay ảnh (nhận xét của người soạn).
 
 <details><summary>Đi sâu: tầng nào chạy trên node nào</summary>
 
-Lưu ý các nút giữa đường (switch, router) thường chỉ chạy các tầng thấp. SA nêu rằng ba tầng thấp nhất được cài đặt trên mọi node mạng, gồm cả switch trong mạng lẫn các host nối ra bên ngoài mạng[^sa-lower3], còn tầng transport trở lên thường chỉ chạy trên các end host chứ không chạy trên switch hay router trung gian[^sa-endhosts]. Đó là điều đầu tiên để nhớ (nhận xét của người soạn): phần lớn logic "đáng tin" nằm ở hai đầu, không nằm ở giữa — lý do ở mục 3.
+Các nút nằm giữa `orders` và `payments` (switch, router) chỉ chạy các tầng thấp. SA nêu rằng ba tầng thấp nhất được cài đặt trên mọi node mạng, kể cả switch trong mạng lẫn host nối ra ngoài[^sa-lower3]. Từ transport trở lên thì thường chỉ chạy trên các end host, không chạy trên switch hay router trung gian[^sa-endhosts]. Hệ quả (nhận xét của người soạn): phần lớn logic "đáng tin" nằm ở hai đầu chứ không nằm ở giữa. Lý do ở mục 3.
 
 </details>
 
-**Quay lại Q1:** phân tầng = mỗi giao thức có interface với tầng trên và thỏa thuận với peer cùng tầng; chi tiết bên dưới bị giấu đi.
+**Quay lại Q1:** mỗi giao thức có interface với tầng trên và thỏa thuận với peer cùng tầng, còn chi tiết bên dưới bị giấu đi; nhờ vậy `orders` chỉ cần `write` và `read`.
 
 ## 2. OSI 7 tầng và kiến trúc Internet (Q2)
 
-> **Trả lời ngắn.** OSI có 7 tầng nhưng là mô hình tham chiếu: SA nói không có mạng nào chạy OSI, song thuật ngữ của nó vẫn được dùng rộng rãi[^sa-osi]. Mạng thật theo kiến trúc Internet (RFC 1122) với bốn tầng: link, internet (IP), transport, application[^rfc1122-link][^rfc1122-ip][^rfc1122-transport][^rfc1122-app].
+> **Trả lời ngắn.** OSI có 7 tầng nhưng chỉ là mô hình tham chiếu: SA nói hiện không có mạng nào chạy theo OSI, tuy thuật ngữ của nó vẫn được dùng rộng rãi[^sa-osi]. Mạng thật chạy theo kiến trúc Internet (RFC 1122), gồm bốn tầng: link, internet (IP), transport, application (mục 2.2 dẫn từng tầng).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): OSI như bản vẽ tiêu chuẩn của một tòa nhà trong sách giáo khoa; Internet là tòa nhà đã xây thật. Dân kỹ thuật vẫn gọi "tầng 2, tầng 7" theo bản vẽ.
+*Với service của bạn.* Trước `payments` có một load balancer, và đội hạ tầng gọi nó là "L4" hay "L7"; switch trong rack thì là "L2". Mấy con số ấy là số tầng của OSI, trong khi stack mà `orders` chạy thật lại theo kiến trúc Internet. Mục này nối hai cách đánh số lại với nhau (nhận xét của người soạn: tình huống giả định).
 
-**OSI: mô hình tham chiếu.**
+### 2.1 OSI: mô hình tham chiếu
 
-OSI chia 7 tầng. SA mô tả từ dưới lên:
+OSI chia 7 tầng. Đi từ dưới lên:
 
 - **Physical**: truyền bit thô qua link.
-- **Data link**: gom một dòng bit thành một đơn vị lớn hơn gọi là frame; card mạng cùng driver trong OS thường hiện thực tầng này[^sa-osi-frame].
-- **Network**: định tuyến giữa các node trong mạng packet-switched; đơn vị dữ liệu thường được gọi là packet chứ không phải frame, dù về bản chất hai thứ là một[^sa-pdu-packet].
-- **Transport**: kênh process-to-process; đơn vị thường gọi là message[^sa-pdu-msg].
-- **Session** và **presentation**: presentation lo định dạng dữ liệu trao đổi giữa các peer (số nguyên 16/32/64 bit, byte nào đi trước…)[^sa-pres]; session cung cấp một không gian tên để gắn các transport stream thuộc cùng một ứng dụng (ví dụ luồng audio và video của một cuộc họp)[^sa-sess].
+- **Data link**: gom một dòng bit thành một đơn vị lớn hơn gọi là frame. Card mạng cùng driver trong OS thường hiện thực tầng này[^sa-osi-frame].
+- **Network**: định tuyến giữa các node trong mạng packet-switched. Đơn vị dữ liệu ở đây thường gọi là packet chứ không phải frame, dù về bản chất hai thứ là một[^sa-pdu-packet].
+- **Transport**: kênh process-to-process. Đơn vị dữ liệu thường gọi là message[^sa-pdu-msg].
+- **Session** và **presentation**: hai tầng ít khi gặp trong thực tế, xem phần Đi sâu.
 - **Application**: HTTP nằm ở đây.
 
-Điểm quan trọng: đó là *reference model*, không phải protocol graph; SA viết rằng hiện không có mạng nào chạy theo OSI, nhưng thuật ngữ OSI định nghĩa vẫn được dùng rộng rãi nên vẫn đáng xem lướt[^sa-osi]. "L2 switch", "L4 load balancer", "L7 proxy" dùng số tầng OSI dù stack chạy thật là Internet (nhận xét của người soạn).
+Điều cần nhớ là OSI là *reference model*, không phải protocol graph. SA viết rằng không có mạng nào chạy theo OSI, nhưng thuật ngữ OSI định nghĩa vẫn được dùng rộng rãi, nên vẫn đáng xem lướt[^sa-osi]. Vì thế "L2 switch", "L4 load balancer", "L7 proxy" đều lấy số tầng OSI, dù stack chạy thật là Internet (nhận xét của người soạn).
 
-**Kiến trúc Internet (RFC 1122).**
+### 2.2 Kiến trúc Internet (RFC 1122)
 
-RFC 1122 ("Requirements for Internet Hosts — Communication Layers") nói host phải hiện thực bộ giao thức phân tầng làm nên Internet protocol suite[^rfc1122-layers], và phạm vi của nó là các tầng giao tiếp: link layer, IP layer và transport layer; phần application để RFC 1123 lo[^rfc1122-scope]. Bốn tầng:
+RFC 1122 ("Requirements for Internet Hosts — Communication Layers") đòi một host phải hiện thực bộ giao thức phân tầng làm nên Internet protocol suite[^rfc1122-layers]. Phạm vi của RFC là các tầng giao tiếp: link, IP và transport. Tầng application để RFC 1123 lo[^rfc1122-scope]. Với `POST /charge` của `orders`, bốn tầng đó là:
 
-- **Link** — giao thức của mạng nối trực tiếp; RFC gọi là link layer hay media-access layer[^rfc1122-link].
-- **Internet (IP)** — dịch vụ liên mạng không kết nối (datagram), không bảo đảm giao đến đích; do đó datagram IP có thể đến nơi bị hỏng, bị lặp, sai thứ tự, hoặc không đến[^rfc1122-ip]. RFC 791 giới hạn phạm vi của IP vào việc chuyển một "internet datagram" từ nguồn tới đích qua hệ thống các mạng nối nhau[^rfc791-scope].
-- **Transport** — cung cấp dịch vụ truyền thông đầu-cuối cho ứng dụng[^rfc1122-transport]: TCP hướng kết nối, tin cậy, có resequencing và flow control; UDP là datagram không kết nối[^rfc1122-tcpudp].
-- **Application** — tầng trên cùng của bộ giao thức Internet[^rfc1122-app].
+- **Link**: giao thức của mạng nối trực tiếp với host. RFC gọi nó là link layer hay media-access layer[^rfc1122-link]. Với máy chạy `orders`, đó là Ethernet hay Wi-Fi.
+- **Internet (IP)**: dịch vụ liên mạng không kết nối (datagram), không bảo đảm giao đến đích. Datagram IP vì vậy có thể đến nơi bị hỏng, bị lặp, sai thứ tự, hoặc không đến[^rfc1122-ip]. RFC 791 giới hạn phạm vi của IP vào đúng một việc: chuyển một "internet datagram" từ nguồn tới đích qua hệ thống các mạng nối nhau[^rfc791-scope].
+- **Transport**: cung cấp dịch vụ truyền thông đầu-cuối cho ứng dụng[^rfc1122-transport]. TCP hướng kết nối, tin cậy, có resequencing và flow control; UDP là dịch vụ datagram không kết nối[^rfc1122-tcpudp]. `orders` dùng TCP.
+- **Application**: tầng trên cùng của bộ giao thức Internet[^rfc1122-app]. HTTP của `POST /charge` nằm ở đây.
 
-<details><summary>Đi sâu: ánh xạ OSI sang Internet và chỗ đứng của TLS</summary>
+<details><summary>Đi sâu: session, presentation, ánh xạ OSI sang Internet và chỗ đứng của TLS</summary>
+
+Hai tầng OSI còn lại. Presentation lo định dạng dữ liệu trao đổi giữa các peer (số nguyên 16/32/64 bit, byte nào đi trước…)[^sa-pres]. Session cung cấp một không gian tên để gắn các transport stream thuộc cùng một ứng dụng, ví dụ luồng audio và video của một cuộc họp[^sa-sess].
 
 Ánh xạ OSI sang Internet chỉ để tham khảo (nhận xét của người soạn): application/presentation/session ≈ application; transport giữ nguyên; network ≈ internet; data link + physical ≈ link. Bảng ánh xạ này không có ô riêng cho TLS; chương [08](08-dns-http-tls.md) trình bày TLS 1.3 handshake.
 
 </details>
 
-**Quay lại Q2:** OSI là bản vẽ để gọi tên tầng; Internet với bốn tầng là thứ chạy thật.
+**Quay lại Q2:** OSI là bản vẽ để gọi tên tầng; kiến trúc Internet với bốn tầng mới là thứ `orders` chạy thật.
 
 ## 3. Hourglass và end-to-end argument (Q3)
 
-> **Trả lời ngắn.** Kiến trúc Internet có hình đồng hồ cát: IP là điểm hẹp chung, phía trên có nhiều giao thức transport, phía dưới có nhiều công nghệ mạng[^sa-hourglass][^sa-above-below]. End-to-end argument nói một chức năng như độ tin cậy chỉ có thể cài hoàn chỉnh với sự trợ giúp của ứng dụng ở hai đầu[^e2e-def]; đôi khi một bản không đầy đủ do tầng dưới cung cấp vẫn có ích như cách tăng hiệu năng[^e2e-perf]. Phù hợp với lập luận đó (suy luận của người soạn), transport như TCP thường chỉ chạy ở end host chứ không trên router[^sa-endhosts].
+> **Trả lời ngắn.** Kiến trúc Internet có hình đồng hồ cát: IP là điểm hẹp chung mà mọi mạng trao đổi packet qua đó[^sa-hourglass]. Phía trên IP có nhiều giao thức transport, phía dưới có nhiều công nghệ mạng[^sa-above-below]. End-to-end argument nói một chức năng như độ tin cậy chỉ có thể cài hoàn chỉnh với sự trợ giúp của ứng dụng ở hai đầu[^e2e-def]; đôi khi một bản không đầy đủ do tầng dưới cung cấp vẫn có ích, như một cách tăng hiệu năng[^e2e-perf]. Hợp với lập luận đó, transport như TCP thường chỉ chạy ở end host chứ không trên router[^sa-endhosts] (suy luận của người soạn về mối liên hệ).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chuyển phát nhanh. Shipper trung gian có cẩn thận đến đâu thì chỉ người nhận mới biết hàng có đúng và đủ không, nên việc kiểm hàng phải làm ở hai đầu.
+*Với service của bạn.* Mạng đã lo cho `orders` khá nhiều: TCP là dịch vụ tin cậy, có resequencing và flow control (mục 2.2). Vậy sao `orders` vẫn phải tự phòng chuyện `charge` bị mất hay bị gửi hai lần? Và vì sao mọi thứ tin cậy đó nằm trong TCP ở hai máy, không nằm trong router? Hai câu hỏi này có chung một lời giải.
 
-**Hourglass: eo hẹp là IP.**
+### 3.1 Hourglass: eo hẹp là IP
 
-SA nêu ba đặc điểm đáng chú ý của kiến trúc Internet; hai đặc điểm đầu liên quan đến mục này. Thứ nhất, nó không đòi hỏi phân tầng nghiêm ngặt: ứng dụng được tự do bỏ qua các tầng transport đã định nghĩa để dùng thẳng IP hoặc một trong các mạng bên dưới[^sa-notstrict]. Thứ hai, hình dạng protocol graph là đồng hồ cát: IP là điểm hội tụ của kiến trúc, định nghĩa một cách chung để trao đổi packet giữa nhiều loại mạng[^sa-hourglass]. Phía trên IP có thể có nhiều giao thức transport với các kênh khác nhau; phía dưới có thể có nhiều công nghệ mạng từ Ethernet tới wireless[^sa-above-below]. SA gom lại thành một "Key Takeaway": eo hẹp của đồng hồ cát là một tập năng lực toàn cục tối thiểu, được chọn lọc kỹ, cho phép ứng dụng ở tầng trên và công nghệ truyền thông ở tầng dưới cùng tồn tại, chia sẻ năng lực và tiến hóa nhanh[^sa-waist].
+Kiến trúc Internet không đòi phân tầng nghiêm ngặt: ứng dụng được tự do bỏ qua các tầng transport đã định nghĩa để dùng thẳng IP hoặc một trong các mạng bên dưới[^sa-notstrict]. Dù vậy, hình dạng protocol graph vẫn là đồng hồ cát, vì IP là điểm hội tụ của kiến trúc: nó định nghĩa một cách chung để trao đổi packet giữa nhiều loại mạng[^sa-hourglass]. Phía trên IP có thể có vô số giao thức transport, mỗi giao thức đưa ra một kiểu kênh khác nhau cho ứng dụng[^sa-above-below]. Phía dưới có thể có đủ loại công nghệ mạng, từ Ethernet tới wireless.
 
-Hệ quả (nhận xét của người soạn): cùng một dịch vụ HTTP chạy trên Wi-Fi, cáp quang hay mạng ảo của container mà không đổi code, vì tất cả đều "nói IP" ở eo.
+SA gọi cái eo ấy là một tập năng lực toàn cục tối thiểu, được chọn lọc kỹ. Nhờ nó, ứng dụng ở tầng trên và công nghệ truyền thông ở tầng dưới cùng tồn tại, chia sẻ năng lực và tiến hóa nhanh[^sa-waist]. Với `orders`: request HTTP chạy trên Wi-Fi, cáp quang hay mạng ảo của container mà không phải đổi code, vì tất cả đều "nói IP" ở eo (nhận xét của người soạn).
 
-**End-to-end argument: vì sao độ tin cậy nằm ở hai đầu.**
+### 3.2 End-to-end argument: vì sao độ tin cậy nằm ở hai đầu
 
-Bài Saltzer, Reed, Clark (*End-to-End Arguments in System Design*, MIT) phát biểu lập luận như sau: một chức năng chỉ có thể được cài đặt đầy đủ và đúng đắn với kiến thức và sự trợ giúp của ứng dụng đứng ở hai đầu của hệ thống truyền thông, cho nên cung cấp nó như một tính năng của chính hệ thống truyền thông là không thể[^e2e-def]; đồng thời ngoặc đơn ghi rõ một phiên bản không đầy đủ do tầng dưới cung cấp đôi khi vẫn có ích như một cách tăng hiệu năng[^e2e-perf].
+Lập luận này đến từ bài *End-to-End Arguments in System Design* của Saltzer, Reed và Clark (MIT). Ý chính: một chức năng chỉ cài đặt đầy đủ và đúng đắn được khi có kiến thức và sự trợ giúp của ứng dụng đứng ở hai đầu hệ thống truyền thông. Vì vậy, cung cấp nó như một tính năng của chính hệ thống truyền thông là không thể[^e2e-def]. Bài không bảo tầng dưới đừng làm gì cả. Một bản không đầy đủ do tầng dưới cung cấp đôi khi vẫn có ích như cách tăng hiệu năng[^e2e-perf].
 
-Liên hệ với IP và TCP (suy luận của người soạn từ các nguồn trên): IP chọn *không* bảo đảm giao đúng (RFC 1122 ở trên), còn độ tin cậy dựng ở TCP trên hai end host; router không phải giữ trạng thái per-connection. Và ngay cả khi TCP báo "đã giao", đó mới là ack của kernel bên nhận, không phải việc ứng dụng bên kia đã xử lý xong — nên giao dịch quan trọng của backend (thanh toán, ghi DB) vẫn cần ack ở tầng ứng dụng và idempotency (nhận xét của người soạn, cùng tinh thần với end-to-end argument).
+Áp vào `orders` và `payments` (suy luận của người soạn từ các nguồn trên): IP chọn *không* bảo đảm giao đúng, như RFC 1122 ghi ở mục 2. Độ tin cậy được dựng ở TCP trên hai end host, và router không phải giữ trạng thái cho từng connection. Nhưng ngay cả khi TCP báo "đã giao", đó mới là ack của kernel bên nhận, chứ chưa phải việc `payments` đã xử lý xong. Nếu `orders` hết thời gian chờ mà không biết `charge` đã chạy hay chưa, gửi lại có thể trừ tiền hai lần. Vì vậy giao dịch quan trọng (thanh toán, ghi DB) vẫn cần ack ở tầng ứng dụng và idempotency, ví dụ một idempotency key trong request (nhận xét của người soạn, cùng tinh thần với end-to-end argument).
 
 <details><summary>Đi sâu: ví dụ "careful file transfer" và trade-off hiệu năng</summary>
 
-Ví dụ trong bài là "careful file transfer": dù mạng đã cố hết sức đáng tin, ứng dụng vẫn phải tự kiểm checksum đầu-cuối và retry. Bài kết luận: dù hệ thống truyền thông có cố hết mức để cực kỳ đáng tin, gánh nặng bảo đảm độ tin cậy của chương trình ứng dụng vẫn không giảm[^e2e-careful]. Bài không bảo tầng dưới đừng làm gì: một số nỗ lực ở tầng dưới nhằm tăng độ tin cậy mạng có thể ảnh hưởng đáng kể tới hiệu năng ứng dụng, nhưng tầng dưới không cần cung cấp độ tin cậy "hoàn hảo". Điều đáng nhớ: mức công sức đầu tư cho các biện pháp tin cậy bên trong hệ thống truyền dữ liệu là một đánh đổi kỹ thuật dựa trên hiệu năng, chứ không phải yêu cầu về tính đúng đắn[^e2e-tradeoff].
+Ví dụ trong bài là "careful file transfer". Mạng có cố hết sức đáng tin thì ứng dụng vẫn phải tự kiểm checksum đầu-cuối rồi retry. Bài kết luận rằng việc hệ thống truyền thông cố hết mức để cực kỳ đáng tin không làm giảm gánh nặng bảo đảm độ tin cậy của chương trình ứng dụng[^e2e-careful].
+
+Điều đó không có nghĩa tầng dưới nên bỏ mặc độ tin cậy. Một số nỗ lực ở tầng dưới có thể ảnh hưởng đáng kể tới hiệu năng ứng dụng, chỉ là tầng dưới không cần cung cấp độ tin cậy "hoàn hảo". Điều đáng nhớ: mức công sức đầu tư cho các biện pháp tin cậy bên trong hệ thống truyền dữ liệu là một đánh đổi kỹ thuật dựa trên hiệu năng, chứ không phải yêu cầu về tính đúng đắn[^e2e-tradeoff].
 
 </details>
 
-**Quay lại Q3:** IP là eo chung; độ tin cậy hoàn chỉnh cần ứng dụng ở hai đầu, và SA nói transport thường chỉ chạy ở end host, nên TCP không nằm trong router.
+**Quay lại Q3:** IP là eo chung; độ tin cậy hoàn chỉnh cần ứng dụng ở hai đầu, và transport thường chỉ chạy ở end host, nên TCP nằm ở máy `orders` và máy `payments` chứ không nằm trong router.
 
 ## 4. Encapsulation: header, payload, PDU (Q4)
 
-> **Trả lời ngắn.** Mỗi tầng coi thứ tầng trên đưa xuống là chuỗi byte không diễn giải rồi gắn thêm header của mình[^sa-header]; bên nhận gỡ header và đọc demux key để chọn tầng trên[^sa-demux]. Đơn vị dữ liệu của TCP là segment[^rfc9293-seg]. Một HTTP request trên dây là byte trong payload của TCP segment, nằm trong payload của IP datagram, nằm trong payload của Ethernet frame (ví dụ đã chạy ở phần Đi sâu).
+> **Trả lời ngắn.** Mỗi tầng coi thứ tầng trên đưa xuống là một chuỗi byte không diễn giải, rồi gắn thêm header của mình vào[^sa-header]. Bên nhận gỡ header, đọc demux key để biết giao cho giao thức nào ở tầng trên[^sa-demux]. TCP gọi đơn vị dữ liệu của mình là segment, và mỗi segment được gửi đi như một IP datagram[^rfc9293-seg]. Vì vậy một HTTP request trên dây là byte nằm trong payload của TCP segment, trong payload của IP datagram, trong payload của Ethernet frame (ví dụ đã chạy ở phần Đi sâu).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): phong bì lồng phong bì. Thư bạn viết cho khách (HTTP) bỏ vào phong bì có số cổng (TCP), rồi vào phong bì địa chỉ nhà (IP), rồi vào túi của bưu tá khu phố (Ethernet). Mỗi nơi chỉ đọc phong bì của mình.
+*Với service của bạn.* `orders` chỉ ghi vào `TcpStream` một đoạn text kiểu `POST /charge HTTP/1.1 …`, dài vài trăm byte. Nhưng thứ rời card mạng là một Ethernet frame, và trong frame đó còn có header IP và header TCP. Mục này mở từng lớp ra: ai thêm gì, bên nhận dựa vào trường nào để biết giao cho ai, và cộng lại thì được bao nhiêu byte (nhận xét của người soạn).
 
-**Cơ chế.**
+### 4.1 Mỗi tầng gắn header
 
-Mỗi tầng muốn nói chuyện với peer thì cần truyền "thông tin điều khiển". SA mô tả: giao thức coi thứ tầng trên đưa xuống là một chuỗi byte không diễn giải, rồi gắn một header vào message; header là một cấu trúc dữ liệu nhỏ — từ vài byte đến vài chục byte — dùng giữa các peer để giao tiếp với nhau[^sa-header]. Header thường ở đầu; thông tin điều khiển đặt ở cuối thì gọi là *trailer*[^sa-trailer]. Ethernet có cả hai: header 14 byte ở đầu[^sa-eth-14], CRC ở cuối (chi tiết ở [chương 02](02-link-layer.md)).
+Để nói chuyện với peer, mỗi tầng cần chuyển cho nó một ít thông tin điều khiển. Cách làm: tầng coi thứ tầng trên đưa xuống là một chuỗi byte không diễn giải, rồi gắn vào đầu message một header. Header là một cấu trúc dữ liệu nhỏ, từ vài byte đến vài chục byte, dùng giữa các peer để giao tiếp với nhau[^sa-header]. Thông tin điều khiển đặt ở cuối message thì gọi là *trailer*[^sa-trailer]. Ethernet có cả hai: header 14 byte ở đầu[^sa-eth-14] và CRC ở cuối (chi tiết ở [chương 02](02-link-layer.md)).
 
-Bên nhận làm ngược lại: tầng dưới gỡ header, xem demux key và tách (demultiplex) message tới đúng ứng dụng[^sa-demux]. Cái gì làm *demux key* ở từng tầng của Internet:
+```mermaid
+flowchart LR
+  A["HTTP của orders<br/>(payload)"] --> T["TCP: thêm header TCP<br/>= segment"]
+  T --> I["IP: thêm header IP<br/>= datagram"]
+  I --> E["Ethernet: thêm header<br/>= frame"]
+```
 
-| Tầng | Header | Trường dùng để chọn tầng trên |
+(Sơ đồ minh họa của người soạn; số byte thật của một request ở phần Đi sâu.)
+
+### 4.2 Bên nhận gỡ header, đọc demux key
+
+Bên nhận làm ngược lại. Tầng dưới gỡ header của mình, đọc demux key, rồi tách (demultiplex) message tới đúng chỗ ở tầng trên[^sa-demux]. Vậy ở mỗi tầng của Internet, trường nào đóng vai demux key?
+
+| Tầng | Header | Trường chọn tầng trên |
 |---|---|---|
-| Link (Ethernet) | Ethernet | type — dùng làm demux key, cho biết frame này nên giao cho giao thức tầng trên nào trong số nhiều giao thức có thể[^sa-eth-type] |
-| Internet | IP | Protocol — cho biết giao thức tầng kế tiếp được dùng trong phần dữ liệu của internet datagram[^rfc791-protocol] |
+| Link (Ethernet) | Ethernet | `type`: cho biết frame này nên giao cho giao thức nào trong số nhiều giao thức tầng trên có thể có[^sa-eth-type] |
+| Internet | IP | `Protocol`: cho biết giao thức tầng kế tiếp dùng trong phần dữ liệu của internet datagram[^rfc791-protocol] |
 | Transport | TCP/UDP | port đích → socket (chương [04](04-udp-va-tcp-co-ban.md), [07](07-socket-va-kernel.md)) |
 
-Điều SA nhấn thêm: message đi xuống rồi đi lên chính là message mà ứng dụng đã đưa xuống, ứng dụng bên nhận không thấy header nào[^sa-same-msg]; trong ví dụ của SA, các node trong mạng (switch, router) có thể xem header đặt ở đầu message[^sa-nodes-inspect].
+Với `POST /charge`, máy `payments` đọc type để biết frame mang IP, đọc Protocol để biết datagram mang TCP, rồi đọc port đích 443 hay 8080 để biết giao segment cho socket của process `payments` (nhận xét của người soạn: số cổng là giả định).
 
-**Tên gọi đơn vị dữ liệu (PDU).**
+SA nhấn thêm hai điều. Message đi lên tới ứng dụng bên nhận chính là message mà ứng dụng bên gửi đã đưa xuống, ứng dụng không thấy header nào[^sa-same-msg]. Còn trên đường đi, trong ví dụ của SA, các node trong mạng (switch, router) có thể xem header đặt ở đầu message[^sa-nodes-inspect].
+
+### 4.3 Tên gọi đơn vị dữ liệu (PDU)
 
 PDU (protocol data unit) là thuật ngữ chung cho "một message của giao thức ở tầng X". Tên thường dùng:
 
@@ -137,17 +160,17 @@ PDU (protocol data unit) là thuật ngữ chung cho "một message của giao t
 |---|---|---|
 | Application | message (HTTP request/response) | — |
 | Transport (TCP) | segment | RFC 9293: byte-stream của ứng dụng được chở qua mạng bằng các TCP segment, mỗi segment được gửi đi như một IP datagram[^rfc9293-seg] |
-| Transport (UDP) | datagram | RFC 1122: UDP là "datagram" service[^rfc1122-tcpudp] |
+| Transport (UDP) | datagram | RFC 1122: UDP là dịch vụ "datagram"[^rfc1122-tcpudp] |
 | Internet | datagram / packet | RFC 791 gọi "internet datagram"[^rfc791-scope]; SA gọi chung là packet[^sa-pdu-packet] |
 | Link | frame | SA[^sa-osi-frame] |
 
-Tên gọi không nhất quán: SA nói thẳng rằng ở tầng network, packet và frame về bản chất là một thứ[^sa-pdu-packet], và ở transport thường gọi message thay vì packet hay frame[^sa-pdu-msg]. Đừng cãi vặt về tên; chỉ cần biết đang nói về lớp nào (nhận xét của người soạn).
+Tên gọi không nhất quán. SA nói thẳng rằng ở tầng network, packet và frame về bản chất là một thứ[^sa-pdu-packet], còn ở transport thì người ta thường gọi là message thay vì packet hay frame[^sa-pdu-msg]. Đừng cãi vặt về tên; chỉ cần biết đang nói về lớp nào (nhận xét của người soạn).
 
-Kích thước tối thiểu (suy luận của người soạn): IHL của IPv4 tính bằng từ 32 bit và giá trị tối thiểu cho một header hợp lệ là 5[^rfc791-ihl], tức ≥ 20 byte; Data Offset của TCP là số từ 32 bit trong header TCP, cho biết dữ liệu bắt đầu ở đâu[^rfc9293-doff].
+Từ hai trường trong header ta suy ra được kích thước tối thiểu (suy luận của người soạn). IHL của IPv4 tính bằng từ 32 bit, và giá trị tối thiểu cho một header hợp lệ là 5[^rfc791-ihl], tức header IP dài ít nhất 20 byte. Data Offset của TCP cũng đếm bằng từ 32 bit và cho biết dữ liệu bắt đầu ở đâu[^rfc9293-doff].
 
 <details><summary>Đi sâu: ví dụ chạy thật — một HTTP request trên dây</summary>
 
-Để không chỉ tin sơ đồ, tôi chạy trong container Linux của repo (`./labs/linux.sh`): một "server" `nc` trả về response HTTP cố định ở port 8080, `curl` gửi `GET /x`, và `tcpdump -i lo -e -x` bắt gói có cờ PSH. Đây là **quan sát từ một lần chạy trên interface loopback**, không phải bảo đảm; trên `lo` địa chỉ MAC toàn số 0 và MTU là 65536 (`ip link show lo`), nên số liệu về MAC/MTU không đại diện cho Ethernet thật.
+Để không chỉ tin sơ đồ, tôi bắt một request thật. Request này không phải của `orders` mà do `curl` gửi `GET /x` tới một "server" `nc` trả về response HTTP cố định ở port 8080. Mọi thứ chạy trong container Linux của repo (`./labs/linux.sh`), và `tcpdump -i lo -e -x` bắt gói có cờ PSH. Đây là **quan sát từ một lần chạy trên interface loopback**, không phải bảo đảm. Trên `lo` địa chỉ MAC toàn số 0 và MTU là 65536 (`ip link show lo`), nên số liệu về MAC/MTU không đại diện cho Ethernet thật.
 
 Gói request (rút gọn từ output của tcpdump):
 
@@ -170,79 +193,93 @@ ethertype IPv4 (0x0800), length 145: 127.0.0.1.48132 > 127.0.0.1.8080:
 | `40` | TTL | 64 |
 | `06` | IP Protocol | 6 = TCP |
 | `bc04` `1f90` | port nguồn, port đích | 48132 → 8080 |
-| `80` (đầu byte 0x20) | TCP Data Offset = 8 từ | header TCP 32 byte = 20 + 12 byte options: `0101 080a` rồi TSval, TSecr là NOP, NOP, rồi Timestamps kind 8 độ dài 10[^rfc7323-kind], option này thêm 10 byte (tối đa 12 kể cả padding) vào header TCP[^rfc7323-ts] |
+| `80` (đầu byte 0x20) | TCP Data Offset = 8 từ | header TCP 32 byte = 20 + 12 byte options. Options là `0101 080a` rồi TSval, TSecr: hai NOP, rồi Timestamps kind 8 độ dài 10[^rfc7323-kind]. Option này thêm 10 byte (tối đa 12 kể cả padding) vào header TCP[^rfc7323-ts] |
 | `4745 5420 …` | payload | "GET /x HTTP/1.1\r\nHost: …" |
 
-Tổng frame tcpdump báo là 145 byte = 14 (Ethernet) + 20 (IP) + 32 (TCP) + 79 (HTTP): khớp từng byte. Gói response cùng cách cộng: 14 + 20 + 32 + 62 = 128, đúng với `length 128` và IP Total Length `0x0072` = 114 = 20 + 32 + 62. Header ăn 66/145 byte (khoảng 45%). Frame Ethernet trong capture này không kèm preamble hay CRC; theo SA, adaptor là bên gắn các thứ đó khi gửi[^sa-eth-adaptor].
+Tổng frame tcpdump báo là 145 byte = 14 (Ethernet) + 20 (IP) + 32 (TCP) + 79 (HTTP): khớp từng byte. Gói response cộng cùng cách: 14 + 20 + 32 + 62 = 128, đúng với `length 128` và IP Total Length `0x0072` = 114 = 20 + 32 + 62. Header ăn 66/145 byte, khoảng 45%. Frame Ethernet trong capture này không kèm preamble hay CRC; theo SA, adaptor là bên gắn các thứ đó khi gửi[^sa-eth-adaptor].
 
 ```mermaid
 flowchart LR
   E["Ethernet 14 B"] --> I["IP 20 B"] --> T["TCP 32 B"] --> H["HTTP 79 B"]
 ```
 
-Vì vậy "một HTTP request" ở mức dây là byte trong payload của TCP segment, nằm trong payload của IP datagram, nằm trong payload của Ethernet frame.
+Nghĩa là "một HTTP request" ở mức dây chỉ là byte nằm trong payload của TCP segment, nằm trong payload của IP datagram, nằm trong payload của Ethernet frame.
 
 </details>
 
-**Quay lại Q4:** mỗi tầng gắn header và dùng demux key để chọn tầng trên; request HTTP chỉ là payload lồng trong TCP, IP, Ethernet.
+**Quay lại Q4:** mỗi tầng gắn header của mình và bên nhận dùng demux key để chọn tầng trên; request `POST /charge` của `orders` chỉ là payload lồng trong TCP, IP, Ethernet.
 
 ## 5. Packet switching và circuit switching (Q5)
 
-> **Trả lời ngắn.** Circuit switching dựng trước một mạch riêng rồi mới gửi bit[^sa-circuit]; packet switching gửi các khối rời rạc, mỗi node nhận đủ gói rồi mới chuyển tiếp (store-and-forward)[^sa-sf]. Mạng máy tính chọn packet switching vì hiệu quả: tránh được thời gian rảnh khi một luồng không có gì để gửi[^sa-stat].
+> **Trả lời ngắn.** Circuit switching dựng trước một mạch riêng rồi mới gửi bit[^sa-circuit]. Packet switching thì gửi các khối rời rạc, và mỗi node nhận đủ cả gói rồi mới chuyển tiếp (store-and-forward)[^sa-sf]. Mạng máy tính chọn packet switching vì hiệu quả hơn: link không bị bỏ không những lúc một luồng chẳng có gì để gửi[^sa-stat].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): điện thoại bàn giữ nguyên một đường dây suốt cuộc gọi dù hai bên im lặng; packet giống xe buýt, nhiều hành khách thay phiên dùng chung một tuyến.
+*Với service của bạn.* Link ra khỏi máy chạy `orders` không chỉ chở request tới `payments`. Nó còn chở truy vấn tới database, log đẩy đi chỗ khác, health check từ load balancer. Phần lớn thời gian mỗi luồng chỉ gửi lẻ tẻ vài gói rồi im. Nếu mỗi luồng giữ riêng một đường suốt cuộc "gọi", đường đó nằm không gần hết thời gian. Câu hỏi của mục này là mạng chia link cho các luồng ấy thế nào, và `orders` phải trả giá gì cho cách chia đó (nhận xét của người soạn: tình huống giả định).
 
-Mạng chuyển mạch (switched network) là các node nối bằng link point-to-point; node nối ít nhất hai link thì chạy phần mềm chuyển tiếp dữ liệu từ link này sang link khác. SA: có nhiều loại mạng chuyển mạch, trong đó hai loại phổ biến nhất là circuit switched và packet switched; loại đầu được dùng nổi bật nhất trong hệ thống điện thoại, loại sau được dùng cho phần lớn áp đảo các mạng máy tính[^sa-switched].
+### 5.1 Hai kiểu mạng chuyển mạch
 
-- **Circuit switching**: trước hết dựng một mạch riêng qua một chuỗi link, rồi cho node nguồn gửi một dòng bit qua mạch này tới node đích[^sa-circuit].
-- **Packet switching**: các node gửi nhau các khối dữ liệu rời rạc (packet), và dùng *store-and-forward*: mỗi node trong mạng store-and-forward trước hết nhận trọn một packet qua một link, lưu nó trong bộ nhớ trong, rồi mới chuyển trọn packet đó tới node kế tiếp[^sa-sf].
+Mạng chuyển mạch (switched network) gồm các node nối với nhau bằng link point-to-point. Node nào nối ít nhất hai link thì chạy phần mềm chuyển tiếp dữ liệu từ link này sang link khác. Có nhiều loại mạng chuyển mạch, và hai loại phổ biến nhất là circuit switched và packet switched. Loại đầu dùng nổi bật nhất trong hệ thống điện thoại, loại sau dùng cho phần lớn áp đảo các mạng máy tính[^sa-switched].
 
-Hệ quả thiết kế (suy luận của người soạn): vì không dành riêng tài nguyên cho từng luồng, packet có thể phải chờ trong hàng đợi của switch/router (queuing delay, mục 6) và khi tải vượt khả năng thì bị bỏ. Chính vì vậy TCP cần congestion control ([chương 06](06-congestion-control.md)) — đó là cái giá của việc chia sẻ hiệu quả.
+- **Circuit switching**: dựng trước một mạch riêng qua một chuỗi link, rồi cho node nguồn gửi một dòng bit qua mạch đó tới node đích[^sa-circuit].
+- **Packet switching**: các node gửi nhau những khối dữ liệu rời rạc (packet) theo kiểu *store-and-forward*. Mỗi node trước hết nhận trọn một packet qua một link, lưu nó trong bộ nhớ trong, rồi mới chuyển trọn packet đó tới node kế tiếp[^sa-sf].
+
+### 5.2 Cái giá: queuing và mất gói
+
+Packet switching không dành riêng tài nguyên cho từng luồng. Vì vậy packet của `orders` có thể phải chờ trong hàng đợi của switch hay router (queuing delay, xem mục 6), và khi tải vượt khả năng thì packet bị bỏ (suy luận của người soạn). Đây cũng là lý do TCP cần congestion control ([chương 06](06-congestion-control.md)): đó là cái giá của việc chia sẻ link hiệu quả.
 
 <details><summary>Đi sâu: statistical multiplexing và vì sao packet có kích thước tối đa</summary>
 
-SA nêu lý do chọn packet switching là *efficiency*. Cơ chế gọi là statistical multiplexing: link được chia sẻ theo thời gian, nhưng dữ liệu của mỗi luồng được gửi *theo nhu cầu*, không theo khe thời gian định sẵn; nếu chỉ một luồng có dữ liệu để gửi thì nó được gửi ngay mà không phải chờ tới lượt (quantum) của mình, và chính việc tránh thời gian rảnh đó làm nên hiệu quả của packet switching[^sa-stat]. Để các luồng thay phiên nhau, mỗi lần chỉ được gửi một khối kích thước tối đa — packet; message lớn bị chia thành nhiều packet và bên nhận ghép lại[^sa-frag].
+SA nêu lý do chọn packet switching là *efficiency*. Cơ chế gọi là statistical multiplexing. Link được chia sẻ theo thời gian, nhưng dữ liệu của mỗi luồng được gửi *theo nhu cầu*, không theo khe thời gian định sẵn. Nếu chỉ một luồng có dữ liệu thì nó được gửi ngay, không phải chờ tới lượt (quantum) của mình. Chính việc tránh thời gian rảnh đó làm nên hiệu quả của packet switching[^sa-stat].
+
+Để các luồng thay phiên nhau, mỗi lần mỗi luồng chỉ được gửi một khối kích thước tối đa, chính là packet. Message lớn bị chia thành nhiều packet và bên nhận ghép lại[^sa-frag].
 
 </details>
 
-**Quay lại Q5:** packet switching chia sẻ link theo nhu cầu nên hiệu quả, đổi lại có queuing và có thể mất gói.
+**Quay lại Q5:** packet switching chia sẻ link theo nhu cầu nên hiệu quả; đổi lại, packet của `orders` có thể phải xếp hàng hoặc bị bỏ.
 
 ## 6. Thước đo: bandwidth, latency, RTT, BDP (Q6)
 
-> **Trả lời ngắn.** Latency là tổng các độ trễ: propagation, transmission, processing và queuing[^hpbn-latency-sum]. Bandwidth là số bit/giây link truyền được[^sa-bandwidth]; RTT là thời gian đi và về[^sa-rtt]; BDP = bandwidth × RTT là lượng bit tối đa "đang bay" trong ống[^sa-bdp][^sa-fill].
+> **Trả lời ngắn.** Latency là tổng các độ trễ: propagation, transmission, processing và queuing[^hpbn-latency-sum]. Bandwidth là số bit/giây mà link truyền được[^sa-bandwidth]. RTT là thời gian đi và về[^sa-rtt]. Nhân bandwidth với RTT ra BDP, lượng bit tối đa có thể đang "bay" trong ống tại một thời điểm[^sa-bdp]; bên gửi không đẩy đủ lượng đó thì không lấp đầy đường[^sa-fill].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ống nước. Băng thông là độ rộng ống, propagation là độ dài ống, BDP là lượng nước ống chứa khi đầy, queuing là xếp hàng trước vòi.
+*Với service của bạn.* Một cuộc gọi `payments` chậm thì chậm vì đâu: đường dài, link hẹp, hay hàng đợi? Mục này cho bộ thước đo để tách ba khả năng đó, và một công thức trả lời "cần bao nhiêu byte đang bay thì mới dùng hết đường". Để có số cụ thể, giả sử máy chạy `orders` và máy chạy `payments` cách nhau RTT 50 ms trên đường 100 Mbps (số giả định của người soạn, dùng ở 6.4).
 
-**Bandwidth và throughput.**
+### 6.1 Bandwidth và throughput
 
-SA: hiệu năng mạng được đo theo hai cách cơ bản: bandwidth (còn gọi là throughput) và latency (còn gọi là delay)[^sa-two]. Khi nói về link, bandwidth là số bit/giây có thể truyền[^sa-bandwidth]; còn *throughput* dùng cho hiệu năng đo được — một link 10 Mbps có thể chỉ đạt 2 Mbps do thiếu hiệu quả ở cài đặt[^sa-throughput]. HPBN lưu ý một cái bẫy đơn vị: tốc độ mạng đo bằng bit/s (bps), còn thiết bị không phải mạng thường ghi byte/s (Bps)[^hpbn-units].
+Hiệu năng mạng được đo theo hai cách cơ bản: bandwidth (còn gọi là throughput) và latency (còn gọi là delay)[^sa-two]. Khi nói về một link, bandwidth là số bit/giây có thể truyền qua nó[^sa-bandwidth]. *Throughput* thì thường dùng cho hiệu năng đo được: một link 10 Mbps có thể chỉ đạt 2 Mbps do thiếu hiệu quả ở cài đặt[^sa-throughput]. Cũng đừng nhầm đơn vị: tốc độ mạng đo bằng bit/s (bps), còn thiết bị không phải mạng thường ghi byte/s (Bps)[^hpbn-units].
 
-**Bốn thành phần của latency.**
+### 6.2 Bốn thành phần của latency
 
-Latency là thời gian từ khi nguồn gửi gói đến khi đích nhận được. HPBN tách thành bốn thành phần ở mỗi router/link:
+Latency là thời gian từ khi nguồn gửi gói đến khi đích nhận được. Nó gồm bốn thành phần, và mỗi router, mỗi link trên đường đều góp phần:
 
 - **Propagation delay**: thời gian tín hiệu đi từ người gửi đến người nhận, là hàm của khoảng cách và tốc độ lan truyền tín hiệu[^hpbn-lat4].
-- **Transmission delay**: thời gian đẩy toàn bộ bit của gói vào link — hàm của độ dài gói và data rate của link[^hpbn-trans].
+- **Transmission delay**: thời gian đẩy toàn bộ bit của gói vào link, là hàm của độ dài gói và data rate của link[^hpbn-trans].
 - **Processing delay**: thời gian xử lý header, kiểm tra lỗi bit và xác định đích của gói[^hpbn-proc].
-- **Queuing delay**: thời gian gói chờ trong hàng đợi; HPBN nói thẳng rằng thời gian dữ liệu nằm chờ trong buffer được gọi là queuing delay[^hpbn-queue].
+- **Queuing delay**: thời gian gói chờ trong hàng đợi. Thời gian dữ liệu nằm chờ trong buffer chính là queuing delay[^hpbn-queue].
 
-Tổng latency giữa client và server là tổng tất cả các độ trễ đó[^hpbn-latency-sum]. SA viết công thức ba thành phần (không liệt kê processing riêng): `Latency = Propagation + Transmit + Queue`, với `Propagation = Distance/SpeedOfLight` và `Transmit = Size/Bandwidth`[^sa-formula]. Quan trọng: transmission không liên quan gì tới khoảng cách giữa client và server — nó chỉ phụ thuộc data rate của link[^hpbn-trans]. Còn propagation do khoảng cách và môi trường tín hiệu đi qua quyết định[^hpbn-prop].
+Latency giữa client và server là tổng tất cả các độ trễ đó[^hpbn-latency-sum]. SA viết công thức ba thành phần, không tách processing riêng: `Latency = Propagation + Transmit + Queue`, với `Propagation = Distance/SpeedOfLight` và `Transmit = Size/Bandwidth`[^sa-formula]. Chú ý hai thành phần đầu phụ thuộc rất khác nhau. Transmission không liên quan gì tới khoảng cách giữa client và server, nó chỉ phụ thuộc data rate của link[^hpbn-trans]. Propagation thì do khoảng cách và môi trường tín hiệu đi qua quyết định[^hpbn-prop]. Nghĩa là mua link nhanh hơn chỉ rút được transmission, không đụng được tới propagation của đường `orders` → `payments`.
 
-**RTT và bandwidth-delay product.**
+### 6.3 RTT và bandwidth-delay product
 
-SA định nghĩa RTT là thời gian cần để gửi một message từ đầu này của mạng tới đầu kia và ngược lại — thời gian đi và về[^sa-rtt]. Bandwidth × delay là thể tích của ống — số bit tối đa có thể đang truyền trong ống tại một thời điểm bất kỳ[^sa-bdp]. Thường "delay" ở đây được hiểu là RTT: bên gửi có thể phát đi cả RTT × bandwidth bit trước khi nghe được phản hồi; nếu không lấp đầy "ống" thì không tận dụng hết mạng[^sa-fill].
+RTT (round-trip time) là thời gian cần để gửi một message từ đầu này của mạng tới đầu kia rồi ngược lại, tức thời gian đi và về[^sa-rtt]. Còn bandwidth × delay là thể tích của "ống": số bit tối đa có thể đang truyền trong ống tại một thời điểm bất kỳ[^sa-bdp]. Ở đây "delay" thường được hiểu là RTT. Bên gửi có thể phát đi cả RTT × bandwidth bit trước khi nghe được phản hồi đầu tiên; nếu không phát đủ để lấp đầy "ống" thì mạng không được tận dụng hết[^sa-fill].
 
-Ví dụ của SA: kênh xuyên lục địa one-way 50 ms, băng thông 45 Mbps chứa được `50×10⁻³ × 45×10⁶ = 2,25×10⁶ bit`, xấp xỉ 280 KB[^sa-bdp-ex]. Tôi tính lại: 2,25×10⁶ bit / 8 = 281.250 byte — khớp "xấp xỉ 280 KB" (KB ở đây hiểu là 1000 byte, suy luận của người soạn từ phép tính; tính theo 1024 thì ≈ 274,7 KiB).
+Ví dụ của SA: kênh xuyên lục địa có độ trễ một chiều 50 ms, băng thông 45 Mbps, chứa được `50×10⁻³ × 45×10⁶ = 2,25×10⁶ bit`, xấp xỉ 280 KB[^sa-bdp-ex]. Tôi tính lại: 2,25×10⁶ bit / 8 = 281.250 byte, khớp "xấp xỉ 280 KB" (KB ở đây hiểu là 1000 byte, suy luận của người soạn từ phép tính; tính theo 1024 thì ≈ 274,7 KiB).
 
-<details><summary>Đi sâu: tốc độ ánh sáng, ví dụ số, lỗi số học trong SA, số RTT trước byte đầu tiên</summary>
+### 6.4 Áp vào `orders` và `payments`: BDP và cửa sổ
 
-**Tốc độ ánh sáng đặt cận dưới.**
+Với đường 100 Mbps và RTT 50 ms của ví dụ, BDP = 100×10⁶ × 0,05 / 8 = 625.000 byte ≈ 610 KiB (người soạn tính, không có trong nguồn). Muốn lấp đầy đường, bên gửi phải có khoảng 610 KiB dữ liệu "đang bay" chưa được ack.
 
-SA cho tốc độ lan truyền: 3,0 × 10⁸ m/s trong chân không, 2,3 × 10⁸ m/s trong cáp đồng và 2,0 × 10⁸ m/s trong sợi quang[^sa-speeds]; HPBN dùng quy tắc ngón tay cái khoảng 200.000.000 m/s cho sợi quang[^hpbn-fiber], và nhấn rằng tốc độ ánh sáng đặt một giới hạn cứng, đồng thời là bộ điều tốc, lên thời gian lan truyền của mọi packet mạng[^hpbn-light]. Hệ quả: tăng băng thông không giảm propagation. SA: RTT xuyên lục địa của link 1 Gbps vẫn là 100 ms, y như với link 1 Mbps[^sa-highspeed].
+Giả sử giao thức dùng cửa sổ cố định 65.535 byte. Con số này không tự nghĩ ra: trường window của TCP rộng 16 bit nên có giới hạn cứng trên là 65.535 byte[^hpbn-winscale]. Mỗi RTT bên gửi chỉ phát được một cửa sổ (suy luận của người soạn), nên tốc độ tối đa là 65.535 × 8 / 0,05 s ≈ 10,5 Mbps, bất kể link là 100 Mbps hay 1 Gbps. Đó là lý do TCP có window scaling, và vì sao throughput của một kết nối TCP bị chặn bởi window / RTT (nhận xét của người soạn). Chi tiết ở [chương 05](05-tcp-reliability-va-flow-control.md) và [06](06-congestion-control.md).
+
+### 6.5 Mấy RTT trước byte đầu tiên
+
+TCP cần trọn một roundtrip độ trễ trước khi có thể truyền bất kỳ dữ liệu ứng dụng nào[^hpbn-hs]. TLS 1.3 nhắm tới 1 RTT cho phiên mới và 0 RTT cho phiên được nối lại[^hpbn-tls13]. Với RTT 50 ms (người soạn tính, bỏ qua DNS và thời gian xử lý của `payments`): TCP 1 RTT + TLS 1.3 1 RTT + request/response 1 RTT = 150 ms tới byte đầu của response trên kết nối mới, so với 50 ms trên kết nối tái dùng. Đó là lý do `orders` nên giữ connection pool tới `payments` thay vì mở kết nối mới mỗi request (nhận xét của người soạn). Chi tiết ở [chương 04](04-udp-va-tcp-co-ban.md) và [08](08-dns-http-tls.md).
+
+<details><summary>Đi sâu: tốc độ ánh sáng, bảng khoảng cách, ví dụ số, lỗi số học trong SA</summary>
+
+**Tốc độ ánh sáng đặt cận dưới.** SA cho tốc độ lan truyền: 3,0 × 10⁸ m/s trong chân không, 2,3 × 10⁸ m/s trong cáp đồng và 2,0 × 10⁸ m/s trong sợi quang[^sa-speeds]. HPBN dùng quy tắc ngón tay cái khoảng 200.000.000 m/s cho sợi quang[^hpbn-fiber], và nhấn rằng tốc độ ánh sáng đặt một giới hạn cứng, đồng thời là bộ điều tốc, lên thời gian lan truyền của mọi packet mạng[^hpbn-light]. Hệ quả: tăng băng thông không giảm propagation. SA: RTT xuyên lục địa của link 1 Gbps vẫn là 100 ms, y như với link 1 Mbps[^sa-highspeed].
 
 Tính lại các số trong bảng của HPBN (phép chia của người soạn, tốc độ sợi quang = 2×10⁸ m/s; riêng one-way New York–Sydney đã được kiểm bằng chương trình Rust ở mục 8):
 
@@ -252,81 +289,78 @@ Tính lại các số trong bảng của HPBN (phép chia của người soạn,
 | New York – London | 5.585 km | 27,9 ms | 55,8 ms | 56 ms |
 | New York – Sydney | 15.993 km | 80,0 ms | 159,9 ms | 160 ms |
 
-HPBN nêu rằng dù ánh sáng nhanh, vẫn mất 160 mili-giây cho một vòng đi-về (RTT) từ New York tới Sydney[^hpbn-sydney]; đây còn là con số lạc quan vì giả định cáp quang đi theo đường tròn lớn, còn thực tế gói đi đường dài hơn và mỗi hop thêm độ trễ routing, processing, queuing và transmission[^hpbn-hops], nên RTT thực tế rơi vào khoảng 200–300 mili-giây[^hpbn-actual]. Các số khoảng cách là của HPBN, phần chia là phép tính của người soạn; khớp với bảng.
+Nếu `orders` ở New York còn `payments` ở Sydney thì dù ánh sáng nhanh, vẫn mất 160 mili-giây cho một vòng đi-về (RTT)[^hpbn-sydney]. Đây còn là con số lạc quan vì giả định cáp quang đi theo đường tròn lớn. Thực tế gói đi đường dài hơn, và mỗi hop thêm độ trễ routing, processing, queuing và transmission[^hpbn-hops], nên RTT thực tế rơi vào khoảng 200–300 mili-giây[^hpbn-actual]. Các số khoảng cách là của HPBN, phần chia là phép tính của người soạn; khớp với bảng.
 
-Thêm hai điểm thực tế: độ trễ đáng kể thường nằm ở "last few miles"[^hpbn-lastmile], và bufferbloat là queuing delay do router có bộ đệm lớn, vốn phá cơ chế tránh tắc nghẽn của TCP[^hpbn-bufferbloat].
+Thêm hai điểm thực tế. Độ trễ đáng kể thường nằm ở "last few miles", không phải ở các chặng vượt đại dương hay lục địa[^hpbn-lastmile]. Còn bufferbloat là queuing delay sinh ra khi router có bộ đệm lớn, với giả định rằng nên tránh bỏ gói bằng mọi giá[^hpbn-bufferbloat]. Theo suy luận của người soạn, bộ đệm sâu như vậy làm TCP thấy tắc nghẽn muộn; chương [06](06-congestion-control.md) sẽ nói tiếp.
 
-**Tính một ví dụ số: transmission vs propagation.**
+**Transmission vs propagation, tính bằng số.** Gói 1500 byte = 12.000 bit. Transmission delay theo `Size / Bandwidth` (người soạn tính) là 1,2 ms ở 10 Mbps, 120 µs ở 100 Mbps, 12 µs ở 1 Gbps. Propagation trên 1.000 km sợi quang: 1.000.000 m / 2×10⁸ m/s = 5 ms. Tức là trên đường dài, propagation lấn át transmission của gói nhỏ: nâng link từ 100 Mbps lên 1 Gbps chỉ bớt 108 µs cho mỗi gói 1500 byte, vô nghĩa so với 5 ms.
 
-Gói 1500 byte = 12.000 bit. Transmission delay theo `Size / Bandwidth` (người soạn tính): 1,2 ms ở 10 Mbps, 120 µs ở 100 Mbps, 12 µs ở 1 Gbps. Propagation trên 1.000 km sợi quang: 1.000.000 m / 2×10⁸ m/s = 5 ms. Tức là trên đường dài thì propagation lấn át transmission của gói nhỏ; tăng link từ 100 Mbps lên 1 Gbps chỉ bớt 108 µs cho mỗi gói 1500 byte, vô nghĩa so với 5 ms. Với file lớn, SA chỉ ra băng thông mới quyết định: tải ảnh 25 MB qua kênh 10 Mbps mất 20 giây (25×10⁶×8 / 10×10⁶), nên khác biệt giữa kênh 1 ms và 100 ms (20,001 s vs 20,1 s) không đáng kể[^sa-25mb]. Ngược lại một client gửi 1 byte rồi nhận 1 byte là "latency bound": RTT 100 ms hay 1 ms mới là chuyện chính, link 1 hay 100 Mbps không quan trọng[^sa-latbound].
+Với file lớn thì ngược lại. SA tính tải ảnh 25 MB qua kênh 10 Mbps mất 20 giây (25×10⁶×8 / 10×10⁶), nên khác biệt giữa kênh 1 ms và 100 ms (20,001 s vs 20,1 s) không đáng kể; băng thông mới quyết định[^sa-25mb]. Còn một client gửi 1 byte rồi nhận 1 byte là "latency bound": RTT 100 ms hay 1 ms mới là chuyện chính, link 1 hay 100 Mbps không quan trọng[^sa-latbound]. Request nhỏ của `orders` tới `payments` thuộc loại thứ hai (nhận xét của người soạn).
 
-Store-and-forward cộng thêm: qua 3 link 100 Mbps liên tiếp, mỗi link phải nhận đủ gói rồi mới chuyển ([mục 5](#5-packet-switching-và-circuit-switching-q5)) nên tổng transmission là 3 × 120 µs = 360 µs (người soạn tính, bỏ qua processing và queuing).
+Store-and-forward cộng thêm: qua 3 link 100 Mbps liên tiếp, mỗi link phải nhận đủ gói rồi mới chuyển ([mục 5](#5-packet-switching-và-circuit-switching-q5)), nên tổng transmission là 3 × 120 µs = 360 µs (người soạn tính, bỏ qua processing và queuing).
 
-**Một con số trong sách không khớp phép tính.** Vài câu sau, SA viết về lượng dữ liệu tối đa đang bay ("in flight") theo RTT: trong "ví dụ ở trên", lượng đó tương ứng 5,5×10⁶ bit (671 KB)[^sa-bdp-rtt]. Tôi đọc kỹ ngữ cảnh nguồn: câu đó nằm ngay sau ví dụ trên và nói "ví dụ ở trên", không đưa RTT hay băng thông khác. Vậy RTT = 2 × 50 ms = 100 ms, băng thông 45 Mbps, và:
+**Một con số trong sách không khớp phép tính.** Vài câu sau ví dụ 45 Mbps, SA viết về lượng dữ liệu tối đa đang bay ("in flight") theo RTT: trong "ví dụ ở trên", lượng đó tương ứng 5,5×10⁶ bit (671 KB)[^sa-bdp-rtt]. Tôi đọc kỹ ngữ cảnh nguồn: câu đó nằm ngay sau ví dụ trên và nói "ví dụ ở trên", không đưa RTT hay băng thông khác. Vậy RTT = 2 × 50 ms = 100 ms, băng thông 45 Mbps, và:
 
-- Cách tính đúng theo ví dụ: 100×10⁻³ s × 45×10⁶ bit/s = **4,5×10⁶ bit** = 562.500 byte (≈ 562 KB hoặc ≈ 549 KiB) — đúng gấp đôi 2,25×10⁶.
-- Con số in trong sách: 5,5×10⁶ bit. Nó ứng với RTT = 5,5×10⁶ / 45×10⁶ ≈ 122 ms, không phải 100 ms; còn "671 KB" là 5,5×10⁶ / 8 / 1024 ≈ 671,4 KiB, tức đổi đơn vị theo 1024 trong khi "280 KB" ở trên đổi theo 1000.
+- Cách tính đúng theo ví dụ: 100×10⁻³ s × 45×10⁶ bit/s = **4,5×10⁶ bit** = 562.500 byte (≈ 562 KB hoặc ≈ 549 KiB), đúng gấp đôi 2,25×10⁶.
+- Con số in trong sách: 5,5×10⁶ bit. Nó ứng với RTT = 5,5×10⁶ / 45×10⁶ ≈ 122 ms, không phải 100 ms. Còn "671 KB" là 5,5×10⁶ / 8 / 1024 ≈ 671,4 KiB, tức đổi đơn vị theo 1024 trong khi "280 KB" ở trên đổi theo 1000.
 
-Tôi không thấy trong nguồn RTT hay băng thông nào cho ra 5,5×10⁶ bit, nên coi đây là lỗi số học của sách (suy luận của người soạn từ phép tính; chưa kiểm tra bản in hay errata). Chương này dùng **4,5×10⁶ bit cho RTT 100 ms**; ý của SA — lượng dữ liệu đang bay tối đa bằng RTT × bandwidth, và gửi ít hơn thì không lấp đầy đường[^sa-fill] — không đổi.
-
-Ví dụ backend-hóa (người soạn tính, không có trong nguồn): đường 100 Mbps với RTT 50 ms có BDP = 100×10⁶ × 0,05 / 8 = 625.000 byte ≈ 610 KiB. Muốn lấp đầy đường, bên gửi phải có ~610 KiB dữ liệu "đang bay" chưa được ack. Một giao thức cửa sổ cố định 65.535 byte — HPBN nêu trường window 16 bit đặt giới hạn cứng trên 65.535 byte[^hpbn-winscale] — đạt tối đa 65.535 × 8 / 0,05 s ≈ 10,5 Mbps, bất kể link 100 Mbps hay 1 Gbps (suy luận của người soạn: mỗi RTT chỉ gửi được một cửa sổ). Đó là lý do TCP có window scaling và vì sao throughput một kết nối TCP bị chặn bởi window/RTT (nhận xét của người soạn); chi tiết ở [chương 05](05-tcp-reliability-va-flow-control.md) và [06](06-congestion-control.md).
-
-**Gộp lại: số RTT trước byte đầu tiên.**
-
-HPBN: TCP cần trọn một roundtrip độ trễ trước khi có thể truyền bất kỳ dữ liệu ứng dụng nào[^hpbn-hs], TLS 1.3 nhắm tới 1 RTT cho phiên mới và 0 RTT cho phiên được nối lại[^hpbn-tls13]. Với RTT 50 ms (người soạn tính, bỏ qua DNS và xử lý của server): TCP 1 RTT + TLS 1.3 1 RTT + request/response 1 RTT = 150 ms tới byte đầu của response trên kết nối mới, so với 50 ms trên kết nối tái dùng — lý do connection pool có ý nghĩa (nhận xét của người soạn). Chi tiết ở [chương 04](04-udp-va-tcp-co-ban.md) và [08](08-dns-http-tls.md).
+Tôi không thấy trong nguồn RTT hay băng thông nào cho ra 5,5×10⁶ bit, nên coi đây là lỗi số học của sách (suy luận của người soạn từ phép tính; chưa kiểm tra bản in hay errata). Chương này dùng **4,5×10⁶ bit cho RTT 100 ms**. Ý của SA không đổi: lượng dữ liệu đang bay tối đa bằng RTT × bandwidth, và gửi ít hơn thì không lấp đầy đường[^sa-fill].
 
 </details>
 
-**Quay lại Q6:** latency là tổng bốn độ trễ; BDP = bandwidth × RTT cho biết cần bao nhiêu dữ liệu đang bay để lấp đầy đường.
+**Quay lại Q6:** latency là tổng bốn độ trễ; BDP = bandwidth × RTT cho biết `orders` cần giữ bao nhiêu dữ liệu đang bay tới `payments` để lấp đầy đường.
 
 ## 7. Phân tầng trong Linux network stack (Q7)
 
-> **Trả lời ngắn.** Kernel đại diện mỗi packet bằng `struct sk_buff` (skb), một cấu trúc metadata còn dữ liệu nằm ở các buffer đi kèm[^kdoc-skb][^kdoc-skb-meta]. Thiết kế đếm tham chiếu của skb cho phép tầng dưới thêm header của mình phía trước[^kdoc-skb-prepend]. Về đường nhận, ở chế độ hoạt động cơ bản thiết bị báo sự kiện mới bằng interrupt rồi host lên lịch một instance NAPI để xử lý[^kdoc-napi].
+> **Trả lời ngắn.** Kernel đại diện mỗi packet bằng `struct sk_buff` (skb)[^kdoc-skb]. Đó là một cấu trúc metadata, còn dữ liệu nằm ở các buffer đi kèm[^kdoc-skb-meta]. Thiết kế đếm tham chiếu của skb cho phép tầng dưới thêm header của mình phía trước[^kdoc-skb-prepend]. Về đường nhận, ở chế độ hoạt động cơ bản thiết bị báo sự kiện mới bằng interrupt, rồi host lên lịch một instance NAPI để xử lý[^kdoc-napi].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): skb như phiếu theo dõi gắn trên kiện hàng chạy qua các bộ phận của kho; mỗi bộ phận dán thêm nhãn của mình lên trước.
+*Với service của bạn.* Khi `orders` `write` request xuống `TcpStream`, kernel của máy phải biến chuỗi byte đó thành packet có đủ header TCP, IP, Ethernet, rồi đưa qua nhiều tầng code của stack. Câu hỏi của mục này: kernel dùng cấu trúc nào để cầm một packet đi xuyên các tầng, và chuyện "tầng dưới thêm header vào trước" của mục 4 hiện ra trong kernel ở chỗ nào. Phần này chỉ là bức tranh tổng quan, chi tiết ở [chương 07](07-socket-va-kernel.md) (nhận xét của người soạn).
 
-Các khái niệm trên xuất hiện rõ trong kernel Linux. Mục này trích tài liệu `Documentation/networking` của kernel **v6.8** (ghim tag, trong file `.rst` và `include/linux/skbuff.h` của tag đó); tôi chỉ dẫn điều tài liệu nói trực tiếp.
+Ta trích tài liệu `Documentation/networking` của kernel **v6.8** (ghim tag, trong file `.rst` và `include/linux/skbuff.h` của tag đó), và chỉ dẫn điều tài liệu nói trực tiếp.
 
-- **`struct sk_buff` (skb)** là cấu trúc mạng chính đại diện cho một packet[^kdoc-skb]. Nó là cấu trúc metadata: bản thân struct sk_buff không chứa dữ liệu packet nào — dữ liệu nằm ở các buffer đi kèm[^kdoc-skb-meta]. Chi tiết ở [chương 07](07-socket-va-kernel.md).
-- **Encapsulation có chỗ trong kernel**: tài liệu nói transport layer gửi đi các bản clone của skb payload mà nó giữ để retransmit[^kdoc-skb-clone], và thiết kế đếm tham chiếu cho phép các tầng thấp hơn của stack thêm header của chúng vào phía trước[^kdoc-skb-prepend] — cùng ý "tầng dưới thêm header của mình vào trước" ở mục 4. Việc skb ban đầu do tầng transport tạo ra rồi các tầng dưới thêm header phía trước là suy luận của người soạn từ đoạn này, chương 07 sẽ kiểm bằng source.
+- **`struct sk_buff` (skb)** là cấu trúc mạng chính đại diện cho một packet[^kdoc-skb]. Nó là cấu trúc metadata: bản thân struct không chứa dữ liệu packet nào, dữ liệu nằm ở các buffer đi kèm[^kdoc-skb-meta].
+- **Encapsulation có chỗ trong kernel.** Tài liệu nói tầng transport gửi đi các bản clone của skb payload mà nó giữ lại để retransmit[^kdoc-skb-clone]. Còn thiết kế đếm tham chiếu cho phép các tầng thấp hơn của stack thêm header của chúng vào phía trước[^kdoc-skb-prepend]. Đó cũng là ý "tầng dưới thêm header của mình vào trước" ở mục 4. Việc skb ban đầu do tầng transport tạo ra rồi các tầng dưới thêm header phía trước là suy luận của người soạn từ đoạn này; chương 07 sẽ kiểm bằng source.
 
 <details><summary>Đi sâu: đường nhận và NAPI</summary>
 
-- **Đường nhận**: theo tài liệu NAPI, thiết bị báo cho host về sự kiện mới bằng một interrupt, rồi host lên lịch một instance NAPI để xử lý các sự kiện đó[^kdoc-napi]; NAPI thường chạy trong ngữ cảnh software interrupt, dù có tùy chọn dùng kernel thread riêng[^kdoc-napi-softirq]. Nói cách khác (nhận xét của người soạn), driver của tầng link là nơi gói đi vào kernel; những gì xảy ra sau đó (IP rồi TCP rồi socket) là chủ đề của chương 07 và các chương giao thức.
+Đường nhận theo tài liệu NAPI: thiết bị báo cho host về sự kiện mới bằng một interrupt, rồi host lên lịch một instance NAPI để xử lý các sự kiện đó[^kdoc-napi]. NAPI thường chạy trong ngữ cảnh software interrupt, dù có tùy chọn dùng kernel thread riêng[^kdoc-napi-softirq]. Nói cách khác (nhận xét của người soạn), driver của tầng link là nơi gói đi vào kernel. Những gì xảy ra sau đó (IP rồi TCP rồi socket) là chủ đề của chương 07 và các chương giao thức.
 
 </details>
 
-**Quay lại Q7:** skb là phiếu metadata đi xuyên stack, tầng dưới thêm header vào trước; gói đi vào kernel qua driver của tầng link và NAPI.
+**Quay lại Q7:** skb là cấu trúc metadata đi xuyên stack và tầng dưới thêm header vào trước; gói tới máy `payments` đi vào kernel qua driver của tầng link và NAPI.
 
 ## 8. Liên hệ với Rust
 
-`std::net` cung cấp chức năng mạng cho các giao thức Transmission Control và User Datagram, cùng các kiểu cho địa chỉ IP/socket và các hàm liên quan đến thuộc tính mạng[^std-net-mod] — tức là (nhận xét của người soạn) ở mức transport (TCP, UDP) cộng với địa chỉ IP/socket. Header Ethernet/IP/TCP của mục 4 không xuất hiện trong API: bạn đọc/ghi *payload*, đúng nghĩa encapsulation giấu header khỏi tầng trên (nhận xét của người soạn).
+Với `orders` viết bằng Rust, chương này không bắt bạn đổi dòng code nào. Nó chỉ cho thấy API của `std::net` đứng ở đâu trên chồng giao thức.
+
+`std::net` cung cấp chức năng mạng cho các giao thức Transmission Control và User Datagram, cùng các kiểu cho địa chỉ IP/socket và các hàm liên quan đến thuộc tính mạng[^std-net-mod]. Nói cách khác (nhận xét của người soạn), nó đứng ở mức transport (TCP, UDP) cộng với địa chỉ IP/socket. Header Ethernet/IP/TCP của mục 4 không xuất hiện trong API: bạn đọc và ghi *payload*, đúng nghĩa encapsulation giấu header khỏi tầng trên (nhận xét của người soạn).
 
 Hai hệ quả:
 
-- `TcpStream` là một TCP stream giữa socket cục bộ và socket từ xa[^std-tcpstream]. RFC 9293 mô tả byte-stream của ứng dụng được chở qua các TCP segment[^rfc9293-seg]; từ hai nguồn đó suy ra ranh giới segment không đến được `read` (suy luận của người soạn). Đối với `UdpSocket`, tài liệu nói UDP là giao thức không bảo đảm thứ tự và không tin cậy[^std-udp-rfc]; ví dụ của `recv_from` nhận một datagram mỗi lần và nếu buffer nhận quá nhỏ thì thông điệp bị cắt bớt[^std-udp-trunc].
+- **`TcpStream` là byte stream.** Docs mô tả nó là một TCP stream giữa socket cục bộ và socket từ xa[^std-tcpstream]. RFC 9293 thì mô tả byte-stream của ứng dụng được chở qua các TCP segment[^rfc9293-seg]. Ghép hai nguồn lại suy ra: ranh giới segment không đến được `read` của `orders`, nên một `read` không đảm bảo trả đúng một request (suy luận của người soạn).
+- **`UdpSocket` thì khác.** Tài liệu nói UDP là giao thức không bảo đảm thứ tự và không tin cậy[^std-udp-rfc]. Ví dụ của `recv_from` nhận một datagram mỗi lần, và nếu buffer nhận quá nhỏ thì thông điệp bị cắt bớt[^std-udp-trunc].
 
 Các phép tính ở mục 6 tôi kiểm lại bằng một chương trình Rust ngắn (`rustc --edition 2021 -O`, hằng số sợi quang 2×10⁸ m/s theo HPBN): `fn transmit_s(bytes, bps) = bytes*8/bps`, `fn propagate_s(m) = m/2e8`, `fn bdp_bytes(bps, rtt) = bps*rtt/8`. Kết quả khi chạy: 1500 B @ 100 Mbps = `120.0 us`; New York–Sydney one-way `80.0 ms`; BDP 100 Mbps × 50 ms = `625000 B`; cửa sổ 65535 B @ RTT 50 ms = `10.49 Mbps`.
 
 ## Tóm tắt
 
-- Phân tầng là abstraction: mỗi giao thức có interface với tầng trên và thỏa thuận với peer cùng tầng[^sa-abstraction][^sa-peers].
-- OSI là mô hình tham chiếu, không có mạng chạy OSI nhưng thuật ngữ còn dùng[^sa-osi]; Internet dùng bốn tầng link / internet / transport / application[^rfc1122-link][^rfc1122-ip][^rfc1122-transport][^rfc1122-app].
-- IP là eo đồng hồ cát[^sa-hourglass]; end-to-end argument: độ tin cậy hoàn chỉnh cần ứng dụng ở hai đầu, tầng dưới nhiều nhất cung cấp bản không đầy đủ, có ích về hiệu năng[^e2e-def][^e2e-tradeoff].
-- Encapsulation: mỗi tầng gắn header, bên nhận đọc demux key (Ethernet type, IP protocol, port) để chọn tầng trên[^sa-demux]; trong capture đã chạy, 79 byte HTTP thành frame 145 byte = 14 + 20 + 32 + 79.
-- Packet switching dùng statistical multiplexing để tránh idle time[^sa-stat]; đổi lại có queuing và có thể mất gói (suy luận của người soạn).
-- Latency = propagation + transmission + processing + queuing[^hpbn-latency-sum]; băng thông không giảm propagation[^sa-highspeed].
-- BDP = bandwidth × RTT; cửa sổ nhỏ hơn BDP thì không lấp đầy đường[^sa-fill].
-- Trong Linux, `sk_buff` đại diện packet và cấu trúc đếm tham chiếu của nó được thiết kế để tầng dưới thêm header vào skb mà tầng transport còn giữ cho retransmit[^kdoc-skb][^kdoc-skb-prepend].
+- Phân tầng là abstraction: mỗi giao thức có interface với tầng trên và thỏa thuận với peer cùng tầng[^sa-peers]. `orders` chỉ thấy `write` và `read`.
+- OSI là mô hình tham chiếu, không có mạng chạy OSI nhưng thuật ngữ còn dùng[^sa-osi]. Internet dùng bốn tầng link / internet / transport / application (mục 2.2).
+- IP là eo của đồng hồ cát[^sa-hourglass]. End-to-end argument: độ tin cậy hoàn chỉnh cần ứng dụng ở hai đầu[^e2e-def], tầng dưới nhiều nhất cung cấp bản không đầy đủ, có ích về hiệu năng[^e2e-tradeoff]. Nên `charge` vẫn cần idempotency ở tầng ứng dụng (nhận xét của người soạn).
+- Encapsulation: mỗi tầng gắn header, bên nhận đọc demux key (Ethernet type, IP protocol, port) để chọn tầng trên[^sa-demux]. Trong capture đã chạy, 79 byte HTTP thành frame 145 byte = 14 + 20 + 32 + 79.
+- Packet switching dùng statistical multiplexing để tránh thời gian rảnh[^sa-stat]; đổi lại có queuing và có thể mất gói (suy luận của người soạn).
+- Latency = propagation + transmission + processing + queuing[^hpbn-latency-sum]. Băng thông không giảm propagation[^sa-highspeed].
+- BDP = bandwidth × RTT; cửa sổ nhỏ hơn BDP thì không lấp đầy đường[^sa-fill]. Với 100 Mbps và RTT 50 ms, BDP ≈ 610 KiB.
+- Trong Linux, `sk_buff` đại diện packet[^kdoc-skb], và cấu trúc đếm tham chiếu của nó được thiết kế để tầng dưới thêm header vào phía trước[^kdoc-skb-prepend].
 
 ## Câu hỏi tự kiểm tra
 
 1. Hai "mặt" của một giao thức trong kiến trúc phân tầng là gì?
 <details><summary>Đáp án</summary>
 
-Interface với tầng trên cùng máy, và thỏa thuận với peer cùng tầng ở máy kia về hình dạng, ý nghĩa message[^sa-abstraction][^sa-peers].
+Interface với tầng trên cùng máy[^sa-abstraction], và thỏa thuận với peer cùng tầng ở máy kia về hình dạng, ý nghĩa message[^sa-peers].
 
 </details>
 

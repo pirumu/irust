@@ -16,24 +16,26 @@
 - [Chương 01 — Thread](01-thread.md) và [Chương 02 — Scheduling](02-scheduling.md): thread có register riêng nhưng chung bộ nhớ, timer interrupt có thể chuyển CPU giữa hai lệnh bất kỳ.
 - [Assembly x86-64 và AArch64](../02-cpu/03-assembly-x86-64-va-aarch64.md): đọc được `mov`, `add`, `ldr`, `str`.
 
+Cả chương bám theo một service giả định tên `orders`, viết bằng Rust, chạy trên Linux, có vài handler thread cùng phục vụ request. Mỗi handler đụng vào hai thứ dùng chung: biến đếm `served` (số request đã phục vụ) và một cache đơn hàng. Hai thứ đó là lý do ta cần lock.
+
 ## 1. Race condition: `counter += 1` không phải một bước (Q1)
 
-> **Trả lời ngắn.** `counter += 1` không phải một bước mà là ba: nạp từ bộ nhớ, cộng, ghi lại[^ostep-ctr-seq]. Nếu thread khác chen vào giữa, một lần cập nhật bị mất và kết quả không biết trước[^ostep-lost-update][^ostep-indeterminate]. Critical section là đoạn code không được chạy đồng thời[^ostep-cs]; mutual exclusion là tính chất ngăn thread khác vào[^ostep-mutex]; atomicity là chạy như một đơn vị[^ostep-atomic-def].
+> **Trả lời ngắn.** `counter += 1` nhìn như một bước nhưng máy làm ba bước: nạp giá trị từ bộ nhớ, cộng 1, ghi lại[^ostep-ctr-seq]. Nếu thread khác chen vào giữa chừng, một lần cộng bị mất[^ostep-lost-update]. Vì thế kết quả cuối không đoán trước được[^ostep-indeterminate]. Ba thuật ngữ cần phân biệt khi nói về lỗi này (critical section, mutual exclusion, atomicity) được giải nghĩa ngay dưới đây.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai nhân viên cùng sửa một con số trên bảng bằng cách đọc, tính ra giấy nháp rồi chép lại; ai chép sau ghi đè cập nhật của người kia.
+*Với service `orders`.* Mỗi handler thread, sau khi trả lời xong một request, chạy `served += 1` trên biến đếm chung. Một con số metrics lệch vài đơn vị thì chưa chết ai, nhưng cùng một lỗi trên số dư hay tồn kho thì đã là bug thật. Câu hỏi của mục này: khi hai handler cùng chạy `served += 1`, chuyện gì xảy ra?
 
-**Ba lệnh thay vì một.**
+### 1.1 Một phép cộng, ba lệnh
 
-Hai thread cùng tăng một biến chung. OSTEP chỉ ra rằng mã máy x86 cho "cộng 1 vào counter" có thể là ba lệnh: nạp từ bộ nhớ vào register, cộng, ghi lại[^ostep-ctr-seq].
+Ở mã máy x86, "cộng 1 vào biến trong bộ nhớ" có thể là ba lệnh: nạp giá trị vào register, cộng 1 vào register, ghi register ngược lại bộ nhớ[^ostep-ctr-seq]. Giữa ba lệnh này, timer interrupt (chương 02) có thể chuyển CPU sang thread khác. Ta thử xem một lịch chạy xấu, khi `served` đang là 50:
 
 ```mermaid
 sequenceDiagram
-  participant T1 as Thread 1
-  participant M as counter (bộ nhớ)
-  participant T2 as Thread 2
-  Note over M: counter = 50
+  participant T1 as Handler 1
+  participant M as served (bộ nhớ)
+  participant T2 as Handler 2
+  Note over M: served = 50
   T1->>M: load → eax = 50
   Note over T1: bị ngắt (timer interrupt)
   T2->>M: load → eax = 50
@@ -42,15 +44,17 @@ sequenceDiagram
   Note over M: 2 lần tăng, kết quả 51 — mất một cập nhật
 ```
 
-(Biểu đồ là minh họa của người soạn cho kịch bản mất cập nhật; OSTEP mô tả đúng kịch bản này với giá trị khởi đầu 50[^ostep-lost-update].) Kết quả phụ thuộc thời điểm thực thi — OSTEP gọi là *race condition* (cụ thể hơn là data race)[^ostep-race], và kết quả là "indeterminate": không biết trước, và có thể khác nhau giữa các lần chạy[^ostep-indeterminate].
+(Biểu đồ là minh họa của người soạn; sách OSTEP mô tả đúng kịch bản này với giá trị khởi đầu 50[^ostep-lost-update].) Hai handler đều tăng `served`, vậy mà biến chỉ lên 51. Handler 1 ghi đè kết quả của handler 2 bằng một giá trị tính từ số liệu đã cũ.
 
+Lỗi mà kết quả phụ thuộc vào thời điểm từng thread chạy như vậy gọi là *race condition*, hay cụ thể hơn là data race[^ostep-race]. Chạy lại lần sau, `served` có thể ra số khác: kết quả kiểu này gọi là *indeterminate*, tức không biết trước và có thể khác nhau giữa các lần chạy[^ostep-indeterminate].
 
-**Ba khái niệm cần phân biệt.**
+### 1.2 Ba khái niệm cần phân biệt
 
-- **Critical section**: đoạn code truy cập biến/tài nguyên chung và không được chạy đồng thời bởi nhiều hơn một thread[^ostep-cs].
-- **Mutual exclusion**: tính chất bảo đảm nếu một thread đang trong critical section thì các thread khác bị ngăn không cho vào[^ostep-mutex].
-- **Atomicity**: "atomically" nghĩa là "as a unit", đôi khi hiểu là "all or none"[^ostep-atomic-def]. Thứ ta muốn là cả chuỗi ba lệnh chạy như một đơn vị; OSTEP đặt câu hỏi liệu phần cứng có nên có lệnh "cập nhật nguyên B-tree" và trả lời "Probably not", nên ta xin vài lệnh hữu ích rồi dựng các *synchronization primitive* từ đó[^ostep-sync-prims].
+- **Critical section**: đoạn code đụng vào biến hoặc tài nguyên chung và không được để nhiều hơn một thread chạy cùng lúc[^ostep-cs]. Trong `orders`, dòng `served += 1` là một critical section.
+- **Mutual exclusion**: tính chất bảo đảm rằng khi một thread đang ở trong critical section thì các thread khác bị chặn, không vào được[^ostep-mutex].
+- **Atomicity**: "atomically" nghĩa là "như một đơn vị", đôi khi hiểu là "tất cả hoặc không gì cả"[^ostep-atomic-def]. Thứ ta muốn là cả chuỗi load, cộng, store chạy như một đơn vị, không ai chen vào giữa.
 
+Muốn có atomicity thì ta không thể đòi phần cứng làm sẵn từng thao tác phức tạp mà ta cần. Hướng thực tế hơn: xin phần cứng vài lệnh đơn giản nhưng hữu ích, rồi dựng các *synchronization primitive* (lock và họ hàng của nó) từ những lệnh ấy[^ostep-sync-prims]. Các mục 2 và 3 đi theo hướng này.
 
 <details><summary>Đi sâu: assembly thật và race condition so với data race</summary>
 
@@ -74,70 +78,72 @@ pub fn cas_loop(c: &AtomicU64)   { let mut cur = c.load(Relaxed);
 
 Hai điều rút ra:
 
-1. Trên AArch64, `racy` là đúng ba bước rời như OSTEP mô tả. Trên x86-64, trình biên dịch gộp thành *một* lệnh `inc` trên bộ nhớ — nhưng một lệnh không có nghĩa là atomic giữa các core: *Rust Atomics and Locks* nói rõ phiên bản x86-64 của phép cộng non-atomic vẫn "not atomic" vì lệnh `add` bị bộ xử lý tách thành nhiều vi lệnh[^atomics-x86-notatomic]. Mục 7 đo `racy` trên máy lab aarch64 (không phải x86-64), nên chỉ quan sát được mất cập nhật ở AArch64; với x86-64 ta chỉ có lập luận của sách.
-2. Phần cứng cung cấp lệnh atomic thật: x86 có tiền tố `lock` biến các lệnh như `add`, `sub`, `and`, `or`, `xor` thành atomic[^atomics-lockprefix]; ARMv8.1 có `ldadd` tương đương `fetch_add` và `cas` tương đương `compare_exchange`[^atomics-ldadd].
+1. Trên AArch64, `racy` đúng là ba bước rời như mô tả ở mục 1. Trên x86-64, trình biên dịch gộp thành *một* lệnh `inc` trên bộ nhớ, nhưng một lệnh chưa chắc đã atomic giữa các core: sách *Rust Atomics and Locks* nói rõ phiên bản x86-64 của phép cộng non-atomic vẫn không atomic[^atomics-x86-notatomic]. Mục 7 đo `racy` trên máy lab aarch64 (không phải x86-64), nên ta chỉ quan sát được mất cập nhật ở AArch64; với x86-64 ta chỉ có lập luận của sách.
+2. Phần cứng có lệnh atomic thật. Trên x86, tiền tố `lock` biến các lệnh như `add`, `sub`, `and`, `or`, `xor` thành atomic[^atomics-lockprefix]. Trên ARMv8.1, `ldadd` tương đương `fetch_add` còn `cas` tương đương `compare_exchange`[^atomics-ldadd].
 
 Bảng là cho `aarch64-apple-darwin`; trong container Linux aarch64 (target mặc định) `fetch_add` thành `bl __aarch64_ldadd8_relax`, tức gọi hàm helper (quan sát của người review).
 
 **Race condition không đồng nghĩa data race.**
 
-*Data race* là khái niệm hẹp của memory model. Docs `std::sync::atomic` của Rust định nghĩa nó là các truy cập xung đột, không đồng bộ, trong đó ít nhất một truy cập là non-atomic; và data race là undefined behavior[^std-datarace]. Nomicon phát biểu bằng ba điều kiện: hai thread trở lên truy cập đồng thời cùng một vị trí nhớ, ít nhất một là ghi, ít nhất một không đồng bộ[^nomicon-race-def]. (Hai cách phát biểu khác chữ nhau; người soạn không khẳng định chúng trùng. Cả khóa dùng định nghĩa của `std`; phần so sánh nằm ở [chương 06, mục 3](06-memory-model.md).)
+*Data race* là khái niệm hẹp của memory model. Docs `std::sync::atomic` định nghĩa nó là các truy cập xung đột, không đồng bộ, trong đó ít nhất một truy cập là non-atomic, và nói data race là undefined behavior[^std-datarace]. Nomicon phát biểu bằng ba điều kiện: hai thread trở lên truy cập đồng thời cùng một vị trí nhớ, ít nhất một là ghi, ít nhất một không đồng bộ[^nomicon-race-def]. Hai cách phát biểu khác chữ nhau và người soạn không khẳng định chúng trùng. Cả khóa dùng định nghĩa của `std`; phần so sánh nằm ở [chương 06, mục 3](06-memory-model.md).
 
-*Race condition* là bug logic về thứ tự thời gian, rộng hơn. Nomicon nói Rust không ngăn được race condition nói chung[^nomicon-race-cond]. Ví dụ ngay trong bảng trên: `racy` chỉ dùng atomic nên không có data race, nhưng vẫn mất cập nhật vì `load` rồi `store` là hai thao tác tách rời; thao tác đúng là một lệnh đọc-sửa-ghi atomic như `fetch_add`[^atomics-fetch].
+*Race condition* là bug logic về thứ tự thời gian, rộng hơn data race: Nomicon nói Rust không ngăn được race condition nói chung[^nomicon-race-cond]. Ví dụ ngay trong bảng trên: `racy` chỉ dùng atomic nên không có data race, nhưng vẫn mất cập nhật vì `load` rồi `store` là hai thao tác tách rời. Thao tác đúng là một lệnh đọc-sửa-ghi atomic như `fetch_add`[^atomics-fetch].
 
 </details>
 
-**Quay lại Q1:** `counter += 1` là chuỗi nhiều bước nên cần mutual exclusion hoặc một thao tác atomic thật sự.
+**Quay lại Q1:** `served += 1` là chuỗi nhiều bước nên hai handler có thể giẫm lên nhau; muốn đúng thì cần mutual exclusion hoặc một thao tác atomic thật sự.
 
 ## 2. Lock: giao diện, ba tiêu chí và hai lối tắt thất bại (Q2)
 
-> **Trả lời ngắn.** Lock là một biến có hai trạng thái, rảnh hoặc đang bị giữ[^ostep-lock-states]; thread gọi `lock()` khi lock đang bị giữ phải chờ đến khi nó được nhả[^ostep-lock-block]. Lock được đánh giá theo tính đúng, fairness và performance[^ostep-lock-criteria][^ostep-lock-fairness][^ostep-lock-perf]. Một cờ với load/store thường không đủ vì "kiểm tra rồi đặt" lại là hai bước[^ostep-flag-fail]; tắt interrupt thì không chạy trên đa xử lý[^ostep-intr-mp].
+> **Trả lời ngắn.** Lock là một biến có hai trạng thái, rảnh hoặc đang bị giữ[^ostep-lock-states]. Thread gọi `lock()` khi lock đang bị giữ sẽ chờ tới khi lock được nhả[^ostep-lock-block]. Một lock tốt phải đúng, công bằng và nhanh; ba tiêu chí này được nêu chi tiết bên dưới. Tự dựng lock bằng một cờ với load/store thường thì hỏng vì "kiểm tra rồi đặt" lại là hai bước[^ostep-flag-fail], còn tắt interrupt thì không chạy được trên máy nhiều CPU[^ostep-intr-mp].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): khóa cửa phòng họp — nếu hai người cùng thấy cửa "trống" rồi cùng đẩy cửa vào thì tấm biển không có tác dụng; việc kiểm tra và khóa phải là một động tác không thể chen vào.
+*Với service `orders`.* Để `served += 1` không bị chen, ta cần đúng một handler thread ở trong dòng đó tại một thời điểm, tức là cần mutual exclusion. Công cụ làm việc này là lock. Mục này nói lock hứa gì, đo nó bằng thước nào, và vì sao hai cách tự chế dễ nghĩ nhất đều hỏng.
 
-**Giao diện.**
+### 2.1 Giao diện của lock
 
-Một lock chỉ là một biến giữ trạng thái: *available* (unlocked/free — không thread nào giữ) hoặc *acquired* (locked/held — đúng một thread giữ và có lẽ đang ở trong critical section)[^ostep-lock-states]. Ngữ nghĩa: nếu thread khác gọi `lock()` trên cùng biến khi lock đang bị giữ, lời gọi không trả về cho đến khi lock được nhả[^ostep-lock-block]. Với ví dụ `balance = balance + 1;`, ta bọc `lock(&mutex); … unlock(&mutex);` quanh nó.
+Một lock chỉ là một biến giữ trạng thái: *available* (còn gọi unlocked hay free, không thread nào giữ) hoặc *acquired* (locked hay held, đúng một thread đang giữ và có lẽ đang ở trong critical section)[^ostep-lock-states]. Handler gọi `lock(&mutex)` trước `served += 1` và `unlock(&mutex)` ngay sau đó. Nếu lúc ấy một handler khác đang giữ lock, lời gọi `lock()` không trả về cho đến khi lock được nhả, nhờ vậy handler kia không vào critical section được[^ostep-lock-block].
 
+### 2.2 Ba tiêu chí
 
-**Ba tiêu chí đánh giá.**
+Có nhiều cách dựng lock, nên cần thước đo để so sánh. Sách OSTEP dùng ba:
 
-OSTEP đánh giá một lock theo ba tiêu chí:
+1. **Đúng**: lock có làm được việc cơ bản của nó là mutual exclusion không[^ostep-lock-criteria].
+2. **Fairness**: khi lock rảnh, mỗi thread đang tranh có cơ hội công bằng để giành nó không, hay có thread bị đói (starve)[^ostep-lock-fairness].
+3. **Performance**: chi phí thời gian mà lock thêm vào[^ostep-lock-perf]. Cần xét riêng ba tình huống: một thread không có tranh chấp, nhiều thread tranh chấp trên một CPU, và nhiều thread tranh chấp trên nhiều CPU[^ostep-lock-perf-cases].
 
-1. **Đúng**: có làm đúng việc cơ bản là mutual exclusion không[^ostep-lock-criteria].
-2. **Fairness**: mỗi thread tranh lock có cơ hội công bằng khi lock rảnh không, hay có thread bị đói (starve)[^ostep-lock-fairness].
-3. **Performance**: chi phí thời gian mà lock thêm vào[^ostep-lock-perf]. Sách tách ra ba tình huống: một thread không tranh chấp, nhiều thread tranh chấp trên một CPU, và nhiều thread tranh chấp trên nhiều CPU[^ostep-lock-perf-cases].
+### 2.3 Lối tắt thứ nhất: một cờ và load/store thường
 
+Cách dễ nghĩ nhất là dùng một biến `flag`: `lock()` quay `while (flag == 1)` rồi đặt `flag = 1`, còn `unlock()` đặt `flag = 0`. Lock này hỏng đúng ở chỗ ta vừa học ở mục 1. Giả sử handler 1 thấy `flag == 0`, và trước khi kịp ghi `flag = 1` thì có interrupt chen vào. Handler 2 chạy, cũng thấy `flag == 0`, đặt cờ rồi vào critical section. Khi handler 1 chạy lại, nó cũng đặt cờ và vào, và thế là cả hai cùng ở trong critical section[^ostep-flag-fail]. Nói cách khác, race condition của `served` chỉ chuyển sang biến `flag`: "kiểm tra rồi đặt" cũng là hai bước.
 
-**Một cờ và load/store thường.** Thử xây lock chỉ bằng một biến `flag`: `lock()` quay `while (flag == 1)` rồi đặt `flag = 1`; `unlock()` đặt `flag = 0`. OSTEP chỉ ra lỗi đúng-sai: nếu một interrupt chen vào giữa lúc Thread 1 thấy `flag == 0` và lúc nó ghi `flag = 1`, thì cả hai thread đều đặt cờ và cả hai vào critical section[^ostep-flag-fail]. Đó là chính race condition của mục 1, chuyển từ biến `counter` sang biến `flag`: "kiểm tra rồi đặt" cũng là hai bước. Lỗi thứ hai là hiệu năng: thread chờ quay liên tục (spin-waiting)[^ostep-spinwait].
+Lỗi thứ hai là hiệu năng: thread chờ lock phải quay vòng liên tục (spin-waiting), và việc đó phí thời gian CPU của thread đang chờ[^ostep-spinwait].
 
-<details><summary>Đi sâu: tắt interrupt</summary>
+<details><summary>Đi sâu: lối tắt thứ hai, tắt interrupt</summary>
 
-Giải pháp cũ cho máy một CPU: tắt interrupt trước critical section rồi bật lại, nên đoạn code bên trong không thể bị ngắt và chạy "như thể atomic"[^ostep-intr-works]. Ưu điểm chính theo OSTEP là đơn giản[^ostep-intr-simple]. Nhược điểm theo OSTEP:
+Cách này từng dùng cho máy một CPU: tắt interrupt trước critical section rồi bật lại, nên đoạn code bên trong không thể bị ngắt và chạy "như thể atomic"[^ostep-intr-works]. Ưu điểm chính của nó là đơn giản[^ostep-intr-simple]. Nhược điểm thì có ba:
 
-- Cho phép chương trình bất kỳ thực hiện thao tác đặc quyền (tắt/bật interrupt), nghĩa là phải tin chương trình đó; một chương trình có thể độc chiếm CPU, hoặc lặp vô hạn và hệ điều hành không bao giờ giành lại quyền điều khiển[^ostep-intr-trust].
-- Không chạy trên đa xử lý: các thread trên CPU khác vẫn vào được critical section[^ostep-intr-mp].
+- Chương trình nào cũng phải được phép tắt và bật interrupt, mà đây là thao tác đặc quyền. Tức là ta phải tin mọi chương trình: một chương trình có thể độc chiếm CPU, hoặc lặp vô hạn để hệ điều hành không bao giờ giành lại quyền điều khiển[^ostep-intr-trust].
+- Không dùng được trên máy nhiều CPU: thread chạy ở CPU khác vẫn vào được critical section[^ostep-intr-mp].
 - Tắt interrupt quá lâu có thể làm mất interrupt, ví dụ không biết đĩa đã đọc xong[^ostep-intr-lost].
 
 </details>
 
-**Quay lại Q2:** lock tốt phải đúng, công bằng và nhanh; cờ thường và tắt interrupt đều thiếu một thao tác atomic thật.
+**Quay lại Q2:** lock tốt phải đúng, công bằng và nhanh; cờ thường và tắt interrupt đều hỏng vì thiếu một thao tác atomic thật của phần cứng, và đó là chuyện của mục 3.
 
 ## 3. Các lệnh atomic phần cứng và lock xây trên chúng (Q3)
 
-> **Trả lời ngắn.** Phần cứng cung cấp các lệnh đọc-sửa-ghi atomic: test-and-set[^ostep-tas-code], compare-and-swap[^ostep-cas], load-linked/store-conditional[^ostep-llsc] và fetch-and-add[^ostep-faa]. Spin lock xây trên test-and-set hoặc CAS[^ostep-spin]; ticket lock dùng fetch-and-add để mọi thread đều tiến triển[^ostep-ticket-progress].
+> **Trả lời ngắn.** Phần cứng cung cấp vài lệnh đọc-sửa-ghi chạy atomic, trong đó test-and-set là dễ hiểu nhất[^ostep-tas]. Spin lock dựng được từ test-and-set hoặc compare-and-swap[^ostep-spin]. Ticket lock dựng từ fetch-and-add và thêm một bảo đảm: mọi thread đều tiến triển[^ostep-ticket-progress].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): lệnh atomic giống một cú "bốc số và đóng dấu" làm trong một động tác — không ai chen vào giữa lúc bốc và lúc đóng.
+*Với service `orders`.* Ở mục 2 ta cần một thao tác "kiểm tra cờ rồi đặt cờ" mà không ai chen vào được. Tới đây phần cứng đã có sẵn lệnh làm việc đó trong một bước, và `orders` chỉ cần dựng lock của mình lên trên. Mục này đi qua hai lock: spin lock (đơn giản, nhưng không công bằng) và ticket lock (công bằng hơn).
 
-**Test-and-set (atomic exchange).**
+### 3.1 Test-and-set và spin lock
 
-Test-and-set là hỗ trợ phần cứng đơn giản nhất để hiểu (theo sách)[^ostep-tas]. Theo mã trong sách, nó lấy giá trị cũ tại một địa chỉ, ghi giá trị mới vào đó và trả giá trị cũ về — cả chuỗi này thực hiện atomic[^ostep-tas-code]. Tên khác nhau theo kiến trúc: trên x86 nó là phiên bản có khóa của `xchg`[^ostep-tas-names]; *Rust Atomics and Locks* lưu ý `xchg` có tiền tố `lock` ngầm định, và nó tương ứng với phép `swap` atomic[^atomics-xchg]. (Nhận xét của người soạn: nếu giá trị cũ trả về là "đã khóa" thì thread biết lock đang bị giữ; nếu là "rảnh" thì đồng thời nó đã tự đặt thành "khóa", tức đã giành được lock.)
+Mã trong sách mô tả test-and-set như sau: nó lấy giá trị cũ tại một địa chỉ, ghi giá trị mới vào đó và trả giá trị cũ về, cả chuỗi này chạy atomic[^ostep-tas-code]. Tên gọi thay đổi theo kiến trúc: trên x86 nó là phiên bản có khóa của `xchg`[^ostep-tas-names]. Sách *Rust Atomics and Locks* nói thêm rằng `xchg` có tiền tố `lock` ngầm định, và nó tương ứng với phép `swap` atomic của Rust[^atomics-xchg].
 
-Nhờ chỉ một thao tác atomic, chỉ một thread giành được lock; loại lock cứ quay vòng đến khi lock rảnh gọi là **spin lock**[^ostep-spin]. Trong Rust, sách *Rust Atomics and Locks* viết đúng như vậy với `swap`[^atomics-spin-code], như đoạn code sau:
+Dùng nó làm lock thì như sau (nhận xét của người soạn): nếu giá trị cũ trả về là "đã khóa" thì handler biết lock đang bị giữ; nếu là "rảnh" thì đồng thời nó đã tự đặt thành "khóa", tức là đã giành được lock. Vì chỉ có một thao tác atomic nên chỉ một thread giành được lock[^ostep-spin]. Loại lock quay vòng cho đến khi lock rảnh như vậy gọi là **spin lock**. Trong Rust, sách *Rust Atomics and Locks* viết đúng như thế bằng `swap`[^atomics-spin-code]:
 
 ```rust
 // Khái niệm: test-and-set bằng AtomicBool::swap (rút từ chương 4 của sách)
@@ -145,96 +151,105 @@ while self.locked.swap(true, Acquire) { std::hint::spin_loop(); }   // lock
 self.locked.store(false, Release);                                  // unlock
 ```
 
-Cặp `Acquire`/`Release` bảo đảm mỗi `unlock()` thiết lập quan hệ happens-before với các `lock()` sau nó; thiếu nó thì có data race và là UB[^atomics-spin-hb][^atomics-spin-race]. Memory ordering là đề tài của [chương 06](06-memory-model.md).
+Cặp `Acquire`/`Release` bảo đảm mỗi lần `unlock()` thiết lập quan hệ happens-before với các lần `lock()` sau nó[^atomics-spin-hb]. Thiếu quan hệ đó thì có data race, và data race là UB[^atomics-spin-race]. Memory ordering là đề tài của [chương 06](06-memory-model.md).
 
-**Fetch-and-add và ticket lock.**
+### 3.2 Fetch-and-add và ticket lock
 
-Fetch-and-add tăng một giá trị atomic và trả về giá trị cũ[^ostep-faa]. Spin lock đơn giản không đảm bảo fairness: thread đang quay có thể quay mãi dưới tranh chấp[^ostep-spin-fair]. **Ticket lock** dùng fetch-and-add để khắc phục: thay vì một giá trị, nó dùng cặp biến `ticket` và `turn`[^ostep-ticket-vars]. Khi muốn lock, thread `fetch_add` trên `ticket` lấy "số thứ tự" `myturn`, rồi quay đến khi `turn == myturn`; unlock chỉ việc tăng `turn` để thread kế tiếp được vào[^ostep-ticket-algo]. Hệ quả: lock đảm bảo mọi thread đều tiến triển[^ostep-ticket-progress] — giống phát số ở quầy giao dịch.
+Spin lock đơn giản có một điểm yếu: nó không bảo đảm fairness, một thread đang quay có thể quay mãi dưới tranh chấp[^ostep-spin-fair]. Với `orders`, một handler xui xẻo có thể không bao giờ giành được lock của cache dù các handler khác vào ra liên tục.
+
+**Ticket lock** sửa điều này bằng *fetch-and-add*, lệnh atomic tăng một giá trị và trả về giá trị cũ[^ostep-faa]. Thay vì một biến, nó dùng cặp biến `ticket` và `turn`[^ostep-ticket-vars]. Muốn lấy lock, thread `fetch_add` vào `ticket` để lấy một "số thứ tự" `myturn`, rồi quay cho tới khi `turn == myturn`. Unlock chỉ cần tăng `turn` để thread kế tiếp (nếu có) được vào[^ostep-ticket-algo]. Vì mỗi thread giữ một số thứ tự riêng, lock bảo đảm mọi thread đều tiến triển[^ostep-ticket-progress].
 
 <details><summary>Đi sâu: compare-and-swap và load-linked/store-conditional</summary>
 
 **Compare-and-swap.**
 
-Compare-and-swap (x86 gọi là compare-and-exchange): kiểm tra giá trị tại địa chỉ có bằng `expected` không; nếu có thì ghi giá trị mới[^ostep-cas]. Sách nói CAS là lệnh mạnh hơn test-and-set[^ostep-cas-stronger], nhưng nếu chỉ dùng nó để xây spin lock đơn giản thì hành vi y hệt[^ostep-cas-same]. Trong Rust, `compare_exchange` trả `Result` mang giá trị cũ, và có biến thể `compare_exchange_weak` có thể thất bại giả (trả `Err` dù giá trị khớp) nhưng trên một số nền tảng chạy hiệu quả hơn[^atomics-weak]. Trên x86-64 hai biến thể biên dịch ra cùng một `lock cmpxchg`[^atomics-weak-x86] — khớp với bảng ở mục 1. Mẫu "đọc, tính giá trị mới, CAS, thất bại thì thử lại" là nền của lock-free ([chương 07](07-lock-free.md)).
+Compare-and-swap (CAS; x86 gọi là compare-and-exchange) kiểm tra giá trị tại một địa chỉ có bằng `expected` không, và chỉ khi bằng mới ghi giá trị mới vào[^ostep-cas]. Sách nói CAS là lệnh mạnh hơn test-and-set[^ostep-cas-stronger], nhưng nếu chỉ dùng nó để xây spin lock đơn giản thì hành vi y hệt[^ostep-cas-same]. Trong Rust, `compare_exchange` trả về một `Result` mang giá trị cũ. Biến thể `compare_exchange_weak` có thể thất bại giả (trả `Err` dù giá trị khớp) nhưng trên một số nền tảng chạy hiệu quả hơn[^atomics-weak]. Trên x86-64 hai biến thể biên dịch ra cùng một `lock cmpxchg`[^atomics-weak-x86], khớp với bảng ở mục 1. Mẫu "đọc, tính giá trị mới, CAS, thất bại thì thử lại" là nền của lock-free ([chương 07](07-lock-free.md)).
 
 **Load-linked / store-conditional.**
 
-Một số kiến trúc cung cấp cặp lệnh thay cho CAS: *load-linked* đọc như load thường; *store-conditional* chỉ thành công (và cập nhật giá trị) nếu không có store nào khác vào địa chỉ đó kể từ lần load-linked[^ostep-llsc]. OSTEP nêu MIPS làm ví dụ và nói Alpha, PowerPC, ARM có lệnh tương tự[^ostep-llsc-arch]. Lock xây trên cặp này: quay đến khi cờ bằng 0, rồi thử `store-conditional` đặt thành 1; nếu thread khác chen vào giữa thì store-conditional thất bại và thử lại từ đầu[^ostep-llsc-lock].
+Một số kiến trúc cung cấp cặp lệnh này thay cho CAS. *Load-linked* đọc như load thường. *Store-conditional* chỉ thành công, và chỉ khi đó mới cập nhật giá trị, nếu không có store nào khác vào địa chỉ ấy kể từ lần load-linked[^ostep-llsc]. OSTEP nêu MIPS làm ví dụ và nói Alpha, PowerPC, ARM có lệnh tương tự[^ostep-llsc-arch]. Lock dựng trên cặp lệnh này quay đến khi cờ bằng 0, rồi thử `store-conditional` đặt thành 1; nếu thread khác chen vào giữa thì store-conditional thất bại và thread phải thử lại từ đầu[^ostep-llsc-lock].
 
-Trên ARM64 (phiên bản ARMv8 đầu tiên) cặp lệnh này là `ldxr` / `stxr`[^atomics-ldxr]. Mỗi core chỉ theo dõi được một địa chỉ, và `store-conditional` được phép thất bại giả, nên phần cứng có thể theo dõi thô mà vẫn đúng, đổi lại thêm vài vòng lặp[^atomics-llsc-weak] — Rust Atomics and Locks nói đây là lý do `compare_exchange_weak` tồn tại[^atomics-weak-reason].
+Trên ARM64 (phiên bản ARMv8 đầu tiên) cặp lệnh này là `ldxr` / `stxr`[^atomics-ldxr]. Mỗi core chỉ theo dõi được một địa chỉ, và `store-conditional` được phép thất bại giả, nên phần cứng có thể theo dõi thô mà vẫn đúng, đổi lại thêm vài vòng lặp[^atomics-llsc-weak]. Đó cũng là lý do `compare_exchange_weak` tồn tại[^atomics-weak-reason].
 
 </details>
 
-**Quay lại Q3:** lock xây từ lệnh atomic phần cứng — TAS/CAS cho spin lock, fetch-and-add cho ticket lock công bằng.
-
+**Quay lại Q3:** lock xây từ lệnh atomic của phần cứng: test-and-set hoặc CAS cho spin lock, fetch-and-add cho ticket lock công bằng.
 
 ## 4. Quay, nhường CPU, hay ngủ (Q4)
 
-> **Trả lời ngắn.** Quay (spin) phí CPU, nhất là khi thread giữ lock bị preempt[^ostep-spin-preempt]. Yield nhường CPU nhưng tốn context switch và không chống đói[^ostep-yield-99][^ostep-yield-starve]. Ngủ trong hàng đợi (park/unpark) kiểm soát thread nào nhận lock tiếp theo[^ostep-queue-why]; two-phase lock quay một lúc rồi mới ngủ[^ostep-twophase].
+> **Trả lời ngắn.** Khi lock đang bị giữ, thread đến sau có ba lựa chọn. Quay (spin) thì phí CPU, nhất là khi thread đang giữ lock bị preempt[^ostep-spin-preempt]. Nhường CPU (yield) đỡ phí hơn nhưng tốn context switch và không chống được đói[^ostep-yield-starve]. Ngủ trong hàng đợi (park/unpark) cho phép chọn thread nhận lock tiếp theo[^ostep-queue-why]; còn two-phase lock quay một lúc rồi mới ngủ[^ostep-twophase].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chờ một phòng họp — đứng ngay cửa nhìn chằm chằm (quay), ghé qua hỏi liên tục (yield), hay ngồi ghế chờ và nhờ lễ tân gọi khi phòng trống (ngủ).
+*Với service `orders`.* Giả sử cache của `orders` đang do handler A giữ lock, và 99 handler khác cùng cần nó (con số 100 thread lấy từ ví dụ của sách). Hàng trăm handler đó phải làm gì trong lúc chờ? Mục này đi qua ba câu trả lời, mỗi câu sửa một nhược điểm của câu trước.
 
-**Quay phí CPU.**
+### 4.1 Quay
 
-Spin-waiting phí thời gian chờ thread khác nhả lock[^ostep-spinwait]. Tệ nhất khi thread đang giữ lock bị preempt giữa critical section: scheduler có thể chạy lần lượt mọi thread còn lại, mỗi thread quay hết cả một time slice[^ostep-spin-preempt]; với N thread tranh lock là N − 1 time slice bị phí[^ostep-spin-nminus1]. Trên một CPU, spin lock còn đòi scheduler preemptive mới hoạt động[^ostep-uni-preempt].
+Spin-waiting là đứng chờ mà vẫn chạy CPU, và việc đó phí thời gian chờ thread khác nhả lock[^ostep-spinwait]. Tệ nhất là khi handler A bị preempt ngay giữa critical section. Lúc đó scheduler có thể chạy lần lượt mọi thread còn lại, và mỗi thread quay hết cả một time slice mà không làm được gì[^ostep-spin-preempt]. Với N thread tranh lock, có N − 1 time slice bị phí như vậy[^ostep-spin-nminus1]. Trên máy một CPU, spin lock còn đòi scheduler phải preemptive mới chạy đúng[^ostep-uni-preempt].
 
-**Yield.**
+### 4.2 Yield
 
-Cách đầu tiên: khi sắp quay, hãy nhường CPU cho thread khác[^ostep-yield]. `yield` là system call chuyển thread gọi từ trạng thái running sang ready[^ostep-yield-state]. Với hai thread trên một CPU cách này chạy tốt; nhưng với 100 thread, nếu thread giữ lock bị preempt thì 99 thread còn lại mỗi thread gọi `lock()`, thấy lock bị giữ và yield[^ostep-yield-99] — tốt hơn quay, nhưng chi phí context switch đáng kể. Và yield không giải quyết đói: một thread có thể kẹt trong vòng yield vô tận[^ostep-yield-starve].
+Cách thứ nhất là: khi sắp phải quay, hãy nhường CPU cho thread khác[^ostep-yield]. `yield` là system call chuyển thread gọi từ trạng thái running sang ready[^ostep-yield-state]. Với hai thread trên một CPU, cách này chạy tốt. Nhưng với 100 handler, nếu A bị preempt thì 99 handler còn lại mỗi cái gọi `lock()`, thấy lock bị giữ rồi yield[^ostep-yield-99]. Như vậy tốt hơn quay, nhưng 99 lần context switch vẫn đắt. Hơn nữa yield không giải quyết chuyện đói: một thread có thể kẹt mãi trong vòng yield trong khi các thread khác liên tục vào ra critical section[^ostep-yield-starve].
 
-**Ngủ trong hàng đợi (park/unpark).**
+### 4.3 Ngủ trong hàng đợi (park/unpark)
 
-OSTEP chỉ ra gốc vấn đề: các cách trước để quá nhiều thứ cho may rủi, nên cần chủ động kiểm soát thread nào nhận lock tiếp theo[^ostep-queue-why]. Sách dùng hai lời gọi của Solaris: `park()` đưa thread gọi vào trạng thái ngủ và `unpark(threadID)` đánh thức một thread cụ thể[^ostep-park]. Lock gồm cờ `flag`, một `guard` (spin lock ngắn bảo vệ `flag` và hàng đợi) và hàng đợi các thread chờ. Khi unlock mà hàng đợi không rỗng, lock được **chuyển thẳng** cho thread kế tiếp mà không đặt `flag` về 0[^ostep-handoff]; spin ở `guard` chỉ kéo dài vài lệnh trong code `lock`/`unlock`, không phải suốt critical section của người dùng[^ostep-guard-short].
+Gốc của vấn đề là các cách trên để quá nhiều thứ cho may rủi. Muốn công bằng thì phải chủ động kiểm soát thread nào nhận lock sau khi người giữ nhả nó[^ostep-queue-why]. Sách dùng hai lời gọi của Solaris: `park()` đưa thread gọi vào trạng thái ngủ, còn `unpark(threadID)` đánh thức đúng thread có ID đó[^ostep-park].
 
-**Two-phase lock.** Spin hữu ích khi lock sắp được nhả; ngủ hữu ích khi phải chờ lâu. **Two-phase lock** kết hợp: pha một quay một lúc, hy vọng giành được lock; không được thì sang pha hai là ngủ[^ostep-twophase]. OSTEP nhận xét lock Linux ở dạng futex là một dạng two-phase nhưng chỉ quay một lần; có thể tổng quát hóa thành quay trong vòng lặp[^ostep-twophase-linux]. Mục 6: `std::sync::Mutex` có cấu trúc tương tự — quay có giới hạn rồi `futex_wait` (suy luận của người soạn).
+Lock dựng trên hai lời gọi này gồm một cờ `flag`, một hàng đợi các thread đang chờ, và một `guard`, tức một spin lock ngắn bảo vệ `flag` và hàng đợi. Khi unlock mà hàng đợi không rỗng, lock được **chuyển thẳng** cho thread kế tiếp mà không đặt `flag` về 0[^ostep-handoff]. Còn spin ở `guard` chỉ kéo dài vài lệnh trong code `lock`/`unlock`, không kéo dài suốt critical section của người dùng[^ostep-guard-short].
+
+### 4.4 Two-phase lock
+
+Quay có ích khi lock sắp được nhả; ngủ có ích khi phải chờ lâu. **Two-phase lock** lấy cả hai: pha một thread quay một lúc, hy vọng giành được lock; không được thì sang pha hai là ngủ[^ostep-twophase]. OSTEP nhận xét lock Linux ở dạng futex là một dạng two-phase, nhưng chỉ quay một lần, và có thể tổng quát hóa thành quay trong vòng lặp[^ostep-twophase-linux]. Mục 6 sẽ cho thấy `std::sync::Mutex` có cấu trúc tương tự: quay có giới hạn rồi `futex_wait` (suy luận của người soạn).
 
 <details><summary>Đi sâu: wakeup/waiting race</summary>
 
-**Wakeup/waiting race.** Nếu thread bị ngắt ngay trước `park()`, và thread giữ lock nhả lock rồi `unpark` trong khoảng đó, thì `park()` sau đó có thể ngủ mãi — vấn đề này OSTEP gọi là "wakeup/waiting race"[^ostep-park-race]. Solaris thêm `setpark()`: nếu `unpark` đến trước khi `park` được gọi thật, thì `park` trả về ngay thay vì ngủ[^ostep-setpark]. Cách khác là đưa `guard` vào kernel để nhả lock và đưa thread vào hàng đợi một cách atomic[^ostep-guard-kernel]. Futex (mục 5) đi theo hướng so sánh giá trị trong kernel.
+Cách ngủ trong hàng đợi có một lỗ hổng về thời điểm. Giả sử thread bị ngắt ngay trước khi gọi `park()`, và trong khoảng đó thread đang giữ lock nhả lock rồi `unpark` nó. Khi thread chạy lại, `park()` có thể ngủ mãi, vì lời đánh thức đã đến trước khi nó ngủ. OSTEP gọi vấn đề này là "wakeup/waiting race"[^ostep-park-race]. Solaris vá bằng `setpark()`: nếu `unpark` đến trước khi `park` được gọi thật, thì `park` trả về ngay thay vì ngủ[^ostep-setpark]. Một cách khác là đưa `guard` vào kernel, để nhả lock và đưa thread vào hàng đợi trong một thao tác atomic[^ostep-guard-kernel]. Futex (mục 5) đi theo hướng so sánh giá trị ngay trong kernel.
 
 </details>
 
-**Quay lại Q4:** quay phí CPU, yield tốn context switch, ngủ trong hàng đợi chống đói nhưng có wakeup/waiting race; two-phase lock lấy phần tốt của hai bên.
+**Quay lại Q4:** quay phí CPU, yield tốn context switch, ngủ trong hàng đợi chống được đói nhưng có wakeup/waiting race; two-phase lock lấy phần tốt của cả hai.
 
 ## 5. Futex: fast path ở user space, slow path ở kernel (Q5)
 
-> **Trả lời ngắn.** Futex là một số nguyên trong shared memory: khi không tranh chấp, thread đổi trạng thái bằng lệnh atomic và kernel không biết gì[^futex-uncontended]. `FUTEX_WAIT` so sánh giá trị rồi ngủ một cách atomic, trả `EAGAIN` nếu giá trị đã đổi nên không mất wake-up[^futex-wait-atomic][^futex-eagain]; `FUTEX_WAKE` đánh thức tối đa `val` thread[^futex-wake].
+> **Trả lời ngắn.** Futex là một số nguyên nằm trong shared memory. Khi không ai tranh lock, thread đổi số đó bằng lệnh atomic và kernel không hay biết gì[^futex-uncontended]. Khi phải chờ, thread gọi `FUTEX_WAIT`: kernel đọc giá trị, so với giá trị mong đợi rồi ngủ, cả ba việc trong một thao tác atomic[^futex-wait-atomic]. Nếu giá trị đã đổi thì `FUTEX_WAIT` trả `EAGAIN` ngay, nên không mất wake-up[^futex-eagain]. `FUTEX_WAKE` đánh thức tối đa `val` thread[^futex-wake].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tấm biển "đang dùng" trên cửa phòng — chỉ khi có người đứng chờ mới phải gọi bảo vệ (kernel).
+*Với service `orders`.* Phần lớn thời gian cache của `orders` không có ai tranh, và lúc đó lock/unlock nên rẻ như vài lệnh atomic, không syscall. Chỉ khi một handler thực sự phải chờ thì mới đáng gọi kernel để nó ngủ, và kernel cần đánh thức đúng lúc. Futex là cơ chế Linux cho cả hai việc.
 
+### 5.1 Vì sao cần futex
 
-Spin mãi thì phí CPU, còn ngủ/đánh thức bằng syscall mỗi lần lock thì chậm. futex(7) mô tả futex là khối xây rất cơ bản, phù hợp để xây mutex, condition variable, read-write lock, barrier, semaphore ở tầng cao hơn[^futex7-build]. Hầu hết lập trình viên không gọi futex trực tiếp mà dùng thư viện hệ thống xây trên nó[^futex7-lib]; glibc không cung cấp wrapper cho `futex()` nên muốn gọi phải dùng `syscall(2)`[^futex-nowrapper]. Mara Bos tóm phía Linux: các primitive đồng bộ của pthread đều được cài bằng syscall futex[^atomics-futex-linux]; OSTEP cũng nói Linux cung cấp futex, tương tự giao diện của Solaris nhưng thêm nhiều chức năng trong kernel[^ostep-futex-linux].
+Spin mãi thì phí CPU, còn gọi syscall để ngủ và đánh thức mỗi lần lock thì chậm. Futex tránh cả hai bằng cách để phần lớn thao tác đồng bộ diễn ra ở user space và chỉ gọi syscall khi cần chặn hoặc đánh thức[^futex-userspace]. Với trường hợp không tranh chấp, mọi việc chạy hoàn toàn ở user space, và kernel chỉ phân xử khi có tranh chấp[^futex7-nonc].
 
-**Cơ chế.**
+Futex là khối xây rất cơ bản, hợp để xây mutex, condition variable, read-write lock, barrier, semaphore ở tầng cao hơn[^futex7-build]. Vì thế hầu hết lập trình viên không gọi futex trực tiếp mà dùng thư viện hệ thống xây trên nó[^futex7-lib]. Trên Linux, các primitive đồng bộ của pthread đều cài bằng syscall futex[^atomics-futex-linux].
 
-`futex(2)` là phương tiện chờ đến khi một điều kiện đúng, thường dùng làm khối chặn cho đồng bộ shared-memory; phần lớn thao tác đồng bộ diễn ra ở user space và chỉ gọi syscall khi cần chặn hoặc đánh thức[^futex-userspace]. futex(7) nhấn mạnh: trường hợp không tranh chấp chạy hoàn toàn ở user space, kernel chỉ phân xử khi có tranh chấp[^futex7-nonc].
+### 5.2 Cơ chế
 
-- **Fast path**: trạng thái lock là một số nguyên ("futex word") trong shared memory. Khi không tranh chấp, thread đổi trạng thái chỉ bằng lệnh atomic như compare-and-exchange; kernel không biết gì về lock[^futex-uncontended].
-- **`FUTEX_WAIT`** kiểm tra giá trị tại địa chỉ futex còn bằng giá trị mong đợi `val` không, và nếu còn thì ngủ chờ `FUTEX_WAKE`. Việc đọc giá trị, so sánh và bắt đầu ngủ được thực hiện atomic[^futex-wait-atomic]. Nếu giá trị khác thì thất bại ngay với `EAGAIN`; phép so sánh này để tránh mất wake-up — nếu thread khác đổi giá trị rồi đã gọi wake trước khi ta kịp ngủ, ta nhìn thấy giá trị mới và không ngủ[^futex-eagain]. Man page gọi đây là phép so sánh-rồi-chặn atomic (atomic compare-and-block)[^futex-cab]. Đây chính là lời giải cho wakeup/waiting race ở mục 4, và OSTEP mô tả `futex_wait(address, expected)` đúng như vậy[^ostep-futex-wait].
+- **Fast path**: trạng thái lock là một số nguyên ("futex word") nằm trong shared memory. Khi không tranh chấp, thread đổi trạng thái chỉ bằng lệnh atomic như compare-and-exchange (ví dụ từ "chưa ai giữ" sang "đã giữ"), và kernel không biết gì về lock[^futex-uncontended].
+- **`FUTEX_WAIT`** kiểm tra giá trị tại địa chỉ futex còn bằng giá trị mong đợi `val` không, và nếu còn thì ngủ chờ `FUTEX_WAKE`. Việc đọc giá trị, so sánh và bắt đầu ngủ chạy atomic[^futex-wait-atomic]. Nếu giá trị đã khác thì lời gọi thất bại ngay với `EAGAIN`. Phép so sánh này để tránh mất wake-up: nếu thread khác đã đổi giá trị rồi gọi wake trước khi ta kịp ngủ, ta nhìn thấy giá trị mới và không ngủ[^futex-eagain]. Man page gọi đó là phép so sánh-rồi-chặn atomic (atomic compare-and-block)[^futex-cab].
 - **`FUTEX_WAKE`** đánh thức tối đa `val` thread đang chờ trên futex word đó[^futex-wake].
 
-<details><summary>Đi sâu: mutex tự viết trong Rust Atomics and Locks</summary>
+Phép so sánh-rồi-ngủ atomic chính là lời giải cho wakeup/waiting race ở mục 4. OSTEP mô tả `futex_wait(address, expected)` đúng như vậy: ngủ nếu giá trị tại địa chỉ bằng `expected`, còn nếu không bằng thì trả về ngay[^ostep-futex-wait].
 
-Với mutex tự viết ở chương 9, Mara Bos nói: ở trường hợp không tranh chấp, cả `wait()` lẫn `wake_one()` đều bị bỏ qua hoàn toàn[^atomics-fastpath].
+<details><summary>Đi sâu: wrapper của glibc, futex ở Linux theo OSTEP và mutex tự viết</summary>
+
+glibc không có wrapper cho `futex()`, nên muốn gọi trực tiếp thì phải dùng `syscall(2)`[^futex-nowrapper]. OSTEP nói thêm rằng futex của Linux giống giao diện của Solaris nhưng có thêm nhiều chức năng trong kernel[^ostep-futex-linux].
+
+Với mutex tự viết ở chương 9 của *Rust Atomics and Locks*, tác giả nói rằng ở trường hợp không tranh chấp, cả `wait()` lẫn `wake_one()` đều bị bỏ qua hoàn toàn[^atomics-fastpath].
 
 </details>
 
-**Quay lại Q5:** futex để fast path hoàn toàn ở user space và chỉ vào kernel khi phải chờ, còn việc so sánh-rồi-ngủ atomic loại bỏ wakeup/waiting race.
+**Quay lại Q5:** futex để fast path hoàn toàn ở user space và chỉ vào kernel khi phải chờ; việc so sánh-rồi-ngủ atomic loại bỏ wakeup/waiting race.
 
 ## 6. `std::sync::Mutex` trên Linux (Rust 1.95.0) (Q6)
 
-> **Trả lời ngắn.** Trên Linux (source Rust 1.95.0), `Mutex` là một futex word có ba trạng thái 0/1/2[^std-futex-states]. Lock không tranh chấp là một `compare_exchange` không syscall[^std-futex-fast]; nếu bị chiếm thì spin tối đa 100 vòng[^std-futex-spin100] rồi `futex_wait`[^std-futex-wait]; unlock chỉ gọi wake khi trạng thái cũ là `CONTENDED`[^std-futex-unlock].
+> **Trả lời ngắn.** Trên Linux (source Rust 1.95.0), `Mutex` là một futex word có ba trạng thái 0/1/2[^std-futex-states]. Lock không tranh chấp là một `compare_exchange`, không syscall[^std-futex-fast]. Nếu lock đang bị giữ thì thread spin tối đa 100 vòng[^std-futex-spin100] rồi gọi `futex_wait`[^std-futex-wait]. Unlock chỉ gọi wake khi trạng thái cũ là `CONTENDED`[^std-futex-unlock].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thử mở cửa; không được thì đứng đợi một lúc, rồi ngồi ghế chờ; người ra khỏi phòng chỉ gọi người ngồi ghế chờ nếu thật sự có người.
+*Với service `orders`.* Giả sử cache của `orders` nằm trong một `Mutex<HashMap<…>>`. Khi cache rảnh, handler chỉ cần một lệnh atomic để vào. Khi một handler khác đang giữ, handler đến sau thử quay một lúc, rồi mới ngủ. Lúc unlock, nó chỉ phải gọi kernel nếu thực sự có handler đang ngủ. Mục này đọc source để thấy từng bước đó nằm ở đâu.
 
-
-Trên Linux, `std::sync::Mutex` dùng hiện thực `library/std/src/sys/sync/mutex/futex.rs`. Ba trạng thái được định nghĩa ngay đầu file: `UNLOCKED = 0`, `LOCKED = 1` (khóa, không ai chờ) và `CONTENDED = 2` (khóa, có thread khác đang chờ)[^std-futex-states]. (Đây là chi tiết cài đặt trong source, không phải bảo đảm của docs — có thể đổi giữa các phiên bản; trên macOS thư mục `sys/sync/mutex/` có cài đặt khác, người soạn không đọc nên không khẳng định.)
+Trên Linux, `std::sync::Mutex` dùng hiện thực trong `library/std/src/sys/sync/mutex/futex.rs`. Ba trạng thái được định nghĩa ngay đầu file: `UNLOCKED = 0`, `LOCKED = 1` (đã khóa, không ai chờ) và `CONTENDED = 2` (đã khóa, có thread khác đang chờ)[^std-futex-states]. Đây là chi tiết cài đặt trong source, không phải bảo đảm của docs, nên có thể đổi giữa các phiên bản. Trên macOS thư mục `sys/sync/mutex/` có cài đặt khác, người soạn không đọc nên không khẳng định.
 
 ```mermaid
 stateDiagram-v2
@@ -248,24 +263,35 @@ stateDiagram-v2
   CONTENDED_2 --> UNLOCKED_0: unlock(): swap(0, Release) trả về 2 — futex_wake 1 thread
 ```
 
-- **Fast path**: `lock()` thử `compare_exchange(UNLOCKED, LOCKED, Acquire, Relaxed)`; chỉ khi lỗi mới gọi `lock_contended()`[^std-futex-fast].
-- **Pha spin** (cấu trúc giống two-phase lock): `lock_contended` mở đầu bằng một comment nói nên spin trước để tăng tốc nếu lock được nhả nhanh[^std-futex-spin], và trong vòng spin chỉ dùng `load` (không `swap`/`compare_exchange`) để thân thiện với cache[^std-futex-spin-load]. Bộ đếm spin khởi đầu ở 100, mỗi vòng gọi `spin_loop()` rồi giảm 1[^std-futex-spin100]. Vòng spin dừng sớm khi trạng thái không còn là `LOCKED` (tức đã `UNLOCKED` hoặc đã `CONTENDED`)[^std-futex-spin-stop]. Nếu spin trả về `UNLOCKED`, thread thử `compare_exchange(UNLOCKED, LOCKED)` — giành được thì trả về mà không đánh dấu `CONTENDED`[^std-futex-spin-cas].
-- **Pha ngủ**: nếu vẫn bị chiếm thì đặt trạng thái `CONTENDED` (và nếu `swap` thấy giá trị cũ là `UNLOCKED` thì đã giành được lock)[^std-futex-contended-swap], rồi gọi `futex_wait(&self.futex, CONTENDED, None)` — chờ cho futex đổi khỏi `CONTENDED`[^std-futex-wait].
-- **Unlock**: `swap(UNLOCKED, Release)`; chỉ khi giá trị cũ là `CONTENDED` mới gọi wake[^std-futex-unlock]. Comment trong source giải thích chỉ đánh thức một thread vì thread đó khi lock lại sẽ đặt `CONTENDED`, đảm bảo các thread còn chờ cuối cùng cũng được đánh thức[^std-futex-wake-one].
+### 6.1 Fast path
+
+`lock()` thử `compare_exchange(UNLOCKED, LOCKED, Acquire, Relaxed)`, và chỉ khi nó lỗi mới gọi `lock_contended()`[^std-futex-fast]. Nghĩa là handler nào gặp lock rảnh thì vào luôn, không qua bước nào dưới đây.
+
+### 6.2 Pha spin
+
+Nếu lock đang bị giữ, `lock_contended` mở đầu bằng một comment nói nên spin trước để tăng tốc nếu lock được nhả nhanh[^std-futex-spin]. Cấu trúc này giống two-phase lock ở mục 4. Trong vòng spin, thread chỉ dùng `load` chứ không dùng `swap` hay `compare_exchange`, để thân thiện với cache[^std-futex-spin-load]. Bộ đếm spin khởi đầu ở 100, mỗi vòng gọi `spin_loop()` rồi giảm 1[^std-futex-spin100].
+
+Vòng spin dừng sớm khi trạng thái không còn là `LOCKED`, tức đã `UNLOCKED` hoặc đã `CONTENDED`[^std-futex-spin-stop]. Nếu spin trả về `UNLOCKED`, thread thử `compare_exchange(UNLOCKED, LOCKED)`; giành được thì trả về mà không đánh dấu `CONTENDED`[^std-futex-spin-cas].
+
+### 6.3 Pha ngủ
+
+Nếu lock vẫn bị chiếm, thread đặt trạng thái thành `CONTENDED`. Nếu `swap` này thấy giá trị cũ là `UNLOCKED` thì thread đã giành được lock rồi[^std-futex-contended-swap]. Ngược lại nó gọi `futex_wait(&self.futex, CONTENDED, None)` để chờ cho futex đổi khỏi `CONTENDED`[^std-futex-wait].
+
+### 6.4 Unlock
+
+`unlock` làm `swap(UNLOCKED, Release)`, và chỉ khi giá trị cũ là `CONTENDED` mới gọi wake[^std-futex-unlock]. Comment trong source giải thích vì sao chỉ đánh thức một thread: thread đó khi lock lại sẽ đặt `CONTENDED`, nên các thread còn chờ cuối cùng cũng được đánh thức[^std-futex-wake-one].
 
 <details><summary>Đi sâu: lớp syscall, happens-before, fairness và quan sát bằng strace</summary>
 
-- **Lớp syscall**: trên Linux, `futex_wait` gọi `SYS_futex` với `FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG`[^std-sys-futex]; hàm trả về ngay nếu futex không giữ giá trị mong đợi[^std-sys-futex-ret].
-- **Happens-before**: `lock` dùng `Acquire`, `unlock` dùng `Release` trên cùng futex word (suy luận của người soạn từ source). *Rust Atomics and Locks* ch.3 nêu cho mutex nói chung rằng có happens-before giữa unlock và lock kế tiếp[^atomics-mutex-ex] (chi tiết ở [chương 06, mục 4 và 7](06-memory-model.md)); ch.9 nói với mutex tự viết cùng thiết kế rằng nó được thiết lập khi `swap` acquire thấy giá trị do `swap` release lưu[^atomics-mutex-hb]. Người review không thấy docs `std::sync::Mutex` 1.95.0 nói điều này riêng cho `Mutex` của `std`.
+- **Lớp syscall**: trên Linux, `futex_wait` gọi `SYS_futex` với `FUTEX_WAIT_BITSET | FUTEX_PRIVATE_FLAG`[^std-sys-futex]. Hàm trả về ngay nếu futex không giữ giá trị mong đợi[^std-sys-futex-ret].
+- **Happens-before**: `lock` dùng `Acquire`, `unlock` dùng `Release` trên cùng futex word (suy luận của người soạn từ source). *Rust Atomics and Locks* ch.3 nêu cho mutex nói chung rằng có happens-before giữa unlock và lock kế tiếp[^atomics-mutex-ex] (chi tiết ở [chương 06, mục 4 và 7](06-memory-model.md)). Ch.9 nói với mutex tự viết cùng thiết kế rằng quan hệ này được thiết lập khi `swap` acquire thấy giá trị do `swap` release lưu[^atomics-mutex-hb]. Người review không thấy docs `std::sync::Mutex` 1.95.0 nói điều này riêng cho `Mutex` của `std`.
 - **Fairness**: người review không thấy docs `std::sync::Mutex` 1.95.0 hứa thứ tự cấp lock, nên đừng giả định FIFO. Suy luận của người soạn từ source: `unlock` đặt `UNLOCKED` *rồi mới* đánh thức một thread[^std-futex-unlock], nên thread đang chạy có thể `compare_exchange` thắng trước thread vừa được đánh thức. Ticket lock thì cấp theo số thứ tự (mục 3).
 
-
-**Quan sát bằng strace** (chạy thật trong container Linux aarch64; người review chạy lại, cùng kết quả): thread chính giữ `Mutex` 200 ms trong khi thread con gọi `lock()`. Thread con không giành được lock trong 100 vòng spin nên ngủ bằng `futex(addr, FUTEX_WAIT_BITSET_PRIVATE, 2, NULL, …)` — đối số `2` chính là `CONTENDED`. Khi thread chính nhả lock, nó gọi `futex(addr, FUTEX_WAKE_PRIVATE, 1)` và nhận về `1` (đã đánh thức một thread). 1000 lần lock/unlock không tranh chấp trước đó không sinh lệnh futex nào, khớp với fast path.
+**Quan sát bằng strace** (chạy thật trong container Linux aarch64; người review chạy lại, cùng kết quả): thread chính giữ `Mutex` 200 ms trong khi thread con gọi `lock()`. Thread con không giành được lock trong 100 vòng spin nên ngủ bằng `futex(addr, FUTEX_WAIT_BITSET_PRIVATE, 2, NULL, …)`; đối số `2` chính là `CONTENDED`. Khi thread chính nhả lock, nó gọi `futex(addr, FUTEX_WAKE_PRIVATE, 1)` và nhận về `1` (đã đánh thức một thread). 1000 lần lock/unlock không tranh chấp trước đó không sinh lệnh futex nào, khớp với fast path.
 
 </details>
 
-**Quay lại Q6:** `Mutex` trên Linux là state machine futex 0/1/2: fast path không syscall, spin tối đa 100 vòng, rồi ngủ bằng `futex_wait`.
-
+**Quay lại Q6:** `Mutex` trên Linux là một state machine futex 0/1/2: fast path không syscall, spin tối đa 100 vòng, rồi ngủ bằng `futex_wait`.
 
 ## 7. Đo thử: các lock trên cùng một bộ đếm (Q7)
 
@@ -273,9 +299,9 @@ stateDiagram-v2
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cách nhanh nhất để đếm là cách sai — bỏ khóa thì nhanh nhưng mất số.
+*Với service `orders`.* Thí nghiệm này chính là biến `served` của `orders`, thu gọn lại: 4 thread cùng tăng một bộ đếm. Ta thử năm cách tăng và nhìn hai thứ, kết quả có đúng không và mất bao lâu.
 
-Chương trình lab (rustc 1.95.0 `-O`, container Linux aarch64, 4 vCPU): 4 thread, mỗi thread tăng một bộ đếm 1.000.000 lần, kỳ vọng 4.000.000. Hai lần chạy:
+Chương trình lab chạy với rustc 1.95.0 `-O`, trong container Linux aarch64 có 4 vCPU: 4 thread, mỗi thread tăng một bộ đếm 1.000.000 lần, kỳ vọng 4.000.000. Hai lần chạy cho kết quả sau:
 
 | Cách tăng | Kết quả cuối (lần 1 / lần 2) | Thời gian (lần 1 / lần 2) |
 |---|---|---|
@@ -285,44 +311,49 @@ Chương trình lab (rustc 1.95.0 `-O`, container Linux aarch64, 4 vCPU): 4 thre
 | spin lock (`swap`) | 4.000.000 / 4.000.000 | 0,143 s / 0,132 s |
 | ticket lock | 4.000.000 / 4.000.000 | 0,238 s / 0,258 s |
 
+Cách nhanh nhất là cách sai: bỏ lock thì nhanh, nhưng mất số. Bốn cách còn lại đều đúng, và giá phải trả tăng dần.
+
 <details><summary>Đi sâu: đọc kết quả và nguyên nhân (suy luận)</summary>
 
-Đây là **một thí nghiệm nhỏ trên một máy**, không phải benchmark. Điều chắc chắn là cột kết quả: `racy` mất khoảng 58–74% số lần tăng và con số khác nhau giữa hai lần chạy — đúng nghĩa "indeterminate"[^ostep-indeterminate]. Cột thời gian chỉ cho thấy thứ tự `fetch_add` < `Mutex` < spin < ticket (người review chạy lại 3 lần, thứ tự giữ nguyên). Nguyên nhân là **suy luận của người soạn, chưa đo riêng**: thread giữ lock bị preempt làm các thread quay đốt CPU (mục 4), và/hoặc cache line bị chuyển qua lại giữa các core.
+Đây là **một thí nghiệm nhỏ trên một máy**, không phải benchmark. Điều chắc chắn là cột kết quả: `racy` mất khoảng 58–74% số lần tăng, và con số khác nhau giữa hai lần chạy, đúng nghĩa "indeterminate"[^ostep-indeterminate]. Cột thời gian chỉ cho thấy thứ tự `fetch_add` < `Mutex` < spin < ticket (người review chạy lại 3 lần, thứ tự giữ nguyên). Nguyên nhân là **suy luận của người soạn, chưa đo riêng**: thread giữ lock bị preempt làm các thread quay đốt CPU (mục 4), và/hoặc cache line bị chuyển qua lại giữa các core.
 
 </details>
 
-**Quay lại Q7:** chỉ cột kết quả là chắc chắn (racy mất cập nhật); thứ tự thời gian chỉ là quan sát một máy.
-
+**Quay lại Q7:** chỉ cột kết quả là chắc chắn (racy mất cập nhật); thứ tự thời gian chỉ là quan sát trên một máy.
 
 ## 8. Cấu trúc dữ liệu có lock (Q8)
 
-> **Trả lời ngắn.** Một lock to bọc cả cấu trúc thì đúng và đơn giản; nếu cấu trúc không quá chậm thì thế là đủ[^ostep-biglock][^ostep-biglock-done]. Nhiều lock nhỏ (fine-grained) cho nhiều thread cùng vào hơn[^ostep-fine] nhưng không chắc nhanh hơn: hand-over-hand thường chậm hơn một lock[^ostep-hoh-slow]. Reader-writer lock cho nhiều reader chạy đồng thời khi không có writer[^ostep-rw-idea].
+> **Trả lời ngắn.** Một lock to bọc cả cấu trúc thì đúng và đơn giản, và nếu cấu trúc không quá chậm thì thế là đủ[^ostep-biglock-done]. Nhiều lock nhỏ (fine-grained) cho nhiều thread cùng ở trong code có lock hơn[^ostep-fine], nhưng không chắc nhanh hơn: hand-over-hand thường chậm hơn một lock[^ostep-hoh-slow]. Reader-writer lock cho nhiều reader chạy đồng thời khi không có writer[^ostep-rw-idea].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một cổng soát vé cho cả sân vận động thì đơn giản nhưng nghẽn; nhiều cổng thì nhanh hơn nhưng phải lo người đi nhầm cổng.
+*Với service `orders`.* Cache đơn hàng của `orders` cần được nhiều handler cùng đọc và thỉnh thoảng ghi. Ta có thể bọc cả cache trong một lock, chia nó thành nhiều lock nhỏ, hoặc cho phép nhiều handler cùng đọc. Mục này nói khi nào nên chọn cách nào.
 
-**Một lock to: đúng, đơn giản, có thể không scale.**
+### 8.1 Một lock to: đúng, đơn giản, có thể không scale
 
-Thêm lock vào một cấu trúc dữ liệu để thread dùng được gọi là làm nó *thread safe*[^ostep-threadsafe]. Cách đơn giản nhất: một lock duy nhất, lấy khi gọi hàm thao tác cấu trúc và nhả khi trả về[^ostep-biglock]. Cách này đúng, và sách nhấn mạnh: nếu cấu trúc không quá chậm thì bạn đã xong, không cần làm gì cầu kỳ[^ostep-biglock-done]. POSIX cho phép nhiều lock cho nhiều dữ liệu: một lock lớn cho mọi critical section là *coarse-grained*[^ostep-coarse]; dùng lock khác nhau cho dữ liệu khác nhau cho phép nhiều thread cùng ở trong code có lock hơn (*fine-grained*)[^ostep-fine].
+Thêm lock vào một cấu trúc dữ liệu để thread dùng được gọi là làm nó *thread safe*[^ostep-threadsafe]. Cách đơn giản nhất là một lock duy nhất: handler lấy lock khi gọi hàm thao tác cấu trúc và nhả khi hàm trả về[^ostep-biglock]. Cách này đúng, và sách nhấn mạnh: nếu cấu trúc không quá chậm thì bạn đã xong, không cần làm gì cầu kỳ[^ostep-biglock-done].
 
-**Bộ đếm: lock đúng nhưng không scale.**
+Cách này còn có tên là *coarse-grained*: một lock lớn cho mọi critical section[^ostep-coarse]. POSIX cũng cho phép dùng nhiều lock cho nhiều phần dữ liệu. Khi mỗi phần dữ liệu có lock riêng, nhiều thread cùng ở trong code có lock hơn, và đó là *fine-grained*[^ostep-fine].
 
-OSTEP đo bộ đếm có lock: một thread làm 1 triệu lần cập nhật trong khoảng 0,03 giây, còn hai thread cùng cập nhật 1 triệu lần mỗi thread thì chậm hẳn đi (hơn 5 giây trên máy của họ)[^ostep-counter-slow]. Con số là của máy trong sách nên chỉ có hình dạng là đáng tin: nhiều core tranh một lock thì chậm hơn một core. Cách khắc phục là **approximate counter**: mỗi CPU một bộ đếm cục bộ (có lock riêng) cộng một bộ đếm toàn cục[^ostep-approx]. Cập nhật thường chỉ động tới bộ đếm cục bộ; khi nó đạt ngưỡng S thì được chuyển sang bộ đếm toàn cục[^ostep-approx-flush]. S nhỏ thì chính xác nhưng chậm; S lớn thì nhanh nhưng giá trị toàn cục tụt hậu[^ostep-approx-tradeoff]. (Nhận xét của người soạn: cùng ý tưởng với metrics counter shard theo core/thread rồi cộng khi scrape.)
+### 8.2 Bộ đếm: lock đúng nhưng không scale
+
+Quay lại `served`. OSTEP đo một bộ đếm có lock: một thread làm 1 triệu lần cập nhật trong khoảng 0,03 giây, nhưng hai thread cùng cập nhật 1 triệu lần mỗi thread thì chậm hẳn đi, hơn 5 giây trên máy của họ[^ostep-counter-slow]. Con số là của máy trong sách nên chỉ hình dạng của nó là đáng tin: nhiều core tranh một lock thì chậm hơn một core.
+
+Cách khắc phục là **approximate counter**: mỗi CPU một bộ đếm cục bộ (có lock riêng) cộng với một bộ đếm toàn cục[^ostep-approx]. Cập nhật thông thường chỉ động tới bộ đếm cục bộ. Khi bộ đếm cục bộ đạt ngưỡng S thì giá trị của nó được chuyển sang bộ đếm toàn cục[^ostep-approx-flush]. Chọn S là đánh đổi: S nhỏ thì chính xác nhưng chậm, S lớn thì nhanh nhưng giá trị toàn cục tụt hậu[^ostep-approx-tradeoff]. Nhận xét của người soạn: cùng ý tưởng với việc shard metrics counter theo core hoặc theo thread rồi cộng lại khi scrape.
 
 <details><summary>Đi sâu: danh sách liên kết, hand-over-hand locking và reader-writer lock</summary>
 
 **Danh sách liên kết: lock chỉ bao quanh critical section thật.**
 
-Với linked list, OSTEP nêu hai bài học. Một là **đường lỗi**: gần 40% bug trong một nghiên cứu patch Linux kernel nằm ở các đường code hiếm khi chạy[^ostep-errorpaths] — ví dụ `malloc` thất bại khi đang giữ lock mà quên `unlock`. Hai là **thu hẹp phạm vi lock**: `lock`/`unlock` chỉ bao đúng critical section còn `malloc` làm ngoài lock, và hợp nhất các điểm thoát để ít chỗ quên `unlock`[^ostep-narrow]. (Mục 9: RAII guard của `Mutex` xử lý đúng điều này.)
+Với linked list, OSTEP nêu hai bài học. Một là **đường lỗi**: gần 40% bug trong một nghiên cứu patch Linux kernel nằm ở các đường code hiếm khi chạy[^ostep-errorpaths]. Ví dụ `malloc` thất bại khi đang giữ lock mà quên `unlock`. Hai là **thu hẹp phạm vi lock**: `lock`/`unlock` chỉ bao đúng critical section còn `malloc` làm ngoài lock, và hợp nhất các điểm thoát để ít chỗ quên `unlock`[^ostep-narrow]. (Mục 9: RAII guard của `Mutex` xử lý đúng điều này.)
 
 **Hand-over-hand locking.**
 
-Để tăng độ đồng thời, *hand-over-hand locking* (lock coupling) đặt một lock cho mỗi node; khi duyệt, lấy lock node kế tiếp rồi mới nhả node hiện tại[^ostep-handoverhand]. Nghe hợp lý, nhưng khó nhanh hơn một lock duy nhất vì chi phí lấy/nhả lock từng node quá lớn[^ostep-hoh-slow]. Bài học của sách: thêm lock và độ phức tạp có thể làm hỏng hơn là giúp; cách duy nhất để biết là xây cả hai và đo[^ostep-tip-concurrency].
+Để tăng độ đồng thời, *hand-over-hand locking* (lock coupling) đặt một lock cho mỗi node. Khi duyệt, thread lấy lock của node kế tiếp rồi mới nhả node hiện tại[^ostep-handoverhand]. Nghe hợp lý, nhưng khó nhanh hơn một lock duy nhất vì chi phí lấy và nhả lock từng node quá lớn[^ostep-hoh-slow]. Bài học của sách: thêm lock và độ phức tạp có thể làm hỏng hơn là giúp; cách duy nhất để biết là xây cả hai rồi đo[^ostep-tip-concurrency].
 
 **Reader-writer lock (mức khái niệm).**
 
-Nhiều thao tác chỉ đọc (lookup), một số thao tác ghi (insert). Miễn là không có insert đang chạy, ta có thể cho nhiều lookup chạy đồng thời — loại lock hỗ trợ điều đó là *reader-writer lock*[^ostep-rw-idea]. Trong hiện thực mẫu của OSTEP, nhiều reader được vào cùng lúc, còn writer phải chờ đến khi mọi reader ra; reader cuối cùng mở đường cho writer[^ostep-rw-impl]. Sách chỉ ra điểm yếu của hiện thực đơn giản này là fairness: reader dễ làm đói writer[^ostep-rw-starve]. Và rw-lock nên dùng thận trọng: chúng thường thêm overhead nên có thể không nhanh hơn lock đơn giản[^ostep-rw-caution].
+Nhiều thao tác chỉ đọc (lookup), một số thì ghi (insert). Miễn là không có insert nào đang chạy, ta có thể cho nhiều lookup chạy đồng thời. Loại lock hỗ trợ điều đó là *reader-writer lock*[^ostep-rw-idea]. Trong hiện thực mẫu của OSTEP, nhiều reader được vào cùng lúc, còn writer phải chờ đến khi mọi reader ra; reader cuối cùng mở đường cho writer[^ostep-rw-impl]. Điểm yếu của hiện thực đơn giản này là fairness: reader dễ làm đói writer[^ostep-rw-starve]. Vì vậy sách khuyên dùng rw-lock thận trọng: chúng thường thêm overhead nên có thể không nhanh hơn lock đơn giản[^ostep-rw-caution].
 
 </details>
 
@@ -330,8 +361,10 @@ Nhiều thao tác chỉ đọc (lookup), một số thao tác ghi (insert). Mi�
 
 ## 9. Liên hệ với Rust
 
-- **`Mutex<T>` bọc dữ liệu.** Dữ liệu chỉ truy cập được qua RAII guard trả về từ `lock`/`try_lock`, bảo đảm dữ liệu chỉ được chạm khi mutex đang khóa[^std-mutex-guard]. `MutexGuard` cài `Deref` và `Drop`: lock tự nhả khi guard ra khỏi scope[^book-guard]. Suy luận từ hai nguồn: không thể "quên lock", cũng không thể "quên unlock trên đường lỗi" như ví dụ `malloc` ở mục 8. Dưới Linux, nó chính là state machine futex 0/1/2 ở mục 6.
-- **`RwLock<T>`** cho nhiều reader miễn là không có writer đang giữ[^std-rwlock]. Docs không bảo đảm chính sách ưu tiên — nó phụ thuộc OS — và một writer đang chờ có thể chặn hoặc không chặn các lời gọi `read` mới[^std-rwlock-policy]. Docs đưa ví dụ có thể deadlock khi cùng một thread gọi `read` hai lần trong lúc có writer chờ[^std-rwlock-deadlock]. Yêu cầu kiểu: `T: Send` để chia sẻ qua thread và `T: Sync` để cho nhiều reader truy cập đồng thời[^std-rwlock-bounds]. Đây là cùng chủ đề fairness/starvation của mục 8 (nhận xét của người soạn): docs không cam kết một chính sách cố định.
+Với `orders`, Rust gói các ý trên vào hai kiểu của `std`.
+
+- **`Mutex<T>` bọc dữ liệu.** Nếu cache nằm trong `Mutex<HashMap<…>>` thì handler chỉ chạm được vào nó qua RAII guard mà `lock`/`try_lock` trả về, nên dữ liệu chỉ bị đụng khi mutex đang khóa[^std-mutex-guard]. `MutexGuard` cài `Deref` để trỏ tới dữ liệu bên trong và `Drop` để lock tự nhả khi guard ra khỏi scope[^book-guard]. Từ hai nguồn trên ta suy ra (suy luận của người soạn) rằng handler không thể "quên lock", cũng không thể "quên unlock trên đường lỗi" như ví dụ `malloc` ở mục 8. Dưới Linux, `Mutex` chính là state machine futex 0/1/2 ở mục 6.
+- **`RwLock<T>`** cho phép bao nhiêu reader cũng được miễn là không có writer đang giữ lock[^std-rwlock]. Docs không bảo đảm chính sách ưu tiên, vì nó phụ thuộc OS, và một writer đang chờ có thể chặn hoặc không chặn các lời gọi `read` mới[^std-rwlock-policy]. Docs còn đưa ví dụ có thể deadlock khi cùng một thread gọi `read` hai lần trong lúc có writer chờ[^std-rwlock-deadlock]. Về kiểu, `T` phải là `Send` để chia sẻ qua thread và `Sync` để nhiều reader truy cập đồng thời[^std-rwlock-bounds]. Đây là cùng chủ đề fairness và starvation của mục 8 (nhận xét của người soạn): docs không cam kết một chính sách cố định.
 - **Poisoning, `Condvar`, `Send`/`Sync`**: `Condvar` ở [chương 04](04-condition-variable-va-semaphore.md); poisoning, `Send`/`Sync` và `Mutex`/`RwLock` chi tiết ở [chương 08](08-rust-concurrency.md) (mục 6 cho poisoning).
 
 ## Tóm tắt
@@ -349,56 +382,56 @@ Nhiều thao tác chỉ đọc (lookup), một số thao tác ghi (insert). Mi�
 1. Vì sao hai thread cùng `counter += 1` có thể cho kết quả nhỏ hơn kỳ vọng? Vẽ interleaving với counter bắt đầu 50.
 <details><summary>Đáp án</summary>
 
-Thread 1 load 50 vào register, bị ngắt; Thread 2 load 50, store 51; Thread 1 resume và store 51 từ register cũ — hai lần tăng chỉ ra 51[^ostep-ctr-seq][^ostep-lost-update].
+Thread 1 load 50 vào register rồi bị ngắt. Thread 2 load 50 và store 51. Thread 1 chạy lại và store 51 từ register cũ[^ostep-ctr-seq]. Kết quả: hai lần tăng chỉ ra 51[^ostep-lost-update].
 
 </details>
 
 2. Ba tiêu chí đánh giá lock là gì?
 <details><summary>Đáp án</summary>
 
-Mutual exclusion, fairness (chống đói), performance (chi phí thời gian)[^ostep-lock-criteria][^ostep-lock-fairness][^ostep-lock-perf].
+Mutual exclusion (đúng)[^ostep-lock-criteria], fairness (chống đói)[^ostep-lock-fairness] và performance (chi phí thời gian)[^ostep-lock-perf].
 
 </details>
 
 3. Vì sao lock chỉ dùng một biến cờ và load/store thường thất bại?
 <details><summary>Đáp án</summary>
 
-"Kiểm tra cờ" và "đặt cờ" là hai bước; một interrupt chen vào giữa khiến cả hai thread đều đặt cờ và vào critical section[^ostep-flag-fail].
+"Kiểm tra cờ" và "đặt cờ" là hai bước. Một interrupt chen vào giữa khiến cả hai thread đều đặt cờ và vào critical section[^ostep-flag-fail].
 
 </details>
 
 4. Test-and-set và compare-and-swap làm gì? Chúng khác `load` rồi `store` ở đâu?
 <details><summary>Đáp án</summary>
 
-TAS atomically trả giá trị cũ và ghi giá trị mới[^ostep-tas-code]; CAS ghi giá trị mới chỉ khi giá trị hiện tại bằng `expected`[^ostep-cas]. Cả đọc và ghi diễn ra như một thao tác atomic, không có khoảng hở.
+TAS atomically trả giá trị cũ và ghi giá trị mới[^ostep-tas-code]. CAS chỉ ghi giá trị mới khi giá trị hiện tại bằng `expected`[^ostep-cas]. Cả đọc và ghi diễn ra như một thao tác atomic, không có khoảng hở.
 
 </details>
 
 5. "Wakeup/waiting race" là gì và futex ngăn nó thế nào?
 <details><summary>Đáp án</summary>
 
-Thread bị ngắt giữa lúc quyết định ngủ và lúc ngủ thật; thread khác nhả lock và đánh thức trước, nên thread kia ngủ mãi[^ostep-park-race]. `FUTEX_WAIT` so sánh giá trị rồi ngủ atomic, thất bại với `EAGAIN` nếu giá trị đã đổi[^futex-eagain][^futex-cab].
+Thread bị ngắt giữa lúc quyết định ngủ và lúc ngủ thật; thread khác nhả lock và đánh thức trước, nên thread kia ngủ mãi[^ostep-park-race]. `FUTEX_WAIT` so sánh giá trị rồi ngủ atomic, và thất bại với `EAGAIN` nếu giá trị đã đổi[^futex-eagain]. Man page gọi đó là atomic compare-and-block[^futex-cab].
 
 </details>
 
 6. Mô tả ba trạng thái của `std::sync::Mutex` trên Linux và khi nào có syscall.
 <details><summary>Đáp án</summary>
 
-UNLOCKED=0, LOCKED=1, CONTENDED=2[^std-futex-states]. Lock/unlock không tranh chấp không có syscall (fast path `compare_exchange`, unlock `swap`)[^std-futex-fast][^std-futex-unlock]; syscall `futex_wait` khi spin (tối đa 100 vòng) kết thúc mà lock vẫn chưa được nhả[^std-futex-spin100][^std-futex-wait], `futex_wake` khi unlock thấy trạng thái cũ CONTENDED[^std-futex-unlock].
+UNLOCKED=0, LOCKED=1, CONTENDED=2[^std-futex-states]. Lock không tranh chấp là một `compare_exchange` không có syscall[^std-futex-fast]. Unlock không tranh chấp là một `swap` cũng không có syscall[^std-futex-unlock]. Syscall `futex_wait` chỉ xảy ra khi spin (tối đa 100 vòng) kết thúc mà lock vẫn chưa được nhả[^std-futex-spin100]. Lúc đó thread gọi `futex_wait`[^std-futex-wait]. Syscall `futex_wake` xảy ra khi unlock thấy trạng thái cũ là CONTENDED[^std-futex-unlock].
 
 </details>
 
 7. Khi nào nên chọn một lock to, khi nào chia nhỏ? Cho ví dụ cho thấy chia nhỏ không luôn nhanh hơn.
 <details><summary>Đáp án</summary>
 
-Bắt đầu bằng một lock to nếu đủ nhanh[^ostep-biglock-done]; chỉ chia nhỏ khi đo thấy cần. Hand-over-hand locking cho linked list khó nhanh hơn một lock vì chi phí lấy/nhả lock từng node[^ostep-hoh-slow]; bộ đếm có lock thì lại scale kém và approximate counter giải quyết[^ostep-counter-slow][^ostep-approx].
+Bắt đầu bằng một lock to nếu nó đủ nhanh[^ostep-biglock-done]; chỉ chia nhỏ khi đo thấy cần. Hand-over-hand locking cho linked list khó nhanh hơn một lock vì chi phí lấy và nhả lock từng node[^ostep-hoh-slow]. Còn bộ đếm có lock thì scale kém[^ostep-counter-slow], và approximate counter giải quyết chuyện đó[^ostep-approx].
 
 </details>
 
 8. Vì sao vòng spin của `std::sync::Mutex` chỉ dùng `load`?
 <details><summary>Đáp án</summary>
 
-Source comment nói đây là để thân thiện với cache[^std-futex-spin-load]; cơ chế (ghi cần quyền sở hữu cache line, load thì không) là suy luận của người soạn.
+Source comment nói đây là để thân thiện với cache[^std-futex-spin-load]. Cơ chế (ghi cần quyền sở hữu cache line, load thì không) là suy luận của người soạn.
 
 </details>
 

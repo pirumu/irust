@@ -20,35 +20,41 @@ Chương này chỉ nói về việc **sender tự hạn chế tốc độ để
 
 ## 1. Vấn đề: congestion collapse (Q1)
 
-> **Trả lời ngắn.** Flow control chỉ bảo vệ *receiver*: receiver báo còn chỗ bao nhiêu byte qua `rwnd`[^hpbn-flow]. Không có gì trong đó ngăn hai đầu làm quá tải *mạng* ở giữa[^hpbn-collapse]. Khi mạng nghẽn, RTT tăng[^rfc896-rtt]; nếu RTT vượt khoảng truyền lại tối đa của một host, host đó gửi thêm ngày càng nhiều bản sao của cùng dữ liệu, tải tăng đúng lúc mạng đang nghẽn[^rfc896-copies] — đó là congestion collapse, và trạng thái này ổn định: mạng tiếp tục hoạt động ở trạng thái suy giảm[^hpbn-nagle-stable].
+> **Trả lời ngắn.** Flow control chỉ bảo vệ *receiver*: receiver báo qua `rwnd` là nó còn chỗ cho bao nhiêu byte[^hpbn-flow]. Nhưng giữa hai đầu còn cả một mạng, và không có gì trong flow control ngăn hai đầu làm quá tải mạng đó[^hpbn-collapse]. Khi mạng nghẽn thì RTT tăng[^rfc896-rtt]. Nếu RTT vượt khoảng truyền lại tối đa của một host, host đó gửi thêm ngày càng nhiều bản sao của cùng dữ liệu, tức là thêm tải đúng lúc mạng đang nghẽn[^rfc896-copies]. Tình trạng này gọi là congestion collapse, và nó ổn định: mạng cứ chạy mãi trong trạng thái suy giảm[^hpbn-nagle-stable].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một ngã tư kẹt xe. Mỗi tài xế chỉ hỏi "bãi đỗ ở đích còn chỗ không" (flow control) mà không nhìn đường; thấy chưa tới nơi, họ cử thêm xe đi cùng tuyến, làm đường kẹt hơn.
+*Với service của bạn.* Giả sử `orders`, một service Rust, có endpoint trả báo cáo đơn hàng tháng, khoảng 1,5 MB JSON, cho các client ở xa; ngoài ra nó giữ một pool kết nối tới service `inventory` (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Ta sẽ bám theo `orders` suốt chương. Ở chương 05 bạn đã biết client dùng `rwnd` để nói "tôi còn nhận được bấy nhiêu byte". Câu hỏi của mục này: nếu client nào cũng làm đúng như vậy, ai bảo vệ đường truyền ở giữa, thứ mà `orders` phải dùng chung với rất nhiều kết nối khác?
 
-Giữa hai đầu là mạng với các router/gateway có hàng đợi hữu hạn và đường truyền có băng thông hữu hạn, mà cả hai đầu đều không biết. HPBN mô tả: flow control ngăn sender làm quá tải receiver, nhưng không có cơ chế nào ngăn một trong hai phía làm quá tải mạng bên dưới[^hpbn-collapse].
+### 1.1 Vì sao `rwnd` không đủ
 
-Hiện tượng này được John Nagle mô tả trong RFC 896 (1984), một memo nhằm khơi gợi suy nghĩ và thảo luận, tự nhận không đặt ra tiêu chuẩn nào[^rfc896-memo]. Kịch bản: trong mạng datagram thuần có truyền lại đầu-cuối, khi các nút chuyển mạch nghẽn thì thời gian đi vòng (RTT) qua mạng tăng lên[^rfc896-rtt]; nếu RTT vượt khoảng truyền lại tối đa của một host, host đó gửi thêm ngày càng nhiều bản sao của cùng datagram — thêm tải đúng lúc mạng đang nghẽn[^rfc896-copies]. Nagle gọi tình trạng đó là *congestion collapse*[^rfc896-name] và nhấn mạnh nó **ổn định**: khi đã bão hòa, mạng tiếp tục hoạt động ở trạng thái suy giảm[^hpbn-nagle-stable].
+Giữa `orders` và client là các router, mỗi router có hàng đợi hữu hạn và mỗi đường truyền có băng thông hữu hạn; hai đầu kết nối không nhìn thấy gì trong số đó. `rwnd` chỉ phản ánh chỗ trống ở receiver, nên nó không nói gì về chuyện mạng ở giữa chịu được bao nhiêu. Nói cách khác, flow control ngăn sender làm quá tải receiver, nhưng không có cơ chế nào ngăn một trong hai phía làm quá tải mạng bên dưới[^hpbn-collapse].
 
-Đáp lại, TCP được bổ sung các cơ chế điều tiết tốc độ gửi — flow control, congestion control và congestion avoidance[^hpbn-mech]. RFC 5681 định nghĩa bốn thuật toán: slow start, congestion avoidance, fast retransmit và fast recovery[^rfc5681-abs]. RFC 9293 (đặc tả TCP hiện hành) không chép chúng vào mà dẫn sang các tài liệu bổ trợ[^rfc9293-congestion-ext].
+### 1.2 Congestion collapse diễn ra thế nào
+
+John Nagle mô tả hiện tượng này năm 1984 trong RFC 896. Áp kịch bản của ông vào `orders` thì như sau. Khi các router trên đường ra bị nghẽn, thời gian đi vòng (RTT) của kết nối tăng lên[^rfc896-rtt]. Nếu RTT vượt quá khoảng thời gian tối đa mà một host chờ trước khi truyền lại, host đó bắt đầu nhét ngày càng nhiều bản sao của cùng một gói vào mạng[^rfc896-copies]. Cuối cùng host nào cũng gửi mỗi gói nhiều lần, và chỉ một bản sao nào đó của gói tới được đích; Nagle gọi tình trạng đó là *congestion collapse*[^rfc896-name].
+
+Điểm đáng sợ là trạng thái này *ổn định*: một khi mạng đã bão hòa, nó cứ chạy mãi trong tình trạng suy giảm, với điều kiện cách chọn gói để drop là công bằng[^hpbn-nagle-stable]. Mạng không tự thoát ra được, nên phải có cơ chế ở hai đầu để không đẩy nó vào đó (nhận xét của người soạn).
+
+Vì vậy TCP được bổ sung các cơ chế điều tiết tốc độ gửi: flow control, congestion control và congestion avoidance[^hpbn-mech]. RFC 5681 định nghĩa bốn thuật toán của congestion control là slow start, congestion avoidance, fast retransmit và fast recovery[^rfc5681-abs]. Ba mục tiếp theo lần lượt đi qua chúng.
 
 <details><summary>Đi sâu: sự cố thật năm 1986</summary>
 
-Đây không chỉ là lý thuyết. HPBN kể lại: năm 1986, khi số nút (5.000+) và sự đa dạng của chúng tăng, một loạt sự cố congestion collapse lan khắp mạng — có trường hợp dung lượng tụt tới 1.000 lần và mạng không dùng được[^hpbn-1986].
+Đây không chỉ là lý thuyết. Năm 1986, khi số nút trên mạng (5.000+) và sự đa dạng của chúng tăng lên, một loạt sự cố congestion collapse đã lan khắp mạng; có trường hợp dung lượng tụt tới 1.000 lần và mạng không dùng được[^hpbn-1986].
 
 </details>
 
-**Quay lại Q1:** flow control bảo vệ receiver, không bảo vệ mạng; thiếu cơ chế thứ hai thì truyền lại làm nghẽn nặng thêm và trạng thái suy giảm kéo dài.
+**Quay lại Q1:** flow control bảo vệ receiver chứ không bảo vệ mạng; thiếu cơ chế thứ hai thì truyền lại làm mạng nghẽn nặng thêm và trạng thái suy giảm kéo dài.
 
 ## 2. Các biến trạng thái (Q2)
 
-> **Trả lời ngắn.** `cwnd` là giới hạn phía sender về lượng dữ liệu được đẩy vào mạng trước khi nhận ACK; `rwnd` là giới hạn phía receiver. Lượng gửi bị chặn bởi cái nhỏ hơn trong hai[^rfc5681-vars]. `cwnd` chỉ nằm ở sender, không gửi cho peer[^hpbn-cwnd].
+> **Trả lời ngắn.** `cwnd` là giới hạn phía sender về lượng dữ liệu được đẩy vào mạng trước khi nhận ACK, còn `rwnd` là giới hạn phía receiver; lượng gửi bị chặn bởi giá trị nhỏ hơn trong hai[^rfc5681-vars]. `cwnd` chỉ nằm ở sender và không được gửi cho peer[^hpbn-cwnd].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn gửi hàng bằng xe tải qua một cầu. Người nhận nói "kho tôi còn chứa được 50 thùng" (`rwnd`); còn bạn tự quyết "tôi chỉ dám cho 10 thùng lên cầu cùng lúc cho tới khi biết cầu chịu được" (`cwnd`). Bạn phải tuân theo con số nhỏ hơn.
+*Với `orders`.* Khi `orders` gửi báo cáo 1,5 MB, kernel của nó giữ hai con số cho kết nối đó: `rwnd` mà client quảng bá trong header, và `cwnd` do chính kernel của `orders` tự đặt. Code Rust của `orders` thường không đụng tới hai biến này; nó chỉ thấy hệ quả là báo cáo tới nhanh hay chậm. Mục này nói hai biến ấy là gì và cái nào đang chặn `orders`.
 
-RFC 5681 định nghĩa hai biến cho mỗi kết nối: congestion window `cwnd` là giới hạn phía sender về lượng dữ liệu được đẩy vào mạng trước khi nhận ACK, còn `rwnd` là giới hạn phía receiver; giá trị nhỏ hơn trong hai biến quyết định lượng dữ liệu được truyền[^rfc5681-vars]. Phát biểu chặt chẽ hơn: tại mọi thời điểm TCP không được gửi dữ liệu có sequence number cao hơn tổng của sequence number cao nhất đã được ack và `min(cwnd, rwnd)`[^rfc5681-defs].
+RFC 5681 định nghĩa hai biến cho mỗi kết nối. Congestion window `cwnd` là giới hạn phía sender về lượng dữ liệu được đẩy vào mạng trước khi nhận ACK; `rwnd` là giới hạn phía receiver; giá trị nhỏ hơn trong hai biến quyết định lượng dữ liệu được truyền[^rfc5681-vars]. Phát biểu chặt chẽ hơn: tại mọi thời điểm TCP không được gửi dữ liệu có sequence number cao hơn tổng của sequence number cao nhất đã được ack và `min(cwnd, rwnd)`[^rfc5681-defs].
 
 | Biến | Ai giữ | Ai thấy | Ý nghĩa |
 |---|---|---|---|
@@ -58,45 +64,57 @@ RFC 5681 định nghĩa hai biến cho mỗi kết nối: congestion window `cwn
 | `FlightSize` | sender | không | dữ liệu đã gửi nhưng chưa được cumulative-ack[^rfc5681-flight] |
 | `SMSS` | sender | – | sender maximum segment size (kích thước payload tối đa một segment) |
 
-**Effective window** = `min(cwnd, rwnd)` trừ đi phần đang bay. Hệ quả (suy luận của người soạn): tốc độ tối đa của một kết nối bị chặn bởi *cái nhỏ hơn* trong hai cửa sổ chia cho RTT. Một receiver rộng rãi (rwnd lớn) không giúp gì nếu `cwnd` còn nhỏ — ví dụ ngay sau khi kết nối mới mở. HPBN minh họa: dù receive window là 64 KB, thông lượng của kết nối mới ban đầu bị giới hạn bởi congestion window[^hpbn-ss-every-rwnd].
+Cửa sổ gửi thực tế (effective window) là `min(cwnd, rwnd)` trừ đi phần đang bay. Từ đó suy ra (suy luận của người soạn) tốc độ tối đa của một kết nối bị chặn bởi *cái nhỏ hơn* trong hai cửa sổ, chia cho RTT. Với `orders`, điều này có nghĩa: client có `rwnd` rộng bao nhiêu cũng không giúp gì nếu `cwnd` còn nhỏ, mà `cwnd` nhỏ chính là tình trạng của mọi kết nối mới mở. Ví dụ trong HPBN: dù receive window là 64 KB, thông lượng của một kết nối mới ban đầu vẫn bị giới hạn bởi congestion window[^hpbn-ss-every-rwnd].
 
 <details><summary>Đi sâu: bẫy dùng <code>cwnd</code> thay <code>FlightSize</code></summary>
 
-RFC 5681 cảnh báo: dùng `cwnd` thay cho `FlightSize` khi tính `ssthresh` là lỗi dễ mắc, vì `cwnd` trong một số cài đặt có thể vô tình tăng vượt xa `rwnd`[^rfc5681-impnote]. `FlightSize` mới phản ánh lượng thực sự đang ở trong mạng.
+RFC 5681 cảnh báo rằng dùng `cwnd` thay cho `FlightSize` khi tính `ssthresh` là lỗi dễ mắc, vì `cwnd` trong một số cài đặt có thể vô tình tăng vượt xa `rwnd`[^rfc5681-impnote]. `FlightSize` mới phản ánh lượng dữ liệu thực sự đang ở trong mạng.
 
 </details>
 
-**Quay lại Q2:** `cwnd` là biến riêng của sender, `rwnd` do receiver quảng bá; gửi được tối đa `min(cwnd, rwnd)` tính từ byte đã được ack.
+**Quay lại Q2:** `cwnd` là biến riêng của sender, `rwnd` do receiver quảng bá; sender gửi được tối đa `min(cwnd, rwnd)` tính từ byte đã được ack.
 
 ## 3. Slow start và congestion avoidance (AIMD) (Q3)
 
-> **Trả lời ngắn.** Kết nối mới bắt đầu từ cửa sổ nhỏ, tăng theo hàm mũ (slow start) tới `ssthresh`, rồi chỉ tăng khoảng 1 segment mỗi RTT (congestion avoidance)[^rfc5681-ss-inc][^rfc5681-ca]; mất gói thì cắt cửa sổ. Khi `cwnd == ssthresh`, RFC cho dùng một trong hai pha[^rfc5681-eq].
+> **Trả lời ngắn.** Kết nối mới bắt đầu từ cửa sổ nhỏ, tăng theo hàm mũ (slow start) cho tới `ssthresh`, rồi chỉ tăng khoảng 1 segment mỗi RTT (congestion avoidance)[^rfc5681-ca]; mất gói thì cắt cửa sổ. Khi `cwnd == ssthresh`, RFC cho dùng pha nào cũng được[^rfc5681-eq].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thử nước tắm — vặn vòi nhỏ trước, thấy ổn thì mở to dần nhanh, gần nóng thì nhích từng chút, bỏng thì giảm hẳn.
+*Với `orders`.* Một client vừa mở kết nối tới `orders` và xin báo cáo 1,5 MB. Kernel của `orders` chưa biết đường tới client rộng hay hẹp, nên không thể đẩy hết 1,5 MB vào mạng ngay. Nó phải dò: gửi ít trước, tăng dần, và lùi lại khi thấy dấu hiệu nghẽn. Mục này mô tả cách dò đó.
 
-*Slow start.* Khi kết nối mới mở, hai đầu chưa biết băng thông khả dụng, nên bắt đầu gửi hết cỡ ngay là liều. Giải pháp: bắt đầu từ cửa sổ nhỏ (initial window, IW), tăng dần cho đến khi gặp tín hiệu nghẽn.
+### 3.1 Slow start
 
-1. *Tăng.* Trong slow start, TCP tăng `cwnd` tối đa bằng SMSS byte cho mỗi ACK xác nhận dữ liệu mới theo kiểu cumulative[^rfc5681-ss-inc]. Mỗi ACK mới cộng tối đa 1 SMSS, nên số segment đang bay nhân đôi sau mỗi RTT — HPBN gọi là tăng theo hàm mũ[^hpbn-ss-double]. Với delayed ACK (hai segment mới ack một lần) số ACK ít hơn nên mức tăng mỗi RTT thấp hơn gấp đôi (suy luận của người soạn).
-2. *Kết thúc.* Slow start dừng khi `cwnd` vượt `ssthresh` (hoặc, tùy chọn, khi chạm tới ngưỡng) hoặc khi quan sát được nghẽn[^rfc5681-ss-end].
-3. *`ssthresh` ban đầu* nên được đặt rất cao (ví dụ bằng cửa sổ quảng bá lớn nhất có thể) và buộc phải hạ khi có nghẽn[^rfc5681-initssthresh]. RFC 5681 chỉ nêu hai điều kiện kết thúc slow start (điểm 2 ở trên); HPBN liệt kê ba điều kiện dừng: vượt `rwnd`, vượt `ssthresh` cấu hình, hoặc mất gói[^hpbn-ss-end]. Cài đặt thật có thể khác nhau (xem phần Đi sâu).
+Khi kết nối mới mở, hai đầu chưa biết băng thông khả dụng, nên gửi hết cỡ ngay là liều. Vì vậy sender bắt đầu từ một cửa sổ nhỏ (initial window, IW) rồi tăng dần cho đến khi gặp tín hiệu nghẽn.
 
-Với các kết nối HTTP ngắn, việc truyền dữ liệu có thể xong trước khi cửa sổ đạt cực đại, nên hiệu năng thường bị giới hạn bởi RTT giữa client và server chứ không phải băng thông[^hpbn-short].
+Mức tăng cụ thể: trong slow start, mỗi ACK xác nhận dữ liệu mới theo kiểu cumulative cho phép TCP tăng `cwnd` tối đa bằng SMSS byte[^rfc5681-ss-inc]. Vì mỗi ACK mới cộng tối đa một SMSS, số segment đang bay nhân đôi sau mỗi RTT, tức là tăng theo hàm mũ[^hpbn-ss-double]. Nếu receiver dùng delayed ACK (hai segment mới ack một lần) thì số ACK ít đi, và mức tăng mỗi RTT thấp hơn gấp đôi (suy luận của người soạn).
 
-*Congestion avoidance.* Khi `cwnd > ssthresh`, thuật toán chuyển sang congestion avoidance: `cwnd` tăng khoảng 1 segment đầy đủ mỗi round-trip time (RTT)[^rfc5681-ca].
+Slow start dừng khi `cwnd` vượt `ssthresh` (hoặc, tùy chọn, ngay khi chạm tới ngưỡng), hoặc khi quan sát được nghẽn[^rfc5681-ss-end]. Lúc mới mở kết nối, `ssthresh` nên được đặt rất cao, chẳng hạn bằng cửa sổ quảng bá lớn nhất có thể, và buộc phải hạ xuống khi có nghẽn[^rfc5681-initssthresh]. Nhờ vậy ở đầu kết nối, thứ chặn slow start thường là tín hiệu nghẽn chứ không phải một ngưỡng đặt sẵn (suy luận của người soạn).
 
-*AIMD.* Vế còn lại của **AIMD** (additive increase, multiplicative decrease) là giảm: khi phát hiện mất, cửa sổ bị cắt theo tỉ lệ (về cơ bản một nửa, xem mục 4). HPBN nhấn mạnh tiền đề thiết kế: TCP được thiết kế riêng để dùng mất gói làm cơ chế phản hồi[^hpbn-loss] — mất gói không phải câu hỏi "có hay không" mà là "bao giờ". Giả định ngầm là mất gói = nghẽn[^hpbn-loss-assume]. Giả định này sai khi mất gói do lỗi ngẫu nhiên; BBR và ECN (mục 6) là hai hướng không dùng mất gói làm tín hiệu duy nhất (nhận xét của người soạn).
+Với `orders`, hệ quả là các response ngắn thường xong trước khi cửa sổ kịp lớn. Với HTTP, nhiều kết nối ngắn và bùng phát, nên việc truyền dữ liệu có thể kết thúc trước khi cửa sổ đạt cực đại; khi đó hiệu năng bị giới hạn bởi RTT giữa client và server chứ không phải băng thông[^hpbn-short].
 
-*Khi `cwnd == ssthresh`.* RFC 5681: slow start dùng khi `cwnd < ssthresh`, congestion avoidance khi `cwnd > ssthresh`, và khi hai giá trị bằng nhau thì sender được phép dùng slow start hoặc congestion avoidance[^rfc5681-eq]. Nhất quán với điều đó, slow start kết thúc khi `cwnd` vượt `ssthresh` *hoặc, tùy chọn, ngay khi chạm tới*[^rfc5681-ss-end]. Nghĩa là RFC **không** quy định một hành vi duy nhất tại điểm bằng nhau; hai cài đặt tuân thủ có thể khác nhau.
+### 3.2 Congestion avoidance
+
+Khi `cwnd > ssthresh`, thuật toán chuyển sang congestion avoidance: `cwnd` tăng khoảng 1 segment đầy đủ mỗi round-trip time (RTT)[^rfc5681-ca]. So với slow start, đây là bước chậm lại rõ rệt: sender không còn nhân đôi mỗi RTT mà chỉ nhích dần để dò xem mạng còn chịu thêm được không.
+
+### 3.3 AIMD: tăng cộng, giảm nhân
+
+Đã có phần tăng thì phải có phần giảm. **AIMD** là viết tắt của additive increase, multiplicative decrease: cộng thêm một ít khi mọi thứ ổn, và khi phát hiện mất thì cắt cửa sổ theo tỉ lệ (về cơ bản là một nửa, xem mục 4).
+
+Cách làm này dựa trên một tiền đề thiết kế: TCP được thiết kế riêng để dùng mất gói làm cơ chế phản hồi[^hpbn-loss], nên với TCP, mất gói không phải câu hỏi "có hay không" mà là "bao giờ". Giả định ngầm đi kèm là mất gói đồng nghĩa với nghẽn[^hpbn-loss-assume]. Giả định này sai khi gói mất do lỗi ngẫu nhiên trên đường truyền; BBR và ECN (mục 6) là hai hướng không dùng mất gói làm tín hiệu duy nhất (nhận xét của người soạn).
+
+### 3.4 Khi `cwnd == ssthresh`
+
+RFC 5681 dùng slow start khi `cwnd < ssthresh` và congestion avoidance khi `cwnd > ssthresh`; khi hai giá trị bằng nhau, sender được phép chọn một trong hai[^rfc5681-eq]. Điều này khớp với điều kiện dừng ở §3.1: slow start kết thúc khi `cwnd` vượt `ssthresh` *hoặc, tùy chọn, ngay khi chạm tới*[^rfc5681-ss-end]. Nói cách khác, RFC **không** quy định một hành vi duy nhất tại điểm bằng nhau, và hai cài đặt tuân thủ có thể khác nhau.
 
 <details><summary>Đi sâu: IW, công thức tăng trong congestion avoidance, ví dụ HPBN, quan sát trong container</summary>
 
-**Initial window.** RFC 5681 đặt cận trên: SMSS ≤ 1095 byte thì IW ≤ 4 segment; (1095, 2190] thì ≤ 3 segment; lớn hơn thì ≤ 2 segment[^rfc5681-iw]. RFC 6928 nâng cận trên lên `min(10*MSS, max(2*MSS, 14600))`[^rfc6928-iw] — 10 segment với MSS 1448 (tính của người soạn) — nhưng là tài liệu loại Experimental (đề xuất một thí nghiệm)[^rfc6928-exp]. HPBN nêu rằng trên Linux IW10 là mặc định mới cho mọi kernel mới hơn 2.6.39[^hpbn-iw10].
+**Điều kiện dừng slow start theo HPBN.** RFC 5681 chỉ nêu hai điều kiện dừng như ở §3.1. HPBN liệt kê ba: vượt `rwnd`, vượt `ssthresh` cấu hình, hoặc mất gói[^hpbn-ss-end]. Cài đặt thật có thể khác nhau ở chi tiết này.
 
-**Công thức tăng trong congestion avoidance.** RFC khuyến nghị đếm byte đã được ack và tăng tối đa 1 SMSS khi đủ `cwnd` byte[^rfc5681-bytecount]; công thức `cwnd += SMSS*SMSS/cwnd` trên mỗi ACK mới chỉ là lựa chọn "MAY"[^rfc5681-eq3], xấp xỉ "acceptable" của +1 segment/RTT[^rfc5681-eq3b]. Biểu thức này cho thấy vì sao tăng tuyến tính: khi `cwnd` chứa N segment, N ACK mỗi cái cộng `SMSS/N` byte → tổng +1 SMSS mỗi RTT (tính toán của người soạn). Cài đặt số nguyên có thể làm kết quả bằng 0 khi `cwnd > SMSS*SMSS`; RFC khuyến nghị (SHOULD) làm tròn lên 1 byte[^rfc5681-round].
+**Initial window.** RFC 5681 đặt cận trên: SMSS ≤ 1095 byte thì IW ≤ 4 segment; (1095, 2190] thì ≤ 3 segment; lớn hơn thì ≤ 2 segment[^rfc5681-iw]. RFC 6928 nâng cận trên lên `min(10*MSS, max(2*MSS, 14600))`[^rfc6928-iw]. Với MSS 1448 thì đó là 10 segment (tính của người soạn). Tuy vậy RFC 6928 chỉ thuộc loại Experimental, tức đề xuất một thí nghiệm[^rfc6928-exp]. HPBN nêu rằng trên Linux IW10 là mặc định mới cho mọi kernel mới hơn 2.6.39[^hpbn-iw10].
 
-**Ví dụ có số (HPBN).** Receive window 64 KB, IW = 10, RTT = 56 ms: để chạm 64 KB phải nới `cwnd` lên 45 segment, mất 168 ms — ba RTT[^hpbn-168]. Dù client và server có thể truyền ở tốc độ megabit mỗi giây trở lên, điều đó không có tác dụng ở đầu kết nối mới — HPBN gọi đó là slow-start[^hpbn-168-note].
+**Công thức tăng trong congestion avoidance.** RFC khuyến nghị đếm số byte đã được ack, và khi con số đó đạt `cwnd` thì tăng tối đa 1 SMSS[^rfc5681-bytecount]. Công thức `cwnd += SMSS*SMSS/cwnd` trên mỗi ACK mới chỉ là một lựa chọn "MAY"[^rfc5681-eq3]. Nó là một xấp xỉ "acceptable" của mức +1 segment/RTT[^rfc5681-eq3b]. Biểu thức này cho thấy vì sao mức tăng là tuyến tính: khi `cwnd` chứa N segment thì có N ACK, mỗi ACK cộng `SMSS/N` byte, tổng cộng +1 SMSS mỗi RTT (tính toán của người soạn). Cài đặt số nguyên có thể cho kết quả 0 khi `cwnd > SMSS*SMSS`; khi đó RFC khuyến nghị (SHOULD) làm tròn lên 1 byte[^rfc5681-round].
+
+**Ví dụ có số (HPBN).** Receive window 64 KB, IW = 10, RTT = 56 ms: để chạm 64 KB phải nới `cwnd` lên 45 segment, mất 168 ms, tức ba RTT[^hpbn-168]. Dù client và server có thể truyền ở tốc độ megabit mỗi giây trở lên, điều đó không có tác dụng ở đầu kết nối mới; HPBN gọi đó là slow start[^hpbn-168-note].
 
 **Quan sát thật: slow start trong container.** Kernel trong container lab là `6.8.0-117-generic`. Tôi làm chậm loopback bằng `tc netem` (25 ms mỗi chiều → RTT ≈ 50 ms), hạ MTU `lo` xuống 1500 (loopback mặc định có MSS rất lớn), cho server gửi 1,5 MB và lấy mẫu `ss -tinm` của socket gửi mỗi ~40 ms:
 
@@ -127,29 +145,39 @@ Quan sát (hai lần chạy, chỉ minh họa): `cwnd` bắt đầu ở **10** (
 
 ## 4. Phát hiện mất: fast retransmit, fast recovery, timeout (Q4)
 
-> **Trả lời ngắn.** Sender biết mất gói bằng 3 duplicate ACK liên tiếp (nhanh) hoặc hết RTO (chậm)[^rfc5681-fr]. Với 3 dup-ACK, `ssthresh = max(FlightSize/2, 2*SMSS)` rồi `cwnd = ssthresh + 3*SMSS`, và khi ACK mới đến thì `cwnd = ssthresh`[^rfc5681-ssthresh][^rfc5681-fr3][^rfc5681-deflate]. Với RTO, `cwnd` bị đưa về tối đa 1 segment và chạy lại slow start[^rfc5681-lw].
+> **Trả lời ngắn.** Sender biết mất gói bằng 3 duplicate ACK liên tiếp (nhanh) hoặc khi hết RTO (chậm)[^rfc5681-fr]. Với 3 dup-ACK, `ssthresh = max(FlightSize/2, 2*SMSS)`[^rfc5681-ssthresh]. Sau đó `cwnd = ssthresh + 3*SMSS`[^rfc5681-fr3]. Khi ACK mới đến thì `cwnd` về `ssthresh`[^rfc5681-deflate]. Với RTO, `cwnd` bị đưa về tối đa 1 segment rồi chạy lại slow start[^rfc5681-lw].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn gửi 20 thư đánh số; người nhận cứ báo "vẫn chưa thấy thư số 7" ba lần liền — bạn gửi lại ngay thư 7 mà không cần chờ hết giờ. Còn nếu im lặng hoàn toàn thì phải chờ hết hạn và thận trọng hơn nhiều.
+*Với `orders`.* Giả sử giữa chừng lúc `orders` đẩy báo cáo, một segment bị router drop. Kernel của `orders` không nhận được thông báo nào; nó chỉ có các ACK gửi về, hoặc sự im lặng. Từ đó nó phải đoán xem mất gói chưa, rồi quyết định hạ `cwnd` bao nhiêu. Hạ quá tay thì báo cáo chậm vô ích, hạ quá nhẹ thì góp phần đẩy mạng vào nghẽn.
 
-Có hai cách sender phát hiện mất. Cách nhanh là **duplicate ACK**: khi một segment đến sai thứ tự, receiver nên (SHOULD) gửi ngay một ACK báo số thứ tự đang chờ[^rfc5681-dupack-recv]. RFC 5681 lưu ý dup-ACK có ba nguyên nhân: mất segment, đảo thứ tự (reordering) — RFC nói đây không phải chuyện hiếm trên một số đường truyền — và nhân bản segment/ACK trong mạng[^rfc5681-dupcauses]. Vì dup-ACK có thể do đảo thứ tự, sender không nên coi một dup-ACK đơn lẻ là mất gói (suy luận của người soạn); ngưỡng RFC dùng là **3** dup-ACK liên tiếp (không có ACK nào xen giữa làm `SND.UNA` tiến lên), coi đó là dấu hiệu một segment đã mất[^rfc5681-fr]. Cách chậm là hết **RTO** (retransmission timeout, chương 05, mục 3).
+### 4.1 Hai cách phát hiện mất
 
-*Fast retransmit + fast recovery (3 dup-ACK).* Từng bước theo RFC 5681 §3.2:
+Cách nhanh là **duplicate ACK**. Khi một segment đến sai thứ tự, receiver nên (SHOULD) gửi ngay một ACK nhắc lại số thứ tự nó đang chờ[^rfc5681-dupack-recv]. Vì vậy một segment bị mất sẽ khiến mỗi segment đến sau nó sinh ra một dup-ACK. Tuy nhiên dup-ACK không phải lúc nào cũng nghĩa là mất: RFC 5681 lưu ý nó có ba nguyên nhân là mất segment, đảo thứ tự (reordering, không hiếm trên một số đường truyền) và mạng nhân bản segment hoặc ACK[^rfc5681-dupcauses]. Một dup-ACK đơn lẻ thì chưa nên coi là mất gói (suy luận của người soạn). Ngưỡng RFC dùng là **3** dup-ACK liên tiếp, không có ACK nào xen giữa làm `SND.UNA` tiến lên, và coi đó là dấu hiệu một segment đã mất[^rfc5681-fr].
+
+Cách chậm là hết **RTO** (retransmission timeout, chương 05, mục 3): sender chờ mãi không có ACK nào mới.
+
+### 4.2 Ba dup-ACK: fast retransmit và fast recovery
+
+Từng bước theo RFC 5681 §3.2:
 
 1. Hai dup-ACK đầu: TCP nên (SHOULD) gửi một segment dữ liệu chưa gửi theo *limited transmit* (RFC 3042) nếu cửa sổ quảng bá cho phép và còn dữ liệu, nhưng không được (MUST NOT) đổi `cwnd` vì hai segment này[^rfc5681-lt].
-2. **Dup-ACK thứ ba**: TCP bắt buộc (MUST) đặt `ssthresh` không quá giá trị của phương trình (4)[^rfc5681-fr-ssthresh], với `ssthresh = max(FlightSize / 2, 2*SMSS)`[^rfc5681-ssthresh]. Đây là phần "multiplicative decrease": một nửa lượng đang bay, nhưng không dưới 2 segment.
-3. Retransmit segment ở `SND.UNA` và đặt `cwnd = ssthresh + 3*SMSS`[^rfc5681-fr3] — cộng 3 vì ba segment đã rời mạng và đang nằm trong buffer của receiver; RFC gọi việc này là làm "phồng" (inflate) cửa sổ một cách nhân tạo[^rfc5681-inflate].
+2. **Dup-ACK thứ ba**: TCP bắt buộc (MUST) đặt `ssthresh` không quá giá trị của phương trình (4)[^rfc5681-fr-ssthresh]. Phương trình đó là `ssthresh = max(FlightSize / 2, 2*SMSS)`[^rfc5681-ssthresh]. Đây là phần "multiplicative decrease": một nửa lượng đang bay, nhưng không dưới 2 segment.
+3. Retransmit segment ở `SND.UNA` và đặt `cwnd = ssthresh + 3*SMSS`[^rfc5681-fr3]. Số 3 được cộng vì ba segment đã rời mạng và đang nằm trong buffer của receiver; RFC gọi việc này là làm "phồng" (inflate) cửa sổ một cách nhân tạo[^rfc5681-inflate].
 4. Mỗi dup-ACK thêm sau đó: `cwnd += SMSS`, phản ánh thêm một segment đã rời mạng[^rfc5681-fr4]. Khi có dữ liệu chưa gửi và `cwnd` mới cùng cửa sổ quảng bá cho phép, TCP nên (SHOULD) gửi 1*SMSS byte dữ liệu mới[^rfc5681-fr5].
-5. Khi ACK báo dữ liệu mới đến: `cwnd = ssthresh` (RFC gọi là thu nhỏ — deflate)[^rfc5681-deflate]. Lúc này `cwnd == ssthresh`, nên theo mục 3 RFC cho dùng slow start hoặc congestion avoidance; sơ đồ và bảng bên dưới chọn congestion avoidance cho gọn (đơn giản hóa của người soạn).
+5. Khi ACK báo dữ liệu mới đến: `cwnd = ssthresh` (RFC gọi là thu nhỏ, deflate)[^rfc5681-deflate]. Lúc này `cwnd == ssthresh`, nên theo mục 3 RFC cho dùng slow start hoặc congestion avoidance; sơ đồ và bảng bên dưới chọn congestion avoidance cho gọn (đơn giản hóa của người soạn).
 
-Điểm quan trọng: không quay lại slow start từ 1 segment. RFC giải thích: dup-ACK cho thấy nhiều khả năng segment đã rời mạng và đang nằm ở buffer của receiver (RFC lưu ý việc mạng nhân bản segment hàng loạt có thể làm kết luận này sai)[^rfc5681-whyfr], nên sender tiếp tục gửi — nhưng với `cwnd` đã giảm, vì mất gói là dấu hiệu nghẽn[^rfc5681-whyfr2].
+Điểm quan trọng là sender **không** quay lại slow start từ 1 segment. Lý do RFC đưa ra: dup-ACK không chỉ cho biết một segment đã mất mà còn cho biết các segment khác nhiều khả năng đang rời mạng, vì receiver chỉ sinh được dup-ACK khi có segment đã đến và nằm trong buffer của nó (RFC lưu ý rằng mạng nhân bản segment hàng loạt có thể làm kết luận này sai)[^rfc5681-whyfr]. Vì vậy sender cứ tiếp tục gửi, nhưng với `cwnd` đã giảm, vì mất gói là dấu hiệu của nghẽn[^rfc5681-whyfr2].
 
-*Mất qua timeout (RTO).* Timeout nặng hơn vì không còn dòng dup-ACK để tin rằng mạng còn chở được (suy luận của người soạn). Quy tắc:
+### 4.3 Mất qua timeout (RTO)
 
-- `ssthresh` cũng bị hạ theo cùng phương trình (4)[^rfc5681-ssthresh-rto]. Ngoại lệ: nếu segment bị mất *đã được retransmit bằng timer ít nhất một lần*, `ssthresh` được giữ nguyên, "held constant"[^rfc5681-held] (lý do — tránh hạ hai lần cho cùng một sự kiện — là suy luận của người soạn).
-- `cwnd` tối đa bằng *loss window* LW = 1 full-sized segment, bất kể IW[^rfc5681-lw].
-- Sau đó chạy lại slow start (`cwnd` tăng gấp đôi mỗi RTT) từ 1 segment lên `ssthresh` mới[^rfc5681-lw].
+Timeout nặng hơn 3 dup-ACK, vì không còn dòng dup-ACK nào để tin rằng mạng vẫn đang chở được dữ liệu (suy luận của người soạn). Với `orders`, đó là lúc cả luồng ACK từ client im bặt. Quy tắc:
+
+- `ssthresh` cũng bị hạ theo cùng phương trình (4)[^rfc5681-ssthresh-rto]. Có một ngoại lệ: nếu segment bị mất *đã được retransmit bằng timer ít nhất một lần*, `ssthresh` được giữ nguyên ("held constant")[^rfc5681-held]. Lý do, tránh hạ hai lần cho cùng một sự kiện, là suy luận của người soạn.
+- `cwnd` được đưa về tối đa bằng *loss window* LW = 1 full-sized segment, bất kể IW[^rfc5681-lw].
+- Sau đó sender chạy lại slow start, tăng `cwnd` từ 1 segment lên `ssthresh` mới (`cwnd` gấp đôi mỗi RTT)[^rfc5681-lw].
+
+Toàn bộ các pha và chuyển pha:
 
 ```mermaid
 stateDiagram-v2
@@ -190,23 +218,31 @@ Hình răng cưa: leo tuyến tính, rớt một nửa (fast recovery) hoặc v�
 
 ## 5. Slow-start restart sau khi idle (Q5)
 
-> **Trả lời ngắn.** Sau một khoảng im lặng, các ACK trong mạng đã cạn nên sender không còn nhịp để rải segment ra[^rfc5681-ackclock]. Vì vậy RFC 5681 nói TCP nên (SHOULD) đưa `cwnd` về không quá `min(IW, cwnd)` trước khi gửi tiếp nếu đã không gửi dữ liệu quá một RTO[^rfc5681-restart-should][^rfc5681-rw]. Trên Linux tham số điều khiển là `net.ipv4.tcp_slow_start_after_idle`, mặc định bật[^sysctl-ssai][^tcp7-ssai].
+> **Trả lời ngắn.** Sau một khoảng im lặng, các ACK trong mạng đã cạn nên sender không còn nhịp để rải segment ra[^rfc5681-ackclock]. Vì vậy RFC 5681 nói TCP nên (SHOULD) đưa `cwnd` về không quá `min(IW, cwnd)` trước khi gửi tiếp, nếu đã không gửi dữ liệu quá một RTO[^rfc5681-restart-should]. Trên Linux tham số điều khiển là `net.ipv4.tcp_slow_start_after_idle`, mặc định bật[^tcp7-ssai].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): xe cộ đã tản hết khỏi đường; đừng tưởng đường vẫn thông như hôm qua mà đổ ngay cả đoàn xe lớn lên đó — tình trạng đường có thể đã đổi.
+*Với `orders`.* Một client giữ kết nối keep-alive tới `orders`: nó tải xong báo cáo, rồi nằm im vài giây trước khi gọi request tiếp. Lúc này `cwnd` của kết nối vẫn đang to, nhờ lần tải trước. Câu hỏi là kernel có cho `orders` dùng lại nguyên cửa sổ đó cho request kế tiếp không. Với TCP chuẩn thì không, nếu khoảng im lặng đủ dài.
 
-Sau một thời gian im lặng, ACK trong mạng đã cạn, sender mất "ACK clock" để rải segment ra theo nhịp: RFC 5681 §4.1 nói rằng sau khoảng idle, TCP không thể dùng ACK clock để nhịp việc đưa segment mới vào mạng vì mọi ACK đã cạn khỏi mạng[^rfc5681-ackclock]. Xả đầy `cwnd` cũ có thể gây một burst ở tốc độ đường truyền, và điều kiện mạng có thể đã đổi trong lúc idle khiến `cwnd` không còn phản ánh đúng dung lượng[^rfc5681-burst]; HPBN nêu lý do tương tự[^hpbn-ssr].
+### 5.1 Vì sao phải hạ `cwnd` sau idle
 
-Quy tắc: RFC mô tả cơ chế đã được triển khai rộng rãi — khi TCP không nhận segment nào trong hơn một retransmission timeout, `cwnd` được giảm xuống restart window (RW) trước khi bắt đầu truyền[^rfc5681-restart], với `RW = min(IW, cwnd)`[^rfc5681-rw]. Điều kiện "không nhận" có điểm yếu ở HTTP persistent (xem phần Đi sâu), nên quy định của RFC (SHOULD) dùng điều kiện "không gửi dữ liệu quá một RTO"[^rfc5681-restart-should]. RW không làm *tăng* `cwnd` — nếu `cwnd` đang nhỏ hơn IW thì giữ nguyên (suy ra từ `min`).
+Khi dữ liệu đang chạy đều, các ACK đến đều đặn và chính chúng giữ nhịp cho sender: ACK về thì segment mới đi ra. Sau một khoảng im lặng, sender mất nhịp đó, vì mọi ACK đã cạn khỏi mạng[^rfc5681-ackclock]. Nếu lúc đó nó xả đầy `cwnd` cũ, nó có thể bắn một burst cỡ `cwnd` ở tốc độ đường truyền. Hơn nữa, trong lúc idle điều kiện mạng có thể đã đổi, nên `cwnd` cũ có thể không còn phản ánh đúng dung lượng của đường đi[^rfc5681-burst]. HPBN nêu lý do tương tự: điều kiện mạng có thể đã đổi trong lúc kết nối idle, và để tránh nghẽn thì cửa sổ được đặt lại về một mức "an toàn"[^hpbn-ssr].
 
-Trên Linux: `net.ipv4.tcp_slow_start_after_idle` — nếu bật, kernel áp dụng hành vi RFC 2861 và cho cửa sổ congestion hết hạn sau một khoảng idle, trong đó khoảng idle được tính theo RTO hiện tại[^sysctl-ssai]; mặc định bật[^tcp7-ssai].
+### 5.2 Quy tắc
+
+Bản mô tả gốc của cơ chế dùng điều kiện "TCP không nhận segment nào trong hơn một retransmission timeout": khi đó `cwnd` được giảm xuống restart window (RW) trước khi bắt đầu truyền[^rfc5681-restart]. RW được định nghĩa là `min(IW, cwnd)`[^rfc5681-rw]. Do là `min`, RW không bao giờ làm *tăng* `cwnd`: nếu `cwnd` đang nhỏ hơn IW thì nó giữ nguyên (suy ra từ định nghĩa).
+
+Điều kiện "không nhận segment nào" có điểm yếu với HTTP persistent (xem phần Đi sâu). Vì vậy quy định (SHOULD) của RFC dùng điều kiện "không gửi dữ liệu quá một RTO"[^rfc5681-restart-should].
+
+### 5.3 Trên Linux
+
+Tham số `net.ipv4.tcp_slow_start_after_idle`: nếu bật, kernel áp dụng hành vi của RFC 2861 và cho cửa sổ congestion hết hạn sau một khoảng idle; khoảng idle ở đây được tính theo RTO hiện tại[^sysctl-ssai]. Giá trị mặc định là bật[^tcp7-ssai].
 
 <details><summary>Đi sâu: HTTP persistent connection, RFC 2861 và lời khuyên tắt SSR</summary>
 
-RFC cũng ghi nhận một điểm tinh tế: dùng "lần cuối nhận segment" để đo idle có thể không giảm `cwnd` đúng ở HTTP persistent connection — vì web server nhận request (một segment) trước khi gửi response, nên phép thử idle thất bại[^rfc5681-http]. Vì vậy RFC chuyển sang điều kiện "không gửi dữ liệu" nêu ở trên.
+Dùng "lần cuối nhận segment" để đo idle có thể không giảm `cwnd` đúng ở HTTP persistent connection: web server nhận request (một segment) trước khi gửi response, nên phép thử idle thất bại[^rfc5681-http]. Vì vậy RFC chuyển sang điều kiện "không gửi dữ liệu" nêu ở §5.2.
 
-Kernel doc dẫn RFC 2861 (khác RFC 5681 §4.1), nên đừng giả định hai bên giống từng chi tiết. HPBN khuyến nghị tắt SSR trên server để cải thiện kết nối HTTP sống lâu[^hpbn-ssr-off]. Đó là lời khuyên của HPBN; đánh đổi (nhận xét của người soạn): tắt SSR có thể xả cửa sổ lớn vào đường đã đổi trạng thái, nên chỉ đổi khi đã đo.
+Kernel doc dẫn RFC 2861 (khác RFC 5681 §4.1), nên đừng giả định hai bên giống nhau từng chi tiết. HPBN khuyến nghị tắt SSR trên server để cải thiện kết nối HTTP sống lâu[^hpbn-ssr-off]. Đó là lời khuyên của HPBN. Về đánh đổi (nhận xét của người soạn): tắt SSR có thể xả một cửa sổ lớn vào đường đã đổi trạng thái, nên chỉ đổi khi đã đo.
 
 </details>
 
@@ -214,19 +250,39 @@ Kernel doc dẫn RFC 2861 (khác RFC 5681 §4.1), nên đừng giả định hai
 
 ## 6. CUBIC, BBR, ECN và bufferbloat (Q6)
 
-> **Trả lời ngắn.** CUBIC thay mức tăng +1 segment/RTT của Reno bằng hàm bậc ba nhưng vẫn dựa vào mất gói[^cubic-abs][^cubic-queue]. BBR dựng mô hình đường truyền từ các phép đo thay vì chỉ dựa vào mất gói, và hiện là Internet-Draft Experimental[^bbr-model][^bbr-status]. ECN cho router báo nghẽn không cần drop[^ecn-ce]; bufferbloat gắn với hàng đợi tồn tại lâu trong bộ đệm, chỉ làm tăng độ trễ[^bloat-delay].
+> **Trả lời ngắn.** CUBIC thay mức tăng +1 segment/RTT của Reno bằng hàm bậc ba[^cubic-abs]. Nó vẫn dựa vào mất gói[^cubic-queue]. BBR dựng mô hình đường truyền từ các phép đo thay vì chỉ dựa vào mất gói[^bbr-model]. Hiện nó là Internet-Draft Experimental[^bbr-status]. ECN cho router báo nghẽn mà không cần drop[^ecn-ce]. Bufferbloat gắn với hàng đợi tồn tại lâu trong bộ đệm, và chỉ làm tăng độ trễ[^bloat-delay].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): Reno như người leo cầu thang mỗi bước một bậc dù cầu thang rất dài; CUBIC bước dài khi còn xa mức từng đạt, chậm lại khi tới gần mức cũ, rồi dò xem mức mới có cao hơn không.
+*Với `orders`.* Reno, thuật toán trong RFC 5681 mà ta vừa đi qua, đã đủ để `orders` không làm sập mạng. Nhưng khi client nằm xa và đường truyền nhanh, `orders` phải mất rất nhiều RTT mới nới cửa sổ lên mức đủ lớn, và nó chỉ biết nghẽn khi đã có gói bị mất. Các thuật toán và cơ chế trong mục này đều nhắm vào hai điểm yếu đó: tăng quá chậm, và phát hiện nghẽn quá muộn.
 
-*CUBIC (RFC 9438).* Reno (thuật toán RFC 5681) tăng +1 segment/RTT trong congestion avoidance (BDP là "bandwidth-delay product", lượng dữ liệu tối đa có thể đang bay[^hpbn-bdp]). CUBIC thay hàm tăng tuyến tính bằng hàm bậc ba, nhằm cải thiện khả năng mở rộng và độ ổn định trên mạng nhanh và đường dài[^cubic-abs] — tức là mức +1/RTT được coi là chưa đủ mở rộng trên các mạng đó (suy luận của người soạn). Nó đã là mặc định của Linux, Windows và Apple[^cubic-default]. CUBIC vẫn **dựa vào mất gói**, và RFC thừa nhận nó có thể làm đầy các drop-tail buffer lớn nhanh hơn Reno và làm tăng nguy cơ standing queue[^cubic-queue].
+### 6.1 CUBIC (RFC 9438)
 
-*BBR.* BBR là thuật toán dựa trên mô hình, khác hướng loss-based: **mô hình hóa đường truyền**. Ý tưởng: BBR dùng các phép đo gần đây về tốc độ chuyển giao, round-trip time và tỉ lệ mất gói của một kết nối để dựng mô hình tường minh của đường truyền, rồi dùng mô hình đó điều khiển cả *tốc độ gửi* lẫn *lượng tối đa đang bay*[^bbr-model]. Lợi ích draft nêu: so với thuật toán loss-based như Reno hay CUBIC, BBR cho thông lượng cao hơn đáng kể ở nút cổ chai có buffer nông hoặc mất gói ngẫu nhiên, và độ trễ hàng đợi thấp hơn đáng kể ở nút cổ chai có buffer sâu[^bbr-benefit]. Đây là tuyên bố của tác giả draft, không phải kết quả đo của tôi.
+Trong congestion avoidance, Reno tăng +1 segment mỗi RTT. CUBIC thay hàm tăng tuyến tính đó bằng hàm bậc ba, nhằm cải thiện khả năng mở rộng và độ ổn định trên mạng nhanh và đường dài[^cubic-abs]. Nói cách khác, mức +1/RTT được coi là chưa đủ mở rộng trên các mạng đó (suy luận của người soạn). Hiện CUBIC là mặc định của Linux, Windows và Apple[^cubic-default].
 
-*ECN (RFC 3168).* Mất gói là tín hiệu nghẽn "đắt": sender phải đợi dup-ACK hay RTO, rồi truyền lại. ECN cho phép router báo nghẽn *mà không drop*: thay vì chỉ drop, router có thể đặt codepoint Congestion Experienced (CE) trong IP header của các gói từ transport hỗ trợ ECN[^ecn-ce]. Receiver gặp CE thì đặt cờ **ECE** (ECN-Echo) trong ACK kế tiếp; sender nhận ECE thì phản ứng như khi một gói bị drop[^ecn-seq], rồi đặt cờ **CWR** (Congestion Window Reduced) để báo đã giảm cửa sổ[^ecn-flags]; receiver dùng CWR để biết khi nào thôi đặt ECE[^ecn-stop]. RFC 3168 yêu cầu coi CE giống một gói bị mất: với TCP hỗ trợ ECN, TCP nguồn bắt buộc phải giảm một nửa cửa sổ congestion cho mọi cửa sổ dữ liệu có chứa gói bị drop hoặc dấu hiệu ECN[^ecn-halve] — và chỉ giảm một lần cho mỗi cửa sổ dữ liệu[^ecn-once]. Lợi ích: receiver vẫn nhận được gói, tránh được độ trễ quá mức do truyền lại sau khi mất gói[^ecn-benefit].
+Điều CUBIC không đổi là nó vẫn **dựa vào mất gói**. RFC thừa nhận CUBIC có thể làm đầy các drop-tail buffer lớn nhanh hơn Reno và làm tăng nguy cơ standing queue[^cubic-queue]. Phần bufferbloat bên dưới giải thích vì sao đó là vấn đề.
 
-*Bufferbloat.* Router/modem có bộ đệm để hấp thụ burst. RFC 8289 mô tả: buffer mạng tồn tại để hấp thụ các burst gói xảy ra tự nhiên trong mạng ghép kênh thống kê[^bloat-buffers]. Mối quan hệ với congestion control (suy luận của người soạn từ cơ chế loss-based): thuật toán loss-based chỉ phát hiện nghẽn khi bộ đệm *đầy và drop*, nên với bộ đệm sâu, sender cứ tăng `cwnd` đến khi đệm đầy. RFC 8289 định nghĩa *standing queue* là hàng đợi tồn tại lâu, cỡ RTT dài[^bloat-standing]. Trong ví dụ cửa sổ 25 gói qua đường có BDP 20 gói, RFC chỉ ra hàng đợi đứng hình thành do chênh lệch giữa kích thước cửa sổ và kích thước "pipe", không liên quan tới tốc độ gửi[^bloat-pipe], và mọi hàng đợi ngoài burst thoáng qua chỉ tạo thêm độ trễ[^bloat-delay]. Biện pháp ở phía mạng: AQM như CoDel — RFC 8289 mô tả nó như một framework kiểm soát độ trễ dư do bufferbloat[^codel-abs]; IETF cũng có khuyến nghị riêng về AQM (RFC 7567)[^rfc7567]. ECN cho AQM một cách báo nghẽn không cần drop (nhận xét của người soạn).
+### 6.2 BBR
+
+BBR đi theo hướng khác hẳn: thay vì chờ mất gói, nó **mô hình hóa đường truyền**. BBR dùng các phép đo gần đây về tốc độ chuyển giao dữ liệu, round-trip time và tỉ lệ mất gói của một kết nối để dựng mô hình tường minh của đường truyền, rồi dùng mô hình đó điều khiển cả *tốc độ gửi* lẫn *lượng tối đa đang bay*[^bbr-model]. Tác giả draft nêu lợi ích: so với thuật toán loss-based như Reno hay CUBIC, BBR cho thông lượng cao hơn đáng kể ở nút cổ chai có buffer nông hoặc mất gói ngẫu nhiên, và độ trễ hàng đợi thấp hơn đáng kể ở nút cổ chai có buffer sâu[^bbr-benefit]. Đây là tuyên bố của tác giả draft, không phải kết quả đo của tôi.
+
+### 6.3 ECN (RFC 3168)
+
+Mất gói là tín hiệu nghẽn "đắt": sender phải đợi dup-ACK hay RTO, rồi còn phải truyền lại. ECN cho router báo nghẽn *mà không drop*. Router có thể đặt codepoint Congestion Experienced (CE) trong IP header của các gói từ transport hỗ trợ ECN, thay vì drop gói[^ecn-ce].
+
+Receiver gặp CE thì đặt cờ **ECE** (ECN-Echo) trong ACK kế tiếp, và sender nhận ECE thì phản ứng như khi một gói bị drop[^ecn-seq]. Sau đó sender đặt cờ **CWR** (Congestion Window Reduced) để báo rằng nó đã giảm cửa sổ[^ecn-flags]. Receiver dùng CWR để biết khi nào thôi đặt ECE[^ecn-stop].
+
+RFC 3168 yêu cầu coi CE giống một gói bị mất: với TCP hỗ trợ ECN, TCP nguồn bắt buộc phải giảm một nửa cửa sổ congestion cho mọi cửa sổ dữ liệu có chứa gói bị drop hoặc dấu hiệu ECN[^ecn-halve]. Mức giảm này chỉ áp dụng một lần cho mỗi cửa sổ dữ liệu[^ecn-once]. Lợi ích: receiver vẫn nhận được gói, nên tránh được độ trễ quá mức do truyền lại sau khi mất gói[^ecn-benefit].
+
+### 6.4 Bufferbloat
+
+Router và modem có bộ đệm để hấp thụ burst. Cụ thể, buffer mạng tồn tại để hấp thụ các burst gói xảy ra tự nhiên trong mạng ghép kênh thống kê[^bloat-buffers].
+
+Vấn đề nảy sinh khi bộ đệm quá sâu, và nó liên quan trực tiếp đến thuật toán loss-based (suy luận của người soạn từ cơ chế loss-based). Thuật toán loss-based chỉ biết nghẽn khi bộ đệm *đầy và drop*, nên với bộ đệm sâu, sender cứ tăng `cwnd` cho tới khi đệm đầy. Gói của `orders` lúc đó không bị mất mà nằm chờ trong hàng đợi, và độ trễ của mọi kết nối qua router đó tăng theo.
+
+Hàng đợi tồn tại lâu như vậy gọi là *standing queue*: hàng đợi (tính bằng gói, byte hay thời gian trễ) tồn tại trong buffer suốt một khoảng "dài", cỡ các RTT dài qua buffer đó[^bloat-standing]. RFC 8289 có một ví dụ: một kết nối TCP sống lâu với cửa sổ 25 gói đi qua đường có BDP (bandwidth-delay product, lượng dữ liệu tối đa có thể đang bay[^hpbn-bdp]) 20 gói. Sau burst ban đầu, kết nối ổn định ở một hàng đợi đứng khoảng 5 gói; hàng đợi này do chênh lệch giữa kích thước cửa sổ và kích thước "pipe", không liên quan tới tốc độ gửi[^bloat-pipe]. Còn mọi hàng đợi ngoài những burst thoáng qua thì chỉ tạo thêm độ trễ[^bloat-delay].
+
+Biện pháp ở phía mạng là AQM (active queue management) như CoDel: RFC 8289 mô tả nó như một framework kiểm soát độ trễ dư do bufferbloat sinh ra[^codel-abs]. IETF cũng có một khuyến nghị riêng về AQM, RFC 7567[^rfc7567]. ECN cho AQM một cách báo nghẽn mà không cần drop (nhận xét của người soạn).
 
 <details><summary>Đi sâu: cơ chế CUBIC, trạng thái BBR draft, các bước ECN, <code>tcp_ecn</code> trên Linux, bối cảnh bufferbloat</summary>
 
@@ -234,21 +290,24 @@ Hình dung (nhận xét của người soạn): Reno như người leo cầu tha
 
 - Ghi nhớ `Wmax` — kích thước `cwnd` ngay trước lần giảm gần nhất (khi tắt fast convergence)[^cubic-wmax].
 - Khi nhận ACK trong congestion avoidance, tính cả `Wcubic(t)` (hàm bậc ba theo thời gian từ lần giảm cuối) lẫn `West` (ước lượng Reno) và lấy giá trị lớn hơn[^cubic-max].
-- Ba vùng: *Reno-friendly* (bảo đảm không thua Reno)[^cubic-friendly]; *concave* khi `cwnd < Wmax`[^cubic-concave] — tiến tới `Wmax` rồi chững lại (plateau)[^cubic-plateau]; *convex* khi `cwnd > Wmax`[^cubic-convex] — dò tìm `Wmax` mới: tăng rất chậm quanh `Wmax` rồi nhanh dần[^cubic-probe].
+- Ba vùng:
+  - *Reno-friendly*, bảo đảm CUBIC không thua Reno[^cubic-friendly].
+  - *Concave*, khi `cwnd < Wmax`[^cubic-concave]. `cwnd` tiến tới `Wmax` rồi chững lại (plateau)[^cubic-plateau].
+  - *Convex*, khi `cwnd > Wmax`[^cubic-convex]. Vùng này dò tìm `Wmax` mới: tăng rất chậm quanh `Wmax` rồi nhanh dần[^cubic-probe].
 - Khi mất, giảm nhân với `βcubic`, RFC khuyến nghị (SHOULD) đặt bằng 0,7, khác hệ số giảm của RFC 5681 (và RFC 6675) trong fast recovery[^cubic-beta]. Nghĩa là CUBIC cắt ít hơn Reno (giữ 70% thay vì 50%) (suy luận của người soạn).
 
-**Trạng thái tài liệu BBR.** Đặc tả là Internet-Draft `draft-ietf-ccwg-bbr`; bản tôi đọc là `-04` (20/10/2025), **Intended Status: Experimental**[^bbr-status]. Khi review (10/2026) datatracker đã có `-06` (6/7/2026), vẫn Experimental[^bbr-06], nên chi tiết dưới đây có thể đã đổi. Một Internet-Draft chỉ là tài liệu nháp có thể bị cập nhật, thay thế hoặc bị tài liệu khác làm lỗi thời bất kỳ lúc nào[^bbr-draft]; nội dung gắn với `-04`, tức đặc tả phiên bản 3 của BBR (BBRv3)[^bbr-v3]. Ước lượng BDP trong draft: `BBR.bdp = BBR.bw * BBR.min_rtt`[^bbr-bdp] — băng thông ước lượng nhân RTT nhỏ nhất quan sát được.
+**Trạng thái tài liệu BBR.** Đặc tả là Internet-Draft `draft-ietf-ccwg-bbr`; bản tôi đọc là `-04` (20/10/2025), **Intended Status: Experimental**[^bbr-status]. Khi review (10/2026) datatracker đã có `-06` (6/7/2026), vẫn Experimental[^bbr-06], nên chi tiết dưới đây có thể đã đổi. Một Internet-Draft chỉ là tài liệu nháp có thể bị cập nhật, thay thế hoặc bị tài liệu khác làm lỗi thời bất kỳ lúc nào[^bbr-draft]. Nội dung gắn với `-04`, tức đặc tả phiên bản 3 của BBR (BBRv3)[^bbr-v3]. Ước lượng BDP trong draft là `BBR.bdp = BBR.bw * BBR.min_rtt`[^bbr-bdp], tức băng thông ước lượng nhân RTT nhỏ nhất quan sát được.
 
 **Các bước ECN.**
 
-1. Hai đầu thương lượng ECN khi thiết lập kết nối[^ecn-negotiate]; sau đó sender đánh dấu gói bằng codepoint ECT(0) hoặc ECT(1) trong IP header — các codepoint ECT '10' và '01' do bên gửi dữ liệu đặt để báo hai đầu transport hỗ trợ ECN[^ecn-ect].
+1. Hai đầu thương lượng ECN khi thiết lập kết nối[^ecn-negotiate]. Sau đó sender đánh dấu gói bằng codepoint ECT(0) hoặc ECT(1) trong IP header; các codepoint ECT '10' và '01' do bên gửi dữ liệu đặt để báo hai đầu transport hỗ trợ ECN[^ecn-ect].
 2. Router hỗ trợ ECN, khi phát hiện nghẽn sắp xảy ra và thấy gói sắp bị drop mang codepoint ECT, đặt CE thay vì drop[^ecn-router].
 3. Receiver echo bằng ECE, sender đặt CWR[^ecn-flags].
 4. Sender giảm cửa sổ một lần mỗi cửa sổ dữ liệu: cửa sổ congestion của TCP sender chỉ nên (should) giảm một lần để đáp ứng một chuỗi gói bị drop và/hoặc gói CE trong cùng một cửa sổ dữ liệu[^ecn-once].
 
 **ECN trên Linux.** `net.ipv4.tcp_ecn`: ECN chỉ được dùng khi cả hai đầu kết nối TCP cùng báo hỗ trợ[^sysctl-ecn]. Giá trị 2 (bật khi đầu kia yêu cầu, không yêu cầu ở kết nối đi ra) là mặc định từ Linux 2.6.31, và tcp(7) cảnh báo ECN có thể ảnh hưởng kết nối tới một số đích vì middlebox cũ hỏng[^tcp7-ecn]. Container lab đọc được `tcp_ecn=2`.
 
-**Bối cảnh bufferbloat.** RFC 8289 nói bài toán bộ đệm luôn đầy ngày càng tệ hơn khi mật độ bộ nhớ theo Định luật Moore khiến kích thước buffer pool tăng theo hàm mũ[^bloat-rfc8289]. RFC 9438 xác nhận rủi ro với CUBIC (đã nêu ở trên); BBR draft quảng cáo độ trễ hàng đợi thấp hơn đáng kể ở nút cổ chai có buffer sâu[^bbr-benefit].
+**Bối cảnh bufferbloat.** RFC 8289 nói bài toán bộ đệm luôn đầy ngày càng tệ hơn khi mật độ bộ nhớ theo Định luật Moore khiến kích thước buffer pool tăng theo hàm mũ[^bloat-rfc8289]. RFC 9438 xác nhận rủi ro với CUBIC (đã nêu ở §6.1); BBR draft quảng cáo độ trễ hàng đợi thấp hơn đáng kể ở nút cổ chai có buffer sâu[^bbr-benefit].
 
 </details>
 
@@ -256,17 +315,21 @@ Hình dung (nhận xét của người soạn): Reno như người leo cầu tha
 
 ## 7. Congestion control trên Linux (Q7)
 
-> **Trả lời ngắn.** Thuật toán mặc định cho kết nối mới đặt bằng sysctl `net.ipv4.tcp_congestion_control`[^sysctl-cc]; từng socket đổi được bằng option `TCP_CONGESTION`[^tcp7-opt]. Container lab đọc được mặc định là `cubic`, trong danh sách `reno cubic`.
+> **Trả lời ngắn.** Thuật toán mặc định cho kết nối mới đặt bằng sysctl `net.ipv4.tcp_congestion_control`[^sysctl-cc]. Từng socket đổi được bằng option `TCP_CONGESTION`[^tcp7-opt]. Container lab đọc được mặc định là `cubic`, trong danh sách `reno cubic`.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): sysctl như cấu hình mặc định của cả cluster, `TCP_CONGESTION` như override trên từng pod.
+*Với `orders`.* Máy chạy `orders` đang dùng thuật toán nào cho các kết nối ra client, và nếu muốn dùng thuật toán khác chỉ cho kết nối tới `inventory` thì sửa ở đâu? Linux có hai mức: một mặc định cho cả máy, và một lựa chọn riêng theo từng socket.
 
-**Chọn thuật toán toàn hệ thống.** `net.ipv4.tcp_congestion_control` đặt thuật toán dùng cho kết nối mới; mặc định do cấu hình kernel quyết định; với kết nối passive, lựa chọn của listener được thừa hưởng[^sysctl-cc]. tcp(7) nói thêm: thuật toán khả dụng ngoài reno phụ thuộc cấu hình kernel[^tcp7-cc].
+### 7.1 Chọn thuật toán cho cả máy
 
-**Danh sách.** `tcp_available_congestion_control` (chỉ đọc) liệt kê các thuật toán đã đăng ký; có thể còn thuật toán khác ở dạng module chưa nạp[^sysctl-avail]. `tcp_allowed_congestion_control` là tập con dành cho process không đặc quyền[^sysctl-allowed].
+`net.ipv4.tcp_congestion_control` đặt thuật toán dùng cho kết nối mới. Mặc định do cấu hình kernel quyết định; với kết nối passive (kết nối mà `orders` `accept()` từ client) lựa chọn của listener được thừa hưởng[^sysctl-cc]. tcp(7) nói thêm rằng thuật toán khả dụng ngoài reno phụ thuộc cấu hình kernel[^tcp7-cc].
 
-**Theo từng socket.** Option `TCP_CONGESTION` cho phép đặt thuật toán theo từng socket; process không đặc quyền chỉ chọn trong `tcp_allowed_congestion_control`, còn `CAP_NET_ADMIN` chọn được bất kỳ thuật toán sẵn có nào[^tcp7-opt].
+Hai sysctl liên quan đến danh sách thuật toán. `tcp_available_congestion_control` (chỉ đọc) liệt kê các thuật toán đã đăng ký; có thể còn thuật toán khác ở dạng module chưa nạp[^sysctl-avail]. `tcp_allowed_congestion_control` là tập con dành cho process không đặc quyền[^sysctl-allowed].
+
+### 7.2 Chọn theo từng socket
+
+Option `TCP_CONGESTION` cho phép đặt thuật toán theo từng socket. Process không đặc quyền chỉ chọn được trong `tcp_allowed_congestion_control`, còn process có `CAP_NET_ADMIN` chọn được bất kỳ thuật toán sẵn có nào[^tcp7-opt]. Như vậy `orders` chạy với quyền thường chỉ đổi được trong tập cho phép đó.
 
 <details><summary>Đi sâu: giá trị đọc trong container lab</summary>
 
@@ -288,14 +351,14 @@ tcp_ecn=2
 
 ## 8. Hệ quả cho backend (Q8)
 
-> **Trả lời ngắn.** Slow start áp dụng cho mọi kết nối mới[^hpbn-ss-every], nên những byte đầu luôn chậm. Dùng lại kết nối (keep-alive, pool) trả phí này một lần, trừ khi kết nối idle quá một RTO khi `tcp_slow_start_after_idle` bật[^sysctl-ssai] (kết luận của người soạn).
+> **Trả lời ngắn.** Slow start áp dụng cho mọi kết nối mới[^hpbn-ss-every], nên những byte đầu luôn chậm. Dùng lại kết nối (keep-alive, pool) trả phí này một lần, trừ khi kết nối idle quá một RTO trong lúc `tcp_slow_start_after_idle` đang bật[^sysctl-ssai] (kết luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mở kết nối mới như khởi động xe nguội — chạy chậm ở quãng đầu; pool kết nối là giữ máy nóng, nhưng để xe nguội quá lâu thì phải khởi động lại.
+*Với `orders`.* Hai chỗ trong `orders` chịu ảnh hưởng của congestion control: client mở kết nối mới để lấy báo cáo, và `orders` gọi `inventory` qua pool kết nối. Mục này gom những gì ta đã học thành hai hệ quả cho cách bạn thiết kế hai chỗ đó.
 
-1. **Kết nối mới chậm ở những byte đầu.** Request đầu tiên trên kết nối mới trả giá handshake TCP, (TLS), rồi vài RTT để `cwnd` lớn lên; với response ngắn, thời gian bị chi phối bởi RTT chứ không bởi băng thông (mục 3)[^hpbn-short].
-2. **Connection reuse / keep-alive / pool trả phí này một lần.** `cwnd` là trạng thái của *kết nối*, nên request sau trên cùng kết nối thừa hưởng cửa sổ đã được nới; vì vậy keep-alive và pool kết nối tới DB/HTTP downstream giảm latency (nhận xét của người soạn, suy ra từ HPBN). Nhưng **chỉ khi kết nối không idle quá lâu**: idle quá một RTO với `tcp_slow_start_after_idle=1` thì `cwnd` bị kéo về `min(IW, cwnd)` (mục 5), nên pool giữ kết nối nhàn rỗi lâu có thể vẫn trả phí slow start lại.
+1. **Kết nối mới chậm ở những byte đầu.** Request đầu tiên trên một kết nối mới phải trả giá handshake TCP, (TLS nếu có), rồi vài RTT để `cwnd` lớn lên. Với response ngắn, thời gian bị chi phối bởi RTT chứ không phải băng thông (mục 3)[^hpbn-short].
+2. **Dùng lại kết nối (keep-alive, pool) trả phí này một lần.** `cwnd` là trạng thái của *kết nối*, nên request sau trên cùng kết nối thừa hưởng cửa sổ đã được nới. Vì vậy keep-alive, và pool kết nối từ `orders` tới `inventory` hay DB, giúp giảm latency (nhận xét của người soạn, suy ra từ HPBN). Lợi ích này chỉ còn khi kết nối không idle quá lâu: idle quá một RTO với `tcp_slow_start_after_idle=1` thì `cwnd` bị kéo về `min(IW, cwnd)` (mục 5), nên một pool giữ kết nối nhàn rỗi lâu vẫn có thể phải trả phí slow start lại.
 
 <details><summary>Đi sâu: quan sát và chuyển sang HTTP/2, HTTP/3</summary>
 
@@ -307,7 +370,7 @@ Hình dung (nhận xét của người soạn): mở kết nối mới như kh�
 
 ## Liên hệ với Rust
 
-`std::net::TcpStream` phơi ra các option TCP cơ bản, ví dụ `set_nodelay` — đặt giá trị của option `TCP_NODELAY` trên socket[^std-nodelay]. Khi tôi tìm từ "congestion" trong trang docs `TcpStream` bản 1.95.0, không có kết quả, nên trang đó không có hàm đặt `TCP_CONGESTION` (kết luận từ việc không tìm thấy). Chọn thuật toán theo socket phải gọi `setsockopt` ở mức hệ điều hành (crate cụ thể chưa kiểm chứng). Đa số code backend Rust không cần: mặc định kernel (mục 7) và việc dùng lại kết nối quyết định hiệu năng.
+`std::net::TcpStream` phơi ra các option TCP cơ bản, ví dụ `set_nodelay`, hàm đặt giá trị của option `TCP_NODELAY` trên socket[^std-nodelay]. Tôi đã tìm từ "congestion" trong trang docs `TcpStream` bản 1.95.0 và không có kết quả, nên trang đó không có hàm đặt `TCP_CONGESTION` (kết luận từ việc không tìm thấy). Vì vậy, nếu `orders` muốn chọn thuật toán theo socket thì phải gọi `setsockopt` ở mức hệ điều hành (crate cụ thể chưa kiểm chứng). Đa số code backend Rust không cần làm vậy: mặc định của kernel (mục 7) và việc dùng lại kết nối mới quyết định hiệu năng.
 
 ## Tóm tắt
 
@@ -323,56 +386,56 @@ Hình dung (nhận xét của người soạn): mở kết nối mới như kh�
 1. Vì sao flow control không ngăn được congestion collapse? Congestion collapse theo RFC 896 diễn ra thế nào?
 <details><summary>Đáp án</summary>
 
-Flow control chỉ bảo vệ receiver, không có cơ chế ngăn quá tải mạng[^hpbn-collapse]. RTT tăng khi nút nghẽn[^rfc896-rtt]; nếu vượt khoảng truyền lại tối đa, host gửi thêm bản sao khiến tải tăng đúng lúc nghẽn[^rfc896-copies]; trạng thái đó ổn định[^hpbn-nagle-stable].
+Flow control chỉ bảo vệ receiver, không có cơ chế ngăn quá tải mạng[^hpbn-collapse]. RTT tăng khi nút nghẽn[^rfc896-rtt]. Nếu RTT vượt khoảng truyền lại tối đa, host gửi thêm bản sao khiến tải tăng đúng lúc nghẽn[^rfc896-copies]. Trạng thái đó ổn định[^hpbn-nagle-stable].
 
 </details>
 
 2. Ai giữ `cwnd`, nó có nằm trong header TCP không, và gửi bị chặn bởi gì?
 <details><summary>Đáp án</summary>
 
-Sender giữ, không quảng bá cho peer[^hpbn-cwnd]; lượng gửi bị chặn bởi `min(cwnd, rwnd)`[^rfc5681-vars][^rfc5681-defs].
+Sender giữ, không quảng bá cho peer[^hpbn-cwnd]. Lượng gửi bị chặn bởi `min(cwnd, rwnd)`[^rfc5681-vars]. Nói chặt chẽ hơn, sequence number gửi không được vượt tổng của sequence number cao nhất đã ack và `min(cwnd, rwnd)`[^rfc5681-defs].
 
 </details>
 
 3. Cho `FlightSize` = 3 segment, SMSS = 1460. `ssthresh` sau dup-ACK thứ ba là bao nhiêu?
 <details><summary>Đáp án</summary>
 
-`max(FlightSize/2, 2*SMSS)`[^rfc5681-ssthresh] = max(2.190, 2.920) = 2.920 byte (2 SMSS).
+Công thức là `max(FlightSize/2, 2*SMSS)`[^rfc5681-ssthresh], tức max(2.190, 2.920) = 2.920 byte (2 SMSS).
 
 </details>
 
 4. Trình tự `cwnd` trong fast recovery từ dup-ACK thứ ba đến ACK mới?
 <details><summary>Đáp án</summary>
 
-`ssthresh` theo phương trình (4)[^rfc5681-fr-ssthresh]; `cwnd = ssthresh + 3*SMSS`[^rfc5681-fr3]; mỗi dup-ACK thêm +SMSS[^rfc5681-fr4]; ACK mới → `cwnd = ssthresh`[^rfc5681-deflate].
+`ssthresh` đặt theo phương trình (4)[^rfc5681-fr-ssthresh]. Rồi `cwnd = ssthresh + 3*SMSS`[^rfc5681-fr3]. Mỗi dup-ACK thêm cộng +SMSS[^rfc5681-fr4]. Khi ACK mới đến, `cwnd = ssthresh`[^rfc5681-deflate].
 
 </details>
 
 5. RTO khác 3 dup-ACK ở điểm nào về `cwnd` và `ssthresh`?
 <details><summary>Đáp án</summary>
 
-RTO: `cwnd` ≤ 1 segment[^rfc5681-lw] rồi slow start; `ssthresh` cũng theo (4)[^rfc5681-ssthresh-rto], nhưng giữ nguyên nếu segment đã retransmit bằng timer trước đó[^rfc5681-held].
+Với RTO, `cwnd` ≤ 1 segment rồi chạy slow start[^rfc5681-lw]. `ssthresh` cũng theo phương trình (4)[^rfc5681-ssthresh-rto]. Nhưng nó được giữ nguyên nếu segment đó đã retransmit bằng timer trước đó[^rfc5681-held].
 
 </details>
 
 6. Slow-start restart là gì và tham số Linux nào điều khiển?
 <details><summary>Đáp án</summary>
 
-Nếu đã không gửi dữ liệu quá một RTO, TCP nên (SHOULD) đưa `cwnd` về không quá RW = `min(IW, cwnd)`[^rfc5681-restart-should][^rfc5681-rw]; Linux: `tcp_slow_start_after_idle`, mặc định bật[^sysctl-ssai][^tcp7-ssai].
+Nếu đã không gửi dữ liệu quá một RTO, TCP nên (SHOULD) đưa `cwnd` về không quá RW[^rfc5681-restart-should]. RW được định nghĩa là `min(IW, cwnd)`[^rfc5681-rw]. Trên Linux, tham số là `tcp_slow_start_after_idle`[^sysctl-ssai]. Mặc định nó bật[^tcp7-ssai].
 
 </details>
 
 7. ECN báo nghẽn bằng cách nào và sender phản ứng ra sao?
 <details><summary>Đáp án</summary>
 
-Router đặt CE[^ecn-ce]; receiver echo bằng ECE, sender đặt CWR[^ecn-flags]; sender giảm `cwnd` như với drop, một lần mỗi cửa sổ[^ecn-halve][^ecn-once].
+Router đặt CE[^ecn-ce]. Receiver echo bằng ECE, sender đặt CWR[^ecn-flags]. Sender giảm `cwnd` như với drop[^ecn-halve]. Mức giảm chỉ áp dụng một lần mỗi cửa sổ[^ecn-once].
 
 </details>
 
 8. Vì sao connection pool giúp về mặt congestion control, và khi nào lợi ích mất?
 <details><summary>Đáp án</summary>
 
-Slow start áp dụng cho mỗi kết nối mới[^hpbn-ss-every]; kết nối cũ giữ `cwnd` đã nới, trừ khi idle quá RTO và `tcp_slow_start_after_idle` bật[^sysctl-ssai]. Kết luận cho backend là nhận xét của người soạn.
+Slow start áp dụng cho mỗi kết nối mới[^hpbn-ss-every]. Kết nối cũ giữ `cwnd` đã nới, trừ khi idle quá RTO và `tcp_slow_start_after_idle` bật[^sysctl-ssai]. Kết luận cho backend là nhận xét của người soạn.
 
 </details>
 
@@ -386,13 +449,11 @@ Slow start áp dụng cho mỗi kết nối mới[^hpbn-ss-every]; kết nối c
 
 [^hpbn-flow]: High Performance Browser Networking, Building Blocks of TCP (Flow Control) — <https://hpbn.co/building-blocks-of-tcp/> — "each side of the TCP connection advertises (Figure 2-2) its own receive window (rwnd)"
 [^hpbn-collapse]: High Performance Browser Networking, Building Blocks of TCP (Slow-Start) — <https://hpbn.co/building-blocks-of-tcp/> — "flow control prevented the sender from overwhelming the receiver, but there was no mechanism to prevent either side from overwhelming the underlying network"
-[^rfc896-memo]: RFC 896, Abstract — <https://www.rfc-editor.org/rfc/rfc896.html> — "It is intended to stimulate thought and further discussion of this topic. While some specific suggestions are made for improved congestion control implementation, this memo does not specify any standards."
 [^rfc896-rtt]: RFC 896, Congestion collapse — <https://www.rfc-editor.org/rfc/rfc896.html> — "In heavily loaded pure datagram networks with end to end retransmission, as switching nodes become congested, the round trip time through the net increases"
 [^hpbn-nagle-stable]: High Performance Browser Networking, Building Blocks of TCP (quoting RFC 896) — <https://hpbn.co/building-blocks-of-tcp/> — "This condition is stable. Once the saturation point has been reached, if the algorithm for selecting packets to be dropped is fair, the network will continue to operate in a degraded condition."
 [^hpbn-1986]: High Performance Browser Networking, Building Blocks of TCP — <https://hpbn.co/building-blocks-of-tcp/> — "a series of congestion collapse incidents swept throughout the network — in some cases the capacity dropped by a factor of 1,000 and the network became unusable."
 [^hpbn-mech]: High Performance Browser Networking, Building Blocks of TCP — <https://hpbn.co/building-blocks-of-tcp/> — "multiple mechanisms were implemented in TCP to govern the rate with which the data can be sent in both directions: flow control, congestion control, and congestion avoidance."
 [^rfc5681-abs]: RFC 5681, Abstract — <https://www.rfc-editor.org/rfc/rfc5681.html> — "This document defines TCP's four intertwined congestion control algorithms: slow start, congestion avoidance, fast retransmit, and fast recovery."
-[^rfc9293-congestion-ext]: RFC 9293, §1 Purpose and Scope — <https://www.rfc-editor.org/rfc/rfc9293.html> — "Some companion documents are referenced for important algorithms that are used by TCP (e.g., for congestion control) but have not been completely included in this document."
 [^rfc5681-vars]: RFC 5681, §3.1 Slow Start and Congestion Avoidance — <https://www.rfc-editor.org/rfc/rfc5681.html> — "The congestion window (cwnd) is a sender-side limit on the amount of data the sender can transmit into the network before receiving an acknowledgment (ACK), while the receiver's advertised window (rwnd) is a receiver-side limit on the amount of outstanding data. The minimum of cwnd and rwnd governs data transmission."
 [^rfc5681-defs]: RFC 5681, §2 Definitions — <https://www.rfc-editor.org/rfc/rfc5681.html> — "At any given time, a TCP MUST NOT send data with a sequence number higher than the sum of the highest acknowledged sequence number and the minimum of cwnd and rwnd."
 [^hpbn-cwnd]: High Performance Browser Networking, Building Blocks of TCP (Slow-Start) — <https://hpbn.co/building-blocks-of-tcp/> — "The cwnd variable is not advertised or exchanged between the sender and receiver — in this case, it will be a private variable maintained by the server in London."

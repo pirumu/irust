@@ -1,6 +1,6 @@
 # P10 · Chương 02 — Type layout: size, alignment, repr, enum và niche
 
-> Nguồn ghim Rust 1.95.0 (Reference, Nomicon, `std`). Chương này **không có thí nghiệm mới**: mọi con số hoặc lấy từ ví dụ `assert_eq!` ngay trong tài liệu chính thức, hoặc là kết quả *tính tay theo thuật toán* của Reference (ghi rõ), hoặc là quan sát đã có output thật trong [Lab 10 bài (a)](../labs/10-rust-internals-lab.md) (ghi rõ). Chỉ những câu có chú thích cuối trang mới là bảo đảm của docs. Phần ghi "(nhận xét của người soạn)" là ý kiến, "(suy luận của người soạn)" là suy ra từ nguồn nhưng chưa có câu nào nói thẳng.
+> Phạm vi: nguồn ghim Rust 1.95.0 (Reference, Nomicon, `std`). Chương này **không có thí nghiệm mới**. Mỗi con số trong chương thuộc một trong ba loại: ví dụ `assert_eq!` lấy thẳng từ tài liệu chính thức, kết quả *tính tay* theo thuật toán của Reference (có ghi rõ), hoặc quan sát đã có output thật trong [Lab 10 bài (a)](../labs/10-rust-internals-lab.md) (có ghi rõ). Chỉ những câu có chú thích cuối trang mới là bảo đảm của docs. "(nhận xét của người soạn)" là ý kiến; "(suy luận của người soạn)" là điều suy ra từ nguồn nhưng chưa có câu nào nói thẳng.
 
 ## Bạn sẽ hiểu được gì
 
@@ -18,52 +18,77 @@
 
 Kiểu có size chỉ biết lúc chạy (`[T]`, `str`, `dyn Trait`) và con trỏ béo của chúng nằm ở [P10 · Chương 03 — DST, fat pointer và vtable](03-dst-fat-pointer-vtable.md); chương này chỉ nói về kiểu `Sized`.
 
+Mọi ví dụ trong chương xoay quanh một service giả định tên `ingest`, giới thiệu ở mục 1.
+
 ## 1. Size, alignment, padding và vì sao số đo không phải hợp đồng (Q1)
 
-> **Trả lời ngắn.** Alignment `n` nghĩa là giá trị chỉ được đặt ở địa chỉ chia hết cho `n`[^ref-align]. Size là khoảng cách tính bằng byte giữa hai phần tử liên tiếp của mảng cùng kiểu, đã gồm padding (byte đệm)[^ref-sizedef], và luôn là bội của alignment[^ref-size]. Reference nói layout có thể đổi sau mỗi lần biên dịch, nên số bạn đo chỉ là quan sát[^ref-guarantees].
+> **Trả lời ngắn.** Alignment `n` nghĩa là giá trị chỉ được đặt ở địa chỉ chia hết cho `n`[^ref-align]. Size là khoảng cách tính bằng byte giữa hai phần tử liên tiếp của mảng cùng kiểu, đã gồm padding (byte đệm)[^ref-sizedef]. Size luôn là bội của alignment[^ref-size]. Layout có thể đổi sau mỗi lần biên dịch, nên con số `size_of` bạn đo được chỉ là quan sát[^ref-guarantees].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): kho hàng xếp pallet. Kiện nhỏ đặt ở ô nào cũng được; kiện lớn chỉ được đặt ở ô có số chia hết cho cỡ của nó. Giữa hai kiện khác cỡ sẽ có ô trống: đó là padding.
+*Với service của bạn.* Hãy hình dung `ingest`, một service Rust nhận event từ client rồi giữ vài triệu event trong một `Vec<Event>` trên RAM. Mỗi byte thừa trong `Event` bị nhân lên vài triệu lần, nên bạn muốn biết `Event` chiếm bao nhiêu byte và vì sao. Ta sẽ bám theo `ingest` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này: size, alignment, padding nghĩa là gì, và con số `size_of::<Event>()` in ra thì tin được đến đâu?
 
-*Alignment.* Reference nói rõ: giá trị alignment 2 phải ở địa chỉ chẵn, alignment 1 ở địa chỉ nào cũng được, và alignment luôn là lũy thừa của 2[^ref-align-ex]. Phần "vì sao phần cứng cần điều đó" đã nằm ở [P3·07 mục 5](../03-memory/07-stack-alignment-padding.md); ở đây chỉ dùng định nghĩa.
+### 1.1 Alignment
 
-*Size là bội của alignment.* Nomicon giải thích lý do: nhờ vậy một mảng kiểu đó luôn được chỉ mục bằng cách cộng bội số của size[^nomicon-size-mult]. Mảng `[T; N]` có size `size_of::<T>() * N` và alignment của `T`[^ref-array].
+Alignment là một điều kiện về địa chỉ: giá trị alignment 2 phải nằm ở địa chỉ chẵn, alignment 1 nằm ở đâu cũng được, và alignment luôn là lũy thừa của 2[^ref-align-ex]. Vì sao phần cứng cần điều đó thì [P3 · Chương 07, mục 5](../03-memory/07-stack-alignment-padding.md) đã nói; ở đây ta chỉ dùng định nghĩa.
 
-*Kiểu ghép.* Nomicon liệt kê năm loại kiểu ghép: struct, tuple, array, enum, union[^nomicon-composites]. Rust chèn padding để mọi field được căn và để size tổng là bội của alignment[^nomicon-padding]. Alignment của struct `repr(Rust)` ít nhất bằng alignment lớn nhất trong các field[^ref-rust-guar].
+### 1.2 Size và padding
 
-*Con số đo được là quan sát.* Reference viết rằng layout có thể đổi mỗi lần biên dịch và chỉ ghi lại những gì được bảo đảm hôm nay[^ref-guarantees]. Với `size_of`, docs nói cùng ý: size của kiểu nói chung không ổn định giữa các lần biên dịch, trừ vài kiểu như primitive[^sizeof-unstable]. Vì vậy phân biệt ba loại thông tin khi đọc chương này: *bảo đảm* (docs hứa), *quan sát* (đo một lần trên một compiler), *chi tiết cài đặt* (đọc từ source, có thể đổi).
+Size luôn là bội của alignment, để một mảng kiểu đó chỉ mục được bằng cách cộng bội số của size[^nomicon-size-mult]. Mảng `[Event; N]` có size `N * size_of::<Event>()` và alignment của `Event`[^ref-array]. Dữ liệu của `Vec<Event>` trong `ingest` cũng nằm liền nhau theo kiểu đó (nhận xét của người soạn).
 
-<details><summary>Đi sâu: alignment của primitive, con trỏ, và hai khẳng định "tính tay"</summary>
+Vì field nào cũng phải được căn mà size tổng vẫn phải là bội của alignment, compiler chèn padding vào những chỗ cần[^nomicon-padding]. Với struct `repr(Rust)`, alignment của cả struct ít nhất bằng alignment lớn nhất trong các field[^ref-rust-guar]. Mục 2 sẽ tính cụ thể trên một `Event` thu nhỏ.
 
-- Alignment của primitive phụ thuộc nền tảng[^ref-prim-align]. Thường nó bằng size, nhưng `u128`/`i128` hay chỉ được căn 4 hoặc 8 dù size là 16[^ref-i128-align]. Tức là không thể suy `align_of` từ `size_of`.
-- Con trỏ tới kiểu `Sized` có cùng size và alignment với `usize`[^ref-ptr-sized]; `&T` và `&mut T` cùng layout[^ref-ptr-same].
-- Giá trị `size_of` của primitive (`u8` = 1, `u32` = 4, `u64` = 8, `char` = 4…) được `std::mem::size_of` liệt kê thành bảng[^sizeof-prim-table].
-- Tuple dùng biểu diễn Rust[^ref-tuple], trừ unit `()` được bảo đảm size 0 và alignment 1[^ref-unit]; closure thì "không có bảo đảm layout nào"[^ref-closure].
-- Trên stack, kích thước và vị trí thật của từng biến còn do compiler/optimizer quyết (ví dụ biến nằm trong thanh ghi không có địa chỉ; nhận xét của người soạn, chương này không dẫn nguồn cho điều đó); chương này chỉ nói layout *của kiểu*, không nói frame.
+### 1.3 Con số `size_of` chỉ là quan sát
+
+Điều quan trọng nhất của mục này: con số `size_of::<Event>()` in ra hôm nay chỉ là kết quả của lần biên dịch hôm nay. Reference nói layout có thể đổi mỗi lần biên dịch, và tài liệu chỉ ghi những gì được bảo đảm tính đến hiện tại[^ref-guarantees]. Docs của `size_of` nói cùng ý: size của một kiểu nói chung không ổn định giữa các lần biên dịch, chỉ vài kiểu như primitive là ổn định[^sizeof-unstable].
+
+Vì vậy khi đọc chương này hãy phân biệt ba loại thông tin: *bảo đảm* (docs hứa), *quan sát* (đo một lần trên một compiler) và *chi tiết cài đặt* (đọc từ source, có thể đổi). Với `ingest`: dùng `size_of::<Event>()` để ước lượng RAM thì ổn, nhưng đóng nó vào định dạng file hay hợp đồng với bên ngoài thì không (nhận xét của người soạn).
+
+<details><summary>Đi sâu: alignment của primitive, con trỏ, tuple, closure và các kiểu ghép</summary>
+
+- Alignment của primitive phụ thuộc nền tảng[^ref-prim-align]. Thường nó bằng size, nhưng `u128`/`i128` hay chỉ được căn 4 hoặc 8 dù size là 16[^ref-i128-align]. Nói cách khác, không thể suy `align_of` từ `size_of`.
+- Con trỏ tới kiểu `Sized` có cùng size và alignment với `usize`[^ref-ptr-sized]. `&T` và `&mut T` cùng layout[^ref-ptr-same].
+- `std::mem::size_of` liệt kê size của primitive thành một bảng (`u8` = 1, `u32` = 4, `u64` = 8, `char` = 4…)[^sizeof-prim-table].
+- Nomicon kể năm cách ghép dữ liệu: struct, tuple, array, enum, union[^nomicon-composites]. Tuple dùng biểu diễn Rust[^ref-tuple]. Ngoại lệ là unit `()`, được bảo đảm size 0 và alignment 1[^ref-unit]. Closure thì "không có bảo đảm layout nào"[^ref-closure].
+- Trên stack, kích thước và vị trí thật của từng biến còn do compiler/optimizer quyết (ví dụ biến nằm trong thanh ghi thì không có địa chỉ; nhận xét của người soạn, chương này không dẫn nguồn cho điều đó). Chương này chỉ nói layout *của kiểu*, không nói frame.
 
 </details>
 
-**Quay lại Q1:** alignment là điều kiện địa chỉ, size là bội của alignment đã gồm padding, và size của kiểu nói chung chỉ là số đo của một lần biên dịch (trừ vài kiểu như primitive).
+**Quay lại Q1:** alignment là điều kiện địa chỉ, size là bội của alignment đã gồm padding, và size của một kiểu nói chung chỉ là số đo của một lần biên dịch (trừ vài kiểu như primitive); với `ingest`, `size_of::<Event>()` đủ để ước lượng RAM nhưng chưa phải thứ để đóng vào định dạng file.
 
 ## 2. `repr(Rust)` và `repr(C)`: ai quyết định thứ tự field? (Q2)
 
-> **Trả lời ngắn.** Với `repr(Rust)` (mặc định), Reference chỉ hứa những gì cần cho tính đúng: field được căn, không chồng nhau, alignment kiểu ≥ alignment lớn nhất của field[^ref-rust-guar]; thứ tự trong bộ nhớ không nhất thiết là thứ tự khai báo[^ref-rust-order]. `repr(C)` thì có thuật toán xác định: duyệt field theo khai báo, chèn padding cho đến khi offset chia hết alignment của field[^ref-c-algo]. Cần layout đoán trước được (giao tiếp với C, hoặc diễn giải lại giá trị thành kiểu khác) thì dùng `repr(C)`[^ref-c-purposes].
+> **Trả lời ngắn.** Với `repr(Rust)` (mặc định), Reference chỉ hứa những gì cần cho tính đúng: field được căn, không chồng nhau, alignment của kiểu ≥ alignment lớn nhất của field[^ref-rust-guar]. Thứ tự trong bộ nhớ không nhất thiết là thứ tự khai báo[^ref-rust-order]. `repr(C)` thì có thuật toán xác định: duyệt field theo khai báo, chèn padding cho đến khi offset chia hết alignment của field[^ref-c-algo]. Khi cần layout đoán trước được (giao tiếp với C, hoặc diễn giải lại giá trị thành kiểu khác) thì dùng `repr(C)`[^ref-c-purposes].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `repr(C)` giống bản vẽ nhà có số phòng cố định, ai đọc bản vẽ cũng ra cùng một căn nhà. `repr(Rust)` giống giao khoán cho nhà thầu: nhà thầu được tự xếp lại các phòng miễn là phòng nào cũng đủ rộng và không chồng nhau.
+*Với `ingest`.* `ingest` có hai loại struct với hai nhu cầu ngược nhau. `Event` chỉ nằm trong RAM và chỉ code Rust của ta đọc, nên ta muốn nó gọn và không quan tâm field nằm ở offset nào. Còn header ghi vào file, hoặc truyền cho thư viện nén viết bằng C, thì bên kia phải biết chính xác mỗi field nằm ở byte nào. Rust cho mỗi nhu cầu một `repr`, và mục này so sánh hai `repr` đó trên cùng một struct.
 
-Lấy struct có ba field `a: u8`, `b: u32`, `c: u16`.
+Để tính cho gọn, ta thu `Event` về ba field: `a: u8` (loại event), `b: u32` (user id), `c: u16` (mã trạng thái).
 
 ```rust
-struct A { a: u8, b: u32, c: u16 }              // repr(Rust)
-#[repr(C)] struct AC { a: u8, b: u32, c: u16 }  // repr(C)
+struct Event { a: u8, b: u32, c: u16 }              // repr(Rust)
+#[repr(C)] struct EventC { a: u8, b: u32, c: u16 }  // repr(C)
 ```
 
-*`repr(C)`, từng bước theo thuật toán.* Bắt đầu với offset 0. Với mỗi field theo khai báo: nếu offset hiện tại không chia hết alignment của field thì cộng padding cho đến khi chia hết; offset lúc đó là offset của field; rồi tăng offset thêm size của field[^ref-c-algo]. Cuối cùng size của struct là offset hiện tại làm tròn lên bội của alignment struct[^ref-c-size], và alignment struct là alignment của field căn lớn nhất[^ref-c-align]. Áp vào `AC` (tính tay, giả định `u8`/`u16`/`u32` có alignment bằng size): `a` ở 0; offset 1 không chia hết 4 nên thêm 3 byte padding, `b` ở 4; `c` ở 8 (offset 8 chia hết 2); offset thành 10, làm tròn lên bội của 4 thành 12. Vậy size 12, alignment 4. Khớp output chạy thật của `CRepr` (cùng ba field) trong [Lab 10 bài (a)](../labs/10-rust-internals-lab.md): size 12, align 4, `a`@0, `b`@4, `c`@8.
+### 2.1 `repr(C)`: thuật toán cố định
 
-*`repr(Rust)`, cùng struct.* Nomicon viết hai cách xếp "có thể xảy ra": `a`, 3 byte padding, `b`, `c`, 2 byte padding; hoặc `b`, `c`, `a`, 1 byte padding[^nomicon-two-layouts]. Cách sau nhỏ hơn: theo cách xếp đó size là 8 (tính tay: `b` ở 0..4, `c` ở 4..6, `a` ở 6, padding 1 để tròn bội của 4). Quan sát (output thật trong [Lab 10 bài (a)](../labs/10-rust-internals-lab.md), rustc 1.95.0 trên aarch64; không chạy lại ở bản này): `RustRepr`, cùng ba field nhưng không có `repr(C)`, được compiler xếp `b`@0, `c`@4, `a`@6, size 8, align 4. Đây là quan sát chứ không phải lời hứa; bản compiler khác được phép chọn khác.
+Với `repr(C)`, compiler xếp field đúng theo thuật toán của Reference. Bắt đầu với offset 0. Với mỗi field theo thứ tự khai báo: nếu offset hiện tại chưa chia hết alignment của field thì cộng padding cho đến khi chia hết, offset lúc đó là offset của field, rồi tăng offset thêm size của field[^ref-c-algo]. Hết field thì size của struct là offset hiện tại làm tròn lên bội của alignment struct[^ref-c-size]. Alignment struct là alignment của field căn lớn nhất[^ref-c-align].
+
+Áp vào `EventC` (tính tay, giả định `u8`/`u16`/`u32` có alignment bằng size):
+
+- `a` ở offset 0, offset thành 1.
+- Offset 1 không chia hết 4 nên thêm 3 byte padding; `b` ở 4, offset thành 8.
+- Offset 8 chia hết 2 nên `c` ở 8, offset thành 10.
+- Alignment của struct là 4 (của `b`); làm tròn 10 lên bội của 4 thành 12.
+
+Vậy `EventC` có size 12, alignment 4. Con số này khớp output chạy thật của `CRepr` (cùng ba field) trong [Lab 10 bài (a)](../labs/10-rust-internals-lab.md): size 12, align 4, `a`@0, `b`@4, `c`@8.
+
+### 2.2 `repr(Rust)`: compiler được xếp lại
+
+Với `repr(Rust)`, compiler được chọn cách xếp. Ví dụ của Nomicon cho đúng kiểu struct này nêu hai khả năng: `a`, 3 byte padding, `b`, `c`, 2 byte padding; hoặc `b`, `c`, `a`, 1 byte padding[^nomicon-two-layouts]. Cách thứ hai gọn hơn. Tính tay: `b` ở 0..4, `c` ở 4..6, `a` ở 6, thêm 1 byte padding cho tròn bội của 4, tổng size 8.
+
+Quan sát (output thật trong [Lab 10 bài (a)](../labs/10-rust-internals-lab.md), rustc 1.95.0 trên aarch64; không chạy lại ở bản này): `RustRepr`, cùng ba field nhưng không có `repr(C)`, được compiler xếp `b`@0, `c`@4, `a`@6, size 8, align 4. Đây là quan sát chứ không phải lời hứa; bản compiler khác được phép chọn khác.
 
 ```mermaid
 flowchart LR
@@ -79,108 +104,134 @@ flowchart LR
 
 (Sơ đồ `repr(C)` suy ra từ thuật toán; sơ đồ `repr(Rust)` là *một* thứ tự hợp lệ chứ không phải bảo đảm.)
 
-*Vì sao Rust cố tình không hứa thứ tự.* Nomicon: Rust bảo đảm hai instance của cùng một struct có layout y hệt nhau, nhưng không bảo đảm hai struct khác tên (dù khai báo giống hệt) có cùng thứ tự field hay padding[^nomicon-reorder]. Nomicon nêu generic làm ví dụ đầu tiên (và nói thêm rằng enum làm chuyện này phức tạp hơn): với `struct Foo<T, U> { count: u16, data1: T, data2: U }`, nếu giữ nguyên thứ tự khai báo thì `Foo<u32, u16>` phải thêm padding lãng phí, nên dùng không gian tối ưu đòi hỏi các monomorphization khác nhau có thứ tự field khác nhau[^nomicon-mono-reorder].
+### 2.3 Vì sao Rust cố tình không hứa thứ tự
 
-*Representation khác layout.* Reference nhấn mạnh: vì `repr` là attribute gắn vào item, representation không phụ thuộc tham số generic; `Foo<Bar>` và `Foo<Baz>` có cùng representation[^ref-repr-generic]. Đừng đọc câu đó là "cùng layout": representation `Rust` chính là cái cho phép layout của hai instantiation khác nhau (suy luận của người soạn, ghép từ hai câu trên).
+Rust bảo đảm hai instance của cùng một struct có layout y hệt nhau. Nhưng với hai struct khác tên, dù khai báo giống hệt, Rust không bảo đảm chúng có cùng thứ tự field hay padding[^nomicon-reorder]. Lý do dễ thấy nhất là generic. Lấy `struct Foo<T, U> { count: u16, data1: T, data2: U }`: nếu giữ nguyên thứ tự khai báo thì `Foo<u32, u16>` phải thêm padding lãng phí, trong khi dùng chỗ tối ưu đòi hỏi các monomorphization khác nhau có thứ tự field khác nhau[^nomicon-mono-reorder].
 
-*Hệ quả thực hành.* Đừng ép con trỏ giữa hai struct `repr(Rust)` "trông giống nhau", đừng dựa vào offset. Mẹo "xếp field giảm dần theo alignment để tiết kiệm padding" chỉ có tác dụng với `repr(C)`, vì với `repr(Rust)` compiler đã được phép tự làm việc đó (nhận xét của người soạn).
+Cần phân biệt *representation* với *layout*. `repr` là attribute gắn vào item, nên representation không phụ thuộc tham số generic: `Foo<Bar>` và `Foo<Baz>` có cùng representation[^ref-repr-generic]. Cùng representation chưa có nghĩa cùng layout. Chính vì representation `Rust` chỉ hứa tính đúng nên layout của hai instantiation vẫn được phép khác nhau (suy luận của người soạn, ghép từ hai câu trên).
+
+### 2.4 Với `ingest`: header dùng `repr(C)`, `Event` để mặc định
+
+Header ghi file hoặc gửi cho thư viện C phải là `repr(C)`, vì chỉ lúc đó offset của từng field mới là một phần hợp đồng. `Event` trong RAM thì để mặc định và để compiler tự xếp. Hai điều cần tránh: ép con trỏ giữa hai struct `repr(Rust)` "trông giống nhau", và dựa vào offset của chúng. Mẹo "xếp field giảm dần theo alignment để đỡ padding" cũng chỉ có tác dụng với `repr(C)`; với `repr(Rust)` compiler đã được phép tự làm việc đó (nhận xét của người soạn).
 
 <details><summary>Đi sâu: pseudocode của Reference, ví dụ size 6 vs 4, union, field lồng nhau, <code>offset_of!</code></summary>
 
 - Pseudocode chính thức của Reference dùng một hàm `padding_needed_for(offset, alignment)` và cảnh báo rằng nó ngây thơ, bỏ qua tràn số; để tính layout trong code thật phải dùng `Layout`[^ref-c-warning].
-- `std::mem::size_of` có ví dụ `#[repr(C)] struct FieldStruct { first: u8, second: u16, third: u8 }` với size 6[^sizeof-fieldstruct], và ghi chú rằng đổi chỗ để `third` đứng trước `second` loại được cả hai byte padding, còn 4 byte[^sizeof-reorder]. Docs cũng nói size của item `repr(C)` ổn định miễn là các field có size ổn định[^sizeof-reprc].
+- `std::mem::size_of` có ví dụ `#[repr(C)] struct FieldStruct { first: u8, second: u16, third: u8 }` với size 6[^sizeof-fieldstruct]. Docs ghi chú thêm rằng đổi chỗ để `third` đứng trước `second` loại được cả hai byte padding, còn 4 byte[^sizeof-reorder]. Docs cũng nói size của item `repr(C)` ổn định miễn là các field có size ổn định[^sizeof-reprc].
 - Union `repr(C)`: size là max size các field làm tròn lên theo alignment, alignment là max alignment các field, và mỗi field nằm ở offset 0[^ref-c-union].
 - `repr` chỉ đổi padding *giữa* các field, không đổi layout *bên trong* field: struct `repr(C)` chứa `Inner` kiểu `repr(Rust)` không làm đổi layout của `Inner`[^ref-repr-inter-field].
 - Reference cảnh báo bảo đảm "không chồng nhau" không có nghĩa các field có địa chỉ khác nhau: kiểu size 0 có thể trùng địa chỉ với field khác (mục 7)[^ref-zst-addr].
 - `repr(Rust)` viết tường minh được bảo đảm giống hệt việc bỏ attribute[^ref-rust-explicit].
-- `offset_of!(Type, field)` trả offset (tính bằng byte từ đầu kiểu) dưới dạng `usize`[^offset-of-def][^offset-of-usize]. Docs hứa offset của một field trong một kiểu không đổi suốt vòng đời chương trình, nhưng hai lần biên dịch có thể cho layout khác[^offset-of-change]; và với các kiểu tương tự nhưng không giống hệt như `Wrapper<u8, u8>` và `Wrapper<u8, i8>` thì không có bảo đảm gì về việc chúng cùng layout[^offset-of-wrapper].
+- Macro `offset_of!(Type, field)` cho offset của field, tính bằng byte từ đầu kiểu[^offset-of-def]. Docs hứa offset của một field trong một kiểu không đổi suốt vòng đời chương trình, nhưng hai lần biên dịch có thể cho layout khác[^offset-of-change]. Với các kiểu tương tự nhưng không giống hệt như `Wrapper<u8, u8>` và `Wrapper<u8, i8>` thì không có bảo đảm gì về việc chúng cùng layout[^offset-of-wrapper].
 
 </details>
 
-**Quay lại Q2:** `repr(Rust)` chỉ hứa tính đúng và được tự xếp lại field; `repr(C)` có thuật toán padding xác định nên dùng khi layout là một phần hợp đồng.
+**Quay lại Q2:** `repr(Rust)` chỉ hứa tính đúng và được tự xếp lại field; `repr(C)` có thuật toán padding xác định nên dùng khi layout là một phần hợp đồng, như header của `ingest`.
 
 ## 3. `align`, `packed`, `transparent` (Q3)
 
-> **Trả lời ngắn.** `align(n)` nâng alignment của kiểu lên ít nhất `n`[^nomicon-align-least]; `packed(n)` hạ alignment xuống tối đa `n`[^nomicon-packed-most], và `packed(1)` bỏ hết padding giữa field[^ref-packed]. Cái giá của `packed` là tham chiếu tới field không căn bị cấm vì là UB[^ref-packed-ref]. `transparent` dành cho kiểu bọc đúng một field thật (thường gọi là newtype, cách gọi của người soạn): nó có cùng layout và ABI với field đó[^ref-transparent].
+> **Trả lời ngắn.** `align(n)` nâng alignment của kiểu lên ít nhất `n`[^nomicon-align-least]. `packed(n)` hạ alignment xuống tối đa `n`[^nomicon-packed-most]. Riêng `packed(1)` bỏ hết padding giữa field[^ref-packed]. Cái giá của `packed` là tham chiếu tới field không căn bị cấm vì là UB[^ref-packed-ref]. `transparent` dành cho kiểu bọc đúng một field thật (thường gọi là newtype, cách gọi của người soạn): nó có cùng layout và ABI với field đó[^ref-transparent].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `align(64)` giống quy định "mỗi kiện hàng bắt đầu ở đầu một ô pallet 64"; `packed` giống nén chặt các kiện, đổi lại người lấy hàng phải thò tay vào chỗ không thẳng hàng; `transparent` giống hộp trong suốt: bên ngoài hộp có nhãn riêng nhưng đem đi đâu cũng như món bên trong.
+*Với `ingest`.* Ba chỗ trong `ingest` cần chỉnh layout bằng tay. Một: mỗi worker thread có một counter metric riêng, và ta không muốn hai counter nằm chung một cache line. Hai: ingest đọc một header nhị phân từ socket, nơi các field nằm sát nhau, không chừa padding. Ba: user id là `u64` nhưng ta muốn kiểu riêng `UserId(u64)` để khỏi nhầm với các số khác. Ba chỗ này tương ứng `align`, `packed` và `transparent`.
 
-*`align` và `packed` là modifier.* Chúng nâng/hạ alignment và biến đổi representation đã chọn; nếu không chọn gì thì biến đổi representation mặc định[^ref-align-packed-mod]. Riêng chúng không bảo đảm thứ tự field; muốn thứ tự thì ghép với `C`[^ref-align-no-order]. Hai quy tắc dễ quên: `align(n)` nhỏ hơn alignment tự nhiên thì không có tác dụng[^ref-align-less]; và không dùng chung `align` với `packed` trên một kiểu[^ref-align-packed-excl].
+### 3.1 `align` và `packed` là modifier
 
-*`align` để làm gì.* Nomicon nêu ví dụ: bảo đảm các phần tử kề nhau của mảng không bao giờ dùng chung một cache line, có thể giúp một số loại code đồng thời chạy nhanh hơn[^nomicon-align-cache]. (Nhận xét của người soạn: đây là công cụ chống false sharing giữa các counter của từng thread; cache line và false sharing được giải thích ở [P2 · Chương 06 mục 6](../02-cpu/06-cache-va-numa.md), còn `repr(align)`/`CachePadded` ở [P2 · Chương 07 mục 7](../02-cpu/07-rust-va-may.md).)
+Hai attribute này không tự đứng thành một representation mà sửa representation đã chọn; nếu không chọn gì thì chúng sửa representation mặc định[^ref-align-packed-mod]. Riêng chúng không bảo đảm thứ tự field, muốn có thứ tự thì phải ghép với `C`[^ref-align-no-order]. Có hai quy tắc dễ quên. `align(n)` nhỏ hơn alignment tự nhiên thì không có tác dụng[^ref-align-less]. Và không dùng `align` chung với `packed` trên một kiểu[^ref-align-packed-excl].
 
-*`packed` và cái giá.* Mỗi field được căn theo `min(n, alignment tự nhiên)`[^ref-packed-fields]; padding giữa các field là mức tối thiểu để thỏa alignment đó[^ref-packed-padding]. Nomicon cảnh báo đa số kiến trúc ưa dữ liệu căn tự nhiên: load không căn có thể bị phạt (x86) hoặc thậm chí lỗi (một số chip ARM)[^nomicon-packed-cost]. Với field của struct `packed`, Reference chỉ ra ba cách: copy giá trị ra biến cục bộ[^ref-packed-copy]; trong `println!` (vốn tạo tham chiếu) thì bọc thành `{ e.f2 }` để nó thành bản copy[^ref-packed-braces]; hoặc dùng `&raw const` rồi `read_unaligned`/`write_unaligned`[^ref-packed-ways]. Số đo `repr(C, packed)` cụ thể có ở [P3·07 mục 7](../03-memory/07-stack-alignment-padding.md) (phần Đi sâu).
+### 3.2 `align`: tách counter của từng thread
 
-*`transparent`.* Chỉ dùng được trên struct hoặc enum một biến thể có tối đa một field "thật", cộng bất kỳ số field size 0 alignment 1 (ví dụ `PhantomData<T>`)[^ref-transparent-constraint]. Khác `repr(C)` ở ABI: struct `repr(C)` luôn có ABI của một struct C, còn struct `transparent` bọc một primitive có ABI của primitive đó[^ref-transparent-abi]. Mục đích Nomicon nêu là cho phép `transmute` giữa field và wrapper[^nomicon-transparent-goal], và truyền wrapper qua FFI ở chỗ bên kia mong kiểu bên trong[^nomicon-transparent-ffi]. Ví dụ backend (nhận xét của người soạn): `#[repr(transparent)] struct UserId(u64);` phân biệt kiểu ở compile time mà không thêm byte nào.
+Nomicon nêu một công dụng: bảo đảm các phần tử kề nhau của mảng không bao giờ dùng chung một cache line, và điều đó có thể giúp một số loại code đồng thời chạy nhanh hơn[^nomicon-align-cache]. Với `ingest` (nhận xét của người soạn): đó là cách chống false sharing giữa các counter của từng thread. Cache line và false sharing được giải thích ở [P2 · Chương 06, mục 6](../02-cpu/06-cache-va-numa.md); `repr(align)` và `CachePadded` ở [P2 · Chương 07, mục 7](../02-cpu/07-rust-va-may.md).
+
+### 3.3 `packed`: gọn hơn, nhưng đắt
+
+Với `packed(n)`, mỗi field được căn theo `min(n, alignment tự nhiên)`[^ref-packed-fields]. Padding giữa các field chỉ ở mức tối thiểu để thỏa alignment đó[^ref-packed-padding]. Cái giá nằm ở phần cứng: đa số kiến trúc ưa dữ liệu căn tự nhiên, nên load không căn có thể bị phạt (x86) hoặc thậm chí lỗi (một số chip ARM)[^nomicon-packed-cost]. Với header của `ingest`, `packed` cho layout khớp từng byte trên dây, nhưng ta phải trả giá khi đọc field.
+
+Rust còn cấm hẳn việc lấy tham chiếu tới field không căn, vì đó là UB[^ref-packed-ref]. Vậy muốn đọc field của struct `packed` thì có ba đường, đều lấy từ Reference. Một là copy giá trị ra biến cục bộ[^ref-packed-copy]. Hai là trong `println!` (macro này tạo tham chiếu) thì bọc thành `{ e.f2 }` để nó thành bản copy[^ref-packed-braces]. Ba là lấy con trỏ bằng `&raw const` rồi dùng `read_unaligned`/`write_unaligned` thay vì dereference trực tiếp[^ref-packed-ways]. Số đo `repr(C, packed)` cụ thể có ở [P3 · Chương 07, mục 7](../03-memory/07-stack-alignment-padding.md) (phần Đi sâu).
+
+### 3.4 `transparent`: newtype không tốn byte nào
+
+`transparent` chỉ dùng được trên struct, hoặc enum một biến thể, có tối đa một field "thật", cộng bất kỳ số field size 0 alignment 1 (ví dụ `PhantomData<T>`)[^ref-transparent-constraint]. Với `ingest`: `#[repr(transparent)] struct UserId(u64);` phân biệt kiểu ở compile time mà không thêm byte nào (nhận xét của người soạn).
+
+`transparent` khác `repr(C)` ở ABI. Struct `repr(C)` luôn có ABI của một struct C, còn struct `transparent` bọc một primitive thì có ABI của chính primitive đó[^ref-transparent-abi]. Nomicon nêu hai mục đích. Mục đích thứ nhất là cho phép `transmute` giữa field và wrapper[^nomicon-transparent-goal]. Mục đích thứ hai là truyền wrapper qua FFI ở chỗ bên kia mong kiểu bên trong[^nomicon-transparent-ffi].
 
 <details><summary>Đi sâu: giới hạn của <code>transparent</code>, <code>align</code> trên enum, khi nào layout thành "public ABI"</summary>
 
 - `transparent` không ghép với repr khác, vì nó giao toàn bộ layout cho kiểu khác[^ref-transparent-exclusive].
 - Nomicon: repr này chỉ được coi là một phần ABI công khai của kiểu khi field duy nhất là `pub` hoặc layout được ghi bằng văn xuôi; nếu không thì crate khác không nên dựa vào nó[^nomicon-transparent-pub].
-- `align` áp dụng được cho enum, tác dụng lên alignment giống như bọc enum trong một newtype struct có cùng modifier `align`[^ref-align-enum].
+- `align` áp dụng được cho enum, và tác dụng lên alignment giống như bọc enum trong một newtype struct có cùng modifier `align`[^ref-align-enum].
 - `align`/`packed` chỉ áp dụng được cho representation `Rust` và `C`[^ref-align-packed-excl].
-- Nomicon khuyên: "không dùng `packed` tùy tiện"[^nomicon-packed-warning]; để tương thích FFI nên viết tường minh `repr(C, packed)`[^nomicon-packed-ffi].
+- Nomicon khuyên "không dùng `packed` tùy tiện"[^nomicon-packed-warning]. Để tương thích FFI, nên viết tường minh `repr(C, packed)`[^nomicon-packed-ffi].
 
 </details>
 
-**Quay lại Q3:** `align` nâng, `packed` hạ alignment (đổi lấy field không căn và cấm tham chiếu), `transparent` làm newtype giống hệt field bên trong về layout lẫn ABI.
+**Quay lại Q3:** `align` nâng, `packed` hạ alignment (đổi lấy field không căn và cấm tham chiếu), `transparent` làm newtype giống hệt field bên trong về layout lẫn ABI; trong `ingest` ba thứ đó lần lượt dùng cho counter của từng thread, header trên dây và `UserId`.
 
 ## 4. Enum trong bộ nhớ: tag, discriminant và `repr(u8)`/`repr(C)` (Q4)
 
-> **Trả lời ngắn.** Enum là kiểu tổng (một trong nhiều biến thể), nên mỗi giá trị cần một *discriminant*: số nguyên gắn với biến thể để biết giá trị đang giữ biến thể nào[^ref-discr-intro]. Với `repr(Rust)` mặc định, layout của enum chưa được đặc tả[^nomicon-enum-unspec] và discriminant thậm chí có thể không được lưu thành byte riêng[^disc-default-opaque]. Thêm `repr(u8)`/`repr(C)` thì layout được xác định: một tag cộng vùng payload dùng chung[^ref-prim-adt][^ref-c-adt].
+> **Trả lời ngắn.** Enum là kiểu tổng (một trong nhiều biến thể), nên mỗi giá trị cần một *discriminant*: số nguyên gắn với biến thể để biết giá trị đang giữ biến thể nào[^ref-discr-intro]. Với `repr(Rust)` mặc định, layout của enum chưa được đặc tả[^nomicon-enum-unspec]. Discriminant thậm chí có thể không được lưu thành byte riêng[^disc-default-opaque]. Thêm `repr(u8)` thì layout được xác định thành một union của các struct, mỗi struct bắt đầu bằng tag[^ref-prim-adt]. Thêm `repr(C)` thì thành một struct hai field là tag và union payload[^ref-c-adt].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một message trên đường truyền có trường `type` và trường `data`; bên nhận đọc `type` trước để biết diễn giải `data` thế nào. Enum là bản trong bộ nhớ của kiểu message đó. Nomicon gọi enum là "kiểu tổng" (tagged union)[^nomicon-sumtype].
+*Với `ingest`.* Mỗi event `ingest` nhận có một byte báo loại và phần dữ liệu tùy loại: có loại mang bộ đếm `u32`, có loại mang tổng `u64`, có loại chỉ mang một cờ `u8`. Trong Rust ta viết đó là một enum. Câu hỏi của mục này: enum ấy nằm trong bộ nhớ ra sao, và khi nào bạn được phép dựa vào cách nó nằm?
 
-*Discriminant là gì.* Mỗi giá trị enum có một discriminant: số nguyên về mặt logic gắn với nó, dùng để xác định biến thể[^ref-discr-intro]. Nếu không ghi, discriminant của biến thể bằng discriminant của biến thể liền trước cộng 1, biến thể đầu là 0[^ref-discr-implicit]. Hai biến thể không được trùng discriminant[^ref-discr-dup]. Trong biểu diễn Rust mặc định, discriminant được hiểu là giá trị `isize`, nhưng compiler được dùng kiểu nhỏ hơn hoặc cách khác để phân biệt biến thể trong layout thật[^ref-discr-isize].
+### 4.1 Discriminant
 
-*Enum không có field, kèm `repr(u8)`/`repr(i32)`…* Size và alignment bằng đúng kiểu nguyên đó[^ref-primitive-enum]; discriminant phải vừa kiểu, ví dụ `u8` chỉ nhận 0 đến 255[^ref-prim-range]. Không có `repr` thì enum không field vẫn là kiểu "native" của Rust, không có layout hay biểu diễn ổn định[^nomicon-fieldless]. Với `repr(C)`, size và alignment là của enum C mặc định theo ABI C của target[^ref-c-fieldless]. Nomicon nói thẳng đây là "đoán tốt nhất" vì biểu diễn enum trong C do implementation định nghĩa[^nomicon-c-enum-guess].
+Mỗi giá trị enum có một discriminant, tức một số nguyên về mặt logic gắn với giá trị đó và dùng để xác định biến thể[^ref-discr-intro]. Nếu không ghi, discriminant của biến thể bằng discriminant của biến thể liền trước cộng 1, còn biến thể đầu là 0[^ref-discr-implicit]. Hai biến thể không được trùng discriminant[^ref-discr-dup]. Trong biểu diễn Rust mặc định, discriminant được hiểu là giá trị `isize`, nhưng compiler được dùng kiểu nhỏ hơn hoặc cách khác để phân biệt biến thể trong layout thật[^ref-discr-isize].
 
-*Enum có field.* Với `repr(u8)`: biểu diễn là một `repr(C)` union của các `repr(C)` struct, mỗi struct (cho biến thể có field) bắt đầu bằng tag[^ref-prim-adt]. Với `repr(C)`: một `repr(C)` struct hai field là tag và union payload, đúng kiểu "tagged union" của C[^ref-c-adt].
+### 4.2 Enum không có field
 
-Ví dụ (tính tay theo thuật toán `repr(C)` ở mục 2, giả định `u8`, `u32`, `u64` có alignment bằng size) cho `#[repr(u8)] enum E { A(u32), B(u64), C(u8) }`:
+Enum không field mà có `repr(u8)`, `repr(i32)`…: size và alignment bằng đúng kiểu nguyên đó[^ref-primitive-enum]. Discriminant phải vừa kiểu ấy (ví dụ `u8` chỉ nhận 0 đến 255)[^ref-prim-range]. Không có `repr` thì enum không field vẫn là kiểu "native" của Rust, không có layout hay biểu diễn ổn định[^nomicon-fieldless]. Với `repr(C)`, size và alignment là của enum C mặc định theo ABI C của target[^ref-c-fieldless]. Nomicon nói thẳng đây chỉ là "đoán tốt nhất", vì biểu diễn enum trong C do implementation định nghĩa[^nomicon-c-enum-guess].
+
+### 4.3 Enum có field
+
+Với `repr(u8)`, biểu diễn là một union `repr(C)` của các struct `repr(C)`, mỗi struct (cho biến thể có field) bắt đầu bằng tag[^ref-prim-adt]. Với `repr(C)`, biểu diễn là một struct `repr(C)` hai field gồm tag và union payload, đúng kiểu "tagged union" của C[^ref-c-adt].
+
+Thử với event của `ingest`: `#[repr(u8)] enum Payload { Count(u32), Total(u64), Flag(u8) }`. Tính tay theo thuật toán `repr(C)` ở mục 2 (giả định `u8`, `u32`, `u64` có alignment bằng size):
 
 | Biến thể | Struct tương ứng (tag `u8` ở đầu) | Offset field | Size | Alignment |
 |---|---|---|---|---|
-| `A(u32)` | `(u8, u32)` | tag 0, `u32` ở 4 | 8 | 4 |
-| `B(u64)` | `(u8, u64)` | tag 0, `u64` ở 8 | 16 | 8 |
-| `C(u8)` | `(u8, u8)` | tag 0, `u8` ở 1 | 2 | 1 |
+| `Count(u32)` | `(u8, u32)` | tag 0, `u32` ở 4 | 8 | 4 |
+| `Total(u64)` | `(u8, u64)` | tag 0, `u64` ở 8 | 16 | 8 |
+| `Flag(u8)` | `(u8, u8)` | tag 0, `u8` ở 1 | 2 | 1 |
 
-Union lấy max size làm tròn theo alignment lớn nhất[^ref-c-union]; từ bảng trên (tính tay) ra size 16, alignment 8. Tức biến thể bé nhất cũng phải trả đúng 16 byte, giống ý "vùng chứa chung" trong ví dụ `FooRepr { data: u64, tag: u8 }` của Nomicon, mà Nomicon bảo là *xấp xỉ* cách enum mặc định được bố trí (chưa tính kích thước và vị trí của tag)[^nomicon-enum-naive].
+Union lấy max size làm tròn theo alignment lớn nhất[^ref-c-union]. Từ bảng trên (tính tay) ra size 16, alignment 8. Tức là một `Payload::Flag` bé xíu vẫn tốn đúng 16 byte, giống ý "vùng chứa chung" trong ví dụ `FooRepr { data: u64, tag: u8 }` của Nomicon, mà Nomicon bảo là *xấp xỉ* cách enum mặc định được bố trí (chưa tính kích thước và vị trí của tag)[^nomicon-enum-naive].
 
-*Giá trị không khớp biến thể nào.* Dù có `repr(C)` hay `repr(u*)`, enum không field vẫn không được mang giá trị nguyên không ứng với biến thể nào, trái với enum C. Tạo một giá trị như vậy (bằng `unsafe`) là UB; điều này cho phép `match` đầy đủ vẫn biên dịch bình thường[^nomicon-enum-ub]. Vì thế Reference nhận xét dùng enum không field để mô hình enum C ở FFI thường là sai[^ref-fieldless-c].
+### 4.4 Giá trị không khớp biến thể nào
+
+Dù có `repr(C)` hay `repr(u*)`, enum không field vẫn không được mang giá trị nguyên không ứng với biến thể nào, trái với enum C. Tạo một giá trị như vậy (bằng `unsafe`) là UB; nhờ đó `match` đầy đủ vẫn biên dịch bình thường[^nomicon-enum-ub]. Vì thế Reference nhận xét rằng dùng enum không field để mô hình enum C ở FFI thường là sai[^ref-fieldless-c]. Với `ingest`, nếu thư viện C gửi về một mã loại event mà bên Rust không có biến thể tương ứng, đừng nhận nó bằng enum Rust (suy luận của người soạn từ hai câu trên).
 
 <details><summary>Đi sâu: <code>repr(C, u8)</code>, ví dụ size 2/4 của Reference, đọc discriminant, discriminant tường minh</summary>
 
-- Với enum có field, có thể ghép `repr(C)` và repr nguyên (ví dụ `repr(C, u8)`): khi đó enum discriminant bên trong `repr(C)` đổi sang kiểu nguyên đã chọn[^ref-primitive-c-mod], và với `repr(C, u8)` thì không thể có 257 tag khác nhau[^ref-primitive-c].
-- Reference minh họa size đổi theo repr bằng `assert_eq!`: `EnumC` có size phụ thuộc nền tảng[^ref-enumc-platform], `Enum8` (`repr(C, u8)`) có size 2 (1 byte discriminant, 1 byte giá trị)[^ref-enum8] và `Enum16` (`repr(C, u16)`) có size 4; chú thích trong ví dụ giải thích: 2 byte discriminant, 1 byte giá trị, cộng 1 byte padding[^ref-enum16].
-- Discriminant tường minh (`Unit = 3`) chỉ được đặt trong hai trường hợp, theo Reference[^ref-discr-explicit] là enum "unit-only"[^ref-discr-unit-only], hoặc enum có primitive repr[^ref-discr-primrepr]. Nomicon: nếu discriminant tràn kiểu nguyên của `repr(u*)` thì lỗi compile[^nomicon-repr-overflow].
-- Với enum chỉ có unit variant, discriminant lấy bằng `as`[^disc-cast]. `mem::discriminant` trả giá trị đục dùng để so sánh[^disc-opaque][^disc-compare]; transmute `Discriminant` sang số là UB[^disc-transmute].
-- Chỉ khi enum có primitive repr mới đọc được tag qua con trỏ[^disc-read]; với repr mặc định thì docs nói layout của discriminant là không xác định, không biết nằm ở đâu, thậm chí có thể không được lưu[^disc-default-opaque].
+- Với enum có field, có thể ghép `repr(C)` và repr nguyên (ví dụ `repr(C, u8)`). Khi đó enum discriminant bên trong `repr(C)` đổi sang kiểu nguyên đã chọn[^ref-primitive-c-mod]. Với `repr(C, u8)` thì không thể có 257 tag khác nhau[^ref-primitive-c].
+- Reference minh họa size đổi theo repr bằng `assert_eq!`. `EnumC` có size phụ thuộc nền tảng[^ref-enumc-platform]. `Enum8` (`repr(C, u8)`) có size 2: 1 byte discriminant, 1 byte giá trị[^ref-enum8]. `Enum16` (`repr(C, u16)`) có size 4; chú thích trong ví dụ giải thích: 2 byte discriminant, 1 byte giá trị, cộng 1 byte padding[^ref-enum16].
+- Discriminant tường minh (`Unit = 3`) chỉ đặt được trong hai trường hợp[^ref-discr-explicit]. Một là enum "unit-only"[^ref-discr-unit-only]. Hai là enum có primitive repr[^ref-discr-primrepr]. Nếu discriminant tràn kiểu nguyên của `repr(u*)` thì gặp lỗi compile[^nomicon-repr-overflow].
+- Với enum chỉ có unit variant, lấy discriminant bằng `as`[^disc-cast]. `mem::discriminant` trả một giá trị đục (opaque)[^disc-opaque]. Giá trị này dùng để so sánh hai enum mà bỏ qua dữ liệu bên trong[^disc-compare]. Transmute `Discriminant` sang số là UB[^disc-transmute].
+- Chỉ khi enum có primitive repr mới đọc được tag qua con trỏ[^disc-read]. Với repr mặc định thì docs nói layout của discriminant là không xác định, không biết nằm ở đâu, thậm chí có thể không được lưu[^disc-default-opaque].
 
 </details>
 
-**Quay lại Q4:** enum cần discriminant; với `repr(Rust)` layout là chi tiết nội bộ, còn `repr(u8)`/`repr(C)` đóng thành tag + union payload có thuật toán xác định.
+**Quay lại Q4:** enum cần discriminant; với `repr(Rust)` layout là chi tiết nội bộ, còn `repr(u8)`/`repr(C)` đóng thành tag + union payload có thuật toán xác định, như `Payload` của `ingest` ở trên.
 
 ## 5. Niche: lấy chỗ tag từ giá trị không bao giờ hợp lệ (Q5)
 
-> **Trả lời ngắn.** *Niche* (chữ này xuất hiện trong release notes và docs của Rust[^rel-niche][^mu-niche]; định nghĩa sau là cách diễn đạt của người soạn) là bit pattern mà kiểu không bao giờ được phép giữ, ví dụ con trỏ null của `&T`. Enum có thể dùng pattern đó để mã hóa biến thể còn lại, nên khỏi cần byte tag: `None` của `Option<&T>` được hiểu là con trỏ null[^nomicon-npo]. Kết quả là `Option<&T>` có cùng size với `&T`[^sizeof-same].
+> **Trả lời ngắn.** *Niche* là bit pattern mà kiểu không bao giờ được phép giữ, ví dụ con trỏ null của `&T`. (Định nghĩa này là cách diễn đạt của người soạn; chữ *niche* có trong release notes và docs của Rust, xem bên dưới.) Enum có thể dùng pattern đó để mã hóa biến thể còn lại, nên khỏi cần byte tag: `None` của `Option<&T>` được hiểu là con trỏ null[^nomicon-npo]. Kết quả là `Option<&T>` có cùng size với `&T`[^sizeof-same].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảng DB có cột `owner_id` mà quy ước không bao giờ là 0. Thay vì thêm một cột cờ `has_owner`, bạn dùng 0 để biểu diễn "chưa có". Niche là ý tưởng đó, nhưng compiler tự làm và kiểm tra bằng kiểu, nên không bị lỗi "quên check 0".
+*Với `ingest`.* Mỗi session trong `ingest` nhớ event mới nhất của nó bằng `Option<&Event>`: lúc session vừa mở thì chưa có event nào, `None`. Nếu `Option` luôn phải thêm một byte tag, thì sau padding để căn 8 byte, con trỏ 8 byte biến thành 16 byte (tính tay), và với hàng trăm nghìn session con số đó nhân lên đáng kể. Thực tế bạn không phải trả khoản đó, và mục này giải thích vì sao.
 
-Về tên gọi: Nomicon gọi tối ưu này là "tối ưu con trỏ null" (bước 3 bên dưới). Chữ *niche* xuất hiện trong release notes của Rust 1.50: kiểu `File` trên Unix có một niche là `-1`[^rel-niche], vì giá trị đó không thể là file descriptor hợp lệ nên `Option<File>` chiếm cùng chỗ với `File`[^rel-niche-meaning]. Docs `MaybeUninit` cũng dùng chữ này khi nói về tối ưu lấp niche[^mu-niche]. Chương này dùng *niche* theo nghĩa đó.
+### 5.1 Chữ *niche* từ đâu ra
 
-Từng bước:
+Nomicon gọi tối ưu này là "tối ưu con trỏ null" (bước 3 bên dưới). Chữ *niche* thì xuất hiện trong release notes của Rust 1.50: kiểu `File` trên Unix có một niche là `-1`[^rel-niche]. Giá trị đó không thể là file descriptor hợp lệ, nên `Option<File>` chiếm cùng chỗ với `File`[^rel-niche-meaning]. Docs của `MaybeUninit` cũng dùng chữ này khi nói về tối ưu lấp niche[^mu-niche]. Chương này dùng *niche* theo nghĩa đó.
 
-1. *Kiểu nào có giá trị cấm.* Reference liệt kê điều kiện hợp lệ: `bool` chỉ được là `false` (0) hoặc `true` (1)[^ref-ub-bool]; reference và `Box<T>` phải căn, khác null, không dangling[^ref-ub-ref]; kiểu có khoảng giá trị hợp lệ riêng thì giá trị phải nằm trong khoảng, và trong std điều này áp dụng cho `NonNull<T>` và `NonZero<T>`[^ref-valid-range].
-2. *Vi phạm là UB.* Reference định nghĩa "tạo ra" một giá trị xảy ra mỗi khi gán, đọc, truyền hoặc trả giá trị, và tạo giá trị không hợp lệ là UB[^ref-ub-invalid]. Suy luận của người soạn: vì chương trình đúng không bao giờ tạo ra pattern cấm, compiler được tự do dùng pattern đó làm dữ liệu riêng.
-3. *Dùng pattern cấm làm tag.* Nomicon mô tả "tối ưu con trỏ null": enum gồm một biến thể đơn vị ngoài cùng (như `None`) và một biến thể con trỏ không-null (như `Some(&T)`) khiến tag trở nên thừa; con trỏ null được hiểu là biến thể đơn vị; hệ quả `size_of::<Option<&T>>() == size_of::<&T>()`[^nomicon-npo].
-4. *Phạm vi rộng hơn con trỏ.* Nomicon kể nhiều kiểu std là hoặc chứa con trỏ không-null, như `Box<T>`, `Vec<T>`, `String`, `&T`, `&mut T`[^nomicon-nonnull-types]. Nó cũng hình dung enum lồng nhau gộp tag vào một discriminant vì mỗi cái có tập giá trị hợp lệ hạn chế[^nomicon-pool-tags], và nói về khả năng dùng "thuật toán khá phức tạp" lưu bit rải rác qua các kiểu lồng nhau có giá trị cấm[^nomicon-forbidden]. Chính vì thế, Nomicon thấy nên *giữ layout enum chưa được đặc tả*[^nomicon-enum-unspec].
+### 5.2 Từng bước
+
+1. *Kiểu nào có giá trị cấm.* Reference liệt kê điều kiện hợp lệ cho từng kiểu. `bool` chỉ được là `false` (0) hoặc `true` (1)[^ref-ub-bool]. Reference và `Box<T>` phải căn, khác null, không dangling[^ref-ub-ref]. Kiểu có khoảng giá trị hợp lệ riêng thì giá trị phải nằm trong khoảng, và trong std điều này áp dụng cho `NonNull<T>` và `NonZero<T>`[^ref-valid-range].
+2. *Vi phạm là UB.* Reference định nghĩa "tạo ra" một giá trị là mỗi lần gán, đọc, truyền hoặc trả giá trị, và tạo giá trị không hợp lệ là UB[^ref-ub-invalid]. Suy luận của người soạn: vì chương trình đúng không bao giờ tạo ra pattern cấm, compiler được tự do dùng pattern đó làm dữ liệu riêng.
+3. *Dùng pattern cấm làm tag.* Đây là "tối ưu con trỏ null" của Nomicon: enum gồm một biến thể đơn vị ngoài cùng (như `None`) và một biến thể con trỏ không-null (như `Some(&T)`) thì tag trở nên thừa. Con trỏ null được hiểu là biến thể đơn vị, nên `size_of::<Option<&T>>() == size_of::<&T>()`[^nomicon-npo].
+4. *Phạm vi rộng hơn con trỏ.* Nhiều kiểu std là hoặc chứa con trỏ không-null, như `Box<T>`, `Vec<T>`, `String`, `&T`, `&mut T`[^nomicon-nonnull-types]. Nomicon còn hình dung enum lồng nhau gộp tag vào một discriminant, vì mỗi enum có tập giá trị hợp lệ hạn chế[^nomicon-pool-tags]. Nó cũng nói về khả năng dùng "thuật toán khá phức tạp" để lưu bit rải rác qua các kiểu lồng nhau có giá trị cấm[^nomicon-forbidden]. Chính vì thế Nomicon thấy nên *giữ layout enum chưa được đặc tả*[^nomicon-enum-unspec].
 5. *Kiểu không có niche.* Nếu mọi pattern bit đều hợp lệ thì không còn chỗ giấu tag (suy luận của người soạn; ví dụ `u32` tạo ra mọi giá trị 32 bit). Mục 6 kể về `MaybeUninit`, kiểu cố ý bỏ niche.
 
 ```mermaid
@@ -192,41 +243,51 @@ flowchart LR
   end
 ```
 
-*Ứng dụng backend (nhận xét của người soạn):* cây/danh sách liên kết dùng `Option<Box<Node>>` không tốn thêm byte cho "không có con"[^sizeof-same]; ID kiểu `Option<NonZero<u64>>` cùng size với `u64`, suy ra từ ví dụ `u32` trong docs `NonZero`[^nz-option-size] và từ việc `NonZero<T>` có cùng layout với `T`[^nz-layout].
+### 5.3 Trong `ingest`
 
-<details><summary>Đi sâu: <code>NonNull</code>, <code>NonZero</code>, <code>Option&lt;bool&gt;</code>, kiểu rỗng</summary>
+Hai chỗ ta hưởng niche mà không cần làm gì (nhận xét của người soạn). Danh sách liên kết các batch đang chờ dùng `Option<Box<Batch>>` nên không tốn thêm byte cho "không có batch kế tiếp"[^sizeof-same]. Còn mã session dạng `Option<NonZero<u64>>` thì cùng size với `u64`, suy ra từ ví dụ `u32` trong docs `NonZero`[^nz-option-size]. Suy luận đó dựa thêm vào việc `NonZero<T>` có cùng layout với `T`[^nz-layout].
+
+<details><summary>Đi sâu: <code>NonNull</code>, <code>NonZero</code>, <code>Option&lt;bool&gt;</code>, kiểu rỗng, <code>Vec</code></summary>
 
 - Docs `NonNull<T>`: con trỏ phải luôn khác null, kể cả khi không bao giờ bị dereference, *để enum dùng giá trị cấm đó làm discriminant*; `Option<NonNull<T>>` cùng size với `*mut T`[^nn-forbidden].
-- Docs `NonZero<T>`: có cùng layout và bit validity với `T` trừ việc pattern toàn 0 không hợp lệ[^nz-layout]; `Option<NonZero<T>>` được bảo đảm tương thích với `T`, kể cả ở FFI[^nz-option-ffi].
-- `Option<bool>` có thể chỉ 1 byte: docs `MaybeUninit` có `assert_eq!` khẳng định điều đó[^mu-option-bool]; lý do hợp lý là `bool` chỉ được là 0 hoặc 1[^ref-ub-bool] nên còn pattern bit trống để biểu diễn `None` (suy luận của người soạn). Đó là ví dụ trong docs, không nằm trong danh sách *bảo đảm* của mục 6.
+- Docs `NonZero<T>`: có cùng layout và bit validity với `T`, trừ việc pattern toàn 0 không hợp lệ[^nz-layout]. `Option<NonZero<T>>` được bảo đảm tương thích với `T`, kể cả ở FFI[^nz-option-ffi].
+- `Option<bool>` có thể chỉ 1 byte: docs `MaybeUninit` có `assert_eq!` khẳng định điều đó[^mu-option-bool]. Lý do hợp lý là `bool` chỉ được là 0 hoặc 1[^ref-ub-bool] nên còn pattern bit trống để biểu diễn `None` (suy luận của người soạn). Đó là ví dụ trong docs, không nằm trong danh sách *bảo đảm* của mục 6.
 - Kiểu rỗng (enum không biến thể) là trường hợp cực đoan: Nomicon nói `Result<T, Void>` được biểu diễn chỉ như `T`, vì nhánh `Err` không tồn tại; nhưng đó "chỉ là tối ưu, không bảo đảm", nên transmute giữa chúng vẫn là UB[^nomicon-void-result].
 - `Vec<T>`: docs `Vec` hứa nó luôn là một bộ ba (pointer, capacity, length), không hơn không kém, và không hứa thứ tự các field[^vec-triplet]. Con trỏ không bao giờ null nên `Vec` được tối ưu null-pointer[^vec-nonnull], cùng ý với việc Nomicon xếp `Vec<T>` và `String` vào nhóm kiểu chứa con trỏ không-null (bước 4). Cấu trúc đầy đủ của `Vec` ở [Chương 09 · mục 1](09-collections-internals.md).
 
 </details>
 
-**Quay lại Q5:** niche là bit pattern kiểu không bao giờ hợp lệ giữ; enum mượn nó làm tag nên `Option<&T>` không tốn thêm byte.
+**Quay lại Q5:** niche là bit pattern kiểu không bao giờ hợp lệ giữ; enum mượn nó làm tag nên `Option<&T>` không tốn thêm byte, và `Option<&Event>` của `ingest` vẫn chỉ là một con trỏ.
 
 ## 6. std hứa gì, và cái gì làm mất niche (Q6)
 
-> **Trả lời ngắn.** std chỉ *bảo đảm* cho một danh sách kiểu `T`: `Option<T>` có cùng size, alignment và function-call ABI với `T`[^opt-rep]. Danh sách gồm `Box<U>` (chỉ `Global`), `&U`, `&mut U`, `fn`, `extern "C" fn`, `NonZero*`, `NonNull<U>` và `repr(transparent)` struct bọc một trong các kiểu đó[^opt-table]. Ngoài danh sách thì không hứa; `MaybeUninit` và `repr(u8)` trên enum có field là hai ví dụ làm mất niche[^mu-niche][^nomicon-suppress-npo].
+> **Trả lời ngắn.** std chỉ *bảo đảm* cho một danh sách kiểu `T`: `Option<T>` có cùng size, alignment và function-call ABI với `T`[^opt-rep]. Danh sách gồm `Box<U>` (chỉ `Global`), `&U`, `&mut U`, `fn`, `extern "C" fn`, `NonZero*`, `NonNull<U>` và `repr(transparent)` struct bọc một trong các kiểu đó[^opt-table]. Ngoài danh sách thì không hứa. `MaybeUninit` là một thứ làm mất niche[^mu-niche]. Thứ hai là `repr(u*)` trên enum có field[^nomicon-suppress-npo].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): niche giống số p99 đo được hôm nay trên máy của bạn so với SLA ghi trong hợp đồng. Hợp đồng chỉ có danh sách; số đo ngoài danh sách có thể đẹp hôm nay và khác sau khi nâng phiên bản compiler.
+*Với `ingest`.* `ingest` chạm vào cả hai phía của ranh giới này. Nó nhận từ thư viện nén C một callback có thể null, và nó giữ hàng loạt `Option<Box<Batch>>`. Câu hỏi của mục này: trong các kích thước đó, cái nào docs *hứa*, cái nào chỉ tình cờ đúng trên compiler hôm nay? Ranh giới ấy quyết định bạn có dám viết `unsafe` hay `assert!` dựa vào chúng hay không.
 
-*Danh sách được hứa* (đã liệt kê ở trả lời ngắn). Hệ quả: với các `T` này, `transmute` từ mọi giá trị hợp lệ của `T` sang `Option<T>` và từ `Some(_)` sang `T` đều hợp lệ, nhưng transmute `None` sang `T` là UB[^opt-transmute]. Bảng của docs còn có cột thứ hai, nói ở trường hợp nào docs hứa *thêm* rằng `[0u8; size_of::<T>()]` chính là `None`[^opt-zero]; cụ thể, luôn đúng với `fn`, `extern "C" fn` và `NonZero*`; với `Box<U>`, `&U`, `&mut U`, `NonNull<U>` thì chỉ khi `U: Sized`; với `repr(transparent)` struct thì khi điều đó đúng cho kiểu bên trong[^opt-table]. Chữ `U: Sized` vì vậy chỉ giới hạn lời hứa phụ này, không phải việc `Option<Box<U>>` có nằm trong danh sách hay không (cách đọc bảng của người soạn, dựa trên tiêu đề cột thứ hai).
+### 6.1 Danh sách được hứa
 
-*Tại sao điều này quan trọng với FFI.* Nomicon: nếu `T` là con trỏ không-null an toàn cho FFI thì `Option<T>` có cùng layout và ABI với `T`, nên cũng an toàn cho FFI; hiện gồm `&`, `&mut` và con trỏ hàm[^nomicon-c-ffi-option]. Cách dùng thực tế (nhận xét của người soạn): `Option<extern "C" fn(...)>` thay cho con trỏ hàm có thể null của C.
+Danh sách đã nêu ở trả lời ngắn. Hệ quả: với các `T` đó, `transmute` từ mọi giá trị hợp lệ của `T` sang `Option<T>` và từ `Some(_)` sang `T` đều hợp lệ, nhưng transmute `None` sang `T` là UB[^opt-transmute].
 
-*Ngoài danh sách thì sao.* Docs không hứa. `Option<bool>` nhỏ là ví dụ ở mục 5, một quan sát. Với `Result`, docs chỉ nói "dưới một số điều kiện" các kiểu trong danh sách cũng được tối ưu null pointer khi nằm trong `Result`[^opt-result]. Đừng viết code `unsafe` dựa vào các kích thước ngoài danh sách (nhận xét của người soạn).
+Bảng của docs còn có cột thứ hai, nói ở trường hợp nào docs hứa *thêm* rằng `[0u8; size_of::<T>()]` chính là `None`[^opt-zero]. Cụ thể: luôn đúng với `fn`, `extern "C" fn` và `NonZero*`; với `Box<U>`, `&U`, `&mut U`, `NonNull<U>` thì chỉ khi `U: Sized`; với `repr(transparent)` struct thì khi điều đó đúng cho kiểu bên trong[^opt-table]. Vậy chữ `U: Sized` chỉ giới hạn lời hứa phụ này, không quyết định `Option<Box<U>>` có nằm trong danh sách hay không (cách đọc bảng của người soạn, dựa trên tiêu đề cột thứ hai).
 
-*Con trỏ tới DST.* Cột đầu của bảng không ghi `U: Sized` nên `Option<Box<dyn Trait>>`, `Option<&[T]>` hay `Option<&str>` vẫn thuộc danh sách (cách đọc bảng của người soạn); riêng lời hứa phụ `[0u8; N]` = `None` thì chỉ có khi `U: Sized` nên không áp dụng cho chúng. Docs `size_of` cũng có một câu nói `Box<T>` và `Option<Box<T>>` cùng size mà không kèm `T: Sized`[^sizeof-same]. Số đo `Option<Box<dyn Shape>>` = 16 byte, bằng `Box<dyn Shape>`, nằm ở [Chương 03 · mục 2](03-dst-fat-pointer-vtable.md).
+### 6.2 Vì sao điều này quan trọng với FFI
 
-*Những thứ làm mất niche.*
+Nomicon: nếu `T` là con trỏ không-null an toàn cho FFI thì `Option<T>` có cùng layout và ABI với `T`, nên cũng an toàn cho FFI; hiện danh sách đó gồm `&`, `&mut` và con trỏ hàm[^nomicon-c-ffi-option]. Với `ingest`, cách dùng thực tế (nhận xét của người soạn) là khai báo callback cho thư viện C bằng `Option<extern "C" fn(...)>`, thay cho con trỏ hàm có thể null của C.
 
-- `MaybeUninit<T>`: vì mọi bit pattern đều hợp lệ với nó, compiler không áp dụng tối ưu niche được, có thể làm kiểu lớn hơn[^mu-niche]. Docs còn nhắc: `Option<T>` và `Option<MaybeUninit<T>>` vẫn có thể khác size, dù `MaybeUninit` bảo đảm cùng size/alignment/ABI với `T`[^mu-layout].
+### 6.3 Ngoài danh sách
+
+Docs không hứa gì ngoài danh sách. `Option<bool>` nhỏ chỉ là ví dụ ở mục 5, tức một quan sát. Với `Result`, docs chỉ nói "dưới một số điều kiện" các kiểu trong danh sách cũng được tối ưu null pointer khi nằm trong `Result`[^opt-result]. Đừng viết code `unsafe` dựa vào các kích thước ngoài danh sách (nhận xét của người soạn).
+
+Con trỏ tới DST cần đọc kỹ. Cột đầu của bảng không ghi `U: Sized`, nên `Option<Box<dyn Trait>>`, `Option<&[T]>` hay `Option<&str>` vẫn thuộc danh sách (cách đọc bảng của người soạn). Riêng lời hứa phụ `[0u8; N]` = `None` thì chỉ có khi `U: Sized`, nên không áp dụng cho chúng. Docs `size_of` cũng có một câu nói `Box<T>` và `Option<Box<T>>` cùng size mà không kèm `T: Sized`[^sizeof-same]. Số đo `Option<Box<dyn Shape>>` = 16 byte, bằng `Box<dyn Shape>`, nằm ở [Chương 03 · mục 2](03-dst-fat-pointer-vtable.md).
+
+### 6.4 Những thứ làm mất niche
+
+- `MaybeUninit<T>`: mọi bit pattern đều hợp lệ với nó nên compiler không áp dụng được tối ưu niche, và kiểu có thể lớn hơn[^mu-niche]. Docs còn nhắc: `Option<T>` và `Option<MaybeUninit<T>>` vẫn có thể khác size, dù `MaybeUninit` bảo đảm cùng size/alignment/ABI với `T`[^mu-layout].
 - Enum có field mà gắn `repr(u*)`, `repr(i*)` hoặc `repr(C)`: Nomicon nói điều đó chặn tối ưu con trỏ null[^nomicon-suppress-npo]. Ví dụ của Nomicon khẳng định `MyOption<&u16>` (không repr) có size 8 còn `MyReprOption<&u16>` (`repr(u8)`) có size 16[^nomicon-suppress-npo-ex]. Lý do (suy luận của người soạn): `repr(u8)` đòi một tag `u8` thật ở đầu, nên không còn chỗ để "mượn" niche. Tính tay theo thuật toán mục 4 (giả định con trỏ 8 byte, alignment 8): biến thể `Some(&u16)` là struct `(u8, &u16)` với tag ở 0 và con trỏ ở 8, nên size 16, khớp với con số của Nomicon.
-- Ngược lại, tối ưu này vẫn áp dụng cho enum *không* field dù có `repr(u*)`/`repr(C)`[^nomicon-fieldless-npo]; và (đoạn Nomicon về `repr(u*)`/`repr(i*)`) compiler vẫn khai thác các giá trị "không hợp lệ" của chính kiểu enum đó để tối ưu layout, ví dụ khi enum nằm trong `Option`[^nomicon-repr-niche-kept].
+- Ngược lại, tối ưu này vẫn áp dụng cho enum *không* field dù có `repr(u*)`/`repr(C)`[^nomicon-fieldless-npo]. Và với `repr(u*)`/`repr(i*)`, compiler vẫn khai thác các giá trị "không hợp lệ" của chính kiểu enum đó để tối ưu layout, ví dụ khi enum nằm trong `Option`[^nomicon-repr-niche-kept].
 
 <details><summary>Đi sâu: <code>UnsafeCell</code>, và ranh giới giữa quan sát với bảo đảm</summary>
 
@@ -236,35 +297,46 @@ Hình dung (nhận xét của người soạn): niche giống số p99 đo đư�
 
 </details>
 
-**Quay lại Q6:** chỉ danh sách kiểu của `std::option` được hứa `Option<T>` cùng size, alignment và ABI gọi hàm với `T`; ngoài danh sách là quan sát, và `MaybeUninit` hay `repr(u*)` trên enum có field làm mất niche.
+**Quay lại Q6:** chỉ danh sách kiểu của `std::option` được hứa `Option<T>` cùng size, alignment và ABI gọi hàm với `T`; ngoài danh sách là quan sát, và `MaybeUninit` hay `repr(u*)` trên enum có field làm mất niche. Với `ingest`, callback `Option<extern "C" fn(...)>` đứng trên phần được hứa, còn `Option<bool>` thì chưa.
 
 ## 7. Kiểu kích thước 0 (ZST) (Q7)
 
-> **Trả lời ngắn.** ZST (zero-sized type) là kiểu không chiếm chỗ nào trong bộ nhớ, ví dụ struct không field, `()` và `[u8; 0]`[^nomicon-zst-def]. `()` được bảo đảm size 0 và alignment 1[^ref-unit]. Rust phần lớn hiểu rằng mọi thao tác tạo hoặc lưu ZST đều có thể rút thành no-op[^nomicon-zst]; với unsafe code thì phải cẩn thận vì offset con trỏ là no-op và allocator thường đòi size khác 0[^nomicon-zst-unsafe].
+> **Trả lời ngắn.** ZST (zero-sized type) là kiểu không chiếm chỗ nào trong bộ nhớ, ví dụ struct không field, `()` và `[u8; 0]`[^nomicon-zst-def]. `()` được bảo đảm size 0 và alignment 1[^ref-unit]. Rust phần lớn hiểu rằng mọi thao tác tạo hoặc lưu ZST đều có thể rút thành no-op[^nomicon-zst]. Với unsafe code thì phải cẩn thận, vì offset con trỏ là no-op và allocator thường đòi size khác 0[^nomicon-zst-unsafe].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một "thẻ quyền" kiểu type-state, chỉ để biểu thị "bạn đã qua bước xác thực". Nó có giá trị kiểu (compiler kiểm được) nhưng không mang dữ liệu nào, nên không đáng tốn byte nào.
+*Với `ingest`.* `ingest` dùng type-state để bắt buộc xác thực: chỉ `Session<Authenticated>` mới gọi được hàm ghi event, còn `Session<Anonymous>` thì không. `Authenticated` và `Anonymous` là hai struct không field, chỉ để compiler phân biệt kiểu và không mang dữ liệu nào nên không đáng tốn byte nào (nhận xét của người soạn). Mục này nói ZST thật sự "không tốn" tới mức nào, và chỗ nào unsafe code phải để ý.
 
-Từng ý:
+### 7.1 Định nghĩa và size
 
-1. *Định nghĩa.* Size là bội của alignment, và 0 được coi là bội của mọi alignment; vì thế có kiểu size 0 mà alignment khác 1, ví dụ trên một số nền tảng `[u16; 0]` có size 0 và alignment 2[^ref-zst-align].
-2. *Không làm tròn lên 1 byte.* `size_of` ghi rõ, khác C, struct size 0 không bị làm tròn lên 1 byte[^sizeof-zst]. Reference nói thêm rằng C++ cho struct rỗng size 1 (trừ vài ngoại lệ)[^ref-c-empty]; và với `repr(C)` ZST vẫn size 0 dù điều đó không chuẩn trong C[^nomicon-reprc-zst].
-3. *Thao tác thành no-op.* Lưu ZST không chiếm chỗ, và chỉ có một giá trị của kiểu đó nên "đọc" nó chỉ là tạo ra từ không khí (lời Nomicon)[^nomicon-zst-why]. Ví dụ cực đoan Nomicon đưa ra: `Set<Key>` làm thành `Map<Key, ()>`, và Rust biết mọi load/store giá trị `()` đều vô ích nên phần giá trị không chiếm chỗ nào[^nomicon-set-map].
-4. *Marker.* `PhantomData<T>` là ví dụ Reference dùng cho "field size 0, alignment 1"[^ref-transparent-constraint]; ta gặp lại nó ở [Chương 05 · mục 5](05-variance-va-dropck.md) (variance của kiểu tự định nghĩa và `PhantomData`).
-5. *Chỗ unsafe phải để ý.* Reference chỉ ra field size 0 có thể trùng địa chỉ với field khác[^ref-zst-addr]. Nomicon: tham chiếu tới ZST (kể cả slice rỗng) vẫn phải không-null và căn đúng; nhưng load/store qua con trỏ null tới ZST thì không phải UB, khác con trỏ tới kiểu khác[^nomicon-zst-null].
+Size là bội của alignment, và 0 được coi là bội của mọi alignment. Vì thế có kiểu size 0 mà alignment khác 1, ví dụ trên một số nền tảng `[u16; 0]` có size 0 và alignment 2[^ref-zst-align]. Khác với C, struct size 0 của Rust không bị làm tròn lên 1 byte[^sizeof-zst].
 
-<details><summary>Đi sâu: <code>Vec&lt;ZST&gt;</code>, kiểu rỗng, <code>*const ()</code></summary>
+### 7.2 Thao tác thành no-op
 
+Lưu một ZST không chiếm chỗ. Chỉ có một giá trị của kiểu đó, nên "đọc" nó chỉ là tạo ra từ không khí (lời Nomicon)[^nomicon-zst-why]. Nomicon đưa một ví dụ cực đoan: `Set<Key>` làm thành `Map<Key, ()>`. Rust biết mọi load/store giá trị `()` đều vô ích, nên phần giá trị không chiếm chỗ nào[^nomicon-set-map]. Với `ingest`, nếu bạn lập chỉ mục các user đã thấy bằng `HashMap<UserId, ()>`, phần giá trị không tốn gì (suy luận của người soạn từ ví dụ trên).
+
+### 7.3 Marker
+
+`PhantomData<T>` là ví dụ Reference dùng cho "field size 0, alignment 1"[^ref-transparent-constraint]. Ta gặp lại nó ở [Chương 05 · mục 5](05-variance-va-dropck.md), khi nói về variance của kiểu tự định nghĩa.
+
+### 7.4 Chỗ unsafe phải để ý
+
+Reference chỉ ra field size 0 có thể trùng địa chỉ với field khác[^ref-zst-addr]. Nomicon nói thêm: tham chiếu tới ZST (kể cả slice rỗng) vẫn phải không-null và căn đúng, nhưng load/store qua con trỏ null tới ZST thì không phải UB, khác con trỏ tới kiểu khác[^nomicon-zst-null]. Nghĩa là code unsafe của `ingest` đừng dùng địa chỉ làm định danh cho kiểu có thể là ZST (suy luận của người soạn từ hai câu trên).
+
+<details><summary>Đi sâu: so với C/C++, <code>Vec&lt;ZST&gt;</code>, kiểu rỗng, <code>*const ()</code></summary>
+
+- C++ cho struct rỗng size 1, trừ vài ngoại lệ[^ref-c-empty]. Với `repr(C)`, ZST vẫn size 0 dù điều đó không chuẩn trong C[^nomicon-reprc-zst].
 - Docs `Vec`: nó cấp phát *khi và chỉ khi* `size_of::<T>() * capacity() > 0`; với ZST nó có thể không báo capacity 0[^vec-zst].
-- Kiểu rỗng (enum không biến thể) khác ZST: ZST có đúng một giá trị[^nomicon-zst-why], kiểu rỗng không thể tạo ra giá trị nào[^nomicon-empty-types]. Nomicon khuyên không mô hình `void*` của C bằng `*const Void`[^nomicon-void-rec]; dùng `*const ()` thì có thể biến thành reference mà không vấn đề an toàn[^nomicon-void-ptr].
+- Kiểu rỗng (enum không biến thể) khác ZST. ZST có đúng một giá trị[^nomicon-zst-why]. Còn kiểu rỗng không thể tạo ra giá trị nào[^nomicon-empty-types]. Nomicon khuyên không mô hình `void*` của C bằng `*const Void`[^nomicon-void-rec]. Dùng `*const ()` thì có thể biến thành reference mà không vấn đề an toàn[^nomicon-void-ptr].
 - Struct có DST ở field cuối, và `size_of_val` cho DST, thuộc [Chương 03](03-dst-fat-pointer-vtable.md) (mục 7 cho struct có DST cuối; mục 1 và 2 cho `size_of_val`).
 
 </details>
 
-**Quay lại Q7:** ZST chiếm 0 byte, thao tác trên nó phần lớn rút thành no-op; thứ cần cẩn thận là unsafe code (offset, allocator, địa chỉ trùng).
+**Quay lại Q7:** ZST chiếm 0 byte và thao tác trên nó phần lớn rút thành no-op, nên marker như `Authenticated` của `ingest` không tốn gì; thứ cần cẩn thận là unsafe code (offset, allocator, địa chỉ trùng).
 
 ## 8. Liên hệ với Rust
+
+Với `ingest`, chương này không bắt bạn đổi dòng code nào. Nó cho bạn một thói quen: để compiler tự xếp mọi struct và enum nằm trong RAM, và chỉ khóa layout (bằng `repr`) ở nơi có bên thứ hai đọc nó, như header ghi file, thư viện C hay `unsafe` transmute (nhận xét của người soạn).
 
 Công cụ đo và điều khiển layout trong std (theo docs 1.95.0):
 
@@ -273,22 +345,22 @@ Công cụ đo và điều khiển layout trong std (theo docs 1.95.0):
 | `size_of::<T>()` | Offset giữa hai phần tử liên tiếp của mảng, đã gồm padding[^sizeof-def] | Nói chung không ổn định giữa các lần biên dịch, trừ primitive[^sizeof-unstable] |
 | `align_of::<T>()` | Alignment tối thiểu theo ABI, tính bằng byte[^alignof] | Cũng là alignment dùng cho field của struct[^alignof-field] |
 | `size_of_val(&x)` | Size của giá trị được trỏ tới; dùng cho slice hoặc trait object khi `T` không có size tĩnh[^sizeofval] | Chi tiết ở [Chương 03](03-dst-fat-pointer-vtable.md) |
-| `offset_of!(T, f)` | Offset của field từ đầu kiểu, trả `usize`[^offset-of-def][^offset-of-usize] | Layout có thể đổi giữa các lần biên dịch[^offset-of-change] |
-| `mem::discriminant` | Giá trị đục nhận diện biến thể của enum[^disc-def][^disc-opaque] | Dùng để so sánh enum mà bỏ qua dữ liệu[^disc-compare]; transmute `Discriminant` sang số là UB[^disc-transmute] |
-| `Layout` | Size + alignment cho allocator[^layout-def] | Xem [P3·07 mục 8](../03-memory/07-stack-alignment-padding.md) |
+| `offset_of!(T, f)` | Offset của field từ đầu kiểu, tính bằng byte[^offset-of-def] | Layout có thể đổi giữa các lần biên dịch[^offset-of-change] |
+| `mem::discriminant` | Giá trị đục nhận diện biến thể của enum[^disc-def] | Dùng để so sánh enum mà bỏ qua dữ liệu[^disc-compare]. Transmute `Discriminant` sang số là UB[^disc-transmute] |
+| `Layout` | Size + alignment cho allocator[^layout-def] | Xem [P3 · Chương 07, mục 8](../03-memory/07-stack-alignment-padding.md) |
 
-Chọn `repr` (nhận xét của người soạn, dựa trên các mục trên):
+Chọn `repr` cho từng chỗ của `ingest` (nhận xét của người soạn, dựa trên các mục trên):
 
-| Nhu cầu | Chọn | Vì |
+| Chỗ trong `ingest` | Chọn | Vì |
 |---|---|---|
-| Struct truyền qua FFI hoặc đọc/ghi định dạng nhị phân | `repr(C)` | Thuật toán xác định (mục 2) |
-| Newtype không tốn kém, qua FFI như kiểu bên trong | `repr(transparent)` | Cùng layout và ABI (mục 3) |
-| Enum qua FFI hoặc cần đọc tag | `repr(u8)`/`repr(C)` (kèm field: union của struct) | Layout xác định (mục 4) |
-| Tránh hai field dùng chung cache line | `repr(align(n))` | Mục 3 |
-| Giảm bộ nhớ khi đã hiểu hậu quả | `packed`, chỉ khi chắc chắn | Tham chiếu field không căn là UB (mục 3) |
-| Mọi trường hợp còn lại | để mặc định | Compiler được tự tối ưu (mục 2, 5) |
+| Header ghi file hoặc truyền cho thư viện C | `repr(C)` | Thuật toán xác định (mục 2) |
+| `UserId(u64)` đi qua FFI như `u64` | `repr(transparent)` | Cùng layout và ABI với field bên trong (mục 3) |
+| Mã loại event cần đọc tag, hoặc gửi qua FFI | `repr(u8)`/`repr(C)` (kèm field: union của struct) | Layout xác định (mục 4) |
+| Counter của từng thread, tránh chung cache line | `repr(align(n))` | Mục 3 |
+| Header trên dây không chừa padding | `packed`, chỉ khi chắc chắn | Tham chiếu field không căn là UB (mục 3) |
+| `Event` trong RAM và mọi chỗ còn lại | để mặc định | Compiler được tự tối ưu (mục 2, 5) |
 
-Ví dụ minh họa assert layout lúc biên dịch (nhận xét của người soạn; cú pháp minh họa, chưa chạy ở bản này):
+Ví dụ minh họa assert layout lúc biên dịch cho header của `ingest` (nhận xét của người soạn; cú pháp minh họa, chưa chạy ở bản này):
 
 ```rust
 #[repr(C)]
@@ -300,22 +372,23 @@ Assert kiểu này hợp lý với kiểu `repr(C)` mà bạn chủ động đ�
 
 ## Tóm tắt
 
-- Alignment `n` nghĩa là địa chỉ chia hết cho `n`; size là bội của alignment, đã gồm padding[^ref-align][^ref-sizedef][^ref-size].
+- Alignment `n` nghĩa là địa chỉ chia hết cho `n`[^ref-align]. Size là bội của alignment, đã gồm padding[^ref-size].
 - Số đo layout là quan sát; Reference chỉ ghi lại các bảo đảm hôm nay[^ref-guarantees].
-- `repr(Rust)` chỉ hứa tính đúng, được tự xếp lại field; mỗi monomorphization có thể xếp khác nhau[^ref-rust-guar][^nomicon-mono-reorder].
-- `repr(C)` có thuật toán padding xác định[^ref-c-algo]; được thiết kế cho giao tiếp với C và cho thao tác dựa trên layout như diễn giải lại giá trị sang kiểu khác[^ref-c-purposes].
-- `packed(1)` bỏ padding giữa field[^ref-packed] nhưng cấm tham chiếu field không căn[^ref-packed-ref]; `align` nâng alignment[^nomicon-align-least]; `transparent` giữ layout và ABI của field bên trong[^ref-transparent].
-- Enum có discriminant; `repr(u8)` cho enum có field là union của các `repr(C)` struct bắt đầu bằng tag[^ref-prim-adt].
+- `repr(Rust)` chỉ hứa tính đúng và được tự xếp lại field[^ref-rust-guar]. Mỗi monomorphization có thể xếp khác nhau[^nomicon-mono-reorder].
+- `repr(C)` có thuật toán padding xác định[^ref-c-algo]. Nó được thiết kế cho giao tiếp với C và cho thao tác dựa trên layout như diễn giải lại giá trị sang kiểu khác[^ref-c-purposes].
+- `packed(1)` bỏ padding giữa field[^ref-packed]. Nó cấm tham chiếu field không căn[^ref-packed-ref]. `align` nâng alignment[^nomicon-align-least]. `transparent` giữ layout và ABI của field bên trong[^ref-transparent].
+- Enum có discriminant. `repr(u8)` cho enum có field là union của các `repr(C)` struct bắt đầu bằng tag[^ref-prim-adt].
 - Niche là pattern cấm của kiểu; enum mượn nó nên `Option<&T>` cùng size với `&T`[^nomicon-npo].
-- std chỉ hứa `Option<T>` cùng size, alignment và ABI gọi hàm với `T` cho danh sách kiểu của `std::option`[^opt-rep] (điều kiện `U: Sized` trong bảng chỉ giới hạn lời hứa phụ `[0u8; N]` = `None`[^opt-table]); `MaybeUninit` và `repr(u*)` trên enum có field làm mất niche[^mu-niche][^nomicon-suppress-npo].
-- ZST có size 0; thao tác thành no-op; unsafe code phải để ý offset và allocator[^nomicon-zst][^nomicon-zst-unsafe].
+- std chỉ hứa `Option<T>` cùng size, alignment và ABI gọi hàm với `T` cho danh sách kiểu của `std::option`[^opt-rep]. Điều kiện `U: Sized` trong bảng chỉ giới hạn lời hứa phụ `[0u8; N]` = `None`[^opt-table].
+- `MaybeUninit` làm mất niche[^mu-niche]. `repr(u*)` trên enum có field cũng vậy[^nomicon-suppress-npo].
+- ZST có size 0 và thao tác trên nó thành no-op[^nomicon-zst]. Unsafe code phải để ý offset và allocator[^nomicon-zst-unsafe].
 
 ## Câu hỏi tự kiểm tra
 
 1. Vì sao size luôn là bội của alignment?
 2. `repr(Rust)` của Reference thực sự hứa những gì về struct?
 3. Với `#[repr(C)] struct { a: u8, b: u32, c: u16 }`, size và offset của `b` là bao nhiêu (tính tay)?
-4. Vì sao hai struct khác tên cùng khai báo vẫn có thể có thứ tự field khác?
+4. Vì sao hai struct khác tên cùng khai báo vẫn có thể có thứ tự field khác nhau?
 5. Vì sao tham chiếu tới field của struct `packed` bị cấm, và có những cách lấy giá trị nào?
 6. `repr(transparent)` khác `repr(C)` ở điểm nào trong ABI?
 7. Discriminant là gì, và `repr(u8)` làm layout enum có field ra sao?
@@ -326,16 +399,16 @@ Assert kiểu này hợp lý với kiểu `repr(C)` mà bạn chủ động đ�
 
 <details><summary>Đáp án</summary>
 
-1. Để mảng luôn chỉ mục được bằng cộng bội của size[^nomicon-size-mult]; Reference cũng nêu size là bội của alignment[^ref-size].
-2. Field được căn, không chồng nhau, alignment kiểu ≥ alignment lớn nhất của field; thứ tự không nhất thiết như khai báo[^ref-rust-guar][^ref-rust-order].
-3. `a` ở 0, padding 3, `b` ở 4, `c` ở 8, size làm tròn lên 12 (theo thuật toán)[^ref-c-algo][^ref-c-size].
-4. Nomicon không bảo đảm hai struct khác tên có cùng thứ tự/padding, vì cần để các monomorphization có thứ tự khác nhau[^nomicon-reorder][^nomicon-mono-reorder].
-5. Vì là UB[^ref-packed-ref]; copy giá trị ra biến cục bộ hoặc dùng `read_unaligned` qua con trỏ thô[^ref-packed-ways].
-6. Struct `repr(C)` luôn có ABI của struct C; `transparent` bọc primitive có ABI của primitive[^ref-transparent-abi].
-7. Số nguyên gắn với biến thể để biết giá trị giữ biến thể nào[^ref-discr-intro]; `repr(u8)` cho enum có field là union của `repr(C)` struct, mỗi struct bắt đầu bằng tag[^ref-prim-adt].
-8. Pattern bit mà kiểu cấm giữ. Vì tạo giá trị không hợp lệ là UB[^ref-ub-invalid], enum có thể dùng pattern đó làm dữ liệu riêng (suy luận của người soạn); ví dụ `None` là con trỏ null[^nomicon-npo].
-9. Chỉ `Option<&T>`: `&U` có trong danh sách của docs[^opt-table]; `Option<bool>` chỉ là ví dụ trong docs `MaybeUninit`[^mu-option-bool], còn `MaybeUninit` làm mất niche[^mu-niche].
-10. Vì repr đó chặn tối ưu con trỏ null; ví dụ Nomicon có 8 so với 16[^nomicon-suppress-npo][^nomicon-suppress-npo-ex].
+1. Để mảng luôn chỉ mục được bằng cộng bội của size[^nomicon-size-mult]. Reference cũng nêu size là bội của alignment[^ref-size].
+2. Field được căn, không chồng nhau, alignment kiểu ≥ alignment lớn nhất của field[^ref-rust-guar]. Thứ tự không nhất thiết như khai báo[^ref-rust-order].
+3. `a` ở 0, padding 3, `b` ở 4, `c` ở 8 (theo thuật toán)[^ref-c-algo]. Offset cuối là 10, làm tròn lên bội của 4 thành size 12[^ref-c-size].
+4. Nomicon không bảo đảm hai struct khác tên có cùng thứ tự/padding[^nomicon-reorder]. Lý do là cần để các monomorphization có thứ tự khác nhau[^nomicon-mono-reorder].
+5. Vì đó là UB[^ref-packed-ref]. Muốn lấy giá trị thì copy ra biến cục bộ, hoặc dùng `read_unaligned` qua con trỏ thô[^ref-packed-ways].
+6. Struct `repr(C)` luôn có ABI của struct C; struct `transparent` bọc primitive có ABI của primitive[^ref-transparent-abi].
+7. Discriminant là số nguyên gắn với biến thể để biết giá trị giữ biến thể nào[^ref-discr-intro]. `repr(u8)` cho enum có field là union của `repr(C)` struct, mỗi struct bắt đầu bằng tag[^ref-prim-adt].
+8. Niche là pattern bit mà kiểu cấm giữ. Tạo giá trị không hợp lệ là UB[^ref-ub-invalid], nên enum có thể dùng pattern đó làm dữ liệu riêng (suy luận của người soạn). Ví dụ `None` là con trỏ null[^nomicon-npo].
+9. Chỉ `Option<&T>`: `&U` có trong danh sách của docs[^opt-table]. `Option<bool>` chỉ là ví dụ trong docs `MaybeUninit`[^mu-option-bool]. Còn `MaybeUninit` làm mất niche[^mu-niche].
+10. Vì repr đó chặn tối ưu con trỏ null[^nomicon-suppress-npo]. Ví dụ Nomicon có 8 so với 16[^nomicon-suppress-npo-ex].
 11. 0 được coi là bội của mọi alignment, nên có kiểu size 0 mà alignment khác 1 (trên một số nền tảng)[^ref-zst-align].
 
 </details>
@@ -407,7 +480,6 @@ Assert kiểu này hợp lý với kiểu `repr(C)` mà bạn chủ động đ�
 [^disc-default-opaque]: Rust std, mem::discriminant — <https://doc.rust-lang.org/1.95.0/std/mem/fn.discriminant.html> — "That cannot be done for enums using the default representation, however, as it’s undefined what layout the discriminant has and where it’s stored — it might not even be stored at all!"
 [^ref-prim-adt]: The Rust Reference, Type layout — <https://doc.rust-lang.org/1.95.0/reference/type-layout.html> — "The representation of a primitive representation enum is a repr(C) union of repr(C) structs for each variant with a field. The first field of each struct in the union is the primitive representation version of the enum with all fields removed (“the tag”) and the remaining fields are the fields of that variant."
 [^ref-c-adt]: The Rust Reference, Type layout — <https://doc.rust-lang.org/1.95.0/reference/type-layout.html> — "The representation of a repr(C) enum with fields is a repr(C) struct with two fields, also called a “tagged union” in C:"
-[^nomicon-sumtype]: The Rustonomicon, repr(Rust) — <https://doc.rust-lang.org/1.95.0/nomicon/repr-rust.html> — "enums (named sum types – tagged unions)"
 [^ref-discr-implicit]: The Rust Reference, Enumerations — <https://doc.rust-lang.org/1.95.0/reference/items/enumerations.html> — "If a discriminant for a variant is not specified, then it is set to one higher than the discriminant of the previous variant in the declaration. If the discriminant of the first variant in the declaration is unspecified, then it is set to zero."
 [^ref-discr-dup]: The Rust Reference, Enumerations — <https://doc.rust-lang.org/1.95.0/reference/items/enumerations.html> — "It is an error when two variants share the same discriminant."
 [^ref-discr-isize]: The Rust Reference, Enumerations — <https://doc.rust-lang.org/1.95.0/reference/items/enumerations.html> — "Under the Rust representation, the discriminant is interpreted as an isize value. However, the compiler is allowed to use a smaller type (or another means of distinguishing variants) in its actual memory layout."
@@ -473,7 +545,6 @@ Assert kiểu này hợp lý với kiểu `repr(C)` mà bạn chủ động đ�
 [^offset-of-def]: Rust std, mem::offset_of — <https://doc.rust-lang.org/1.95.0/std/mem/macro.offset_of.html> — "Expands to the offset in bytes of a field from the beginning of the given type."
 [^sizeof-prim-table]: Rust std, mem::size_of — <https://doc.rust-lang.org/1.95.0/std/mem/fn.size_of.html> — "The following table gives the size for primitives. Type size_of::\<Type>() () 0 bool 1 u8 1 u16 2 u32 4 u64 8 u128 16 i8 1 i16 2 i32 4 i64 8 i128 16 f32 4 f64 8 char 4"
 [^ref-c-purposes]: The Rust Reference, Type layout — <https://doc.rust-lang.org/1.95.0/reference/type-layout.html> — "The C representation is designed for dual purposes. One purpose is for creating types that are interoperable with the C Language. The second purpose is to create types that you can soundly perform operations on that rely on data layout such as reinterpreting values as a different type."
-[^offset-of-usize]: Rust std, mem::offset_of — <https://doc.rust-lang.org/1.95.0/std/mem/macro.offset_of.html> — "The offset is returned as a usize."
 [^nomicon-align-least]: The Rustonomicon, Alternative representations — <https://doc.rust-lang.org/1.95.0/nomicon/other-reprs.html> — "repr(align(n)) (where n is a power of two) forces the type to have an alignment of at least n."
 [^nomicon-packed-most]: The Rustonomicon, Alternative representations — <https://doc.rust-lang.org/1.95.0/nomicon/other-reprs.html> — "repr(packed(n)) (where n is a power of two) forces the type to have an alignment of at most n."
 [^ref-packed-padding]: The Rust Reference, Type layout — <https://doc.rust-lang.org/1.95.0/reference/type-layout.html> — "Inter-field padding is guaranteed to be the minimum required in order to satisfy each field’s (possibly altered) alignment"

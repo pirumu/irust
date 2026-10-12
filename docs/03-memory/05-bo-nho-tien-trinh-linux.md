@@ -1,6 +1,6 @@
 # P3 · Chương 05 — Bộ nhớ của tiến trình trên Linux
 
-Chương này trả lời câu hỏi thực dụng: **một process Linux trông thế nào trong bộ nhớ, nó đến từ đâu, và các con số "memory usage" trên `top`, `ps`, `/proc` nghĩa là gì?** Bạn cần nó khi debug service "ăn" RAM hoặc container bị OOM-kill.
+Chương này trả lời câu hỏi thực dụng: **một process Linux trông thế nào trong bộ nhớ, nó đến từ đâu, và các con số "memory usage" trên `top`, `ps`, `/proc` nghĩa là gì?** Bạn cần nó khi debug một service "ăn" RAM hoặc một container bị OOM-kill.
 
 ## Bạn sẽ hiểu được gì
 
@@ -22,20 +22,22 @@ Chương này trả lời câu hỏi thực dụng: **một process Linux trông
 
 ## 1. Từ file đến process: ELF (Q1)
 
-> **Trả lời ngắn.** ELF là định dạng file thực thi trên Linux; nó nói cho hệ thống byte nào của file là lệnh, byte nào là dữ liệu, và cần thêm bao nhiêu chỗ cho dữ liệu chưa khởi tạo. `.text`, `.rodata`, `.data` có nội dung nằm trong file, còn `.bss` (dữ liệu toàn số 0) có kiểu `SHT_NOBITS` nên không chiếm chỗ trong file[^elf-nobits]. Khi nạp, header mô tả vùng nhớ lớn hơn phần có trong file (`p_memsz` lớn hơn `p_filesz`) và phần dư được định nghĩa là số 0[^elf-load-zero].
+> **Trả lời ngắn.** ELF là định dạng file thực thi của Linux: nó cho hệ thống biết byte nào trong file là lệnh, byte nào là dữ liệu, và cần dành thêm bao nhiêu chỗ cho dữ liệu chưa khởi tạo. `.text`, `.rodata`, `.data` có nội dung nằm trong file, còn `.bss` (dữ liệu toàn số 0) thuộc kiểu `SHT_NOBITS` nên không chiếm chỗ trong file[^elf-nobits]. Lúc nạp, header mô tả một vùng nhớ lớn hơn phần có trong file (`p_memsz` lớn hơn `p_filesz`), và phần dư được định nghĩa là số 0[^elf-load-zero].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bản vẽ lắp ráp đồ nội thất ghi "tấm gỗ này có sẵn trong hộp, còn 1 m² sàn trống để bạn tự trải" — sàn trống không cần nằm trong hộp, chỉ cần ghi kích thước.
+*Với service của bạn.* Hãy hình dung `orders`, một service viết bằng Rust, chạy trong container trên Kubernetes. Ta sẽ bám theo nó suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Mỗi mục trả lời một câu bạn sẽ gặp khi vận hành `orders`: binary của nó chứa gì (mục 1), nó thành process ra sao (mục 2), đọc `/proc/<pid>/maps` thế nào (mục 3), RSS tăng lúc nào (mục 4 và 5), con số nào của `ps` đáng tin (mục 6), và vì sao container bị OOM-kill (mục 8). Ta bắt đầu từ file. Giả sử `orders` có một buffer `static mut` rộng 1 MiB, toàn số 0, mà file binary không phình thêm 1 MiB. Vậy 1 MiB đó nằm ở đâu?
 
-CPU chỉ chạy lệnh nằm trong bộ nhớ. Nhưng thứ bạn có trên đĩa là một file. Cần một **định dạng file** nói cho hệ thống: "byte nào của file là lệnh, byte nào là dữ liệu khởi tạo, cần bao nhiêu chỗ cho dữ liệu chưa khởi tạo, nạp vào đâu, với quyền gì". Trên Linux định dạng đó là **ELF** (Executable and Linkable Format), mô tả trong `elf(5)`.
+CPU chỉ chạy được lệnh nằm trong bộ nhớ, trong khi thứ `orders` có trên đĩa là một file. Vì vậy cần một **định dạng file** nói rõ: byte nào là lệnh, byte nào là dữ liệu đã khởi tạo, cần bao nhiêu chỗ cho dữ liệu chưa khởi tạo, nạp vào đâu và với quyền gì. Trên Linux định dạng đó là **ELF** (Executable and Linkable Format), mô tả trong `elf(5)`.
 
-ELF có hai "bảng mục lục" cho hai người dùng khác nhau:
+ELF có hai "bảng mục lục" cho hai đối tượng đọc khác nhau:
 
-- **Section** (section header table) dành cho *linker* và công cụ: `.text`, `.rodata`, `.data`, `.bss`…
-- **Segment** (program header table) dành cho *loader*: bảng này là mảng cấu trúc, mỗi phần tử mô tả một segment hoặc thông tin khác hệ thống cần để chuẩn bị chạy chương trình[^elf-phdr]. Một segment chứa một hoặc nhiều section[^elf-seg-sec].
+- **Section** (section header table) dành cho *linker* và các công cụ: `.text`, `.rodata`, `.data`, `.bss`…
+- **Segment** (program header table) dành cho *loader*, tức bên nạp chương trình lên bộ nhớ. Bảng này là một mảng cấu trúc, mỗi phần tử mô tả một segment hoặc một thông tin khác mà hệ thống cần để chuẩn bị chạy chương trình[^elf-phdr]. Một segment chứa một hoặc nhiều section[^elf-seg-sec].
 
-Khi chạy, hệ thống không quan tâm tên `.rodata`; nó chỉ quan tâm các segment `PT_LOAD`. Phần tử `PT_LOAD` mô tả một segment nạp được, bằng `p_filesz` và `p_memsz`; các byte của file được map vào đầu segment trong bộ nhớ[^elf-load]. Nếu `p_memsz` lớn hơn `p_filesz` thì phần dư được định nghĩa là chứa giá trị 0 và nằm ngay sau vùng đã khởi tạo[^elf-load-zero]. Đây chính là cơ chế của `.bss`. Mỗi segment có cờ quyền: segment text thường có `PF_X` và `PF_R`, segment data thường có `PF_W` và `PF_R`[^elf-flags]. Quyền này sẽ hiện ra thành `r-xp`/`rw-p` trong `/proc/<pid>/maps` (mục 3).
+Lúc chạy, kernel không quan tâm section tên gì mà chỉ đọc các segment `PT_LOAD`. Mỗi phần tử `PT_LOAD` mô tả một segment nạp được bằng hai con số: `p_filesz` (phần có trong file) và `p_memsz` (kích thước trong bộ nhớ). Các byte của file được map vào đầu segment[^elf-load]. Nếu `p_memsz` lớn hơn `p_filesz` thì phần dư được định nghĩa là số 0 và nằm ngay sau vùng đã khởi tạo[^elf-load-zero]. Đó chính là cơ chế của `.bss`, và cũng là câu trả lời cho buffer 1 MiB của `orders`: file không chứa byte nào của nó, chỉ ghi một `p_memsz` lớn hơn `p_filesz`; kernel tự điền số 0 khi nạp (thí nghiệm ở phần Đi sâu cho thấy đúng như vậy).
+
+Mỗi segment còn có cờ quyền: segment text thường có `PF_X` và `PF_R`, segment data thường có `PF_W` và `PF_R`[^elf-flags]. Các quyền này sẽ hiện ra thành `r-xp` và `rw-p` trong `/proc/<pid>/maps` (mục 3).
 
 | Section | Nội dung theo `elf(5)` | Trong file? | Quyền thường gặp |
 |---|---|---|---|
@@ -44,7 +46,7 @@ Khi chạy, hệ thống không quan tâm tên `.rodata`; nó chỉ quan tâm c�
 | `.data` | dữ liệu đã khởi tạo, đóng góp vào memory image[^elf-data] | có | đọc + ghi |
 | `.bss` | dữ liệu chưa khởi tạo; hệ thống khởi tạo toàn số 0 khi chương trình bắt đầu chạy[^elf-bss] | **không** | đọc + ghi |
 
-`.bss` có kiểu `SHT_NOBITS`[^elf-bss]; section kiểu này có thể có kích thước khác 0 nhưng không chiếm chỗ trong file[^elf-nobits]. Ngược lại `.text`, `.rodata`, `.data` đều có kiểu `SHT_PROGBITS`[^elf-progbits-text][^elf-progbits-ro][^elf-progbits-data], nên (suy luận của người soạn) có byte thật trong file. Một mảng 1 MiB toàn số 0 không cần 1 MiB trên đĩa: file chỉ ghi kích thước (`p_memsz` lớn hơn `p_filesz`) và phần dư được định nghĩa là số 0[^elf-load-zero]. `proc(5)` nêu BSS là một ví dụ của mapping không có inode[^proc-inode].
+`.bss` có kiểu `SHT_NOBITS`[^elf-bss], và section kiểu này có thể có kích thước khác 0 nhưng không chiếm chỗ trong file[^elf-nobits]. Ba section còn lại đều có kiểu `SHT_PROGBITS`. `.text` là vậy[^elf-progbits-text]. `.rodata` cũng vậy[^elf-progbits-ro]. `.data` cũng vậy[^elf-progbits-data]. Từ đó ta suy ra chúng có byte thật trong file (suy luận của người soạn). Một mảng 1 MiB toàn số 0 vì vậy không tốn 1 MiB trên đĩa: file chỉ ghi kích thước (`p_memsz` lớn hơn `p_filesz`), còn phần dư được định nghĩa là số 0[^elf-load-zero]. `proc(5)` cũng nêu BSS làm ví dụ cho một mapping không có inode[^proc-inode].
 
 <details><summary>Đi sâu: ví dụ chạy thật với <code>static mut</code>, static không <code>mut</code>, và <code>PT_GNU_STACK</code></summary>
 
@@ -66,136 +68,152 @@ before touch: VmRSS: 1680 kB | RssAnon: 120 kB  | RssFile: 1560 kB
 after touch : VmRSS: 2704 kB | RssAnon: 1144 kB | RssFile: 1560 kB
 ```
 
-- Dòng `rw-p` với `offset 0x60000` và inode khác 0 là `.data` lấy từ file. Dòng ngay sau, dài đúng `0x100000` = 1 MiB, **không tên, inode 0**, khớp với phần dư `p_memsz > p_filesz` của `.bss`: hệ thống dựng nó bằng bộ nhớ anonymous (suy luận của người soạn từ inode 0 và kích thước khớp).
+- Dòng `rw-p` có `offset 0x60000` và inode khác 0 là `.data` lấy từ file. Dòng ngay sau, dài đúng `0x100000` = 1 MiB, **không tên, inode 0**, khớp với phần dư `p_memsz > p_filesz` của `.bss`. Hệ thống dựng nó bằng bộ nhớ anonymous (suy luận của người soạn từ inode 0 và kích thước khớp).
 - Trước khi chạm, `RssAnon` chỉ 120 kB dù `ZERO` rộng 1 MiB; sau khi chạm mỗi page, `RssAnon` tăng đúng 1024 kB. Đó là demand zeroing[^ostep-demand-zero] quan sát bằng số liệu.
 - `readelf -lW` cho segment `LOAD RW` có `FileSiz 0x3c68`, `MemSiz 0x103d48`: chênh ≈ 1 MiB là `.bss`; file thực thi (≈ 4,3 MB) không phình ra.
 
-**Quan sát đáng nhớ (không phải bảo đảm).** Với `static ZERO: [u8; 1<<20] = [0; 1<<20];` (không `mut`), `readelf -SW` cho thấy `.rodata` phình lên `0x107390` byte còn `.bss` gần rỗng: rustc đặt static bất biến vào `.rodata` kể cả khi toàn số 0. Phù hợp với Rust Reference: static không `mut`, kiểu không interior-mutable, *có thể* ở bộ nhớ chỉ đọc[^ref-static-ro]. Muốn thấy `.data`/`.bss` phải dùng `static mut` (cần `unsafe` để đọc/ghi[^ref-static-mut]) hoặc kiểu interior-mutable như atomic.
+**Quan sát đáng nhớ (không phải bảo đảm).** Với `static ZERO: [u8; 1<<20] = [0; 1<<20];` (không `mut`), `readelf -SW` cho thấy `.rodata` phình lên `0x107390` byte còn `.bss` gần rỗng: rustc đặt static bất biến vào `.rodata` kể cả khi toàn số 0. Điều này phù hợp với Rust Reference: static không `mut`, kiểu không interior-mutable, *có thể* nằm ở bộ nhớ chỉ đọc[^ref-static-ro]. Muốn thấy `.data` hoặc `.bss` thì phải dùng `static mut` (cần `unsafe` để đọc hay ghi[^ref-static-mut]) hoặc một kiểu interior-mutable như atomic.
 
-`PT_GNU_STACK` là extension GNU, kernel Linux dùng để điều khiển trạng thái stack qua `p_flags`[^elf-gnustack]; trong ví dụ cờ là `RW` (không `E`). Guard page và tràn stack ở [Chương 07](./07-stack-alignment-padding.md); chương đó không bàn riêng `PT_GNU_STACK`.
+`PT_GNU_STACK` là extension của GNU, kernel Linux dùng nó để điều khiển trạng thái stack qua `p_flags`[^elf-gnustack]; trong ví dụ cờ là `RW` (không có `E`). Guard page và tràn stack nằm ở [Chương 07](./07-stack-alignment-padding.md); chương đó không bàn riêng `PT_GNU_STACK`.
 
 </details>
 
-**Quay lại Q1:** ELF mô tả file bằng section (cho linker) và segment (cho loader); `.bss` chỉ là kích thước trong file, phần dư `p_memsz > p_filesz` được định nghĩa là số 0 lúc chạy.
+**Quay lại Q1:** với `orders`, ELF mô tả file bằng section (cho linker) và segment (cho loader); buffer 1 MiB toàn số 0 chỉ là một con số trong header, vì phần dư `p_memsz > p_filesz` được định nghĩa là số 0 lúc chạy.
 
 ## 2. Loader và dynamic linker (`ld.so`) (Q2)
 
-> **Trả lời ngắn.** `execve` thay chương trình đang chạy trong process bằng một chương trình mới, với stack, heap và data segment mới[^execve-replace]. Nếu chương trình dùng thư viện chia sẻ (liên kết động), file ELF ghi đường dẫn một "người nạp thư viện" (interpreter, segment `PT_INTERP`) và `execve` dùng nó để nạp các thư viện cần thiết[^execve-interp]. Người nạp đó là `ld.so`: nó tìm và nạp thư viện rồi chạy chương trình[^ldso-desc].
+> **Trả lời ngắn.** `execve` thay chương trình đang chạy trong process bằng một chương trình mới, với stack, heap và data segment mới[^execve-replace]. Nếu chương trình dùng thư viện chia sẻ (liên kết động), file ELF ghi đường dẫn của một "người nạp thư viện" (interpreter, segment `PT_INTERP`), và `execve` nhờ nó nạp các thư viện cần thiết[^execve-interp]. Người nạp đó là `ld.so`: nó tìm và nạp thư viện rồi mới chạy chương trình[^ldso-desc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `execve` như dọn một căn phòng trống và đặt bàn ghế theo bản vẽ; nếu bản vẽ ghi "cần thêm đồ từ kho chung", người quản lý kho (`ld.so`) mang đồ vào trước khi bạn bắt đầu làm việc.
+*Với service `orders`.* Khi bạn chạy `./orders`, trước khi dòng đầu tiên của `main` chạy đã có một chuỗi việc diễn ra, và chuỗi đó giải thích một chi tiết lạ trong `maps` (mục 3): `libc.so.6` nằm trong address space của `orders` dù không hề có trong file binary. Mục này đi qua chuỗi việc ấy, từ lúc shell gọi `execve` tới lúc `main` chạy. Có hai bên làm hai việc nối nhau.
 
-Từ lúc shell gọi `execve` đến lúc `main` chạy là hai việc nối nhau, do hai bên khác nhau làm:
+1. **Kernel dọn chỗ.** `execve` thay chương trình đang chạy trong process bằng chương trình mới, với stack, heap và data segment mới[^execve-replace]. Không có process mới nào ra đời, PID giữ nguyên[^execve-pid], còn mọi memory mapping cũ đều bị bỏ[^execve-mappings]. Vì vậy phần page dùng chung kiểu COW mà con thừa hưởng từ cha qua `fork` (mục 4) không sống sót qua `exec` (suy luận của người soạn).
+2. **Kernel đọc bảng segment.** Các segment `PT_LOAD` của file (mục 1) cho kernel biết vùng nhớ nào nạp từ byte nào của file[^elf-load]. Nếu ELF còn có segment `PT_INTERP`, segment đó chứa đường dẫn của một chương trình "thông dịch" cần gọi[^elf-interp]. Với binary liên kết động, `execve` dùng interpreter này để nạp các shared object cần thiết[^execve-interp]. Trong ví dụ ở mục 1, `readelf` báo `/lib/ld-linux-aarch64.so.1`.
+3. **`ld.so` nạp thư viện.** Interpreter đó chính là dynamic linker `ld.so`: nó tìm và nạp các shared object chương trình cần, chuẩn bị chương trình rồi chạy nó[^ldso-desc]. Danh sách thư viện cần nạp nằm trong ELF dưới dạng các mục `DT_NEEDED`, mỗi mục là một offset trong string table, trỏ tới tên một thư viện[^elf-needed].
 
-1. **Kernel dọn chỗ.** `execve` thay chương trình đang chạy trong process bằng chương trình mới, với stack, heap và data segment mới[^execve-replace]. Không có process mới: PID giữ nguyên[^execve-pid], còn mọi memory mapping cũ bị bỏ[^execve-mappings]. Vì vậy phần page dùng chung kiểu COW mà con thừa hưởng từ cha qua `fork` (mục 4) không sống sót qua `exec` (suy luận của người soạn).
-2. **Kernel đọc bảng segment.** Các segment `PT_LOAD` của file (mục 1) mô tả vùng nhớ nào nạp từ byte nào của file[^elf-load]. Nếu ELF còn có segment `PT_INTERP`, nó chứa đường dẫn của một chương trình "thông dịch" cần gọi[^elf-interp]; với binary liên kết động, `execve` dùng interpreter này để nạp các shared object cần thiết[^execve-interp]. Trong ví dụ ở mục 1, `readelf` báo `/lib/ld-linux-aarch64.so.1`.
-3. **`ld.so` nạp thư viện.** Interpreter đó chính là dynamic linker `ld.so`: nó tìm và nạp các shared object chương trình cần, chuẩn bị chương trình rồi chạy nó[^ldso-desc]. Danh sách cần nạp nằm trong ELF dưới dạng các mục `DT_NEEDED`, mỗi mục là offset trong string table tới tên một thư viện cần dùng[^elf-needed].
-
-Thứ tự chi tiết bên trong kernel (dựng mapping nào trước, đặt stack lúc nào) là cài đặt mà chương này không đọc source nên không khẳng định. Bằng chứng trong `maps` (mục 3): `libc.so.6` nằm trong address space dù không có trong file thực thi — nó là thư viện do `ld.so` nạp lúc chạy; `ld-linux-aarch64.so.1` có mặt vì chính nó là interpreter của `PT_INTERP`.
+Chương này không đọc source kernel nên không khẳng định thứ tự chi tiết bên trong, chẳng hạn mapping nào được dựng trước hay stack được đặt lúc nào. Điều quan sát được nằm trong `maps` (mục 3): `libc.so.6` có mặt vì `ld.so` nạp nó lúc chạy, còn `ld-linux-aarch64.so.1` có mặt vì chính nó là interpreter của `PT_INTERP`.
 
 <details><summary>Đi sâu: thứ tự tìm thư viện, secure-execution, resolve lười, static và dynamic</summary>
 
-- **Tìm thư viện ở đâu.** Với dependency không chứa `/`, thứ tự là: `DT_RPATH` (nếu không có `DT_RUNPATH`), `LD_LIBRARY_PATH` (bỏ qua trong secure-execution mode), `DT_RUNPATH`, cache `/etc/ld.so.cache`, rồi `/lib`, `/usr/lib`[^ldso-search]. Cache là "danh sách đã biên dịch các shared object ứng viên"[^ldso-cache], nên thêm thư viện mà không cập nhật cache (`ldconfig`) có thể khiến nó không được thấy (suy luận của người soạn).
-- Trong **secure-execution mode** (ví dụ binary set-user-ID), một số biến môi trường bị vô hiệu hoặc sửa và bị gỡ khỏi môi trường[^ldso-secure], nên đừng dựa vào `LD_LIBRARY_PATH`/`LD_PRELOAD` cho chương trình đặc quyền.
-- **Resolve lười.** Đặt `LD_BIND_NOW` thì mọi symbol được phân giải lúc khởi động thay vì trì hoãn đến lần tham chiếu đầu[^ldso-bind].
-- **Static vs dynamic:** binary Linux cần liên kết động trừ khi truyền `-static` cho `ld(1)`[^ldso-static]. Liên kết động cho nhiều process dùng chung một bản `libc.so.6` trong RAM; liên kết tĩnh cho file tự đủ, tiện cho container tối giản (nhận xét của người soạn).
+- **Tìm thư viện ở đâu.** Với dependency không chứa `/`, thứ tự là: `DT_RPATH` (nếu không có `DT_RUNPATH`), `LD_LIBRARY_PATH` (bỏ qua trong secure-execution mode), `DT_RUNPATH`, cache `/etc/ld.so.cache`, rồi `/lib`, `/usr/lib`[^ldso-search]. Cache là một "danh sách đã biên dịch các shared object ứng viên"[^ldso-cache], nên thêm thư viện mà không cập nhật cache (`ldconfig`) có thể khiến nó không được thấy (suy luận của người soạn).
+- Trong **secure-execution mode** (ví dụ binary set-user-ID), một số biến môi trường bị vô hiệu hoặc sửa, rồi bị gỡ khỏi môi trường[^ldso-secure]. Vì vậy đừng dựa vào `LD_LIBRARY_PATH` hay `LD_PRELOAD` cho chương trình đặc quyền.
+- **Resolve lười.** Đặt `LD_BIND_NOW` thì mọi symbol được phân giải ngay lúc khởi động thay vì hoãn đến lần tham chiếu đầu tiên[^ldso-bind].
+- **Static và dynamic.** Binary Linux cần liên kết động trừ khi truyền `-static` cho `ld(1)` lúc biên dịch[^ldso-static]. Liên kết động cho nhiều process dùng chung một bản `libc.so.6` trong RAM; liên kết tĩnh cho file tự đủ, tiện cho container tối giản (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q2:** `execve` dựng address space mới từ `PT_LOAD`; nếu có `PT_INTERP` thì `ld.so` nạp thư viện chia sẻ rồi mới chạy chương trình.
+**Quay lại Q2:** `execve` dựng address space mới từ các segment `PT_LOAD`; nếu có `PT_INTERP` thì `ld.so` nạp thư viện chia sẻ rồi mới chạy `main` của `orders`.
 
 ## 3. Bố cục address space, `maps`, `smaps` và ASLR (Q3)
 
-> **Trả lời ngắn.** `/proc/<pid>/maps` liệt kê các vùng nhớ đang được map và quyền truy cập của chúng[^proc-maps]; `smaps` cho biết mức tiêu thụ của từng vùng[^proc-smaps]. ASLR (ngẫu nhiên hóa bố cục address space) làm vị trí một số vùng thay đổi giữa các lần chạy; kiểu ngẫu nhiên hóa chọn bằng `randomize_va_space`[^kdoc-aslr]. Vì vậy địa chỉ trong log chỉ có nghĩa khi kèm địa chỉ nền (base) của file hoặc thư viện lấy từ `maps` (nhận xét của người soạn).
+> **Trả lời ngắn.** `/proc/<pid>/maps` liệt kê các vùng nhớ đang được map cùng quyền truy cập của chúng[^proc-maps], còn `smaps` cho biết mỗi vùng tiêu thụ bao nhiêu[^proc-smaps]. ASLR (ngẫu nhiên hóa bố cục address space) làm vị trí một số vùng đổi giữa các lần chạy, và kiểu ngẫu nhiên hóa chọn bằng `randomize_va_space`[^kdoc-aslr]. Vì vậy địa chỉ trong log chỉ có nghĩa khi kèm địa chỉ nền (base) của file hoặc thư viện lấy từ `maps` (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `maps` là sơ đồ tầng của tòa nhà — ai thuê khoảng nào, quyền gì; `smaps` thêm hóa đơn điện của từng phòng; ASLR là việc chủ nhà đổi số phòng mỗi lần bạn đến để kẻ trộm không đoán được.
+*Với service `orders`.* Giả sử `orders` vừa crash và on-call dán vào chat một địa chỉ lấy từ log, hỏi "địa chỉ này thuộc hàm nào?". Muốn trả lời, bạn phải biết địa chỉ đó rơi vào vùng nhớ nào của process, và vùng đó bắt đầu ở đâu trong lần chạy này. `maps` và `smaps` cho bạn thông tin ấy; ASLR giải thích vì sao lần chạy sau lại khác.
 
-*Đọc một dòng.* Mỗi dòng của `maps` có dạng:
+### Đọc một dòng của `maps`
+
+Mỗi dòng của `maps` có dạng:
 
 ```text
 address            perms offset   dev   inode    pathname
 c9e9e7520000-c9e9e756e000 r-xp 00000000 00:32 1337895   /tmp/sec3
 ```
 
-- `perms`: `r`/`w`/`x`; ký tự thứ tư `s` = shared hoặc `p` = private (copy on write)[^proc-perms].
-- `offset`, `dev`, `inode`: vị trí trong file/thiết bị; inode 0 nghĩa là không có inode gắn với vùng đó[^proc-inode].
-- `pathname`: thường là file đang backing mapping; với file ELF có thể đối chiếu `offset` với trường Offset trong program header (`readelf -l`)[^proc-pathname]. Đó chính là điều đã làm ở mục 1: `rw-p ... 00060000` khớp segment data.
-- Pathname giả: `[stack]` là stack của initial process (còn gọi main thread)[^proc-stack]; `[heap]`: heap của process[^proc-heap]; `[vdso]`: virtual dynamically linked shared object[^proc-vdso]. Pathname trống = anonymous mapping.
+- `perms` gồm `r`, `w`, `x`, và ký tự thứ tư là `s` (shared) hoặc `p` (private, copy on write)[^proc-perms].
+- `offset`, `dev`, `inode` cho biết vị trí trong file hoặc thiết bị. Inode 0 nghĩa là không có inode nào gắn với vùng đó[^proc-inode].
+- `pathname` thường là file đang backing mapping. Với file ELF, bạn có thể đối chiếu `offset` với trường Offset trong program header (`readelf -l`)[^proc-pathname]. Đó chính là điều ta đã làm ở mục 1: dòng `rw-p ... 00060000` khớp với segment data.
+- Một số pathname là tên giả. `[stack]` là stack của initial process, còn gọi là main thread[^proc-stack]. `[heap]` là heap của process[^proc-heap]. `[vdso]` là virtual dynamically linked shared object[^proc-vdso]. Pathname trống nghĩa là anonymous mapping.
 
-Cùng một file có thể xuất hiện nhiều dòng với quyền khác nhau: file thực thi ở mục 1 có `r-xp`, `r--p` và `rw-p`; `libc.so.6` trong lần chạy quan sát còn có thêm dòng `---p` (không truy cập được; không liệt kê ở đây). Lý do (suy luận của người soạn): quyền được thực thi theo từng page vì mỗi PTE có bit riêng, như [Chương 03](./03-page-table-va-tlb.md) đã nêu.
+Cùng một file có thể xuất hiện ở nhiều dòng với quyền khác nhau. File thực thi ở mục 1 có `r-xp`, `r--p` và `rw-p`; trong lần chạy quan sát, `libc.so.6` còn có thêm dòng `---p` (không truy cập được, không liệt kê ở đây). Lý do (suy luận của người soạn): quyền được thực thi theo từng page vì mỗi PTE có bit riêng, như [Chương 03](./03-page-table-va-tlb.md) đã nêu.
 
-*Một process thật.* Quan sát một lần chạy trên aarch64, theo thứ tự địa chỉ tăng dần: file thực thi (`r-xp` text, `r--p`, `rw-p` data) → anonymous `rw-p` là `.bss` → `[heap]` → `libc.so.6`, `libgcc_s.so.1`, `ld-linux` → `[vvar]`, `[vdso]` → `[stack]` ở địa chỉ rất cao. OSTEP nói cách xếp stack/heap chỉ là quy ước, có thể xếp khác[^ostep-convention]; đừng viết code giả định `[heap]` nằm trước hay sau thư viện.
+### Một process thật
 
-1. **`[heap]` không phải toàn bộ heap của bạn.** Nó thường là vùng do `brk` quản lý (mục 4; suy luận của người soạn từ `[heap]` = "heap của process" ở trên và định nghĩa program break); cấp phát lớn thường đi qua `mmap` anonymous không tên ([Chương 06](./06-heap-allocator.md)). RSS anonymous nằm ở cả hai nơi.
-2. **Stack của thread không còn tên riêng.** `[stack:tid]` chỉ có từ Linux 3.4 đến 4.4, bị gỡ từ 4.5 vì quá tốn kém với process nhiều thread[^proc-stacktid].
+Quan sát một lần chạy trên aarch64, theo thứ tự địa chỉ tăng dần: file thực thi (`r-xp` text, `r--p`, `rw-p` data), rồi anonymous `rw-p` là `.bss`, rồi `[heap]`, rồi `libc.so.6`, `libgcc_s.so.1`, `ld-linux`, rồi `[vvar]`, `[vdso]`, và `[stack]` ở địa chỉ rất cao. Cách xếp stack và heap như vậy chỉ là quy ước, có thể xếp khác[^ostep-convention], nên đừng viết code giả định `[heap]` nằm trước hay sau thư viện.
 
-*`smaps`.* `/proc/<pid>/smaps` cho biết mức tiêu thụ của *từng* mapping[^proc-smaps]: `Size`, `Rss` (phần đang trong RAM), `Pss` (phần chia theo tỉ lệ cho process này), số page shared/private và clean/dirty[^proc-smaps-fields]. Kernel docs định nghĩa PSS là số page process có trong bộ nhớ, mỗi page chia cho số process dùng chung nó[^kdoc-pss]: page được N process cùng map thì mỗi process chịu 1/N. Tổng PSS không đếm trùng page chung, còn tổng RSS thì có (suy luận của người soạn từ định nghĩa).
+Có hai điều dễ hiểu sai khi nhìn vào danh sách này:
 
-*ASLR.* Nếu layout cố định, kẻ tấn công biết trước địa chỉ hàm `libc`, stack… (nhận xét của người soạn). **ASLR** (address space layout randomization) ngẫu nhiên hóa vị trí các vùng; lần chạy sau thường khác lần trước (xem hai lần chạy ở Đi sâu). `randomize_va_space` chọn kiểu ngẫu nhiên hóa, cho kiến trúc hỗ trợ[^kdoc-aslr]:
+1. **`[heap]` không phải toàn bộ heap của bạn.** Nó thường là vùng do `brk` quản lý (mục 4; suy luận của người soạn từ chuyện `[heap]` là "heap của process" và định nghĩa program break). Cấp phát lớn thường đi qua `mmap` anonymous không tên ([Chương 06](./06-heap-allocator.md)), nên RSS anonymous nằm ở cả hai nơi.
+2. **Stack của thread không còn tên riêng.** Dòng `[stack:tid]` chỉ có từ Linux 3.4 đến 4.4, rồi bị gỡ từ 4.5 vì quá tốn kém với process có nhiều thread[^proc-stacktid].
+
+### `smaps` và PSS
+
+`/proc/<pid>/smaps` cho biết mức tiêu thụ của *từng* mapping[^proc-smaps]: `Size`, `Rss` (phần đang nằm trong RAM), `Pss` (phần chia theo tỉ lệ cho process này), số page shared và private, clean và dirty[^proc-smaps-fields]. Kernel docs định nghĩa PSS là số page process có trong bộ nhớ, trong đó mỗi page được chia cho số process dùng chung nó[^kdoc-pss]. Một page do N process cùng map thì mỗi process chịu 1/N. Từ định nghĩa này ta thấy tổng PSS không đếm trùng page dùng chung, còn tổng RSS thì có (suy luận của người soạn).
+
+### ASLR
+
+Nếu bố cục cố định thì kẻ tấn công biết trước địa chỉ các hàm của `libc`, của stack… (nhận xét của người soạn). **ASLR** (address space layout randomization) ngẫu nhiên hóa vị trí các vùng, nên lần chạy sau thường khác lần trước (xem hai lần chạy ở phần Đi sâu). `randomize_va_space` chọn kiểu ngẫu nhiên hóa, trên các kiến trúc hỗ trợ[^kdoc-aslr]:
 
 | Giá trị | Ý nghĩa (theo kernel docs) |
 |---|---|
 | 0 | tắt ngẫu nhiên hóa; mặc định với kiến trúc không hỗ trợ và kernel boot với `norandmaps`[^kdoc-aslr0] |
-| 1 | ngẫu nhiên hóa địa chỉ mmap base, stack và trang VDSO — thư viện chia sẻ được nạp ở địa chỉ ngẫu nhiên; với binary liên kết PIE, địa chỉ bắt đầu code cũng ngẫu nhiên[^kdoc-aslr1] |
+| 1 | ngẫu nhiên hóa địa chỉ mmap base, stack và trang VDSO, nên thư viện chia sẻ được nạp ở địa chỉ ngẫu nhiên; với binary liên kết PIE, địa chỉ bắt đầu code cũng ngẫu nhiên[^kdoc-aslr1] |
 | 2 | thêm ngẫu nhiên hóa heap[^kdoc-aslr2] |
 
-Hệ quả (nhận xét của người soạn): địa chỉ trong log/core dump chỉ có nghĩa kèm base của module (lấy từ `maps`). ASLR giảm khả năng khai thác chứ không thay memory safety. [Chương 01](./01-address-space.md) mục 2 đã in địa chỉ của hai lần chạy; ở đây là cơ chế đứng sau.
+Quay lại địa chỉ trong log của `orders` (nhận xét của người soạn): nó chỉ có nghĩa khi bạn biết base của module chứa nó, và base lấy từ `maps` của đúng lần chạy đó. Trong core dump cũng vậy. ASLR làm khai thác khó hơn chứ không thay được memory safety. [Chương 01](./01-address-space.md) mục 2 đã in địa chỉ của hai lần chạy; ở đây là cơ chế đứng sau.
 
 <details><summary>Đi sâu: VmFlags, vì sao heap tách riêng, quan sát hai lần chạy</summary>
 
-- Mỗi mapping trong `smaps` còn có `VmFlags` như `rd`, `wr`, `ex`, `sh`, `lo` (pages are locked in memory), `ac` (area is accountable), `nr` (swap space is not reserved)[^proc-vmflags].
-- Heap tách riêng vì có chương trình rất cũ giả định vùng `brk` bắt đầu ngay sau code+bss (kernel docs nêu libc.so.5 từ 1996) và không biết ứng dụng không-legacy nào bị hỏng bởi điều này[^kdoc-compat].
-- Chạy hai lần cùng binary (`randomize_va_space = 2`):
+- Mỗi mapping trong `smaps` còn có dòng `VmFlags` với các cờ như `rd`, `wr`, `ex`, `sh`, `lo` (pages are locked in memory), `ac` (area is accountable), `nr` (swap space is not reserved)[^proc-vmflags].
+- Heap được ngẫu nhiên hóa riêng vì có chương trình rất cũ giả định vùng `brk` bắt đầu ngay sau code và bss (kernel docs nêu libc.so.5 từ 1996), nhưng không biết ứng dụng không-legacy nào bị hỏng vì điều này[^kdoc-compat].
+- Chạy hai lần cùng một binary (`randomize_va_space = 2`):
 
 ```text
 lần 1: main = 0xc3affe0e86e8   heap Box = 0xc3b0260dcd60   stack = 0xffffebb959dc
 lần 2: main = 0xbb813b1086e8   heap Box = 0xbb816aa31d60   stack = 0xffffc2e18ddc
 ```
 
-Phần thấp (`6e8`, `d60`) giữ nguyên, phần cao đổi: base của text, heap, stack đều dời. Binary là PIE (`readelf`: `DYN (Position-Independent Executable file)`).
+Phần thấp (`6e8`, `d60`) giữ nguyên, phần cao đổi: base của text, heap và stack đều dời. Binary là PIE (`readelf`: `DYN (Position-Independent Executable file)`).
 
 </details>
 
-**Quay lại Q3:** `maps` cho biết vùng nào có quyền gì và từ file nào, `smaps` cho biết mỗi vùng tốn bao nhiêu, và ASLR dời vị trí các vùng (mmap base, stack, vdso, text của PIE, heap ở mức 2) nên phải ghi địa chỉ kèm base.
+**Quay lại Q3:** `maps` cho biết vùng nào có quyền gì và đến từ file nào, `smaps` cho biết mỗi vùng tốn bao nhiêu, còn ASLR dời vị trí các vùng (mmap base, stack, vdso, text của PIE, heap ở mức 2) nên địa chỉ trong log của `orders` phải đi kèm base.
 
 ## 4. `mmap`, copy-on-write và `brk` (Q4)
 
-> **Trả lời ngắn.** `mmap` tạo một vùng nhớ mới trong address space của process[^mmap-new]: vùng *anonymous* (không gắn file) khởi tạo bằng 0[^mmap-anon], vùng *file-backed* (gắn file) khởi tạo từ nội dung file[^mmap-file]. Với `MAP_SHARED`, ghi vào vùng thì process khác map cùng vùng thấy được[^mmap-shared]; với `MAP_PRIVATE`, ghi chỉ thấy riêng và không xuống file[^mmap-private] — nhờ copy-on-write (COW): chỉ chép page thật khi một bên ghi[^ostep-cow]. `brk` dời *program break*, mép cuối vùng dữ liệu của process, để cấp hoặc trả bộ nhớ[^brk-def].
+> **Trả lời ngắn.** `mmap` tạo một vùng nhớ mới trong address space của process[^mmap-new]. Vùng *anonymous* (không gắn file) được khởi tạo bằng 0[^mmap-anon]. Vùng *file-backed* (gắn file) được khởi tạo từ nội dung file[^mmap-file]. Với `MAP_SHARED`, ghi vào vùng thì process khác map cùng vùng thấy được[^mmap-shared]. Với `MAP_PRIVATE`, ghi chỉ mình thấy và không xuống file[^mmap-private], nhờ copy-on-write (COW): chỉ khi một bên ghi thì page mới được chép thật. Còn `brk` dời *program break*, mép cuối vùng dữ liệu của process, để cấp hoặc trả bộ nhớ[^brk-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `mmap` như đặt chỗ trong rạp — có vé nhưng chưa ai ngồi; `MAP_PRIVATE` như photo tài liệu chung khi bạn muốn viết vào: bản gốc không đổi, bạn chép riêng một bản chỉ khi bắt đầu viết.
+*Với service `orders`.* Giả sử `orders` nạp bảng giá 16 MiB từ file bằng `mmap` thay vì `read`, và còn tạo snapshot bằng `fork`. Có hai chuyện bạn cần nắm: RSS của `orders` tăng lúc nào, và khi `orders` (hoặc process con của nó) ghi vào một vùng nhớ thì file và bộ nhớ của bên kia bị ảnh hưởng ra sao.
 
-Mọi vùng trong `maps` được tạo bằng một trong số ít syscall. Hai syscall quan trọng nhất: `mmap` và `brk`.
+Mọi vùng bạn thấy trong `maps` đều do một trong số ít syscall tạo ra, và hai syscall quan trọng nhất là `mmap` và `brk`.
 
-*`mmap`: anonymous và file-backed.* `mmap` tạo mapping mới trong virtual address space của process gọi nó[^mmap-new]. Nếu `addr` là NULL, kernel chọn địa chỉ (căn theo page)[^mmap-null]. Hai loại:
+### `mmap`: anonymous và file-backed
+
+`mmap` tạo mapping mới trong virtual address space của process gọi nó[^mmap-new]. Nếu `addr` là NULL thì kernel tự chọn địa chỉ, căn theo page[^mmap-null]. Có hai loại mapping:
 
 | | **Anonymous** (`MAP_ANONYMOUS`) | **File-backed** |
 |---|---|---|
-| Nội dung ban đầu | không backed bởi file nào, khởi tạo bằng 0[^mmap-anon] | khởi tạo từ `length` byte của file bắt đầu tại `offset`[^mmap-file] |
+| Nội dung ban đầu | không gắn file nào, khởi tạo bằng 0[^mmap-anon] | khởi tạo từ `length` byte của file bắt đầu tại `offset`[^mmap-file] |
 | Khi hết RAM | cần swap (không có file để nạp lại) | page chưa bị sửa bỏ đi được, nạp lại từ file |
 | `RssAnon` / `RssFile` | `RssAnon` | `RssFile` |
 
-Hàng "khi hết RAM": frame của page code dùng lại được vì nạp lại từ file thực thi trên đĩa ([Chương 04](./04-page-fault-va-swapping.md) mục 3); anonymous không có bản gốc trên đĩa nên cần swap (suy luận của người soạn từ ý đó).
+Hàng "khi hết RAM" có lý do này: frame của page code dùng lại được vì nạp lại được từ file thực thi trên đĩa ([Chương 04](./04-page-fault-va-swapping.md) mục 3), còn anonymous không có bản gốc trên đĩa nên cần swap (suy luận của người soạn từ ý đó).
 
-*`MAP_SHARED` và `MAP_PRIVATE`.*
+### `MAP_SHARED` và `MAP_PRIVATE`
 
-- `MAP_SHARED`: cập nhật hiển thị với process khác map cùng vùng, và với file-backed được ghi xuống file[^mmap-shared].
+- `MAP_SHARED`: cập nhật hiển thị với process khác map cùng vùng, và với file-backed thì còn được ghi xuống file[^mmap-shared].
 - `MAP_PRIVATE`: mapping copy-on-write riêng; cập nhật không hiển thị với process khác và không ghi xuống file[^mmap-private].
 
-Hiểu lầm phổ biến: "RSS tăng = process vừa `mmap` thêm". Theo thí nghiệm ở Đi sâu, `mmap` chỉ làm `VmSize` tăng; RSS tăng khi *chạm* (anonymous) hoặc *đọc* (file-backed) page.
+Với bảng giá của `orders`, nếu map `MAP_PRIVATE` thì dù `orders` sửa vào vùng đó, file trên đĩa vẫn nguyên. Nếu map `MAP_SHARED` thì sửa là ghi xuống file.
 
-*Copy-on-write và `fork`.* Khi cần sao chép page giữa hai address space, OS map nó vào đích và đánh dấu chỉ đọc ở cả hai; chỉ khi một bên ghi mới chép thật[^ostep-cow]. `fork()` tạo bản sao chính xác address space của caller, chép thật thì chậm và tốn dữ liệu[^ostep-cow-fork]. Linux cài `fork` bằng COW, nên phí chỉ là nhân đôi page table của cha và tạo task structure cho con[^fork-cow].
+Một hiểu lầm phổ biến là "RSS tăng nghĩa là process vừa `mmap` thêm". Thí nghiệm ở phần Đi sâu cho thấy `mmap` chỉ làm `VmSize` tăng; RSS tăng khi *chạm* page (anonymous) hoặc *đọc* page (file-backed).
 
-*`brk` và program break.* `brk`/`sbrk` đổi vị trí **program break**, cuối data segment (vị trí đầu tiên sau uninitialized data segment); tăng break là cấp bộ nhớ, giảm là trả[^brk-def]. Man page khuyên tránh dùng trực tiếp: `malloc(3)` là cách di động để cấp phát[^brk-avoid]; hàm bị đánh dấu LEGACY trong SUSv2 và gỡ khỏi POSIX.1-2001[^brk-std]. Allocator ([Chương 06](./06-heap-allocator.md)) mới là người gọi. Ở `randomize_va_space = 2`, điểm bắt đầu `[heap]` cũng bị dời (mục 3): trong lần chạy ở mục 1, `[heap]` cách `.bss` một khoảng lớn.
+### Copy-on-write và `fork`
+
+Khi cần sao chép page giữa hai address space, OS map page đó vào đích rồi đánh dấu chỉ đọc ở cả hai bên; chỉ khi một bên ghi thì mới chép thật[^ostep-cow]. Điều này đặc biệt hữu ích với `fork()`, vì `fork()` tạo bản sao chính xác của address space của caller, và chép thật thì vừa chậm vừa tốn dữ liệu[^ostep-cow-fork]. Linux cài `fork` bằng COW, nên cái giá chỉ là thời gian và bộ nhớ để nhân đôi page table của cha và tạo task structure cho con[^fork-cow].
+
+### `brk` và program break
+
+`brk` và `sbrk` đổi vị trí **program break**, tức cuối data segment (vị trí đầu tiên sau uninitialized data segment). Tăng break là cấp bộ nhớ cho process, giảm break là trả lại[^brk-def]. Man page khuyên tránh gọi trực tiếp, vì `malloc(3)` mới là cách di động để cấp phát[^brk-avoid]. Hàm này còn bị đánh dấu LEGACY trong SUSv2 và bị gỡ khỏi POSIX.1-2001[^brk-std]. Người gọi `brk` thực tế là allocator ([Chương 06](./06-heap-allocator.md)). Ở `randomize_va_space = 2`, điểm bắt đầu của `[heap]` cũng bị dời (mục 3): trong lần chạy ở mục 1, `[heap]` cách `.bss` một khoảng lớn.
 
 <details><summary>Đi sâu: thí nghiệm <code>mmap</code>/COW, thí nghiệm <code>fork</code> (RSS vs PSS), <code>SIGBUS</code>, đóng fd</summary>
 
-- Sau khi `mmap` trả về, có thể đóng ngay file descriptor mà mapping vẫn hợp lệ[^mmap-fdclose]; ngược lại, đóng fd không unmap vùng, mapping tự biến mất khi process kết thúc[^munmap].
-- Truy cập page nằm hoàn toàn sau cuối file đã map gây `SIGBUS`[^mmap-sigbus]. Man page không nói rõ trường hợp file bị cắt, nhưng chạy thử trên lab (C: `mmap` file 8 KiB `MAP_SHARED`, `ftruncate` xuống 0, ghi byte 5000) process chết với `Bus error`, exit 135 = 128 + SIGBUS (một lần chạy). Nhận xét của người soạn: `mmap` file không an toàn như `read` nếu process khác có thể cắt ngắn file.
+- Sau khi `mmap` trả về, bạn có thể đóng ngay file descriptor mà mapping vẫn hợp lệ[^mmap-fdclose]. Ngược lại, đóng fd không làm vùng bị unmap; mapping tự biến mất khi process kết thúc[^munmap].
+- Truy cập một page nằm hoàn toàn sau cuối file đã map gây `SIGBUS`[^mmap-sigbus]. Man page không nói rõ trường hợp file bị cắt ngắn, nhưng chạy thử trên lab (C: `mmap` file 8 KiB `MAP_SHARED`, `ftruncate` xuống 0, ghi byte 5000) thì process chết với `Bus error`, exit 135 = 128 + SIGBUS (một lần chạy). Nhận xét của người soạn: `mmap` file không an toàn như `read` nếu process khác có thể cắt ngắn file.
 
 **Thí nghiệm `mmap`** (C, đã chạy; file 16 MiB tạo bằng `ftruncate`; trước đó `VmSize=2196kB VmRSS=1216kB`):
 
@@ -211,7 +229,7 @@ file byte 0 after shared write: Y
 
 1. `mmap` 256 MiB anonymous: `VmSize` +262 144 kB nhưng `VmRSS` **không đổi**. Chạm 128 MiB thì `RssAnon` +128 MiB.
 2. `mmap` file private 16 MiB: RSS chưa đổi; đọc hết file thì `RssFile` +16 384 kB.
-3. Ghi **một byte** vào mapping private: `RssAnon` +4 kB, `RssFile` −4 kB — page file-backed được thay bằng bản sao anonymous riêng (COW); `pread` byte 0 của file vẫn là 0.
+3. Ghi **một byte** vào mapping private: `RssAnon` +4 kB, `RssFile` −4 kB. Page file-backed được thay bằng một bản sao anonymous riêng (COW), còn `pread` byte 0 của file vẫn là 0.
 4. Ghi qua `MAP_SHARED` thì đọc lại file thấy `Y`.
 
 **Thí nghiệm `fork`** (C, đã chạy): cha chạm ~192 MiB anonymous, `fork`; con đọc `/proc/self/smaps_rollup`, ghi 32 MiB, đọc lại.
@@ -223,38 +241,38 @@ child wrote 32MiB         Rss=213920kB Pss=123004kB Shared_Dirty=163896kB Privat
 parent after child exit   Rss=214276kB Pss=213174kB Shared_Dirty=0kB      Private_Dirty=196712kB
 ```
 
-Đây là bài học **RSS vs PSS**: ngay sau `fork`, `Rss` của con ≈ cha nhưng `Pss` còn một nửa — gần như mọi page dùng chung, mỗi bên chịu 1/2. Con ghi 32 MiB: `Private_Dirty` ≈ 32 812 kB (đã COW), `Shared_Dirty` giảm 32 768 kB, `Pss` tăng ≈ 16 MiB (nửa của 32 MiB chuyển từ chia sẻ sang riêng). Khi con thoát, PSS của cha trở lại như cũ. (Một lần chạy; phần giải thích là suy luận từ định nghĩa PSS.)
+Đây là bài học **RSS vs PSS**: ngay sau `fork`, `Rss` của con ≈ cha nhưng `Pss` chỉ còn một nửa, vì gần như mọi page đều dùng chung và mỗi bên chịu 1/2. Khi con ghi 32 MiB, `Private_Dirty` ≈ 32 812 kB (đã COW), `Shared_Dirty` giảm 32 768 kB, và `Pss` tăng ≈ 16 MiB (nửa của 32 MiB chuyển từ chia sẻ sang riêng). Khi con thoát, PSS của cha trở lại như cũ. (Một lần chạy; phần giải thích là suy luận từ định nghĩa PSS.)
 
-Liên hệ backend (nhận xét của người soạn): snapshot kiểu "fork rồi con ghi ra đĩa" dựa vào COW; nếu cha ghi nhanh trong lúc con chạy, page bị chép dần và bộ nhớ thật có thể tiến gần gấp đôi — hãy theo dõi `Private_Dirty`/PSS chứ đừng chỉ RSS.
+Liên hệ backend (nhận xét của người soạn): snapshot kiểu "fork rồi con ghi ra đĩa" dựa vào COW. Nếu cha ghi nhanh trong lúc con chạy, page bị chép dần và bộ nhớ thật có thể tiến gần gấp đôi, nên hãy theo dõi `Private_Dirty` hoặc PSS chứ đừng chỉ nhìn RSS.
 
 </details>
 
-**Quay lại Q4:** `mmap` chỉ tạo mapping, RAM cấp khi chạm; `MAP_PRIVATE` ghi thì COW, `MAP_SHARED` ghi xuống file; `fork` cũng dựa vào COW.
+**Quay lại Q4:** `mmap` chỉ tạo mapping và RAM chỉ được cấp khi chạm; với bảng giá của `orders`, `MAP_PRIVATE` ghi thì COW còn `MAP_SHARED` ghi xuống file; `fork` cũng dựa vào COW.
 
 ## 5. Overcommit (Q5)
 
-> **Trả lời ngắn.** `mmap` chỉ giữ chỗ trong address space, không đặt trước RAM thật; kernel phải chọn giữa từ chối sớm và chấp nhận rồi chịu rủi ro hết RAM sau. Ở chế độ 0 (mặc định) kernel chỉ từ chối các yêu cầu *hiển nhiên* quá lớn[^kdoc-oc0], còn lời gọi `mmap` có cờ `MAP_NORESERVE` thì không bị kiểm tra[^proc-oc0]. Trong thí nghiệm ở Đi sâu, `mmap` 1 TiB trên máy 5,8 GiB RAM thất bại nhưng thêm `MAP_NORESERVE` thì thành công.
+> **Trả lời ngắn.** `mmap` chỉ giữ chỗ trong address space chứ không đặt trước RAM thật, nên kernel phải chọn giữa từ chối sớm và chấp nhận rồi chịu rủi ro hết RAM về sau. Ở chế độ 0 (mặc định), kernel chỉ từ chối các yêu cầu *hiển nhiên* quá lớn[^kdoc-oc0]. Lời gọi `mmap` có cờ `MAP_NORESERVE` thì không bị kiểm tra[^proc-oc0]. Trong thí nghiệm ở phần Đi sâu, `mmap` 1 TiB trên máy 5,8 GiB RAM thất bại, nhưng thêm `MAP_NORESERVE` thì thành công.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hãng hàng không bán nhiều vé hơn số ghế vì biết không phải ai cũng đến; chỉ khi mọi người cùng đến thì mới có người bị bỏ lại.
+*Với service `orders`.* Giả sử một thư viện trong `orders` xin trước một vùng address space rất lớn để dùng dần, và `ps` hiện VSZ lên tới hàng chục GB, trong khi máy chỉ có vài GB RAM. Câu hỏi là kernel có chịu cấp vùng đó không, và dựa vào đâu để quyết định.
 
-`mmap` 256 MiB ở mục 4 thành công nhưng RSS không đổi: *không có RAM nào được đặt trước*. Kernel phải chọn: từ chối sớm lúc `mmap` (`ENOMEM` rõ ràng), hay chấp nhận rồi chịu rủi ro hết RAM sau (kết thúc bằng OOM kill). Linux cho chọn bằng sysctl `vm.overcommit_memory`, với các chế độ sau theo kernel docs[^kdoc-oc-modes].
+`mmap` 256 MiB ở mục 4 thành công mà RSS không đổi: *không có RAM nào được đặt trước*. Vì vậy kernel phải chọn một trong hai. Nó có thể từ chối sớm ngay lúc `mmap` (trả `ENOMEM` rõ ràng), hoặc chấp nhận rồi chịu rủi ro hết RAM về sau, kết thúc bằng OOM kill. Linux cho bạn chọn bằng sysctl `vm.overcommit_memory`, với các chế độ sau theo kernel docs[^kdoc-oc-modes]:
 
 | Mode | Hành vi |
 |---|---|
-| 0 | heuristic: từ chối các overcommit *hiển nhiên* về address space; dùng cho hệ thống điển hình; đảm bảo cấp phát "hoang dại" thất bại nhưng vẫn cho overcommit để giảm swap; **mặc định**[^kdoc-oc0] |
+| 0 | heuristic: từ chối các overcommit *hiển nhiên* về address space; dùng cho hệ thống điển hình; bảo đảm cấp phát "hoang dại" thất bại nhưng vẫn cho overcommit để giảm swap; **mặc định**[^kdoc-oc0] |
 | 1 | luôn overcommit; hợp với một số ứng dụng khoa học dùng mảng thưa, dựa vào việc bộ nhớ ảo gần như toàn page số 0[^kdoc-oc1] |
 | 2 | không overcommit: tổng commit toàn hệ thống không được vượt swap + một tỉ lệ cấu hình được (mặc định 50%) RAM vật lý; thường process sẽ không bị giết lúc truy cập page mà nhận lỗi ngay lúc cấp phát[^kdoc-oc2] |
 
-`proc(5)` thêm: ở mode 0, `mmap` có `MAP_NORESERVE` không bị kiểm tra, và kiểm tra mặc định "rất yếu", dẫn tới rủi ro bị OOM-kill[^proc-oc0]. Hai lời gọi trong thí nghiệm chỉ khác `MAP_NORESERVE` (không dành chỗ swap cho mapping[^mmap-noreserve]). Rủi ro: khi swap không được dành, ghi vào page có thể nhận `SIGSEGV` nếu không còn bộ nhớ vật lý[^mmap-noreserve2].
+`proc(5)` bổ sung hai điều cho mode 0: `mmap` có `MAP_NORESERVE` không bị kiểm tra, và phép kiểm tra mặc định "rất yếu", nên vẫn có rủi ro bị OOM-kill[^proc-oc0]. Hai lời gọi trong thí nghiệm chỉ khác nhau đúng cờ `MAP_NORESERVE`, tức là không dành chỗ swap cho mapping[^mmap-noreserve]. Cái giá là khi swap không được dành, một lần ghi vào page có thể nhận `SIGSEGV` nếu không còn bộ nhớ vật lý[^mmap-noreserve2].
 
-Hệ quả (nhận xét của người soạn): một process có `VmSize` hàng chục GB vì reserve address space không nhất thiết có vấn đề; chỉ số đáng theo dõi là RSS/PSS và memory cgroup (mục 8).
+Hệ quả cho `orders` (nhận xét của người soạn): một process có `VmSize` hàng chục GB vì reserve address space chưa chắc đã có vấn đề. Chỉ số đáng theo dõi là RSS, PSS và memory cgroup (mục 8).
 
 <details><summary>Đi sâu: cái gì tính vào commit, <code>CommitLimit</code>, thí nghiệm 1 TiB</summary>
 
-- `CommitLimit` và `Committed_AS` xem trong `/proc/meminfo`[^kdoc-oc-view]; giới hạn chỉ có hiệu lực khi bật strict accounting (mode 2)[^proc-commitlimit]. Ở mode 2 cờ `MAP_NORESERVE` bị bỏ qua[^kdoc-oc-gotcha].
-- Theo kernel docs: mapping file-backed SHARED hoặc READ-only tốn 0, PRIVATE WRITABLE tốn bằng kích thước mapping cho mỗi instance[^kdoc-oc-rules]; anonymous SHARED hoặc PRIVATE WRITABLE tốn bằng kích thước mapping[^kdoc-oc-rules2]. `Committed_AS` trong `/proc/meminfo` tính cả phần chưa "dùng": xin 1 GB nhưng chạm 300 MB vẫn được cấp address space cho cả 1 GB[^proc-committed].
+- `CommitLimit` và `Committed_AS` xem được trong `/proc/meminfo`[^kdoc-oc-view]; giới hạn chỉ có hiệu lực khi bật strict accounting (mode 2)[^proc-commitlimit]. Ở mode 2, cờ `MAP_NORESERVE` bị bỏ qua[^kdoc-oc-gotcha].
+- Theo kernel docs, mapping file-backed SHARED hoặc READ-only tốn 0, còn PRIVATE WRITABLE tốn bằng kích thước mapping cho mỗi instance[^kdoc-oc-rules]. Anonymous SHARED hoặc PRIVATE WRITABLE thì tốn bằng kích thước mapping[^kdoc-oc-rules2]. `Committed_AS` trong `/proc/meminfo` tính cả phần chưa "dùng": xin 1 GB nhưng chỉ chạm 300 MB thì vẫn được cấp address space cho cả 1 GB[^proc-committed].
 - **Thí nghiệm.** Máy lab: mode 0, RAM ≈ 5,8 GiB, không swap. Hai lời gọi (C, đã chạy):
 
 ```text
@@ -266,15 +284,15 @@ Sau lệnh thứ hai, `VmSize` là 1 074 104 468 kB (≈ 1 TiB) trong khi `VmRSS
 
 </details>
 
-**Quay lại Q5:** mode 0 chỉ chặn yêu cầu hiển nhiên quá lớn và bỏ qua kiểm tra khi có `MAP_NORESERVE`; đổi lại, hết RAM thật thì rủi ro là OOM-kill hoặc `SIGSEGV`.
+**Quay lại Q5:** mode 0 chỉ chặn yêu cầu hiển nhiên quá lớn và bỏ qua kiểm tra khi có `MAP_NORESERVE`; đổi lại, nếu hết RAM thật thì rủi ro là OOM-kill hoặc `SIGSEGV`.
 
 ## 6. Đọc memory usage: RSS, VSZ và họ hàng (Q6)
 
-> **Trả lời ngắn.** `VSZ` (cột của `ps`)[^ps-vsz] là kích thước virtual memory, tức phần address space đã map chứ chưa chắc có RAM; trong `/proc/<pid>/status` trường tương ứng là `VmSize`[^proc-vmsize]. `RSS` (`ps` rss[^ps-rss], `VmRSS` trong `/proc`) là phần đang nằm trong RAM, bằng `RssAnon + RssFile + RssShmem`[^proc-vmrss]. `PSS` chia mỗi page cho số process dùng chung nó[^kdoc-pss], nên cộng PSS giữa các process không đếm trùng (suy luận của người soạn từ định nghĩa). VSZ lớn mà RSS nhỏ thường vô hại (nhận xét của người soạn).
+> **Trả lời ngắn.** `VSZ` (cột của `ps`) là kích thước virtual memory[^ps-vsz], tức phần address space đã map chứ chưa chắc có RAM. Trong `/proc/<pid>/status` trường tương ứng là `VmSize`[^proc-vmsize]. `RSS` là phần đang nằm trong RAM: `ps` gọi nó là `rss`[^ps-rss], còn `/proc` gọi là `VmRSS`, bằng `RssAnon + RssFile + RssShmem`[^proc-vmrss]. `PSS` chia mỗi page cho số process dùng chung nó[^kdoc-pss], nên cộng PSS giữa các process không đếm trùng (suy luận của người soạn từ định nghĩa). VSZ lớn mà RSS nhỏ thường vô hại (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): VSZ là tổng diện tích bạn thuê trên hợp đồng; RSS là phần bạn thật sự đang dùng chỗ; PSS là phần của bạn khi chia đều chi phí phòng họp chung.
+*Với service `orders`.* Dashboard của bạn có thể hiện `orders` với VSZ vài chục GB nhưng RSS vài trăm MB, và `ps` của năm replica cộng lại vượt RAM của node. Hai câu hỏi tự nhiên là con số nào mới phản ánh mức dùng thật, và cộng chúng giữa các process có hợp lệ không. Các trường dưới đây trả lời cả hai.
 
 | Trường | Ý nghĩa theo `proc(5)` |
 |---|---|
@@ -287,77 +305,79 @@ Hình dung (nhận xét của người soạn): VSZ là tổng diện tích bạ
 | `VmSwap` | bộ nhớ anonymous private đã bị swap ra; không tính shmem swap[^proc-vmswap] |
 | `VmHWM` | đỉnh của RSS[^proc-vmhwm] |
 
-Cách đọc:
+Cách đọc các con số này khi nhìn vào `orders`:
 
-- **VSZ lớn, RSS nhỏ**: reserve nhiều address space nhưng chưa chạm (mục 4, 5). Thường vô hại.
-- **`RssFile` lớn**: code/thư viện hoặc file được `mmap`; page sạch bỏ được rồi nạp lại từ file (lần chạm sau là major fault — [Chương 04](./04-page-fault-va-swapping.md) mục 6).
-- **`RssAnon` lớn**: heap, stack, `.bss` đã chạm, buffer — phần "thật sự của ứng dụng", chỉ giảm khi chương trình trả lại hoặc bị swap.
-- **Tổng RSS vượt RAM** giữa nhiều process: bình thường nếu có chia sẻ (`libc.so.6`, COW sau `fork`); dùng PSS để cộng (mục 4).
-- **"Tôi `free` mà RSS không giảm"**: `free` không luôn trả bộ nhớ cho OS (chi tiết và nguồn ở [Chương 06](./06-heap-allocator.md)).
+- **VSZ lớn, RSS nhỏ**: process reserve nhiều address space nhưng chưa chạm tới (mục 4 và 5). Thường vô hại.
+- **`RssFile` lớn**: phần lớn là code, thư viện hoặc file được `mmap`. Page sạch bỏ được rồi nạp lại từ file, và lần chạm sau là một major fault ([Chương 04](./04-page-fault-va-swapping.md) mục 6).
+- **`RssAnon` lớn**: heap, stack, `.bss` đã chạm và các buffer. Đây là phần "thật sự của ứng dụng", chỉ giảm khi chương trình trả lại hoặc bị swap.
+- **Tổng RSS vượt RAM** giữa nhiều process: bình thường nếu có chia sẻ (`libc.so.6`, COW sau `fork`). Muốn cộng cho đúng thì dùng PSS (mục 4).
+- **"Tôi `free` mà RSS không giảm"**: `free` không phải lúc nào cũng trả bộ nhớ cho OS (chi tiết và nguồn ở [Chương 06](./06-heap-allocator.md)).
 
 <details><summary>Đi sâu: độ chính xác của các con số và quy trình chẩn đoán</summary>
 
-- `proc(5)` cảnh báo nhiều giá trị trên **không chính xác** vì một tối ưu hóa scalability của kernel; cần chính xác thì dùng `smaps` hoặc `smaps_rollup`, chậm hơn nhiều[^proc-statm-inacc]. Dùng `VmRSS` để xem xu hướng, `smaps_rollup` để đối chiếu.
-- Quy trình chẩn đoán gợi ý (nhận xét của người soạn): `VmRSS` → tách `RssAnon/RssFile/RssShmem` → `smaps_rollup`/`smaps` tìm mapping lớn nhất → đối chiếu `maps` xem đó là `[heap]`, anonymous giữa thư viện hay file cụ thể.
+- `proc(5)` cảnh báo nhiều giá trị trên **không chính xác** vì một tối ưu hóa scalability trong kernel; cần chính xác thì dùng `smaps` hoặc `smaps_rollup`, chậm hơn nhiều[^proc-statm-inacc]. Dùng `VmRSS` để xem xu hướng, `smaps_rollup` để đối chiếu.
+- Quy trình chẩn đoán gợi ý (nhận xét của người soạn): `VmRSS`, rồi tách `RssAnon/RssFile/RssShmem`, rồi `smaps_rollup` hoặc `smaps` để tìm mapping lớn nhất, cuối cùng đối chiếu `maps` xem đó là `[heap]`, một vùng anonymous giữa các thư viện hay một file cụ thể.
 
 </details>
 
-**Quay lại Q6:** VSZ là address space, RSS là phần resident (Anon + File + Shmem), PSS chia phần dùng chung — nhìn xu hướng bằng `VmRSS`, đối chiếu bằng `smaps_rollup`.
+**Quay lại Q6:** VSZ là address space, RSS là phần resident (Anon + File + Shmem), PSS chia phần dùng chung; với `orders`, hãy nhìn xu hướng bằng `VmRSS` và đối chiếu bằng `smaps_rollup`.
 
 ## 7. `mlock`: ghim page trong RAM (Q7)
 
-> **Trả lời ngắn.** `mlock`, `mlock2`, `mlockall` khóa một phần hoặc toàn bộ address space vào RAM, không cho bộ nhớ đó bị đẩy ra swap[^mlock-desc]. Khi `mlock` thành công, các page trong dải địa chỉ được bảo đảm nằm trong RAM cho tới khi mở khóa[^mlock-guarantee]. Process không đặc quyền bị giới hạn bởi `RLIMIT_MEMLOCK` (mức tối đa được khóa); vượt thì lỗi `ENOMEM`[^mlock-limit][^mlock-enomem].
+> **Trả lời ngắn.** `mlock`, `mlock2` và `mlockall` khóa một phần hoặc toàn bộ address space vào RAM, không cho bộ nhớ đó bị đẩy ra swap[^mlock-desc]. Khi `mlock` thành công, các page trong dải địa chỉ được bảo đảm nằm trong RAM cho tới khi mở khóa[^mlock-guarantee]. Process không đặc quyền bị giới hạn bởi `RLIMIT_MEMLOCK`, mức tối đa được khóa[^mlock-limit]. Vượt mức thì lỗi `ENOMEM`[^mlock-enomem].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `mlock` như dán nhãn "không được dọn" lên một bàn trong quán đông khách — bàn đó luôn thuộc về bạn, nhưng quán có ít bàn hơn cho người khác.
+*Với service `orders`.* Giả sử `orders` giữ khóa ký token trong bộ nhớ và bạn không muốn khóa đó bị chép ra swap, hoặc có một đường xử lý nhạy cảm về latency mà bạn không muốn bị page fault làm chậm. `mlock` cho phép ghim vùng nhớ đó vào RAM, nhưng ghim bao nhiêu thì còn tùy hạn mức, và ghim cũng không miễn phí.
 
-Cơ chế từng bước:
+Cơ chế đi theo từng bước:
 
-1. **Khóa theo page, kèm bảo đảm.** `mlock(addr, len)` khóa mọi page chứa một phần dải địa chỉ; việc khóa và mở khóa tính theo page nguyên[^mlock-page]. Khi lời gọi trả về thành công, các page đó đã nằm trong RAM và ở lại đến khi mở khóa[^mlock-guarantee]. `mlock2` với cờ `MLOCK_ONFAULT` nới lỏng: chỉ khóa các page đang có trong RAM và đánh dấu cả dải để page chưa có sẽ bị khóa khi được nạp qua page fault[^mlock-onfault].
-2. **Hạn mức.** `RLIMIT_MEMLOCK` chỉ áp cho process không đặc quyền[^mlock-limit]; vượt hạn mức thì `ENOMEM`, trừ khi process có `CAP_IPC_LOCK`[^mlock-enomem]. Trong lab `ulimit -l` là 8192 kB nên khóa 16 MiB chạm hạn mức (thí nghiệm ở Đi sâu).
-3. **Trạng thái và vòng đời.** `VmLck` trong `/proc/<pid>/status` là kích thước bộ nhớ đã khóa[^proc-vmsize]. Khóa không xếp chồng: một page khóa nhiều lần vẫn được mở bởi một lần `munlock`[^mlock-nostack], và sau đó kernel được phép đẩy page ra swap lại[^mlock-munlock]. Khóa tự gỡ khi dải địa chỉ bị unmap[^mlock-munmap]; con tạo bởi `fork` không thừa hưởng khóa, còn `execve` hoặc process kết thúc cũng gỡ khóa[^mlock-inherit].
-4. **Dùng để làm gì.** Hai ứng dụng chính: real-time, vì paging là nguyên nhân chính gây trễ bất ngờ[^mlock-rt]; và bảo mật, vì bí mật không nên bị chép ra swap[^mlock-sec].
+1. **Khóa theo page, kèm bảo đảm.** `mlock(addr, len)` khóa mọi page chứa một phần của dải địa chỉ; việc khóa và mở khóa tính theo page nguyên[^mlock-page]. Khi lời gọi trả về thành công, các page đó đã nằm trong RAM và ở lại cho tới khi mở khóa[^mlock-guarantee]. `mlock2` với cờ `MLOCK_ONFAULT` nới lỏng hơn: nó chỉ khóa các page đang có trong RAM, rồi đánh dấu cả dải để page chưa có sẽ bị khóa khi được nạp qua page fault[^mlock-onfault].
+2. **Hạn mức.** `RLIMIT_MEMLOCK` chỉ áp cho process không đặc quyền[^mlock-limit]. Vượt hạn mức thì lỗi `ENOMEM`, trừ khi process có `CAP_IPC_LOCK`[^mlock-enomem]. Trong lab `ulimit -l` là 8192 kB nên khóa 16 MiB chạm hạn mức (thí nghiệm ở phần Đi sâu).
+3. **Trạng thái và vòng đời.** `VmLck` trong `/proc/<pid>/status` là kích thước bộ nhớ đã khóa[^proc-vmsize]. Khóa không xếp chồng: một page đã khóa nhiều lần vẫn được mở bằng một lần `munlock`[^mlock-nostack], và sau đó kernel được phép đẩy page ra swap trở lại[^mlock-munlock]. Khóa tự gỡ khi dải địa chỉ bị unmap[^mlock-munmap]. Process con tạo bởi `fork` không thừa hưởng khóa, còn `execve` hoặc việc process kết thúc cũng gỡ khóa[^mlock-inherit].
+4. **Dùng để làm gì.** Hai ứng dụng chính là real-time, vì paging là một nguyên nhân chính gây trễ bất ngờ[^mlock-rt], và bảo mật, vì bí mật không nên bị chép ra swap[^mlock-sec].
 
 <details><summary>Đi sâu: <code>MCL_FUTURE</code> và thí nghiệm trong lab</summary>
 
-- `mlockall(MCL_FUTURE)` còn làm các syscall sau (`mmap`, `sbrk`, `malloc`) có thể thất bại nếu vượt giới hạn[^mlock-future].
-- Thí nghiệm (C, đã chạy, `ulimit -l` = 8192 kB): `mlock` 16 MiB trả `ENOMEM`; `mlock` 4 MiB thành công và `VmLck=4096kB`. Người soạn không kiểm tra `CAP_IPC_LOCK`; kết quả phù hợp trường hợp không đặc quyền. Cái giá (suy luận của người soạn): bộ nhớ đã khóa không thu hồi được khi thiếu RAM, nên khóa nhiều làm hệ thống/cgroup dễ hết bộ nhớ.
+- `mlockall(MCL_FUTURE)` còn khiến các syscall về sau (`mmap`, `sbrk`, `malloc`) có thể thất bại nếu vượt giới hạn[^mlock-future].
+- Thí nghiệm (C, đã chạy, `ulimit -l` = 8192 kB): `mlock` 16 MiB trả `ENOMEM`; `mlock` 4 MiB thành công và `VmLck=4096kB`. Người soạn không kiểm tra `CAP_IPC_LOCK`; kết quả phù hợp với trường hợp không đặc quyền. Cái giá (suy luận của người soạn): bộ nhớ đã khóa không thu hồi được khi thiếu RAM, nên khóa nhiều làm hệ thống hoặc cgroup dễ hết bộ nhớ hơn.
 
 </details>
 
-**Quay lại Q7:** `mlock` đảm bảo page resident (hợp với real-time và bảo mật) nhưng bị `RLIMIT_MEMLOCK` chặn với process không đặc quyền.
+**Quay lại Q7:** `mlock` bảo đảm page ở lại RAM (hợp với real-time và bảo mật), nhưng với process không đặc quyền như `orders` thì bị `RLIMIT_MEMLOCK` chặn.
 
 ## 8. Nối sang memory cgroup (Q8)
 
-> **Trả lời ngắn.** Hạn mức bộ nhớ của container (cgroup v2) tính nhiều thứ hơn bộ nhớ anonymous của process: cả page cache, cấu trúc dữ liệu kernel như dentry/inode và socket buffer TCP[^cg-tracked]. Chạm `memory.max` mà mức dùng không giảm được thì OOM killer chạy trong cgroup[^cg-max]. Vì vậy container có thể bị OOM-kill dù `RssAnon` còn thấp, khi phần không thu hồi được (như tmpfs hay bộ nhớ kernel) chiếm chỗ (suy luận của người soạn).
+> **Trả lời ngắn.** Hạn mức bộ nhớ của container (cgroup v2) tính nhiều thứ hơn bộ nhớ anonymous của process: cả page cache, cấu trúc dữ liệu kernel như dentry và inode, và socket buffer TCP[^cg-tracked]. Chạm `memory.max` mà mức dùng không giảm được thì OOM killer chạy trong cgroup[^cg-max]. Vì vậy container có thể bị OOM-kill dù `RssAnon` còn thấp, khi phần không thu hồi được (như tmpfs hay bộ nhớ kernel) chiếm chỗ (suy luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hóa đơn điện của cả tòa nhà gồm cả đèn hành lang và thang máy chứ không chỉ công tơ từng phòng.
+*Với service `orders`.* Đây là tình huống thực tế nhất của cả chương. Pod `orders` bị Kubernetes báo OOMKilled, bạn mở `/proc/<pid>/status` và thấy `RssAnon` chỉ ở mức vừa phải. Vậy ai đã chiếm bộ nhớ? Câu trả lời nằm ở chỗ mọi con số trên là góc nhìn **per-process**, trong khi giới hạn của container được áp ở mức **cgroup**.
 
-Mọi con số ở trên là góc nhìn **per-process**. Trong container/Kubernetes, giới hạn được áp ở mức **cgroup**: memory controller của cgroup v2 đếm bộ nhớ userland (page cache và anonymous), cấu trúc dữ liệu kernel như dentry và inode, và socket buffer TCP[^cg-tracked]. Từng bước:
+Memory controller của cgroup v2 đếm bộ nhớ userland (page cache và anonymous), cấu trúc dữ liệu kernel như dentry và inode, và socket buffer TCP[^cg-tracked]. Đi từng bước:
 
-1. **Tính cho ai.** Một vùng nhớ bị tính cho cgroup đã tạo ra nó, nên page cache sinh ra do process trong container đọc file được tính vào container (suy luận của người soạn từ quy tắc đó); quy tắc "charge" và thí nghiệm ghi file lớn vào cgroup giới hạn ở [Cgroups v2, mục 4](../08-containers/03-cgroups-v2.md).
-2. **Cộng lại thành `memory.current`.** Đây là tổng bộ nhớ cgroup và con cháu đang dùng[^cg-current], nên **không** bằng tổng `RssAnon` của các process: nó gồm cả page cache và bộ nhớ kernel.
-3. **Thu hồi trước, giết sau.** Page có thể giải phóng bất cứ lúc nào, vì dữ liệu có bản ở nơi khác (như page cache của file) hoặc có thể swap ra, gọi là *reclaimable*[^kdoc-reclaimable]; page chứa dữ liệu nội bộ kernel thường không dùng lại được, gọi là *unreclaimable*[^kdoc-unreclaimable]. `memory.max` là hard limit: khi mức dùng chạm giới hạn và không giảm được thì OOM killer được gọi *trong cgroup*[^cg-max]. `memory.high` (chỉ throttle) và các cờ khác ở [Chương 04](./04-page-fault-va-swapping.md) mục 7; danh sách file và thí nghiệm ở [Cgroups v2, mục 4](../08-containers/03-cgroups-v2.md).
-4. **Vì sao `RssAnon` thấp vẫn bị giết (suy luận của người soạn).** Page cache sạch được thu hồi dễ nên hiếm khi một mình gây OOM; thủ phạm thường là phần không thu hồi được: bộ nhớ kernel, socket buffer, và `shmem` — dữ liệu filesystem dạng swap-backed như tmpfs, shm segment, shared anonymous mmap[^cg-shmem]. Phần `shmem` đang được map hiện ở `RssShmem` chứ không phải `RssAnon` (mục 6), và nếu không có swap thì nó không có chỗ đi.
+1. **Tính cho ai.** Một vùng nhớ được tính cho cgroup đã tạo ra nó. Từ quy tắc đó ta suy ra page cache sinh ra khi process trong container đọc file cũng được tính vào container (suy luận của người soạn). Quy tắc "charge" và thí nghiệm ghi file lớn vào cgroup có giới hạn nằm ở [Cgroups v2, mục 4](../08-containers/03-cgroups-v2.md).
+2. **Cộng lại thành `memory.current`.** Đây là tổng bộ nhớ mà cgroup và con cháu của nó đang dùng[^cg-current], nên nó **không** bằng tổng `RssAnon` của các process: nó gồm cả page cache và bộ nhớ kernel.
+3. **Thu hồi trước, giết sau.** Page có thể giải phóng bất cứ lúc nào, vì dữ liệu có bản ở nơi khác (như page cache của file) hoặc có thể swap ra, được gọi là *reclaimable*[^kdoc-reclaimable]. Page chứa dữ liệu nội bộ của kernel thường không dùng lại được, gọi là *unreclaimable*[^kdoc-unreclaimable]. `memory.max` là hard limit: khi mức dùng chạm giới hạn và không giảm được thì OOM killer được gọi *trong cgroup*[^cg-max]. `memory.high` (chỉ throttle) và các cờ khác nằm ở [Chương 04](./04-page-fault-va-swapping.md) mục 7; danh sách file và thí nghiệm ở [Cgroups v2, mục 4](../08-containers/03-cgroups-v2.md).
+4. **Vì sao `RssAnon` thấp vẫn bị giết (suy luận của người soạn).** Page cache sạch được thu hồi dễ nên hiếm khi một mình gây OOM. Thủ phạm thường là phần không thu hồi được: bộ nhớ kernel, socket buffer, và `shmem`, tức dữ liệu filesystem dạng swap-backed như tmpfs, shm segment, shared anonymous mmap[^cg-shmem]. Phần `shmem` đang được map hiện ở `RssShmem` chứ không phải `RssAnon` (mục 6), và nếu máy không có swap thì nó không có chỗ nào để đi.
 
 <details><summary>Đi sâu: <code>memory.stat</code> tách theo loại</summary>
 
-- `memory.stat` tách theo loại: `anon` là bộ nhớ trong anonymous mapping như `brk()`, `sbrk()` và `mmap(MAP_ANONYMOUS)`[^cg-anon]; `file` là bộ nhớ cache dữ liệu filesystem, gồm tmpfs và shared memory[^cg-file] — gần với `RssAnon` và `RssFile/RssShmem`, nhưng tính trên cả cgroup và gồm cả page cache chưa được map (suy luận của người soạn).
+- `memory.stat` tách bộ nhớ theo loại. `anon` là bộ nhớ trong anonymous mapping như `brk()`, `sbrk()` và `mmap(MAP_ANONYMOUS)`[^cg-anon]. `file` là bộ nhớ cache dữ liệu filesystem, gồm tmpfs và shared memory[^cg-file]. Hai loại này gần với `RssAnon` và `RssFile/RssShmem`, nhưng tính trên cả cgroup và gồm cả page cache chưa được map (suy luận của người soạn).
 - Các trường để tìm phần không thu hồi được: `kernel` là tổng bộ nhớ kernel (kernel_stack, pagetables, percpu, vmalloc, slab…)[^cg-kernel]; `slab_unreclaimable` là phần slab không thu hồi được khi thiếu bộ nhớ[^cg-slab-unrecl]; `sock` là bộ nhớ cho buffer truyền mạng[^cg-sock].
 
 </details>
 
-**Quay lại Q8:** cgroup tính cả page cache và bộ nhớ kernel vào hạn mức nên `memory.current` lớn hơn tổng `RssAnon`; OOM-kill xảy ra khi phần không thu hồi được chạm `memory.max`, dù `RssAnon` thấp.
+**Quay lại Q8:** cgroup tính cả page cache và bộ nhớ kernel vào hạn mức nên `memory.current` của pod `orders` lớn hơn tổng `RssAnon`; OOM-kill xảy ra khi phần không thu hồi được chạm `memory.max`, dù `RssAnon` thấp.
 
 ## Liên hệ với Rust
 
-- **Static đi đâu.** `static` là một allocation trong chương trình, mọi tham chiếu và raw pointer tới nó trỏ cùng allocation[^ref-static-intro], khởi tạo bằng constant expression lúc biên dịch[^ref-static-init]. Static không `mut` *có thể* ở bộ nhớ chỉ đọc[^ref-static-ro] — quan sát ở mục 1: mảng 1 MiB toàn số 0 vào `.rodata`.
-- **Heap Rust trên Unix.** `std::alloc::System` dựa trên `malloc` trên Unix[^sys-alloc]; còn global allocator mặc định "chưa được đặc tả", chỉ cdylib/staticlib được bảo đảm dùng `System`[^sys-default]. Nên mục 4/5/6 (`brk`, `mmap`, RSS không giảm sau free) áp dụng cho `Vec`/`Box` trên cấu hình mặc định hiện nay (suy luận của người soạn, docs không hứa cho binary thường).
-- **`Box::leak`, `mem::forget`** không thoát khỏi RSS: bộ nhớ leak vẫn là page anonymous resident cho tới khi process kết thúc (suy luận của người soạn; về `forget`/`leak` xem [Chương 08](./08-rust-va-bo-nho.md) mục 6).
-- **Đọc memory trong Rust**: `std::fs::read_to_string("/proc/self/status")` rồi tách `VmRSS`/`RssAnon`; theo người soạn, danh sách mục của `std` 1.95.0 không có API `mmap`/`mlock`, nên cần crate `libc`.
+Với `orders` viết bằng Rust, bốn điểm sau nối các mục ở trên với code bạn viết.
+
+- **Static đi đâu.** `static` là một allocation trong chương trình, và mọi tham chiếu hay raw pointer tới nó đều trỏ cùng một allocation[^ref-static-intro]. Nó được khởi tạo bằng một constant expression tính lúc biên dịch[^ref-static-init]. Static không `mut` *có thể* nằm ở bộ nhớ chỉ đọc[^ref-static-ro], đúng như quan sát ở mục 1: mảng 1 MiB toàn số 0 đi vào `.rodata`.
+- **Heap Rust trên Unix.** `std::alloc::System` dựa trên `malloc` trên Unix[^sys-alloc]. Còn global allocator mặc định thì "chưa được đặc tả", và chỉ cdylib hay staticlib được bảo đảm dùng `System`[^sys-default]. Vì vậy những gì mục 4, 5 và 6 nói về `brk`, `mmap` và RSS không giảm sau `free` áp dụng cho `Vec` và `Box` trong cấu hình mặc định hiện nay (suy luận của người soạn; docs không hứa điều này cho binary thông thường).
+- **`Box::leak`, `mem::forget`** không làm bộ nhớ rời khỏi RSS: bộ nhớ bị leak vẫn là page anonymous resident cho tới khi process kết thúc (suy luận của người soạn; về `forget` và `leak` xem [Chương 08](./08-rust-va-bo-nho.md) mục 6).
+- **Đọc memory trong Rust.** Bạn đọc `std::fs::read_to_string("/proc/self/status")` rồi tách `VmRSS` và `RssAnon`. Theo người soạn, danh sách mục của `std` 1.95.0 không có API `mmap` hay `mlock`, nên cần crate `libc`.
 
 ## Tóm tắt
 
@@ -375,70 +395,70 @@ Mọi con số ở trên là góc nhìn **per-process**. Trong container/Kuberne
 1. Binary có `.bss` 1 MiB nhưng file chỉ vài trăm KB. Vì sao, và trường nào của `readelf -l` cho thấy?
 <details><summary>Đáp án</summary>
 
-`.bss` kiểu `SHT_NOBITS` không chiếm chỗ trong file[^elf-nobits]; ở `PT_LOAD` ghi được, `p_memsz` lớn hơn `p_filesz` và phần dư là số 0[^elf-load-zero]. Thí nghiệm: `FileSiz 0x3c68` vs `MemSiz 0x103d48`.
+`.bss` thuộc kiểu `SHT_NOBITS` nên không chiếm chỗ trong file[^elf-nobits]. Ở `PT_LOAD` ghi được, `p_memsz` lớn hơn `p_filesz` và phần dư là số 0[^elf-load-zero]. Thí nghiệm: `FileSiz 0x3c68` so với `MemSiz 0x103d48`.
 
 </details>
 
 2. Ai đọc `PT_INTERP` và việc gì xảy ra tiếp?
 <details><summary>Đáp án</summary>
 
-`execve` dùng interpreter trong `PT_INTERP` để nạp shared object[^execve-interp]; `ld.so` tìm, nạp thư viện, chuẩn bị rồi chạy chương trình[^ldso-desc].
+`execve` dùng interpreter ghi trong `PT_INTERP` để nạp shared object[^execve-interp]. Sau đó `ld.so` tìm và nạp thư viện, chuẩn bị rồi chạy chương trình[^ldso-desc].
 
 </details>
 
 3. Dòng `maps` `rw-p`, inode 0, không pathname, ngay sau segment data của file thực thi thường là gì?
 <details><summary>Đáp án</summary>
 
-Phần `.bss` vượt quá file: inode 0 là trường hợp BSS[^proc-inode] và phần dư được điền số 0[^elf-load-zero]. Ở mục 1 (thí nghiệm `static mut`) vùng này dài đúng 0x100000.
+Đó là phần `.bss` vượt quá file: inode 0 là trường hợp của BSS[^proc-inode], và phần dư được điền số 0[^elf-load-zero]. Ở mục 1 (thí nghiệm `static mut`) vùng này dài đúng 0x100000.
 
 </details>
 
 4. `randomize_va_space` = 1 và = 2 khác nhau thế nào? Vì sao heap tách riêng?
 <details><summary>Đáp án</summary>
 
-1: mmap base, stack, VDSO, code của PIE[^kdoc-aslr1]; 2: thêm heap[^kdoc-aslr2]. Chương trình rất cũ giả định vùng brk ngay sau code+bss[^kdoc-compat].
+Mức 1 ngẫu nhiên hóa mmap base, stack, VDSO và code của PIE[^kdoc-aslr1]; mức 2 thêm heap[^kdoc-aslr2]. Heap tách riêng vì có chương trình rất cũ giả định vùng brk nằm ngay sau code và bss[^kdoc-compat].
 
 </details>
 
 5. Sau `mmap` 256 MiB anonymous, `VmSize` và `VmRSS` đổi thế nào? Khi nào RSS tăng?
 <details><summary>Đáp án</summary>
 
-`VmSize` tăng ≈ 256 MiB, `VmRSS` không đổi; RSS tăng khi chạm page (demand zeroing[^ostep-demand-zero]); anonymous khởi tạo bằng 0[^mmap-anon].
+`VmSize` tăng ≈ 256 MiB còn `VmRSS` không đổi. RSS tăng khi chạm page (demand zeroing[^ostep-demand-zero]), vì anonymous được khởi tạo bằng 0[^mmap-anon].
 
 </details>
 
 6. Ghi một byte vào mapping `MAP_PRIVATE` của file thì `RssAnon`, `RssFile`, file đổi thế nào? `MAP_SHARED` thì sao?
 <details><summary>Đáp án</summary>
 
-Private: COW, không ghi xuống file[^mmap-private] (thí nghiệm: `RssAnon` +4 kB, `RssFile` −4 kB, file không đổi). Shared: ghi xuống file[^mmap-shared] (đọc lại thấy `Y`).
+Private: COW và không ghi xuống file[^mmap-private] (thí nghiệm: `RssAnon` +4 kB, `RssFile` −4 kB, file không đổi). Shared: ghi xuống file[^mmap-shared] (đọc lại thấy `Y`).
 
 </details>
 
 7. Sau `fork`, RSS con ≈ RSS cha nhưng PSS chỉ một nửa. Vì sao?
 <details><summary>Đáp án</summary>
 
-`fork` dùng COW[^fork-cow], page được dùng chung[^ostep-cow]; Rss đếm mọi page resident còn Pss là phần chia theo tỉ lệ[^proc-pss]. Thí nghiệm: Pss 106 612 kB vs Rss 213 792 kB.
+`fork` dùng COW[^fork-cow]. Nhờ đó page được dùng chung[^ostep-cow]. Rss đếm mọi page resident, còn Pss chỉ là phần chia theo tỉ lệ[^proc-pss]. Thí nghiệm: Pss 106 612 kB so với Rss 213 792 kB.
 
 </details>
 
 8. Vì sao `mmap` 1 TiB thất bại nhưng thêm `MAP_NORESERVE` lại thành công ở mode 0? Rủi ro? Mode 2 thì sao?
 <details><summary>Đáp án</summary>
 
-Mode 0 từ chối overcommit hiển nhiên[^kdoc-oc0]; `MAP_NORESERVE` không bị kiểm tra ở mode 0[^proc-oc0]. Rủi ro: ghi vào page khi hết bộ nhớ vật lý có thể nhận `SIGSEGV`[^mmap-noreserve2]. Mode 2 bỏ qua cờ này[^kdoc-oc-gotcha].
+Mode 0 từ chối overcommit hiển nhiên[^kdoc-oc0], còn `MAP_NORESERVE` không bị kiểm tra ở mode 0[^proc-oc0]. Rủi ro là ghi vào page khi hết bộ nhớ vật lý có thể nhận `SIGSEGV`[^mmap-noreserve2]. Mode 2 bỏ qua cờ này[^kdoc-oc-gotcha].
 
 </details>
 
 9. `VmRSS` gồm những phần nào; vì sao không nên tin tuyệt đối?
 <details><summary>Đáp án</summary>
 
-Tổng `RssAnon + RssFile + RssShmem`[^proc-vmrss]; có thể kém chính xác do tối ưu scalability, cần chính xác thì dùng `smaps`/`smaps_rollup`[^proc-statm-inacc].
+`VmRSS` là tổng `RssAnon + RssFile + RssShmem`[^proc-vmrss]. Giá trị có thể kém chính xác do một tối ưu hóa scalability, và cần chính xác thì dùng `smaps` hoặc `smaps_rollup`[^proc-statm-inacc].
 
 </details>
 
 10. `mlock` 16 MiB có thể thất bại trong container vì sao; và `memory.current` của cgroup vì sao khác tổng `RssAnon`?
 <details><summary>Đáp án</summary>
 
-Process không đặc quyền bị `RLIMIT_MEMLOCK` giới hạn, vượt thì `ENOMEM`[^mlock-enomem] (`ulimit -l` = 8192 kB). cgroup tính cả page cache, dentry/inode và socket buffer TCP[^cg-tracked]; OOM-kill xảy ra khi mức dùng chạm `memory.max` mà không giảm được[^cg-max], và phần thu hồi được như page cache sạch bị thu hồi trước[^kdoc-reclaimable].
+Process không đặc quyền bị `RLIMIT_MEMLOCK` giới hạn, vượt thì `ENOMEM`[^mlock-enomem] (`ulimit -l` = 8192 kB). cgroup tính cả page cache, dentry/inode và socket buffer TCP[^cg-tracked]. OOM-kill xảy ra khi mức dùng chạm `memory.max` mà không giảm được[^cg-max], và phần thu hồi được như page cache sạch bị thu hồi trước[^kdoc-reclaimable].
 
 </details>
 

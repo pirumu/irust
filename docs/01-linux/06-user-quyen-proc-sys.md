@@ -4,12 +4,12 @@
 
 ## Bạn sẽ hiểu được gì
 
-- **Q1.** Một process trên Linux mang những ID nào (real, effective, saved, filesystem, supplementary), và kernel dùng ID nào để quyết định "process này có được mở file này không"? → mục 1
-- **Q2.** Chín bit quyền cộng ba bit đặc biệt (setuid, setgid, sticky) làm gì với file và thư mục; `umask` biến mode bạn xin thành mode file thực tế ra sao? → mục 2
-- **Q3.** Vì sao "root hay không root" là cách nghĩ cũ; capabilities chia đặc quyền thế nào, và một service nghe cổng 80 cần đúng cái gì? → mục 3
-- **Q4.** Đọc `/proc/<pid>/status`, `fd`, `maps`, `limits`, `stat` để chẩn đoán một process đang chạy: cái nào cho biết gì? → mục 4
-- **Q5.** `/sys` khác `/proc` ra sao, và `sysctl` chỉnh tham số kernel bằng cơ chế gì? → mục 5
-- **Q6.** `ulimit -n`, `RLIMIT_NOFILE`, `fs.nr_open`, `fs.file-max` quan hệ với nhau thế nào, và lỗi `EMFILE` / `ENFILE` xuất hiện ở đâu? → mục 6
+1. **Q1.** Một process trên Linux mang những ID nào (real, effective, saved, filesystem, supplementary), và khi service mở file thì kernel dựa vào ID nào để cho phép hay từ chối? → mục 1
+2. **Q2.** Chín bit quyền cộng ba bit đặc biệt (setuid, setgid, sticky) làm gì với file và thư mục; `umask` biến mode bạn xin thành mode file thực tế ra sao? → mục 2
+3. **Q3.** Vì sao "root hay không root" là cách nghĩ cũ; capabilities chia đặc quyền thế nào, và một service nghe cổng 80 cần đúng cái gì? → mục 3
+4. **Q4.** Service đang chạy mà có chuyện lạ: đọc `/proc/<pid>/status`, `fd`, `maps`, `limits`, `stat` để biết điều gì? → mục 4
+5. **Q5.** `/sys` khác `/proc` ra sao, và `sysctl` chỉnh tham số kernel bằng cơ chế gì? → mục 5
+6. **Q6.** `ulimit -n`, `RLIMIT_NOFILE`, `fs.nr_open`, `fs.file-max` quan hệ với nhau thế nào, và lỗi `EMFILE` / `ENFILE` xuất hiện ở đâu? → mục 6
 
 ## Kiến thức cần trước
 
@@ -19,29 +19,37 @@
 
 ## 1. Process mang những ID nào, và kernel dùng ID nào? (Q1)
 
-> **Trả lời ngắn.** Mỗi process mang một bộ số nguyên làm "danh tính": UID/GID thật (ai sở hữu process), effective (danh tính đang dùng để xin quyền), saved set (bản lưu để chuyển qua lại), filesystem (riêng Linux) và danh sách group phụ (các group bổ sung mà process thuộc về). Khi mở file, Linux dùng filesystem ID cùng group phụ[^cred-fs]. Kernel tự đặt filesystem ID bằng effective ID mỗi lần effective ID đổi, nên hai loại này thường bằng nhau và việc kiểm tra quyền file giống các UNIX khác[^cred-fsauto]. Vì vậy khi đọc quyền file trong thực tế, bạn có thể coi "effective UID + group" là đủ, trừ khi chương trình gọi `setfsuid` (nhận xét của người soạn).
+> **Trả lời ngắn.** Mỗi process mang một bộ số nguyên làm danh tính: UID/GID thật (ai sở hữu process), effective (danh tính đang dùng khi xin quyền), saved set (bản lưu để chuyển qua lại), filesystem (chỉ có trên Linux) và danh sách group phụ (các group bổ sung mà process thuộc về). Khi mở file, Linux dùng filesystem ID cùng group phụ[^cred-fs]. Kernel tự đặt filesystem ID bằng effective ID mỗi lần effective ID đổi, nên hai loại này thường bằng nhau và việc kiểm tra quyền file giống các UNIX khác[^cred-fsauto]. Vì vậy khi đọc quyền file trong thực tế, bạn coi "effective UID + group" là đủ, trừ khi chương trình gọi `setfsuid` (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một nhân viên có tên in trên thẻ (real UID: ai thực sự là người này), còn thẻ ra vào đang đeo trước ngực (effective UID: quyền đang dùng) có thể được đổi tạm sang thẻ của sếp rồi trả lại. Saved set-ID là ngăn kéo cất thẻ cũ để đổi lại được. Filesystem ID là thẻ riêng dùng ở cửa kho file (chỉ Linux có), thường trùng thẻ ra vào. Group phụ là danh sách các nhóm làm việc.
+*Với service của bạn.* Hãy hình dung `orders`, một service viết bằng Rust, do systemd khởi động dưới một user riêng tên `orders` (trong các ví dụ chạy thật của chương này là uid 1000). Mỗi request nó mở file, ghi log; thỉnh thoảng nó bind một cổng hay nhận một signal. Việc nào cũng khiến kernel hỏi cùng một câu: process này là ai, có được làm việc này không? Ta sẽ bám theo `orders` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Mục này trả lời nửa đầu của câu hỏi: kernel biểu diễn "là ai" bằng những con số nào, và khi `orders` mở file thì nó xét con số nào.
 
-Kernel phải trả lời "ai được làm việc này?" cho mở file, gửi signal, bind cổng… Unix gắn vào mỗi process một danh tính là số nguyên `uid_t`/`gid_t`[^cred-types]. Trên Linux, `credentials(7)` liệt kê năm loại:
+### 1.1 Năm loại ID
+
+Unix gắn cho mỗi process một danh tính dưới dạng số nguyên kiểu `uid_t` và `gid_t`[^cred-types]. Trên Linux, danh tính đó gồm năm loại ID, mỗi loại có syscall đọc riêng:
 
 | ID | Dùng để | Đọc bằng |
 |---|---|---|
 | Real UID/GID | xác định ai *sở hữu* process[^cred-real] | `getuid(2)`, `getgid(2)` |
-| Effective UID/GID | kernel dùng để quyết định quyền khi truy cập tài nguyên chia sẻ (message queue, shared memory, semaphore); trên hầu hết UNIX nó còn quyết định quyền file, riêng Linux dùng filesystem ID cho việc đó[^cred-eff] | `geteuid(2)`, `getegid(2)` |
-| Saved set-user-ID / set-group-ID | bản sao effective ID lúc chương trình được `exec`[^cred-saved-def] | `getresuid(2)`, `getresgid(2)`[^cred-saved-get] |
+| Effective UID/GID | kernel dùng để quyết định quyền khi process truy cập tài nguyên chia sẻ như message queue, shared memory, semaphore; trên hầu hết UNIX nó còn quyết định quyền file, còn Linux giao việc đó cho filesystem ID[^cred-eff] | `geteuid(2)`, `getegid(2)` |
+| Saved set-user-ID / set-group-ID | bản sao effective ID tại lúc chương trình được `exec`[^cred-saved-def] | `getresuid(2)`, `getresgid(2)`[^cred-saved-get] |
 | Filesystem UID/GID (riêng Linux) | cùng group phụ, quyết định quyền truy cập *file*[^cred-fs] | `setfsuid(2)`, `setfsgid(2)` để đổi cho khác effective ID[^cred-fsauto] |
-| Supplementary group IDs | tập group phụ dùng cho kiểm tra quyền truy cập file và tài nguyên chia sẻ khác[^cred-supp-def] | `getgroups(2)`[^cred-supp-get] |
+| Supplementary group IDs | tập group phụ dùng khi kiểm tra quyền truy cập file và các tài nguyên chia sẻ khác[^cred-supp-def] | `getgroups(2)`[^cred-supp-get] |
 
-Điểm hay gây nhầm: trên Linux, effective ID *không* phải ID quyết định quyền file; ID đó là filesystem ID, thường bằng effective ID[^cred-fsauto].
+### 1.2 Khi mở file, kernel xét ID nào
 
-Các ID này đi theo process qua `fork` và `exec`. `fork` cho con **bản sao** mọi user/group ID của cha; qua `execve`, real UID/GID và group phụ được giữ nguyên, còn effective và saved có thể đổi[^cred-inherit]. "Có thể đổi" chính là cơ chế setuid ở mục 2; bảng đầy đủ các thuộc tính sống sót qua `exec` nằm ở [Chương 03, mục 4.1](03-process.md).
+Trong bảng, hai loại dễ lẫn nhất là effective và filesystem. Trên Linux, ID quyết định quyền file là filesystem ID chứ không phải effective ID[^cred-eff]. Tuy vậy hai số này thường bằng nhau, vì mỗi lần effective ID đổi, kernel tự đặt filesystem ID theo giá trị mới; chúng chỉ lệch nhau khi chương trình gọi `setfsuid(2)` hoặc `setfsgid(2)`[^cred-fsauto]. Với `orders` chạy dưới user `orders`, điều bạn cần nhớ chỉ là: muốn biết `orders` mở được file nào, hãy nhìn effective UID và các group của nó.
 
-Saved set-user-ID là bản sao effective UID tại lúc `exec`. Nhờ nó, một chương trình setuid không-phải-root có thể bỏ hết đặc quyền, làm việc không đặc quyền, rồi nhận lại effective UID ban đầu một cách an toàn[^setuid-saved]. `credentials(7)` mô tả cùng ý: chương trình setuid chuyển effective UID qua lại giữa real UID và saved set-user-ID[^cred-saved-switch].
+### 1.3 ID đi theo process qua fork và exec
 
-Muốn xem tận mắt, `/proc/<pid>/status` có dòng `Uid:` và `Gid:` với bốn số theo thứ tự real, effective, saved set, filesystem; `Groups:` là danh sách group phụ[^proc-status-uid]. Ví dụ chạy thật trong container Linux (aarch64, rustc 1.95.0) khi chạy một chương trình Rust dưới `setpriv --reuid=1000 --regid=1000 --clear-groups`:
+`orders` có thể sinh process con (ví dụ chạy một script bằng `Command`), nên ta cần biết các ID đi đâu. Con do `fork` nhận bản sao mọi user/group ID của cha, còn qua `execve` thì real UID/GID và group phụ được giữ nguyên, effective và saved có thể đổi[^cred-inherit]. Chữ "có thể đổi" chính là cơ chế setuid ở mục 2; bảng đầy đủ các thuộc tính sống sót qua `exec` nằm ở [Chương 03, mục 4.1](03-process.md).
+
+Còn saved set-user-ID để làm gì? Nhờ nó, một chương trình setuid không-phải-root có thể bỏ hết đặc quyền, làm việc không đặc quyền, rồi nhận lại effective UID ban đầu một cách an toàn[^setuid-saved]. Cách làm là chuyển effective UID qua lại giữa real UID và saved set-user-ID[^cred-saved-switch].
+
+### 1.4 Xem tận mắt
+
+Muốn biết `orders` đang mang ID nào, đọc `/proc/<pid>/status`. Dòng `Uid:` và `Gid:` có bốn số theo thứ tự real, effective, saved set, filesystem, còn `Groups:` là danh sách group phụ[^proc-status-uid]. Ví dụ chạy thật trong container Linux (aarch64, rustc 1.95.0) khi chạy một chương trình Rust dưới `setpriv --reuid=1000 --regid=1000 --clear-groups`:
 
 ```text
 Uid:	1000	1000	1000	1000
@@ -49,31 +57,35 @@ Gid:	1000	1000	1000	1000
 Groups:	
 ```
 
-Bốn số bằng nhau và `Groups:` trống. Man page `setpriv` mô tả `--reuid` là đặt UID thực và UID hiệu dụng[^setpriv-reuid] và `--clear-groups` là xóa group phụ[^setpriv-clear]; riêng việc saved set cũng ra 1000 là quan sát, man page không nói thẳng.
+Bốn số bằng nhau và `Groups:` trống. `--reuid` đặt cả UID thực lẫn UID hiệu dụng[^setpriv-reuid]. `--clear-groups` xóa group phụ[^setpriv-clear]. Việc saved set cũng ra 1000 là quan sát; man page `setpriv` không nói thẳng.
 
 <details><summary>Đi sâu: đổi ID, thread, giới hạn group phụ</summary>
 
-- **Số group phụ:** từ Linux 2.6.4 một process có thể thuộc tới 65536 group phụ (trước đó là 32)[^cred-supp].
-- **`setuid(2)`:** đặt effective UID của bên gọi; nếu bên gọi có `CAP_SETUID` trong user namespace của nó thì real UID và saved set-user-ID cũng bị đặt[^setuid-def]. Với root hoặc chương trình setuid-root, `setuid()` đặt mọi ID liên quan thành giá trị mới và sau đó chương trình không thể lấy lại đặc quyền root — đọc kỹ `setuid(2)` trước khi viết code drop privilege[^setuid-root].
-- **Credentials theo thread:** POSIX đòi mọi thread trong process chia sẻ credentials, nhưng kernel Linux giữ credentials riêng cho từng thread[^cred-threads]. Man page `setuid(2)` nói cài đặt thread NPTL xử lý yêu cầu của POSIX bằng các hàm wrapper cho những syscall đổi UID/GID; wrapper dùng kỹ thuật dựa trên signal để khi một thread đổi credentials thì mọi thread khác trong process đổi theo[^setuid-nptl]. Hệ quả (suy luận của người soạn từ hai đoạn trên): một lời gọi `setuid` thô, không qua wrapper này (ví dụ `syscall(SYS_setuid, …)`), chỉ đổi credentials của thread gọi; vì vậy chương trình đa luồng muốn bỏ đặc quyền nên gọi `setuid` của libc, hoặc bỏ đặc quyền trước khi tạo thread.
-- **UID còn dùng ở đâu:** kiểm tra quyền gửi signal (quy tắc chi tiết ở [Chương 05, mục 8](05-signal.md)), quyền đổi tham số lập lịch và kiểm tra resource limit[^cred-other]; ở mục 6 ta sẽ thấy `RLIMIT_NPROC` đếm theo **real UID**.
+- **Số group phụ:** từ Linux 2.6.4 một process thuộc được tới 65536 group phụ (trước đó là 32)[^cred-supp].
+- **`setuid(2)`:** đặt effective UID của bên gọi; nếu bên gọi có `CAP_SETUID` trong user namespace của nó thì real UID và saved set-user-ID cũng bị đặt[^setuid-def]. Với root hoặc chương trình setuid-root, `setuid()` đặt mọi ID liên quan về giá trị mới, và sau đó chương trình không lấy lại được đặc quyền root, nên phải đọc kỹ `setuid(2)` trước khi viết code bỏ đặc quyền[^setuid-root].
+- **Credentials theo thread:** điều này đáng để ý với `orders` nhiều thread. POSIX đòi mọi thread trong process chia sẻ credentials, nhưng kernel Linux giữ credentials riêng cho từng thread[^cred-threads]. Để thỏa yêu cầu của POSIX, cài đặt thread NPTL bọc các syscall đổi UID/GID trong hàm wrapper dùng kỹ thuật dựa trên signal, nhờ đó khi một thread đổi credentials thì mọi thread khác trong process đổi theo[^setuid-nptl]. Từ hai điều trên suy ra (suy luận của người soạn): một lời gọi `setuid` thô, không qua wrapper (ví dụ `syscall(SYS_setuid, …)`), chỉ đổi credentials của thread gọi. Vì vậy chương trình đa luồng muốn bỏ đặc quyền nên gọi `setuid` của libc, hoặc bỏ đặc quyền trước khi tạo thread.
+- **UID còn dùng ở đâu:** ngoài quyền file, UID còn dùng để kiểm tra quyền gửi signal (quy tắc chi tiết ở [Chương 05, mục 8](05-signal.md)), quyền đổi tham số lập lịch và kiểm tra resource limit[^cred-other]. Ở mục 6 ta sẽ thấy `RLIMIT_NPROC` đếm theo **real UID**.
 
 </details>
 
-**Quay lại Q1:** process mang real, effective, saved, filesystem ID và group phụ; quyền mở file dựa trên filesystem ID + group phụ, thường trùng effective ID.
+**Quay lại Q1:** process mang real, effective, saved, filesystem ID và group phụ; khi `orders` mở file, kernel xét filesystem ID cùng group phụ, và hai thứ này thường trùng với effective ID.
 
 
 ## 2. Chín bit quyền, setuid/setgid/sticky và umask (Q2)
 
-> **Trả lời ngắn.** Mode của file gồm chín bit quyền (đọc/ghi/chạy cho chủ file, cho group của file và cho mọi người còn lại) cộng ba bit đặc biệt: setuid, setgid và sticky (giải thích ở Bước 3)[^chmod-mode]. Với mỗi lần truy cập, kernel chọn đúng một trong ba nhóm ba bit để kiểm tra: nhóm của chủ file; nếu không phải thì nhóm của group; nếu cũng không thì nhóm của mọi người còn lại[^perm-bits]. `umask` là mặt nạ của process: nó tắt bớt bit khỏi mode bạn xin khi tạo file, nên file thực tế thường có ít quyền hơn mode xin[^umask-use].
+> **Trả lời ngắn.** Mode của file gồm chín bit quyền (đọc/ghi/chạy cho chủ file, cho group của file và cho mọi người còn lại) cộng ba bit đặc biệt: setuid, setgid và sticky (giải thích ở §2.3)[^chmod-mode]. Với mỗi lần truy cập, kernel chọn đúng một trong ba nhóm ba bit để kiểm tra: nhóm của chủ file; nếu không phải thì nhóm của group; nếu cũng không thì nhóm của mọi người còn lại[^perm-bits]. `umask` là mặt nạ của process: nó tắt bớt bit khỏi mode bạn xin khi tạo file, nên file thực tế thường có ít quyền hơn mode xin[^umask-use].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mode bạn truyền vào `open` giống tờ đơn xin quyền; `umask` là người duyệt đơn dùng bút gạch bớt những quyền mà môi trường không muốn cấp.
+*Với service `orders`.* `orders` ghi mỗi đơn hàng ra một file và ghi log ra một file khác. Hai chuyện dễ gặp ở đây: ops hỏi vì sao file log ra mode 644 trong khi code xin 666, và một process khác không đọc được file của `orders`. Cả hai quy về ba thứ: chín bit quyền, ba bit đặc biệt và `umask` của process. Ta đi lần lượt.
 
-**Bước 1 — kernel chọn nhóm bit.** Chín bit quyền chia ba nhóm ba bit. Nhóm đầu áp dụng khi effective user ID của bên gọi bằng owner của file; nhóm hai khi group của file bằng effective group ID của process hoặc nằm trong group phụ; không thì nhóm ba[^perm-bits]. (Chính xác hơn, Linux so bằng filesystem ID thay cho effective ID — thường chúng bằng nhau, như ở mục 1[^perm-fsuid].) Ba bit trong nhóm là read, write, execute — với thư mục, bit cuối là **search** (quyền đi qua thư mục để tra tên bên trong)[^perm-bits2].
+### 2.1 Kernel chọn nhóm bit nào
 
-**Bước 2 — thư mục cha cũng bị kiểm tra.** Nếu process không có quyền search trên thư mục đang tra cứu thì lỗi trả về là `EACCES`[^pr-search]. Nhận xét của người soạn: vì thế để mở `/a/b/c` bạn cần quyền `x` trên `/`, `/a`, `/a/b` — thiếu `x` trên một thư mục cha thì dù file `c` mode 777 vẫn không mở được.
+Chín bit quyền chia thành ba nhóm, mỗi nhóm ba bit, và mỗi lần truy cập kernel chỉ xét một nhóm. Nhóm đầu áp dụng khi effective user ID của bên gọi bằng owner của file; nhóm hai áp dụng khi group của file bằng effective group ID của process hoặc nằm trong group phụ của nó; nếu cả hai đều không thì dùng nhóm ba[^perm-bits]. Nói chính xác hơn, Linux so bằng filesystem ID thay cho effective ID, và như ở mục 1 hai số này thường bằng nhau[^perm-fsuid]. Ba bit trong mỗi nhóm là read, write, execute; riêng với thư mục, bit cuối là **search**, tức quyền đi qua thư mục để tra tên bên trong[^perm-bits2].
+
+### 2.2 Thư mục cha cũng bị kiểm tra
+
+Kernel không chỉ xét file cuối cùng mà xét từng thành phần của đường dẫn. Nếu process không có quyền search trên thư mục đang tra cứu thì lỗi trả về là `EACCES`[^pr-search]. Hệ quả (nhận xét của người soạn): để `orders` mở `/a/b/c` thì cần quyền `x` trên `/`, `/a` và `/a/b`; thiếu `x` ở một thư mục cha thì dù file `c` mode 777 vẫn không mở được.
 
 Chạy thật: một file `/tmp/secret` mode `600` do root tạo; một chương trình Rust chạy với uid 1000 mở nó ra:
 
@@ -83,7 +95,9 @@ open secret: Permission denied (os error 13) raw=Some(13) kind=PermissionDenied
 
 Chạy với root thì mở được (quan sát lần chạy này; vì sao root không bị chặn: xem phần Đi sâu).
 
-**Bước 3 — ba bit đặc biệt.**
+### 2.3 Ba bit đặc biệt
+
+Ngoài chín bit còn ba bit đặc biệt. Chúng đổi hành vi của `execve` hoặc của thư mục:
 
 | Bit | Mã octal | Trên file thực thi | Trên thư mục |
 |---|---|---|---|
@@ -91,7 +105,7 @@ Chạy với root thì mở được (quan sát lần chạy này; vì sao root 
 | set-group-ID | 02000 | đổi effective GID thành group của file[^exec-suid] | file mới tạo trong thư mục thừa hưởng group của thư mục (không lấy group của process tạo), và thư mục con mới tạo cũng được đặt setgid[^inode-sgid] |
 | sticky | 01000 | — | file trong thư mục chỉ bị đổi tên/xóa bởi owner của file, owner của thư mục, hoặc process privileged[^inode-sticky] |
 
-Sau khi `execve` chạy file setuid/setgid, effective ID được chép sang saved set-user-ID/saved set-group-ID; việc chép này xảy ra *sau* mọi thay đổi do bit setuid/setgid[^exec-saved]. Real UID **không đổi**[^cred-inherit] — vì thế chương trình phân biệt được "ai thực sự gọi mình" (`getuid`) với "mình đang chạy dưới quyền ai" (`geteuid`).
+Sau khi `execve` chạy một file setuid/setgid, kernel chép effective ID sang saved set-user-ID/saved set-group-ID, và việc chép này xảy ra *sau* mọi thay đổi do bit setuid/setgid[^exec-saved]. Real UID thì **không đổi**[^cred-inherit], nên chương trình phân biệt được "ai thực sự gọi mình" (`getuid`) với "mình đang chạy dưới quyền ai" (`geteuid`).
 
 ```mermaid
 sequenceDiagram
@@ -106,46 +120,52 @@ sequenceDiagram
   K-->>P: chương trình chạy với real=1000, eff=0, saved=0
 ```
 
-(Sơ đồ theo mô tả của `execve(2)`; `passwd` thuộc root với mode 4755 chỉ là ví dụ minh họa. Trong container thử nghiệm, `stat -c %A` cho `/usr/bin/passwd` là `-rwsr-xr-x`, `/usr/bin/chage` là `-rwxr-sr-x`, `/tmp` là `drwxrwxrwt`; cách đọc chữ `s`/`t` là quy ước hiển thị của `ls`/`stat`, không phải khẳng định của man page đã trích — theo quy ước đó `/tmp` có bit sticky nên áp dụng quy tắc ở hàng sticky của bảng.)
+(Sơ đồ theo mô tả của `execve(2)`; `passwd` thuộc root với mode 4755 chỉ là ví dụ minh họa. Trong container thử nghiệm, `stat -c %A` cho `/usr/bin/passwd` là `-rwsr-xr-x`, `/usr/bin/chage` là `-rwxr-sr-x`, `/tmp` là `drwxrwxrwt`. Cách đọc chữ `s`/`t` là quy ước hiển thị của `ls`/`stat`, không phải khẳng định của man page đã trích; theo quy ước đó `/tmp` có bit sticky nên áp dụng quy tắc ở hàng sticky của bảng.)
 
-**Bước 4 — `umask`.** `umask(2)` đặt mask của process thành `mask & 0777` và trả mask cũ[^umask-def]. Mask được `open(2)`, `mkdir(2)` và các lời gọi tạo file khác dùng để **tắt** các bit tương ứng khỏi `mode` bạn truyền vào[^umask-use]. Giá trị mặc định điển hình là `022`[^umask-typical]; xin mode `0666` thì được `0644` vì `0666 & ~022 = 0644`[^umask-default]. Con do `fork` thừa hưởng umask của cha; `execve` không đổi umask[^umask-inherit].
+### 2.4 `umask`: vì sao log ra mode 644
 
-Chạy thật (Rust, `OpenOptions::mode(0o666)` + `create_new`): umask `022` cho file mode `644`, umask `077` cho `600`, với cả uid 0 lẫn uid 1000. Docs Rust khớp: `mode` mặc định `0o666` và hệ điều hành che bằng umask[^rs-optmode]. Nhận xét của người soạn: file log hay socket tạo ra với mode "lạ" thường do service chạy với umask khác shell của bạn; kiểm tra dòng `Umask:` trong `/proc/<pid>/status` (dòng này có từ Linux 4.7[^proc-umask]).
+Quay lại câu hỏi của ops, đây là việc của `umask`. `umask(2)` đặt mask của process thành `mask & 0777` và trả về mask cũ[^umask-def]. `open(2)`, `mkdir(2)` và các lời gọi tạo file khác dùng mask này để **tắt** những bit tương ứng khỏi `mode` bạn truyền vào[^umask-use]. Giá trị mặc định điển hình là `022`[^umask-typical]. Vì vậy xin mode `0666` thì ra `0644`, do `0666 & ~022 = 0644`[^umask-default]. Process con do `fork` thừa hưởng umask của cha, còn `execve` không đổi umask[^umask-inherit].
+
+Chạy thật (Rust, `OpenOptions::mode(0o666)` + `create_new`): umask `022` cho file mode `644`, umask `077` cho `600`, với cả uid 0 lẫn uid 1000. Docs Rust khớp với quan sát: `mode` mặc định là `0o666` và hệ điều hành che bằng umask[^rs-optmode]. Vì vậy (nhận xét của người soạn) file log hay socket tạo ra với mode "lạ" thường do service chạy với umask khác shell của bạn; hãy kiểm tra dòng `Umask:` trong `/proc/<pid>/status`, dòng này có từ Linux 4.7[^proc-umask].
 
 <details><summary>Đi sâu: chmod, nosuid/no_new_privs, race của umask, root và ACL</summary>
 
-- **Ai được `chmod`:** `chmod(2)` đòi effective UID của bên gọi khớp owner của file, hoặc bên gọi là privileged (trên Linux: có `CAP_FOWNER`)[^chmod-owner]. Nếu bên gọi không có `CAP_FSETID` và group của file không khớp effective GID hay group phụ nào của nó, kernel âm thầm tắt bit setgid — không báo lỗi[^chmod-sgid]. Man page `chmod(2)` gọi bit sticky là cờ hạn chế xóa (restricted deletion flag)[^chmod-bits].
+- **Ai được `chmod`:** `chmod(2)` đòi effective UID của bên gọi khớp owner của file, hoặc bên gọi là privileged (trên Linux: có `CAP_FOWNER`)[^chmod-owner]. Nếu bên gọi không có `CAP_FSETID` và group của file không khớp effective GID hay group phụ nào của nó, kernel âm thầm tắt bit setgid, không báo lỗi[^chmod-sgid]. Man page `chmod(2)` gọi bit sticky là cờ hạn chế xóa (restricted deletion flag)[^chmod-bits].
 - **Ghi file làm mất bit setuid:** tùy filesystem, bit setuid/setgid có thể bị tắt khi file bị ghi; trên Linux điều này xảy ra nếu bên ghi không có `CAP_FSETID`[^chmod-write]. Ý nghĩa thực tế (suy luận của người soạn từ câu trên): ghi đè tại chỗ một binary setuid bằng user không có `CAP_FSETID` có thể làm mất bit setuid, nên sau khi deploy bằng user thường cần kiểm tra lại mode.
-- **Khi nào setuid/setgid bị bỏ qua:** việc đổi effective ID bị **bỏ qua** nếu thread có thuộc tính `no_new_privs`, nếu filesystem mount `nosuid`, hoặc nếu process đang bị ptrace[^exec-ignored]; capabilities của file cũng bị bỏ qua trong cùng các trường hợp đó[^exec-ignored-caps].
+- **Khi nào setuid/setgid bị bỏ qua:** việc đổi effective ID bị **bỏ qua** nếu thread có thuộc tính `no_new_privs`, nếu filesystem mount `nosuid`, hoặc nếu process đang bị ptrace[^exec-ignored]. Capabilities của file cũng bị bỏ qua trong cùng các trường hợp đó[^exec-ignored-caps].
 - **Race của umask:** không có cách đọc umask mà không đồng thời đổi nó; hai bước "đọc rồi khôi phục" không nguyên tử nên có race trong chương trình đa luồng[^umask-race]. Từ Linux 4.7, đọc dòng `Umask` trong `/proc/self/status` tránh được vấn đề này[^umask-proc].
-- **Phạm vi của umask:** umask cũng áp dụng cho POSIX IPC object, FIFO và UNIX domain socket do process tạo; **không** áp dụng cho System V IPC[^umask-ipc].
-- **Root có bỏ qua mọi thứ không?** Truyền thống: process privileged (effective UID 0) bỏ qua mọi kiểm tra quyền của kernel, process không privileged chịu kiểm tra đầy đủ[^caps-priv]. Với file, `path_resolution(7)` nói: trên Linux, đặc quyền superuser được chia thành capabilities; hai capability liên quan là `CAP_DAC_OVERRIDE` và `CAP_DAC_READ_SEARCH`[^pr-caps]. `CAP_DAC_OVERRIDE` vượt mọi kiểm tra quyền nhưng chỉ cấp quyền *execute* khi ít nhất một trong ba bit execute của file được bật[^pr-dac]. Suy ra (suy luận của người soạn, giả định root đang có `CAP_DAC_OVERRIDE`): root không chạy được file `0600` không có bit `x` nào. Capabilities được giải thích ở mục 3.
-- **ACL (tóm tắt):** POSIX ACL cho quyền chi tiết hơn bộ chín bit[^acl-desc], gồm access ACL và default ACL (ACL ban đầu cho object tạo trong thư mục)[^acl-types]. Nếu thư mục cha có default ACL thì umask bị bỏ qua và ACL được thừa hưởng[^umask-acl]. Chương này không đi sâu hơn ACL.
+- **Phạm vi của umask:** umask cũng áp dụng cho POSIX IPC object, FIFO và UNIX domain socket do process tạo, nhưng **không** áp dụng cho System V IPC[^umask-ipc].
+- **Root có bỏ qua mọi thứ không?** Theo truyền thống, process privileged (effective UID 0) bỏ qua mọi kiểm tra quyền của kernel, còn process không privileged chịu kiểm tra đầy đủ[^caps-priv]. Với file, trên Linux đặc quyền superuser được chia thành capabilities, và hai capability liên quan là `CAP_DAC_OVERRIDE` và `CAP_DAC_READ_SEARCH`[^pr-caps]. `CAP_DAC_OVERRIDE` vượt mọi kiểm tra quyền nhưng chỉ cấp quyền *execute* khi ít nhất một trong ba bit execute của file được bật[^pr-dac]. Suy ra (suy luận của người soạn, giả định root đang có `CAP_DAC_OVERRIDE`): root không chạy được file `0600` không có bit `x` nào. Capabilities được giải thích ở mục 3.
+- **ACL (tóm tắt):** POSIX ACL cho quyền chi tiết hơn bộ chín bit[^acl-desc]. Có access ACL và default ACL, loại sau là ACL ban đầu cho các object tạo trong thư mục[^acl-types]. Nếu thư mục cha có default ACL thì umask bị bỏ qua và ACL được thừa hưởng[^umask-acl]. Chương này không đi sâu hơn về ACL.
 
 </details>
 
-**Quay lại Q2:** kernel chọn một nhóm trong chín bit (owner → group → other), ba bit đặc biệt đổi hành vi `execve` và thư mục, còn `umask` che bớt bit khỏi mode bạn xin.
+**Quay lại Q2:** kernel chọn một nhóm trong chín bit (owner → group → other), ba bit đặc biệt đổi hành vi `execve` và thư mục, còn `umask` che bớt bit khỏi mode mà `orders` xin khi tạo file.
 
 
 ## 3. Capabilities: tách "root" thành từng mảnh (Q3)
 
-> **Trả lời ngắn.** Linux chia đặc quyền của superuser (root) thành nhiều đơn vị gọi là capabilities; mỗi đơn vị bật/tắt độc lập và là thuộc tính của từng thread[^caps-split]. Service muốn nghe cổng dưới 1024 (như cổng 80) cần capability `CAP_NET_BIND_SERVICE`[^caps-netbind], không cần cả quyền root. Ngưỡng "cổng đặc quyền" còn tùy một giá trị sysctl của *network namespace* nơi service chạy (một phạm vi mạng tách biệt, có thiết bị mạng, bảng route và số cổng riêng[^netns-def]), nên có môi trường không cần capability này[^sysctl-unpriv-port].
+> **Trả lời ngắn.** Linux chia đặc quyền của superuser (root) thành nhiều đơn vị gọi là capabilities; mỗi đơn vị bật/tắt độc lập và là thuộc tính của từng thread[^caps-split]. Service muốn nghe cổng dưới 1024 (như cổng 80) cần capability `CAP_NET_BIND_SERVICE`[^caps-netbind], không cần cả quyền root. Ngưỡng "cổng đặc quyền" còn tùy một giá trị sysctl của *network namespace* nơi service chạy, nên có môi trường không cần capability này[^sysctl-unpriv-port]. (Network namespace là một phạm vi mạng tách biệt, có thiết bị mạng, bảng route và số cổng riêng[^netns-def].)
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì một chìa khóa vạn năng mở mọi phòng (root), ta phát từng chìa riêng cho từng phòng; service cổng 80 chỉ cầm chìa "bind cổng thấp".
+*Với service `orders`.* Ta muốn `orders` nghe cổng 80. Cách dễ nhất là chạy nó bằng root, nhưng khi đó một lỗi trong `orders` thành lỗi của root. Mục này cho thấy Linux có cách khác: chỉ trao cho `orders` đúng một đặc quyền là bind cổng thấp, và trả lời hai câu hỏi đi kèm: đặc quyền đó nằm ở đâu trên process, và nó có sống sót qua `exec` không.
 
-**Vấn đề.** Nếu "đặc quyền" chỉ có hai mức (UID 0 hay không), một web server chỉ cần bind cổng 80 cũng phải chạy root, và lỗi trong nó là lỗi root (nhận xét của người soạn). Từ Linux 2.2, kernel chia đặc quyền của superuser thành các đơn vị gọi là capabilities[^caps-split].
+### 3.1 Vì sao phải tách root
 
-**Vài capability điển hình** trong `capabilities(7)`:
+Nếu đặc quyền chỉ có hai mức (UID 0 hay không), một web server chỉ cần bind cổng 80 cũng phải chạy root, và lỗi trong nó là lỗi root (nhận xét của người soạn). Vì vậy từ Linux 2.2 kernel chia đặc quyền của superuser thành các đơn vị riêng, gọi là capabilities[^caps-split].
 
-- `CAP_NET_BIND_SERVICE`: bind socket vào cổng Internet đặc quyền (số cổng dưới 1024)[^caps-netbind].
+Vài capability điển hình:
+
+- `CAP_NET_BIND_SERVICE`: bind socket vào cổng Internet đặc quyền (số cổng dưới 1024)[^caps-netbind]. Đây là thứ `orders` cần.
 - `CAP_SYS_RESOURCE`: gồm nâng resource limit và ghi đè giới hạn `RLIMIT_NPROC`[^caps-sysres].
-- `CAP_SYS_ADMIN`: man page tự ghi là "overloaded" (gánh quá nhiều việc), gồm mount, `sethostname` và nhiều thao tác quản trị khác[^caps-sysadmin]. (Nhận xét của người soạn: gặp yêu cầu "cho container `--cap-add SYS_ADMIN`" thì nên coi gần như cấp root.)
+- `CAP_SYS_ADMIN`: man page tự ghi là "overloaded" (gánh quá nhiều việc), gồm mount, `sethostname` và nhiều thao tác quản trị khác[^caps-sysadmin]. Gặp yêu cầu "cho container `--cap-add SYS_ADMIN`" thì nên coi gần như cấp root (nhận xét của người soạn).
 
-**Mỗi thread có năm tập capability:**
+### 3.2 Năm tập capability của một thread
 
-| Tập | Ý nghĩa theo `capabilities(7)` |
+Mỗi thread mang năm tập capability, với vai trò như sau:
+
+| Tập | Ý nghĩa |
 |---|---|
 | Permitted | tập bao (superset) giới hạn cho effective[^caps-permitted]; bỏ một capability khỏi permitted là mất vĩnh viễn, trừ khi `execve` một chương trình setuid-root hoặc chương trình có file capability cấp lại capability đó[^caps-permitted-drop] |
 | Effective | tập kernel dùng để kiểm tra quyền cho thread[^caps-effective] |
@@ -153,20 +173,30 @@ Hình dung (nhận xét của người soạn): thay vì một chìa khóa vạn
 | Bounding | cơ chế giới hạn capability có thể nhận qua `execve`; theo thread từ Linux 2.6.25[^caps-bounding] |
 | Ambient (từ Linux 4.3) | tập giữ qua `execve` của chương trình không privileged; luôn là tập con của permitted ∩ inheritable[^caps-ambient] |
 
-Kiểm tra bằng `/proc/<pid>/status`: có `CapInh`, `CapPrm`, `CapEff` (hex mask), `CapBnd` và `CapAmb`, thêm `NoNewPrivs`[^proc-cap].
+Muốn kiểm tra trên `orders` đang chạy, đọc `/proc/<pid>/status`: có `CapInh`, `CapPrm`, `CapEff` (mask dạng hex), `CapBnd`, `CapAmb`, và thêm `NoNewPrivs`[^proc-cap].
 
-**Sau `execve`.** Capabilities cũng có thể gắn vào *file*: chúng lưu trong extended attribute `security.capability`, đặt bằng `setcap(8)`, và ghi attribute này cần `CAP_SETFCAP`; tập capability của file cùng tập của thread quyết định capability của thread sau `execve`[^caps-file]. File có một bit effective riêng: bật thì mọi capability permitted mới cũng được nâng lên effective, tắt thì không capability mới nào nằm ở effective[^caps-file-eff]. Hai điều quan trọng cho người vận hành dịch vụ (rút từ công thức ở phần Đi sâu; nhận xét của người soạn):
+### 3.3 Capability sau `execve`
 
-1. File capability với `F(permitted)` chứa `CAP_NET_BIND_SERVICE` và bit effective của file bật cho phép một binary không-root có capability đó ở cả permitted lẫn effective sau `exec` — đủ để bind cổng thấp — miễn bounding set của process còn chứa nó[^caps-formula]. Lưu ý: file capability bị bỏ qua nếu thread có `no_new_privs`, filesystem mount `nosuid` hoặc process đang bị ptrace[^exec-ignored][^exec-ignored-caps] (xem mục 2).
-2. Ambient capability là cách để capability sống sót qua `exec` của chương trình thường (không privileged), với điều kiện capability đó đang ở cả permitted và inheritable[^caps-ambient]. Man page nói rõ: chạy chương trình đổi UID/GID nhờ setuid/setgid, hoặc chương trình có file capability, sẽ xóa ambient set[^caps-ambient-clear]. systemd có directive `AmbientCapabilities=` cho service chạy bằng user không đặc quyền mà vẫn cần vài capability[^systemd-ambient].
+Phần này quan trọng với người deploy `orders`, vì quyết định capability có tới được process hay không. Capabilities gắn được vào chính *file* thực thi: chúng lưu trong extended attribute `security.capability`, đặt bằng `setcap(8)`, và ghi attribute này cần `CAP_SETFCAP`. Tập capability của file cùng tập của thread quyết định capability của thread sau `execve`[^caps-file]. File còn có một bit effective riêng: bật thì mọi capability permitted mới cũng được nâng lên effective, tắt thì không capability mới nào nằm ở effective[^caps-file-eff].
 
-**Đổi UID kéo theo đổi capabilities.** `credentials(7)` nhắc: thay đổi user/group ID của process có thể ảnh hưởng capabilities của nó, như mô tả trong `capabilities(7)`[^cred-caps]. Cụ thể, nếu real, effective hoặc saved UID từng có giá trị 0 và sau lần đổi cả ba đều khác 0, kernel xóa hết capabilities khỏi permitted, effective và ambient[^caps-uid-clear] (ví dụ: process root gọi `setuid(1000)`). Bit `SECBIT_NOROOT` là công tắc để kernel không cấp capabilities khi chạy chương trình setuid-root, hoặc khi process có effective hay real UID 0 gọi `execve`[^caps-noroot].
+Từ công thức ở phần Đi sâu rút ra hai điều cho người vận hành (nhận xét của người soạn):
 
-**Cổng 80.** *Theo docs kernel:* tham số `ip_unprivileged_port_start` định nghĩa cổng không đặc quyền đầu tiên trong network namespace; bind cổng đặc quyền cần root hoặc `CAP_NET_BIND_SERVICE`; đặt `0` là tắt toàn bộ cổng đặc quyền; mặc định `1024`; tham số theo từng namespace[^sysctl-unpriv-port]. *Quan sát* (một lần chạy trong container thử nghiệm, không phải bảo đảm): process uid 1000 với `CapEff = 0` **bind được** `0.0.0.0:80`, đồng thời `/proc/sys/net/ipv4/ip_unprivileged_port_start` đọc ra `0`. *Suy luận của người soạn:* hai điều trên khớp nhau — bind được vì ngưỡng bằng 0 trong namespace của container đó. Bài học: "cần `CAP_NET_BIND_SERVICE`" phụ thuộc giá trị sysctl của network namespace nơi service chạy, nên đừng suy ra kết luận chung từ một thử nghiệm trong một container.
+1. Gắn vào binary `orders` một file capability có `F(permitted)` chứa `CAP_NET_BIND_SERVICE` và bit effective bật, thì process không-root chạy binary đó có capability này ở cả permitted lẫn effective sau `exec`, đủ để bind cổng thấp, miễn là bounding set của process còn chứa nó[^caps-formula]. Cần nhớ file capability cũng bị bỏ qua trong các trường hợp setuid bị bỏ qua ở mục 2[^exec-ignored-caps]. Đó là khi thread có `no_new_privs`, filesystem mount `nosuid`, hoặc process đang bị ptrace[^exec-ignored].
+2. Ambient capability là cách để capability sống sót qua `exec` của chương trình thường (không privileged), với điều kiện capability đó đang ở cả permitted và inheritable[^caps-ambient]. Ngược lại, chạy chương trình đổi UID/GID nhờ setuid/setgid, hoặc chương trình có file capability, thì xóa ambient set[^caps-ambient-clear]. systemd có directive `AmbientCapabilities=` cho service chạy bằng user không đặc quyền mà vẫn cần vài capability[^systemd-ambient]; với `orders` đó là chỗ để khai `CAP_NET_BIND_SERVICE`.
+
+### 3.4 Đổi UID kéo theo đổi capabilities
+
+Đổi user/group ID của process có thể làm capabilities của nó đổi theo[^cred-caps]. Cụ thể, nếu real, effective hoặc saved UID từng có giá trị 0 và sau lần đổi cả ba đều khác 0, kernel xóa hết capabilities khỏi permitted, effective và ambient[^caps-uid-clear]; ví dụ là process root gọi `setuid(1000)` (nhận xét của người soạn). Ngoài ra, bit `SECBIT_NOROOT` là công tắc để kernel không cấp capabilities khi chạy chương trình setuid-root, hoặc khi process có effective hay real UID 0 gọi `execve`[^caps-noroot].
+
+### 3.5 Cổng 80 trong thực tế
+
+Docs kernel mô tả tham số `ip_unprivileged_port_start` như sau: nó định nghĩa cổng không đặc quyền đầu tiên trong network namespace; bind vào cổng đặc quyền cần root hoặc `CAP_NET_BIND_SERVICE`; đặt `0` là tắt toàn bộ cổng đặc quyền; mặc định là `1024`; và tham số này theo từng namespace[^sysctl-unpriv-port].
+
+Quan sát (một lần chạy trong container thử nghiệm, không phải bảo đảm): process uid 1000 với `CapEff = 0` **bind được** `0.0.0.0:80`, đồng thời `/proc/sys/net/ipv4/ip_unprivileged_port_start` đọc ra `0`. Hai điều này khớp nhau: bind được vì ngưỡng bằng 0 trong namespace của container đó (suy luận của người soạn). Bài học: câu "`orders` cần `CAP_NET_BIND_SERVICE`" phụ thuộc giá trị sysctl của network namespace nơi nó chạy, nên đừng suy ra kết luận chung từ một thử nghiệm trong một container.
 
 <details><summary>Đi sâu: công thức chuyển capability qua execve và quan sát trong container</summary>
 
-Công thức chuyển đổi theo man page[^caps-formula] như sau:
+Công thức chuyển capability qua `execve` theo man page[^caps-formula]:
 
 ```text
 P'(ambient)     = (file is privileged) ? 0 : P(ambient)
@@ -178,77 +208,93 @@ P'(bounding)    = P(bounding)
 
 Ở đây `P` là tập của thread trước `execve`, `P'` sau `execve`, `F` là tập của file.
 
-Quan sát chạy thật trong container: process root có `CapPrm = CapEff = CapBnd = 00000000a80c35fb`, còn process uid 1000 có `CapPrm = CapEff = 0000000000000000` nhưng `CapBnd` vẫn là `a80c35fb`. Đây là quan sát chứ không phải bảo đảm của docs. Giá trị này không phải tập đầy đủ vì container của lab không chạy `--privileged`: so với tập mặc định của Docker `a80425fb` (14 capability, giải mã ở [P8 Chương 05, mục 3](../08-containers/05-bao-mat-container.md)), nó hơn đúng `0x81000`, tức bit 12 (`CAP_NET_ADMIN`) và bit 19 (`CAP_SYS_PTRACE`) — hai capability mà `labs/linux.sh` thêm bằng `--cap-add` (phép trừ hex và việc gán bit ↔ tên là suy luận của người soạn, khớp bản giải mã ở P8 Chương 02 và 05). Khớp với man page: khi process có real và effective UID đều là 0 gọi `execve`, kernel coi file như có mọi capability, nên permitted mới = inheritable | bounding và effective = permitted, tức process nhận mọi capability trừ phần bị bounding set che[^caps-root-exec]; nếu tập inheritable nằm trong bounding set (giả định), đó chính là `CapPrm = CapEff = CapBnd` đã quan sát. Với uid 1000 chạy chương trình không có file capability (và ambient rỗng — giả định), các số hạng lấy từ file bằng 0 nên `P'(permitted)` = 0 theo công thức ở trên, còn `P'(bounding) = P(bounding)` nên `CapBnd` giữ nguyên (suy luận của người soạn từ công thức).
+Quan sát chạy thật trong container: process root có `CapPrm = CapEff = CapBnd = 00000000a80c35fb`, còn process uid 1000 có `CapPrm = CapEff = 0000000000000000` nhưng `CapBnd` vẫn là `a80c35fb`. Đây là quan sát chứ không phải bảo đảm của docs. Giá trị này không phải tập đầy đủ vì container của lab không chạy `--privileged`: so với tập mặc định của Docker `a80425fb` (14 capability, giải mã ở [P8 Chương 05, mục 3](../08-containers/05-bao-mat-container.md)), nó hơn đúng `0x81000`, tức bit 12 (`CAP_NET_ADMIN`) và bit 19 (`CAP_SYS_PTRACE`), hai capability mà `labs/linux.sh` thêm bằng `--cap-add` (phép trừ hex và việc gán bit ↔ tên là suy luận của người soạn, khớp bản giải mã ở P8 Chương 02 và 05).
+
+Các con số trên khớp với công thức. Khi process có real và effective UID đều là 0 gọi `execve`, kernel coi file như có mọi capability, nên permitted mới = inheritable | bounding và effective = permitted, tức process nhận mọi capability trừ phần bị bounding set che[^caps-root-exec]. Nếu tập inheritable nằm trong bounding set (giả định), đó chính là `CapPrm = CapEff = CapBnd` đã quan sát. Với uid 1000 chạy chương trình không có file capability (và ambient rỗng, cũng là giả định), các số hạng lấy từ file bằng 0 nên `P'(permitted)` = 0 theo công thức, còn `P'(bounding) = P(bounding)` nên `CapBnd` giữ nguyên (suy luận của người soạn từ công thức).
 
 </details>
 
-**Quay lại Q3:** đặc quyền root được tách thành capabilities theo thread; service cổng 80 cần `CAP_NET_BIND_SERVICE` (hoặc ngưỡng cổng đặc quyền được hạ trong namespace của nó), không cần chạy root.
+**Quay lại Q3:** đặc quyền root được tách thành capabilities theo thread; `orders` nghe cổng 80 cần `CAP_NET_BIND_SERVICE` (hoặc ngưỡng cổng đặc quyền được hạ trong namespace của nó), không cần chạy root.
 
 
 ## 4. Chẩn đoán process bằng `/proc/<pid>` (Q4)
 
-> **Trả lời ngắn.** `/proc` là một "filesystem giả" (pseudo-filesystem) làm giao diện tới cấu trúc dữ liệu của kernel[^proc5-pseudo]; với người dùng, nó trông như một cây thư mục và file (nhận xét của người soạn). Mỗi process có thư mục `/proc/<pid>`[^proc-pid-dir]: `status` là bản tóm tắt dễ đọc cho người[^proc-status], `fd/` liệt kê file đang mở[^proc-fd], `maps` cho các vùng nhớ[^proc-maps], `limits` cho resource limit[^proc-limits], `stat` là thông tin trạng thái mà `ps` dùng[^proc-stat].
+> **Trả lời ngắn.** `/proc` là một "filesystem giả" (pseudo-filesystem) làm giao diện tới cấu trúc dữ liệu của kernel[^proc5-pseudo]; với người dùng, nó trông như một cây thư mục và file (nhận xét của người soạn). Mỗi process có thư mục `/proc/<pid>`[^proc-pid-dir]. Trong đó `status` là bản tóm tắt dễ đọc cho người[^proc-status]. `fd/` liệt kê file đang mở[^proc-fd]. `maps` cho các vùng nhớ[^proc-maps]. `limits` cho resource limit[^proc-limits]. Còn `stat` là thông tin trạng thái mà `ps` dùng[^proc-stat].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `/proc` giống bảng đồng hồ của xe — bạn không mở động cơ, chỉ đọc kim chỉ; mỗi process có một bảng riêng.
+*Với service `orders`.* Giả sử `orders` đột ngột ngừng nhận kết nối. Bạn SSH vào máy, và điều cần biết lúc đó là: process còn sống không, đang mang quyền gì, đang mở bao nhiêu fd, giới hạn là bao nhiêu. Tất cả có trong `/proc/<pid>`. Mục này đi qua từng file.
 
-**Bản chất.** `proc(5)`: proc filesystem là *pseudo-filesystem* cung cấp giao diện tới cấu trúc dữ liệu của kernel[^proc5-pseudo] (nhận xét của người soạn: "pseudo" nghĩa là nó không phải thư mục lưu trên đĩa); phần lớn file chỉ đọc, một số ghi được để đổi biến kernel[^proc5-rw]. Mỗi process đang chạy có thư mục con đặt theo PID[^proc-pid-dir]. `/proc/self` là symlink "ma thuật" trỏ tới thư mục của chính process truy cập[^proc-self].
+### 4.1 `/proc` là gì
 
-**`/proc/<pid>/status`** — bản "dễ đọc cho người" của `stat` và `statm`[^proc-status]. Các dòng quan trọng:
+`/proc` là một pseudo-filesystem cung cấp giao diện tới cấu trúc dữ liệu của kernel[^proc5-pseudo]. Chữ "pseudo" nghĩa là nó không phải thư mục lưu trên đĩa (nhận xét của người soạn). Phần lớn file trong đó chỉ đọc, một số ghi được để đổi biến kernel[^proc5-rw]. Mỗi process đang chạy có một thư mục con đặt theo PID[^proc-pid-dir]. `/proc/self` là symlink "ma thuật" trỏ tới thư mục của chính process đang truy cập[^proc-self].
 
-| Dòng | Ý nghĩa (theo `proc(5)`) |
+### 4.2 `/proc/<pid>/status`: tổng quan
+
+`status` là bản "dễ đọc cho người" của `stat` và `statm`[^proc-status]. Với `orders`, các dòng đáng xem là:
+
+| Dòng | Ý nghĩa |
 |---|---|
 | `State` | một trong R (running), S (sleeping), D (disk sleep), T (stopped), t (tracing stop), Z (zombie), X (dead)[^proc-state]; các trạng thái process nói kỹ hơn ở [Chương 03, mục 1](03-process.md) |
 | `Uid`, `Gid`, `Groups` | xem mục 1[^proc-status-uid] |
 | `FDSize` | số slot file descriptor đang được cấp[^proc-fdsize] |
 | `VmRSS` | resident set size, bằng tổng `RssAnon + RssFile + RssShmem`[^proc-vmrss]; `proc(5)` ghi chú một số giá trị bộ nhớ là không chính xác vì một tối ưu scalability trong kernel, cần giá trị chính xác thì dùng `smaps`/`smaps_rollup`[^proc-inaccurate] (đọc RSS kỹ hơn: [P3 Chương 05, mục 6](../03-memory/05-bo-nho-tien-trinh-linux.md)) |
 | `Threads` | số thread của process chứa thread này[^proc-threads] |
-| `CapInh/Prm/Eff/Bnd/Amb`, `NoNewPrivs`, `Seccomp` | trạng thái đặc quyền[^proc-cap] |
-| `Umask` | umask (từ Linux 4.7)[^proc-umask] |
+| `CapInh/Prm/Eff/Bnd/Amb`, `NoNewPrivs`, `Seccomp` | trạng thái đặc quyền (mục 3)[^proc-cap] |
+| `Umask` | umask, từ Linux 4.7 (mục 2)[^proc-umask] |
 | `voluntary_ctxt_switches`, `nonvoluntary_ctxt_switches` | số lần context switch tự nguyện / không tự nguyện[^proc-ctxt] (ý nghĩa hai bộ đếm: [Chương 01, mục 5.5](01-os-va-kernel.md)) |
 
-**`/proc/<pid>/fd/`** — một entry cho mỗi file process đang mở, đặt tên theo số fd, là symlink tới file thật[^proc-fd]; với pipe và socket, nội dung link là loại file kèm inode, dạng `type:[inode]`, ví dụ `socket:[2248868]`[^proc-fd-sock]. Vì mỗi file đang mở là một entry, đếm số entry trong thư mục này cho biết process đang dùng bao nhiêu fd (suy luận của người soạn từ định nghĩa trên) — so với `Max open files` ở mục 6.
+### 4.3 `fd`, `maps`, `limits`, `stat`
 
-**`/proc/<pid>/maps`** — các vùng nhớ đang map và quyền của chúng[^proc-maps]. Định dạng mỗi dòng: `address perms offset dev inode pathname`[^proc-maps-fmt]. Cách đọc sâu (VMA, `smaps`, pathname giả như `[heap]`, `[stack]`, `[vdso]`, ASLR) thuộc Phase 3 — xem [P3 Chương 05 — Bộ nhớ của tiến trình trên Linux, mục 3](../03-memory/05-bo-nho-tien-trinh-linux.md).
+`/proc/<pid>/fd/` có một entry cho mỗi file process đang mở, đặt tên theo số fd và là symlink tới file thật[^proc-fd]. Với pipe và socket, nội dung link là loại file kèm inode, dạng `type:[inode]`, ví dụ `socket:[2248868]`[^proc-fd-sock]. Vì mỗi file đang mở là một entry, đếm số entry cho biết `orders` đang dùng bao nhiêu fd (suy luận của người soạn từ định nghĩa trên); số đó đem so với `Max open files` ở mục 6.
 
-**`/proc/<pid>/limits`** — soft limit, hard limit và đơn vị của từng resource limit (từ Linux 2.6.24); từ 2.6.36 mọi user đọc được[^proc-limits]. Đây là nơi trả lời nhanh "service này đang chạy với `nofile` bao nhiêu?" — xem mục 6.
+`/proc/<pid>/maps` liệt kê các vùng nhớ đang map và quyền của chúng[^proc-maps]. Mỗi dòng có dạng `address perms offset dev inode pathname`[^proc-maps-fmt]. Cách đọc sâu (VMA, `smaps`, pathname giả như `[heap]`, `[stack]`, `[vdso]`, ASLR) thuộc Phase 3, xem [P3 Chương 05 — Bộ nhớ của tiến trình trên Linux, mục 3](../03-memory/05-bo-nho-tien-trinh-linux.md).
 
-**`/proc/<pid>/stat`** — thông tin trạng thái mà `ps(1)` dùng, các trường theo thứ tự[^proc-stat].
+`/proc/<pid>/limits` cho soft limit, hard limit và đơn vị của từng resource limit (từ Linux 2.6.24); từ 2.6.36 mọi user đọc được[^proc-limits]. Đây là chỗ trả lời nhanh câu "`orders` đang chạy với `nofile` bao nhiêu?"; mục 6 sẽ dùng tới.
 
-**Kịch bản chẩn đoán `Too many open files` (đề xuất của người soạn):** đọc `/proc/<pid>/limits` (soft/hard thực tế), đếm `ls /proc/<pid>/fd | wc -l`, rồi `ls -l` để xem loại fd chiếm nhiều (`socket:[…]` nhiều thì nghi leak connection).
+`/proc/<pid>/stat` là thông tin trạng thái mà `ps(1)` dùng[^proc-stat].
+
+### 4.4 Kịch bản: `orders` báo `Too many open files`
+
+Thứ tự đọc nên là (đề xuất của người soạn): xem `/proc/<pid>/limits` để biết soft/hard limit thực tế, đếm `ls /proc/<pid>/fd | wc -l`, rồi `ls -l` để xem loại fd nào chiếm nhiều. Nếu `socket:[…]` chiếm phần lớn thì nghi `orders` đang leak connection.
 
 <details><summary>Đi sâu: parser của stat, fdinfo, hidepid, trạng thái D</summary>
 
-- **`stat`:** ví dụ trường (14) `utime` đo bằng clock tick, chia cho `sysconf(_SC_CLK_TCK)`[^proc-utime]. Trường (2) `comm` nằm trong ngoặc đơn[^proc-comm] nên (nhận xét của người soạn) parser an toàn phải tìm dấu `)` **cuối cùng**, hoặc dùng `status`.
+- **`stat`:** ví dụ trường (14) `utime` đo bằng clock tick, chia cho `sysconf(_SC_CLK_TCK)`[^proc-utime]. Trường (2) `comm` nằm trong ngoặc đơn[^proc-comm], nên (nhận xét của người soạn) parser an toàn phải tìm dấu `)` **cuối cùng**, hoặc dùng `status`.
 - **`fd` và `fdinfo`:** với fd kiểu socket, inode có thể dùng để tra thêm trong `/proc/net/`[^proc-fd-sock]. `/proc/<pid>/fdinfo/` cho thông tin từng fd, nội dung phụ thuộc loại file; chỉ chủ process đọc được[^proc-fdinfo].
-- **`hidepid=2`:** mount option này làm thư mục `/proc/<pid>` của user khác vô hình[^proc-hidepid] (nhận xét của người soạn: tool monitoring non-root có thể "không thấy" process vì thế).
-- **Trạng thái `D`:** `proc(5)` gọi nó là "disk sleep"[^proc-state]; `ps(1)` mô tả mã `D` là uninterruptible sleep, thường do I/O[^ps-d]. Chữ "uninterruptible" (không bị ngắt) gợi ý rằng signal không đánh thức process ngay, nên process ở `D` có thể không thoát ngay dù đã bị `kill` — đây là suy luận của người soạn, man page không nói thẳng.
+- **`hidepid=2`:** mount option này làm thư mục `/proc/<pid>` của user khác vô hình[^proc-hidepid]. Hệ quả (nhận xét của người soạn): tool monitoring chạy non-root có thể "không thấy" process vì thế.
+- **Trạng thái `D`:** `proc(5)` gọi nó là "disk sleep"[^proc-state]; `ps(1)` mô tả mã `D` là uninterruptible sleep, thường do I/O[^ps-d]. Chữ "uninterruptible" (không bị ngắt) gợi ý rằng signal không đánh thức process ngay, nên process ở `D` có thể không thoát ngay dù đã bị `kill`; đây là suy luận của người soạn, man page không nói thẳng.
 
 </details>
 
-**Quay lại Q4:** `status` để xem tổng quan (ID, trạng thái, số fd slot, capabilities), `fd` để đếm và phân loại fd, `maps` cho vùng nhớ, `limits` cho giới hạn, `stat` cho thông tin trạng thái mà `ps` dùng.
+**Quay lại Q4:** với `orders` đang chạy, `status` cho tổng quan (ID, trạng thái, số fd slot, capabilities), `fd` để đếm và phân loại fd, `maps` cho vùng nhớ, `limits` cho giới hạn, `stat` cho thông tin trạng thái mà `ps` dùng.
 
 
 ## 5. `/sys` khác `/proc` thế nào, và `sysctl` chỉnh kernel ra sao? (Q5)
 
-> **Trả lời ngắn.** `/sys` (sysfs) là một filesystem nằm trong RAM, xuất cấu trúc dữ liệu của kernel cùng thuộc tính và liên kết giữa chúng ra user space[^sysfs-what]; trong thực tế đó là cây thiết bị, bus, driver ở dạng thư mục và file[^sysfs-dev]. `/proc` thì có thư mục theo từng process[^proc-pid-dir] và `/proc/sys` chứa các biến kernel[^proc-sys]. `sysctl` không phải cơ chế riêng: nó là công cụ chỉnh tham số kernel lúc chạy, các tham số đó là những gì nằm dưới `/proc/sys/`, và nó cần procfs để hoạt động[^sysctl-desc].
+> **Trả lời ngắn.** `/sys` (sysfs) là một filesystem nằm trong RAM, xuất cấu trúc dữ liệu của kernel cùng thuộc tính và liên kết giữa chúng ra user space[^sysfs-what]. Trong thực tế đó là cây thiết bị, bus, driver ở dạng thư mục và file[^sysfs-dev]. `/proc` thì có thư mục theo từng process[^proc-pid-dir]. `/proc/sys` chứa các biến kernel[^proc-sys]. `sysctl` không phải cơ chế riêng: nó là công cụ chỉnh tham số kernel lúc chạy, các tham số đó là những gì nằm dưới `/proc/sys/`, và nó cần procfs để hoạt động[^sysctl-desc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `/proc` là bảng đồng hồ theo từng process cộng một tủ công tắc chung (`/proc/sys`); `/sys` là sơ đồ lắp ráp phần cứng, mỗi linh kiện một thư mục.
+*Với service `orders`.* Khi vận hành `orders` bạn sẽ hỏi hai câu. Một là thiết bị mà máy đang dùng (card mạng, đĩa) hiện ra ở đâu để xem. Hai là muốn chỉnh một tham số kernel, như ngưỡng cổng đặc quyền ở mục 3 hay `somaxconn` ở phần Đi sâu, thì chỉnh ở đâu và bằng công cụ gì (nhận xét của người soạn). Câu một thuộc về `/sys`, câu hai thuộc về `/proc/sys` và `sysctl`.
 
-**sysfs.** `sysfs` là filesystem nằm trong RAM, ban đầu dựa trên ramfs, xuất cấu trúc dữ liệu kernel, thuộc tính của chúng và liên kết giữa chúng ra user space; nó gắn chặt với hạ tầng *kobject* (đối tượng kernel đăng ký trong hệ thống)[^sysfs-what]. Với mỗi kobject đã đăng ký, một thư mục được tạo trong sysfs[^sysfs-dir]. Mount bằng `mount -t sysfs sysfs /sys`[^sysfs-mount]. **Thuộc tính** được xuất thành file thường: sysfs chuyển I/O file thành lời gọi method của attribute; quy ước file ASCII, tốt nhất một giá trị mỗi file[^sysfs-attr].
+### 5.1 sysfs
 
-**So với `/proc`.** `/proc` có một thư mục cho mỗi process đang chạy[^proc-pid-dir] và `/proc/sys` chứa các file ứng với biến kernel[^proc-sys]; mỗi file `/proc` có định dạng riêng — so `status`, `stat`, `maps` ở mục 4 (nhận xét của người soạn). `/sys` là cây theo đối tượng kernel, mỗi kobject một thư mục[^sysfs-dir], và theo quy ước một giá trị mỗi file[^sysfs-attr]. Chương này chỉ nêu các thư mục cấp cao của `/sys` ở phần Đi sâu, không liệt kê tên file cụ thể bên trong vì chưa có nguồn trích cho chúng.
+`sysfs` là filesystem nằm trong RAM, ban đầu dựa trên ramfs. Nó xuất cấu trúc dữ liệu kernel, thuộc tính của chúng và liên kết giữa chúng ra user space, và gắn chặt với hạ tầng *kobject* (đối tượng kernel đăng ký trong hệ thống)[^sysfs-what]. Với mỗi kobject đã đăng ký, kernel tạo một thư mục trong sysfs[^sysfs-dir]. Bạn mount nó bằng `mount -t sysfs sysfs /sys`[^sysfs-mount]. Thuộc tính của kobject được xuất thành file thường: sysfs chuyển I/O file thành lời gọi method của attribute, và theo quy ước đó là file ASCII, tốt nhất mỗi file một giá trị[^sysfs-attr].
 
-**sysctl.** `/proc/sys` chứa các file và thư mục tương ứng với biến kernel; đọc được và (một số) ghi được qua proc filesystem, và qua syscall `sysctl(2)` đã bị deprecated[^proc-sys]. Docs kernel mô tả `/proc/sys/` là nơi để chỉnh một số khía cạnh của kernel lúc chạy mà không cần công cụ đặc biệt[^ksysctl-intro]. Công cụ `sysctl(8)` (gói procps) dùng để sửa tham số kernel lúc chạy; các tham số có sẵn là những gì dưới `/proc/sys/`, và nó cần procfs để hoạt động[^sysctl-desc]. Tên khóa dùng dấu `.` thay `/` (ví dụ `kernel.ostype`), dấu `/` cũng được chấp nhận[^sysctl-param]. Theo docs kernel, để dùng các cấu hình này cần có root access[^ksysctl-need]; trong container, runtime quyết định tham số nào chỉnh được (nhận xét của người soạn).
+### 5.2 So với `/proc`
+
+Cả hai đều là filesystem giả, nhưng tổ chức khác nhau. `/proc` có một thư mục cho mỗi process đang chạy[^proc-pid-dir]. `/proc/sys` chứa các file ứng với biến kernel[^proc-sys]. Mỗi file `/proc` còn có định dạng riêng, như `status`, `stat`, `maps` ở mục 4 (nhận xét của người soạn). `/sys` thì là cây theo đối tượng kernel, mỗi kobject một thư mục[^sysfs-dir]. Theo quy ước, mỗi file `/sys` chứa một giá trị[^sysfs-attr]. Chương này chỉ nêu các thư mục cấp cao của `/sys` ở phần Đi sâu, không liệt kê tên file cụ thể bên trong vì chưa có nguồn trích cho chúng.
+
+### 5.3 sysctl
+
+`/proc/sys` chứa các file và thư mục ứng với biến kernel; bạn đọc được, và một số ghi được, qua proc filesystem hoặc qua syscall `sysctl(2)` (syscall này đã bị deprecated)[^proc-sys]. Docs kernel mô tả `/proc/sys/` là chỗ để chỉnh một số khía cạnh của kernel lúc chạy mà không cần công cụ đặc biệt[^ksysctl-intro]. Nếu muốn có công cụ thì có `sysctl(8)` (gói procps): nó sửa tham số kernel lúc chạy, các tham số có sẵn là những gì dưới `/proc/sys/`, và nó cần procfs để hoạt động[^sysctl-desc]. Tên khóa dùng dấu `.` thay cho `/` (ví dụ `kernel.ostype`), dù dấu `/` cũng được chấp nhận[^sysctl-param]. Để dùng các cấu hình này cần có root access[^ksysctl-need]. Còn trong container thì runtime quyết định tham số nào chỉnh được (nhận xét của người soạn).
 
 <details><summary>Đi sâu: cấu trúc sysfs, cấu hình bền vững, các tham số sysctl liên quan backend</summary>
 
-- **Cấu trúc thư mục** cấp cao nhất của sysfs theo docs kernel: `block/ bus/ class/ dev/ devices/ firmware/ fs/ hypervisor/ kernel/ module/ power/`[^sysfs-layout]. `devices/` là biểu diễn của cây thiết bị nội bộ kernel; `bus/` chứa các kiểu bus, mỗi bus có `devices/` (symlink tới thiết bị trong `/sys/devices`) và `drivers/`[^sysfs-dev]. Thuộc tính mới phải được ghi vào `Documentation/ABI`[^sysfs-abi].
-- **Cấu hình bền vững:** với `sysctl --system`, man page liệt kê thứ tự thư mục được đọc: `/etc/sysctl.d/*.conf`, `/run/sysctl.d/*.conf`, `/usr/local/lib/sysctl.d/*.conf`, `/usr/lib/sysctl.d/*.conf`, `/lib/sysctl.d/*.conf`, rồi `/etc/sysctl.conf`; file trùng tên ở thư mục sau bị bỏ qua[^sysctl-conf], và mọi file được sắp theo thứ tự từ vựng bất kể thư mục[^sysctl-sort]. Cách persist khác nhau theo distro/hệ thống init — hãy đọc man page của chính hệ thống bạn.
-- **Tham số liên quan trực tiếp backend** (trích từ `proc(5)` và `listen(2)`):
+- **Cấu trúc thư mục** cấp cao nhất của sysfs theo docs kernel: `block/ bus/ class/ dev/ devices/ firmware/ fs/ hypervisor/ kernel/ module/ power/`[^sysfs-layout]. `devices/` là biểu diễn của cây thiết bị nội bộ kernel; `bus/` chứa các kiểu bus, mỗi bus có `devices/` (symlink tới thiết bị trong `/sys/devices`) và `drivers/`[^sysfs-dev]. Thuộc tính mới của sysfs phải được ghi vào `Documentation/ABI`[^sysfs-abi].
+- **Cấu hình bền vững:** với `sysctl --system`, man page liệt kê thứ tự thư mục được đọc: `/etc/sysctl.d/*.conf`, `/run/sysctl.d/*.conf`, `/usr/local/lib/sysctl.d/*.conf`, `/usr/lib/sysctl.d/*.conf`, `/lib/sysctl.d/*.conf`, rồi `/etc/sysctl.conf`; file trùng tên ở thư mục sau bị bỏ qua[^sysctl-conf]. Mọi file được sắp theo thứ tự từ vựng bất kể thư mục[^sysctl-sort]. Cách persist khác nhau theo distro và hệ thống init, nên hãy đọc man page của chính hệ thống bạn.
+- **Tham số liên quan trực tiếp đến backend** (trích từ `proc(5)` và `listen(2)`):
 
 | Tham số | Ý nghĩa |
 |---|---|
@@ -257,7 +303,7 @@ Hình dung (nhận xét của người soạn): `/proc` là bảng đồng hồ 
 | `fs.nr_open` | trần mà `RLIMIT_NOFILE` có thể được nâng tới, áp dụng cả cho process privileged lẫn không; mặc định 1048576[^proc-nropen] |
 | `net.core.somaxconn` | trần của đối số `backlog` của `listen(2)`[^proc-somaxconn]; `listen(2)` nói thêm backlog vượt giá trị này bị cắt âm thầm, mặc định 4096 từ Linux 5.4 (trước đó 128)[^listen-somaxconn]; hai hàng đợi của socket nghe và SYN cookies: [P6 Chương 07, mục 2](../06-networking/07-socket-va-kernel.md) |
 
-Chạy thật trong container: `fs.nr_open = 1048576` và `file-nr` = `864 0 9223372036854775807`; số handle rảnh bằng 0 khớp docs kernel: từ Linux 2.6 số file handle rảnh luôn được báo là 0 và đó không phải lỗi[^ksysctl-filenr].
+Chạy thật trong container: `fs.nr_open = 1048576` và `file-nr` = `864 0 9223372036854775807`. Số handle rảnh bằng 0 khớp docs kernel: từ Linux 2.6 số file handle rảnh luôn được báo là 0 và đó không phải lỗi[^ksysctl-filenr].
 
 </details>
 
@@ -270,24 +316,36 @@ Chạy thật trong container: `fs.nr_open = 1048576` và `file-nr` = `864 0 922
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `RLIMIT_NOFILE` là hạn mức thẻ mượn sách của từng người; `fs.file-max` là số sách của cả thư viện; `fs.nr_open` là mức trần tuyệt đối mà thư viện cho phép một thẻ được nâng tới.
+*Với service `orders`.* Giả sử `orders` lên traffic và log bắt đầu có dòng `Too many open files (os error 24)`. Mỗi kết nối client là một fd, nên đây là chuyện sớm muộn gì cũng gặp. Có ba con số liên quan, và chúng chồng lên nhau: giới hạn mỗi process, trần của giới hạn đó, và giới hạn của cả máy. Mục này xếp chúng theo thứ tự để bạn biết cần nâng cái nào, ở đâu.
 
-**Soft limit và hard limit.** `getrlimit(2)`/`setrlimit(2)` làm việc với struct có `rlim_cur` (soft) và `rlim_max` (hard). **Soft limit** là giá trị kernel thực sự thi hành; **hard limit** là trần của soft. Quy tắc đổi: process không privileged chỉ đặt soft trong khoảng từ 0 tới hard, và hạ hard (không đảo ngược được)[^rlim-soft]; process privileged (trên Linux: có `CAP_SYS_RESOURCE` trong initial user namespace) đổi tùy ý cả hai[^rlim-priv].
+### 6.1 Soft limit và hard limit
 
-**Thừa kế.** Con do `fork` thừa hưởng resource limit; limit được giữ qua `execve`; limit là thuộc tính theo process, các thread chia sẻ[^rlim-inherit]. Vì vậy `ulimit` của shell (builtin của shell) áp lên mọi lệnh shell chạy[^rlim-shell]. Man page bash: hard limit không thể được user thường nâng lên, soft có thể nâng tới hard; không chỉ rõ `-H`/`-S` thì đặt cả hai[^bash-ulimit]. Xem limit của mọi process qua `/proc/<pid>/limits` (từ Linux 2.6.24)[^rlim-proc].
+`getrlimit(2)`/`setrlimit(2)` làm việc với một struct có `rlim_cur` (soft) và `rlim_max` (hard). **Soft limit** là giá trị kernel thực sự thi hành; **hard limit** là trần của soft. Về quy tắc đổi: process không privileged chỉ đặt soft trong khoảng từ 0 tới hard, và hạ hard (không đảo ngược được)[^rlim-soft]. Process privileged (trên Linux: có `CAP_SYS_RESOURCE` trong initial user namespace) đổi tùy ý cả hai[^rlim-priv].
 
-**Hai lỗi dễ lẫn nhau:**
+### 6.2 Limit đi theo process con
+
+Con do `fork` thừa hưởng resource limit, limit được giữ qua `execve`, và nó là thuộc tính theo process mà các thread chia sẻ[^rlim-inherit]. Vì vậy `ulimit` của shell (một builtin của shell) áp lên mọi lệnh shell chạy[^rlim-shell]. Với `orders` điều này có nghĩa là limit của nó đến từ bên đã khởi động nó (nhận xét của người soạn). Về cách đổi: user thường không nâng hard limit được, soft nâng được tới hard, và nếu không chỉ rõ `-H`/`-S` thì `ulimit` đặt cả hai[^bash-ulimit]. Còn xem limit của process bất kỳ thì đọc `/proc/<pid>/limits` (từ Linux 2.6.24)[^rlim-proc].
+
+### 6.3 `EMFILE` và `ENFILE`
+
+Hai lỗi này dễ lẫn nhau, nhưng chúng ứng với hai giới hạn khác nhau:
 
 | Lỗi | Nghĩa | Phạm vi |
 |---|---|---|
 | `EMFILE` | đã chạm giới hạn số fd mở **của một process**[^open-emfile] | `RLIMIT_NOFILE` |
 | `ENFILE` | đã chạm giới hạn tổng số file mở **toàn hệ thống**[^open-enfile] | `fs.file-max`[^proc-filemax] |
 
-`accept(2)` cũng trả `EMFILE` khi chạm giới hạn per-process[^accept-emfile]. Với server, đó là tình huống nguy hiểm: kết nối đang chờ trong hàng đợi accept nhưng `accept` thất bại; với epoll level-triggered thì vòng lặp có thể quay trống vì fd nghe vẫn báo sẵn sàng, còn với edge-triggered thì ngược lại, kết nối có thể bị bỏ quên trong hàng đợi vì không còn edge mới ([P7 Chương 02, mục 5](../07-io-async/02-select-poll-epoll.md) về LT/ET). Cả hai là suy luận của người soạn từ hai sự kiện đã trích (backlog của `listen` ở mục 5 và `EMFILE` ở đây) cộng quy tắc LT/ET của epoll.
+`accept(2)` cũng trả `EMFILE` khi chạm giới hạn per-process[^accept-emfile]. Với server như `orders`, đó là tình huống nguy hiểm: kết nối đang chờ trong hàng đợi accept nhưng `accept` thất bại. Với epoll level-triggered, vòng lặp có thể quay trống vì fd nghe vẫn báo sẵn sàng. Với edge-triggered thì ngược lại, kết nối có thể bị bỏ quên trong hàng đợi vì không còn edge mới ([P7 Chương 02, mục 5](../07-io-async/02-select-poll-epoll.md) về LT/ET). Cả hai là suy luận của người soạn từ hai sự kiện đã trích (backlog của `listen` ở mục 5 và `EMFILE` ở đây) cộng quy tắc LT/ET của epoll.
 
-**Thứ tự các trần.** `RLIMIT_NOFILE` là một giá trị lớn hơn số fd lớn nhất có thể mở đúng một đơn vị (limit 64 thì fd cao nhất là 63)[^rlim-nofile]. Nâng hard limit `RLIMIT_NOFILE` vượt `fs.nr_open` cho `EPERM`[^rlim-eperm]; docs kernel mô tả `nr_open` là số file-handle tối đa một process có thể cấp phát[^ksysctl-nropen]. Thứ tự trần (nhận xét của người soạn, tổng hợp): soft ≤ hard ≤ `fs.nr_open`, còn `fs.file-max` là trần tổng của cả hệ thống.
+### 6.4 Thứ tự các trần
 
-**Đặt limit cho service.** Shell dùng `ulimit -n`; systemd dùng `LimitNOFILE=` (cùng `LimitNPROC=`, `LimitAS=`…), và bảng trong docs systemd ghép `LimitNOFILE=` với `ulimit -n`[^systemd-ulimit-table]. Một giá trị đơn đặt soft và hard bằng nhau; cặp `soft:hard` đặt riêng từng giá trị; `infinity` là không giới hạn[^systemd-limit]. Trong chương trình thì gọi `setrlimit`/`prlimit`. Lưu ý: ghi chú đi kèm `LimitNOFILE=` trong bảng đó mở đầu bằng lời khuyên đừng dùng nó, vì hard limit mặc định hiện nay đã cao (524288) và ứng dụng thường nên tự nâng soft limit lên hard limit nếu chấp nhận fd lớn hơn 1023[^systemd-nofile]; vì vậy chỉ đặt `LimitNOFILE=` khi bạn có lý do cụ thể (nhận xét của người soạn).
+`RLIMIT_NOFILE` là một giá trị lớn hơn số fd lớn nhất có thể mở đúng một đơn vị, nên limit 64 thì fd cao nhất là 63[^rlim-nofile]. Nâng hard limit `RLIMIT_NOFILE` vượt `fs.nr_open` thì nhận `EPERM`[^rlim-eperm]; docs kernel mô tả `nr_open` là số file-handle tối đa một process có thể cấp phát[^ksysctl-nropen]. Tổng hợp lại (nhận xét của người soạn): soft ≤ hard ≤ `fs.nr_open`, còn `fs.file-max` là trần tổng của cả hệ thống.
+
+### 6.5 Đặt limit cho `orders`
+
+Trong shell bạn dùng `ulimit -n`. Trong unit systemd của `orders` thì dùng `LimitNOFILE=` (cùng `LimitNPROC=`, `LimitAS=`…); bảng trong docs systemd ghép `LimitNOFILE=` với `ulimit -n`[^systemd-ulimit-table]. Một giá trị đơn đặt soft và hard bằng nhau, cặp `soft:hard` đặt riêng từng giá trị, còn `infinity` là không giới hạn[^systemd-limit]. Trong chương trình thì gọi `setrlimit`/`prlimit`.
+
+Có một lưu ý: ghi chú đi kèm `LimitNOFILE=` trong bảng đó mở đầu bằng lời khuyên đừng dùng nó, vì hard limit mặc định hiện nay đã cao (524288) và ứng dụng thường nên tự nâng soft limit lên hard limit nếu chấp nhận fd lớn hơn 1023[^systemd-nofile]. Vì vậy chỉ đặt `LimitNOFILE=` khi bạn có lý do cụ thể (nhận xét của người soạn).
 
 <details><summary>Đi sâu: thí nghiệm EMFILE bằng Rust, prlimit, RLIMIT_NPROC/AS, lưu ý của systemd</summary>
 
@@ -317,7 +375,7 @@ Max open files            64                   64                   files
 opened 61 files then: Too many open files (os error 24) | raw=Some(24) kind=Uncategorized
 ```
 
-Giải thích: limit 64 gồm cả fd 0, 1, 2 nên mở được 61 file nữa — khớp định nghĩa của `RLIMIT_NOFILE` là giá trị lớn hơn số fd lớn nhất có thể mở đúng một đơn vị, tức fd cao nhất là 63[^rlim-nofile]. `kind=Uncategorized` là quan sát với Rust 1.95.0 ([Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md) giải thích cách `std` suy `kind` từ `errno`); cần phân biệt thì so `raw_os_error()` với `libc::EMFILE`. Quan sát thêm: ngay sau `EMFILE`, `fs::read_dir("/proc/self/fd")` trong cùng process cũng thất bại (`Err(Some(24))`) — hết fd thì chẩn đoán từ bên trong cũng hỏng (nhận xét của người soạn: nên chẩn đoán từ process ngoài).
+Giải thích: limit 64 gồm cả fd 0, 1, 2 nên mở được 61 file nữa. Con số này khớp định nghĩa của `RLIMIT_NOFILE` là giá trị lớn hơn số fd lớn nhất có thể mở đúng một đơn vị, tức fd cao nhất là 63[^rlim-nofile]. `kind=Uncategorized` là quan sát với Rust 1.95.0 ([Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md) giải thích cách `std` suy `kind` từ `errno`); cần phân biệt thì so `raw_os_error()` với `libc::EMFILE`. Quan sát thêm: ngay sau `EMFILE`, `fs::read_dir("/proc/self/fd")` trong cùng process cũng thất bại (`Err(Some(24))`). Nghĩa là hết fd thì chẩn đoán từ bên trong cũng hỏng, nên (nhận xét của người soạn) hãy chẩn đoán từ process ngoài.
 
 Cùng container: `ulimit -Sn` = 1024, `ulimit -Hn` = 524288; root chạy `ulimit -n 100000` thành công (không có `-H`/`-S` thì đặt cả hai[^bash-ulimit]).
 
@@ -329,12 +387,12 @@ Cùng container: `ulimit -Sn` = 1024, `ulimit -Hn` = 524288; root chạy `ulimit
 | `RLIMIT_NPROC` | giới hạn số process (chính xác hơn, thread) của **real UID** của bên gọi; khi số process của real UID đó đã đạt tới limit thì `fork` lỗi `EAGAIN`[^rlim-nproc]; không áp dụng cho process có `CAP_SYS_ADMIN`, `CAP_SYS_RESOURCE` hoặc real UID 0[^rlim-nproc-exempt] |
 | `RLIMIT_AS` | kích thước tối đa của virtual memory (address space); `brk`, `mmap`, `mremap` vượt thì `ENOMEM`[^rlim-as] |
 
-- `RLIMIT_NPROC` đếm theo real UID của bên gọi[^rlim-nproc]; docs systemd nói rõ `LimitNPROC=` giới hạn số process của một (real) UID chứ không phải số process do service fork ra, nên giới hạn cộng dồn cho mọi process cùng UID[^systemd-nproc] — hệ quả: hai service chạy chung UID chia chung một ngân sách.
+- `RLIMIT_NPROC` đếm theo real UID của bên gọi[^rlim-nproc]. Docs systemd nói rõ `LimitNPROC=` giới hạn số process của một (real) UID chứ không phải số process do service fork ra, nên giới hạn cộng dồn cho mọi process cùng UID[^systemd-nproc]. Hệ quả: hai service chạy chung UID chia chung một ngân sách.
 - `RLIM_INFINITY` nghĩa là không giới hạn[^rlim-inf].
 - Hạ soft limit xuống thấp hơn mức đang dùng vẫn thành công, nhưng chặn process dùng thêm[^rlim-lower].
-- `prlimit(2)` (riêng Linux, từ 2.6.36[^prlimit-ver]) gộp và mở rộng get/set, cho phép đọc/đặt limit của **process tùy ý** theo `pid`[^prlimit].
+- `prlimit(2)` gộp và mở rộng get/set, cho phép đọc/đặt limit của **process tùy ý** theo `pid`[^prlimit]. Đây là syscall riêng Linux, có từ 2.6.36[^prlimit-ver].
 - Process có `CAP_SYS_ADMIN` có thể vượt `file-max`[^proc-filemax-override].
-- Vì sao ngưỡng 1023 đáng nhớ: docs systemd (bookworm) ghi `select()` không dùng được với fd từ 1023 trở lên trên Linux, nên cẩn thận khi nâng soft limit quá 1024; hard limit mặc định hiện nay là 524288 (khớp quan sát ở trên)[^systemd-nofile].
+- Vì sao ngưỡng 1023 đáng nhớ: docs systemd (bookworm) ghi `select()` không dùng được với fd từ 1023 trở lên trên Linux, nên cẩn thận khi nâng soft limit quá 1024; hard limit mặc định hiện nay là 524288, khớp quan sát ở trên[^systemd-nofile].
 
 </details>
 
@@ -343,46 +401,50 @@ Cùng container: `ulimit -Sn` = 1024, `ulimit -Hn` = 524288; root chạy `ulimit
 
 ## 7. Liên hệ với Rust
 
-Các kiểu Rust đứng trên những cơ chế ở chương này (fd, `io::Error`, `Command`, FFI) được giải thích ở [Chương 07 — Rust trên giao diện hệ thống](07-rust-tren-giao-dien-he-thong.md); ở đây chỉ nối từng điểm với mục tương ứng.
+Với `orders` viết bằng Rust, chương này không buộc bạn đổi dòng code nào. Nhưng có vài chỗ API của `std` chạm đúng vào các cơ chế ở trên. Các kiểu Rust đứng trên những cơ chế đó (fd, `io::Error`, `Command`, FFI) được giải thích ở [Chương 07 — Rust trên giao diện hệ thống](07-rust-tren-giao-dien-he-thong.md); ở đây chỉ nối từng điểm với mục tương ứng.
 
-- **Tạo file với mode (mục 2):** `OpenOptionsExt::mode` đặt mode xin, mặc định `0o666`, và hệ điều hành che bằng umask[^rs-optmode] — khớp quan sát ở mục 2. Mode của file có sẵn đọc/đặt bằng `PermissionsExt` ([Chương 07, phần Bổ sung](07-rust-tren-giao-dien-he-thong.md)); chủ file đọc bằng `MetadataExt::uid()`[^rs-mduid].
-- **Đổi user cho process con (mục 1):** `CommandExt::uid` dịch thành một lời gọi `setuid` trong process con, lỗi làm `spawn` thất bại[^rs-cmduid]; chi tiết về `setgroups` và việc đặt `uid` buộc `Command` bỏ đường `posix_spawn` nằm ở [Chương 07, mục 3](07-rust-tren-giao-dien-he-thong.md).
-- **`EMFILE` (mục 6):** lỗi hiện ra là `io::Error`; `raw_os_error()` trả `Some(errno)` nếu lỗi tới từ `last_os_error`/`from_raw_os_error`[^rs-raw-os-error], nên `os error 24` ở quan sát mục 6 so được với `libc::EMFILE`; chi tiết `ErrorKind` ở [Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md).
-- **Rlimit (mục 6):** gọi `setrlimit` cần crate FFI như `libc` (docs mô tả là các binding FFI thô tới thư viện hệ thống)[^libc-crate]; cách chọn `libc`/`nix`/`rustix` ở [Chương 07, mục 7](07-rust-tren-giao-dien-he-thong.md). Quan sát (tra mã nguồn, không phải bảo đảm của docs): trong `library/std/src` của Rust 1.95.0 (rust-src của toolchain 1.95.0, mọi `cfg`) không có lời gọi `setrlimit`; `RLIMIT_NOFILE` chỉ xuất hiện trong hai dòng comment ở `sys/pal/unix/mod.rs`, về việc `poll()` có thể bị chặn nên phải fallback sang `fcntl`[^rs-std-rlimit-comment]. Suy luận của người soạn: std không tự nâng rlimit, nên server Rust chạy với `nofile` mặc định của môi trường; muốn nhiều hơn phải đặt ở `ulimit`/systemd hoặc tự gọi `setrlimit`.
-- **Đóng fd (mục 6):** `File` đóng khi ra khỏi scope[^rs-file]; leak fd thường do giữ `File`/socket trong cấu trúc sống lâu (nhận xét của người soạn). Kiểu sở hữu fd (`OwnedFd`) ở [Chương 07, mục 1](07-rust-tren-giao-dien-he-thong.md).
+**Tạo file với mode (mục 2).** `OpenOptionsExt::mode` đặt mode xin, mặc định là `0o666`, và hệ điều hành che bằng umask[^rs-optmode]; điều này khớp quan sát ở mục 2. Mode của file có sẵn đọc và đặt bằng `PermissionsExt` ([Chương 07, phần Bổ sung](07-rust-tren-giao-dien-he-thong.md)). Chủ file thì đọc bằng `MetadataExt::uid()`[^rs-mduid].
+
+**Đổi user cho process con (mục 1).** `CommandExt::uid` dịch thành một lời gọi `setuid` trong process con, và lỗi ở đó làm `spawn` thất bại[^rs-cmduid]. Chi tiết về `setgroups` và việc đặt `uid` buộc `Command` bỏ đường `posix_spawn` nằm ở [Chương 07, mục 3](07-rust-tren-giao-dien-he-thong.md).
+
+**`EMFILE` (mục 6).** Lỗi hiện ra là một `io::Error`. `raw_os_error()` trả `Some(errno)` nếu lỗi tới từ `last_os_error` hoặc `from_raw_os_error`[^rs-raw-os-error], nên `os error 24` ở quan sát mục 6 so được với `libc::EMFILE`. Chi tiết về `ErrorKind` ở [Chương 07, mục 2](07-rust-tren-giao-dien-he-thong.md).
+
+**Rlimit (mục 6).** Gọi `setrlimit` từ Rust cần một crate FFI như `libc`, mà docs mô tả là các binding FFI thô tới thư viện hệ thống[^libc-crate]. Cách chọn giữa `libc`, `nix` và `rustix` ở [Chương 07, mục 7](07-rust-tren-giao-dien-he-thong.md). Quan sát (tra mã nguồn, không phải bảo đảm của docs): trong `library/std/src` của Rust 1.95.0 (rust-src của toolchain 1.95.0, mọi `cfg`) không có lời gọi `setrlimit`; `RLIMIT_NOFILE` chỉ xuất hiện trong hai dòng comment ở `sys/pal/unix/mod.rs`, nói về việc `poll()` có thể bị chặn nên phải fallback sang `fcntl`[^rs-std-rlimit-comment]. Từ đó suy ra (suy luận của người soạn) `std` không tự nâng rlimit, nên server Rust chạy với `nofile` mặc định của môi trường; muốn nhiều hơn thì đặt ở `ulimit`/systemd hoặc tự gọi `setrlimit`.
+
+**Đóng fd (mục 6).** `File` tự đóng khi ra khỏi scope[^rs-file]. Vì vậy leak fd thường do giữ `File` hay socket trong một cấu trúc sống lâu (nhận xét của người soạn). Kiểu sở hữu fd (`OwnedFd`) ở [Chương 07, mục 1](07-rust-tren-giao-dien-he-thong.md).
 
 
 ## Tóm tắt
 
-- Process có real, effective, saved set, filesystem UID/GID và group phụ; quyền file trên Linux dùng filesystem ID, thường bằng effective ID[^cred-eff][^cred-fsauto].
-- Chọn nhóm quyền theo owner → group → other; thư mục cần bit search trên mọi cấp cha[^perm-bits][^pr-search].
-- Setuid/setgid đổi *effective* ID lúc `execve`, real ID giữ nguyên, và bị vô hiệu bởi `nosuid`, `no_new_privs`, ptrace[^exec-suid][^exec-ignored].
-- `umask` che bit khỏi mode xin, thừa kế qua `fork`/`exec`[^umask-use][^umask-inherit].
-- Capabilities tách đặc quyền root theo thread; xem `CapEff`… trong `status`[^caps-split][^proc-cap].
-- Service nghe cổng dưới 1024 cần `CAP_NET_BIND_SERVICE`, trừ khi `ip_unprivileged_port_start` của network namespace được hạ xuống[^caps-netbind][^sysctl-unpriv-port].
-- `/proc/<pid>/{status,fd,maps,limits,stat}` là bộ chẩn đoán chính; `/sys` xuất cây kobject; `/proc/sys` là bề mặt sysctl[^proc-status][^sysfs-what][^proc-sys].
-- `RLIMIT_NOFILE` vượt thì `EMFILE`, chạm `fs.file-max` thì `ENFILE`; trần cứng là `fs.nr_open`[^open-emfile][^open-enfile][^proc-nropen].
+- Process có real, effective, saved set, filesystem UID/GID và group phụ. Quyền file trên Linux dùng filesystem ID, thường bằng effective ID[^cred-fsauto].
+- Kernel chọn nhóm quyền theo thứ tự owner → group → other[^perm-bits]. Thư mục cần bit search trên mọi cấp cha[^pr-search].
+- Setuid/setgid đổi *effective* ID lúc `execve` và real ID giữ nguyên[^exec-suid]. Chúng bị vô hiệu bởi `nosuid`, `no_new_privs` và ptrace[^exec-ignored].
+- `umask` che bit khỏi mode xin[^umask-use]. Nó được thừa kế qua `fork` và `exec`[^umask-inherit].
+- Capabilities tách đặc quyền root theo thread[^caps-split]. Xem `CapEff` và các dòng tương tự trong `status`[^proc-cap].
+- Service nghe cổng dưới 1024 cần `CAP_NET_BIND_SERVICE`[^caps-netbind]. Ngoại lệ là khi `ip_unprivileged_port_start` của network namespace được hạ xuống[^sysctl-unpriv-port].
+- `/proc/<pid>/{status,fd,maps,limits,stat}` là bộ chẩn đoán chính[^proc-status]. `/sys` xuất cây kobject[^sysfs-what]. `/proc/sys` là bề mặt sysctl[^proc-sys].
+- `RLIMIT_NOFILE` vượt thì `EMFILE`[^open-emfile]. Chạm `fs.file-max` thì `ENFILE`[^open-enfile]. Trần cứng của `RLIMIT_NOFILE` là `fs.nr_open`[^proc-nropen].
 
 ## Câu hỏi tự kiểm tra
 
 1. Process có real UID 1000, effective UID 0, saved UID 0: tình huống nào tạo ra nó?
    <details><summary>Đáp án</summary>
 
-   Chạy file setuid-root: effective đổi thành owner khi `execve`, real giữ nguyên[^exec-suid][^cred-inherit], saved chép từ effective[^exec-saved].
+   Chạy một file setuid-root dưới user 1000. Effective đổi thành owner của file khi `execve`[^exec-suid]. Real giữ nguyên[^cred-inherit]. Saved chép từ effective[^exec-saved].
 
    </details>
 
 2. Vì sao `/a/b/c` mode `777` vẫn không mở được?
    <details><summary>Đáp án</summary>
 
-   Thiếu quyền search trên một thành phần đường dẫn thì lỗi `EACCES`[^pr-search]; với thư mục, bit execute chính là search[^perm-bits2].
+   Thiếu quyền search trên một thành phần đường dẫn thì lỗi là `EACCES`[^pr-search]. Với thư mục, bit execute chính là search[^perm-bits2].
 
    </details>
 
 3. `umask 027`, xin mode `0666`: mode file là gì, và đọc umask an toàn thế nào?
    <details><summary>Đáp án</summary>
 
-   `0666 & ~027 = 0640`[^umask-use][^umask-default]; đọc qua `Umask` trong `/proc/self/status` thay vì `umask(0)` (race)[^umask-race][^umask-proc].
+   `0666 & ~027 = 0640`, theo cách umask tắt bit khỏi mode xin[^umask-use]. Phép tính này giống `0666 & ~022 = 0644`[^umask-default]. Đọc umask thì dùng dòng `Umask` trong `/proc/self/status` thay vì `umask(0)`, vì gọi `umask` để đọc sẽ đồng thời đổi nó và gây race[^umask-race]. Từ Linux 4.7 dòng đó đọc được mà không đổi gì[^umask-proc].
 
    </details>
 
@@ -396,21 +458,21 @@ Các kiểu Rust đứng trên những cơ chế ở chương này (fd, `io::Err
 5. Phân biệt Permitted, Effective, Bounding.
    <details><summary>Đáp án</summary>
 
-   Permitted là trần của effective[^caps-permitted]; Effective là tập kernel dùng khi kiểm tra[^caps-effective]; Bounding giới hạn capability nhận qua `execve`[^caps-bounding].
+   Permitted là trần của effective[^caps-permitted]. Effective là tập kernel dùng khi kiểm tra[^caps-effective]. Bounding giới hạn capability nhận qua `execve`[^caps-bounding].
 
    </details>
 
-6. Service Rust báo `os error 24`: kiểm tra gì?
+6. `orders` báo `os error 24`: kiểm tra gì?
    <details><summary>Đáp án</summary>
 
-   `os error 24` là `EMFILE` (quan sát ở mục 6): xem `/proc/<pid>/limits`[^proc-limits], đếm `/proc/<pid>/fd`[^proc-fd].
+   `os error 24` là `EMFILE` (quan sát ở mục 6). Xem `/proc/<pid>/limits`[^proc-limits]. Rồi đếm `/proc/<pid>/fd`[^proc-fd].
 
    </details>
 
 7. `EMFILE` khác `ENFILE` thế nào, và `ulimit -n 2000000` của root vì sao thất bại?
    <details><summary>Đáp án</summary>
 
-   Per-process vs toàn hệ thống[^open-emfile][^open-enfile]; hard `RLIMIT_NOFILE` không vượt được `fs.nr_open` kể cả với process privileged[^proc-nropen][^rlim-eperm] (mặc định 1048576, nhỏ hơn 2000000).
+   `EMFILE` là chạm giới hạn của một process[^open-emfile]. `ENFILE` là chạm giới hạn toàn hệ thống[^open-enfile]. Hard `RLIMIT_NOFILE` không vượt được `fs.nr_open` kể cả với process privileged[^proc-nropen]. Vượt thì nhận `EPERM`[^rlim-eperm]. Mặc định `fs.nr_open` là 1048576, nhỏ hơn 2000000.
 
    </details>
 
@@ -421,17 +483,17 @@ Các kiểu Rust đứng trên những cơ chế ở chương này (fd, `io::Err
 
    </details>
 
-9. Service Rust nghe cổng 80 bằng user thường: cần gì, và vì sao container thử nghiệm ở mục 3 bind được dù `CapEff = 0`?
+9. `orders` chạy bằng user thường muốn nghe cổng 80: cần gì, và vì sao container thử nghiệm ở mục 3 bind được dù `CapEff = 0`?
    <details><summary>Đáp án</summary>
 
-   Cần `CAP_NET_BIND_SERVICE` nếu cổng nằm dưới ngưỡng đặc quyền[^caps-netbind]; ngưỡng là sysctl `ip_unprivileged_port_start` theo từng network namespace, đặt `0` thì không còn cổng đặc quyền[^sysctl-unpriv-port]. Container thử nghiệm đọc ra ngưỡng `0` nên bind được (suy luận ở mục 3).
+   Cần `CAP_NET_BIND_SERVICE` nếu cổng nằm dưới ngưỡng đặc quyền[^caps-netbind]. Ngưỡng là sysctl `ip_unprivileged_port_start` theo từng network namespace, đặt `0` thì không còn cổng đặc quyền[^sysctl-unpriv-port]. Container thử nghiệm đọc ra ngưỡng `0` nên bind được (suy luận ở mục 3).
 
    </details>
 
 10. `sysctl`, `/proc/sys` và `/sys` quan hệ thế nào?
     <details><summary>Đáp án</summary>
 
-    `sysctl` chỉnh các tham số nằm dưới `/proc/sys/`[^sysctl-desc]; `/sys` là sysfs, xuất cấu trúc dữ liệu kernel theo kobject, mỗi kobject một thư mục[^sysfs-what][^sysfs-dir].
+    `sysctl` chỉnh các tham số nằm dưới `/proc/sys/`[^sysctl-desc]. `/sys` là sysfs, xuất cấu trúc dữ liệu kernel theo kobject, mỗi kobject một thư mục[^sysfs-dir].
 
     </details>
 
