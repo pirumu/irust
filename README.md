@@ -4,6 +4,8 @@ Giáo trình tự học bằng tiếng Việt về những gì nằm bên dướ
 
 Giáo trình gồm **13 phase, 115 chương lý thuyết và 15 bài lab** có code chạy được. Mọi khẳng định sự thật đều có chú thích kèm câu trích nguyên văn từ nguồn, và có script tự động kiểm tra lại các câu trích đó.
 
+**Đọc online:** <https://pirumu.github.io/irust/>
+
 **Bắt đầu đọc:** [Lộ trình](docs/00-roadmap.md) · [Bảng thuật ngữ Việt–Anh](docs/thuat-ngu.md) · [Lab đầu tiên](docs/labs/01-linux-lab.md)
 
 ---
@@ -140,17 +142,6 @@ tools/                    verify_citations.py, check_links.py, fix_markdown_html
 book.toml, book-assets/   cấu hình mdBook và script Mermaid
 .github/workflows/        CI: kiểm Markdown và link, build sách, deploy GitHub Pages
 ```
-
-## Xuất bản lên GitHub Pages
-
-Workflow `.github/workflows/pages.yml` làm ba việc: kiểm Markdown và link, build sách, rồi deploy.
-
-1. Push repo lên GitHub, nhánh `main`.
-2. Vào **Settings → Pages → Build and deployment → Source** và chọn **GitHub Actions**.
-
-Mỗi lần push lên `main`, sách được deploy tới `https://<user>.github.io/<repo>/`. Workflow tự đặt `site-url` theo tên repo nên không cần sửa `book.toml`. Pull request chỉ build, không deploy.
-
-CI không chạy `verify_citations.py`: script tải hơn 2000 nguồn nên dễ bị rate limit. Hãy chạy nó trên máy trước khi push nội dung mới.
 
 ## Đóng góp
 
