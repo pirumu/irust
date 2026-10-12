@@ -1,0 +1,25 @@
+error[E0499]: cannot borrow `counter` as mutable more than once at a time
+   --> compile-fail/two_mut_borrows.rs:9:17
+    |
+  7 |     thread::scope(|s| {
+    |                    - has type `&'1 Scope<'1, '_>`
+  8 |         s.spawn(|| counter += 1);
+    |         ------------------------
+    |         |       |  |
+    |         |       |  first borrow occurs due to use of `counter` in closure
+    |         |       first mutable borrow occurs here
+    |         argument requires that `counter` is borrowed for `'1`
+  9 |         s.spawn(|| counter += 1);
+    |                 ^^ ------- second borrow occurs due to use of `counter` in closure
+    |                 |
+    |                 second mutable borrow occurs here
+    |
+note: requirement that the value outlives `'1` introduced here
+   --> ~/.rustup/toolchains/stable-aarch64-apple-darwin/lib/rustlib/src/rust/library/std/src/thread/scoped.rs:203:35
+    |
+203 |         F: FnOnce() -> T + Send + 'scope,
+    |                                   ^^^^^^
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0499`.

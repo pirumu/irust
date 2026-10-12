@@ -1,0 +1,15 @@
+[package]
+name = "lab-language"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+# Bật để biên dịch lời giải mẫu trong src/solutions/ thay cho phần `todo!()`.
+solution = []
+# Feature phụ cho bài 8 (Cargo features); có tính cộng (additive): chỉ thêm hàm `shout`.
+shout = []
+
+[dependencies]

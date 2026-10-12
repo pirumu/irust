@@ -1,0 +1,10 @@
+[package]
+name = "lab-distributed"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "P12b labs: deterministic, seedable simulations of replication, quorums, partitioning, fencing, ordering, Raft election, streams and Redis patterns"
+
+# std only: every simulation is driven by the seeded PRNG in `rng`, so there are no dependencies.
+[dependencies]

@@ -1,0 +1,10 @@
+[package]
+name = "lab-memory"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Gọi trực tiếp mmap/munmap/getrusage/getrlimit/sysconf; std không bọc các syscall này.
+libc = "0.2"

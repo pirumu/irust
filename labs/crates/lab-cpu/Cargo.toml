@@ -1,0 +1,9 @@
+[package]
+name = "lab-cpu"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# Không có dependency ngoài std: các lab P2 (CPU) chỉ cần std::thread, std::sync::atomic, std::hint, std::time.
+[dependencies]

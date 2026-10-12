@@ -1,0 +1,11 @@
+[package]
+name = "lab-data"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Phase 12 labs (one node): log-structured KV, mini LSM, row vs column scan, tagged encoding, MVCC and isolation anomalies, external sort and joins, latency percentiles"
+
+# Pure std on purpose: every algorithm in these labs is written out so you can read it.
+# The PostgreSQL part of the lab lives in `sql/` and is run by hand against a `postgres:16` container.
+[dependencies]

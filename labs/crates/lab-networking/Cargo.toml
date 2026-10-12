@@ -1,0 +1,12 @@
+[package]
+name = "lab-networking"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Only `sockopts` reads SO_RCVBUF/SO_SNDBUF/TCP_NODELAY straight through getsockopt(2).
+libc = "0.2"

@@ -1,0 +1,21 @@
+[package]
+name = "lab-tla"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Phase 13 labs: an explicit-state model checker, the same models as the TLA+ specs in specs/, liveness under fairness, and differential testing of a 2PC implementation"
+
+# Nothing here is Linux-only: the model checker, the models and the tests are plain std and build
+# on macOS. The TLA+ specs in specs/ are files for the TLA+ tools (Java) and are not run by cargo.
+
+[dependencies]
+# Lab (f): property-based generation of action sequences, with shrinking. Only the `std` feature:
+# no fork/timeout machinery, so the runner executes inside this process.
+proptest = { version = "~1.12", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# Only for tests/specs.rs: parse specs/*.tla (TLA+ with embedded PlusCal) and fail on any
+# ERROR/MISSING node, so a typo in a spec cannot hide just because TLC is not run here.
+tree-sitter = "~0.25"
+tree-sitter-tlaplus = "~1.5"

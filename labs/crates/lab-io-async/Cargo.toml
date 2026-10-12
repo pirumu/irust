@@ -1,0 +1,14 @@
+[package]
+name = "lab-io-async"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# `nonblocking_pipe` calls pipe(2)/fcntl(2)/read(2) directly; `epoll_echo` calls epoll(7) directly.
+libc = "0.2"
+# Lab (b): the portable readiness layer that Tokio itself is built on.
+mio = { version = "=1.2.4", features = ["os-poll", "net"] }
+# Lab (d): only what the echo server needs (runtime, both schedulers, TCP, AsyncRead/WriteExt).
+tokio = { version = "=1.53.2", features = ["rt", "rt-multi-thread", "net", "io-util"] }

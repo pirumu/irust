@@ -1,0 +1,10 @@
+[package]
+name = "lab-storage"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Gọi posix_fadvise/mmap/mincore/munmap/sysconf và cờ O_DIRECT; std không bọc các thứ này.
+libc = "0.2"

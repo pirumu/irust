@@ -1,0 +1,21 @@
+[package]
+name = "lab-observability"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Phase 11 labs: sampling targets, syscall/allocation tracing, latency percentiles, tracing spans, a debugger target, crash scenarios and an ELF reader"
+
+[dependencies]
+# Lab (c): latency percentiles. `default-features = false` drops the serialization (flate2, base64)
+# and the crossbeam-based SyncHistogram; the plain `Histogram` is all the lab uses.
+hdrhistogram = { version = "=7.5.4", default-features = false }
+# Lab (d): spans, events and a hand-written Layer. `registry` is what a Layer needs to look spans up.
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["registry", "std"] }
+# Lab (d): a current-thread runtime, to show what holding `Span::enter` across `.await` does.
+tokio = { version = "=1.53.2", default-features = false, features = ["rt"] }
+# Thread CPU time (clock_gettime) and RLIMIT_CORE (getrlimit); std wraps neither.
+libc = "0.2"
+# The lab's locks: `lock()` returns the guard directly, there is no poisoning to unwrap.
+parking_lot = "=0.12.5"

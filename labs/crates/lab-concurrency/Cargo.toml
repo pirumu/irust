@@ -1,0 +1,10 @@
+[package]
+name = "lab-concurrency"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+description = "Phase 4 labs: Send/Sync, Mutex vs atomics, futex under strace, a hand-written spin lock, false sharing, deadlock"
+
+# No dependencies: everything here is std. The futex lab is observed with strace from outside,
+# so it needs no libc calls of its own.

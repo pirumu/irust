@@ -1,0 +1,61 @@
+name: Book (GitHub Pages)
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+env:
+  MDBOOK_VERSION: "0.5.2"
+  MDBOOK_MERMAID_VERSION: "0.17.0"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mdBook and mdbook-mermaid
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSL "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C "$HOME/.local/bin"
+          curl -sSL "https://github.com/badboy/mdbook-mermaid/releases/download/v${MDBOOK_MERMAID_VERSION}/mdbook-mermaid-v${MDBOOK_MERMAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Check Markdown and links
+        run: |
+          python3 tools/fix_markdown_html.py --check
+          python3 tools/check_links.py
+
+      - name: Build book
+        env:
+          REPO: ${{ github.event.repository.name }}
+        run: |
+          # 404.html needs the Pages base path; user/org sites (<name>.github.io) live at "/".
+          case "$REPO" in *.github.io) base="/" ;; *) base="/$REPO/" ;; esac
+          MDBOOK_OUTPUT__HTML__SITE_URL="$base" mdbook build
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: book
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
