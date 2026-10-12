@@ -2,7 +2,7 @@
 
 Giáo trình tự học bằng tiếng Việt về những gì nằm bên dưới một service Rust: kernel và system call, CPU, bộ nhớ, concurrency, lưu trữ, networking, async I/O, container, ngôn ngữ và trình biên dịch Rust, đo đạc và gỡ lỗi, hệ thống dữ liệu, đặc tả hình thức với TLA+, toán nền cho hệ thống và thuật toán phân tán.
 
-Giáo trình gồm **15 phase, 132 chương lý thuyết và 15 bài lab** có code chạy được. Mọi khẳng định sự thật đều có chú thích kèm câu trích nguyên văn từ nguồn, và có script tự động kiểm tra lại các câu trích đó.
+Giáo trình gồm **15 phase, 137 chương lý thuyết và 15 bài lab** có code chạy được. Mọi khẳng định sự thật đều có chú thích kèm câu trích nguyên văn từ nguồn, và có script tự động kiểm tra lại các câu trích đó.
 
 **Đọc online:** <https://pirumu.github.io/irust/>
 
@@ -38,7 +38,7 @@ Giáo trình không giả định bạn đã học hệ điều hành hay mạng
 | [P11](docs/11-do-dac-va-go-loi/00-tong-quan.md) | Đo đạc và gỡ lỗi: perf, eBPF, hiệu năng service, debugger/DWARF, core dump, ELF/linker/loader | [Lab P11](docs/labs/11-do-dac-va-go-loi-lab.md) (`lab-observability`) |
 | [P12](docs/12-he-thong-du-lieu/00-tong-quan.md) | Hệ thống dữ liệu: storage engine, encoding, replication, partitioning, transaction, consensus, stream; case study PostgreSQL và Redis; chương chuyên sâu về thuật toán đồng thuận | [P12a](docs/labs/12a-du-lieu-mot-node-lab.md) (`lab-data`), [P12b](docs/labs/12b-du-lieu-phan-tan-lab.md) (`lab-distributed`) |
 | [P13](docs/13-tla-plus/00-tong-quan.md) | TLA+: state/action, invariant và TLC, liveness, PlusCal, refinement, 2PC/Paxos/Raft, từ spec đến code Rust | [Lab P13](docs/labs/13-tla-plus-lab.md) (`lab-tla`) |
-| [P14](docs/14-toan-va-ly-thuyet/00-tong-quan.md) | Toán và lý thuyết nền: logic và chứng minh, toán rời rạc, xác suất, độ phức tạp, queueing theory, thống kê cho benchmark | — |
+| [P14](docs/14-toan-va-ly-thuyet/00-tong-quan.md) | Toán và lý thuyết nền: logic và chứng minh, toán rời rạc, xác suất, độ phức tạp, queueing theory, thống kê cho benchmark, tổ hợp và đếm, số học modular và mật mã, chuỗi Markov và quá trình Poisson; mỗi chương có bài tập kèm lời giải | — |
 | [P15](docs/15-thuat-toan-phan-tan/00-tong-quan.md) | Thuật toán phân tán: FLP, broadcast, consistency, CRDT, mutex và bầu leader, snapshot, gossip, chain replication, giao dịch phân tán, BFT | — |
 | — | [Capstone](docs/labs/capstone.md): HTTP server trên epoll, rồi tự viết mini async runtime | `lab-capstone` |
 

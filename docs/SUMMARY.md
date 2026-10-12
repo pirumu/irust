@@ -181,6 +181,8 @@
   - [04. Thuật toán và độ phức tạp](14-toan-va-ly-thuyet/04-thuat-toan-va-do-phuc-tap.md)
   - [05. Queueing theory cho backend](14-toan-va-ly-thuyet/05-queueing-theory.md)
   - [06. Thống kê cho benchmark](14-toan-va-ly-thuyet/06-thong-ke-cho-benchmark.md)
+  - [07. Tổ hợp và đếm](14-toan-va-ly-thuyet/07-to-hop-va-dem.md)
+  - [08. Số học modular và nền mật mã cho hệ phân tán](14-toan-va-ly-thuyet/08-so-hoc-modular-va-mat-ma.md)
   - [09. Chuỗi Markov và quá trình Poisson](14-toan-va-ly-thuyet/09-chuoi-markov-va-qua-trinh-poisson.md)
 
 # P15 — Thuật toán phân tán
