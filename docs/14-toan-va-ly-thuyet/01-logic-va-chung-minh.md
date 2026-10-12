@@ -1025,6 +1025,360 @@ Ba điểm cần soi (nhận xét của người soạn). Một, `check` ở cu�
 
 </details>
 
+## Bài tập
+
+Mười bài dưới đây xếp từ dễ đến khó và không lặp lại câu hỏi tự kiểm tra: mỗi bài bắt bạn tự chứng minh hoặc tự tính một điều mới bằng đúng các công cụ của chương (phủ định lượng từ, phản đảo và phản chứng, quy nạp thường và mạnh, sắp tốt, invariant quy nạp, loop invariant). Bài 1 đến 3 là bài khởi động, bài 4 đến 7 là bài chính, bài 8 đến 10 là bài khó và đều đặt trong tình huống hệ phân tán hoặc backend. Hãy tự làm trên giấy trước khi mở gợi ý. Mọi lời giải là "lời giải của người soạn"; các chương trình Rust dùng để kiểm số liệu (bài 6, 7, 9, 10) đã được chạy thật bằng `rustc 1.95.0` trên macOS arm64, build không tối ưu.
+
+**Bài 1 (Dễ).** Runbook của `pay-gw` có thêm một dòng: "Mỗi shard có một replica khỏe và replica đó chứa mọi lần ghi đã được xác nhận của shard." Viết thành công thức: ∀ s ∈ Shard. ∃ r ∈ Replica(s). khỏe(r) ∧ (∀ w ∈ Ghi(s). có(r, w)).
+
+a) Viết phủ định của câu này bằng cách đẩy ¬ vào trong, và đọc thành lời.
+
+b) Dựng một counter-model hai replica cho một shard làm câu gốc sai, trong khi câu yếu hơn "mọi lần ghi đã xác nhận đều nằm trên *ít nhất một* replica khỏe", viết là ∀ s ∀ w ∈ Ghi(s) ∃ r. khỏe(r) ∧ có(r, w), vẫn đúng.
+
+c) Câu gốc đúng hay sai với một shard chưa có lần ghi nào? Với một shard không có replica nào?
+
+<details><summary>Gợi ý</summary>
+
+Mỗi lần ¬ đi qua một lượng từ thì ∀ đổi thành ∃ và ngược lại, còn ¬(P ∧ Q) thành ¬P ∨ ¬Q. Ở (b), chia hai lần ghi cho hai replica khác nhau.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Đẩy ¬ qua ∀ s thành ∃ s, qua ∃ r thành ∀ r, rồi qua phép hội thành phép tuyển[^mcs-negq], và qua ∀ w thành ∃ w:
+
+> ∃ s. ∀ r ∈ Replica(s). ¬khỏe(r) ∨ (∃ w ∈ Ghi(s). ¬có(r, w))
+
+Đọc thành lời: có một shard mà *mọi* replica của nó đều hoặc không khỏe, hoặc thiếu ít nhất một lần ghi đã xác nhận. Đây chính là hình dạng của một phản ví dụ mà dashboard cần tìm: một shard cụ thể, kèm lý do riêng cho *từng* replica của nó. Hai luật ∀/∃ ở đây là De Morgan nâng lên cho miền vô hạn[^mcs-demorgan-q].
+
+b) Lấy một shard s có hai replica r₁, r₂, cả hai đều khỏe, và hai lần ghi đã xác nhận w₁, w₂. Replica r₁ chỉ có w₁, replica r₂ chỉ có w₂. Câu yếu đúng: w₁ nằm trên r₁ khỏe, w₂ nằm trên r₂ khỏe. Câu gốc sai: r₁ thiếu w₂ và r₂ thiếu w₁ nên với cả hai replica vế "∀ w. có(r, w)" đều sai, và phần ∃ r không tìm được r thỏa. Hai câu khác nhau đúng như mục 1.3: ở câu yếu, replica chọn được *phụ thuộc* vào lần ghi w (∀ w ∃ r), còn câu gốc đòi một replica duy nhất cho mọi lần ghi (∃ r ∀ w). Hệ quả thực tế (nhận xét của người soạn): cụm trên vẫn có thể "mất" dữ liệu nếu failover chọn nhầm replica.
+
+c) Shard chưa có lần ghi nào: vế "∀ w ∈ ∅. có(r, w)" đúng rỗng (mục 1.4), nên câu gốc cho shard này rút gọn thành "có một replica khỏe"; đây cũng chính là điều `Iterator::all` làm trên iterator rỗng[^rs-all-empty]. Shard không có replica nào: ∃ r trên tập rỗng sai (`any` trên iterator rỗng trả `false`[^rs-any-empty]), nên câu gốc sai ngay cả khi shard chưa có lần ghi nào. Vì vậy một health check viết `all` cho mọi lần ghi mà quên vế "tồn tại một replica khỏe" sẽ báo xanh với shard không còn replica nào.
+
+</details>
+
+**Bài 2 (Dễ).** Một dịch vụ có m gateway; gateway thứ i đã retry rᵢ lần trong giây vừa rồi (rᵢ là số nguyên không âm). Ngân sách retry của cả cụm là B lần mỗi giây.
+
+a) Chứng minh bằng *phản đảo*: nếu r₁ + r₂ + … + rₘ > B thì có một gateway i với rᵢ > B/m.
+
+b) Viết lại thành chứng minh *phản chứng* và chỉ ra bước nào của nó là thừa so với bản phản đảo.
+
+c) Đảo của phát biểu ở (a) là "nếu có một gateway với rᵢ > B/m thì tổng > B". Nó đúng hay sai? Dựng ví dụ nếu sai.
+
+d) Với m = 8 và B = 1000: khi tổng vượt 1000, gateway nào chắc chắn đã retry bao nhiêu lần?
+
+<details><summary>Lời giải</summary>
+
+a) Phản đảo của "tổng > B ⇒ có i với rᵢ > B/m" là "mọi i đều có rᵢ ≤ B/m ⇒ tổng ≤ B". Giả sử rᵢ ≤ B/m với mọi i. Cộng m bất đẳng thức: r₁ + … + rₘ ≤ m · (B/m) = B. Vậy phản đảo đúng, và vì một phép kéo theo tương đương với phản đảo của nó[^mcs-contra-equiv], phát biểu gốc đúng. ∎ (chứng minh của người soạn)
+
+b) Phản chứng: giả sử tổng > B *và* mọi rᵢ ≤ B/m. Từ vế sau, cộng như ở (a) ta được tổng ≤ B, mâu thuẫn với tổng > B. Vậy giả sử sai. Chứng minh này chứa nguyên chứng minh phản đảo ở (a) rồi thêm một bước cuối: giả thiết "tổng > B" chỉ dùng ở dòng cuối để tạo mâu thuẫn, còn toàn bộ phần suy luận không cần tới nó. Bản phản đảo bỏ bước thừa ấy, đúng như nhận xét ở mục 2.1 rằng phản đảo là phản chứng bỏ đi bước kết luận cuối.
+
+c) Sai: đảo của một phép kéo theo nói chung không tương đương với nó[^mcs-converse]. Lấy m = 2, B = 10, r = (6, 0). Gateway 1 có r₁ = 6 > B/m = 5, nhưng tổng bằng 6 ≤ 10. Về vận hành (nhận xét của người soạn): "tổng retry vượt ngân sách" luôn chỉ ra được một gateway vượt phần chia đều, nhưng một gateway vượt phần chia đều thì không có nghĩa là cụm vượt ngân sách.
+
+d) B/m = 1000/8 = 125. Tổng > 1000 kéo theo có gateway với rᵢ > 125, và vì rᵢ là số nguyên nên rᵢ ≥ 126. Phát biểu không nói *gateway nào*: chỉ có thể kết luận tồn tại, đúng dạng ∃ của phép chứng minh.
+
+</details>
+
+**Bài 3 (Dễ).** Cụm `kvmeta` được dựng bằng cách thêm từng node; mỗi node mới mở một kết nối trực tiếp tới *mỗi* node đã có (full mesh). Gọi L(n) là số kết nối khi cụm có n node (n ≥ 1, L(1) = 0). Chứng minh bằng quy nạp rằng L(n) = n(n − 1)/2, rồi tính L(100).
+
+<details><summary>Gợi ý</summary>
+
+Phát biểu P(n) cho rõ trước khi làm: P(n) là "L(n) = n(n − 1)/2". Node thứ n + 1 thêm đúng n kết nối.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+Quy nạp theo n với giả thiết P(n): L(n) = n(n − 1)/2[^mcs-ind-five].
+
+- *Cơ sở* (n = 1): cụm một node không có kết nối nào, L(1) = 0 = 1 · 0/2.
+- *Bước quy nạp*: giả sử P(n). Cụm n + 1 node có được từ cụm n node bằng cách thêm một node, và node đó mở đúng n kết nối mới (một tới mỗi node cũ); không kết nối nào bị đếm hai lần vì mỗi kết nối mới có một đầu là node mới. Vậy L(n + 1) = L(n) + n = n(n − 1)/2 + n = (n(n − 1) + 2n)/2 = n(n + 1)/2 = (n + 1)((n + 1) − 1)/2. Đó là P(n + 1).
+
+Theo nguyên lý quy nạp[^mcs-induction], P(n) đúng với mọi n ≥ 1. ∎ (chứng minh của người soạn)
+
+L(100) = 100 · 99/2 = 4950. Cụm 5 node có 10 kết nối, nhưng 100 node đã cần 4950, tức số kết nối tăng theo bình phương số node; đó là lý do các hệ thống lớn dùng gossip với fan-out nhỏ thay vì full mesh (nhận xét của người soạn).
+
+</details>
+
+**Bài 4 (Vừa).** Một truy vấn scatter-gather của `pay-gw` chạy trên n ≥ 1 shard theo quy tắc đệ quy: nếu n = 1 thì hỏi thẳng shard đó (không merge); nếu n ≥ 2 thì coordinator chia tập shard thành hai nhóm khác rỗng cỡ a và b với a + b = n (a *bất kỳ*, không nhất thiết cân bằng), xử lý hai nhóm bằng đúng quy tắc này, rồi thực hiện *một* phép merge hai kết quả.
+
+a) Chứng minh bằng quy nạp mạnh rằng, dù chia thế nào, tổng số phép merge là n − 1.
+
+b) Nếu mỗi lần chia cân bằng (a = ⌈n/2⌉, b = ⌊n/2⌋) thì độ sâu của cây đệ quy tối đa là ⌈log₂ n⌉. Chứng minh, rồi tính cho n = 1000.
+
+<details><summary>Gợi ý</summary>
+
+Ở (a), a và b chỉ biết là nhỏ hơn n, không biết bằng n − 1, nên giả thiết P(n − 1) không đủ: cần P(k) cho mọi k < n. Ở (b), dùng n ≤ 2ᵏ ⇒ ⌈n/2⌉ ≤ 2ᵏ⁻¹ với k = ⌈log₂ n⌉.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Giả thiết P(n): mọi cách chia cho n shard dùng đúng n − 1 phép merge. Quy nạp mạnh: bước quy nạp được dùng P(k) cho mọi k < n[^mcs-strong].
+
+- *Cơ sở* (n = 1): 0 merge = 1 − 1.
+- *Bước quy nạp*: lấy n ≥ 2 và giả sử P(k) với mọi 1 ≤ k < n. Coordinator chia thành hai nhóm cỡ a, b với a + b = n và a, b ≥ 1, nên a, b ≤ n − 1 < n. Theo giả thiết, nhóm thứ nhất dùng a − 1 merge, nhóm thứ hai dùng b − 1 merge. Cộng một merge cuối: (a − 1) + (b − 1) + 1 = a + b − 1 = n − 1. Đó là P(n).
+
+Vậy P(n) đúng với mọi n ≥ 1. ∎ (chứng minh của người soạn) Điều đáng để ý là số merge *không phụ thuộc* cách chia; chỉ độ sâu mới phụ thuộc. Hệ quả: chia lệch (a = 1 ở mọi lần) vẫn dùng n − 1 merge nhưng độ sâu n − 1, nên latency tuyến tính theo số shard thay vì logarit (nhận xét của người soạn).
+
+b) Giả thiết Q(n): mọi cây chia cân bằng cho n shard có độ sâu ≤ ⌈log₂ n⌉ (độ sâu của n = 1 là 0, của một cây lớn hơn là 1 cộng độ sâu lớn nhất của hai cây con).
+
+- *Cơ sở* (n = 1): độ sâu 0 = ⌈log₂ 1⌉.
+- *Bước quy nạp*: lấy n ≥ 2, đặt k = ⌈log₂ n⌉ ≥ 1, nên n ≤ 2ᵏ. Hai nhóm có cỡ a = ⌈n/2⌉ và b = ⌊n/2⌋, đều trong khoảng [1, n − 1]. Từ n ≤ 2ᵏ ta có n/2 ≤ 2ᵏ⁻¹, và vì 2ᵏ⁻¹ là số nguyên nên ⌈n/2⌉ ≤ 2ᵏ⁻¹; cũng có ⌊n/2⌋ ≤ ⌈n/2⌉. Do ⌈log₂ ·⌉ không giảm, ⌈log₂ a⌉ ≤ k − 1 và ⌈log₂ b⌉ ≤ k − 1. Theo Q(a) và Q(b), cả hai cây con có độ sâu ≤ k − 1, nên cây gốc có độ sâu ≤ 1 + (k − 1) = k = ⌈log₂ n⌉.
+
+Đó là Q(n). ∎ (chứng minh của người soạn) Với n = 1000: 2⁹ = 512 < 1000 ≤ 1024 = 2¹⁰ nên ⌈log₂ 1000⌉ = 10; tức tối đa 10 tầng merge, dù có 999 phép merge tất cả.
+
+</details>
+
+**Bài 5 (Vừa).** Dùng *nguyên lý sắp tốt* (không dùng quy nạp) để chứng minh:
+
+a) Mọi số nguyên n ≥ 1 đều viết được n = 2ᵏ · m với k ≥ 0 nguyên và m lẻ.
+
+b) Cách viết đó là duy nhất: nếu 2ᵏ · m = 2ʲ · m' với m, m' lẻ thì k = j và m = m'.
+
+<details><summary>Gợi ý</summary>
+
+Ở (a), gọi C là tập các n ≥ 1 *không* viết được và xét phần tử nhỏ nhất của C: nó chẵn hay lẻ? Ở (b), giả sử k < j rồi chia hai vế cho 2ᵏ.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Theo khuôn của nguyên lý sắp tốt[^mcs-wop-template]: gọi C là tập các n ≥ 1 không viết được dưới dạng 2ᵏ · m với m lẻ, và giả sử C khác rỗng. C là tập khác rỗng các số nguyên không âm nên có phần tử nhỏ nhất n₀[^mcs-wop]. Có hai trường hợp.
+
+- n₀ lẻ: n₀ = 2⁰ · n₀ với n₀ lẻ, nên n₀ viết được, mâu thuẫn với n₀ ∈ C.
+- n₀ chẵn: n₀ = 2n₁ với n₁ nguyên và 1 ≤ n₁ < n₀ (n₀ ≥ 2 vì n₀ chẵn và dương). Vì n₁ < n₀ và n₀ là phần tử nhỏ nhất của C nên n₁ ∉ C, tức n₁ = 2ᵏ · m với m lẻ. Khi đó n₀ = 2n₁ = 2ᵏ⁺¹ · m viết được, lại mâu thuẫn với n₀ ∈ C.
+
+Cả hai trường hợp đều mâu thuẫn nên C rỗng. ∎
+
+b) Giả sử 2ᵏ · m = 2ʲ · m' với m, m' lẻ và k ≠ j; không mất tổng quát k < j. Chia hai vế cho 2ᵏ: m = 2ʲ⁻ᵏ · m'. Vì j − k ≥ 1 nên vế phải chẵn, trong khi m lẻ: mâu thuẫn. Vậy k = j, và chia hai vế cho 2ᵏ được m = m'. ∎ (chứng minh của người soạn cho cả hai phần)
+
+Ví dụ: 1000 = 2³ · 125, và k = 3 là số bit 0 ở đuôi của 1000 trong biểu diễn nhị phân (1111101000₂). Tính duy nhất cho phép coi k là một hàm của n; tính tồn tại bảo đảm hàm ấy xác định trên mọi n ≥ 1 (nhận xét của người soạn).
+
+</details>
+
+**Bài 6 (Vừa).** Một sender gửi segment qua kênh có cửa sổ cỡ W ≥ 1. Trạng thái là bộ ba số tự nhiên (s, r, a): s là số segment đã gửi, r là số segment receiver đã nhận, a là số segment sender đã nhận ack. Trạng thái đầu là (0, 0, 0). Ba transition:
+
+- Send: guard s < a + W; (s, r, a) → (s + 1, r, a).
+- Deliver: guard r < s; (s, r, a) → (s, r + 1, a).
+- Ack: guard a < r; (s, r, a) → (s, r, a + 1).
+
+Mục tiêu là T ≡ r ≤ a + W: số segment đã tới receiver nhưng chưa được ack không vượt W.
+
+a) Chứng minh T *không* phải invariant quy nạp: chỉ ra một trạng thái thỏa T mà một transition đưa ra khỏi T, và giải thích vì sao trạng thái đó không với tới được.
+
+b) Tăng cường T thành một invariant quy nạp I, chứng minh I quy nạp, và suy ra T đúng ở mọi trạng thái với tới được.
+
+<details><summary>Gợi ý</summary>
+
+Phản ví dụ nằm ở Deliver. Hỏi: vì sao trạng thái ấy không thể xảy ra? Câu trả lời là một bất đẳng thức giữa s và a mà T không nhắc tới.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Lấy trạng thái (W + 1, W, 0). Nó thỏa T vì r = W ≤ 0 + W. Guard của Deliver, r < s tức W < W + 1, đúng, và bước Deliver cho (W + 1, W + 1, 0), có r = W + 1 > 0 + W, tức vi phạm T. Vậy T không được bảo toàn bởi mọi transition, nên không phải invariant quy nạp[^mcs-preserved-def]. Trạng thái (W + 1, W, 0) không với tới được vì nó có s = W + 1 > a + W, tức sender đã gửi nhiều hơn W segment chưa ack, điều mà guard của Send không cho phép. Đây đúng là hiện tượng ở mục 4.3: điều kiện đúng ở mọi trạng thái với tới được vẫn có thể không quy nạp[^mcs-invariant2].
+
+b) Vế còn thiếu chính là câu trả lời cho "vì sao trạng thái trên không với tới được": s ≤ a + W. Đặt
+
+> I ≡ (r ≤ a + W) ∧ (s ≤ a + W)
+
+- **(O1)** Ở (0, 0, 0): 0 ≤ 0 + W, đúng cho cả hai vế.
+- **(O2)** Giả sử I. Với Send, guard cho s < a + W, nên s + 1 ≤ a + W (số nguyên); r và a không đổi nên r ≤ a + W vẫn đúng. Với Deliver, guard cho r < s nên r + 1 ≤ s ≤ a + W; s và a không đổi nên vế còn lại giữ nguyên. Với Ack, a tăng lên a + 1 nên cả r ≤ a + W lẫn s ≤ a + W còn đúng với a + 1 + W lớn hơn.
+- **(O3)** I có sẵn r ≤ a + W, tức T.
+
+Theo nguyên lý invariant, mọi trạng thái với tới được thỏa I, nên thỏa T[^mcs-inv-principle]. ∎ (chứng minh của người soạn) Chú ý guard của Send gánh bước Send và guard của Deliver gánh bước Deliver, giống như guard `busy < max` gánh Grow ở mục 4.4. Người soạn cũng đã kiểm vét cạn trong hộp 0..=3W+3 cho W = 1 đến 4 (quan sát, `rustc 1.95.0`): T có phản ví dụ của bước quy nạp (một trong số đó đúng là (W + 1, W, 0)), I không có phản ví dụ nào, và duyệt rộng từ (0, 0, 0) tới s ≤ 40 mọi trạng thái đều thỏa T. Đó là kiểm trong phạm vi, không thay chứng minh.
+
+</details>
+
+**Bài 7 (Vừa).** Hàm dưới đây tính lũy thừa bằng bình phương liên tiếp, dùng cho bước chờ cấp số nhân của một cơ chế backoff:
+
+```rust
+fn pow_fast(base: u64, k: u32) -> u64 {
+    let (mut r, mut b, mut e) = (1u64, base, k);
+    while e > 0 {
+        if e % 2 == 1 {
+            r *= b;
+        }
+        b *= b;
+        e /= 2;
+    }
+    r
+}
+```
+
+a) Tìm một loop invariant và chứng minh hàm trả đúng baseᵏ (cho số tự nhiên, coi phép nhân là toán học).
+
+b) Chứng minh vòng lặp dừng và chạy tối đa ⌊log₂ k⌋ + 1 lượt với k ≥ 1.
+
+c) Chỉ ra đầu vào mà baseᵏ vừa trong `u64`, nhưng bản build debug panic.
+
+d) Sửa hàm và chứng minh, với base ≥ 1 và baseᵏ ≤ `u64::MAX`, mọi phép nhân trong bản sửa đều không tràn.
+
+<details><summary>Gợi ý</summary>
+
+Ở (a), đại lượng bất biến là r · bᵉ. Ở (c), theo dõi giá trị của b sau mỗi lượt khi k = 63. Ở (d), phép nhân nào là thừa ở lượt cuối?
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Invariant I ≡ r · bᵉ = baseᵏ.
+
+- **(O1)** Trước vòng lặp: r = 1, b = base, e = k nên r · bᵉ = baseᵏ.
+- **(O2)** Giả sử I và e > 0. Nếu e chẵn, e = 2q: thân vòng cho r' = r, b' = b², e' = q, nên r' · b'^e' = r · (b²)^q = r · b^(2q) = r · b^e = base^k. Nếu e lẻ, e = 2q + 1: cho r' = r · b, b' = b², e' = q (phép chia nguyên `e / 2` cho q), nên r' · b'^e' = r · b · b^(2q) = r · b^(2q+1) = r · b^e = base^k.
+- **(O3)** Khi thoát, e = 0 nên r = r · b⁰ = baseᵏ, tức hàm trả đúng baseᵏ.
+
+Đây là partial correctness: nếu vòng lặp dừng thì kết quả đúng[^mcs-partial-def]. ∎ (chứng minh của người soạn)
+
+b) Dùng đại lượng e làm biến dẫn xuất: e là số tự nhiên và `e /= 2` làm e giảm thật sự khi e > 0, nên mọi execution đều hữu hạn[^mcs-derived]. Để đếm lượt, lập luận của Định lý 3.2 dùng lại nguyên văn: mỗi lượt đưa e về e' = ⌊e/2⌋ (đúng cận s' ≤ ⌊s/2⌋ của mục 3.2) và vòng chạy khi e ≥ 1, nên quy nạp mạnh cho số lượt tối đa ⌊log₂ e⌋ + 1. Với k = 1000 đó là 10 lượt.
+
+c) Với k = 63 = 111111₂, vòng chạy 6 lượt với e = 63, 31, 15, 7, 3, 1 và e lẻ ở mọi lượt. Sau t lần bình phương b = `2^(2^t)`; trước lượt thứ 6, b = 2³², và sau phép `r *= b` của lượt đó r = `2^(1+2+4+8+16+32)` = 2⁶³ ≤ `u64::MAX`. Nhưng ngay sau đó `b *= b` tính (2³²)² = 2⁶⁴, vượt `u64::MAX`, nên `pow_fast(2, 63)` panic ở build debug[^rs-overflow-debug]. Ở build release phép nhân cuộn vòng mà kết quả vẫn đúng, vì b không còn được dùng nữa[^rs-overflow-release]. Người soạn đã chạy cả hai (quan sát, `rustc 1.95.0`, build không tối ưu): `pow_fast(2, 63)` và `pow_fast(1 << 32, 1)` đều panic. Trong 3312 cặp (base, k) với 0 ≤ base ≤ 300, 0 ≤ k ≤ 70 mà baseᵏ vừa `u64`, bản gốc panic ở 814 cặp. Chứng minh ở (a) không sai: nó chứng minh cho số tự nhiên, còn `b *= b` ở lượt cuối là một bước mà chứng minh không cần nhưng máy vẫn thực hiện, đúng bài học ở mục 5.5.
+
+d) Chỉ bình phương khi còn lượt sau:
+
+```rust
+fn pow_fast(base: u64, k: u32) -> u64 {
+    let (mut r, mut b, mut e) = (1u64, base, k);
+    while e > 0 {
+        if e % 2 == 1 {
+            r *= b;
+        }
+        e /= 2;
+        if e > 0 {
+            b *= b;
+        }
+    }
+    r
+}
+```
+
+Với base = 0 mọi giá trị đều là 0 hoặc 1, không tràn. Với base ≥ 1, r ≥ 1 và b ≥ 1 ở mọi lúc, và I vẫn là loop invariant với cùng chứng minh ở (a). Ta chứng minh mọi phép nhân đều cho kết quả ≤ baseᵏ ≤ `u64::MAX`.
+
+- `r *= b` chạy khi e ≥ 1. Từ I: r · bᵉ = baseᵏ, và vì e ≥ 1, b ≥ 1 nên bᵉ ≥ b, suy ra r · b ≤ r · bᵉ = baseᵏ.
+- `b *= b` chạy khi e' = ⌊e/2⌋ ≥ 1, sau khi r được cập nhật thành r'. Tại điểm đó r' · b^(2e') = base^k: nếu e chẵn thì e = 2e' và r' = r; nếu e lẻ thì e = 2e' + 1, r' = r · b, và r · b · b^(2e') = r · b^e. Vì e' ≥ 1, b ≥ 1 nên b^(2e') ≥ b², suy ra b² ≤ b^(2e') ≤ r' · b^(2e') = base^k.
+
+Vậy không phép nhân nào tràn. ∎ (lời giải của người soạn) Kiểm vét cạn cùng khoảng 0 ≤ base ≤ 300, 0 ≤ k ≤ 70: bản sửa không panic và trả đúng kết quả ở cả 3312 cặp mà baseᵏ vừa `u64` (quan sát). Bài học giống mục 5.5: invariant của loop phải kèm điều kiện "không tràn", và ở đây điều kiện ấy đòi bỏ một phép nhân mà logic không cần.
+
+</details>
+
+**Bài 8 (Khó).** Chuỗi gọi `pay-gw` có L + 1 tầng đánh số 0, …, L như ở Định lý 3.1. Mỗi lời gọi tầng i (0 ≤ i < L) nhận được sinh ngay (cùng tick) đúng một *lần thử đầu* xuống tầng i + 1. Ngoài ra tầng i chỉ được retry khi lấy được một token từ bucket riêng của nó (sức chứa `cap`, nạp r token mỗi tick, khởi đầu đầy, mỗi lần retry là một Admit như ở mục 4.6), và mỗi retry cũng đến tầng i + 1 trong cùng tick. Không có nguồn gọi nào khác. Cho một đoạn bất kỳ gồm Δ tick của một execution, gọi Nᵢ là số lời gọi tầng i nhận được trong đoạn đó.
+
+a) Chứng minh số retry tầng i phát ra trong đoạn đó tối đa cap + r·Δ.
+
+b) Chứng minh Nᵢ₊₁ ≤ Nᵢ + cap + r·Δ, rồi bằng quy nạp theo i: Nᵢ ≤ N₀ + i · (cap + r·Δ).
+
+c) Tính cận cho L = 5, cap = 10, r = 5, Δ = 60 và N₀ = 1000 lời gọi của người dùng, so với trường hợp không có bucket và mỗi tầng thử k = 3 lần.
+
+<details><summary>Gợi ý</summary>
+
+Ở (a), Định lý 4.4 áp cho bucket của tầng i, với "request được cho qua" là "retry được cho qua". Ở (b), chia lời gọi mà tầng i + 1 nhận được thành lần thử đầu và retry.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Bucket của tầng i là đúng mô hình ở mục 4.6, trong đó mỗi lần retry là một Admit và Δ là số tick của đoạn. Theo Định lý 4.4 (cận cửa sổ), số Admit trong đoạn tối đa cap + r·Δ. Chứng minh ấy không giả định gì về chuyện tầng i muốn retry nhiều hay ít, nên cận đúng cho mọi lịch lỗi, kể cả lịch tệ nhất. ∎
+
+b) Tầng i + 1 chỉ nhận lời gọi từ tầng i, nên Nᵢ₊₁ = (số lần thử đầu của tầng i trong đoạn) + (số retry của tầng i trong đoạn), giả sử độ trễ gọi bằng 0 để mọi lời gọi phát ra trong đoạn cũng được nhận trong đoạn. Mỗi lời gọi tầng i nhận được sinh đúng một lần thử đầu, nên số lần thử đầu bằng Nᵢ. Theo (a), số retry ≤ cap + r·Δ. Vậy Nᵢ₊₁ ≤ Nᵢ + cap + r·Δ.
+
+Gọi β = cap + r·Δ. Giả thiết quy nạp P(i): Nᵢ ≤ N₀ + i·β.
+
+- *Cơ sở* (i = 0): N₀ ≤ N₀.
+- *Bước quy nạp*: giả sử P(i). Theo (b), Nᵢ₊₁ ≤ Nᵢ + β ≤ N₀ + i·β + β = N₀ + (i + 1)·β. Đó là P(i + 1).
+
+Theo quy nạp thường, P(i) đúng với mọi 0 ≤ i ≤ L; đặc biệt N_L ≤ N₀ + L·β. ∎ (chứng minh của người soạn)
+
+c) β = 10 + 5 · 60 = 310 và N_L ≤ 1000 + 5 · 310 = 2550 lời gọi tới tầng sâu nhất trong 60 giây. Không có bucket, mỗi tầng thử k = 3 lần: tầng cuối nhận tối đa 3⁵ · 1000 = 243000 lời gọi (Định lý 3.1; 3⁵ = 243 là con số AWS nêu cho chuỗi sâu năm tầng, mỗi tầng thử ba lần[^aws-retry-amp]), tức gần 95 lần số trên (243000/2550 ≈ 95,3). Khác biệt về *hình dạng*: cận không bucket *nhân* theo từng tầng[^aws-retry-multiply], cận có bucket chỉ *cộng* thêm L·β. Điều này giải thích vì sao AWS giới hạn retry tại chỗ bằng token bucket[^aws-retry-bucket] (nhận xét của người soạn).
+
+Hai lưu ý về phạm vi (nhận xét của người soạn). Một: chứng minh giả sử độ trễ bằng 0 và các tick của mọi tầng khớp nhau; nếu có độ trễ thì cửa sổ ở tầng i + 1 lệch so với cửa sổ ở tầng i và cận phải cộng thêm phần lệch. Hai: kết luận chỉ cho *retry*; nếu mỗi tầng còn có cơ chế khác sinh thêm lời gọi (hedging, fan-out) thì cận phải cộng cả chúng.
+
+</details>
+
+**Bài 9 (Khó).** Cụm bầu leader có n server. Cải tiến Định lý 2.3: thay "đa số" bằng ngưỡng q tùy ý (1 ≤ q ≤ n): một ứng viên thắng term t khi có phiếu từ ít nhất q server. Mỗi server *trung thực* bỏ phiếu cho tối đa một ứng viên trong term t. Nhưng có tối đa m server *hay quên*: chúng có thể mất `votedFor` khi khởi động lại và vì thế bỏ phiếu cho nhiều ứng viên trong cùng term, giống tình huống `votedFor` không được ghi bền[^raft-persist].
+
+a) Chứng minh: nếu 2q − n ≥ m + 1 thì mỗi term có tối đa một leader.
+
+b) Chứng minh điều ngược lại: nếu 2q − n ≤ m thì có một kịch bản hợp lệ với hai leader trong cùng một term.
+
+c) Suy ra ngưỡng nhỏ nhất qmin theo n và m. Tính cho n = 5 với m = 0 và m = 1, và cho n = 3f + 1 với m = f. Cái giá của ngưỡng lớn hơn là gì?
+
+<details><summary>Gợi ý</summary>
+
+Ở (a), dùng dạng định lượng của chứng minh trực tiếp ở Định lý 2.1: |A ∩ B| ≥ |A| + |B| − n. Ở (b), chọn hai tập phiếu "xếp sát hai đầu" của {1, …, n} để giao của chúng nhỏ nhất có thể.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Giả sử trong term t có hai leader c₁ ≠ c₂. Gọi V₁, V₂ là tập các server đã bỏ phiếu cho c₁, c₂ trong term t; |V₁| ≥ q và |V₂| ≥ q. Từ chứng minh trực tiếp ở Định lý 2.1, |V₁ ∩ V₂| ≥ |V₁| + |V₂| − n ≥ 2q − n ≥ m + 1. Mỗi server trong V₁ ∩ V₂ đã bỏ phiếu cho cả c₁ lẫn c₂ khác nhau trong cùng term, nên không thể trung thực, tức đều hay quên. Nhưng chỉ có tối đa m server hay quên, mà |V₁ ∩ V₂| ≥ m + 1: mâu thuẫn. Vậy mỗi term có tối đa một leader. ∎ (chứng minh của người soạn; với m = 0 đây là Định lý 2.3, vì 2q − n ≥ 1 ⇔ q > n/2)
+
+b) Giả sử 2q − n ≤ m. Đặt d = max(0, 2q − n); vậy d ≤ m. Xếp V₁ = {1, …, q} và V₂ = {n − q + 1, …, n}, hai tập cỡ q. Nếu 2q > n thì giao của chúng là {n − q + 1, …, q}, gồm q − (n − q) = 2q − n = d phần tử; nếu 2q ≤ n thì chúng rời nhau và d = 0. Coi các server trong V₁ ∩ V₂ là hay quên (đúng d ≤ m, hợp lệ). Kịch bản: mọi server trong V₁ bỏ phiếu cho c₁; mọi server trong V₂ ∖ V₁ bỏ phiếu cho c₂; mỗi server trong V₁ ∩ V₂ trước tiên bỏ phiếu cho c₁, khởi động lại mất `votedFor`, rồi bỏ phiếu cho c₂. Mỗi ứng viên nhận đúng q phiếu, nên cả hai thắng term t. ∎ (chứng minh của người soạn) Khi d = 0, đó là phản ví dụ "nửa số node không đủ" ở mục 2.1 (cụm 6 node, quorum 3).
+
+c) Từ (a) và (b), term an toàn khi và chỉ khi 2q − n ≥ m + 1, tức q ≥ (n + m + 1)/2, nên qmin = ⌈(n + m + 1)/2⌉.
+
+- n = 5, m = 0: qmin = ⌈6/2⌉ = 3, đúng "đa số" của cụm 5 node.
+- n = 5, m = 1: qmin = ⌈7/2⌉ = 4.
+- n = 3f + 1, m = f: qmin = ⌈(4f + 2)/2⌉ = 2f + 1; đây là con số quorum 2f + 1 trong cụm 3f + 1 node của họ giao thức chịu lỗi Byzantine mà mục 2.1 nhắc tới.
+
+Cái giá: để một ứng viên thắng được phải còn ít nhất q server sống và bỏ phiếu cho nó, nên số server sập tối đa mà cụm còn bầu được là n − q. Với n = 5, quorum 4 chỉ chịu được 1 server sập thay vì 2 như quorum 3. An toàn mạnh hơn mua bằng tính sống yếu hơn; định lý an toàn nói riêng không nói gì về tính sống (nhận xét của người soạn, theo cùng lưu ý ở mục 2.3). Người soạn đã duyệt vét cạn mọi cặp tập con cỡ q của {1, …, n} với n ≤ 10 và xác nhận giao nhỏ nhất đúng bằng max(0, 2q − n) (quan sát, `rustc 1.95.0`).
+
+</details>
+
+**Bài 10 (Khó).** Mô hình rút gọn của two-phase commit với n resource manager (RM) và một transaction manager (TM). Trạng thái: rm[i] ∈ {W, P, C, A} cho mỗi RM (working, prepared, committed, aborted), tm ∈ {I, C, A} (init, committed, aborted), và tập prep ⊆ {1, …, n} gồm các RM đã gửi thông điệp Prepared (thông điệp không mất). Lúc đầu mọi rm[i] = W, tm = I, prep = ∅. Sáu loại transition:
+
+- Prepare(i): rm[i] = W → rm[i] := P và thêm i vào prep.
+- SelfAbort(i): rm[i] = W → rm[i] := A.
+- TMCommit: tm = I và prep = {1, …, n} → tm := C.
+- TMAbort: tm = I → tm := A.
+- RcvCommit(i): tm = C → rm[i] := C.
+- RcvAbort(i): tm = A → rm[i] := A.
+
+Mục tiêu (Consistent): không có hai RM i, j nào mà rm[i] = C và rm[j] = A.
+
+a) Chứng minh Consistent *không* phải invariant quy nạp.
+
+b) Tìm một invariant quy nạp I kéo theo Consistent, và chứng minh đủ ba cửa. Gợi ý quy trình ở mục 4.4: bắt đầu từ Consistent, lấy phản ví dụ của bước quy nạp, hỏi vì sao nó không với tới được, thêm vế còn thiếu. Gợi ý: I gồm bốn vế, mỗi vế nói về một mối liên hệ giữa rm, tm và prep.
+
+<details><summary>Gợi ý</summary>
+
+Hai quan sát để dựng I: (1) một RM chỉ ở trạng thái C nếu TM đã quyết định commit; (2) một RM ở trạng thái A hoặc là do TM abort, hoặc là do nó tự abort *trước khi* gửi Prepared. Thêm hai vế để các quan sát ấy tự bảo toàn: TM chỉ commit khi mọi RM đã gửi Prepared, và RM đang W thì chưa gửi Prepared.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+a) Lấy n = 2 và trạng thái rm = (C, W), tm = I, prep = ∅. Nó thỏa Consistent (không có RM nào ở A). Transition SelfAbort(2) hợp lệ (rm[2] = W) và cho rm = (C, A), có hai RM ở C và A: vi phạm. Vậy Consistent không được bảo toàn bởi mọi transition, nên không phải invariant quy nạp[^mcs-preserved-def]. Trạng thái xuất phát không với tới được: rm[1] = C đòi tm = C, và tm = C đòi prep = {1, 2}, trong khi ở đây prep = ∅.
+
+b) Hai vế đầu là hai quan sát trong gợi ý, và chúng chính là câu trả lời cho "vì sao phản ví dụ ở (a) không với tới được":
+
+- K1: với mọi i, rm[i] = C ⇒ tm = C.
+- K2: với mọi i, rm[i] = A ⇒ (tm = A hoặc i ∉ prep).
+- K3: tm = C ⇒ prep = {1, …, n}.
+
+Thử I = K1 ∧ K2 ∧ K3 và kiểm cửa (O2): có phản ví dụ rm = (W, W, W), tm = I, prep = {1} (n = 3), vì nó thỏa K1, K2, K3 và bước SelfAbort(1) cho rm[1] = A với tm = I và 1 ∈ prep, vi phạm K2. Trạng thái này không với tới được vì RM 1 đã gửi Prepared mà vẫn ở W, trong khi Prepare chuyển W sang P cùng lúc với việc thêm vào prep. Đó là vế còn thiếu:
+
+- K4: với mọi i, rm[i] = W ⇒ i ∉ prep.
+
+Đặt I ≡ K1 ∧ K2 ∧ K3 ∧ K4.
+
+**(O1)** Ở trạng thái đầu: không có RM nào ở C hay A nên K1 và K2 đúng rỗng; tm = I nên K3 đúng rỗng; prep = ∅ nên K4 đúng.
+
+**(O2)** Giả sử I đúng trước bước; xét từng transition với guard của nó đúng.
+
+- *Prepare(i).* Trước bước rm[i] = W. Không RM nào thành C và tm không đổi nên K1 giữ. Với j ≠ i, rm[j] không đổi và j ∈ prep không đổi nên K2 và K4 giữ; với j = i, rm[i] = P nên K2 và K4 không có gì để kiểm. K3: nếu tm = C thì prep đã là toàn bộ tập, và thêm i vẫn là toàn bộ.
+- *SelfAbort(i).* Trước bước rm[i] = W nên theo K4, i ∉ prep; vậy rm[i] = A mới thỏa K2 (vế i ∉ prep). K1, K3 không đổi và không có RM mới ở C; K4 giữ vì rm[i] = A ≠ W.
+- *TMCommit.* Guard cho tm = I và prep là toàn bộ tập. K3 đúng ngay vì prep là toàn bộ tập, và K1 đúng vì tm' = C. Với K2: nếu có j với rm[j] = A thì trước bước tm = I ≠ A nên theo K2, j ∉ prep, trái với prep là toàn bộ tập; vậy không có RM nào ở A và K2 đúng rỗng. K4 không đổi.
+- *TMAbort.* Guard cho tm = I. Theo K1 (dạng phản đảo), trước bước không RM nào ở C, nên K1 đúng rỗng sau bước. K2 đúng vì tm' = A; K3 đúng vì tm' ≠ C; K4 không đổi.
+- *RcvCommit(i).* Guard cho tm = C. K1 đúng vì tm = C. Với K2, tm = C ≠ A nên mọi RM ở A (không phải i, vì rm[i] vừa thành C) đã có j ∉ prep trước bước, và điều đó không đổi. K3 không đổi; K4 giữ vì rm[i] = C ≠ W.
+- *RcvAbort(i).* Guard cho tm = A. K1: tm không đổi và không RM nào mới thành C. K2 đúng cho i vì tm = A, các RM khác không đổi. K3 đúng vì tm = A ≠ C. K4 giữ vì rm[i] = A ≠ W.
+
+**(O3)** I ⇒ Consistent: giả sử rm[i] = C và rm[j] = A. Theo K1, tm = C. Theo K2 cho j, tm = A hoặc j ∉ prep; vì tm = C ≠ A nên j ∉ prep. Nhưng theo K3, tm = C kéo theo prep = {1, …, n} ∋ j: mâu thuẫn. Vậy không có cặp (i, j) như thế.
+
+Theo nguyên lý invariant, mọi trạng thái với tới được thỏa I nên thỏa Consistent[^mcs-inv-principle]. ∎ (lời giải của người soạn) Người soạn đã kiểm vét cạn mô hình với n = 3 trên cả 4³ · 3 · 2³ = 1536 trạng thái thô (quan sát, `rustc 1.95.0`): Consistent có 1080 phản ví dụ của bước quy nạp; K1 ∧ K2 ∧ K3 còn 102 phản ví dụ, trong đó có (W, W, W), tm = I, prep = {1}; I không có phản ví dụ nào và I ⇒ Consistent đúng trên cả hộp; duyệt rộng từ trạng thái đầu thấy 99 trạng thái với tới được, tất cả thỏa Consistent. Đây là kiểm cho n = 3, còn chứng minh ở trên là cho mọi n. Bài này cho thấy ba nguồn thông tin của một invariant: quan sát trạng thái với tới được (K1, K2), điều kiện của guard (K3), và phản ví dụ của chính bước quy nạp (K4)[^mcs-find-inv].
+
+</details>
+
 ## Đọc thêm
 
 - Lehman, Leighton, Meyer, [*Mathematics for Computer Science* (MIT 6.042, 2018)](https://courses.csail.mit.edu/6.042/spring18/mcs.pdf), chương 1 (khuôn chứng minh: kéo theo, phản đảo, phản chứng) và chương 3, mục 3.6 (lượng từ, phủ định, counter-model): nguồn chính của mục 1 và 2, đọc để có thêm bài tập.

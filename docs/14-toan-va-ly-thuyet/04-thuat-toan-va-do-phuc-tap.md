@@ -1163,6 +1163,267 @@ Lấy `m(m−1) = 6` job độ dài 1 rồi một job độ dài `m = 3`, theo t
 
 </details>
 
+## Bài tập
+
+Mười một bài dưới đây dùng đúng công cụ của chương: chọn cặp `(c, n₀)`, giải recurrence, chọn hàm thế, dựng reduction và chứng minh hệ số xấp xỉ. Mỗi bài chia ba nấc: Dễ (làm lại kỹ thuật đã thấy trên số liệu mới), Vừa (tự dựng chứng minh ngắn), Khó (nhiều bước, hoặc một kết luận ngược trực giác). Các bài 5, 8, 9 và 10 đặt trong tình huống backend; mô hình trong đó là giả định của người soạn, không phải code trong repo. Hãy tự làm trước khi mở lời giải. Mọi lời giải đều là lời giải của người soạn, và các con số trong đó đã được người soạn kiểm lại bằng một chương trình Rust nhỏ (`rustc 1.95.0`, macOS arm64; chương trình không đính kèm).
+
+**Bài 1 (Dễ).** Một đợt dọn dẹp của `jobq` tốn `T(n) = n²/2 − 3n + 10` bước với `n` job.
+
+(a) Chứng minh `T(n) = Θ(n²)` bằng cách chỉ ra hằng số cụ thể: cận trên với `c = 1/2`, cận dưới với `c = 1/4`. Với mỗi cận, nêu `n₀` nhỏ nhất bạn tìm được và chứng minh rằng với `c = 1/2` thì `n₀ = 3` không dùng được.
+
+(b) Chứng minh `√n · lg n = O(n)` với `c` và `n₀` tường minh (`lg` là `log₂`).
+
+<details><summary>Gợi ý</summary>
+
+(a) Nhân hai vế với 2 hoặc 4 để bỏ phân số, rồi đưa về một tam thức bậc hai theo `n`; với cận dưới, thử viết nó dưới dạng bình phương cộng một số dương. (b) Chặn `lg n` bằng một căn của `n`: đặt `k = ⌈√n⌉` rồi dùng `k < 2ᵏ` ở Mệnh đề 2.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(a) *Cận trên.* `T(n) ≤ n²/2` tương đương `−3n + 10 ≤ 0`, tức `n ≥ 10/3`. Với `n` nguyên điều đó nghĩa là `n ≥ 4`, nên `c = 1/2`, `n₀ = 4` dùng được. Còn `n₀ = 3` thì không: `T(3) = 4,5 − 9 + 10 = 5,5 > 4,5 = 3²/2`. Vậy `n₀ = 4` là nhỏ nhất cho `c = 1/2`.
+
+*Cận dưới.* `T(n) ≥ n²/4` tương đương `n²/4 − 3n + 10 ≥ 0`, tức `n² − 12n + 40 ≥ 0`. Mà `n² − 12n + 40 = (n − 6)² + 4 > 0` với mọi `n`. Vậy `c = 1/4`, `n₀ = 1` dùng được. Hai cận cùng nhau cho `T(n) = Θ(n²)`[^mcs-bigo-def].
+
+Lưu ý: không thể chọn `c = 1/2` cho cận dưới. Với `n ≥ 4` ta có `T(n) = n²/2 − 3n + 10 < n²/2` (vì `3n > 10`), nên `T(n) ≥ n²/2` sai ở mọi `n ≥ 4`. Hằng số của cận dưới phải nhỏ hơn hệ số cao nhất.
+
+(b) Với `n ≥ 1`, đặt `k = ⌈√n⌉`, là số nguyên `≥ 1`. Vì `k ≥ √n` nên `n ≤ k²`, suy ra `lg n ≤ 2·lg k`. Mệnh đề 2 cho `k < 2ᵏ`, tức `lg k < k`. Mặt khác `k < √n + 1 ≤ 2√n` vì `√n ≥ 1`. Ghép lại: `lg n < 2k < 4√n`. Nhân hai vế với `√n`: `√n · lg n < 4n` với mọi `n ≥ 1`, tức `c = 4`, `n₀ = 1`. Đây là một trường hợp cụ thể của việc logarit tăng chậm hơn mọi căn[^mcs-log-roots]. Hằng số 4 rộng tay; số đo trực tiếp cho tỉ số `√n·lg n / n` lớn nhất khoảng `1,06` trên `n < 2·10⁶`.
+
+</details>
+
+**Bài 2 (Dễ).** `jobq` giữ một bộ đếm thế hệ gồm `k` bit trong mảng `[bool; k]`, khởi đầu toàn 0. Phép `increment` lật tất cả các bit 1 ở cuối về 0 rồi lật bit 0 đứng ngay trước chúng thành 1. Chi phí một `increment` là số bit bị lật. Giả sử không bao giờ tràn.
+
+(a) Chọn `Φ` = số bit 1 trong bộ đếm. Chứng minh chi phí amortized của mỗi `increment` bằng đúng 2, rồi suy ra `n` lần `increment` liên tiếp từ 0 tốn đúng `2n − s(n)` lần lật bit, với `s(n)` là số bit 1 của `n` trong hệ nhị phân.
+
+(b) Nếu có thêm phép `decrement` (đối xứng: lật các bit 0 ở cuối thành 1 rồi lật bit 1 ngay trước chúng thành 0), chứng minh không còn chặn được chi phí trung bình bởi một hằng số: dựng một chuỗi thao tác mà mỗi thao tác đều tốn `k`.
+
+<details><summary>Lời giải</summary>
+
+(a) Giả sử giá trị hiện tại có `t` bit 1 ở cuối (`t ≥ 0`), và vì không tràn nên ngay trước chúng có một bit 0. `increment` lật `t` bit 1 thành 0 và một bit 0 thành 1: chi phí thật `t + 1`. Số bit 1 giảm `t` rồi tăng 1, nên `ΔΦ = 1 − t`. Chi phí amortized là `(t + 1) + (1 − t) = 2`, bất kể `t`. `Φ` không âm và bằng 0 lúc đầu, nên tổng chi phí thật không vượt tổng amortized[^m6-potential-valid]. Cụ thể hơn, cộng đẳng thức "thật = amortized − `ΔΦ`" qua `n` thao tác thì các `ΔΦ` triệt tiêu từng đôi và còn lại `Φ₀ − Φₙ`[^eri-am-potential]: tổng chi phí thật `= 2n − Φₙ + Φ₀ = 2n − s(n)`, vì sau `n` lần đếm thì bộ đếm chứa số `n`. Kiểm bằng tay với `n = 7`: các lần `increment` lật `1, 2, 1, 3, 1, 2, 1` bit, tổng 11, và `2·7 − s(7) = 14 − 3 = 11`.
+
+(b) Lấy giá trị `x = 2ᵏ⁻¹ − 1`, gồm `k − 1` bit 1 rồi tới bit 0 ở vị trí cao nhất. `increment` đưa `x` tới `2ᵏ⁻¹`: `k − 1` bit 1 về 0 và bit cao nhất lên 1, tổng `k` lần lật. `decrement` đưa `2ᵏ⁻¹` về `x`, cũng lật đúng `k` bit. Xen kẽ hai phép này thì *mỗi* thao tác tốn `k`, nên `m` thao tác tốn `m·k`, và chi phí trung bình không thể bị chặn bởi hằng số độc lập với `k`. Lý do: hàm thế `Φ` = số bit 1 giảm `k − 2` ở `increment` nhưng tăng `k − 2` ở `decrement`, nên `decrement` có amortized `k + (k − 2) = 2k − 2`. Hai thao tác ngược nhau không thể cùng dùng một hàm thế như vậy.
+
+</details>
+
+**Bài 3 (Dễ).** Cho `T(0) = 0` và `T(n) = T(⌊n/2⌋) + T(⌊n/4⌋) + n` với `n ≥ 1`. (Một thủ tục giả định của `jobq` xử lý nửa đầu và một phần tư đầu của hàng đợi rồi quét thêm `n` phần tử.)
+
+(a) Giải thích vì sao Master theorem không áp dụng trực tiếp.
+
+(b) Chứng minh bằng substitution rằng `T(n) = Θ(n)`, và chỉ ra hằng số cận trên.
+
+(c) Vì sao bước quy nạp không đóng được nếu bạn giả sử `T(n) ≤ 3n`? Kết luận `T(n) ≤ 3n` có thật sự sai không?
+
+<details><summary>Gợi ý</summary>
+
+Cây đệ quy: tổng chi phí tầng 0 là `n`, tầng 1 là `n/2 + n/4 = 3n/4`, và mỗi tầng chỉ bằng `3/4` tầng trên. Tổng cấp số nhân giảm nên gốc thống trị; hãy đoán `T(n) ≤ c·n` rồi tìm `c`.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(a) Master theorem xét dạng `T(n) = a·T(n/b) + g(n)`, tức mọi bài toán con cùng cỡ `n/b`[^mcs-master]. Ở đây hai bài toán con có cỡ khác nhau, `n/2` và `n/4`, nên không có cặp `(a, b)` nào. Công thức Akra–Bazzi xử lý được dạng này[^mcs-akra], nhưng bài này đủ dễ để làm bằng quy nạp.
+
+(b) *Cận dưới.* Bằng quy nạp mạnh, `T(n) ≥ 0` với mọi `n` (tổng của các số không âm), nên `T(n) ≥ n` với `n ≥ 1`: `c = 1`, `n₀ = 1`.
+
+*Cận trên.* Ta chứng minh `T(n) ≤ 4n` với mọi `n ≥ 0` bằng quy nạp mạnh. Cơ sở: `T(0) = 0 ≤ 0`. Bước: với `n ≥ 1`, cả `⌊n/2⌋` và `⌊n/4⌋` nhỏ hơn `n` nên giả thiết quy nạp dùng được cho chúng:
+
+```text
+T(n) = T(⌊n/2⌋) + T(⌊n/4⌋) + n ≤ 4⌊n/2⌋ + 4⌊n/4⌋ + n ≤ 4·(n/2) + 4·(n/4) + n = 2n + n + n = 4n
+```
+
+Vậy `T(n) = Θ(n)` với `c = 1` và `c = 4`, `n₀ = 1`.
+
+(c) Giả sử `T(m) ≤ 3m` cho mọi `m < n`. Bước quy nạp cho `T(n) ≤ 3·(n/2) + 3·(n/4) + n = 3,25·n`, lớn hơn `3n`, nên vòng không đóng. Hằng số `c` đóng được khi `3c/4 + 1 ≤ c`, tức `c ≥ 4`; giá trị 4 là chặt nhất mà cách chứng minh này cho được. Trong trường hợp này lỗi không chỉ ở cách chứng minh: chương trình của người soạn tính `T(10⁶) / 10⁶ ≈ 3,933`, tức `T(n) ≤ 3n` thật sự sai ở `n = 10⁶`. Điều này khớp với tiên đoán từ cây đệ quy: tổng `n·(1 + 3/4 + (3/4)² + …) = 4n`.
+
+</details>
+
+**Bài 4 (Vừa).** (a) Chứng minh `lg(n!) = Θ(n log n)`: cận trên `lg(n!) ≤ n·lg n`, cận dưới `lg(n!) ≥ (n/4)·lg n` với `n ≥ 4`.
+
+(b) Mọi thuật toán sắp xếp chỉ dựa trên so sánh hai phần tử, chạy trên `n` khóa phân biệt, cần ít nhất `lg(n!)` phép so sánh trong trường hợp xấu nhất. Chứng minh điều đó, rồi kết luận gì về lời hứa `O(n log n)` của `slice::sort`?
+
+<details><summary>Gợi ý</summary>
+
+(a) Cận dưới: `n!` là tích của `n` thừa số; chỉ giữ lại nửa lớn nhất của chúng. (b) Mỗi phép so sánh có hai kết quả; hỏi xem `k` phép so sánh phân biệt được tối đa bao nhiêu thứ tự ban đầu.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(a) *Cận trên.* Mỗi thừa số của `n! = 1·2·…·n` không vượt quá `n`, nên `n! ≤ nⁿ`; lấy `lg` hai vế được `lg(n!) ≤ n·lg n`.
+
+*Cận dưới.* Chỉ giữ các thừa số từ `⌈n/2⌉` tới `n`: `n! ≥ ∏_{i=⌈n/2⌉}^{n} i`. Có `n − ⌈n/2⌉ + 1 = ⌊n/2⌋ + 1 ≥ n/2` thừa số, mỗi thừa số `≥ ⌈n/2⌉ ≥ n/2`. Với `n ≥ 2` ta có `n/2 ≥ 1`, nên tích không nhỏ hơn `(n/2)^(n/2)` (đáy `≥ 1` và số mũ thật lớn hơn `n/2`). Lấy `lg`: `lg(n!) ≥ (n/2)·lg(n/2) = (n/2)(lg n − 1)`. Với `n ≥ 4` có `lg n ≥ 2`, nên `lg n − 1 ≥ (lg n)/2`, suy ra `lg(n!) ≥ (n/4)·lg n`. Chọn `c = 1/4`, `n₀ = 4`; chiều ngược lại dùng `c = 1`, `n₀ = 1`. Vậy `lg(n!) = Θ(n log n)`.
+
+(b) Xét một thuật toán xác định chỉ đọc thứ tự qua các phép so sánh. Nếu nó dùng không quá `k` phép so sánh trên mọi đầu vào, dãy `k` kết quả đúng/sai nhiều nhất là `2ᵏ` khả năng, và thuật toán đi theo cùng một đường chạy khi gặp cùng dãy kết quả. Hai thứ tự ban đầu khác nhau của `n` khóa phân biệt đòi hai hoán vị đầu ra khác nhau; nếu chúng dẫn tới cùng dãy kết quả so sánh thì thuật toán xuất cùng một hoán vị cho cả hai, sai ở ít nhất một. Vậy `n!` thứ tự phải cho `n!` dãy kết quả khác nhau: `2ᵏ ≥ n!`, tức `k ≥ lg(n!) ≥ (n/4)·lg n` với `n ≥ 4`.
+
+Kết luận: không có thuật toán sắp theo so sánh nào có trường hợp xấu nhất `o(n log n)`. Vì vậy lời hứa `O(n * log(n))` worst-case của `slice::sort`[^rs-sort-stable] là tối ưu về bậc cho lớp thuật toán đó. Tối ưu hóa tiếp chỉ làm thay đổi hằng số hoặc khai thác cấu trúc đầu vào, như driftsort chạy tuyến tính trên dữ liệu đã sắp[^rs-sort-impl]; nó không phá được cận này.
+
+</details>
+
+**Bài 5 (Vừa, hệ thống).** Lịch sử của `jobq` nằm trong `k` file đã sắp theo thời gian, mỗi file `s` bản ghi (`n = k·s`), giống các run của một LSM-tree (nhận xét của người soạn: mô hình giả định). Việc dọn dẹp gộp `k` file thành một file đã sắp bằng phép trộn hai dãy đã sắp, và ta đếm chi phí là số bản ghi được ghi ra: trộn hai dãy cỡ `p` và `q` tốn đúng `p + q`.
+
+(a) Cách tuần tự: trộn file 1 với file 2, kết quả trộn với file 3, và cứ thế. Tính chi phí chính xác theo `s` và `k`, và chứng minh nó là `Θ(n·k)`.
+
+(b) Cách chia để trị với `k = 2ʲ`: chia `k` file thành hai nhóm một nửa, gộp mỗi nhóm đệ quy, rồi trộn hai kết quả. Chứng minh chi phí đúng `n·lg k`.
+
+(c) Với `s = 10⁶` và `k = 64`, hai cách chênh nhau bao nhiêu lần?
+
+<details><summary>Lời giải</summary>
+
+(a) Ở bước `i` (`i = 2, …, k`), ta trộn kết quả `(i − 1)·s` bản ghi của các bước trước với file thứ `i` cỡ `s`, nên ghi `i·s` bản ghi. Tổng:
+
+```text
+Σ_{i=2}^{k} i·s = s·(k(k+1)/2 − 1) = s·(k² + k − 2)/2
+```
+
+Với `k ≥ 2` có `k² + k − 2 ≥ k²/2` (vì `k²/2 + k − 2 ≥ 0` khi `k ≥ 2`) và `k² + k − 2 ≤ 2k²`, nên chi phí nằm giữa `s·k²/4` và `s·k²`. Với `n = s·k`, đó là `Θ(n·k)`.
+
+(b) Gọi `C(k)` là chi phí gộp `k` file cỡ `s`. Hai nhóm mỗi nhóm `k/2` file tốn `2·C(k/2)`, rồi phép trộn cuối ghi toàn bộ `k·s` bản ghi: `C(1) = 0`, `C(k) = 2·C(k/2) + k·s`. Quy nạp theo `j` với `k = 2ʲ`: `C(1) = 0 = s·1·0`. Nếu `C(2ʲ⁻¹) = 2ʲ⁻¹·s·(j−1)` thì `C(2ʲ) = 2·2ʲ⁻¹·s·(j−1) + 2ʲ·s = 2ʲ·s·j = n·lg k`. Đây là trường hợp "mọi tầng bằng nhau" của cây đệ quy: `lg k` tầng, mỗi tầng ghi `n`[^er-equal].
+
+(c) Tuần tự: `10⁶·(64·65/2 − 1) = 10⁶·2079 = 2,079·10⁹` bản ghi. Chia để trị: `64·10⁶·6 = 3,84·10⁸`. Tỉ số `2079/384 ≈ 5,41`. Khoảng cách tăng như `k / lg k`: với `k = 1024` file thì tuần tự tốn khoảng 51 lần cách còn lại (phép tính của người soạn, cùng công thức). Một bài học cho thiết kế: khi gộp nhiều nguồn đã sắp, đừng để một "bộ tích lũy" ngày càng lớn đi trộn lại với từng nguồn mới.
+
+</details>
+
+**Bài 6 (Vừa).** Trong mô hình chi phí của mục 3.1 (ghi một phần tử tốn 1, chép một phần tử tốn 1), giả sử mỗi lần `Vec` đầy với `cap = c ≥ 1`, capacity mới là `c' ≥ g·c` với `g > 1` thực. Lần cấp phát đầu (`cap = 0`) cho capacity `m ≥ 1` và tốn 1. Tìm hàm thế `Φ` để chứng minh chi phí amortized của `push` không quá `(2g − 1)/(g − 1)`, bằng đúng cận mà Định lý 2 cho theo phương pháp aggregate. Kiểm lại với `g = 2`.
+
+<details><summary>Gợi ý</summary>
+
+Thử `Φ = max(0, a·len − b·cap)`. Hai điều kiện: ở lần tăng capacity, `Φ` trước đó phải đúng bằng `c` (để trả cho `c` phần tử bị chép), và `Φ` sau đó không phụ thuộc `c`. Giải hai điều kiện đó cho `a` và `b`.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+Đặt `a = g/(g − 1)` và `b = 1/(g − 1)`; khi đó `a − b = 1` và `b·g = a`. Chọn `Φ = max(0, a·len − b·cap)`. `Φ ≥ 0` và `Φ = 0` với `Vec` rỗng, nên tổng chi phí thật không vượt tổng amortized[^m6-potential-valid]. Ba trường hợp:
+
+- *`push` vào `Vec` còn chỗ.* Chi phí thật 1; `len` tăng 1 nên `a·len − b·cap` tăng `a`. Vì `max(0, x + a) ≤ max(0, x) + a` với `a ≥ 0`, `Φ` tăng nhiều nhất `a`. Amortized `≤ 1 + a`.
+- *`push` vào `Vec` đầy, `len = cap = c ≥ 1`.* Chi phí thật `c + 1`. Trước đó `Φ = max(0, (a − b)·c) = c`. Sau đó `len = c + 1`, `cap = c' ≥ g·c`, và vì `b > 0`: `a(c + 1) − b·c' ≤ a(c + 1) − b·g·c = a(c + 1) − a·c = a`. Vậy `Φ` sau `≤ a`. Amortized `≤ (c + 1) + a − c = 1 + a`.
+- *`push` đầu tiên (`cap = 0`).* Chi phí thật 1, `Φ` trước bằng 0, `Φ` sau `= max(0, a − b·m) ≤ a`. Amortized `≤ 1 + a`.
+
+Cả ba trường hợp cho amortized `≤ 1 + a = (2g − 1)/(g − 1)`, nên `n` lần `push` tốn không quá `n·(2g − 1)/(g − 1)`, đúng cận của Định lý 2. Với `g = 2`: `a = 2`, `b = 1`, `Φ = max(0, 2·len − cap)` là hàm thế ở mục 3.4, và cận là 3, khớp hệ số 2 mà source Rust 1.95.0 đang dùng[^rs-grow-src]. Với `g = 1,5` cận là 4, với `g = 1,1` cận là 12 (chương trình của người soạn mô phỏng bốn trường hợp `g = 1,1; 1,5; 2; 3` và thấy amortized lớn nhất đúng bằng 12, 4, 3 và 2,5). Khi `g → 1` cận tăng không giới hạn: bộ nhớ trống ít hơn được đổi bằng việc chép nhiều hơn. Docs `Vec` chỉ hứa `O(1)` amortized cho bất kỳ chiến lược nào, không hứa hằng số[^rs-vec-guarantee].
+
+</details>
+
+**Bài 7 (Vừa).** `jobq` có đồ thị xung đột `G = (V, E)`: hai job có cạnh nếu không được chạy song song. Một *vertex cover* của `G` là tập `C ⊆ V` sao cho mọi cạnh có ít nhất một đầu mút trong `C`. Trong `jobq`, nếu hoãn mọi job trong `C` thì các job còn lại không xung đột và chạy song song được.
+
+(a) Chứng minh `S ⊆ V` là tập độc lập khi và chỉ khi `V ∖ S` là vertex cover.
+
+(b) Dùng (a) để viết hai reduction đa thức: Independent Set quy về Vertex Cover và Vertex Cover quy về Independent Set, và chứng minh cả hai đúng.
+
+(c) Kết luận gì về độ khó của "tối thiểu hóa số job phải hoãn"? Kiểm trên đồ thị hình sao một tâm và 5 lá.
+
+<details><summary>Lời giải</summary>
+
+(a) (⇒) Giả sử `S` độc lập và `{u, v}` là một cạnh. Nếu cả `u` và `v` nằm trong `S` thì giữa hai đỉnh của `S` có cạnh, trái giả thiết. Vậy ít nhất một đầu mút nằm trong `V ∖ S`, tức `V ∖ S` phủ cạnh đó. (⇐) Giả sử `V ∖ S` là vertex cover và `S` chứa hai đỉnh `u, v` kề nhau. Khi đó cạnh `{u, v}` không có đầu mút nào trong `V ∖ S`, trái với việc `V ∖ S` là vertex cover. ∎ Hệ quả: tập độc lập lớn nhất là phần bù của vertex cover nhỏ nhất[^eri-ind-vc].
+
+(b) Đặt `n = |V|`. *Independent Set → Vertex Cover:* ánh xạ `(G, k)` thành `(G, n − k)`. Theo (a), `G` có tập độc lập cỡ `≥ k` khi và chỉ khi có vertex cover cỡ `≤ n − k`: nếu `S` độc lập và `|S| ≥ k` thì `|V ∖ S| ≤ n − k`; nếu `C` là vertex cover với `|C| ≤ n − k` thì `V ∖ C` độc lập và `|V ∖ C| ≥ k`. *Vertex Cover → Independent Set:* ánh xạ `(G, k')` thành `(G, n − k')`, chứng minh đối xứng. Cả hai phép ánh xạ chỉ tốn một phép trừ nên rõ ràng đa thức. Chú ý hai đầu ngưỡng `k` và `n − k` đổi chiều bất đẳng thức; đây là chỗ hay sai.
+
+(c) Independent Set thuộc NP và NP-hard (Định lý 7 và hệ quả của nó), nên NP-complete. Vertex Cover thuộc NP vì bằng chứng là tập `C`, kiểm tra bằng một lượt qua mọi cạnh trong `O(|E|)`[^eri-np]. Nó NP-hard vì Independent Set quy về nó (theo (b)) mà Independent Set NP-hard: nếu giải được Vertex Cover nhanh thì giải được Independent Set nhanh. Vậy Vertex Cover NP-complete, và "tối thiểu số job phải hoãn để các job còn lại không xung đột" là bản tối ưu của nó, không có thuật toán đa thức chính xác trừ khi P = NP. Kiểm: hình sao có tâm `x` và 5 lá `ℓ₁…ℓ₅` có `n = 6` đỉnh; tập độc lập lớn nhất là 5 lá, vertex cover nhỏ nhất là `{x}` cỡ 1, và `6 − 5 = 1`.
+
+</details>
+
+**Bài 8 (Vừa, hệ thống).** Một scheduler đặt pod lên node theo kiểu online: các pod đến lần lượt với yêu cầu CPU `aᵢ` (tính theo phần của một node, `0 < aᵢ ≤ 1`). Quy tắc *Next-Fit*: giữ đúng một node "đang mở"; nếu pod mới vừa node đang mở thì đặt vào đó, nếu không thì đóng node đó vĩnh viễn và mở node mới cho pod này (nhận xét của người soạn: mô hình rất đơn giản hóa, chỉ một tài nguyên). Gọi `NF` là số node Next-Fit dùng và `OPT` là số node tối thiểu cần cho cùng tập pod.
+
+(a) Chứng minh `NF ≤ 2·OPT`.
+
+(b) Chứng minh hệ số 2 là chặt: dựng họ đầu vào với `NF / OPT → 2`.
+
+<details><summary>Gợi ý</summary>
+
+Mục 5 chứng minh `ℓ ≤ 2·OPT + 1` cho First-Fit bằng cách ghép các thùng thành cặp rời nhau. Ở đây hãy ghép các thùng *liên tiếp*, không cần rời nhau: pod đầu của thùng `i + 1` không vừa thùng `i`.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(a) Giả sử Next-Fit dùng `ℓ` node với tải `c₁, …, c_ℓ`. Với mỗi `i < ℓ`, pod đầu tiên của node `i + 1` có kích thước `x ≤ c_{i+1}` và không vừa node `i` lúc đó đang mở, nên `c_i + x > 1`; vậy `c_i + c_{i+1} > 1`. Cộng `ℓ − 1` bất đẳng thức đó:
+
+```text
+ℓ − 1 < Σ_{i=1}^{ℓ−1} (c_i + c_{i+1}) ≤ 2·SIZE
+```
+
+bất đẳng thức cuối vì mỗi tải `cᵢ` được cộng nhiều nhất hai lần, với `SIZE = Σ aᵢ` là tổng yêu cầu. Mỗi node của lời giải tối ưu chứa không quá 1 nên `OPT ≥ SIZE`. Vậy `ℓ − 1 < 2·OPT`; vì cả hai vế nguyên nên `ℓ − 1 ≤ 2·OPT − 1`, tức `ℓ ≤ 2·OPT`. (Nếu `ℓ = 1` thì hiển nhiên.) Theo định nghĩa của nguồn, đây là thuật toán xấp xỉ hệ số 2[^ws-approx-def]; cận của First-Fit `2·OPT + 1` trong chương cùng mẫu lập luận[^ws-binpack-ff].
+
+(b) Lấy `N` chẵn và kích thước node là `2N`, pod có kích thước `N` hoặc `1`, đến theo thứ tự `N, 1, N, 1, …` (mỗi loại `N` pod). Next-Fit: node 1 nhận pod `N` rồi pod `1` (tải `N + 1`); pod `N` kế tiếp cần `N + 1 + N = 2N + 1 > 2N` nên đóng node 1 và mở node 2. Cứ thế mỗi node chứa đúng một pod `N` và một pod `1`, nên `NF = N`. Tối ưu: ghép các pod `N` thành `N/2` cặp, mỗi cặp vừa khít một node, và `N` pod `1` cộng lại `N ≤ 2N` nằm gọn trong một node nữa: `OPT ≤ N/2 + 1`. Tỉ số `N / (N/2 + 1) → 2` khi `N → ∞`. Với `N = 10` đó là 10 node so với 6 (chương trình của người soạn xác nhận `NF = 10`; ngoài ra `NF ≤ 2·OPT` đúng trên 20.000 instance ngẫu nhiên nhỏ với `OPT` vét cạn, tỉ số lớn nhất quan sát là 1,75). Kết luận thực tế: quy tắc "không bao giờ quay lại node đã đóng" tiện cho online nhưng có thể lãng phí tới một nửa; First-Fit và First-Fit-Decreasing tốt hơn bằng cách nhìn lại các node cũ[^ws-binpack-ff].
+
+</details>
+
+**Bài 9 (Khó, hệ thống).** Một hệ thống giám sát cần đặt agent lên ít node nhất sao cho *mỗi liên kết mạng có agent ở ít nhất một đầu*. Mạng được mô tả bằng đồ thị `G`, node là đỉnh, liên kết là cạnh.
+
+(a) Nhận ra đây là bài toán nào, và nói điều gì về khả năng giải chính xác nhanh.
+
+(b) Xét thuật toán: duyệt các cạnh theo thứ tự bất kỳ; gặp cạnh `{u, v}` mà cả `u` lẫn `v` chưa có agent thì đặt agent lên *cả hai*. Chứng minh kết quả là một vertex cover và có kích thước không quá `2·OPT`, và thuật toán chạy trong `O(|V| + |E|)`.
+
+(c) Chứng minh hệ số 2 không cải thiện được cho thuật toán này (dựng đồ thị cụ thể). Rồi giải thích vì sao thuật toán cho (a) không cho một xấp xỉ tương ứng cho Independent Set, dù Bài 7 nói hai bài toán là "phần bù của nhau".
+
+<details><summary>Lời giải</summary>
+
+(a) Đặt agent lên tập `C` sao cho mọi cạnh có đầu mút trong `C` chính là vertex cover (định nghĩa ở Bài 7), và ta muốn `C` nhỏ nhất. Theo Bài 7 bài toán này NP-complete ở dạng quyết định, nên không nên mong thuật toán chính xác đa thức cho đồ thị bất kỳ. Với mạng có cấu trúc đặc biệt (ví dụ cây) vẫn có thể giải nhanh, nhưng đó là một câu hỏi khác (nhận xét của người soạn).
+
+(b) Gọi `C` là tập agent cuối cùng và `M` là tập các cạnh mà thuật toán đã "chọn" (cạnh có cả hai đầu chưa có agent lúc duyệt tới).
+
+*Đúng đắn.* Sau khi duyệt một cạnh, nó có ít nhất một đầu trong `C`: hoặc đã có sẵn, hoặc ta vừa đặt. `C` chỉ lớn lên theo thời gian nên cạnh đó vẫn được phủ đến cuối. Vậy mọi cạnh được phủ: `C` là vertex cover.
+
+*`M` là một matching* (các cạnh đôi một không chung đầu mút). Khi cạnh `e = {u, v}` được chọn, `u` và `v` đi vào `C`. Một cạnh `e' ≠ e` chọn sau đó phải có cả hai đầu mút ngoài `C` lúc đó, nên không chứa `u` hay `v`. Vì mỗi cạnh chọn thêm hai đỉnh mới vào `C` và các cạnh chọn rời nhau, `|C| = 2·|M|`.
+
+*Chặn dưới cho `OPT`.* Mọi vertex cover phải chứa ít nhất một đầu mút của mỗi cạnh trong `M`; các cạnh của `M` rời nhau nên những đầu mút đó khác nhau đôi một. Vậy mọi vertex cover có ít nhất `|M|` đỉnh, tức `OPT ≥ |M|`. Do đó `|C| = 2·|M| ≤ 2·OPT`, đúng định nghĩa thuật toán xấp xỉ hệ số 2[^ws-approx-def].
+
+*Thời gian.* Một lượt qua danh sách cạnh, mỗi cạnh kiểm hai cờ "đã có agent" trong `O(1)`: tổng `O(|V| + |E|)`.
+
+(c) Lấy đồ thị đường đi `v₁ – v₂ – v₃ – v₄ – v₅ – v₆` (5 cạnh), duyệt theo thứ tự dọc đường. Thuật toán chọn `{v₁, v₂}`; cạnh `v₂v₃` đã phủ; chọn `{v₃, v₄}`; cạnh `v₄v₅` đã phủ; chọn `{v₅, v₆}`. Kết quả `|C| = 6`. Tối ưu là `{v₂, v₄, v₅}` cỡ 3 (cỡ 3 là nhỏ nhất vì `M` có 3 cạnh rời nhau và `OPT ≥ |M| = 3`). Tỉ số đúng bằng 2. Họ vô hạn: đồ thị hai phía đầy đủ `K_{n,n}` có `OPT = n` (mỗi vertex cover chứa `≥ n` đỉnh vì tồn tại matching hoàn hảo cỡ `n`, và một phía là một cover), còn thuật toán luôn trả `2n` đỉnh vì mọi matching cực đại của `K_{n,n}` đều hoàn hảo. Vậy phân tích trên không cải thiện được.
+
+Về Independent Set: lấy phần bù của `C` ở `K_{n,n}` ta được tập rỗng, trong khi tập độc lập lớn nhất có `n` đỉnh. Hệ số 2 cho `|C|` không biến thành hệ số hằng nào cho `|V ∖ C|`, vì `|V ∖ C| = |V| − |C|` là *hiệu*, còn bảo đảm của ta là về *tỉ số*. Bài 7 nói hai bài toán tương đương về độ khó chính xác (có reduction đa thức cho bài toán quyết định); điều đó không kéo theo chúng xấp xỉ được ở cùng mức. Chương trình của người soạn kiểm thuật toán trên 20.000 đồ thị ngẫu nhiên nhỏ (đến 9 đỉnh) với `OPT` vét cạn: luôn `|C| ≤ 2·OPT`, và tỉ số lớn nhất quan sát đúng bằng 2.
+
+</details>
+
+**Bài 10 (Khó, hệ thống).** Hàng đợi bằng hai stack ở phần Đi sâu của mục 3 có `push` amortized 2 và `pop` amortized 1 với `Φ = len(inbox)`. Bây giờ `jobq` dùng một bản *bất biến* (persistent) của nó để nhiều reader cùng giữ snapshot: `push(q, x)` và `pop(q)` không sửa `q` mà trả về hàng đợi mới, hai danh sách liên kết `inbox` và `outbox` được chia sẻ giữa các phiên bản. Khi `outbox` rỗng, `pop(q)` đảo `inbox` thành một `outbox` mới (tốn `|inbox|`) rồi lấy phần tử đầu (tốn 1).
+
+(a) Dựng một dãy `2n` thao tác trên các phiên bản có tổng chi phí `Θ(n²)`. Điều đó mâu thuẫn với chặn amortized "mọi thao tác không quá 2" chứng minh bằng `Φ = len(inbox)` ở chỗ nào?
+
+(b) Điều kiện nào của phép phân tích potential bị vi phạm, và hàng đợi hai stack bằng `Vec` với `pop(&mut self)` thì thỏa điều kiện đó như thế nào?
+
+<details><summary>Lời giải</summary>
+
+(a) Thực hiện `n` lần `push` liên tiếp từ hàng đợi rỗng, được phiên bản `Q` với `inbox` cỡ `n` và `outbox` rỗng; chi phí `n`. Rồi gọi `pop(Q)` *`n` lần, mỗi lần trên chính `Q`* (đây là hợp lệ vì `Q` bất biến, ví dụ `n` reader mỗi người lấy một phần tử từ cùng snapshot). Mỗi lần đảo `inbox` cỡ `n` rồi lấy một phần tử: tốn `n + 1`. Tổng `n + n(n + 1) = n² + 2n` cho `2n` thao tác, tức trung bình `n/2 + 1` mỗi thao tác. Với `n = 1000` đó là 1.002.000 trên 2.000 thao tác, 501 mỗi thao tác. Chặn "amortized `≤ 2` mỗi thao tác" chỉ cho phép tối đa `4n`.
+
+Chứng minh amortized dựa trên việc cộng chi phí amortized `chi phí thật + Φ_sau − Φ_trước` dọc theo dãy thao tác để các số hạng `Φ` triệt tiêu từng đôi[^eri-am-potential]. Với `pop(Q)` đầu tiên, `Φ` giảm từ `n` về 0 và "trả" cho việc đảo: amortized 1. Nhưng ở lần `pop(Q)` thứ hai, phiên bản đầu vào lại là `Q` với `Φ(Q) = n`, không phải trạng thái mà thao tác trước vừa để lại. Mỗi lần ta lại "rút" `n` đơn vị thế năng từ cùng một khoản `n` duy nhất, và tổng không còn triệt tiêu.
+
+(b) Điều kiện bị vi phạm: phép cộng dồn chỉ hợp lệ khi các thao tác tạo thành *một chuỗi tuyến tính*, mỗi thao tác bắt đầu từ trạng thái mà thao tác trước kết thúc. Với `Vec`, `pop(&mut self)` sửa tại chỗ nên trạng thái cũ không còn; muốn có hai nhánh phải gọi `clone` (tốn `O(n)`, tức tự trả đúng phần việc chép mà dữ liệu chia sẻ đã né), nên lịch sử luôn tuyến tính. Với `Rc` chia sẻ ta có thể rẽ nhánh miễn phí và chi phí amortized không còn đúng. Đây là suy luận của người soạn từ chứng minh, không phải trích nguồn: khi dùng cấu trúc bất biến cần bảo đảm amortized (ví dụ trong MVCC hay snapshot), ta phải dùng cấu trúc được thiết kế để chịu truy cập bất tuần tự, hoặc chấp nhận chi phí xấu nhất.
+
+</details>
+
+**Bài 11 (Khó).** Giải `T(n) = 2T(n/2) + n/lg n` cho `n = 2ᵏ`, `k ≥ 2`, với `T(2) = 1`.
+
+(a) Giải thích vì sao cả ba trường hợp của Master theorem đều không áp dụng.
+
+(b) Dùng cây đệ quy tính `T(n)` chính xác, rồi chứng minh `T(n) = Θ(n log log n)` với hằng số tường minh cho `k ≥ 3`.
+
+<details><summary>Gợi ý</summary>
+
+Tầng `i` của cây có `2ⁱ` nút, mỗi nút tốn `(n/2ⁱ) / lg(n/2ⁱ) = n / (2ⁱ·(k − i))`. Tổng một tầng là `n/(k − i)`: vẽ ra thì thấy tổng các tầng là một số điều hòa. Dùng so sánh với tích phân `∫ dx/x` để chặn nó.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(a) Ở đây `a = b = 2`, `p = log₂ 2 = 1`, `g(n) = n/lg n`. Trường hợp 1 đòi `g(n) = O(n^(1−ε))` với `ε > 0`; nhưng `n/lg n` lớn hơn `n^(1−ε)` từ một `n` nào đó trở đi, vì `lg n` tăng chậm hơn `nᵋ`[^mcs-log-roots]. Trường hợp 2 đòi `g(n) = Θ(n · logᵐ n)` với `m ≥ 0`; nhưng `n/lg n` ứng với `m = −1`, và nó nhỏ hơn hẳn `n`, không cùng bậc với `n·logᵐ n` nào có `m ≥ 0`. Trường hợp 3 đòi `g(n) = Ω(n^(1+ε))`, lại càng không. Nó rơi vào khoảng trống giữa trường hợp 1 và 2[^mcs-master].
+
+(b) *Cây đệ quy.* Các nút trong ở tầng `i = 0, …, k − 2` (cỡ `n/2ⁱ ≥ 4`) có `2ⁱ` nút, mỗi nút tốn `(n/2ⁱ)/lg(n/2ⁱ) = n/(2ⁱ·(k − i))`, nên tầng `i` tốn `n/(k − i)`. Các nút ở tầng `k − 1` có cỡ 2 và tốn `T(2) = 1` mỗi nút, có `2ᵏ⁻¹ = n/2` nút, tổng `n/2`[^er-rectree]. Gọi `H_k = 1 + 1/2 + … + 1/k`. Khi đó
+
+```text
+T(n) = Σ_{i=0}^{k−2} n/(k − i) + n/2 = n·(1/2 + 1/3 + … + 1/k) + n/2 = n·(H_k − 1/2)
+```
+
+Kiểm bằng quy nạp: `T(2) = 2·(H₁ − 1/2) = 1`, và nếu `T(2ᵏ⁻¹) = 2ᵏ⁻¹·(H_{k−1} − 1/2)` thì `T(2ᵏ) = 2ᵏ·(H_{k−1} − 1/2) + 2ᵏ/k = 2ᵏ·(H_k − 1/2)`.
+
+*Chặn `H_k`.* Vì `1/i ≥ ∫_i^{i+1} dx/x` nên `H_k ≥ ln(k + 1)`. Vì `1/i ≤ ∫_{i−1}^{i} dx/x` với `i ≥ 2` nên `H_k ≤ 1 + ln k`. Từ đó, với `k ≥ 3`:
+
+- cận dưới: `H_k − 1/2 ≥ ln(k + 1) − 1/2 ≥ (1/2)·ln(k + 1) ≥ (1/2)·ln k` (bước giữa đúng khi `ln(k + 1) ≥ 1`, tức `k + 1 ≥ e`);
+- cận trên: `H_k − 1/2 ≤ H_k ≤ 1 + ln k ≤ 2·ln k` (bước cuối đúng khi `ln k ≥ 1`, tức `k ≥ 3`).
+
+Với `k = lg n`: `(1/2)·n·ln(lg n) ≤ T(n) ≤ 2·n·ln(lg n)` cho `n = 2ᵏ ≥ 8`. Vậy `T(n) = Θ(n log log n)`, đúng kết quả mà công thức Akra–Bazzi cho ở Đi sâu mục 2[^mcs-akra], nhưng lần này có chứng minh cụ thể. Con số: `n = 2²⁰` cho `T(n)/n = H₂₀ − 1/2 ≈ 3,098`, so với `lg n = 20` của merge sort ở cùng `n`; chương trình của người soạn tính theo recurrence trực tiếp cho cùng giá trị. Ý nghĩa: thêm một nhân tử `1/lg n` vào chi phí gộp làm tổng giảm từ `n·lg n` xuống gần tuyến tính, nhưng không đủ để biến nó thành `Θ(n)`.
+
+</details>
+
 ---
 
 ## Đọc thêm

@@ -831,6 +831,320 @@ Chương trình mô phỏng của mục 4.3 tự viết bộ sinh số ngẫu nh
 
 </details>
 
+## Bài tập
+
+Mười một bài dưới đây xếp từ dễ đến khó. Bạn nên tự làm trước, rồi mới mở gợi ý và lời giải. Mỗi bài dùng đúng công cụ của chương: Little, utilization, M/M/1, Erlang C, gộp hàng đợi, Pollaczek–Khinchine. Các con số tính bằng Erlang C, Pollaczek–Khinchine, quorum và điểm bất động ở dưới đã được kiểm lại bằng một chương trình Rust nhỏ chạy bằng `rustc` (đệ quy Erlang B → C của mục 5.3 và công thức đóng của các mục 3–7); chương trình không kèm trong chương. Các bài 1, 2, 6, 9, 10, 11 đặt trong bối cảnh backend và hệ phân tán. Bài 5 và bài 10 là hai chỗ dùng sai định luật Little.
+
+**Bài 1 (Dễ).** `orders-api` chạy 6 replica, tổng cộng nhận 1200 request/s. Mỗi request mở một transaction và giữ một kết nối Postgres trung bình $h = 15$ ms: hai truy vấn 6 ms, cộng 3 ms transaction đang mở trong lúc code Rust xử lý ở giữa.
+
+(a) Trung bình có bao nhiêu kết nối đang bận?
+(b) Pool kết nối *tổng* (cộng các replica) tối thiểu là bao nhiêu để hệ ổn định? Với cỡ đó, request chờ kết nối trung bình bao lâu?
+(c) Chọn cỡ pool sao cho ρ ≤ 0.75 rồi tính lại thời gian chờ. So với quy tắc căn bậc hai.
+(d) Một sự cố làm DB chậm khiến $h$ lên 45 ms mà lưu lượng không đổi. Throughput tối đa của pool ở (c) là bao nhiêu, và hàng chờ dài ra với tốc độ nào?
+(e) Thay vì một pool chung, mỗi replica giữ pool riêng gồm 4 kết nối (tổng vẫn 24). ρ của mỗi pool là bao nhiêu và thời gian chờ trung bình thay đổi thế nào?
+
+Coi thời gian giữ kết nối là phân phối mũ và request đến Poisson, để dùng được Erlang C.
+
+<details><summary>Gợi ý</summary>
+
+Ở (a), Utilization Law cho $a = \lambda h$ trực tiếp. Ở (d), pool có $c$ kết nối thì tối đa $c$ request đang được phục vụ cùng lúc, mỗi request giữ kết nối $h$ giây. Ở (e), tính Erlang C cho từng replica với $c = 4$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) Số kết nối bận trung bình là $a = \lambda h = 1200 \times 0.015 = 18$[^hb-utlaw].
+
+(b) Hệ ổn định khi $\lambda < c\mu$, tức $c > a = 18$[^k-multi]. Vậy tối thiểu $c = 19$ kết nối, khi đó $\rho = 18/19 = 0.947$. Với $\mu = 1/h = 66.67$ kết nối/s mỗi kết nối, đệ quy Erlang B → C ở mục 5.3 cho $C(19, 18) = 0.750$ và $E[W_q] = C/(c\mu - \lambda) = 0.750/(1266.7 - 1200) = 11.2$ ms[^wolfram-erlangc]. Pool "ổn định" nhưng ba phần tư request phải chờ kết nối, tức không dùng được.
+
+(c) Cần $c \ge a/0.75 = 24$. Khi đó $C(24, 18) = 0.1275$ và $E[W_q] = 0.1275/(1600 - 1200) = 0.32$ ms. Quy tắc căn bậc hai cho $c \approx a + z\sqrt{a}$ với $z \in \{1, 2\}$[^emu-sqrt], tức $18 + 4.24 = 22.2$ (z = 1) đến $18 + 8.49 = 26.5$ (z = 2). Chọn 24 tương ứng $z = 6/\sqrt{18} = 1.41$, nằm giữa hai mức "tốt" và "rất tốt".
+
+(d) Số request đang được phục vụ không vượt quá số kết nối, mà mỗi request giữ kết nối $h$ giây. Áp Little lên riêng phần phục vụ: $\lambda_{\max} \cdot h \le c$, nên $\lambda_{\max} = c/h = 24/0.045 = 533.3$ request/s[^hb-utlaw]. Offered load lúc này là $a = 1200 \times 0.045 = 54 > 24$, tức $\rho = 2.25$, quá ngưỡng ổn định[^k-single]. Hàng chờ dài ra khoảng $1200 - 533.3 = 666.7$ request mỗi giây (xấp xỉ tất định, bỏ qua dao động quanh trung bình, vì khi ρ > 1 xu hướng tất định lấn át). Sau 10 giây là gần 6700 request đang chờ kết nối. Cũng theo Little (mục 2.3), số request đang bay bằng λ nhân latency, nên khi hàng chờ phình ra như vậy thì số request đang bay, và bộ nhớ service phải giữ cho chúng, tăng theo (nhận xét của người soạn).
+
+(e) Mỗi replica nhận $\lambda = 200$ request/s, pool 4 kết nối, $\mu = 66.67$/s, nên $a = 3$ và $\rho = 3/4 = 0.75$, đúng bằng ρ của pool chung. Nhưng Erlang C khác hẳn. Tính tay: $\sum_{n=0}^{3} 3^n/n! = 1 + 3 + 4.5 + 4.5 = 13$; số hạng cuối $3^4/(4!\,(1 - 0.75)) = 3.375/0.25 = 13.5$. Vậy $C(4, 3) = 13.5/(13 + 13.5) = 0.509$ và $E[W_q] = 0.509/(4 \times 66.67 - 200) = 7.64$ ms, gấp khoảng 24 lần 0.32 ms của pool chung. Cùng ρ, cùng tổng kết nối, nhưng chia nhỏ pool làm chờ tệ đi hai bậc độ lớn. Đây là hiệu ứng của mục 6, bài 7 sẽ định lượng thêm.
+
+</details>
+
+**Bài 2 (Dễ).** Một pipeline xử lý đơn hàng có ba tầng nối tiếp, mỗi tầng một hàng đợi riêng phía trước: (A) parse và xác thực, 1 worker, $E[S] = 1.2$ ms; (B) truy vấn DB, pool 4 kết nối, mỗi request giữ kết nối 6 ms; (C) gọi cổng thanh toán, 2 slot, mỗi lần gọi 3.5 ms. Lưu lượng vào là $\lambda = 500$ request/s.
+
+(a) Tính ρ và số worker bận trung bình của từng tầng. Tầng nào là nút cổ chai, throughput tối đa của cả pipeline là bao nhiêu và còn dư bao nhiêu phần trăm?
+(b) Nếu lưu lượng tăng lên 600 request/s thì tầng nào mất ổn định, hàng chờ ở đó dài ra thế nào, và các tầng còn lại có sao không?
+(c) Muốn chịu 600 request/s, thêm một slot vào tầng C có đủ không? Nút cổ chai mới là gì?
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) Mỗi tầng ổn định khi $\rho = \lambda E[S]/c < 1$[^k-multi], và số worker bận trung bình là $a = \lambda E[S]$[^hb-utlaw]. Khi tầng đầu đủ công suất, mọi request đi qua mọi tầng, nên mỗi tầng thấy cùng $\lambda = 500$.
+
+| Tầng | $c$ | $E[S]$ | $a = 500\,E[S]$ | ρ | Throughput tối đa $c/E[S]$ |
+|---|---|---|---|---|---|
+| A | 1 | 1.2 ms | 0.6 | 0.60 | 833.3/s |
+| B | 4 | 6 ms | 3.0 | 0.75 | 666.7/s |
+| C | 2 | 3.5 ms | 1.75 | 0.875 | 571.4/s |
+
+Nút cổ chai là tầng C, nơi ρ lớn nhất, và đó cũng là tầng có throughput tối đa nhỏ nhất: $2/0.0035 = 571.4$/s. Cả pipeline không thể ổn định ở quá 571.4 request/s. Còn dư $571.4/500 - 1 = 14.3\%$, ít hơn nhiều so với con số 25% mà ρ = 0.75 của tầng B gợi ý.
+
+(b) Ở $\lambda = 600$, tầng C có $\rho = 600/571.4 = 1.05 > 1$, nên hàng đợi ở đó không ổn định[^k-single]. Xấp xỉ tất định: hàng dài ra $600 - 571.4 = 28.6$ request/s, sau một phút khoảng $28.6 \times 60 \approx 1714$ request chờ. Tầng A (ρ = 0.72) và B (ρ = 0.90) vẫn ổn định vì chúng chưa phải gánh quá công suất của chính mình. Nhưng B ở 0.90 đã nằm trong vùng dốc của đường cong mục 4: latency của B tăng nhanh ngay cả khi chưa quá tải.
+
+(c) Với 3 slot, C có throughput tối đa $3/0.0035 = 857.1$/s, ρ ở 600 request/s chỉ còn $600/857.1 = 0.70$. Nút cổ chai chuyển sang tầng B ($666.7$/s, ρ = 0.90). Vậy thêm slot vào C đủ để *ổn định* ở 600 nhưng không làm pipeline có dư địa: nút cổ chai mới chỉ cao hơn 600 khoảng 11%. Bài học: ρ của từng tầng riêng lẻ không đủ, phải so ρ giữa các tầng và nhìn tầng cao nhất (nhận xét của người soạn).
+
+</details>
+
+**Bài 3 (Dễ).** Một worker xử lý tuần tự với $\mu = 250$/s và nhận $\lambda = 200$/s (M/M/1). Tính ρ, $E[N]$, $E[T]$, $E[W_q]$, median và p99 của $T$, rồi $P(T > 50\text{ ms})$ và $P(W_q > 50\text{ ms})$. Với $P(W_q > t)$, dùng kết quả của bài 4 (hoặc làm bài 4 trước).
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+$\rho = 200/250 = 0.8$. $E[N] = \rho/(1-\rho) = 4$ request. Khoảng trống $\mu - \lambda = 50$/s, nên $E[T] = 1/(\mu - \lambda) = 20$ ms và $E[W_q] = E[T] - 1/\mu = 20 - 4 = 16$ ms (hoặc $\rho/(\mu-\lambda) = 0.8/50 = 16$ ms), như mục 3.3[^adan-explode].
+
+$T$ là biến mũ tốc độ $\mu - \lambda = 50$/s[^adan-sojourn], nên $P(T > t) = e^{-50t}$. Median: $e^{-50t} = 0.5$ cho $t = \ln 2/50 = 13.86$ ms. p99: $e^{-50t} = 0.01$ cho $t = \ln 100/50 = 92.1$ ms, bằng $4.6 \times 20$ ms. Hệ số p99/trung bình vẫn là 4.6 và $E[T]$ bằng 5 lần service time 4 ms, đúng $1/(1-\rho)$ của mục 4.1 với ρ = 0.8.
+
+$P(T > 50\text{ ms}) = e^{-50 \times 0.05} = e^{-2.5} = 0.0821$, khoảng 8.2%. Với thời gian *chờ*, bài 4 cho $P(W_q > t) = \rho e^{-(\mu-\lambda)t}$, nên $P(W_q > 50\text{ ms}) = 0.8 \times 0.0821 = 0.0657$, khoảng 6.6%, nhỏ hơn 8.2% vì có 20% request không phải chờ.
+
+</details>
+
+**Bài 4 (Vừa).** Chứng minh rằng ở M/M/1 FCFS ổn định, thời gian chờ trong hàng (không tính phục vụ) có $P(W_q > t) = \rho\,e^{-(\mu - \lambda)t}$ với mọi $t \ge 0$. Rồi, với $\mu = 100$/s và $\lambda = 90$/s, tính $P(W_q = 0)$, $E[W_q]$, median và p99 của $W_q$, và so p99 của $W_q$ với p99 của $T$.
+
+<details><summary>Gợi ý</summary>
+
+Dùng PASTA: một request đến thấy $n$ request trong hệ với xác suất $(1-\rho)\rho^n$. Nếu $n \ge 1$, thời gian chờ là tổng $n$ biến mũ tốc độ $\mu$ độc lập (phần còn lại của việc đang chạy cũng mũ, nhờ tính không nhớ). Tính biến đổi Laplace như ở mục 3.4 rồi nhận dạng phân phối.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(Chứng minh của người soạn.)
+
+Đặt $\delta = \mu - \lambda = \mu(1-\rho)$. Nhờ PASTA, một request đến thấy $n$ request trong hệ với xác suất $(1-\rho)\rho^n$[^pasta]. Nếu $n = 0$ thì nó được phục vụ ngay, $W_q = 0$. Nếu $n \ge 1$ thì nó phải chờ phần còn lại của việc đang chạy, rồi $n - 1$ việc đang đứng trong hàng. Nhờ tính không nhớ, phần còn lại của việc đang chạy cũng là mũ tốc độ $\mu$, nên $W_q$ là tổng $n$ biến mũ tốc độ $\mu$ độc lập[^adan-sojourn]. Mỗi biến như vậy có biến đổi Laplace $r = \mu/(\mu + s)$.
+
+Lấy kỳ vọng theo $n$:
+
+$$E\!\left[e^{-sW_q}\right] = (1-\rho) + \sum_{n \ge 1} (1-\rho)\rho^n r^n = (1-\rho) + (1-\rho)\,\frac{\rho r}{1 - \rho r}.$$
+
+Vì $\rho r/(1 - \rho r) = \rho\mu/(\mu + s - \rho\mu) = \rho\mu/(\delta + s)$ và $(1-\rho)\mu = \delta$, số hạng thứ hai bằng $\rho\delta/(\delta + s)$. Vậy
+
+$$E\!\left[e^{-sW_q}\right] = (1-\rho)\cdot 1 + \rho\cdot\frac{\delta}{\delta + s}.$$
+
+Đây là biến đổi Laplace của một hỗn hợp: với xác suất $1-\rho$ thì $W_q = 0$ (biến đổi bằng 1), với xác suất $\rho$ thì $W_q$ là mũ tốc độ $\delta$ (biến đổi $\delta/(\delta+s)$). Biến đổi Laplace xác định duy nhất phân phối trên $[0, \infty)$, nên $P(W_q > t) = \rho\,e^{-\delta t}$. ∎ Với $c = 1$ thì $C = \rho$, đây đúng là $P(W_q > t) = C\,e^{-(c\mu-\lambda)t}$ của mục 5.1.
+
+*Số.* $\mu = 100$, $\lambda = 90$: $\rho = 0.9$, $\delta = 10$/s. $P(W_q = 0) = 1 - \rho = 0.1$. $E[W_q] = \rho/\delta = 0.09$ s $= 90$ ms (tích phân $\int_0^\infty \rho e^{-\delta t}\,dt$; khớp $E[T] - 1/\mu = 100 - 10$ ms). Median: $0.9\,e^{-10t} = 0.5$ cho $t = \ln(1.8)/10 = 58.8$ ms. p99: $0.9\,e^{-10t} = 0.01$ cho $t = \ln(90)/10 = 450.0$ ms. p99 của $T$ là $\ln(100)/10 = 460.5$ ms. Hai p99 khác nhau 10.5 ms, không phải 10 ms (bằng $E[S]$): percentile không cộng được như trung bình. Cũng chú ý: mọi phân vị ở mức $q \le 10\%$ của $W_q$ đều bằng 0, vì 10% request không phải chờ.
+
+</details>
+
+**Bài 5 (Vừa).** `orders-api` có 20 worker, mỗi request chạy $E[S] = 20$ ms (công suất tối đa $20/0.02 = 1000$ request/s). Lưu lượng chào là 1200 request/s; hàng chờ có biên, khi đầy thì request mới bị trả 503 ngay lập tức, và 240 request/s bị từ chối như vậy. Gauge cho thấy trung bình 30 request nằm trong hệ (đang chạy cộng đang chờ). Một đồng nghiệp tính: "Little cho $W = L/\lambda = 30/1200 = 25$ ms, nên latency trung bình là 25 ms, đạt SLO 30 ms."
+
+(a) Chỉ ra chỗ sai. (b) Latency trung bình thật của các request *được nhận* là bao nhiêu, và SLO có đạt không? (c) Con số 25 ms đo đại lượng gì? (d) Tính số worker bận trung bình và ρ thật, rồi thời gian chờ trung bình trong hàng.
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) Định luật Little nối ba trung bình *của cùng một hệ với cùng một tập khách*: $L$ là số khách trung bình trong hệ, $\lambda$ là tốc độ khách *đi vào* hệ, $W$ là thời gian trung bình mỗi khách ở trong hệ[^little-stmt]. Chứng minh cũng chỉ đếm những khách có hình chữ nhật diện tích nằm trong $[0, T]$[^little-proof]. Một request bị 503 ngay lập tức không bao giờ vào hệ: nó đóng góp 0 vào $L$ và không có $W_i$ để đưa vào trung bình. Đồng nghiệp lấy $L$ của các request được nhận nhưng chia cho $\lambda$ của tất cả request chào, nên mẫu số sai.
+
+(b) Tốc độ vào hệ là $\lambda_{\text{vào}} = 1200 - 240 = 960$ request/s. Áp Little cho hệ gồm hàng chờ và 20 worker: $W = L/\lambda_{\text{vào}} = 30/960 = 31.25$ ms. Latency trung bình thật của request được nhận là 31.25 ms, *vượt* SLO 30 ms. Con số 25 ms đẹp hơn thực tế khoảng 20%, và nó đẹp nhờ chính các request bị từ chối.
+
+(c) Chia $L$ cho tất cả 1200 request chào/s tương ứng cách coi mỗi request bị từ chối như một khách ở trong hệ 0 giây: trung bình theo mọi request chào là $(960 \times 31.25 + 240 \times 0)/1200 = 25$ ms. Đó là một con số hợp lệ (Little vẫn đúng với $\lambda = 1200$, $W = 25$ ms, $L = 30$), nhưng nó là *thời gian trong hệ trung bình, tính cả 0 giây của request bị từ chối*, không phải latency của request được phục vụ. Nó vô nghĩa khi đem so với SLO latency. Còn với client, 503 là một lần thất bại; SLO nghiêm túc phải tính cả tỉ lệ lỗi 20% (nhận xét của người soạn).
+
+(d) Áp Little lên riêng phần phục vụ: số worker bận trung bình là $a = \lambda_{\text{vào}}\,E[S] = 960 \times 0.02 = 19.2$[^hb-utlaw], nên $\rho = 19.2/20 = 0.96$. Số request đang chờ trung bình là $L_q = L - a = 30 - 19.2 = 10.8$ và, Little cho hàng chờ[^adan-little-sub], $E[W_q] = 10.8/960 = 11.25$ ms. Kiểm: $11.25 + 20 = 31.25$ ms ✓. Hệ đã ở ρ = 0.96 chỉ nhờ việc từ chối bớt tải: nếu nhận hết 1200 request/s thì ρ = 1.2 và hàng không ổn định.
+
+</details>
+
+**Bài 6 (Vừa).** Xét worker pool của `orders-api` khi lưu lượng được dự báo lên $\lambda = 1500$ request/s với $E[S] = 8$ ms (nên $\mu = 125$/s mỗi worker, $a = 12$). Dùng M/M/c với một hàng đợi chung và Erlang C.
+
+(a) Cần tối thiểu bao nhiêu worker để ổn định?
+(b) Chọn $c$ nhỏ nhất sao cho thời gian chờ trung bình $E[W_q] \le 1$ ms.
+(c) Chọn $c$ nhỏ nhất sao cho $P(W_q > 5\text{ ms}) \le 1\%$, với $P(W_q > t) = C(c, a)\,e^{-(c\mu - \lambda)t}$ (mục 5.1).
+(d) So hai kết quả với quy tắc $c \approx a + z\sqrt{a}$.
+
+<details><summary>Gợi ý</summary>
+
+Tính $B(k)$ theo đệ quy $B(0) = 1$, $B(k) = aB(k-1)/(k + aB(k-1))$ với $a = 12$, rồi đổi sang $C = B/(1 - \rho(1 - B))$, $\rho = a/c$ (mục 5.3). Không cần tính giai thừa.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) Cần $c\mu > \lambda$, tức $c > a = 12$[^k-multi], nên tối thiểu 13 worker; khi đó $\rho = 12/13 = 0.923$.
+
+Đệ quy Erlang B với $a = 12$ cho $B(12) = 0.19857$, $B(13) = 12 \times 0.19857/(13 + 12 \times 0.19857) = 2.3828/15.3828 = 0.15490$, $B(14) = 1.8588/15.8588 = 0.11721$, rồi $B(15) = 0.08573$, $B(16) = 0.06041$, $B(17) = 0.04090$. Đổi sang Erlang C, ví dụ $c = 17$: $\rho = 12/17 = 0.7059$, $C = 0.04090/(1 - 0.7059 \times (1 - 0.04090)) = 0.04090/0.32299 = 0.1266$. Làm vậy cho từng $c$, và $E[W_q] = C/(125c - 1500)$, $P(W_q > 5\text{ ms}) = C\,e^{-0.005(125c - 1500)}$:
+
+| $c$ | ρ | $C(c, 12)$ | $E[W_q]$ (ms) | $P(W_q > 5\text{ ms})$ |
+|---|---|---|---|---|
+| 13 | 0.923 | 0.7044 | 5.635 | 0.3770 |
+| 14 | 0.857 | 0.4817 | 1.927 | 0.1380 |
+| 15 | 0.800 | 0.3192 | 0.851 | 0.0489 |
+| 16 | 0.750 | 0.2046 | 0.409 | 0.0168 |
+| 17 | 0.706 | 0.1266 | 0.203 | 0.0056 |
+| 18 | 0.667 | 0.0756 | 0.101 | 0.0018 |
+| 19 | 0.632 | 0.0435 | 0.050 | 0.0005 |
+
+(b) $E[W_q] \le 1$ ms: $c = 15$ (0.851 ms); $c = 14$ chưa đạt (1.927 ms).
+
+(c) $P(W_q > 5\text{ ms}) \le 1\%$: $c = 17$ (0.56%); $c = 16$ còn 1.68%. Ví dụ ở $c = 17$, $c\mu - \lambda = 625$/s và $P = 0.1266 \times e^{-3.125} = 0.1266 \times 0.04394 = 0.0056$; ở $c = 16$, $c\mu - \lambda = 500$/s và $P = 0.2046 \times e^{-2.5} = 0.0168$[^emu-exp-wait].
+
+(d) Với $a = 12$, $\sqrt{a} = 3.46$: $z = 1$ cho $15.5$, $z = 2$ cho $18.9$[^emu-sqrt]. Đáp án (b) là $c = 15$ (z = 0.87) và đáp án (c) là $c = 17$ (z = 1.44), đều nằm trong khoảng "tốt" đến "rất tốt" của quy tắc. Quy tắc gần đúng nhưng không thay được tính trực tiếp: yêu cầu về *đuôi* của thời gian chờ ở (c) cần 2 worker nhiều hơn yêu cầu về trung bình ở (b). Nhận xét thêm: với $c \ge 22$ thì $C < 0.01$, tức dưới 1% request phải chờ, nên p99 của thời gian *chờ* bằng 0, dù p99 của $T$ vẫn lớn hơn $E[S]$ (nhận xét của người soạn).
+
+</details>
+
+**Bài 7 (Vừa).** Xét ba cách dùng tổng năng lực $2\mu$ với tải $\lambda = 2\rho\mu$ và arrival Poisson: (i) hai worker, mỗi worker một hàng, chia request ngẫu nhiên đều (2 × M/M/1); (ii) hai worker chung một hàng (M/M/2); (iii) một worker nhanh gấp đôi (M/M/1 với tốc độ $2\mu$).
+
+(a) Chứng minh $E[T_{\text{(iii)}}]/E[T_{\text{(ii)}}] = (1+\rho)/2$ và $E[T_{\text{(iii)}}]/E[T_{\text{(i)}}] = 1/2$ với mọi $\rho \in (0, 1)$. Suy ra thứ tự (iii) < (ii) < (i) về latency trung bình.
+(b) Chứng minh rằng *thời gian chờ* của (iii), tuy vậy, *lớn hơn* thời gian chờ của (ii), và tính tỉ số. Vì sao điều đó không mâu thuẫn với (a)?
+(c) Với $\mu = 100$/s, $\rho = 0.8$ tính $E[T]$ của ba cách. Rồi: pool $10$ worker ($\mu = 100$/s, $\lambda = 800$/s, $E[W_q] = 2.046$ ms, mục 5.2) bị chia thành hai pool $5 + 5$ theo lớp request, mỗi pool có hàng riêng. Tính $E[W_q]$ nếu tải chia 50/50, rồi nếu chia 60/40.
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) Từ mục 6.1: $E[T_{\text{(i)}}] = \dfrac{1}{\mu(1-\rho)}$ và $E[T_{\text{(ii)}}] = \dfrac{1}{\mu(1-\rho^2)}$. Với (iii), hệ là M/M/1 có $\mu' = 2\mu$ và $\lambda = 2\rho\mu$, nên cùng ρ và, theo mục 3.3, $E[T_{\text{(iii)}}] = \dfrac{1}{\mu' - \lambda} = \dfrac{1}{2\mu - 2\rho\mu} = \dfrac{1}{2\mu(1-\rho)}$. Vậy
+
+$$\frac{E[T_{\text{(iii)}}]}{E[T_{\text{(i)}}]} = \frac{1}{2}, \qquad \frac{E[T_{\text{(iii)}}]}{E[T_{\text{(ii)}}]} = \frac{\mu(1-\rho^2)}{2\mu(1-\rho)} = \frac{1+\rho}{2}.$$
+
+Vì $0 < \rho < 1$ nên $(1+\rho)/2 < 1$, và mục 6.1 cho $E[T_{\text{(ii)}}]/E[T_{\text{(i)}}] = 1/(1+\rho) < 1$. Vậy (iii) < (ii) < (i). ∎
+
+(b) Phần chờ của (iii) là $E[T_{\text{(iii)}}] - \dfrac{1}{2\mu} = \dfrac{1}{2\mu}\left(\dfrac{1}{1-\rho} - 1\right) = \dfrac{\rho}{2\mu(1-\rho)}$. Phần chờ của (ii), từ mục 6.1, là $\dfrac{\rho^2}{\mu(1-\rho^2)}$. Tỉ số:
+
+$$\frac{W_q^{\text{(iii)}}}{W_q^{\text{(ii)}}} = \frac{\rho}{2\mu(1-\rho)}\cdot\frac{\mu(1-\rho)(1+\rho)}{\rho^2} = \frac{1+\rho}{2\rho} > 1 \quad\text{vì } \rho < 1.$$
+
+Vậy hàng của worker nhanh chờ *lâu hơn* hàng chung của hai worker chậm. Không mâu thuẫn với (a): worker nhanh thắng nhờ phần *phục vụ* ngắn một nửa ($\tfrac{1}{2\mu}$ so với $\tfrac{1}{\mu}$), phần lợi đó lớn hơn phần thiệt ở hàng chờ. Đây đúng là điều mục 5.4 nói với `orders-api`: gộp hàng đợi giảm chờ, còn muốn giảm thời gian chạy thì phải có server nhanh hơn[^emu-approx].
+
+(c) Với $\mu = 100$, $\rho = 0.8$: (i) $1/(100 \times 0.2) = 50$ ms; (ii) $1/(100 \times 0.36) = 27.78$ ms; (iii) $1/(200 \times 0.2) = 25$ ms. Thứ tự đúng như (a): $25 < 27.78 < 50$. Phần chờ của (iii) là $25 - 5 = 20$ ms, của (ii) là $27.78 - 10 = 17.78$ ms, tỉ số $1.125 = 1.8/1.6$ ✓.
+
+Chia pool 10 worker thành $5 + 5$. *Chia 50/50:* mỗi pool nhận $\lambda = 400$, $c = 5$, $a = 4$, $\rho = 0.8$, cùng ρ với pool 10. Tính tay: $\sum_{n=0}^{4} 4^n/n! = 1 + 4 + 8 + 10.667 + 10.667 = 34.333$; số hạng cuối $4^5/(5!\,\times 0.2) = 8.533/0.2 = 42.667$. $C(5, 4) = 42.667/(34.333 + 42.667) = 0.554$ và $E[W_q] = 0.554/(500 - 400) = 5.54$ ms, gấp 2.7 lần 2.046 ms của pool chung. *Chia 60/40:* pool A nhận $480$/s, $a = 4.8$, $\rho = 0.96$: $\sum_{n=0}^{4} 4.8^n/n! = 57.870$, số hạng cuối $22.118 \times 4.8/5 = 21.234$, chia cho $1-\rho = 0.04$ được $530.84$, nên $C = 530.84/588.71 = 0.902$ và $E[W_q] = 0.902/(500 - 480) = 45.1$ ms. Pool B nhận 320/s, $a = 3.2$, $\rho = 0.64$: $C = 0.289$ và $E[W_q] = 0.289/(500 - 320) = 1.60$ ms. Trung bình theo request: $0.6 \times 45.1 + 0.4 \times 1.60 = 27.7$ ms, gấp 13.5 lần 2.046 ms của pool chung. Cùng tổng 10 worker và cùng ρ tổng 0.8, pool chung chờ 2.0 ms; tách theo lớp chờ 5.5 ms nếu chia đều và 27.7 ms nếu lệch 60/40. Nếu lớp A nhận 70% tải, tức $560$/s lên 5 worker ($\rho = 1.12$), pool A mất ổn định dù tổng ρ vẫn 0.8 (nhận xét của người soạn; công thức mục 5.1 chỉ đúng khi $\rho < 1$).
+
+</details>
+
+**Bài 8 (Vừa).** Một worker xử lý tuần tự (M/G/1), arrival Poisson $\lambda = 80$/s. Service time có hai loại: 95% request nhanh, đúng 5 ms; 5% request chậm, đúng 100 ms.
+
+(a) Tính $E[S]$, $E[S^2]$, $c^2$ và ρ.
+(b) Dùng Pollaczek–Khinchine tính $E[W_q]$, rồi so với M/M/1 có cùng $E[S]$ và cùng λ.
+(c) Chứng minh $E[W_q] = \dfrac{\lambda E[S^2]}{2(1-\rho)}$ từ công thức dạng $c^2$ ở mục 7.1.
+(d) Một request nhanh 5 ms chờ trung bình bao lâu, và nó nên đổi cách nghĩ về SLO của endpoint nhanh thế nào? Nếu tách request chậm sang một worker riêng (mỗi lớp một worker, mỗi lớp xử lý thời gian hằng số, arrival Poisson), thời gian chờ trung bình của từng lớp thành bao nhiêu?
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) $E[S] = 0.95 \times 5 + 0.05 \times 100 = 9.75$ ms. $E[S^2] = 0.95 \times 25 + 0.05 \times 10\,000 = 23.75 + 500 = 523.75$ ms². $\mathrm{Var}(S) = 523.75 - 9.75^2 = 523.75 - 95.0625 = 428.6875$. $c^2 = 428.6875/95.0625 = 4.51$. $\rho = \lambda E[S] = 0.08 \times 9.75 = 0.78$ (λ = 0.08 request/ms).
+
+(b) Công thức mục 7.1: $E[W_q] = \dfrac{1+c^2}{2}\cdot\dfrac{\rho}{1-\rho}\cdot E[S] = 2.7548 \times 3.5455 \times 9.75 = 95.2$ ms[^adan-pk-two]. M/M/1 cùng $E[S]$ và ρ có $c^2 = 1$: $E[W_q] = 3.5455 \times 9.75 = 34.6$ ms. Hệ số là $(1 + c^2)/2 = 2.75$: đúng bằng thừa số $95.2/34.6$. Chỉ vì 5% request chậm, chờ trung bình đã gấp 2.75 lần mô hình mũ, dù ρ và $E[S]$ giống hệt nhau.
+
+(c) Vì $c^2 = \mathrm{Var}(S)/E[S]^2 = (E[S^2] - E[S]^2)/E[S]^2$, ta có $1 + c^2 = E[S^2]/E[S]^2$. Thế vào:
+
+$$E[W_q] = \frac{1}{2}\cdot\frac{E[S^2]}{E[S]^2}\cdot\frac{\rho}{1-\rho}\cdot E[S] = \frac{E[S^2]}{2E[S]}\cdot\frac{\rho}{1-\rho} = \frac{\lambda E[S^2]}{2(1-\rho)},$$
+
+vì $\rho/E[S] = \lambda$. ∎ Số: $0.08 \times 523.75/(2 \times 0.22) = 41.9/0.44 = 95.2$ ms ✓.
+
+(d) FCFS không phân biệt loại request: mọi request, nhanh hay chậm, chờ cùng trung bình 95.2 ms, vì chúng đều đứng sau cùng một hàng. Request nhanh chỉ cần 5 ms để chạy nhưng thực tế mất trung bình khoảng $95.2 + 5 = 100.2$ ms, gấp 20 lần thời gian chạy. SLO của endpoint nhanh phụ thuộc vào endpoint chậm đi chung hàng (nhận xét của người soạn).
+
+Nếu tách thành hai worker, mỗi worker một lớp: lớp nhanh có $\lambda_f = 0.95 \times 80 = 76$/s, $\rho_f = 0.38$, $c^2 = 0$, nên $E[W_q] = \tfrac12 \times \dfrac{0.38}{0.62} \times 5 = 1.53$ ms[^adan-pk-ex]. Lớp chậm có $\lambda_s = 4$/s, $\rho_s = 0.4$, $E[W_q] = \tfrac12 \times \dfrac{0.4}{0.6} \times 100 = 33.3$ ms. Trung bình theo request: $0.95 \times 1.53 + 0.05 \times 33.3 = 3.12$ ms, thay vì 95.2 ms. Lưu ý đây không phải so sánh công bằng: ta dùng 2 worker thay vì 1, nên ρ mỗi worker chỉ còn 0.38 và 0.40. Cái bài này muốn cho thấy là *phần $c^2$*: mỗi lớp riêng có $c^2 = 0$ nên thừa số $(1+c^2)/2$ chỉ còn 0.5, trong khi pool trộn có 2.75. Một so sánh công bằng cần M/G/2 hoặc thêm giả định, nằm ngoài công cụ của chương (nhận xét của người soạn).
+
+</details>
+
+**Bài 9 (Khó).** Một lần đọc quorum trong hệ lưu trữ có 3 replica. Mỗi replica, độc lập với nhau (giả định để tính được), là một M/M/1 với $\mu = 100$/s và $\lambda = 80$/s, nên thời gian trả lời của mỗi replica là biến mũ tốc độ $\delta = \mu - \lambda = 20$/s, trung bình 50 ms. Coordinator gửi request đến cả 3 replica cùng lúc.
+
+(a) Chứng minh rằng nếu coordinator chờ phản hồi *nhanh thứ hai* trong ba (quorum đọc $R = 2$ của 3), thì $P(T_{\text{quorum}} > t) = 3x^2 - 2x^3$ với $x = e^{-\delta t}$.
+(b) Tính trung bình và p99 của $T_{\text{quorum}}$, rồi so với: một replica; chờ cả 3 phản hồi; chỉ chờ phản hồi nhanh nhất.
+(c) Giả định "các replica độc lập" có hợp lý không? Chiều của sai số nếu nó sai?
+
+<details><summary>Gợi ý</summary>
+
+Phản hồi nhanh thứ hai đến *sau* thời điểm $t$ khi và chỉ khi tại $t$ có tối đa một phản hồi đã đến. Mỗi replica đã trả lời trước $t$ với xác suất $1 - x$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) Mỗi replica có $P(T_i > t) = e^{-\delta t} = x$[^adan-sojourn], và ba biến $T_i$ độc lập. Phản hồi nhanh thứ hai đến sau $t$ nếu và chỉ nếu tại $t$ chưa có phản hồi nào đến, hoặc có đúng một phản hồi đã đến. Xác suất không phản hồi nào đến: $x^3$. Xác suất đúng một: $3(1-x)x^2$ (chọn replica đã trả lời, nó xong trước $t$ với xác suất $1-x$, hai replica còn lại chưa xong với xác suất $x^2$). Cộng: $x^3 + 3x^2 - 3x^3 = 3x^2 - 2x^3$. ∎
+
+(b) *Trung bình.* $E[T] = \int_0^\infty P(T > t)\,dt = \int_0^\infty (3e^{-2\delta t} - 2e^{-3\delta t})\,dt = \dfrac{3}{2\delta} - \dfrac{2}{3\delta} = \dfrac{5}{6\delta} = 41.7$ ms, thấp hơn 50 ms của một replica. *p99.* Giải $3x^2 - 2x^3 = 0.01$: $x = 0.0589$ (kiểm: $3 \times 0.003469 - 2 \times 0.000204 = 0.010407 - 0.000409 = 0.009998$), nên $t = -\ln(0.0589)/20 = 2.832/20 = 141.6$ ms.
+
+Với các lựa chọn khác (cùng giả định độc lập): chờ một replica, $P(T > t) = x$, p99 là $\ln 100/20 = 230.3$ ms[^adan-sojourn]. Chờ cả 3: $P(\max > t) = 1 - (1-x)^3$; đặt bằng 0.01 cho $(1-x)^3 = 0.99$, $x = 0.003345$, $t = 285.0$ ms, và trung bình $\tfrac{1}{\delta}(1 + \tfrac12 + \tfrac13) = 91.7$ ms. Chờ phản hồi nhanh nhất: $P(\min > t) = x^3$, đặt bằng 0.01 cho $x = 0.2154$, $t = 76.7$ ms, trung bình $1/(3\delta) = 16.7$ ms.
+
+| Chờ | Trung bình (ms) | p99 (ms) |
+|---|---|---|
+| một replica | 50 | 230.3 |
+| nhanh nhất trong 3 | 16.7 | 76.7 |
+| nhanh thứ hai trong 3 (quorum) | 41.7 | 141.6 |
+| cả 3 | 91.7 | 285.0 |
+
+Quorum 2/3 cắt p99 khoảng 39% so với một replica, và chờ cả ba thì p99 tệ hơn 24% so với một replica: đúng hướng mà mục 4.2(c) cảnh báo về khuếch đại đuôi khi phải gom kết quả từ nhiều server[^tail-fanout].
+
+(c) Các replica đều phục vụ cùng một dòng request đến (cùng thời điểm đến), nên đợt tải dồn cục ảnh hưởng cả ba, và nếu cả ba chia sẻ cùng một thứ phía dưới (mạng, đĩa, một replica đang bị GC) thì các $T_i$ có tương quan dương. Tương quan dương làm các phản hồi "chậm cùng nhau", nên việc chọn nhanh thứ hai hay nhanh nhất giúp được *ít hơn* so với bảng trên: bảng nên coi là cận *lạc quan* về lợi ích của quorum (suy luận của người soạn, không chứng minh ở đây).
+
+</details>
+
+**Bài 10 (Khó).** Bạn đánh giá `orders-api` (10 worker, $\mu = 100$/s mỗi worker, tổng công suất 1000 request/s) bằng một bộ sinh tải *vòng kín* kiểu `wrk`: 40 kết nối, mỗi kết nối gửi request kế ngay khi nhận response (không có thời gian nghỉ). Công cụ báo throughput 1000 request/s. Một đồng nghiệp viết: "Little cho latency $= 40/1000 = 40$ ms ở 1000 request/s, nặng hơn nhiều so với 12 ms ở 800 request/s mà ta đo ở production. Vậy từ 800 lên 1000 request/s latency chỉ tăng 3.3 lần, chấp nhận được."
+
+(a) Chứng minh luật phản hồi tổng quát cho hệ vòng kín: $N$ client, mỗi client có thời gian nghỉ trung bình $Z$ giữa hai request, throughput $X$, thời gian phản hồi trung bình $R$ thì $N = X(R + Z)$. Rồi giải thích vì sao 40 ms ở trên đúng với *thí nghiệm này*.
+(b) Vì sao kết luận "latency chỉ tăng 3.3 lần" sai? Tính $E[T]$ của hệ *mở* M/M/10 ở $\lambda = 900, 950, 990$ request/s để so.
+(c) Nếu bạn tăng lên 80 kết nối thì công cụ báo gì? Nó nói gì về server?
+
+<details><summary>Gợi ý</summary>
+
+Ở (a), lấy "hệ" là tất cả client cộng server: số khách trong hệ luôn đúng bằng $N$. Ở (b), dùng bảng Erlang C bằng đệ quy của mục 5.3 cho $c = 10$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn.)
+
+(a) Lấy hệ là toàn bộ vòng: mỗi client luân phiên giữa trạng thái "nghỉ" (kéo dài $Z$ trung bình) và trạng thái "đang có request trong server" (kéo dài $R$ trung bình). Vì có $N$ client và mỗi client luôn ở đúng một trong hai trạng thái, số khách trong hệ luôn bằng $N$, nên $L = N$. Tốc độ khách đi qua hệ là throughput $X$, và mỗi khách ở trong hệ trung bình $R + Z$. Little cho cả hệ[^little-stmt], vì định luật đúng với hệ và vùng bất kỳ[^hb-gen], cho $N = X(R + Z)$. ∎
+
+Ở thí nghiệm này $Z = 0$ và $N = 40 \ge 10$ nên luôn có ít nhất 10 request trong hệ, mọi worker luôn bận, và throughput bằng công suất tối đa $X = 10 \times 100 = 1000$/s. Vậy $R = N/X = 40/1000 = 40$ ms, gồm 10 ms chạy và 30 ms chờ. Kết quả đúng, và không phụ thuộc phân phối service hay arrival[^hb-gen].
+
+(b) Con số 40 ms là latency của hệ khi đang có *đúng 40 request cùng bay* và server *đang bão hòa*. Nó không phải latency ở một tốc độ đến cho trước. Hệ mở ở $\lambda = 1000$ có $\rho = 1$ nên hàng không ổn định và $E[T]$ vô hạn[^k-single]. Với hệ mở M/M/10 ($\mu = 100$, $E[W_q] = C/(1000 - \lambda)$):
+
+| $\lambda$ (req/s) | $C(10, a)$ | $E[W_q]$ (ms) | $E[T]$ (ms) |
+|---|---|---|---|
+| 800 | 0.4092 | 2.05 | 12.05 |
+| 900 | 0.6687 | 6.69 | 16.69 |
+| 950 | 0.8256 | 16.51 | 26.51 |
+| 990 | 0.9637 | 96.37 | 106.37 |
+
+Ở 990 request/s ($\rho = 0.99$, chỉ 1% dưới ngưỡng) latency trung bình đã là 106 ms, gấp 2.7 lần con số 40 ms. Kết luận "chấp nhận được" sai vì đồng nghiệp đã lấy số của một chế độ vòng kín bão hòa làm đại diện cho chế độ mở ở gần ρ = 1, nơi latency nổ theo đường cong mục 4. Ở vòng kín, khi server chậm đi thì các client tự đợi và tốc độ đến giảm, nên hệ không bao giờ vào vùng latency nổ (xem phần Đi sâu cuối mục 4).
+
+(c) Với $N = 80$ thì $X$ vẫn là 1000/s (đã bão hòa) và $R = 80/1000 = 80$ ms: latency tăng gấp đôi chỉ vì bạn thêm client, trong khi server không đổi một dòng nào. Khi $X$ đã bị chặn bởi công suất, $R = N/X$ chỉ phản ánh tham số $N$ do bạn chọn, không phản ánh năng lực của server. Để đo latency ở một lưu lượng thực tế, cần bộ sinh tải *vòng mở* (gửi request theo lịch đến, không chờ response), và cách đo đó là chủ đề của [Chương 06](06-thong-ke-cho-benchmark.md) (nhận xét của người soạn).
+
+</details>
+
+**Bài 11 (Khó).** Một service tối giản (một worker, M/M/1, $\mu = 100$/s) nhận $\lambda = 70$ request/s từ client. Client đặt timeout $\tau = 100$ ms và, nếu quá hạn, gửi lại *đúng một lần* ngay tức thì. Server không hủy việc của request đã quá hạn, nên mỗi lần quá hạn tạo thêm một request vào hàng. Mô hình đơn giản hóa (của người soạn): coi tổng dòng đến là Poisson tốc độ $\lambda_{\text{eff}} = \lambda(1 + p)$, trong đó $p = P(T > \tau)$ và $T$ là biến mũ tốc độ $\mu - \lambda_{\text{eff}}$ như mục 3.4.
+
+(a) Nếu không có retry, $p_0 = P(T > \tau)$ bằng bao nhiêu?
+(b) Với retry, $p$ thỏa phương trình điểm bất động $p = f(p) = e^{-(\mu - \lambda(1+p))\tau}$. Chứng minh phương trình có đúng hai nghiệm $p_1 < p_2$ trong khoảng $(0, 3/7)$ và tính chúng.
+(c) Chứng minh rằng phép lặp $p \leftarrow f(p)$ ổn định quanh nghiệm $r$ khi và chỉ khi $7r < 1$, và xác định nghiệm nào ổn định. Giải thích hệ quả: một sự cố tạm thời có thể làm hệ rơi vào trạng thái quá tải kéo dài kể cả khi nguyên nhân đã mất.
+
+<details><summary>Gợi ý</summary>
+
+Thế số: $(\mu - \lambda(1+p))\tau = (100 - 70 - 70p) \times 0.1 = 3 - 7p$, nên $f(p) = e^{-3+7p}$. Xét $g(p) = f(p) - p$; $g$ là hàm lồi chặt vì $g'' = 49\,e^{-3+7p} > 0$. Nghiệm hợp lệ cần $\lambda(1+p) < \mu$, tức $p < 3/7$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(Lời giải của người soạn, trên mô hình đơn giản hóa nêu trong đề.)
+
+(a) Không retry: $\mu - \lambda = 30$/s, $p_0 = e^{-30 \times 0.1} = e^{-3} = 0.0498$, khoảng 5% request quá hạn, với $E[T] = 1/30 = 33.3$ ms[^adan-sojourn].
+
+(b) Với retry, $f(p) = e^{-3+7p}$ (thế số như gợi ý), cần $g(p) = e^{-3+7p} - p = 0$ với $p \in (0, 3/7)$ (ngoài khoảng đó $\lambda_{\text{eff}} \ge \mu$ nên không có phân phối dừng[^k-single]). Vì $g'' = 49\,e^{-3+7p} > 0$, $g$ lồi chặt nên có tối đa hai nghiệm. $g'(p) = 7e^{-3+7p} - 1 = 0$ tại $e^{-3+7p} = 1/7$, tức $p_m = (3 - \ln 7)/7 = 0.1506$; giá trị nhỏ nhất là $g(p_m) = 1/7 - p_m = 0.1429 - 0.1506 = -0.0077 < 0$. Mà $g(0) = e^{-3} = 0.0498 > 0$ và $g(0.3) = e^{-0.9} - 0.3 = 0.1066 > 0$. Theo định lý giá trị trung gian, có một nghiệm trong $(0, p_m)$ và một nghiệm trong $(p_m, 0.3)$: đúng hai nghiệm. ∎ Chia đôi số cho $p_1 = 0.1009$ và $p_2 = 0.1951$.
+
+Tại $p_1$: $\lambda_{\text{eff}} = 70 \times 1.1009 = 77.06$/s, $\rho = 0.771$, $E[T] = 1/(100 - 77.06) = 43.6$ ms. Tại $p_2$: $\lambda_{\text{eff}} = 83.66$/s, $\rho = 0.837$, $E[T] = 61.2$ ms.
+
+(c) Phép lặp $p_{k+1} = f(p_k)$ có nghiệm $r$ là điểm bất động. Quanh $r$, $p_{k+1} - r \approx f'(r)(p_k - r)$, nên phép lặp co về $r$ khi $|f'(r)| < 1$ và rời xa $r$ khi $|f'(r)| > 1$. Vì $f'(p) = 7e^{-3+7p} = 7f(p)$ và $f(r) = r$ nên $f'(r) = 7r$, dương, nên ổn định khi và chỉ khi $7r < 1$, tức $r < 1/7 = 0.1429$. Vậy $p_1 = 0.1009$ ($7p_1 = 0.706$) ổn định và $p_2 = 0.1951$ ($7p_2 = 1.366$) không ổn định. Số: bắt đầu từ $p = 0$, phép lặp tiến tới $0.1009$ sau khoảng 25 bước. Bắt đầu từ $p = 0.18 < p_2$ phép lặp quay về $p_1$ ($0.176, 0.170, 0.164, 0.157, 0.149, 0.141, \dots$); bắt đầu từ $p = 0.25 > p_2$ nó đi $0.287, 0.370, 0.663$ rồi vượt $3/7$, nơi $\rho_{\text{eff}} \ge 1$ và mọi request đều quá hạn.
+
+Hệ quả: hệ có hai chế độ. Ở chế độ lành mạnh ($p_1$), retry chỉ tăng tải 10%. Nhưng $p_2$ đóng vai một *ngưỡng*: nếu một cú dừng ngắn (GC pause, failover) khiến tỉ lệ quá hạn tạm thời vượt 19.5%, thì retry thêm tải đủ để giữ tỉ lệ quá hạn cao hơn ngưỡng, và hệ trôi về ρ ≥ 1 *ngay cả khi nguyên nhân gây ra cú dừng đã hết* (mô hình đơn giản hóa; nhận xét của người soạn, không phải kết quả của nguồn). Đây là lý do cần ngân sách retry, backoff và giảm tải chủ động trong thực tế, và là minh họa cho điểm "phản hồi (retry)" ở mục 7.4.
+
+</details>
+
 ## Đọc thêm
 
 - [Adan và Resing, *Queueing Systems*, chương 2 và 4](https://iadan.win.tue.nl/que/h4.pdf): đọc chương 4 để thấy bốn cách khác nhau tới nghiệm M/M/1 và phân phối T; chương 2 cho Kendall, Little và PASTA.

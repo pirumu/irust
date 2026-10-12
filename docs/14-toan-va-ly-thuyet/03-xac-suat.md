@@ -1148,6 +1148,322 @@ Cách tính ngây thơ lệch ở chữ số có nghĩa thứ năm so với `exp
 
     </details>
 
+## Bài tập
+
+Chín bài dưới đây bắt bạn tự chứng minh hoặc tự tính một điều mới bằng đúng các công cụ của chương, trên các tình huống quanh `kvmeta`; chúng không lặp lại câu hỏi tự kiểm tra. Bài nào cũng có lời giải đầy đủ trong thẻ gập, nên hãy tự làm trước rồi mới mở. Mọi số trong đề là giả định của người soạn. Mọi kết quả số trong lời giải đã được kiểm lại bằng một chương trình Rust nhỏ (quan sát: `rustc 1.95.0`, macOS arm64, chạy một lần), và các lời giải đều là lời giải của người soạn; chỗ nào lời giải dùng một sự kiện đã có trong chương thì có chú thích của chương.
+
+**Bài 1 (Dễ). Cảnh báo bật lên, node có hỏng thật không?**
+
+Hệ thống giám sát của `kvmeta-cache` chấm điểm từng cửa sổ 5 phút của mỗi node và bật cảnh báo "node sắp hỏng". Giả sử 0,5% số cửa sổ thật sự nằm trong một sự cố; khi có sự cố, cảnh báo bật với xác suất 95%; khi không có sự cố, nó vẫn bật nhầm với xác suất 2%.
+
+(a) Một cảnh báo vừa bật. Xác suất node đó thật sự đang có sự cố là bao nhiêu?
+
+(b) Có hai monitor chạy riêng, và giả sử rằng khi đã biết có sự cố hay không thì hai monitor bật độc lập với nhau. Cả hai cùng bật thì xác suất có sự cố là bao nhiêu?
+
+(c) Nếu cả hai monitor thực ra đọc cùng một metric và gần như luôn bật cùng nhau, đáp án (b) sai ở đâu?
+
+<details><summary>Gợi ý</summary>
+
+Dùng công thức xác suất toàn phần để tính xác suất cảnh báo bật, rồi chia. Nếu khó hình dung, giả sử có đúng 10 000 cửa sổ và đếm từng loại.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) Gọi $S$ là biến cố "có sự cố" và $A$ là biến cố "cảnh báo bật". Đề cho $\Pr[S] = 0{,}005$, $\Pr[A \mid S] = 0{,}95$ và $\Pr[A \mid \neg S] = 0{,}02$.
+
+(a) Xác suất cảnh báo bật là tổng của hai trường hợp[^mcs-total]:
+
+$$\Pr[A] = 0{,}95 \times 0{,}005 + 0{,}02 \times 0{,}995 = 0{,}00475 + 0{,}0199 = 0{,}02465.$$
+
+Quy tắc nhân cho tử số, $\Pr[S \cap A] = \Pr[S] \cdot \Pr[A \mid S] = 0{,}00475$[^mcs-product], nên
+
+$$\Pr[S \mid A] = \frac{\Pr[S \cap A]}{\Pr[A]} = \frac{0{,}00475}{0{,}02465} \approx 0{,}1927.$$
+
+Chỉ khoảng 19,3% cảnh báo là thật. Đếm trên 10 000 cửa sổ cho cùng kết quả: có 50 cửa sổ sự cố, trong đó 47,5 cái bật cảnh báo; có 9 950 cửa sổ bình thường, trong đó $0{,}02 \times 9950 = 199$ cái bật nhầm. Vậy $47{,}5 / (47{,}5 + 199) \approx 19{,}3\%$. Monitor rất "nhạy" (95%) và rất "ít báo nhầm" (2%) vẫn cho phần lớn cảnh báo giả, vì sự cố hiếm hơn báo nhầm hàng chục lần.
+
+(b) Khi đã biết trạng thái, hai monitor độc lập, nên $\Pr[A_1 \cap A_2 \mid S] = 0{,}95^2 = 0{,}9025$ và $\Pr[A_1 \cap A_2 \mid \neg S] = 0{,}02^2 = 0{,}0004$. Lặp lại phép tính ở (a) với hai số này:
+
+$$\Pr[S \mid A_1 \cap A_2] = \frac{0{,}9025 \times 0{,}005}{0{,}9025 \times 0{,}005 + 0{,}0004 \times 0{,}995} = \frac{0{,}0045125}{0{,}0049105} \approx 0{,}9189.$$
+
+Hai cảnh báo độc lập đẩy độ tin cậy từ 19,3% lên 91,9%. Lưu ý rằng $A_1$ và $A_2$ *không* độc lập với nhau nếu không điều kiện hóa trên $S$, vì cả hai đều tăng xác suất khi có sự cố; giả thiết chỉ là độc lập *có điều kiện*.
+
+(c) Nếu hai monitor đọc cùng một metric thì khi $S$ không xảy ra, việc monitor 1 bật nhầm cho ta biết gần như chắc monitor 2 cũng bật nhầm, nên $\Pr[A_1 \cap A_2 \mid \neg S]$ xấp xỉ $0{,}02$ chứ không phải $0{,}0004$. Với số này, xác suất ở (b) xấp xỉ $0{,}95 \times 0{,}005 / (0{,}95 \times 0{,}005 + 0{,}02 \times 0{,}995) \approx 19{,}3\%$, tức cảnh báo thứ hai không thêm thông tin nào. Đây đúng là bài học của §1.3: giả thiết độc lập là chỗ đắt nhất, và hai cảnh báo chỉ đáng giá khi nguồn của chúng thật sự khác nhau.
+
+</details>
+
+**Bài 2 (Dễ). Fan-out và union bound**
+
+Một lệnh `multi_get` của service `orders` gọi song song 30 shard của `kvmeta-cache`. Mỗi shard trả lời chậm hơn ngưỡng 50 ms với xác suất 0,1%.
+
+(a) Không giả thiết gì về quan hệ giữa các shard, hãy chặn trên xác suất lệnh đó chậm vì ít nhất một shard chậm.
+
+(b) Nếu các shard chậm độc lập, giá trị đúng là bao nhiêu? Vì sao nó gần cận ở (a)?
+
+(c) Với fan-out 100 shard, mỗi shard chậm với xác suất 1%, cận của (a) cho ra gì, và giá trị đúng khi độc lập là bao nhiêu?
+
+(d) Với fan-out 100, muốn cả lệnh chậm không quá 1% thì mỗi lần gọi được phép chậm với xác suất tối đa bao nhiêu, theo union bound và theo giả thiết độc lập?
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) (a) Gọi $E_j$ là biến cố "shard $j$ chậm". Union bound không đòi độc lập[^mcs-union], nên
+
+$$\Pr\Big[\bigcup_{j=1}^{30} E_j\Big] \le 30 \times 0{,}001 = 0{,}03.$$
+
+(b) Nếu độc lập, lệnh không chậm khi cả 30 shard đều nhanh, xác suất $0{,}999^{30}$. Vậy xác suất chậm là $1 - 0{,}999^{30} \approx 0{,}02957$, tức 2,96%. Cận 3% chỉ cao hơn 0,043 điểm phần trăm. Lý do: union bound đếm hai lần mọi trường hợp có hai shard cùng chậm, và những trường hợp này rất hiếm. Chúng có xác suất cỡ $\binom{30}{2} \times 10^{-6} \approx 4{,}35 \times 10^{-4}$, đúng bằng phần chênh. Khi các xác suất nhỏ và tổng của chúng nhỏ, union bound gần như không mất gì.
+
+(c) Cận cho $100 \times 0{,}01 = 1$, tức "xác suất không quá 1": vô nghĩa, vì mọi xác suất đều không quá 1. Giá trị đúng khi độc lập là $1 - 0{,}99^{100} \approx 0{,}634$: 63,4% lệnh `multi_get` 100 shard gặp ít nhất một shard chậm hơn p99 của shard.
+
+(d) Theo union bound, $100\,p \le 0{,}01$ cho $p \le 10^{-4}$. Điều kiện này đủ mà không cần giả thiết gì về quan hệ giữa các lần gọi. Nếu chấp nhận độc lập, điều kiện chính xác là $1 - (1-p)^{100} \le 0{,}01$, tức $p \le 1 - 0{,}99^{1/100} \approx 1{,}005 \times 10^{-4}$. Hai đáp án chỉ lệch nhau 0,5%, nên ở vùng xác suất nhỏ ta chọn union bound và được một bảo đảm đúng vô điều kiện. Hệ quả vận hành (nhận xét của người soạn): muốn p99 của cả lệnh fan-out 100 thì từng shard phải đạt cỡ p99,99 chứ không phải p99.
+
+</details>
+
+**Bài 3 (Dễ). Cấp bộ nhớ cho Bloom filter của SSTable**
+
+Mỗi SSTable của `kvmeta` có $n = 2\,000\,000$ key. Một lần tra key *không tồn tại* đi qua $L = 6$ SSTable, mỗi SSTable có một Bloom filter cấu hình như nhau. Ta muốn kỳ vọng số lần đọc đĩa thừa (do filter báo oan) không quá 0,01 mỗi lần tra.
+
+(a) Mỗi filter được phép báo oan tối đa bao nhiêu?
+
+(b) Theo công thức tối ưu của mục 6, mỗi key cần bao nhiêu bit, $k$ lý thuyết là bao nhiêu, và tổng bộ nhớ của một filter?
+
+(c) Cấp 13 bit mỗi key với $k = 9$ có đạt không? 14 bit mỗi key với $k = 9$?
+
+(d) Một SSTable lớn bất thường có $4\,000\,000$ key nhưng vẫn dùng filter cấu hình 14 bit mỗi key của 2 triệu key. Kỳ vọng số lần đọc thừa trở thành bao nhiêu?
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) (a) Gọi $f$ là xác suất báo oan của một filter. Theo linearity of expectation, số lần đọc thừa kỳ vọng là $L \cdot f$ mà không cần các filter độc lập nhau (§6.2). Vậy $6f \le 0{,}01$, tức $f \le 1/600 \approx 1{,}667 \times 10^{-3}$.
+
+(b) Từ $f = (1/2)^k$ và $k = (m/n)\ln 2$ ta có $m/n = \ln(1/f) / (\ln 2)^2$ và $k = \log_2(1/f)$[^bloom-opt]:
+
+$$\frac{m}{n} = \frac{\ln 600}{(\ln 2)^2} = \frac{6{,}397}{0{,}4805} \approx 13{,}31 \text{ bit/key}, \qquad k = \log_2 600 \approx 9{,}23.$$
+
+Tổng bộ nhớ là $13{,}31 \times 2 \times 10^6 \approx 2{,}66 \times 10^7$ bit, khoảng 3,33 MB.
+
+(c) $k$ phải là số nguyên[^bloom-int], nên ta kiểm bằng công thức $f = (1 - e^{-kn/m})^k$. Với $m/n = 13$ và $k = 9$: $e^{-9/13} \approx 0{,}5004$, nên $f = 0{,}4996^9 \approx 1{,}94 \times 10^{-3}$ và số lần đọc thừa là $6f \approx 0{,}0116 > 0{,}01$: *không đạt*. Với $m/n = 14$ và $k = 9$: $e^{-9/14} \approx 0{,}5258$, nên $f = 0{,}4742^9 \approx 1{,}21 \times 10^{-3}$ và $6f \approx 0{,}0073 \le 0{,}01$: đạt, với bộ nhớ $14 \times 2 \times 10^6 = 2{,}8 \times 10^7$ bit, tức 3,5 MB. Một điểm tinh tế: ngay ở đúng 13,31 bit mỗi key, $k = 9$ cho $6f \approx 0{,}01001$, vượt ngưỡng một chút, vì $k$ lý thuyết là 9,23 mà ta phải làm tròn. Nên làm tròn lên số bit mỗi key thay vì chỉ làm tròn $k$.
+
+(d) Bây giờ $kn/m = 9 \times 4 \times 10^6 / (2{,}8 \times 10^7) = 9/7 \approx 1{,}286$ và $e^{-9/7} \approx 0{,}2763$, nên $f = (1 - 0{,}2763)^9 = 0{,}7237^9 \approx 0{,}0544$. Số lần đọc thừa kỳ vọng là $6 \times 0{,}0544 \approx 0{,}33$ mỗi lần tra, gấp khoảng 45 lần mức 0,0073 ở (c). Nhồi gấp đôi số key vào cùng một mảng bit đẩy tỉ lệ báo oan từ 0,12% lên 5,4%; lý do là một nửa số bit trở thành 1 ở $k$ tối ưu, và vượt qua mốc đó filter đầy lên rất nhanh. Vì vậy filter phải được dựng theo số key thật của từng SSTable, không dùng một cấu hình cố định.
+
+</details>
+
+**Bài 4 (Vừa). Kỳ vọng và phương sai của số shard rỗng**
+
+Một đợt ghi hàng loạt đưa $m = 200$ key vào bảng chia $n = 64$ shard; mỗi key được băm đều và độc lập vào một shard. Gọi $X$ là số shard không nhận key nào.
+
+(a) Tính $\mathbb{E}[X]$.
+
+(b) Chứng minh $\operatorname{Var}[X] = n a + n(n-1)\,b - n^2 a^2$ với $a = (1 - 1/n)^m$ và $b = (1 - 2/n)^m$, rồi tính giá trị số.
+
+(c) Chứng minh $\operatorname{Var}[X] < n a (1 - a)$, tức là $X$ phân tán *ít hơn* trường hợp các chỉ thị "shard $j$ rỗng" độc lập với nhau.
+
+(d) Hãy chặn $\Pr[X \ge 8]$ bằng Markov và bằng Chebyshev.
+
+(e) Cache hot-set có 1000 key khác nhau; 500 request đến, mỗi request chọn một key đều và độc lập. Số key khác nhau kỳ vọng là bao nhiêu?
+
+<details><summary>Gợi ý</summary>
+
+Viết $X = I_1 + \dots + I_n$ với $I_j$ là chỉ thị "shard $j$ rỗng". Với phương sai, dùng $\operatorname{Var}[X] = \mathbb{E}[X^2] - \mathbb{E}[X]^2$ và khai triển $X^2 = \sum_j I_j^2 + \sum_{j \ne l} I_j I_l$. Với (c), so sánh $b$ với $a^2$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) (a) Một key tránh shard $j$ với xác suất $1 - 1/n$, và $m$ key độc lập, nên $\Pr[I_j = 1] = (1 - 1/n)^m = a$. Linearity cho $\mathbb{E}[X] = n a$[^mcs-lin2]. Số: $a = (63/64)^{200} \approx 0{,}04287$, nên $\mathbb{E}[X] \approx 2{,}743$ shard rỗng.
+
+(b) Ta dùng $\operatorname{Var}[X] = \mathbb{E}[X^2] - \mathbb{E}[X]^2$ (§2.3, tính chất 1). Khai triển $X^2 = \sum_j I_j^2 + \sum_{j \ne l} I_j I_l$. Vì $I_j^2 = I_j$ nên $\sum_j \mathbb{E}[I_j^2] = n a$. Với $j \ne l$, tích $I_j I_l$ bằng 1 khi *cả hai* shard rỗng, tức mỗi key tránh cả hai shard, xác suất $1 - 2/n$ mỗi key, nên $\mathbb{E}[I_j I_l] = (1 - 2/n)^m = b$; có $n(n-1)$ cặp có thứ tự. Vậy $\mathbb{E}[X^2] = n a + n(n-1)\,b$ và $\mathbb{E}[X]^2 = n^2 a^2$. Hiệu của chúng là công thức cần chứng minh. Số: $b = (62/64)^{200} \approx 0{,}0017472$, nên
+
+$$n a \approx 2{,}7434, \quad n(n-1)\,b = 4032 \times 0{,}0017472 \approx 7{,}0447, \quad n^2 a^2 \approx 7{,}5264,$$
+
+và $\operatorname{Var}[X] \approx 2{,}7434 + 7{,}0447 - 7{,}5264 = 2{,}2617$, độ lệch chuẩn khoảng 1,50. Các chỉ thị $I_j$ phụ thuộc nhau (nếu một shard nhận nhiều key thì các shard khác dễ rỗng hơn), nên ta không được dùng công thức cộng phương sai của các biến độc lập[^mcs-addvar]; ta phải tính cả các số hạng chéo như trên.
+
+(c) Ta có $1 - 2/n < 1 - 2/n + 1/n^2 = (1 - 1/n)^2$, và nâng cả hai vế (dương) lên lũy thừa $m \ge 1$ cho $b < a^2$. Thay vào (b):
+
+$$\operatorname{Var}[X] < n a + n(n-1)\,a^2 - n^2 a^2 = n a - n a^2 = n a (1 - a).$$
+
+Số: $n a (1-a) = 64 \times 0{,}04287 \times 0{,}95713 \approx 2{,}626$, lớn hơn $2{,}262$. Ý nghĩa: các chỉ thị "rỗng" tương quan *âm* (một shard rỗng làm shard khác kém rỗng hơn một chút), nên tổng của chúng dao động ít hơn trường hợp độc lập.
+
+(d) Markov: $\Pr[X \ge 8] \le 2{,}743 / 8 \approx 0{,}343$. Chebyshev: $X \ge 8$ kéo theo $|X - 2{,}743| \ge 5{,}257$, nên $\Pr[X \ge 8] \le 2{,}2617 / 5{,}257^2 \approx 2{,}2617 / 27{,}63 \approx 0{,}0819$. Quan sát: tính chính xác phân phối của $X$ bằng quy hoạch động theo từng key cho $\Pr[X \ge 8] \approx 0{,}00269$, và kiểm lại $\mathbb{E}[X] = 2{,}7434$, $\operatorname{Var}[X] = 2{,}2617$, khớp với (a), (b). Chebyshev tốt hơn Markov hơn 4 lần, nhưng vẫn cao hơn giá trị đúng khoảng 30 lần: chúng chỉ dùng kỳ vọng và phương sai, không dùng hình dạng của phân phối (§3).
+
+(e) Đây cùng cấu trúc với (a), chỉ đổi vai: "thùng" là 1000 key, "quả bóng" là 500 request. Key $j$ không được yêu cầu lần nào với xác suất $(1 - 1/1000)^{500}$, nên theo linearity
+
+$$\mathbb{E}[\text{số key khác nhau}] = 1000\,\big(1 - 0{,}999^{500}\big) \approx 1000\,(1 - 0{,}6063) \approx 393{,}6.$$
+
+Dù có 500 request, chỉ khoảng 394 key khác nhau được chạm tới; phần còn lại là các lần lặp. Con số này cho ta ước lượng kích thước working set của cache từ một lô request ngẫu nhiên.
+
+</details>
+
+**Bài 5 (Vừa). Đặt headroom cho 50 instance bằng Chernoff**
+
+Service `orders` chạy 50 instance. Trong mỗi cửa sổ 1 giây, mỗi instance nhận $X \sim \mathrm{Bin}(4000, 0{,}1)$ request (4000 client độc lập, mỗi client gửi một request với xác suất 0,1). Instance bị coi là quá tải trong cửa sổ đó khi $X \ge C$. Ta muốn xác suất *có instance nào* quá tải trong một cửa sổ không quá $10^{-4}$.
+
+(a) Tính $\mathbb{E}[X]$ và $\operatorname{Var}[X]$.
+
+(b) Dùng Chernoff và union bound để tìm $C$ nguyên nhỏ nhất bảo đảm mục tiêu.
+
+(c) Làm lại bằng Chebyshev và union bound. Kết quả nói gì?
+
+(d) Giá trị $C$ nhỏ nhất dựa trên phân phối nhị thức chính xác là bao nhiêu? Chernoff tốn thêm bao nhiêu phần trăm headroom?
+
+<details><summary>Gợi ý</summary>
+
+Union bound cho $\Pr[\exists\ \text{instance quá tải}] \le 50 \cdot \Pr[X \ge C]$. Với Chernoff, viết $C = c\mu$ và giải $50\, e^{-\beta(c)\mu} \le 10^{-4}$, trong đó $\beta(c) = c \ln c - c + 1$; hàm $\beta$ tăng với $c \ge 1$ vì $\beta'(c) = \ln c \ge 0$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) (a) $\mathbb{E}[X] = 4000 \times 0{,}1 = 400$ và $\operatorname{Var}[X] = 4000 \times 0{,}1 \times 0{,}9 = 360$ (như ở §2.3), độ lệch chuẩn khoảng 18,97.
+
+(b) Union bound qua 50 instance không cần các instance độc lập với nhau[^mcs-overload]: xác suất có instance quá tải không quá $50 \cdot \Pr[X \ge C]$. $X$ là tổng của 4000 biến chỉ thị độc lập trong $[0, 1]$ nên Chernoff áp dụng được[^mcs-chernoff]: với $C = c \cdot 400$ và $c \ge 1$, $\Pr[X \ge C] \le e^{-\beta(c) \cdot 400}$. Cần
+
+$$50\, e^{-400\,\beta(c)} \le 10^{-4} \iff 400\,\beta(c) \ge \ln(5 \times 10^5) \approx 13{,}122 \iff \beta(c) \ge 0{,}032806.$$
+
+Ta có $\beta(1{,}25) = 1{,}25 \ln 1{,}25 - 0{,}25 \approx 0{,}02893 < 0{,}032806$ và $\beta(1{,}30) \approx 0{,}04107 > 0{,}032806$, và $\beta$ tăng, nên nghiệm nằm giữa; chia đôi liên tiếp cho $c \approx 1{,}2669$, tức $C \ge 506{,}75$. Kiểm với số nguyên: $C = 507$ (khi $c = 1{,}2675$) cho cận $50\,e^{-400\,\beta(c)} \approx 9{,}4 \times 10^{-5} \le 10^{-4}$, còn $C = 506$ cho cận khoảng $1{,}1 \times 10^{-4} > 10^{-4}$. Vậy $C = 507$, tức headroom 26,75% trên mức trung bình 400.
+
+(c) Chebyshev: $X \ge C$ kéo theo $|X - 400| \ge t := C - 400$, nên $\Pr[X \ge C] \le 360 / t^2$. Cần $50 \times 360 / t^2 \le 10^{-4}$, tức $t^2 \ge 1{,}8 \times 10^8$ và $t \ge 13\,416$, vậy $C \ge 13\,816$. Con số này lớn hơn cả số client (4000), trong khi $X \le 4000$ luôn đúng, nên cận không nói được gì. Đúng như §3.4: sau union bound qua nhiều đối tượng, chỉ cận mũ của Chernoff mới còn giá trị[^mcs-chernoff-exp].
+
+(d) Quan sát: cộng chính xác đuôi nhị thức (qua logarit của hàm khối, như hàm `binom_tail_exact` ở §3) cho $C = 491$ là giá trị nhỏ nhất thỏa $50 \cdot \Pr[X \ge C] \le 10^{-4}$ (cụ thể $50 \times 1{,}82 \times 10^{-6} = 9{,}1 \times 10^{-5}$); với $C = 507$ của Chernoff, đuôi đúng chỉ cỡ $1{,}5 \times 10^{-6}$ mỗi instance. Chernoff vì thế dư $507 - 491 = 16$ request, tức khoảng 4 điểm phần trăm headroom (26,75% so với 22,75%): một cái giá nhỏ để có một bảo đảm *chứng minh được* mà không cần tính phân phối chính xác. Nhắc lại cảnh báo của §3.4 (nhận xét của người soạn): cả hai con số đều dựa trên 4000 client độc lập, và retry storm hay một key quá nóng phá giả thiết đó trước khi phá bất kỳ phép tính nào.
+
+</details>
+
+**Bài 6 (Vừa). Chọn độ dài id bằng birthday bound**
+
+Một service sinh id ngẫu nhiên cho từng sự kiện, mỗi id gồm $b$ bit chọn đều và độc lập. Ta cần một bảo đảm rằng trong $n = 10^9$ id, xác suất có hai id trùng không quá $10^{-6}$.
+
+(a) Chứng minh: nếu $\mu = n(n-1)/(2d) \le \varepsilon$ với $d = 2^b$ thì xác suất có va chạm không quá $\varepsilon$.
+
+(b) Tìm $b$ nhỏ nhất theo (a). Có thể dùng bất đẳng thức $\Pr[A] \ge 1 - e^{-\mu}$ của §4.3 để chứng tỏ $b - 1$ bit thật sự không đủ không?
+
+(c) Với UUIDv4 (122 bit ngẫu nhiên), nếu hệ thống sinh $10^9$ id mỗi ngày trong 10 năm thì xác suất va chạm toàn bộ khoảng thời gian đó cỡ bao nhiêu?
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) (a) Gọi $M$ là số cặp $(i, j)$ có $i < j$ mà id trùng nhau. Mỗi cặp trùng với xác suất $1/d$, có $\binom{n}{2}$ cặp, nên linearity cho $\mathbb{E}[M] = n(n-1)/(2d) = \mu$ mà không cần độc lập giữa các cặp. Có va chạm khi và chỉ khi $M \ge 1$, và $M \ge 0$, nên Markov cho $\Pr[M \ge 1] \le \mathbb{E}[M] / 1 = \mu \le \varepsilon$. Đây chính là mệnh đề (a) của §4.3, viết lại cho bài toán thiết kế. Hướng chứng minh này chỉ cho cận trên, nhưng đó là điều ta cần: một bảo đảm.
+
+(b) Cần $d \ge n(n-1)/(2\varepsilon)$. Với $n = 10^9$, $n(n-1) = 10^{18} - 10^9$, và $d \ge (10^{18} - 10^9) / (2 \times 10^{-6}) \approx 5 \times 10^{23}$. Lấy log cơ số 2: $\log_2(5 \times 10^{23}) = \log_2 5 + 23 \log_2 10 \approx 2{,}32 + 76{,}40 = 78{,}73$. Vậy $b = 79$ bit: ở 79 bit, $\mu \approx 8{,}27 \times 10^{-7} \le 10^{-6}$. Ở $b = 78$ bit thì $\mu \approx 1{,}654 \times 10^{-6}$. Cận dưới $\Pr[A] \ge 1 - e^{-\mu}$ (§4.3, phần (b)) cho $\Pr[A] \ge 1 - e^{-1{,}654 \times 10^{-6}} \approx 1{,}654 \times 10^{-6} > 10^{-6}$, nên 78 bit thật sự *không* đủ, không chỉ là "cận chưa chứng minh được". Vậy 79 bit vừa đủ cả hai chiều. Quy tắc nhớ: thêm 1 bit giảm xác suất một nửa, còn nhân đôi số id làm xác suất tăng gấp 4.
+
+(c) $n = 10^9 \times 3650 = 3{,}65 \times 10^{12}$ id và $d = 2^{122}$[^uuid-122], nên $\mu = n(n-1)/(2d) \approx (3{,}65 \times 10^{12})^2 / 2^{123} \approx 1{,}332 \times 10^{25} / 1{,}063 \times 10^{37} \approx 1{,}25 \times 10^{-12}$. Theo (a), xác suất có một cặp trùng trong 10 năm không quá khoảng $1{,}3 \times 10^{-12}$. Mọi bảo đảm ở đây phụ thuộc vào giả thiết các id thật sự đều và độc lập (nhận xét của người soạn); hai instance cùng seed RNG sinh ra cùng một dãy id và phá toàn bộ phép tính.
+
+</details>
+
+**Bài 7 (Vừa). Cụm Raft 3 node chỉ còn hai follower**
+
+Một cụm staging có 3 node chạy Raft, leader vừa chết và còn hai follower. Dùng mô hình độ trễ cố định của §7.1: hai timeout độc lập, đều trên $[150, 150 + W)$ ms, và độ trễ một chiều $\delta$ cố định; đặt $\varepsilon = \delta / W$ (giả sử $\varepsilon \le 1$).
+
+(a) Chứng minh từ đầu rằng với cụm này, $P_{\text{split}} = 1 - (1 - \varepsilon)^2 = 2\varepsilon - \varepsilon^2$.
+
+(b) Tính $P_{\text{split}}$ và số vòng kỳ vọng khi $W = 150$ ms và $\delta = 5$ ms.
+
+(c) Tìm $W$ nhỏ nhất để $P_{\text{split}} \le 1\%$ khi $\delta = 5$ ms.
+
+(d) So sánh thời gian kỳ vọng đến khi có leader với $W = 150$, $300$ và $1000$ ms ($\delta = 5$ ms). Khoảng timeout nào hợp lý hơn?
+
+<details><summary>Gợi ý</summary>
+
+Cần 2 phiếu trên 3 node. Hỏi: ứng viên đầu tiên $C_1$ có tự nhiên đủ phiếu không, và khi nào nó mất phiếu của follower còn lại? Với (a), $\Pr[|T_1 - T_2| \ge \delta]$ là diện tích của hai tam giác trong hình vuông $[0, W)^2$. Với (d), dùng công thức xấp xỉ ở cuối §7.4 và nhớ rằng timeout nhỏ nhất của $s$ biến đều có kỳ vọng $W/(s+1)$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) (a) Với $n = 3$, ứng viên thắng khi có đa số, tức 2 phiếu trên 3. $C_1$, ứng viên hết giờ đầu tiên, có sẵn phiếu của chính nó. Server còn lại hết giờ lúc $T_{(2)}$. Nếu $T_{(2)} \ge T_{(1)} + \delta$ thì lời xin phiếu của $C_1$ tới nó trước khi nó hết giờ, nên nó bỏ phiếu cho $C_1$ và $C_1$ có 2 phiếu: thắng. Nếu $T_{(2)} < T_{(1)} + \delta$ thì server kia cũng thành ứng viên và tự bỏ phiếu cho mình, nên $C_1$ chỉ có 1 phiếu, và ứng viên kia cũng chỉ có 1: tách phiếu[^th-model]. Vậy $P_{\text{split}} = \Pr[|T_1 - T_2| < \delta]$. Đặt $T_i = 150 + W U_i$ với $U_1, U_2$ độc lập, đều trên $[0, 1)$; điều kiện thành $|U_1 - U_2| < \varepsilon$. Xác suất bù: $\Pr[U_2 \ge U_1 + \varepsilon]$ là diện tích của tam giác vuông cân có cạnh $1 - \varepsilon$ trong hình vuông đơn vị, tức $(1 - \varepsilon)^2 / 2$; tam giác đối xứng cho $\Pr[U_1 \ge U_2 + \varepsilon] = (1 - \varepsilon)^2 / 2$. Hai biến cố rời nhau, nên $\Pr[|U_1 - U_2| \ge \varepsilon] = (1 - \varepsilon)^2$ và $P_{\text{split}} = 1 - (1 - \varepsilon)^2$. Kết quả trùng công thức tổng quát $\Pr[\mathrm{Bin}(s, \varepsilon) \ge s - \lfloor n/2 \rfloor]$ của §7.6 với $n = 3$, $s = 2$ (và dòng "12,9%" ở bảng của mục đó với $\varepsilon = 1/15$: $2/15 - 1/225 \approx 0{,}1289$).
+
+(b) $W = 150$, $\delta = 5$: $\varepsilon = 1/30$, nên $P_{\text{split}} = 2/30 - 1/900 \approx 0{,}0656$, tức 6,56%. Số vòng là biến hình học[^th-geom2]: $\mathbb{E}[R] = 1/(1 - p) \approx 1{,}070$, và $\Pr[R \ge 3] = p^2 \approx 0{,}43\%$.
+
+(c) Cần $1 - (1 - \varepsilon)^2 \le 0{,}01$, tức $1 - \varepsilon \ge \sqrt{0{,}99} \approx 0{,}99499$ và $\varepsilon \le 0{,}005013$. Vậy $W \ge \delta / \varepsilon = 5 / 0{,}005013 \approx 997{,}5$ ms; chọn $W = 1000$ ms, được $P_{\text{split}} = 0{,}01 - 0{,}000025 = 0{,}009975$.
+
+(d) Theo cách của §7.4, mỗi vòng có ứng viên đầu tiên sau $a + W/(s+1) = 150 + W/3$ ms (timeout nhỏ nhất của $s = 2$ biến đều có kỳ vọng $W/3$), vòng thành công tốn thêm $2\delta$, và vòng thất bại tốn $a + W/3 + \delta$: thời gian kỳ vọng $\approx (150 + W/3) + 2\delta + \tfrac{p}{1-p}\,(150 + W/3 + \delta)$. Số, với $\delta = 5$ (tính bằng chương trình nhỏ):
+
+| $W$ (ms) | $\varepsilon$ | $P_{\text{split}}$ | $\Pr[R \ge 3]$ | thời gian kỳ vọng (ms) |
+|---|---|---|---|---|
+| 150 | 0,0333 | 6,56% | 0,43% | 224 |
+| 300 | 0,0167 | 3,31% | 0,11% | 269 |
+| 1000 | 0,0050 | 0,998% | 0,0099% | 498 |
+
+Tăng $W$ từ 150 lên 1000 ms hạ $P_{\text{split}}$ từ 6,56% xuống 1%, nhưng đẩy thời gian kỳ vọng từ 224 lên 498 ms, chậm hơn 274 ms. Chi phí kỳ vọng của việc tách phiếu ở $W = 150$ chỉ là $224 - 210 = 14$ ms (210 ms là thời gian khi không tách phiếu), nên một khoảng timeout rộng 1000 ms mua được ít lợi ích mà trả giá đắt. Kết luận (nhận xét của người soạn): với cụm 3 node nên giữ khoảng 150–300 ms và chấp nhận vài phần trăm vòng bầu lại, trừ khi độ trễ đuôi (xác suất $\Pr[R \ge 3]$) là ràng buộc cứng. Luận án khuyến nghị khoảng rộng 10–20 lần độ trễ một chiều[^th-rec]; ở đây 30 lần ($150/5$) đã vượt khuyến nghị.
+
+</details>
+
+**Bài 8 (Khó). Quorum xác suất: đọc ngẫu nhiên có bắt được bản ghi mới không?**
+
+Một kho cache có $N = 100$ replica. Mỗi lần ghi gửi tới $W$ replica chọn đều ngẫu nhiên (không lặp), còn mỗi lần đọc hỏi $R$ replica chọn đều và độc lập với lần ghi. Đọc trả về giá trị mới nếu ít nhất một replica được hỏi nằm trong nhóm vừa được ghi. Giả sử đọc xảy ra ngay sau khi ghi hoàn tất, chưa có read repair hay anti-entropy.
+
+(a) Chứng minh: nếu $W + R > N$ thì đọc luôn thấy bản ghi mới.
+
+(b) Chứng minh $\Pr[\text{đọc không thấy bản mới}] = \binom{N-W}{R} / \binom{N}{R} \le (1 - W/N)^R \le e^{-WR/N}$.
+
+(c) Với mục tiêu $\Pr[\text{đọc cũ}] \le 10^{-3}$, chọn $W = R$ nhỏ nhất theo cận ở (b). Giá trị đúng của xác suất tại đó là bao nhiêu, và $W = R$ nhỏ nhất thật sự cần là bao nhiêu? So với quorum đa số.
+
+(d) Hệ thống có $10^4$ cặp ghi-rồi-đọc mỗi giây. Với $W = R = 23$, kỳ vọng số lần đọc cũ mỗi giờ là bao nhiêu? Kết quả này nói gì về việc "xác suất 0,1% là nhỏ"?
+
+<details><summary>Gợi ý</summary>
+
+Với (a), dùng nguyên lý chuồng bồ câu: hai tập rời nhau phải nằm gọn trong $N$ phần tử. Với (b), xác suất rời nhau là tích $\prod_{i=0}^{R-1} \frac{N-W-i}{N-i}$ (chọn lần lượt từng replica đọc, mỗi lần tránh nhóm ghi); so từng thừa số với $(N - W)/N$ bằng bất đẳng thức giữa các tích chéo, rồi dùng $1 - x \le e^{-x}$ (§4.1).
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn) (a) Gọi $A$ là nhóm ghi và $B$ là nhóm đọc, $|A| = W$ và $|B| = R$. Nếu $A \cap B = \emptyset$ thì $|A \cup B| = W + R$, mà $A \cup B$ nằm trong tập $N$ replica nên $W + R \le N$. Phản đảo: $W + R > N$ thì $A \cap B \ne \emptyset$, tức đọc luôn gặp ít nhất một replica đã ghi. Quorum đa số là trường hợp $W = R = \lfloor N/2 \rfloor + 1$, cùng loại đa số mà Raft đòi ở ứng viên[^raft-majority]; với $N = 100$ đó là $W = R = 51$ và $W + R = 102 > 100$.
+
+(b) Cố định nhóm ghi $A$. Các tập đọc $R$ phần tử đều có khả năng như nhau, trong đó $\binom{N-W}{R}$ tập nằm hẳn ngoài $A$, nên $\Pr[A \cap B = \emptyset] = \binom{N-W}{R} / \binom{N}{R}$. Chọn $R$ replica lần lượt (không lặp): replica thứ $i + 1$ (với $i = 0, \dots, R-1$) phải nằm trong $N - i$ replica còn lại, trong đó $N - W - i$ replica nằm ngoài $A$ nếu các lần trước đều tránh $A$. Do đó
+
+$$\Pr[A \cap B = \emptyset] = \prod_{i=0}^{R-1} \frac{N - W - i}{N - i}.$$
+
+Từng thừa số thỏa $\frac{N-W-i}{N-i} \le \frac{N-W}{N}$. Thật vậy, nhân chéo (cả hai mẫu dương): $N(N - W - i) \le (N - W)(N - i)$ tương đương $N^2 - NW - Ni \le N^2 - Ni - NW + Wi$, tức $0 \le Wi$, đúng. Vậy tích không vượt quá $(1 - W/N)^R$, và $1 - x \le e^{-x}$ (§4.1) với $x = W/N$ cho $(1 - W/N)^R \le e^{-WR/N}$.
+
+(c) Cần $e^{-WR/N} \le 10^{-3}$, tức $WR \ge N \ln 1000 = 690{,}8$. Với $W = R$, $W \ge \sqrt{690{,}8} \approx 26{,}28$, nên $W = R = 27$; cận cho $e^{-729/100} = e^{-7{,}29} \approx 6{,}8 \times 10^{-4}$ (còn $W = R = 26$ cho $e^{-6{,}76} \approx 1{,}16 \times 10^{-3}$, vượt mục tiêu). Quan sát: tính tích ở (b) bằng chương trình cho xác suất đúng tại $W = R = 27$ là $3{,}9 \times 10^{-5}$, nhỏ hơn cận gần 18 lần, và $W = R = 23$ cho $9{,}78 \times 10^{-4} \le 10^{-3}$ (còn $W = R = 22$ cho $1{,}93 \times 10^{-3}$). Cận (b) là điều kiện *đủ* chứng minh được, không phải điều kiện cần. Chi phí: $W = R = 23$ tốn $23 + 23 = 46$ replica được liên lạc cho một cặp ghi-đọc, so với $51 + 51 = 102$ của quorum đa số: ít hơn khoảng 55%, đổi lại là một xác suất đọc cũ khoảng 0,1% (suy luận của người soạn từ các số trên).
+
+(d) Mỗi giờ có $10^4 \times 3600 = 3{,}6 \times 10^7$ cặp. Gọi $J_k$ là chỉ thị "cặp $k$ đọc cũ"; linearity cho $\mathbb{E}[\sum_k J_k] = 3{,}6 \times 10^7 \times 9{,}78 \times 10^{-4} \approx 35\,200$ lần đọc cũ mỗi giờ, mà không cần các cặp độc lập (kỳ vọng của tổng luôn bằng tổng kỳ vọng[^mcs-lin2]). Xác suất 0,1% mỗi lần đọc là "nhỏ" nhưng nhân với lưu lượng thì ra hàng chục nghìn sự kiện mỗi giờ; dùng $W = R = 27$ thì còn khoảng $3{,}6 \times 10^7 \times 3{,}89 \times 10^{-5} \approx 1400$ mỗi giờ. Khi chọn $\varepsilon$ cho một đảm bảo xác suất, phải tính $\varepsilon \times$ lưu lượng, không chỉ nhìn $\varepsilon$ (nhận xét của người soạn).
+
+</details>
+
+**Bài 9 (Khó). Chặn tải lớn nhất của power of two choices bằng quy nạp từng tầng**
+
+Ném $n = 10^6$ quả bóng lần lượt vào $n$ thùng; mỗi quả chọn hai thùng độc lập, đều, ngẫu nhiên và vào thùng đang ít bóng hơn (hòa thì chọn tùy ý). Gọi $\nu_i$ là số thùng có từ $i$ quả trở lên ở cuối quá trình. Hãy chứng minh rằng với xác suất ít nhất 99,9%, tải lớn nhất không quá 8, và chỉ ra vì sao chuỗi các bước cho cỡ $\ln \ln n$ tầng chứ không phải $\ln n / \ln \ln n$.
+
+Cách làm: gọi *độ cao* của một quả bóng là số bóng trong thùng của nó ngay sau khi nó được đặt (kể cả chính nó).
+
+(a) Chứng minh $\nu_i \le$ số quả bóng có độ cao $\ge i$, và một quả bóng chỉ có độ cao $\ge i + 1$ nếu cả hai thùng nó chọn đã có ít nhất $i$ bóng lúc đó.
+
+(b) *Bổ đề bước.* Giả sử $\nu_i \le b$. Chứng minh số quả có độ cao $\ge i + 1$ bị trội ngẫu nhiên bởi $\mathrm{Bin}(n, (b/n)^2)$. Suy ra $\Pr[\nu_{i+1} > b'] \le \Pr[\nu_i > b] + \Pr[\mathrm{Bin}(n, (b/n)^2) > b']$.
+
+(c) Áp dụng liên tiếp từ $i = 4$ với $b_4 = n/4$, dùng Chernoff cho các bước đầu và Markov cho bước cuối, để chặn $\Pr[\text{tải lớn nhất} \ge 9]$.
+
+<details><summary>Gợi ý</summary>
+
+Một thùng có từ 4 bóng trở lên chứa ít nhất 4 trong $n$ bóng, nên $\nu_4 \le n/4$ chắc chắn. Với (b), gọi $Y_t$ là chỉ thị "quả $t$ có độ cao $\ge i + 1$ *và* $\nu_i(t - 1) \le b$" ($\nu_i(t-1)$ là số thùng có $\ge i$ bóng ngay trước quả $t$). Xác suất có điều kiện của $Y_t$ theo lịch sử không quá $(b/n)^2$. Với (c), mỗi bước lấy $b_{i+1} = 2\mu_i$, trong đó $\mu_i = n (b_i/n)^2$ là kỳ vọng của nhị thức, rồi dùng Chernoff với $c = 2$: $\beta(2) = 2\ln 2 - 1 \approx 0{,}3863$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(lời giải của người soạn; đây là bản đơn giản hóa của lập luận quy nạp từng tầng mà §5.2 chỉ phác bằng trực giác)
+
+(a) Một thùng có tải cuối cùng $\ge i$ chứa đúng một quả có độ cao $i$ (quả đưa tải của thùng từ $i - 1$ lên $i$), nên số thùng đó bằng số quả có độ cao *đúng* $i$, và không vượt quá số quả có độ cao $\ge i$. Quả bóng đi vào thùng ít bóng hơn trong hai thùng nó chọn, nên độ cao của nó bằng $1 + \min(\text{tải hai thùng})$. Vì thế độ cao $\ge i + 1$ khi và chỉ khi cả hai tải $\ge i$[^p2c-height].
+
+(b) Tải của mỗi thùng chỉ tăng theo thời gian, nên $\nu_i(t - 1) \le \nu_i(n) \le b$ với mọi $t$ khi $\nu_i \le b$. Gọi $Y_t$ như trong gợi ý. Khi $\nu_i(t - 1) \le b$, quả $t$ chọn hai thùng độc lập đều, mỗi thùng nằm trong nhóm $\ge i$ bóng với xác suất $\nu_i(t-1)/n \le b/n$, nên $\Pr[Y_t = 1 \mid \text{lịch sử}] \le (b/n)^2 =: q$; khi $\nu_i(t-1) > b$ thì $Y_t = 0$. Một dãy chỉ thị mà xác suất có điều kiện luôn không quá $q$ có tổng bị trội bởi $\mathrm{Bin}(n, q)$: sinh $Y_t$ bằng $\mathbf{1}[U_t \le p_t]$ với $U_t$ độc lập đều trên $[0, 1]$ và $p_t \le q$ là xác suất có điều kiện, thì $Y_t \le \mathbf{1}[U_t \le q]$ và các chỉ thị vế phải độc lập, cùng xác suất $q$. Trên biến cố $\{\nu_i \le b\}$, $Y_t$ trùng chỉ thị "quả $t$ có độ cao $\ge i + 1$" với mọi $t$; kết hợp với (a): $\nu_{i+1} \le \sum_t Y_t \le Z$ với $Z \sim \mathrm{Bin}(n, q)$. Bởi vậy $\{\nu_{i+1} > b'\} \subseteq \{\nu_i > b\} \cup \{Z > b'\}$, và union bound cho bất đẳng thức cần chứng minh.
+
+(c) Chernoff[^mcs-chernoff] cho $\Pr[Z \ge c\mu] \le e^{-\beta(c)\mu}$ với $\mu = \mathbb{E}[Z]$; ta dùng $c = 2$ cho ba bước đầu và một $c$ lớn hơn cho bước thứ tư. Bảng các bước, với $b_4 = n/4 = 250\,000$ chắc chắn đúng:
+
+| Bước | $b_i$ | $\mu_i = n (b_i/n)^2$ | ngưỡng kế $b_{i+1}$ | xác suất hỏng của bước |
+|---|---|---|---|---|
+| $i = 4$ | 250 000 | 62 500 | $125\,000 = 2\mu_4$ | $\le e^{-0{,}3863 \times 62500} = e^{-24143}$ |
+| $i = 5$ | 125 000 | 15 625 | $31\,250 = 2\mu_5$ | $\le e^{-6035}$ |
+| $i = 6$ | 31 250 | 976,6 | $1954 \ge 2\mu_6$ | $\le e^{-377}$ |
+| $i = 7$ | 1954 | 3,818 | 19 | $\Pr[Z \ge 20] \le e^{-\beta(c)\mu_7}$, $c = 20/3{,}818 \approx 5{,}238$, $\beta(c) \approx 4{,}436$, cận $\approx 4{,}4 \times 10^{-8}$ |
+| $i = 8$ | 19 | $3{,}61 \times 10^{-4}$ | $\nu_9 = 0$ | $\Pr[Z \ge 1] \le \mathbb{E}[Z] = 3{,}61 \times 10^{-4}$ (Markov) |
+
+Ba dòng đầu hỏng với xác suất nhỏ đến mức không đáng kể (mũ âm hàng trăm đến hàng chục nghìn). Dòng $i = 7$ dùng $c = 20/\mu_7 \approx 5{,}238$ vì $\mu_7 = 1954^2/10^6 = 3{,}818$; dòng $i = 8$ dùng thẳng bất đẳng thức Markov như ở §4.3, vì ta chỉ cần biết $Z \ge 1$ có xảy ra không. Gộp các bước bằng bổ đề ở (b):
+
+$$\Pr[\nu_9 \ge 1] \le e^{-24143} + e^{-6035} + e^{-377} + 4{,}4 \times 10^{-8} + 3{,}61 \times 10^{-4} \approx 3{,}61 \times 10^{-4}.$$
+
+Vậy với xác suất ít nhất $99{,}96\%$ không thùng nào có từ 9 bóng trở lên, tức tải lớn nhất không quá 8. Quan sát (chương trình nhỏ): với đúng các số này, đuôi nhị thức chính xác $\Pr[\mathrm{Bin}(10^6, 3{,}818 \times 10^{-6}) \ge 20]$ chỉ là $4{,}8 \times 10^{-9}$, nhỏ hơn cận Chernoff khoảng 9 lần. Cận 8 lỏng so với quan sát của §5.3 (tải lớn nhất đúng 4 trong cả 100 lần chạy), nhưng nó vẫn nhỏ hơn cận 16 mà §4.2 chứng minh được cho một lựa chọn, và quan trọng hơn là *hình dạng* của nó.
+
+Hình dạng đó là điều bài muốn chỉ ra. Tỉ lệ $b_i / n$ đi $1/4 \to 1/8 \to 1/32 \to 1/512 \to 1{,}9 \times 10^{-5} \to 0$: mỗi bước *bình phương* tỉ lệ trước rồi nhân với một hằng số nhỏ (2 ở ba bước đầu, cỡ 5 ở bước thứ tư vì lúc đó kỳ vọng $\mu_7$ chỉ còn 3,8 nên Chernoff cần biên an toàn lớn hơn), nên số mũ nhân đôi sau mỗi tầng và chỉ sau vài tầng $b_i$ rơi xuống cỡ 1. Số tầng cần cho tỉ lệ rơi từ hằng số xuống dưới $1/n$ vì thế cỡ $\log_2 \log_2 n$, đúng như kết quả $\ln \ln n / \ln 2 + \Theta(1)$ của §5.1[^p2c-abku]; còn với một lựa chọn, mỗi bước chỉ *chia* tỉ lệ cho $i$ (tỉ lệ cỡ $1/i!$, §4.2), nên cần nhiều tầng hơn hẳn, cỡ $\ln n / \ln \ln n$.
+
+</details>
+
 ## Đọc thêm
 
 - MIT 6.042J, *Mathematics for Computer Science* (Lehman, Leighton, Meyer), các chương 17–20: <https://courses.csail.mit.edu/6.042/spring18/mcs.pdf>. Đọc §17.4 (birthday principle), §20.1–20.2 (Markov, Chebyshev), §20.3.5 (đếm cặp trùng bằng phương sai) và §20.5 (Chernoff, cân bằng tải ngẫu nhiên) để có lời giải thích đầy đủ và bài tập.

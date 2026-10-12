@@ -656,7 +656,7 @@ Vậy cạnh Ti → Tj luôn có L(Ti) < L(Tj). Nếu PG(S) có chu trình T₁ 
 
 Đây lại là một lập luận "hàm tăng dọc theo mọi cạnh thì không có chu trình", đúng như Định lý 6.2. Hai chứng minh chung một cấu trúc: ở mục 6.3 hàm là hạng của lock; ở đây là "điểm khóa" L(T).
 
-*Quan hệ giữa precedence graph và wait-for graph (nhận xét của người soạn).* Tại sao S_xấu không xảy ra dưới 2PL? Để R đọc x sau khi D ghi x, D phải nhả lock trên x trước đó; nhưng D còn truy cập y ở cuối lịch, tức xin lock mới sau khi đã nhả: vi phạm pha shrinking. Dưới 2PL, kịch bản "D và R mỗi bên cầm một lock" của mục 6.2 mới là điều xảy ra: D giữ x, R giữ y, mỗi bên chờ bên kia. Vậy 2PL biến *chu trình trong precedence graph* (kết quả sai đã xảy ra) thành *chu trình trong wait-for graph* (chờ nhau, chưa có gì sai và phát hiện được). Nguồn ghi nhận hai mặt còn lại của 2PL: nó có thể dẫn tới deadlock, và có những lịch tuần tự hóa được mà 2PL không cho phép[^cmu-2pl-deadlock].
+*Quan hệ giữa precedence graph và wait-for graph (nhận xét của người soạn).* Tại sao S_xấu không xảy ra dưới 2PL? Để R đọc x sau khi D ghi x, D phải nhả lock trên x trước đó. Xét lúc D xin lock trên y, vì D còn truy cập y ở cuối lịch. Nếu D xin sau khi đã nhả lock x, D xin lock mới trong pha shrinking: vi phạm 2PL. Nếu D xin trước đó, D giữ lock y cho tới các thao tác cuối, nên R không thể ghi y ở giữa lịch vì lock xung đột. Cả hai nhánh đều loại S_xấu. Dưới 2PL, kịch bản "D và R mỗi bên cầm một lock" của mục 6.2 mới là điều xảy ra: D giữ x, R giữ y, mỗi bên chờ bên kia. Vậy 2PL biến *chu trình trong precedence graph* (kết quả sai đã xảy ra) thành *chu trình trong wait-for graph* (chờ nhau, chưa có gì sai và phát hiện được). Nguồn ghi nhận hai mặt còn lại của 2PL: nó có thể dẫn tới deadlock, và có những lịch tuần tự hóa được mà 2PL không cho phép[^cmu-2pl-deadlock].
 
 ### 7.4 Ngoài đời: kiểm tra lịch sử của database bằng chu trình
 
@@ -808,7 +808,311 @@ Dòng thứ hai là mục 3 bằng code: hai sự kiện nhận `dedupe` ở hai
 8. Tập bị deadlock nhỏ nhất là {A, B, C}: đó là chu trình A → B → C → A (Định lý 6.1). Hủy D không gỡ gì, vì D không nằm trong chu trình; D chỉ là job kẹt theo. Hủy C phá chu trình, vì nhả lock cho B (B từng chờ C); sau đó B chạy tiếp, nhả lock cho A, và D chờ A tiếp tục chạy sau A (suy luận của người soạn từ mô hình M1–M3).
 9. Gán `rank(customers) < rank(orders)`. Cả D lẫn R khóa theo hạng tăng dần, nên theo Định lý 6.2 WFG không có chu trình. Cụ thể kịch bản mục 6.2 cần R giữ `customers` mà chờ `orders` trong khi D giữ `orders` mà chờ `customers`; nhưng D không bao giờ giữ `orders` rồi xin `customers` (hạng giảm), nên không có cạnh D → R.
 10. PG(S) chỉ ràng buộc T1 và T2 đứng trước T3: hai thứ tự nối tiếp, T1, T2, T3 và T2, T1, T3 (mọi topological sort là một thứ tự tương đương theo Định lý 7.1). Thêm T3 → T1 tạo chu trình T1 → T3 → T1, nên lịch không tuần tự hóa được theo xung đột (Định lý 7.1, chiều ⇒).
-11. Để R đọc x sau khi D ghi x, D phải đã nhả lock trên x; nhưng D còn truy cập y ở cuối lịch, tức xin lock mới sau khi nhả, vi phạm pha shrinking của 2PL[^cmu-2pl-phases]. Thay vào đó D giữ x và R giữ y, mỗi bên chờ bên kia: chu trình trong WFG, tức deadlock của mục 6.2. Nguồn ghi nhận đúng cái giá này: 2PL có thể dẫn tới deadlock[^cmu-2pl-deadlock].
+11. Để R đọc x sau khi D ghi x, D phải đã nhả lock trên x. Xét lúc D xin lock trên y. Nếu D xin sau khi đã nhả x thì D xin lock mới trong pha shrinking, vi phạm 2PL[^cmu-2pl-phases]. Nếu D xin trước đó thì D giữ lock y đến cuối lịch, nên R không ghi được y ở giữa lịch vì lock xung đột; cả hai nhánh đều loại S_xấu. Thay vào đó D giữ x và R giữ y, mỗi bên chờ bên kia: chu trình trong WFG, tức deadlock của mục 6.2. Nguồn ghi nhận đúng cái giá này: 2PL có thể dẫn tới deadlock[^cmu-2pl-deadlock].
+
+</details>
+
+## Bài tập
+
+Mười một bài dưới đây dùng đúng công cụ của chương: quan hệ và lớp tương đương (mục 1), thứ tự bộ phận và topological sort (mục 2), vector clock (mục 3), join-semilattice và phép gộp ACI (mục 4), đồ thị và chu trình (mục 5), wait-for graph (mục 6), precedence graph (mục 7). Bài 1–3 là khởi động, bài 4–8 là phần cốt lõi (chủ yếu chứng minh và suy dẫn), bài 9–11 khó hơn. Bài 2, 6, 7, 9 và 10 đặt trên tình huống hệ phân tán; bài 3, 8 và 11 đặt trên pipeline và database. Hãy tự làm trước khi mở lời giải. Mọi lời giải là (lời giải của người soạn); các số đếm ở bài 3, 4, 8, 9 và 11 người soạn còn kiểm lại bằng một chương trình Rust nhỏ vét cạn trên chính các ví dụ đó (quan sát một lần chạy, `rustc 1.95.0`, macOS arm64), không thay cho lập luận.
+
+**Bài 1 (Dễ).** Một cụm có sáu node `n1`, …, `n6`: `n1`, `n2` ở rack A; `n3`, `n4` ở rack B; `n5` ở rack C; `n6` ở rack D. Xét ba quan hệ trên tập sáu node: $R_1$ là "cùng rack"; $R_2$ là "khác rack"; và $a \mathrel{R_3} b$ khi rack của $a$ không đứng sau rack của $b$ theo thứ tự A &lt; B &lt; C &lt; D.
+
+(a) Với mỗi quan hệ, xét bốn tính chất phản xạ, đối xứng, phản đối xứng, bắc cầu; mỗi tính chất sai thì nêu một phản ví dụ cụ thể.
+
+(b) Quan hệ nào là quan hệ tương đương? Liệt kê các lớp của nó, rồi đếm số cặp có thứ tự $(a, b)$ thuộc $R_1$.
+
+(c) Với $R_3$: hai node thỏa cả $a \mathrel{R_3} b$ lẫn $b \mathrel{R_3} a$ có quan hệ gì với nhau? Gộp chúng lại thì được cấu trúc nào?
+
+<details><summary>Lời giải</summary>
+
+(a) $R_1$ phản xạ (rack của $a$ bằng chính nó), đối xứng, và bắc cầu (vì "cùng giá trị cột rack"). Nó không phản đối xứng, vì `n1` $R_1$ `n2` và `n2` $R_1$ `n1` mà hai node khác nhau; phản đối xứng chỉ cho phép tối đa một chiều giữa hai đỉnh khác nhau[^mcs-anti].
+
+$R_2$ không phản xạ (`n1` cùng rack với chính nó). Nó đối xứng. Nó không bắc cầu: `n1` $R_2$ `n3` và `n3` $R_2$ `n2`, nhưng `n1` và `n2` cùng rack A nên `n1` $R_2$ `n2` sai. Nó cũng không phản đối xứng: `n1` $R_2$ `n3` và `n3` $R_2$ `n1`.
+
+$R_3$ phản xạ và bắc cầu (vì "$\le$" trên thứ hạng rack bắc cầu). Nó không đối xứng: `n1` $R_3$ `n3` (A $\le$ B) nhưng `n3` $R_3$ `n1` sai (B $\le$ A sai). Nó không phản đối xứng: `n1` $R_3$ `n2` và `n2` $R_3$ `n1`.
+
+(b) Chỉ $R_1$ là quan hệ tương đương, vì quan hệ tương đương đòi đủ ba tính chất phản xạ, đối xứng, bắc cầu[^mcs-equiv-def]. Các lớp là $\{\texttt{n1}, \texttt{n2}\}$, $\{\texttt{n3}, \texttt{n4}\}$, $\{\texttt{n5}\}$, $\{\texttt{n6}\}$, đúng bốn rack (Định lý 1.1). Mỗi lớp $k$ phần tử đóng góp $k^2$ cặp có thứ tự, vì mỗi phần tử ghép với mọi phần tử cùng lớp, kể cả chính nó. Vậy số cặp là $2^2 + 2^2 + 1 + 1 = 10$. Phép đếm vét cạn trên 36 cặp cho cùng con số 10, và 26 cặp còn lại là $R_2$.
+
+(c) $a \mathrel{R_3} b$ và $b \mathrel{R_3} a$ nghĩa là rack của $a$ $\le$ rack của $b$ $\le$ rack của $a$, tức hai rack bằng nhau: hai node đó $R_1$ nhau. Ngược lại hai node cùng rack thì thỏa cả hai chiều. Vậy $R_3$ là tiền thứ tự (phản xạ và bắc cầu nhưng không phản đối xứng), và gộp các node "tương đương nhau theo cả hai chiều" cho đúng các lớp của $R_1$. Còn lại bốn khối A, B, C, D xếp theo thứ tự toàn phần A &lt; B &lt; C &lt; D: đây là đúng cơ chế "gộp để được thứ tự bộ phận thật sự" mà phần Đi sâu của mục 1 mô tả (suy luận của người soạn).
+
+</details>
+
+**Bài 2 (Dễ).** Ba replica S1, S2, S3 của một kho key-value chạy vết sau (ví dụ giả định); mọi lần "ghi" đều ghi vào cùng một key `k`. Trong mỗi replica, các sự kiện xảy ra theo thứ tự liệt kê.
+
+- S1: A1 ghi `k` (cục bộ), A2 gửi m1 cho S2, A3 ghi `k` (cục bộ), A4 gửi m3 cho S3.
+- S2: B1 ghi `k` (cục bộ), B2 nhận m1, B3 gửi m2 cho S3.
+- S3: C1 ghi `k` (cục bộ), C2 nhận m2, C3 nhận m3.
+
+(a) Tính vector clock của cả mười sự kiện theo thuật toán ở mục 3.3 (thứ tự thành phần là S1, S2, S3).
+
+(b) Với bốn lần ghi A1, A3, B1, C1, xác định từng cặp: cái nào xảy ra trước cái nào, cặp nào đồng thời.
+
+(c) Giả sử mỗi tin mang theo mọi bản ghi mà người gửi đã biết. Khi S3 xử lý C3 thì nó giữ bản ghi nào? Bản nào có thể bỏ vì đã bị bản khác thay thế về mặt nhân quả, và bản nào còn lại là "anh em" (sibling) mà ứng dụng phải giải quyết?
+
+<details><summary>Lời giải</summary>
+
+(a) Áp thuật toán: sự kiện cục bộ hoặc gửi thì tăng ô của chính node; sự kiện nhận thì lấy max từng thành phần rồi tăng ô của chính node[^kl-vc-alg].
+
+| Sự kiện | Cách tính | Vector |
+|---|---|---|
+| A1 | cục bộ | ⟨1, 0, 0⟩ |
+| A2 | gửi | ⟨2, 0, 0⟩ |
+| A3 | cục bộ | ⟨3, 0, 0⟩ |
+| A4 | gửi | ⟨4, 0, 0⟩ |
+| B1 | cục bộ | ⟨0, 1, 0⟩ |
+| B2 | nhận m1: max(⟨0,1,0⟩, ⟨2,0,0⟩) = ⟨2,1,0⟩, rồi tăng ô S2 | ⟨2, 2, 0⟩ |
+| B3 | gửi | ⟨2, 3, 0⟩ |
+| C1 | cục bộ | ⟨0, 0, 1⟩ |
+| C2 | nhận m2: max(⟨0,0,1⟩, ⟨2,3,0⟩) = ⟨2,3,1⟩, rồi tăng ô S3 | ⟨2, 3, 2⟩ |
+| C3 | nhận m3: max(⟨2,3,2⟩, ⟨4,0,0⟩) = ⟨4,3,2⟩, rồi tăng ô S3 | ⟨4, 3, 3⟩ |
+
+(b) Theo Định lý 3.6, với hai sự kiện khác nhau, $a \to b$ khi và chỉ khi $V(a) < V(b)$, và hai sự kiện đồng thời khi và chỉ khi hai vector không so sánh được. Có sáu cặp. $V(\text{A1}) = \langle 1,0,0 \rangle < \langle 3,0,0 \rangle = V(\text{A3})$ nên A1 → A3 (cùng node, đúng như mong đợi). Năm cặp còn lại đều không so sánh được, vì mỗi bên có một thành phần lớn hơn bên kia[^kl-vc-incomp]: A1 và B1 (ô S1: 1 &gt; 0 nhưng ô S2: 0 &lt; 1); A1 và C1; A3 và B1; A3 và C1; B1 và C1. Vậy năm cặp đó đồng thời.
+
+(c) Vector của C3 là ⟨4,3,3⟩, và cả bốn vector ghi ⟨1,0,0⟩, ⟨3,0,0⟩, ⟨0,1,0⟩, ⟨0,0,1⟩ đều $\le$ nó, khác nó, nên theo Định lý 3.6 cả bốn lần ghi đều xảy ra trước C3; vì mỗi tin mang theo bản ghi của người gửi (giả định của đề), S3 giữ đủ bốn bản. A1 có A1 → A3, tức A3 đã "nhìn thấy" A1, nên A1 là bản lỗi thời và bỏ được. Còn lại A3, B1, C1 đôi một đồng thời: không bản nào nhìn thấy bản nào, nên chúng là ba sibling mà ứng dụng phải tự gộp hoặc chọn (nhận xét của người soạn: đây là cách đọc vector clock trong các kho key-value kiểu Dynamo, không có nguồn trong chương). Ghi chú: nếu chỉ dùng timestamp Lamport thì cả ba trông như có thứ tự toàn phần, và ta không biết chúng đồng thời[^kl-linear-ext].
+
+</details>
+
+**Bài 3 (Dễ).** Pipeline xử lý dữ liệu giao dịch có sáu job, với các phụ thuộc trực tiếp (viết theo thứ tự này): `fetch → validate`, `fetch → geocode`, `validate → score`, `geocode → score`, `validate → audit`, `score → export`, `audit → export`.
+
+(a) Chạy thuật toán bóc đỉnh của mục 2.2 với hàng đợi vào-trước-ra-trước (FIFO); với mỗi job được xuất, duyệt các job phụ thuộc nó theo thứ tự cạnh ở trên. Ghi dãy xuất.
+
+(b) Tính độ sâu của từng job, độ dài đường găng (tính theo số job, mỗi job một đơn vị thời gian), và số worker tối thiểu để chạy xong trong thời gian bằng đường găng.
+
+(c) Có bao nhiêu topological sort?
+
+(d) Một người vô tình thêm phụ thuộc `export → validate`. Chạy lại thuật toán: job nào xuất được, tập kẹt là gì, và các chu trình trong đó ra sao?
+
+<details><summary>Lời giải</summary>
+
+(a) `chờ` ban đầu: `fetch` 0, `validate` 1, `geocode` 1, `score` 2, `audit` 1, `export` 2. Hàng đợi ban đầu là [`fetch`]. Xuất `fetch`: `validate` và `geocode` về 0, hàng đợi [`validate`, `geocode`]. Xuất `validate`: `score` giảm còn 1, `audit` về 0, hàng đợi [`geocode`, `audit`]. Xuất `geocode`: `score` về 0, hàng đợi [`audit`, `score`]. Xuất `audit`: `export` còn 1. Xuất `score`: `export` về 0. Xuất `export`. Dãy xuất là `fetch`, `validate`, `geocode`, `audit`, `score`, `export`, đúng một topological sort theo Mệnh đề 2.4(i).
+
+(b) Độ sâu là số job đứng trước trên chuỗi dài nhất kết thúc ở job đó[^mcs-depth]: `fetch` 0; `validate`, `geocode` 1; `score`, `audit` 2; `export` 3. Chuỗi dài nhất có 4 job, ví dụ `fetch`, `validate`, `score`, `export`, nên đường găng là 4. Theo Định lý 2.5, xếp mọi job độ sâu $k$ vào bước $k$ cho lịch 4 bước, và bước đông nhất có 2 job, nên 2 worker đủ. Một worker thì cần 6 bước, nhiều hơn 4, nên 2 là tối thiểu.
+
+(c) `fetch` là nguồn duy nhất và `export` là đích duy nhất (mọi job khác đi tới `export`), nên `fetch` đứng đầu và `export` đứng cuối trong mọi topological sort. Bốn job giữa chịu các ràng buộc `validate` trước `score`, `geocode` trước `score`, `validate` trước `audit`. Job đầu tiên trong bốn job đó phải là `validate` hoặc `geocode` (chỉ hai job này không có ràng buộc đứng trước). Nếu là `validate`, ba job còn lại `geocode`, `score`, `audit` chỉ cần `geocode` trước `score`: 3 cách (`geocode`, `score`, `audit`; `geocode`, `audit`, `score`; `audit`, `geocode`, `score`). Nếu là `geocode`, thì `validate` phải đứng ngay sau (vì `score` và `audit` đều đòi `validate` trước), rồi `score`, `audit` tùy ý: 2 cách. Tổng cộng 5 topological sort.
+
+(d) Khi thêm `export → validate`, `validate` có hai cạnh vào (từ `fetch` và từ `export`), nên `chờ` ban đầu là 2. Chỉ `fetch` vào hàng đợi, và xuất `fetch` đưa `geocode` về 0 nhưng `validate` chỉ giảm còn 1. Xuất `geocode`: `score` còn 1 (vẫn chờ `validate`). Hàng đợi rỗng: chỉ xuất được `fetch` và `geocode`. Tập kẹt là {`validate`, `score`, `audit`, `export`}; mỗi job trong đó còn một cạnh vào từ một job cũng kẹt, nên theo Bổ đề 2.1 có chu trình, và Mệnh đề 2.4(ii) bảo đảm điều đó. Đi ngược từ `export` có hai chu trình: `validate → score → export → validate` và `validate → audit → export → validate`. Cả bốn job trong tập kẹt đi tới nhau được, nên chúng tạo một thành phần liên thông mạnh duy nhất; khác với ví dụ ở mục 2.2, ở đây không có job nào "kẹt theo" ngoài chu trình.
+
+</details>
+
+**Bài 4 (Vừa).** Cho quan hệ $R$ trên tập $A$ thỏa hai điều kiện: (i) $R$ phản xạ; (ii) "vòng": $a \mathrel{R} b$ và $b \mathrel{R} c$ kéo theo $c \mathrel{R} a$. Chứng minh $R$ là quan hệ tương đương. Sau đó cho một phản ví dụ khi bỏ điều kiện (i), và chứng minh chiều ngược lại: mọi quan hệ tương đương đều thỏa (ii).
+
+<details><summary>Gợi ý</summary>
+
+Để chứng minh đối xứng, áp dụng (ii) cho bộ ba $(a, b, b)$ và dùng phản xạ của $b$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+*Đối xứng.* Giả sử $a \mathrel{R} b$. Vì $R$ phản xạ nên $b \mathrel{R} b$. Áp dụng (ii) cho cặp $a \mathrel{R} b$ và $b \mathrel{R} b$ (với $c = b$) được $b \mathrel{R} a$.
+
+*Bắc cầu.* Giả sử $a \mathrel{R} b$ và $b \mathrel{R} c$. Theo (ii), $c \mathrel{R} a$. Theo đối xứng vừa chứng minh, $a \mathrel{R} c$.
+
+Cùng với phản xạ có sẵn, $R$ có đủ ba tính chất của quan hệ tương đương[^mcs-equiv-def]. ∎
+
+*Phản ví dụ khi bỏ (i).* Lấy $A = \{1\}$ và $R = \emptyset$. Điều kiện (ii) đúng một cách rỗng (không có cặp nào để kiểm), nhưng $1 \mathrel{R} 1$ sai nên $R$ không phản xạ, do đó không là quan hệ tương đương. Đây cùng loại lỗi với câu hỏi tự kiểm tra 2: tiên đề phản xạ độc lập, không suy ra được từ hai tiên đề còn lại.
+
+*Chiều ngược.* Cho $\sim$ là quan hệ tương đương, và $a \sim b$, $b \sim c$. Bắc cầu cho $a \sim c$, đối xứng cho $c \sim a$: đúng điều (ii) đòi. Vậy "phản xạ + vòng" và "phản xạ + đối xứng + bắc cầu" là hai cách định nghĩa cùng một lớp quan hệ.
+
+Kiểm tra nhỏ (quan sát): duyệt mọi quan hệ trên 4 phần tử, số quan hệ phản xạ và thỏa (ii) là 15, đúng bằng số quan hệ tương đương (và số phân hoạch) ở $n = 4$ trong kết quả vét cạn của mục 1.
+
+</details>
+
+**Bài 5 (Vừa).** Trong một thanh ghi last-write-wins, mỗi bản ghi mang khóa $(t, i)$, với $t \in \mathbb{N}$ là timestamp và $i \in \{1, 2, 3\}$ là id của replica ghi. Định nghĩa $(t, i) \preceq (t', i')$ khi $t < t'$, hoặc $t = t'$ và $i \le i'$ (thứ tự từ điển).
+
+(a) Chứng minh $\preceq$ là thứ tự toàn phần.
+
+(b) Chứng minh $\preceq$ là một linear extension của thứ tự từng thành phần trên $\mathbb{N} \times \{1,2,3\}$: nếu $t \le t'$ và $i \le i'$ thì $(t, i) \preceq (t', i')$. Chỉ ra rằng chiều ngược lại sai.
+
+(c) Suy ra $(\mathbb{N} \times \{1,2,3\}, \preceq)$ là lattice, và phép "lấy khóa lớn hơn" giao hoán, kết hợp, lũy đẳng. Phép này sửa lỗi hòa timestamp của phản ví dụ thứ hai ở mục 4.4 như thế nào?
+
+<details><summary>Lời giải</summary>
+
+(a) Ba tính chất của thứ tự bộ phận yếu cộng với tính toàn phần.
+
+*Phản xạ:* $t = t$ và $i \le i$ nên $(t, i) \preceq (t, i)$.
+
+*Phản đối xứng:* giả sử $(t, i) \preceq (t', i')$ và $(t', i') \preceq (t, i)$. Theo định nghĩa, chiều đầu cho $t \le t'$ và chiều sau cho $t' \le t$, nên $t = t'$. Khi đó cả hai chiều chỉ có thể đúng nhờ nhánh "$t = t'$ và ...", cho $i \le i'$ và $i' \le i$, tức $i = i'$.
+
+*Bắc cầu:* giả sử $(t, i) \preceq (t', i') \preceq (t'', i'')$. Ta có $t \le t' \le t''$. Nếu $t < t'$ hoặc $t' < t''$ thì $t < t''$ và $(t, i) \preceq (t'', i'')$. Nếu không thì $t = t' = t''$ và $i \le i' \le i''$, nên $i \le i''$ và kết luận vẫn đúng.
+
+*Toàn phần:* cho hai khóa $(t, i)$ và $(t', i')$. Nếu $t \ne t'$ thì một trong hai $t < t'$ hoặc $t' < t$, nên một khóa $\preceq$ khóa kia. Nếu $t = t'$ thì $i \le i'$ hoặc $i' \le i$ vì thứ tự trên số nguyên là toàn phần. Theo định nghĩa, thứ tự bộ phận mà hai phần tử bất kỳ đều so sánh được là thứ tự toàn phần[^mcs-linear]. ∎
+
+(b) Giả sử $t \le t'$ và $i \le i'$. Nếu $t < t'$ thì $(t, i) \preceq (t', i')$ theo nhánh đầu; nếu $t = t'$ thì nhánh sau áp dụng với $i \le i'$. Vậy mọi cặp so sánh được theo từng thành phần vẫn giữ thứ tự, nên $\preceq$ mở rộng thứ tự từng thành phần thành toàn phần; đây đúng là nghĩa của linear extension trong mục 2.4[^kl-linear-ext]. Chiều ngược sai: $(1, 3) \preceq (2, 1)$ vì $1 < 2$, nhưng $3 \le 1$ sai nên hai khóa không so sánh được theo từng thành phần.
+
+(c) Trong thứ tự toàn phần, hai phần tử $x, y$ luôn có một cái lớn hơn hoặc bằng cái kia. Join là phần tử lớn hơn và meet là phần tử nhỏ hơn: chứng minh y hệt mục 4.2(ii), và đối ngẫu của nó cho meet. Mọi cặp có cả join lẫn meet nên đó là lattice[^nat-lattice]. Do join là $\max_\preceq$, Định lý 4.2 cho ngay rằng phép này giao hoán, kết hợp và lũy đẳng.
+
+Phản ví dụ ở mục 4.4 sai vì chỉ so $t$: hai bản ghi cùng $t = 7$ nhưng giá trị khác nhau bị coi là "bằng nhau", và `max` của Rust trả đối số thứ hai khi hòa nên hai replica chọn khác nhau. Với khóa $(t, i)$, hai bản ghi do hai replica khác nhau ghi luôn có $i$ khác nhau, nên khóa khác nhau; hai bản ghi cùng replica có $t$ khác nhau nếu replica đó cấp timestamp tăng nghiêm ngặt (giả định của người soạn). Vậy không còn hòa, và vì $\preceq$ phản đối xứng nên $\max$ của hai khóa khác nhau không phụ thuộc thứ tự đối số. Ví dụ $(7, 1) \prec (7, 2)$, nên mọi replica chọn bản ghi của replica 2, cách phá hòa bằng id node mà bài giảng Cambridge dùng cho timestamp Lamport[^kl-lex-tiebreak].
+
+</details>
+
+**Bài 6 (Vừa).** Trên $(\mathbb{N}^n, \le)$ với thứ tự từng thành phần (mục 3.3):
+
+(a) Chứng minh rằng vector $m$ với $m[i] = \min(x[i], y[i])$ là cận dưới lớn nhất (greatest lower bound, gọi tắt meet) của $\{x, y\}$. Suy ra $(\mathbb{N}^n, \le)$ là lattice.
+
+(b) Ba replica giữ các vector $v_1 = \langle 5, 3, 2 \rangle$, $v_2 = \langle 4, 4, 2 \rangle$, $v_3 = \langle 5, 2, 3 \rangle$, trong đó $v_j[i]$ là số sự kiện đầu tiên của node $i$ mà replica $j$ đã nhận (mỗi replica nhận sự kiện của một node theo đúng thứ tự trong node đó). Tính vector $s$ với $s[i]$ là số lớn nhất sao cho mọi replica đã nhận $s[i]$ sự kiện đầu của node $i$. Chứng minh $s$ là meet của ba vector.
+
+(c) Chứng minh: nếu mọi replica chỉ tiến lên ($v_j \le v_j'$ với mọi $j$) thì $s \le s'$. Điều gì xảy ra với $s$ khi replica 3 chết và vector $v_3$ đứng yên?
+
+<details><summary>Lời giải</summary>
+
+(a) $m[i] \le x[i]$ và $m[i] \le y[i]$ với mọi $i$ nên $m \le x$ và $m \le y$: $m$ là cận dưới. Nếu $w \le x$ và $w \le y$ thì $w[i] \le x[i]$ và $w[i] \le y[i]$ với mọi $i$, nên $w[i] \le \min(x[i], y[i]) = m[i]$, tức $w \le m$. Vậy $m$ lớn nhất trong các cận dưới. Đây là bản đối ngẫu của chứng minh ở mục 4.2(iii). Vì thứ tự này có join (max từng thành phần) lẫn meet, nó là lattice[^nat-lattice]. ∎
+
+(b) Replica $j$ đã nhận sự kiện thứ $k$ của node $i$ khi và chỉ khi $k \le v_j[i]$ (theo cách định nghĩa $v_j$). Mọi replica đều đã nhận khi và chỉ khi $k \le \min_j v_j[i]$. Vậy $s[i] = \min_j v_j[i]$: thành phần 1 là $\min(5, 4, 5) = 4$, thành phần 2 là $\min(3, 4, 2) = 2$, thành phần 3 là $\min(2, 2, 3) = 2$, tức $s = \langle 4, 2, 2 \rangle$. Chứng minh $s$ là meet của $\{v_1, v_2, v_3\}$ giống (a): $s \le v_j$ với mọi $j$, và mọi $w$ thỏa $w \le v_j$ với mọi $j$ có $w[i] \le \min_j v_j[i] = s[i]$.
+
+(c) Với mỗi $i$, $v_j[i] \le v_j'[i]$ với mọi $j$ nên $\min_j v_j[i] \le \min_j v_j'[i]$: $s[i] \le s'[i]$. Vậy $s$ chỉ tăng: thông tin "mọi replica đều đã có" chỉ lớn lên chứ không bao giờ rút lại, nên việc dọn các bản ghi nằm dưới $s$ không phải hoàn tác về sau (nhận xét của người soạn). Nếu replica 3 chết và $v_3 = \langle 5, 2, 3 \rangle$ đứng yên, thì $s[2] \le v_3[2] = 2$ mãi mãi: các sự kiện thứ 3 trở đi của node 2 không bao giờ được coi là "mọi replica đã có", dù hai replica còn lại đã nhận hết. Cái giá của việc dựa vào meet là một replica im lặng chặn cả tiến độ dọn dẹp (suy luận của người soạn).
+
+</details>
+
+**Bài 7 (Vừa).** Một scheduler giữ tập job đã xong trong một "tập có bia mộ" (2P-set). Trạng thái là cặp $(A, R)$ với $A, R \subseteq U$: $A$ là các job đã thêm, $R$ là các job đã xóa (bia mộ). Phép gộp là $(A, R) \sqcup (A', R') = (A \cup A', R \cup R')$, và job $e$ "có mặt" khi $e \in A$ và $e \notin R$.
+
+(a) Chứng minh phép gộp thỏa ACI.
+
+(b) Xác định thứ tự bộ phận mà Định lý 4.1 sinh ra từ phép gộp này.
+
+(c) Ba replica: replica 1 thêm `job1`, thêm `job2`, rồi xóa `job2`; replica 2 thêm `job2`; replica 3 thêm `job3`. Tính trạng thái hội tụ và tập job có mặt.
+
+(d) Tính "có mặt" có đơn điệu theo thứ tự ở (b) không? Nếu một replica thêm lại `job2` sau khi đã gộp, `job2` có mặt không?
+
+<details><summary>Lời giải</summary>
+
+(a) Giao hoán: $(A \cup A', R \cup R') = (A' \cup A, R' \cup R)$ vì $\cup$ giao hoán. Kết hợp: gộp ba trạng thái theo cách nào cũng cho $(A \cup A' \cup A'', R \cup R' \cup R'')$ vì $\cup$ kết hợp. Lũy đẳng: $(A \cup A, R \cup R) = (A, R)$. ∎
+
+(b) Theo Định lý 4.1, $x \le y$ khi $x \sqcup y = y$. Với $x = (A, R)$ và $y = (A', R')$, điều đó là $A \cup A' = A'$ và $R \cup R' = R'$, tức $A \subseteq A'$ và $R \subseteq R'$. Đây là thứ tự từng thành phần của $\mathcal{P}(U) \times \mathcal{P}(U)$ với $\subseteq$, và theo Định lý 4.1, $\sqcup$ là cận trên nhỏ nhất của nó (đúng với ví dụ (iv) của mục 4.2).
+
+(c) Trạng thái cục bộ: replica 1 có $(\{\texttt{job1}, \texttt{job2}\}, \{\texttt{job2}\})$, replica 2 có $(\{\texttt{job2}\}, \emptyset)$, replica 3 có $(\{\texttt{job3}\}, \emptyset)$. Theo Định lý 4.3, gộp theo thứ tự nào, lặp bao nhiêu lần, kết quả cũng là $A = \{\texttt{job1}, \texttt{job2}, \texttt{job3}\}$ và $R = \{\texttt{job2}\}$; đó là điều kiện Convergence của strong eventual consistency[^kl-sec]. Tập job có mặt là $A \setminus R = \{\texttt{job1}, \texttt{job3}\}$.
+
+(d) Không đơn điệu: $(\{e\}, \emptyset) \le (\{e\}, \{e\})$ theo (b), nhưng $e$ có mặt ở trạng thái nhỏ và không có mặt ở trạng thái lớn. Dù vậy trạng thái vẫn hội tụ, vì Định lý 4.3 chỉ cần mọi cập nhật đẩy trạng thái lên; chỉ có phép *đọc* "có mặt" là không đơn điệu, nên hai replica đọc ở hai thời điểm có thể thấy hai đáp án (xem Đi sâu của mục 4.4). Thêm lại `job2` sau khi gộp chỉ đưa `job2` vào $A$, mà $A$ đã chứa nó, trong khi $R$ vẫn chứa `job2`; vậy `job2` không bao giờ có mặt trở lại: "đã xóa là xóa vĩnh viễn". Muốn thêm lại được thì cần một lattice khác, đề tài của [P15 · Chương 04](../15-thuat-toan-phan-tan/04-crdt.md).
+
+</details>
+
+**Bài 8 (Vừa).** Ba transaction trên ba hàng $x$, $y$, $z$ của một database (ví dụ giả định): T1 đọc $x$ rồi đọc $y$; T2 ghi $x$ rồi ghi $z$; T3 đọc $z$ rồi ghi $y$. Hai lịch xen kẽ (ký hiệu $r_i(\cdot)$, $w_i(\cdot)$ như mục 7):
+
+- $S_1 = r_1(x)\; w_2(x)\; w_2(z)\; r_3(z)\; w_3(y)\; r_1(y)$
+- $S_2 = r_1(x)\; w_2(x)\; r_1(y)\; w_2(z)\; r_3(z)\; w_3(y)$
+
+(a) Dựng precedence graph của $S_1$ và $S_2$.
+
+(b) Lịch nào tuần tự hóa được theo xung đột? Nếu có, tìm tất cả thứ tự nối tiếp tương đương.
+
+(c) Lịch nào có thể do two-phase locking sinh ra? Nếu có, viết một dãy xin và nhả lock cụ thể.
+
+<details><summary>Gợi ý</summary>
+
+Chỉ cần xét từng đối tượng: các cặp thao tác xung đột đều nằm trên cùng một đối tượng, và trên mỗi đối tượng ở đây chỉ có hai thao tác.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(a) Hai thao tác xung đột khi thuộc hai transaction khác nhau, cùng đối tượng, và ít nhất một bên là ghi[^cmu-conflict]. Trên $x$ có $r_1(x)$ và $w_2(x)$; trên $y$ có $r_1(y)$ và $w_3(y)$; trên $z$ có $w_2(z)$ và $r_3(z)$. Mỗi đối tượng có đúng một cặp xung đột, và cạnh đi từ thao tác đứng trước sang thao tác đứng sau[^cmu-dg].
+
+Ở $S_1$: $r_1(x)$ đứng trước $w_2(x)$ cho T1 → T2; $w_2(z)$ trước $r_3(z)$ cho T2 → T3; $w_3(y)$ trước $r_1(y)$ cho T3 → T1. Đồ thị là chu trình T1 → T2 → T3 → T1.
+
+Ở $S_2$: $r_1(x)$ trước $w_2(x)$ cho T1 → T2; $w_2(z)$ trước $r_3(z)$ cho T2 → T3; lần này $r_1(y)$ đứng *trước* $w_3(y)$ nên cạnh là T1 → T3. Đồ thị có ba cạnh T1 → T2, T2 → T3, T1 → T3 và không có chu trình.
+
+(b) Theo Định lý 7.1, $S_1$ không tuần tự hóa được vì đồ thị có chu trình, còn $S_2$ tuần tự hóa được. Thứ tự nối tiếp tương đương của $S_2$ là mọi topological sort của đồ thị của nó: T1 không có cạnh vào, T3 không có cạnh ra, và T2 nằm giữa (T1 → T2 → T3), nên chỉ có đúng một thứ tự T1, T2, T3 (đây là đường đi đi qua mọi đỉnh, trường hợp "duy nhất" của bài 11). Lịch nối tiếp đó có cùng thứ tự cho mọi cặp xung đột với $S_2$.
+
+(c) Theo Định lý 7.2, 2PL chỉ sinh lịch có đồ thị không chu trình[^cmu-2pl-suff], nên $S_1$ không thể do 2PL sinh ra. Lập luận trực tiếp: T1 đọc $x$ trước khi T2 ghi $x$, nên T1 đã nhả lock $x$ trước bước 2. Nếu T1 đã xin lock $y$ trước lúc đó, thì T1 giữ nó suốt đến bước 6, và T3 không thể ghi $y$ ở bước 5; nếu T1 xin lock $y$ sau lúc đó thì nó xin thêm lock sau khi đã nhả, vi phạm pha shrinking[^cmu-2pl-phases]. Cả hai nhánh đều loại.
+
+$S_2$ thì được, miễn là T1 xin lock sớm. Dãy cụ thể: T1 xin lock đọc $x$ và lock đọc $y$ (hai lần xin, pha growing); bước 1: $r_1(x)$, rồi T1 nhả $x$ (bắt đầu pha shrinking, không xin thêm); bước 2: T2 xin lock ghi $x$ và thực hiện $w_2(x)$; bước 3: $r_1(y)$, rồi T1 nhả $y$; bước 4: T2 xin lock ghi $z$, thực hiện $w_2(z)$, rồi nhả $x$ và $z$; bước 5: T3 xin lock đọc $z$, thực hiện $r_3(z)$; bước 6: T3 xin lock ghi $y$ (T1 đã nhả ở bước 3) và thực hiện $w_3(y)$. Mỗi transaction xin hết lock trước khi nhả lock đầu tiên, và không lock nào xung đột cùng tồn tại. Bài học (nhận xét của người soạn): 2PL không cấm xen kẽ, nó cấm xin lock *muộn*; và nó phụ thuộc cả vào việc transaction biết trước phải xin lock nào.
+
+</details>
+
+**Bài 9 (Khó).** Bài này đo thời gian hội tụ của gossip trong một mô hình lý tưởng hóa. Cho đồ thị vô hướng liên thông $G = (V, E)$ gồm các replica; mỗi replica $v$ có trạng thái ban đầu $s_v^{(0)}$ trong một join-semilattice. Ở mỗi vòng $r \ge 1$, mọi replica gửi trạng thái cuối vòng trước cho mọi láng giềng, rồi gộp mọi trạng thái nhận được vào trạng thái của mình:
+
+$$s_v^{(r)} = s_v^{(r-1)} \sqcup \bigsqcup_{u \in N(v)} s_u^{(r-1)},$$
+
+với $N(v)$ là tập láng giềng của $v$. Gọi $d(v, w)$ là khoảng cách (số cạnh của đường đi ngắn nhất) và $B_r(v) = \{w : d(v, w) \le r\}$ là "quả cầu" bán kính $r$.
+
+(a) Chứng minh bằng quy nạp theo $r$: $s_v^{(r)}$ bằng cận trên nhỏ nhất của $\{s_w^{(0)} : w \in B_r(v)\}$.
+
+(b) Suy ra sau $D$ vòng, với $D$ là đường kính của $G$ (khoảng cách lớn nhất giữa hai replica), mọi replica có cùng một trạng thái.
+
+(c) Chứng minh rằng không thể đảm bảo hội tụ trong ít hơn $D$ vòng nếu chỉ biết trạng thái ở trong một join-semilattice tổng quát.
+
+(d) Áp dụng cho vòng sáu replica (mỗi replica nối với hai láng giềng) và cho đường thẳng năm replica.
+
+<details><summary>Gợi ý</summary>
+
+Trước hết chứng minh: với hai tập hữu hạn khác rỗng $X, Y$, ký hiệu $J(X)$ là cận trên nhỏ nhất của $X$, ta có $J(X) \sqcup J(Y) = J(X \cup Y)$. Rồi chứng minh $B_r(v) = B_{r-1}(v) \cup \bigcup_{u \in N(v)} B_{r-1}(u)$ khi $r \ge 1$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+*Bổ đề (F).* Với hai tập hữu hạn khác rỗng $X, Y$ trong semilattice: $J(X) \sqcup J(Y) = J(X \cup Y)$. Thật vậy, $J(X) \sqcup J(Y) \ge J(X) \ge x$ với mọi $x \in X$, và tương tự cho $Y$, nên nó là cận trên của $X \cup Y$. Nếu $w$ là cận trên của $X \cup Y$ thì $w \ge J(X)$ và $w \ge J(Y)$, nên $w \ge J(X) \sqcup J(Y)$ theo định nghĩa cận trên nhỏ nhất[^nat-lub]. Vậy nó là cận trên nhỏ nhất của $X \cup Y$. Đây là lập luận của phần "kết hợp" trong Định lý 4.2. Hệ quả: nếu một giá trị xuất hiện trong cả $X$ lẫn $Y$ thì không ảnh hưởng, vì $J$ là của một *tập*.
+
+*Bổ đề (G).* Với $r \ge 1$, $B_r(v) = B_{r-1}(v) \cup \bigcup_{u \in N(v)} B_{r-1}(u)$. ($\supseteq$) Nếu $d(v, w) \le r - 1$ thì $d(v, w) \le r$; nếu $u \in N(v)$ và $d(u, w) \le r - 1$ thì $d(v, w) \le 1 + (r-1) = r$. ($\subseteq$) Nếu $d(v, w) = 0$ thì $w = v \in B_{r-1}(v)$. Nếu $1 \le d(v, w) = k \le r$, lấy một đường đi ngắn nhất $v, u, \dots, w$; $u$ là láng giềng của $v$ và $d(u, w) = k - 1 \le r - 1$, nên $w \in B_{r-1}(u)$.
+
+(a) Quy nạp theo $r$. Với $r = 0$: $B_0(v) = \{v\}$ và $s_v^{(0)} = J(\{s_v^{(0)}\})$. Bước quy nạp ($r \ge 1$): theo giả thiết, $s_v^{(r-1)} = J(S_{r-1}(v))$ và $s_u^{(r-1)} = J(S_{r-1}(u))$, với $S_k(x) = \{s_w^{(0)} : w \in B_k(x)\}$. Áp (F) lặp lại cho các láng giềng (mỗi tập khác rỗng vì chứa $s_u^{(0)}$ của chính $u$):
+
+$$s_v^{(r)} = J\Big(S_{r-1}(v) \cup \bigcup_{u \in N(v)} S_{r-1}(u)\Big) = J(S_r(v)),$$
+
+đẳng thức cuối theo (G). ∎
+
+(b) $G$ liên thông nên $D$ hữu hạn, và $B_D(v) = V$ với mọi $v$. Theo (a), $s_v^{(D)} = J(\{s_w^{(0)} : w \in V\})$ cho mọi $v$: một trạng thái chung. Từ $r = D$ trở đi trạng thái không đổi nữa, vì gộp thêm các trạng thái đã nằm dưới cận trên đó không làm nó lớn lên (lũy đẳng). Hai bảo đảm của mô hình đúng là hai vế của strong eventual consistency: mạng giao mọi tin (Eventual delivery[^kl-sec-eventual]) và phép gộp ACI (Convergence). Phép gộp trong mỗi vòng cũng không phụ thuộc thứ tự nhận hay tin bị lặp, nhờ Định lý 4.3.
+
+(c) Lấy semilattice $(\mathcal{P}(V), \subseteq)$ với $\sqcup = \cup$ và $s_w^{(0)} = \{w\}$. Theo (a), $s_v^{(r)} = B_r(v)$. Mỗi $w$ thuộc $B_r(w)$, nên hợp của mọi quả cầu là $V$; nếu mọi quả cầu bằng nhau thì mỗi quả cầu bằng $V$, tức $B_r(v) = V$ với mọi $v$, tức $r \ge d(v, w)$ với mọi $v, w$, tức $r \ge D$. Vậy với trạng thái ban đầu này, các replica chỉ bằng nhau từ vòng $D$.
+
+(d) Vòng sáu replica (đánh số 0..5, $v$ nối với $v \pm 1 \bmod 6$): $D = 3$ (hai node đối diện cách nhau 3 cạnh). Sau 2 vòng, replica 0 mới biết trạng thái ban đầu của $\{4, 5, 0, 1, 2\}$, còn thiếu replica 3. Phải đủ 3 vòng. Đường thẳng năm replica $0 - 1 - 2 - 3 - 4$: $D = 4$; sau 3 vòng replica 0 biết $\{0, 1, 2, 3\}$ và thiếu replica 4, replica 4 thiếu replica 0; cần 4 vòng. Quy luật: đồ thị càng "tròn" (đường kính nhỏ) thì hội tụ càng nhanh; đồ thị đầy đủ có $D = 1$. Lưu ý (nhận xét của người soạn): gossip thật chọn đối tác ngẫu nhiên và bất đồng bộ, nên mô hình này chỉ cho cận dưới theo cấu trúc đồ thị, không phải thời gian thật.
+
+</details>
+
+**Bài 10 (Khó).** Một database chia làm ba node N1, N2, N3, mỗi node có lock manager riêng và chỉ biết các lock của mình. Dùng mô hình M1–M3 của mục 6.1. Tại một thời điểm, N1 thấy T1 chờ một lock do T2 giữ; N2 thấy T2 chờ một lock do T3 giữ; N3 thấy T3 chờ một lock do T1 giữ.
+
+(a) Dựng wait-for graph (WFG) cục bộ của từng node và WFG toàn cục. Chứng minh không node nào tự phát hiện được deadlock nhưng $\{T1, T2, T3\}$ bị deadlock.
+
+(b) Một coordinator thu báo cáo cạnh từ các node rồi lấy hợp. Chứng minh rằng "hợp" là phép join trong một lattice thích hợp, và nói điều đó cho ta bảo đảm gì về việc dồn các báo cáo.
+
+(c) Cho một kịch bản mà coordinator thấy chu trình T1 → T2 → T3 → T1 trong hợp các báo cáo, nhưng chưa từng có deadlock ("deadlock ma", phantom deadlock).
+
+(d) Thêm giả định: mỗi yêu cầu chờ có định danh duy nhất, không bao giờ được tạo lại, đang chờ trong một khoảng thời gian liền mạch, và trong khoảng đó job đang chặn nó (holder) không đổi. Đề xuất một bước kiểm lại và chứng minh rằng nếu mọi cạnh của chu trình được xác nhận thì deadlock là thật.
+
+<details><summary>Gợi ý</summary>
+
+Ở (d), nếu một yêu cầu đang chờ ở hai thời điểm $t < s$ thì nó đang chờ ở mọi thời điểm giữa hai lúc đó. Hãy chọn một thời điểm $T$ nằm giữa mọi cặp $(t_i, s_i)$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(a) WFG cục bộ của N1 chỉ có một cạnh T1 → T2; của N2 chỉ có T2 → T3; của N3 chỉ có T3 → T1. Mỗi đồ thị một cạnh, không có tự vòng, nên không có chu trình. Deadlock xảy ra khi và chỉ khi WFG có chu trình[^pgr-iff], nên không node nào tự phát hiện được. WFG toàn cục có đủ ba cạnh, tạo chu trình T1 → T2 → T3 → T1. Theo Định lý 6.1 (chiều ⇒), $\{T1, T2, T3\}$ bị deadlock và không job nào trong đó chạy tiếp nếu không có can thiệp từ ngoài. Nhận xét: một chu trình mà *không* nằm trọn trong cạnh của một node thì không node nào thấy đủ, và đó chính là chỗ đề tài phân tán ở [P15 · Chương 09](../15-thuat-toan-phan-tan/09-giao-dich-phan-tan.md) bắt đầu.
+
+(b) Tập các cạnh có thể có, tức $\mathcal{P}(V \times V)$ với $\subseteq$, là một join-semilattice mà join là $\cup$ (mục 4.2(i)). Gộp báo cáo cạnh bằng $\cup$ thỏa ACI, nên theo Định lý 4.3 đồ thị coordinator dựng được chỉ phụ thuộc *tập* các báo cáo đã nhận, không phụ thuộc thứ tự đến hay báo cáo bị lặp. Điều đó cho ta bảo đảm hội tụ của coordinator, và chỉ có thế: nó không nói rằng đồ thị đó phản ánh một thời điểm có thật.
+
+(c) Mỗi cạnh có thời gian sống. Giả sử: lúc 0, yêu cầu $r_1$ (T1 chờ T2 ở N1) và $r_3$ (T3 chờ T1 ở N3) bắt đầu; lúc 1, N1 và N3 báo hai cạnh đó cho coordinator; lúc 2, client hủy T1 (hết thời gian chờ), T1 nhả mọi thứ nên $r_1$ kết thúc và $r_3$ cũng kết thúc (T3 được cấp lock); lúc 5, T2 xin một lock mà T3 đang giữ ở N2, tạo yêu cầu mới $r_2$ (T2 chờ T3); lúc 6, N2 báo $r_2$. Hợp các báo cáo là $\{\text{T1} \to \text{T2}, \text{T3} \to \text{T1}, \text{T2} \to \text{T3}\}$, có chu trình. Nhưng $r_1$ và $r_3$ sống trong $[0, 2)$ còn $r_2$ sống từ 5 trở đi, nên ba cạnh chưa bao giờ cùng tồn tại; thậm chí T1 đã bị hủy. Nếu coordinator chọn một nạn nhân trong chu trình, nó hủy một transaction vô cớ.
+
+(d) *Bước kiểm lại.* Sau khi nhận đủ báo cáo của mọi cạnh của chu trình, coordinator hỏi từng node: "yêu cầu $r_i$ còn đang chờ không?" Chỉ khi tất cả đều trả lời có thì mới chọn nạn nhân.
+
+*Chứng minh.* Chu trình có $k$ cạnh, tương ứng $k$ yêu cầu $r_1, \dots, r_k$. Node đã thấy $r_i$ đang chờ ở thời điểm thực $t_i$ (lúc nó gửi báo cáo). Coordinator chỉ gửi các câu hỏi sau khi đã nhận mọi báo cáo, nên câu trả lời "còn chờ" cho $r_i$ được đánh giá ở thời điểm $s_i$ với $s_i > t_j$ mọi $j$. Đặt $T = \max_j t_j$; khi đó $t_i \le T < s_i$ với mọi $i$. Vì $r_i$ đang chờ lúc $t_i$ và lúc $s_i$, và khoảng chờ của nó liền mạch và không bao giờ lặp lại, $r_i$ đang chờ ở *mọi* thời điểm trong $[t_i, s_i]$, trong đó có $T$. Vậy ở thời điểm $T$ cả $k$ yêu cầu cùng đang chờ, và vì holder của từng yêu cầu không đổi, WFG thật ở thời điểm $T$ chứa đủ $k$ cạnh của chu trình. Theo Định lý 6.1, đó là một tập bị deadlock thật, và nó vẫn bị deadlock về sau nếu không ai can thiệp. ∎
+
+Ở kịch bản (c), câu hỏi về $r_1$ trả lời "không" (nó đã kết thúc lúc 2), nên coordinator bỏ chu trình. Ngược lại, deadlock thật thì không bao giờ bị bỏ sót: theo Định lý 6.1 các yêu cầu của nó đứng yên vĩnh viễn, nên vòng thu thập kế tiếp thấy đủ cạnh và các câu hỏi đều trả lời có (suy luận của người soạn). Nhận xét: chứng minh dùng thời gian vật lý chỉ để *chứng minh*, như ở Mệnh đề 3.1; giao thức chỉ cần coordinator gửi câu hỏi sau khi đã nhận đủ báo cáo, không cần đồng hồ đồng bộ.
+
+</details>
+
+**Bài 11 (Khó).** Một DAG hữu hạn có đúng một topological sort khi nào? Chứng minh: một DAG $G$ có $n$ đỉnh có đúng một topological sort khi và chỉ khi có một topological sort $v_1, \dots, v_n$ sao cho $v_i \to v_{i+1}$ là một cạnh của $G$ với mọi $i < n$. Rồi:
+
+(a) Áp vào đồ thị phụ thuộc của `jobq` ở mục 2: topological sort có duy nhất không? Đếm số topological sort.
+
+(b) Phát biểu và chứng minh điều kiện tương đương theo thuật toán bóc đỉnh: thứ tự duy nhất khi và chỉ khi hàng đợi $Q$ có đúng một phần tử ở mọi bước.
+
+<details><summary>Gợi ý</summary>
+
+Chiều "duy nhất ⇒ có đường đi qua mọi đỉnh": phản chứng; nếu thiếu một cạnh giữa hai đỉnh liền nhau của một topological sort, thử hoán đổi hai đỉnh đó. Nhớ rằng một danh sách là topological sort khi và chỉ khi mọi cạnh trực tiếp đều đi tiến (ghi chú sau Định lý 2.3).
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+(⇐) Cho $v_1, \dots, v_n$ là topological sort với mọi cạnh $v_i \to v_{i+1}$. Lấy $L$ là một topological sort bất kỳ. Với $i < j$, có đường đi $v_i \to v_{i+1} \to \dots \to v_j$, nên $v_j$ đi tới được từ $v_i$ và, theo định nghĩa, $v_i$ đứng trước $v_j$ trong $L$[^mcs-toposort-def]. Vậy $L$ xếp mọi cặp $(v_i, v_j)$ theo đúng thứ tự $v_1, \dots, v_n$, nên $L = (v_1, \dots, v_n)$: chỉ có một.
+
+(⇒) Giả sử chỉ có một topological sort, và gọi nó là $L = (v_1, \dots, v_n)$ (tồn tại nhờ Định lý 2.3). Phản chứng: giả sử với một chỉ số $i$, $v_i \to v_{i+1}$ không là cạnh. Gọi $L'$ là danh sách thu được bằng cách hoán đổi hai đỉnh liền nhau $v_i$ và $v_{i+1}$. Hoán đổi hai phần tử liền nhau chỉ làm đổi thứ tự tương đối của đúng cặp đó, nên mọi cạnh $x \to y$ với $\{x, y\} \ne \{v_i, v_{i+1}\}$ vẫn có $x$ trước $y$. Với cặp $\{v_i, v_{i+1}\}$: không thể có cạnh $v_{i+1} \to v_i$ (vì $L$ đặt $v_i$ trước), và theo giả sử cũng không có cạnh $v_i \to v_{i+1}$. Vậy mọi cạnh của $G$ đi tiến trong $L'$, tức $L'$ là topological sort (cùng ghi chú nói trên về đồ thị phụ thuộc trực tiếp), mà $L' \ne L$: mâu thuẫn với tính duy nhất. ∎
+
+(a) Một topological sort của `jobq` là `extract`, `dedupe`, `enrich`, `index`, `aggregate`, `report`, `warm_cache`, `notify` (mục 2.2), và `dedupe` đứng kề `enrich` mà không có cạnh `dedupe → enrich`; theo định lý, topological sort không duy nhất. Để đếm: `extract` đứng đầu (nguồn duy nhất) và `notify` đứng cuối (đích duy nhất). Xét sáu job giữa. Nếu `index` đứng trước `aggregate`: `dedupe`, `enrich`, `index` đứng trước `aggregate` với `dedupe` trước `index`, nên 3 cách xếp (`dedupe`, `enrich`, `index`; `dedupe`, `index`, `enrich`; `enrich`, `dedupe`, `index`), rồi `aggregate`, rồi `report`, `warm_cache` tùy ý (`index` đã xong) nên nhân 2: 6 cách. Nếu `index` đứng sau `aggregate`: `dedupe`, `enrich` tùy ý (2 cách), rồi `aggregate`, rồi `index`, `report`, `warm_cache` với `index` trước `warm_cache` (3 cách: `index`, `report`, `warm_cache`; `index`, `warm_cache`, `report`; `report`, `index`, `warm_cache`): 6 cách. Tổng cộng $6 + 6 = 12$ topological sort, trùng với phép đếm vét cạn của chương trình Rust.
+
+(b) Thuật toán đúng với *mọi* cách chọn phần tử lấy ra khỏi $Q$: Mệnh đề 2.4(i) và (ii) không dùng đến thứ tự FIFO. (⇐) Giả sử mọi bước $|Q| = 1$ và $L$ là một topological sort bất kỳ. Phần tử đầu của $L$ không có cạnh vào (nếu có, đỉnh đứng trước nó phải đứng trước trong $L$), tức là một nguồn, và nguồn duy nhất là phần tử trong $Q$ ở bước đầu. Quy nạp: nếu $k$ phần tử đầu của $L$ trùng với $k$ phần tử đầu thuật toán xuất, thì phần tử thứ $k + 1$ của $L$ có mọi phụ thuộc trực tiếp trong $k$ phần tử đó, nên `chờ` của nó bằng 0 và nó đang nằm trong $Q$ ở bước $k + 1$; $Q$ chỉ có một phần tử nên nó trùng phần tử thuật toán xuất. Vậy $L$ là dãy thuật toán xuất. (⇒) Nếu ở một bước nào đó $|Q| \ge 2$, với $u \ne w$ cùng trong $Q$, thì hai lần chạy cùng giống nhau đến bước đó, rồi một lần lấy $u$ và lần kia lấy $w$; cả hai đều chạy hết (đồ thị là DAG, Mệnh đề 2.4(ii)) và cho hai dãy xuất khác nhau, đều là topological sort theo Mệnh đề 2.4(i). Với `jobq`: sau khi xuất `extract`, $Q = $ {`dedupe`, `enrich`} có hai phần tử, khớp với kết luận ở (a).
 
 </details>
 

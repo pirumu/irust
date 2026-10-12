@@ -671,6 +671,313 @@ Criterion tự cài đặt thống kê bên trong crate thay vì dùng thư vi�
 
 </details>
 
+## Bài tập
+
+Các bài dưới đây bắt bạn tự tính, tự chứng minh hoặc tự thiết kế bằng đúng công cụ của chương. Số liệu trong đề là số liệu giả định do người soạn đặt ra (không phải đo máy thật); đáp số trong lời giải đã được tính lại bằng một chương trình Rust nhỏ (`rustc 1.95.0`, macOS arm64, không đưa vào chương). Percentile dùng nearest-rank như ở mục 3.1; các giá trị $t$ là giá trị tra bảng của người soạn, như ở mục 4.1.
+
+**Bài 1 (Dễ).** Một benchmark vi mô của `orders` ghi được 10 thời gian một lần lặp (ms): 12, 15, 11, 14, 13, 90, 12, 16, 13, 14. Lần 90 ms là lần scheduler đẩy thread ra khỏi CPU giữa chừng.
+
+(a) Tính trung bình, độ lệch chuẩn mẫu $s$ và hệ số biến thiên CoV.
+(b) Tính trung vị và MAD, cả khi chưa nhân lẫn khi đã nhân hằng số 1,4826 mà Criterion dùng.
+(c) Tính p50, p90, p95 theo nearest-rank. Vì sao p50 không trùng trung vị?
+(d) Bỏ mẫu 90 ms ra thì trung bình và trung vị đổi bao nhiêu phần trăm? Bỏ mẫu đó khỏi báo cáo có đúng không?
+
+<details><summary>Gợi ý</summary>
+
+Sắp xếp mẫu tăng dần trước. MAD là trung vị của các giá trị tuyệt đối $|x_i-\text{trung vị}|$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* Mẫu đã sắp xếp: 11, 12, 12, 13, 13, 14, 14, 15, 16, 90.
+
+(a) Tổng bằng $11+12+12+13+13+14+14+15+16+90=210$, nên $\bar x=21$ ms. Các độ lệch $x_i-21$ lần lượt là $-10,-9,-9,-8,-8,-7,-7,-6,-5,+69$; bình phương cộng lại được $100+81+81+64+64+49+49+36+25+4761=5310$. Vậy $s^2=5310/9=590$, $s\approx24{,}29$ ms và $\mathrm{CoV}=24{,}29/21\approx1{,}157$. Độ lệch chuẩn lớn hơn cả trung bình: dấu hiệu rõ nhất của một outlier cực đoan.
+
+(b) $n=10$ chẵn nên trung vị là trung bình của phần tử thứ 5 và thứ 6: $(13+14)/2=13{,}5$ ms. Các $|x_i-13{,}5|$ sắp tăng dần là 0,5; 0,5; 0,5; 0,5; 1,5; 1,5; 1,5; 2,5; 2,5; 76,5, và trung vị của chúng là $(1{,}5+1{,}5)/2=1{,}5$ ms. Đó là MAD thô. Nhân 1,4826 được $2{,}22$ ms[^crit-mad]: ước lượng "độ lệch chuẩn nếu dữ liệu xấp xỉ chuẩn" mà không bị mẫu 90 ms kéo lệch, so với $s=24{,}29$ ms.
+
+(c) Với $n=10$: p50 có $k=\lceil0{,}5\times10\rceil=5$ nên bằng $x_{(5)}=13$; p90 có $k=9$ nên bằng $x_{(9)}=16$; p95 có $k=\lceil9{,}5\rceil=10$ nên bằng $x_{(10)}=90$. Nearest-rank luôn trả về một phần tử có thật của mẫu, còn trung vị của mẫu chẵn là trung điểm hai phần tử giữa, nên p50 $=13$ khác trung vị $13{,}5$. Lưu ý p95 chính là giá trị lớn nhất: với 10 mẫu, các percentile cao không mang thêm thông tin gì ngoài "mẫu chậm nhất" (cùng lý do với Đi sâu của mục 3).
+
+(d) Còn 9 mẫu: 11, 12, 12, 13, 13, 14, 14, 15, 16, tổng 120. Trung bình $=120/9\approx13{,}33$ ms, giảm $36{,}5\%$ so với 21; trung vị là phần tử thứ 5, bằng 13 ms, giảm $3{,}7\%$ so với 13,5. Một mẫu trong 10 đã kéo trung bình lên gần 58%, còn trung vị gần như đứng yên: đây là điều mục 3.1 nói về độ bền với outlier. Dù vậy, không nên lặng lẽ bỏ mẫu đó. Theo luật Tukey (với nearest-rank: $Q_1=x_{(3)}=12$, $Q_3=x_{(8)}=15$, $\mathrm{IQR}=3$) hàng rào ngoài của outlier nặng là $15+3\times3=24$, nên 90 ms là outlier nặng[^crit-tukey]; Criterion cảnh báo nhưng vẫn giữ nó trong phân tích[^crit-nodrop]. Cách báo cáo đúng là đưa cả trung bình lẫn trung vị, ghi rõ có một outlier nặng, và tìm xem 90 ms đến từ đâu.
+
+</details>
+
+**Bài 2 (Dễ).** Dùng công thức số lần lặp của mục 2.2.
+
+(a) Pilot cho CoV $=0{,}15$ (15%). Cần bao nhiêu lần lặp để nửa độ rộng khoảng tin cậy 95% không vượt quá 3% trung bình ($z=1{,}96$)?
+(b) Nếu muốn 1,5% thì sao? Có gấp bốn lần câu (a) không?
+(c) Ở mục 4, mẫu $n=30$ của serializer A có $s=11{,}58$ µs. Cần bao nhiêu lần lặp để khoảng tin cậy 95% của trung bình A có **độ rộng toàn phần** không quá 2 µs?
+(d) Nếu muốn độ rộng toàn phần 1 µs?
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* Từ $h=z\sigma/\sqrt n$ (mục 2.2) suy ra $n\ge(z\sigma/h)^2$; với sai số tương đối thì $\sigma/h=\mathrm{CoV}/r$.
+
+(a) $n\ge(1{,}96\times0{,}15/0{,}03)^2=9{,}8^2=96{,}04$, vậy cần ít nhất **97** lần lặp.
+
+(b) $n\ge(1{,}96\times0{,}15/0{,}015)^2=19{,}6^2=384{,}16$, vậy **385** lần lặp. Con số chính xác là $4\times96{,}04=384{,}16$: giảm $r$ một nửa thì $n$ tăng đúng gấp bốn (làm tròn lên mới ra 97 và 385).
+
+(c) Độ rộng toàn phần 2 µs nghĩa là nửa độ rộng $h=1$ µs, nên $n\ge(1{,}96\times11{,}58/1)^2=22{,}70^2\approx515{,}1$, tức **516** lần lặp. Công thức này dùng độ lệch chuẩn của pilot như thể nó là $\sigma$ thật; vì $n$ ở đây lớn, $t$ xấp xỉ $z$ (mục 4.1) nên sai khác chỉ vài lần lặp.
+
+(d) Độ rộng toàn phần 1 µs nghĩa là $h=0{,}5$: $n\ge(1{,}96\times11{,}58/0{,}5)^2=45{,}39^2\approx2060{,}6$, tức **2.061** lần lặp, đúng gấp bốn câu (c). Chi phí tăng theo bình phương độ chính xác muốn có.
+
+</details>
+
+**Bài 3 (Dễ).** Một lần chạy 8 process cho 8 thời gian trung bình (µs) của serializer A: 98, 104, 101, 97, 110, 100, 103, 99.
+
+(a) Tính khoảng tin cậy 95% của trung bình bằng phân phối t, biết $t_{0{,}975;7}=2{,}365$.
+(b) Nếu dùng nhầm $z=1{,}96$ thì khoảng hẹp đi bao nhiêu phần trăm?
+(c) Đội nghi serializer A "mất 100 µs mỗi đơn". Dữ liệu có bác bỏ giả thuyết đó ở mức 95% không?
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* (a) Tổng bằng 812 nên $\bar x=812/8=101{,}5$ µs. Các độ lệch $x_i-101{,}5$ là $-3{,}5;\ 2{,}5;\ -0{,}5;\ -4{,}5;\ 8{,}5;\ -1{,}5;\ 1{,}5;\ -2{,}5$, bình phương cộng lại $12{,}25+6{,}25+0{,}25+20{,}25+72{,}25+2{,}25+2{,}25+6{,}25=122$. Vậy $s^2=122/7\approx17{,}43$, $s\approx4{,}175$ và sai số chuẩn $s/\sqrt8=4{,}175/2{,}828\approx1{,}476$. Nửa độ rộng $h=2{,}365\times1{,}476\approx3{,}49$, nên khoảng 95% là $[98{,}01;\ 104{,}99]$ µs, tức $\pm3{,}4\%$ trung bình[^g-t].
+
+(b) Với $z=1{,}96$ thì $h=1{,}96\times1{,}476\approx2{,}89$, hẹp hơn $1-2{,}89/3{,}49\approx17\%$ (đúng bằng $1-1{,}96/2{,}365$). Khoảng chuẩn hẹp hơn mức cần vì nó bỏ qua việc $s$ cũng chỉ là ước lượng từ 8 mẫu; $n$ càng nhỏ thì sai lệch càng lớn, và khi $n$ tăng thì $t$ tiến về $z$[^g-t2].
+
+(c) Giá trị 100 nằm trong $[98{,}01;\ 104{,}99]$, nên dữ liệu **không** bác bỏ được giả thuyết trung bình bằng 100 µs ở mức 95%. Điều đó khác với việc chứng minh A "đúng bằng 100": khoảng này vẫn chứa mọi giá trị từ 98,01 đến 104,99.
+
+</details>
+
+**Bài 4 (Vừa).** Dashboard của `orders` vẽ "p99 của dịch vụ" bằng cách lấy trung bình p99 của từng pod. Ta muốn biết cách đó sai thế nào, và có cách nào cứu được không nếu chỉ còn p99 của từng pod. Dùng nearest-rank, $k=\lceil qn\rceil$.
+
+(a) Chứng minh rằng với hai tập mẫu bất kỳ, p99 của tập gộp luôn nằm trong đoạn $[\min(v_1,v_2),\ \max(v_1,v_2)]$, trong đó $v_i$ là p99 của tập thứ $i$.
+(b) Chứng minh rằng bên trong đoạn đó, p99 gộp **không** là hàm của $(v_1,v_2,n_1,n_2)$: dựng hai cặp tập mẫu có cùng bốn đại lượng này nhưng p99 gộp khác nhau.
+(c) Kết luận gì về cách dashboard làm, và nên lưu gì thay vào?
+
+<details><summary>Gợi ý</summary>
+
+Với một tập cỡ $n$ có $k=\lceil qn\rceil$ và $v=x_{(k)}$: có nhiều nhất $n-k$ phần tử lớn hơn $v$ và nhiều nhất $k-1$ phần tử nhỏ hơn $v$. Ngoài ra $qn\le k\lt qn+1$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* (a) Hai nhận xét trong gợi ý đúng vì các phần tử lớn hơn $v=x_{(k)}$ chỉ có thể nằm ở vị trí $k+1,\dots,n$ và các phần tử nhỏ hơn chỉ nằm ở vị trí $1,\dots,k-1$. Gọi $k_i=\lceil qn_i\rceil$, tập gộp có $n=n_1+n_2$ phần tử và $k=\lceil qn\rceil$.
+
+*Cận trên.* Đặt $M=\max(v_1,v_2)$. Số phần tử lớn hơn $M$ trong tập thứ $i$ không vượt quá số phần tử lớn hơn $v_i$, tức nhiều nhất $n_i-k_i$. Vậy trong tập gộp có nhiều nhất $n-(k_1+k_2)$ phần tử lớn hơn $M$. Vì $k_i\ge qn_i$ nên $k_1+k_2\ge qn$, và là số nguyên nên $k_1+k_2\ge\lceil qn\rceil=k$. Do đó có nhiều nhất $n-k$ phần tử lớn hơn $M$. Nếu $x_{(k)}\gt M$ thì cả $n-k+1$ phần tử $x_{(k)},\dots,x_{(n)}$ đều lớn hơn $M$, mâu thuẫn. Vậy $x_{(k)}\le M$.
+
+*Cận dưới.* Đặt $m=\min(v_1,v_2)$. Số phần tử nhỏ hơn $m$ trong tập thứ $i$ nhiều nhất $k_i-1$, nên trong tập gộp nhiều nhất $k_1+k_2-2$. Vì $k_i\lt qn_i+1$ nên $k_1+k_2\lt qn+2\le k+2$, và là số nguyên nên $k_1+k_2\le k+1$. Do đó có nhiều nhất $k-1$ phần tử nhỏ hơn $m$. Nếu $x_{(k)}\lt m$ thì cả $k$ phần tử $x_{(1)},\dots,x_{(k)}$ đều nhỏ hơn $m$, mâu thuẫn. Vậy $x_{(k)}\ge m$. ∎
+
+(b) Lấy $q=0{,}99$, $n_1=n_2=1000$, nên $k_1=k_2=990$ và $k=1980$. Pod 2 gồm 989 request 10 ms và 11 request 500 ms: 11 request chậm chiếm vị trí 990 đến 1000, nên $v_2=x_{(990)}=500$. Pod 1 có hai phương án:
+
+- Pod 1a gồm 990 request 10 ms và 10 request 500 ms. 10 request chậm chiếm vị trí 991 đến 1000, nên $v_1=x_{(990)}=10$. Tập gộp 1a+2 có 21 request chậm ở vị trí 1980 đến 2000, nên p99 gộp $=x_{(1980)}=500$.
+- Pod 1b gồm 1000 request đều 10 ms, cũng có $v_1=10$. Tập gộp 1b+2 chỉ có 11 request chậm ở vị trí 1990 đến 2000, nên p99 gộp $=x_{(1980)}=10$.
+
+Cả hai trường hợp có cùng $(v_1,v_2,n_1,n_2)=(10,500,1000,1000)$ nhưng p99 gộp là 500 và 10. Cho nên mọi công thức tính p99 gộp từ bốn đại lượng đó (trung bình, trung bình có trọng số, hay gì khác) đều sai ở ít nhất một trong hai trường hợp: trung bình hai p99 là 255 ms, lệch 245 ms ở cả hai.
+
+(c) Đoạn $[\min,\max]$ ở câu (a) chỉ là cận, còn vị trí thật trong đoạn phụ thuộc vào *phân phối* mà p99 từng pod đã vứt đi, đúng như tài liệu Prometheus nói: quantile không aggregate được[^prom-agg]. Cách đúng là mỗi pod giữ một histogram rồi gộp trước khi truy vấn quantile; với `hdrhistogram` đó là `Histogram::add`[^hdr-add].
+
+</details>
+
+**Bài 5 (Vừa).** Hai serializer, mỗi cái đo $n=50$ lần. A: trung bình 120 µs, $s=14$ µs. B: trung bình 114 µs, $s=12$ µs. Để tính gọn, dùng $t=2{,}0$ cho mọi khoảng.
+
+(a) Dựng khoảng tin cậy 95% của từng trung bình. Chúng có chồng nhau không?
+(b) Dựng khoảng tin cậy 95% của hiệu $\bar x_A-\bar x_B$. Nó có chứa 0 không?
+(c) Hiệu quan sát $d$ phải nằm trong khoảng nào thì xảy ra đúng cái bẫy "chồng nhau nhưng hiệu vẫn loại 0" với hai sai số chuẩn này? $d=6$ có thuộc khoảng đó không?
+(d) Nếu hiệu quan sát chỉ là $d=5$ (các số khác giữ nguyên) thì kết luận thế nào?
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* Sai số chuẩn của từng trung bình: $se_A=14/\sqrt{50}\approx1{,}980$, $se_B=12/\sqrt{50}\approx1{,}697$.
+
+(a) Nửa độ rộng của A là $2{,}0\times1{,}980=3{,}96$, của B là $2{,}0\times1{,}697=3{,}39$. Vậy khoảng của A là $[116{,}04;\ 123{,}96]$, của B là $[110{,}61;\ 117{,}39]$. Vì $116{,}04\le117{,}39$ nên hai khoảng **chồng nhau** (theo Mệnh đề 3(a), chúng sẽ rời nhau khi $d\gt t(se_A+se_B)=2\times3{,}677=7{,}35$, mà $d=6\lt7{,}35$).
+
+(b) Sai số chuẩn của hiệu là $s_{\bar x}=\sqrt{14^2/50+12^2/50}=\sqrt{196/50+144/50}=\sqrt{6{,}8}\approx2{,}608$[^g-sx]. Nửa độ rộng $2{,}0\times2{,}608=5{,}215$, nên khoảng của hiệu là $6\pm5{,}215=[0{,}785;\ 11{,}215]$ µs: **loại 0**, tức B nhanh hơn A có ý nghĩa thống kê ở mức 95%[^g-diff]. (Với giá trị tra bảng thật, khoảng 2,010 cho mỗi mẫu và khoảng 1,985 cho hiệu theo công thức Welch–Satterthwaite[^g-ndf], khoảng của hiệu là $[0{,}82;\ 11{,}18]$ và hai khoảng riêng vẫn chồng nhau: kết luận không đổi.)
+
+(c) Theo Mệnh đề 3, cái bẫy xảy ra khi $t\sqrt{se_A^2+se_B^2}\lt d\le t(se_A+se_B)$, tức $5{,}215\lt d\le7{,}354$. $d=6$ nằm trong khoảng đó, đúng như (a) và (b). Cửa sổ này rộng $7{,}354-5{,}215\approx2{,}14$ µs, tức hơn 40% so với ngưỡng đúng 5,215; đây là phần "bảo thủ" của kiểm tra bằng mắt[^kj-visual].
+
+(d) Với $d=5$: $5\lt5{,}215$ nên khoảng của hiệu là $5\pm5{,}215=[-0{,}215;\ 10{,}215]$ chứa 0; ở mức 95% chưa kết luận được có khác biệt[^g-diff]. Hai khoảng riêng lẻ cũng chồng nhau (vì $5\lt7{,}354$), nên lần này kết luận "chưa phân biệt được" đúng. Điểm chốt: chồng nhau chỉ là điều kiện cần của "chưa phân biệt được", không đủ; phải xét khoảng của hiệu.
+
+</details>
+
+**Bài 6 (Vừa).** Đội `orders` load-test endpoint nhận đơn bằng một script tự viết, chạy 60 giây. Script dùng **một** kết nối và gửi theo lịch 500 req/s (request thứ $i$ lẽ ra gửi lúc $2i$ ms), nhưng chỉ gửi request kế tiếp khi đã nhận phản hồi request trước; nếu trễ lịch thì gửi ngay khi rảnh. Báo cáo của script:
+
+```text
+requests: 30000   duration: 60 s   target: 500 req/s
+latency (ms): p50 = p90 = p99 = p99.99 = 1    max = 2001
+```
+
+Log phía server cho biết nó đứng hoàn toàn đúng một lần, từ giây thứ 20,000 đến 22,000 (tức 2 s, đơn vị dưới đây là ms), mọi request bắt đầu được xử lý trong khoảng đó chỉ hoàn thành lúc 22.001, và ngoài ra mỗi request mất đúng 1 ms. Server xử lý từng request một.
+
+(a) Nêu hai dấu hiệu trong báo cáo cho thấy script bị coordinated omission.
+(b) Tính latency hiệu chỉnh (đo từ lịch dự định) của mọi request. Bao nhiêu request thực sự bị ảnh hưởng?
+(c) Tính p50, p95, p99, p99,9 và trung bình hiệu chỉnh; so với trung bình của báo cáo.
+(d) SLO của `orders` là p99 dưới 50 ms. Kết luận trước và sau khi hiệu chỉnh?
+
+<details><summary>Gợi ý</summary>
+
+Gọi $j$ là số thứ tự request kể từ request đầu tiên bị kẹt ($i=10.000+j$, lịch dự định $20.000+2j$). Hãy tìm thời điểm hoàn thành $22.001+j$ và chỉ ra nó đúng đến khi nào.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* (a) Dấu hiệu thứ nhất: server đứng 2 s ở tốc độ 500 req/s thì lẽ ra có $2\times500=1000$ request đang đến trong lúc đó, tức hơn 3% của 30.000. Báo cáo lại cho p99 $=1$ ms và p99,99 $=1$ ms; p99,99 bằng 1 ms nghĩa là chỉ nhiều nhất $0{,}01\%\times30.000=3$ request chậm hơn 1 ms. Hai con số mâu thuẫn nhau. Dấu hiệu thứ hai: có đúng một con số chậm (max $=2001$ ms, khớp với độ dài lần đứng cộng 1 ms phục vụ) còn mọi percentile khác bằng 1 ms: script chờ phản hồi trước khi gửi tiếp nên chỉ ghi được một mẫu chậm, đúng cơ chế coordinated omission[^wrk2-co].
+
+(b) *Tính hiệu chỉnh.* Trước lần đứng, request $i$ lẽ ra gửi lúc $2i$ và request trước đã xong lúc $2(i-1)+1\lt2i$, nên mọi request đó mất 1 ms. Request $i=10.000$ có lịch $20.000$, gửi đúng lúc đó, rơi vào khoảng đứng nên hoàn thành lúc $22.001$: latency $2001$ ms (cả hai cách đo đều ra số này). Khẳng định: với $0\le j\le2000$, request $i=10.000+j$ hoàn thành lúc $22.001+j$ và có latency hiệu chỉnh $2001-j$ ms.
+
+*Chứng minh quy nạp.* $j=0$: vừa tính. Giả sử đúng cho $j-1$ (với $1\le j\le2000$), tức request trước xong lúc $22.001+(j-1)=22.000+j$. Request $j$ gửi lúc $\max(20.000+2j,\ 22.000+j)$. Vì $j\le2000$ nên $22.000+j\ge20.000+2j$, thời điểm gửi là $22.000+j\ge22.000$, nằm ngoài khoảng đứng, nên hoàn thành lúc $22.001+j$. Latency hiệu chỉnh $=(22.001+j)-(20.000+2j)=2001-j$. ∎ Còn latency "đóng" mà script ghi (từ lúc gửi thật) là 1 ms cho mọi $j\ge1$.
+
+Với $j=2000$ thì latency hiệu chỉnh là 1 ms, và từ $j=2001$ trở đi server đã đuổi kịp lịch (gửi đúng lịch, 1 ms). Vậy các latency hiệu chỉnh lớn hơn 1 ms là $2001,2000,\dots,2$ ($j=0,\dots,1999$): **2.000 request**, tức 6,7% của 30.000. Trong đó 1.000 request có lịch rơi vào đúng 2 s đứng, 1.000 request còn lại đến sau nhưng phải xếp sau hàng đợi tích lại (server xử lý 1 ms mỗi request trong khi lịch chỉ đến mỗi 2 ms, nên mỗi request xóa được 1 ms nợ).
+
+(c) Sắp xếp tăng dần: 28.000 giá trị đầu bằng 1 ms; giá trị ở vị trí $28.000+m$ bằng $m+1$ ms ($m=1,\dots,2000$). Nearest-rank:
+
+| Thống kê | $k=\lceil qn\rceil$ | Giá trị hiệu chỉnh | Báo cáo của script |
+|---|---|---|---|
+| p50 | 15.000 | 1 ms | 1 ms |
+| p95 | 28.500 ($m=500$) | 501 ms | 1 ms |
+| p99 | 29.700 ($m=1700$) | 1.701 ms | 1 ms |
+| p99,9 | 29.970 ($m=1970$) | 1.971 ms | 1 ms |
+
+Tổng latency hiệu chỉnh là $28.000\times1+\sum_{v=2}^{2001}v=28.000+(2001\cdot2002/2-1)=28.000+2.003.000=2.031.000$ ms, nên trung bình $=2.031.000/30.000=67{,}7$ ms. Script ghi $(29.999\times1+2001)/30.000\approx1{,}07$ ms, chênh khoảng 63 lần.
+
+(d) Trước hiệu chỉnh: p99 $=1$ ms, "đạt" SLO. Sau hiệu chỉnh: p99 $=1.701$ ms, vượt SLO gần 34 lần, và ngay p95 $=501$ ms cũng đã vượt. Bản sửa đúng là gửi theo lịch cố định và đo từ lịch dự định, như `wrk2`[^wrk2-fix]; hoặc bù sau khi ghi bằng `record_correct` của `hdrhistogram`[^hdr-rc], lưu ý mô hình bù đó sinh bản ghi giảm dần theo khoảng mong đợi nên số liệu sẽ không khớp từng con số với phép tính ở trên (suy luận của người soạn từ mô tả hàm).
+
+</details>
+
+**Bài 7 (Vừa).** Bạn thay serializer A bằng B trong benchmark `orders/serialize/encode` rồi chạy lại `cargo bench`. Criterion in ra (số liệu giả định, dạng đầu ra theo sách Criterion.rs):
+
+```text
+orders/serialize/encode
+                        time:   [95.31 µs 96.40 µs 97.62 µs]
+                        change: [-9.2013% -7.4890% -5.6271%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  4 (4.00%) high mild
+  3 (3.00%) high severe
+mean   [95.46 µs 98.40 µs] std. dev.      [3.81 µs 9.72 µs]
+median [95.22 µs 96.35 µs] med. abs. dev. [1.52 µs 2.64 µs]
+```
+
+(a) Đọc dòng `time` và nói độ rộng tương đối của nó.
+(b) Đọc dòng `change` và dòng bên dưới. Hai lần chạy cách nhau bao nhiêu µs, xấp xỉ?
+(c) Giả sử tứ phân vị là $Q_1=95{,}8$ µs, $Q_3=98{,}2$ µs. Tính các hàng rào Tukey và phân loại các mẫu 90,5; 99,0; 102,3; 106,0 µs. Criterion có bỏ các mẫu outlier không?
+(d) Dòng `std. dev.` và `med. abs. dev.` cho biết gì về độ ồn?
+(e) Đội kết luận "B nhanh hơn A 7,5%". Nêu ít nhất bốn lý do kết luận này chưa chắc.
+(f) Một benchmark khác in `change: [-0.9% -0.5% -0.1%] (p = 0.01 < 0.05)`. Criterion kết luận gì, và vì sao?
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* (a) Ba số của dòng `time` là cận dưới, ước lượng tốt nhất và cận trên của khoảng tin cậy quanh thời gian một lần lặp[^crit-cli-time]; ở mục 7, ước lượng đó là độ dốc đường hồi quy, khoảng được dựng bằng bootstrap[^crit-slope-boot]. Nửa độ rộng là $(97{,}62-95{,}31)/2=1{,}155$ µs, tức $1{,}155/96{,}40\approx1{,}2\%$ của ước lượng: rất hẹp.
+
+(b) Dòng `change` là khoảng tin cậy của hiệu giữa lần chạy này và lần chạy trước, kèm xác suất khác biệt quan sát được chỉ là do ngẫu nhiên[^crit-cli-change]. Theo mục 7.4 đó là thay đổi tương đối `mean_new / mean_old - 1`[^crit-rel]: ước lượng $-7{,}49\%$, khoảng 95% từ $-9{,}20\%$ đến $-5{,}63\%$. Toàn bộ khoảng nằm dưới $-1\%$ (ngưỡng nhiễu[^crit-noise]) và $p=0{,}00$ nhỏ hơn mức ý nghĩa 0,05, nên Criterion kết luận "Performance has improved". Từ $\text{mới}=\text{cũ}\times(1+c)$ suy ra $\text{cũ}=\text{mới}/(1+c)$: với $c=-7{,}49\%$ thì cũ $\approx96{,}40/0{,}9251\approx104{,}2$ µs; cho $c$ chạy từ $-9{,}20\%$ đến $-5{,}63\%$ thì cũ nằm khoảng 102,2 đến 106,2 µs (xấp xỉ, coi 96,40 là trung bình mới).
+
+(c) $\mathrm{IQR}=98{,}2-95{,}8=2{,}4$. Hàng rào outlier: $[Q_1-1{,}5\,\mathrm{IQR},\ Q_3+1{,}5\,\mathrm{IQR}]=[92{,}2;\ 101{,}8]$. Hàng rào outlier nặng: $[Q_1-3\,\mathrm{IQR},\ Q_3+3\,\mathrm{IQR}]=[88{,}6;\ 105{,}4]$[^crit-tukey]. Phân loại: 90,5 nằm dưới 92,2 nhưng trên 88,6, là *low mild*; 99,0 nằm trong hàng rào, bình thường; 102,3 vượt 101,8 nhưng không vượt 105,4, là *high mild*; 106,0 vượt 105,4, là *high severe*. Criterion không bỏ outlier, chỉ cảnh báo, và vẫn dùng chúng ở các bước phân tích sau[^crit-nodrop].
+
+(d) Sách Criterion nói nếu độ lệch chuẩn lớn so với các giá trị thời gian thì benchmark ồn[^crit-cli-noisy]. Cận trên của độ lệch chuẩn là $9{,}72$ µs, gần 10% của 96,40 µs, nên đáng ngờ. Nhưng MAD chỉ $1{,}52$ đến $2{,}64$ µs, nhỏ hơn nhiều: phần lớn mẫu rất chặt, vài mẫu xa (9 outlier ở câu (c)) kéo độ lệch chuẩn lên. Hợp với ghi nhận ở mục 1.1 rằng nhiễu từ scheduling gây ra mẫu chậm bất thường[^crit-outliers-cause]. Cũng vì thế, cận trên của trung bình (98,40) cao hơn cận trên của trung vị (96,35).
+
+(e) Có thể kể năm lý do. (1) `change` so với **lần chạy trước**[^crit-compare-prev], tức A và B đo ở hai thời điểm; nhiệt độ, tần số CPU hoặc process nền có thể đã khác đi[^cf-boost]. (2) Khoảng tin cậy này chỉ phản ánh biến thiên giữa các lần lặp trong **một** process, một binary; bias do bố cục code và dữ liệu, cố định theo binary, không lộ ra ở đây[^kj-bias]. (3) Mức ý nghĩa 0,05 nghĩa là khoảng 5% benchmark giống hệt nhau vẫn bị báo "khác" vì nhiễu[^crit-sigdef]; một lần chạy chưa đủ để loại khả năng đó. (4) 9% mẫu là outlier và std. dev. lớn, nghĩa là máy chưa thật yên tĩnh[^crit-quiet]. (5) Một benchmark chỉ dùng một đơn hàng mẫu, không nói được gì về phân phối kích thước đơn trong production (nhận xét của người soạn). Kết luận hợp lý: đây là một dấu hiệu đáng theo dõi, chưa phải bằng chứng; bước tiếp theo là thiết kế như Bài 10.
+
+(f) Toàn bộ khoảng $[-0{,}9\%;\ -0{,}1\%]$ nằm trong $\pm1\%$, tức trong ngưỡng nhiễu; Criterion coi thay đổi trong ngưỡng này là nhiễu và bỏ qua, dù $p=0{,}01\lt0{,}05$[^crit-noise]. Lý do: benchmark nhỏ và có tính xác định cao dễ cho khác biệt "có ý nghĩa thống kê" chỉ vì nhiễu rất nhỏ[^crit-noisedef].
+
+</details>
+
+**Bài 8 (Khó).** Ta muốn khoảng tin cậy 95% của hiệu $\bar x_A-\bar x_B$ có nửa độ rộng không quá $h$, dùng xấp xỉ chuẩn ($z=1{,}96$, $n$ lớn). Hai mẫu độc lập.
+
+(a) Nếu cả hai có độ lệch chuẩn $\sigma$ và cùng cỡ $n$, chứng minh cần $n\ge2(z\sigma/h)^2$ mỗi nhóm. Tính $n$ khi $\sigma=10$ µs với $h=1$ µs và $h=3$ µs.
+(b) Nếu $\sigma_A\neq\sigma_B$ và tổng ngân sách là $N=n_A+n_B$ lần đo, chứng minh phương sai của hiệu $\sigma_A^2/n_A+\sigma_B^2/n_B$ nhỏ nhất đúng khi $n_A:n_B=\sigma_A:\sigma_B$, với giá trị nhỏ nhất $(\sigma_A+\sigma_B)^2/N$.
+(c) Với $\sigma_A=12$ µs, $\sigma_B=6$ µs, $h=1$ µs: tổng số lần đo tối thiểu khi chia đều, và khi chia tối ưu? Tiết kiệm bao nhiêu?
+
+<details><summary>Gợi ý</summary>
+
+Câu (b): nhân biểu thức phương sai với $n_A+n_B$, khai triển, rồi dùng bất đẳng thức AM–GM cho hai số hạng chéo.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* (a) Hai mẫu độc lập nên $\mathrm{Var}(\bar x_A-\bar x_B)=\sigma^2/n+\sigma^2/n=2\sigma^2/n$[^g-sx]. Nửa độ rộng là $h=z\sqrt{2\sigma^2/n}=z\sigma\sqrt2/\sqrt n$; bình phương hai vế và giải theo $n$ được $n=2(z\sigma/h)^2$, nên $n\ge2(z\sigma/h)^2$ là điều kiện để $h$ không vượt mức cho trước. Hệ số 2 so với công thức một trung bình ở mục 2.2 đến từ việc hiệu cộng *hai* phương sai. Với $\sigma=10$: $h=1$ cho $n\ge2\times(19{,}6)^2=768{,}32$, tức **769** lần đo mỗi nhóm; $h=3$ cho $n\ge2\times(19{,}6/3)^2\approx85{,}37$, tức **86** mỗi nhóm. So với mục 4: ở $n=100$, sai số chuẩn của hiệu là 1,34 µs, nửa độ rộng khoảng 2,6 µs, hợp với việc cần ít nhất 86 để đạt $\pm3$ µs.
+
+(b) Đặt $a=\sigma_A$, $b=\sigma_B$, $m=n_A$, $n=n_B$ (dương, $m+n=N$) và $V=a^2/m+b^2/n$. Khi đó
+$$ V\,(m+n)=a^2+b^2+\frac{a^2n}{m}+\frac{b^2m}{n}. $$
+Hai số hạng cuối dương và có tích bằng $a^2b^2$, nên theo AM–GM, tổng của chúng $\ge2ab$, đẳng thức khi $a^2n/m=b^2m/n$. Vậy $V\,N\ge a^2+b^2+2ab=(a+b)^2$, tức $V\ge(a+b)^2/N$. Đẳng thức khi $a^2n^2=b^2m^2$, tức $an=bm$, hay $m:n=a:b$. ∎ Nghĩa là nên đo nhiều hơn ở hệ thống ồn hơn, theo tỉ lệ độ lệch chuẩn. (Khi $n_A,n_B$ phải là số nguyên thì làm tròn tỉ lệ này; ở câu (c) các số vừa khéo là số nguyên.)
+
+(c) Chia đều: $V=(\sigma_A^2+\sigma_B^2)/n=180/n$ với $n$ mỗi nhóm, và $h=z\sqrt V$ cho $n\ge z^2\times180/h^2=3{,}8416\times180\approx691{,}5$, tức 692 mỗi nhóm, **1.384** lần đo. Chia tối ưu: $V=(12+6)^2/N=324/N$ nên $N\ge3{,}8416\times324\approx1244{,}7$, tức **1.245** lần đo, chia $n_A=830$ và $n_B=415$ (tỉ lệ 12:6). Kiểm tra: $V=144/830+36/415\approx0{,}2602$, $h=1{,}96\sqrt{0{,}2602}\approx0{,}9999$ µs. Tiết kiệm $(1384-1245)/1384\approx10\%$ số lần đo cho cùng độ chính xác. Với cùng ngân sách $N=300$, $n_A=200$, $n_B=100$ cho phương sai $0{,}72+0{,}36=1{,}08$, còn chia đều 150/150 cho $0{,}96+0{,}24=1{,}20$; khoảng tin cậy chia đều rộng hơn khoảng $\sqrt{1{,}20/1{,}08}\approx1{,}054$ lần.
+
+</details>
+
+**Bài 9 (Khó).** `orders` chạy trên hai pod. Mỗi pod xuất histogram độ trễ (ms) với bucket có cận trên 1, 2, 4, 8, 16, 32, 64 (bucket $j$ là $(2^{j-1},2^j]$, bucket đầu là $(0,1]$). Số request mỗi bucket trong một phút:
+
+| Cận trên bucket (ms) | 1 | 2 | 4 | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|---|
+| Pod A (9.000 request) | 6.000 | 2.500 | 400 | 80 | 15 | 4 | 1 |
+| Pod B (1.000 request, pod chậm) | 300 | 200 | 150 | 100 | 80 | 100 | 70 |
+
+Ước lượng quantile từ histogram (định nghĩa của người soạn, đơn giản hơn phép nội suy tuyến tính trong bucket): lấy $k=\lceil qn\rceil$, và trả về **cận trên của bucket đầu tiên có số đếm tích lũy $\ge k$**.
+
+(a) Tính p99 của từng pod và p99 của histogram gộp. Làm tương tự với p99,9.
+(b) So với trung bình thường và trung bình có trọng số của hai p99 (và hai p99,9).
+(c) Chứng minh gộp histogram bằng cách cộng số đếm từng bucket cho đúng histogram của tập gộp, và ước lượng ở trên luôn lớn hơn hoặc bằng quantile thật và nhỏ hơn hai lần nó (với quantile thật nằm ở bucket $j\ge1$).
+(d) Giả sử pod A nhận gấp ba lưu lượng (cùng phân phối, 27.000 request), pod B giữ nguyên. Trung bình hai p99 đổi thế nào, p99 của histogram gộp đổi thế nào?
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* (a) Số đếm tích lũy của A: 6.000; 8.500; 8.900; 8.980; 8.995; 8.999; 9.000. Của B: 300; 500; 650; 750; 830; 930; 1.000. Cộng từng bucket được histogram gộp 6.300; 2.700; 550; 180; 95; 104; 71 (tổng 10.000) với tích lũy 6.300; 9.000; 9.550; 9.730; 9.825; 9.929; 10.000.
+
+- p99: pod A có $k=\lceil0{,}99\times9000\rceil=8910$, tích lũy đầu tiên $\ge8910$ là 8.980 ở bucket 8, nên p99 của A là 8 ms. Pod B có $k=990$, tích lũy đầu tiên $\ge990$ là 1.000 ở bucket 64, nên p99 của B là 64 ms. Gộp: $k=9900$, tích lũy đầu tiên $\ge9900$ là 9.929 ở bucket 32, nên p99 gộp $=32$ ms.
+- p99,9: A có $k=\lceil0{,}999\times9000\rceil=8991$, tích lũy 8.995 ở bucket 16 $\Rightarrow16$ ms. B có $k=999$ $\Rightarrow64$ ms. Gộp $k=9990$, tích lũy 10.000 ở bucket 64 $\Rightarrow64$ ms.
+
+(b) Trung bình hai p99 là $(8+64)/2=36$ ms; có trọng số theo số request là $(9000\times8+1000\times64)/10.000=13{,}6$ ms; so với 32 ms của p99 gộp. Với p99,9: trung bình $(16+64)/2=40$ ms, có trọng số $(9000\times16+1000\times64)/10.000=20{,}8$ ms, so với 64 ms. Cả hai cách đều lệch: ở p99,9 cả hai đều thấp hơn thực tế, còn ở p99 con số 36 gần 32 chỉ do trùng hợp (xem (d)).
+
+(c) *Gộp.* Gọi $c_j(S)$ là số phần tử của $S$ rơi vào bucket $j$. Các bucket rời nhau và phủ $(0,64]$, nên mỗi phần tử của tập gộp $S_1\uplus S_2$ rơi vào đúng một bucket, và $c_j(S_1\uplus S_2)=c_j(S_1)+c_j(S_2)$; vậy histogram của tập gộp đúng là tổng hai histogram, và ước lượng quantile trên histogram gộp là ước lượng cho *tập gộp*, không phải ước lượng từ các quantile con. Đây là lý do histogram gộp được còn quantile thì không[^prom-agg].
+
+*Cận sai số.* Gọi $C_j=\sum_{i\le j}c_i$ là tích lũy và $j^{\ast}$ là chỉ số bucket đầu tiên có $C_{j^{\ast}}\ge k$, nên $C_{j^{\ast}-1}\lt k\le C_{j^{\ast}}$. Các bucket sắp theo thứ tự giá trị nên $x_{(1)},\dots,x_{(C_{j^{\ast}-1})}$ ở các bucket trước và $x_{(C_{j^{\ast}-1}+1)},\dots,x_{(C_{j^{\ast}})}$ ở bucket $j^{\ast}$; vì $C_{j^{\ast}-1}\lt k\le C_{j^{\ast}}$, phần tử $x_{(k)}$ nằm ở bucket $j^{\ast}$, tức $2^{j^{\ast}-1}\lt x_{(k)}\le2^{j^{\ast}}$ (với $j^{\ast}\ge1$). Ước lượng là $2^{j^{\ast}}$, nên nó $\ge x_{(k)}$ và $2^{j^{\ast}}/x_{(k)}\lt2^{j^{\ast}}/2^{j^{\ast}-1}=2$. ∎ Với p99 gộp ở trên: quantile thật nằm trong $(16;\ 32]$ và ước lượng là 32. Đây là đánh đổi mà tài liệu Prometheus nhắc: quantile từ histogram là xấp xỉ, sai số phụ thuộc cách chia bucket[^prom-agg].
+
+(d) Pod A ba lần lưu lượng có số đếm 18.000; 7.500; 1.200; 240; 45; 12; 3 (tích lũy 18.000; 25.500; 26.700; 26.940; ...). $k=\lceil0{,}99\times27.000\rceil=26.730$ nên p99 của A vẫn là 8 ms (cùng phân phối), còn p99 của B là 64 ms. Trung bình hai p99 **vẫn là 36 ms**, vì nó không hề biết lưu lượng. Histogram gộp là 18.300; 7.700; 1.350; 340; 125; 112; 73 (tổng 28.000), tích lũy 18.300; 26.000; 27.350; 27.690; 27.815; 27.927; 28.000; $k=\lceil0{,}99\times28.000\rceil=27.720$ nên tích lũy đầu tiên $\ge27.720$ là 27.815 ở bucket 16, p99 gộp $=16$ ms, giảm một nửa so với 32 ms. Đúng hướng trực giác: pod chậm B chiếm tỉ lệ nhỏ hơn thì đuôi chung ngắn lại, nhưng trung bình p99 không phản ứng (36 ms trong cả hai trường hợp). Con số 36 gần 32 ở tình huống đầu chỉ là trùng hợp. Trung bình có trọng số đổi theo lưu lượng nhưng vẫn lệch: $(27.000\times8+1000\times64)/28.000=10$ ms so với 16 ms.
+
+</details>
+
+**Bài 10 (Khó).** Bạn phải so serializer A (JSON) với B (nhị phân) và đưa ra quyết định có nên đổi hay không, trên một máy dùng chung với đội khác.
+
+(a) Thiết kế một A/B benchmark công bằng: liệt kê các quyết định thiết kế quan trọng và lý do, mỗi quyết định gắn với một mục của chương.
+(b) Pilot gồm 10 *cặp* lần chạy: mỗi cặp là một lần khởi chạy process cho A và một lần cho B, chạy liền nhau theo thứ tự ngẫu nhiên (AB hoặc BA), mỗi lần ghi thời gian trung bình mỗi đơn (µs). Kết quả:
+
+| Cặp | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A | 102 | 99 | 105 | 101 | 98 | 104 | 103 | 100 | 106 | 102 |
+| B | 97 | 96 | 101 | 96 | 95 | 99 | 100 | 95 | 100 | 98 |
+
+Tính khoảng tin cậy 95% của hiệu $\bar x_A-\bar x_B$ theo hai cách: (i) coi hai nhóm độc lập (Welch, $t\approx2{,}105$ cho bậc tự do xấp xỉ 17,6); (ii) theo cặp ($t_{0{,}975;9}=2{,}262$). So sánh độ rộng và giải thích.
+(c) Cần bao nhiêu cặp để nửa độ rộng của khoảng theo cặp không quá 0,5 µs?
+(d) Quy tắc quyết định chốt trước: "đổi sang B nếu cận dưới của mức nhanh hơn tương đối lớn hơn 2%". Áp dụng cho pilot.
+
+<details><summary>Gợi ý</summary>
+
+Câu (b): với phép ghép cặp, tính hiệu $d_i=A_i-B_i$ cho từng cặp rồi áp dụng khoảng t của mục 4.1 cho 10 giá trị $d_i$. Phương sai của hiệu là $\mathrm{Var}(A)+\mathrm{Var}(B)-2\,\mathrm{Cov}(A,B)$.
+
+</details>
+
+<details><summary>Lời giải</summary>
+
+*(Lời giải của người soạn.)* (a) Các quyết định:
+
+| Quyết định | Lý do | Mục |
+|---|---|---|
+| Cùng một bộ đơn hàng đại diện (lấy mẫu từ log production, nhiều kích cỡ), tạo ngoài vòng đo; `--release` và `black_box` đầu vào lẫn kết quả | Chi phí serializer phụ thuộc kích thước đơn, và code bị tối ưu mất thì không còn là phép đo (nhận xét của người soạn) | 8 |
+| Cùng harness, cùng cấu hình Criterion cho A và B (cùng `warm_up_time`, `sample_size`), ghim phiên bản | Khác cấu hình thì khác phép đo | 7.5 |
+| Máy yên tĩnh, ghi lại hoặc cố định governor và tắt boost | Tần số động làm hiệu năng single-thread dao động, kết quả có thể không tái lập[^cf-boost]; benchmark nên chạy trên máy yên tĩnh[^crit-quiet] | 1.1 |
+| Lặp ở **level process** (khởi chạy nhiều lần), và nếu nghi bias bố cục thì cả level build (link order khác) | Bias cố định theo binary không mất khi chỉ lặp iteration[^kj-bias]; phải lặp ở level cao nhất còn biến thiên ngẫu nhiên[^kj-levels2] | 1.2 |
+| Xen kẽ A và B, thứ tự AB/BA ngẫu nhiên, ghép cặp theo khoảng thời gian | Tách trôi dạt của máy khỏi khác biệt của code; không dựa vào so sánh "với lần chạy trước" của Criterion[^crit-compare-prev] | 5 (Đi sâu) |
+| Mỗi process là **một** quan sát (trung bình của nó); khoảng t cho hiệu theo cặp | Các lần lặp trong một process không độc lập với nhau về bias của process đó; quan sát độc lập mới là cấp process (suy luận của người soạn từ mục 1.2) | 4.1, 5.1[^g-diff] |
+| Báo tỉ số B/A kèm khoảng, không chỉ p-value | Tỉ số hiếm khi được kèm biên sai số[^kj-ratio]; mẫu đủ lớn thì mọi khác biệt đều "có ý nghĩa"[^kj-sigtest] | 5.3 |
+| Quy tắc quyết định chốt **trước** khi đo (ngưỡng đáng đổi, ví dụ 2%) | Tránh chọn kết luận sau khi nhìn số; ngưỡng cao hơn ngưỡng nhiễu 1% của Criterion[^crit-noise] | 5.3 |
+
+(b) Hiệu $d_i=A_i-B_i$ theo từng cặp: 5, 3, 4, 5, 3, 5, 3, 5, 6, 4. Tổng 43, nên $\bar d=4{,}3$ µs (cũng bằng $\bar A-\bar B=102{,}0-97{,}7$).
+
+*(ii) Theo cặp.* Các độ lệch $d_i-4{,}3$ là $0{,}7;\ -1{,}3;\ -0{,}3;\ 0{,}7;\ -1{,}3;\ 0{,}7;\ -1{,}3;\ 0{,}7;\ 1{,}7;\ -0{,}3$, bình phương cộng lại $10{,}10$. Vậy $s_d^2=10{,}10/9\approx1{,}122$, $s_d\approx1{,}059$, sai số chuẩn $s_d/\sqrt{10}\approx0{,}335$ và nửa độ rộng $2{,}262\times0{,}335\approx0{,}758$. Khoảng 95%: $[3{,}54;\ 5{,}06]$ µs.
+
+*(i) Coi độc lập.* Độ lệch chuẩn của A: tổng bình phương lệch quanh 102,0 bằng 60 nên $s_A^2=60/9\approx6{,}667$, $s_A\approx2{,}582$. Của B: quanh 97,7 bằng $44{,}10$ nên $s_B^2=4{,}9$, $s_B\approx2{,}214$. Sai số chuẩn của hiệu là $\sqrt{(6{,}667+4{,}9)/10}\approx1{,}076$[^g-sx]; nửa độ rộng $2{,}105\times1{,}076\approx2{,}26$. Khoảng 95%: $[2{,}04;\ 6{,}56]$ µs[^g-ndf].
+
+Khoảng theo cặp rộng $\pm0{,}76$, hẹp hơn khoảng độc lập $\pm2{,}26$ gần ba lần. Lý do: $\mathrm{Var}(A-B)=\mathrm{Var}(A)+\mathrm{Var}(B)-2\,\mathrm{Cov}(A,B)$. Khi cả A lẫn B cùng cao hoặc cùng thấp trong một cặp (máy nóng hoặc bận, cùng một khoảng thời gian), hiệp phương sai lớn và hiệu gần như triệt tiêu phần trôi chung. Ở đây hệ số tương quan $\rho\approx(6{,}667+4{,}9-1{,}122)/(2\times2{,}582\times2{,}214)\approx0{,}91$, nên phương sai của hiệu chỉ còn $1{,}12$ thay vì $11{,}57$. Phép ghép cặp chỉ có giá trị khi hai phần tử của cặp thực sự đo trong cùng điều kiện, nên phải xen kẽ và ngẫu nhiên hóa thứ tự (AB hoặc BA). Nếu A luôn chạy trước thì khác biệt hệ thống do thứ tự bị tính cho code (suy luận của người soạn).
+
+(c) Cần $n\ge(t\,s_d/h)^2$ với $t$ phụ thuộc $n-1$. Dùng $z$ trước: $(1{,}96\times1{,}059/0{,}5)^2\approx17{,}2$. Thử $n=20$ ($t_{0{,}975;19}=2{,}093$): $(2{,}093\times1{,}059/0{,}5)^2\approx19{,}7\le20$, thỏa. Thử $n=19$ ($t_{0{,}975;18}=2{,}101$): $(2{,}101\times1{,}059/0{,}5)^2\approx19{,}8\gt19$, không thỏa. Vậy cần **20 cặp**. (Giả sử độ lệch chuẩn của pilot là $\sigma$ thật; pilot chỉ 10 cặp nên con số này cũng chỉ là ước lượng.)
+
+(d) Mức nhanh hơn tương đối $=\bar d/\bar A=4{,}3/102{,}0\approx4{,}2\%$ (tương đương B/A $=97{,}7/102{,}0\approx0{,}958$). Chia khoảng của hiệu cho $\bar A=102{,}0$ được khoảng xấp xỉ $[3{,}5\%;\ 5{,}0\%]$ (bỏ qua độ bất định của mẫu số, nhận xét của người soạn; bootstrap theo cặp sẽ chặt chẽ hơn). Cận dưới 3,5% lớn hơn 2% nên quy tắc cho kết luận **đổi sang B**. Cũng nên kiểm tra thêm bằng build link order khác trước khi tin hoàn toàn, vì pilot chỉ có một bản build mỗi bên (mục 1.2).
+
+</details>
+
 ## Đọc thêm
 
 - [P11 · Chương 03 — Đo và cải thiện hiệu năng service Rust](../11-do-dac-va-go-loi/03-hieu-nang-service-rust.md): đọc để làm phần thực hành (black_box, warm-up, histogram, `hdrhistogram`) mà chương này đã giả định.
@@ -750,3 +1057,6 @@ Criterion tự cài đặt thống kê bên trong crate thay vì dùng thư vi�
 [^cf-def]: Linux kernel docs, CPU Performance Scaling (bản hiện hành, không ghim) — <https://docs.kernel.org/admin-guide/pm/cpufreq.html> — "The activity by which this happens is referred to as CPU performance scaling or CPU frequency scaling (because it involves adjusting the CPU clock frequency)."
 [^cf-boost]: Linux kernel docs, CPU Performance Scaling, Frequency Boost Support (bản hiện hành, không ghim) — <https://docs.kernel.org/admin-guide/pm/cpufreq.html> — "Since the boosting functionality depends on the load of the whole package, single-thread performance may vary because of it which may lead to unreproducible results sometimes."
 [^cf-perf]: Linux kernel docs, CPU Performance Scaling, performance governor (bản hiện hành, không ghim) — <https://docs.kernel.org/admin-guide/pm/cpufreq.html> — "When attached to a policy object, this governor causes the highest frequency, within the scaling_max_freq policy limit, to be requested for that policy."
+[^crit-cli-time]: Criterion.rs Book (tag 0.5.1), Command-Line Output, Time — <https://raw.githubusercontent.com/bheisler/criterion.rs/0.5.1/book/src/user_guide/command_line_output.md> — "This shows a confidence interval over the measured per-iteration time for this benchmark."
+[^crit-cli-change]: Criterion.rs Book (tag 0.5.1), Command-Line Output, Change — <https://raw.githubusercontent.com/bheisler/criterion.rs/0.5.1/book/src/user_guide/command_line_output.md> — "This shows a confidence interval over the difference between this run of the benchmark and the last one, as well as the probability that the measured difference could have occurred by chance."
+[^crit-cli-noisy]: Criterion.rs Book (tag 0.5.1), Command-Line Output, Additional Statistics — <https://raw.githubusercontent.com/bheisler/criterion.rs/0.5.1/book/src/user_guide/command_line_output.md> — "If std. dev. is large compared to the time values from above, the benchmarks are noisy."
