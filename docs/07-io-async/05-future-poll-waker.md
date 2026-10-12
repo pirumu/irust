@@ -21,15 +21,22 @@
 
 ## 1. Vấn đề: một thread, rất nhiều thứ đang chờ
 
-Ở các chương trước, một thread dùng `epoll`/`kqueue` để chờ nhiều file descriptor. Câu hỏi của Rust (nhận xét của người soạn): *code của người dùng* biểu diễn "một thao tác đang chờ" bằng gì, để một vòng lặp chung (executor) xen kẽ rất nhiều thao tác như vậy trên vài thread? Câu trả lời là trait `Future`: Rust Book nhắc khái niệm này còn xuất hiện dưới các tên như task hay promise,[^book-concept] và docs của std mô tả future là một giá trị "có thể chưa tính xong", cho phép thread làm việc hữu ích khác trong lúc chờ giá trị sẵn sàng.[^std-future-def]
+Ở các chương trước, một thread dùng `epoll`/`kqueue` để chờ nhiều file descriptor cùng lúc. Chương này đi tiếp sang phía Rust: code của người dùng phải biểu diễn "một thao tác đang chờ" bằng cái gì, để một vòng lặp chung (executor) xen kẽ được rất nhiều thao tác như vậy trên vài thread (nhận xét của người soạn).
+
+Ta sẽ bám theo một service giả định tên `orders`, viết bằng Rust async (ví dụ của người soạn, không phải code trong repo). Mỗi request `GET /orders/42` buộc handler phải gọi sang service `inventory` qua mạng rồi đợi phản hồi. Lúc cao điểm có hàng nghìn handler như vậy đang đợi cùng lúc, trong khi `orders` chỉ có vài worker thread. Nếu mỗi handler đang đợi giữ riêng một thread thì thread hết trước khi request hết, nên handler phải dừng lại được mà không giữ thread, và executor phải biết lúc nào quay lại nó (nhận xét của người soạn).
+
+Thứ cho phép việc đó là trait `Future`. Rust Book nhắc rằng khái niệm này còn xuất hiện trong các ngôn ngữ khác dưới những tên như task hay promise.[^book-concept] Docs của std định nghĩa future là một giá trị có thể chưa tính xong.[^std-future-def]
+
+Mỗi mục sau mở bằng việc nó có nghĩa gì với `orders`; mục 7 dựng một timer và một `block_on` thật để chạy thử.
 
 ## 2. Trait `Future`, `poll` và `Poll` (Q1)
 
-> **Trả lời ngắn.** `Future::poll` có chữ ký `fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>`.[^std-future-sig] Nó là một lần *thử*: nếu giá trị chưa sẵn sàng thì không chặn mà trả `Pending`, và task được lên lịch đánh thức khi có thể poll tiếp.[^std-future-poll] `Poll` chỉ có hai kết quả: `Ready(T)` (đã xong) hoặc `Pending` (còn việc).[^book-poll] Future là "lười" vì tự nó bất động: phải có ai đó chủ động poll thì phép tính mới tiến triển.[^std-future-inert]
+> **Trả lời ngắn.** `Future::poll` có chữ ký `fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output>`.[^std-future-sig] Mỗi lần gọi là một lần *thử*: nếu giá trị chưa sẵn sàng thì `poll` không chặn mà trả `Pending`, và task được lên lịch đánh thức khi có thể thử tiếp.[^std-future-poll] Kết quả của `poll` chỉ có hai khả năng: `Ready(T)` (đã xong) hoặc `Pending` (còn việc).[^book-poll] Future "lười" vì tự nó bất động: phải có ai chủ động poll thì phép tính mới tiến triển.[^std-future-inert]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `poll` giống việc gõ cửa phòng hỏi "xong chưa?". Câu trả lời là "xong, đây" hoặc "chưa, lát nữa tôi gọi lại"; không ai gõ cửa thì căn phòng không làm gì.
+*Với service `orders`.* Giả sử handler của `/orders/42` là một `async fn` gọi sang `inventory`. Executor không chạy handler một mạch từ đầu tới cuối: nó gọi `poll` trên future của handler, và future chạy tới chỗ phải đợi phản hồi thì trả `Pending` ngay. Worker thread được trả lại để poll handler của request khác. Khi phản hồi về, handler được poll lại và lần này trả `Ready` cùng kết quả. Ngược lại, chưa ai poll thì handler chưa chạy một dòng nào. Đó là bức tranh chung (mô tả của người soạn); phần dưới đi vào từng chi tiết.
+
 
 ```rust
 pub trait Future {
@@ -38,53 +45,61 @@ pub trait Future {
 }
 ```
 
-Chữ ký này đúng như docs nêu.[^std-future-sig] Ba phần cần đọc:
+Ba phần của chữ ký:
 
-- `type Output`: kiểu giá trị khi future hoàn tất.[^std-future-output]
-- `self: Pin<&mut Self>`: thay vì `&mut self`, `poll` nhận một tham chiếu *đã ghim*. Ở mức chương này chỉ cần nhớ lý do: std ghi rằng ví dụ điển hình của kiểu tự tham chiếu (self-referential) là chính các state machine mà compiler sinh ra để cài `Future` cho `async fn`.[^std-pin-sr] Nếu giá trị loại đó bị di chuyển trong bộ nhớ thì tham chiếu nội bộ sẽ hỏng. `Pin` không phải phép màu của compiler: nó là một lời hứa "sẽ không move giá trị này", còn bản thân Rust vẫn coi mọi giá trị là có thể move bằng phép gán hay `mem::replace`.[^std-pin-promise] Để giữ lời hứa trong code an toàn, `Pin<Ptr>` hạn chế quyền truy cập vào con trỏ bọc bên trong.[^std-pin-restrict] Cơ chế đầy đủ, `Unpin` (ngoại lệ của hạn chế này), `pin!` nằm ở [Chương 06, mục 5](06-async-await-pin.md). Trong các ví dụ bên dưới, các future thủ công của ta không tự tham chiếu nên không cần lo.
+- `type Output`: kiểu giá trị future cho ra khi hoàn tất, ví dụ phản hồi đã parse của `inventory`.[^std-future-output]
+- `self: Pin<&mut Self>`: thay vì `&mut self`, `poll` nhận một tham chiếu *đã ghim* (pinned), tức giá trị phía sau đã được hứa là sẽ không bị move, dù bản thân Rust vẫn coi mọi giá trị là có thể move.[^std-pin-promise] Lý do cần lời hứa này: state machine mà compiler sinh ra cho `async fn` là ví dụ điển hình của kiểu tự tham chiếu (self-referential), và nếu nó bị move thì tham chiếu nội bộ sẽ hỏng.[^std-pin-sr] Cơ chế đầy đủ nằm ở [Chương 06, mục 5](06-async-await-pin.md). Các future thủ công trong chương này không tự tham chiếu nên chưa cần lo.
 - `cx: &mut Context<'_>`: nơi future lấy `Waker` (mục 4).
 
 ### 2.1 `poll` là một lần *thử*, không phải một lần *chờ*
 
-Docs viết: `poll` cố gắng đưa future tới giá trị cuối; phương thức này không chặn nếu giá trị chưa sẵn sàng, thay vào đó task hiện tại được lên lịch để đánh thức khi có thể tiến triển tiếp bằng cách poll lại.[^std-future-poll] Docs cũng nói thêm: thông thường bạn không gọi `poll` trực tiếp mà `.await` giá trị.[^std-future-await]
+`poll` cố đưa future tới giá trị cuối, nhưng nếu giá trị chưa có thì nó không chặn: nó trả `Pending`, và task hiện tại được lên lịch để đánh thức khi có thể poll lại.[^std-future-poll] Trong code thường ngày bạn hiếm khi gọi `poll` trực tiếp mà `.await` giá trị.[^std-future-await]
 
-So với `read` non-blocking ([Chương 01](01-mo-hinh-io.md)): `read` trả dữ liệu hoặc `EAGAIN`; `poll` trả `Ready(giá trị)` hoặc `Pending`. Docs cũng nói futures "giống `epoll(4)`" hơn là `poll(2)`/`select(2)`, vì không đòi mọi lần wakeup phải poll lại mọi sự kiện.[^std-future-epoll] Phần "đăng ký để được báo khi sẵn sàng" mà `epoll_ctl` làm trong kernel được `Waker` làm ở mức thư viện (nhận xét của người soạn).
+Nếu bạn từng viết socket non-blocking ([Chương 01](01-mo-hinh-io.md)) thì đây là cùng một ý: `read` trả dữ liệu hoặc `EAGAIN`, còn `poll` trả `Ready(giá trị)` hoặc `Pending`. Docs còn nói futures "giống `epoll(4)`" hơn là `poll(2)` hay `select(2)`, vì không đòi mọi lần wakeup phải poll lại mọi sự kiện.[^std-future-epoll] Việc "đăng ký để được báo khi sẵn sàng" mà `epoll_ctl` làm trong kernel thì ở đây `Waker` làm ở tầng thư viện (nhận xét của người soạn).
 
-Yêu cầu kèm theo: một cài đặt `poll` nên trả về nhanh và không chặn; nếu biết trước một lần gọi có thể tốn thời gian thì việc đó nên được đẩy sang thread pool hoặc thứ tương tự để `poll` trả về nhanh.[^std-future-quick]
+Vì `poll` chạy thẳng trên worker thread của `orders`, nó phải trả về nhanh: docs yêu cầu một cài đặt `poll` nên cố trả về nhanh và không chặn.[^std-future-quick] Việc nặng, như parse một payload rất lớn, nên để ngoài `poll` (nhận xét của người soạn).
 
 ### 2.2 `Poll`: hai kết quả
 
-`Poll<T>` có hai biến thể: `Ready(T)` và `Pending`. Rust Book nói nó giống `Option` về hình dạng nhưng ý nghĩa khác hẳn: `Pending` cho biết future vẫn còn việc, người gọi sẽ phải kiểm tra lại sau; `Ready` cho biết future đã xong và giá trị `T` có sẵn.[^book-poll]
+`Poll<T>` chỉ có hai biến thể. `Ready(T)` báo future đã xong và giá trị `T` có sẵn. `Pending` báo future vẫn còn việc, nên người gọi phải kiểm tra lại sau.[^book-poll] Với `orders`: `Pending` nghĩa là `inventory` chưa trả lời, còn `Ready(phản hồi)` nghĩa là handler đi tiếp được.
 
 ### 2.3 Future "lười"
 
-Docs: future tự nó *bất động* (inert); phải có ai đó chủ động poll thì phép tính bên dưới mới tiến triển. Mỗi khi task được đánh thức, nó nên poll lại các future còn quan tâm.[^std-future-inert] Rust Book: future trong Rust là lazy, không làm gì cho đến khi bạn yêu cầu bằng `await`.[^book-lazy] Reference nói rõ với `async fn`: gọi hàm chỉ "capture" đối số vào một future, thân hàm chỉ chạy khi future bị poll.[^ref-async-fn]
+Future tự nó bất động: phải có ai chủ động poll thì phép tính bên dưới mới tiến triển, và mỗi khi task được đánh thức nó nên poll lại các future còn quan tâm.[^std-future-inert] Cùng ý đó, future trong Rust là lazy: nó không làm gì cho tới khi bạn yêu cầu bằng `await`.[^book-lazy] Với `async fn` thì Reference nói rõ hơn: gọi hàm chỉ gom các đối số vào một future, còn thân hàm chạy khi future bị poll.[^ref-async-fn]
 
-<details><summary>Đi sâu: future "ống dẫn" và quan sát thân async chỉ chạy khi bị poll</summary>
+Hệ quả cho `orders`: gọi `inventory.get(42)` mà quên `.await` thì không có gói tin nào được gửi đi (suy ra từ các câu trên; nhận xét của người soạn).
 
-Ngoại lệ đã được docs ghi nhận: một số future chỉ là "ống dẫn" cho giá trị đang được tính ở task khác (điển hình là future có được khi spawn một task vào runtime); phép tính nền của chúng chạy độc lập với future.[^std-future-conduit] Đó là hành vi của kiểu cụ thể, không phải của trait.
+<details><summary>Đi sâu: future "ống dẫn", cách <code>Pin</code> hạn chế truy cập, và quan sát thân async chỉ chạy khi bị poll</summary>
 
-Quan sát chạy thật ở mục 7.1 (phần 1): dòng "thân async chạy" chỉ xuất hiện sau khi `block_on` poll lần đầu.
+**Future "ống dẫn".** Docs ghi nhận một ngoại lệ: có future chỉ là "ống dẫn" cho giá trị đang được tính ở task khác (điển hình là future có được khi spawn một task vào runtime), và phép tính nền của chúng chạy độc lập với future.[^std-future-conduit] Đó là hành vi của kiểu cụ thể, không phải của trait.
+
+**Pin hạn chế truy cập.** Để giữ lời hứa "không move" ngay trong code an toàn, `Pin<Ptr>` hạn chế quyền truy cập vào con trỏ bọc bên trong.[^std-pin-restrict] `Unpin` (ngoại lệ của hạn chế này) và `pin!` nằm ở [Chương 06, mục 5](06-async-await-pin.md).
+
+**Quan sát.** Ở mục 7.1 (phần 1), dòng "thân async chạy" chỉ xuất hiện sau khi `block_on` poll lần đầu.
 
 </details>
 
 **Quay lại Q1:** `poll` là một lần thử không chặn trả `Ready` hoặc `Pending`, và future không làm gì cho đến khi có người poll.
 
+
 ## 3. Hợp đồng của `poll` (Q2)
 
-> **Trả lời ngắn.** Future trả `Pending` thì phải bảo đảm task hiện tại được lên lịch đánh thức khi có thể tiến triển;[^std-poll-pending] cụ thể là lưu một bản clone của `Waker` lấy từ `Context`.[^std-future-clone] Dù vậy `poll` vẫn có thể bị gọi khi chưa có gì mới (Tokio gọi là spurious wakeup),[^tokio-spurious] nên `poll` đúng luôn kiểm tra lại điều kiện thật (nhận xét của người soạn).
+> **Trả lời ngắn.** Future trả `Pending` thì phải bảo đảm task hiện tại được lên lịch đánh thức khi có thể tiến triển;[^std-poll-pending] cụ thể là lưu một bản clone của `Waker` lấy từ `Context`.[^std-future-clone] Dù vậy `poll` vẫn có thể bị gọi khi chưa có gì mới (Tokio gọi là spurious wakeup),[^tokio-spurious] nên một `poll` đúng luôn kiểm tra lại điều kiện thật (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): trước khi cúp máy bạn phải để lại số điện thoại, nếu không không ai biết gọi bạn khi có tin. Đôi khi chuông reo mà chưa có tin gì, nên mỗi lần nghe máy bạn vẫn phải kiểm tra lại.
+*Với service `orders`.* Handler gửi request sang `inventory` rồi trả `Pending`. Từ lúc đó worker thread đã đi làm việc khác, và chỉ future của handler biết nó đang đợi socket nào. Nếu future không để lại cách báo tin, thì khi `inventory` trả lời sẽ không ai biết phải poll handler nào, và request treo mãi. Ngược lại, đôi khi handler bị poll dù `inventory` chưa nói gì, và nó phải chịu được chuyện đó. Hai chiều này là cốt lõi của hợp đồng `poll`.
 
-Đây là phần dễ viết sai nhất khi tự cài future. Bốn điều khoản (đã đối chiếu docs):
+Hợp đồng có bốn điều khoản, và đây là phần dễ viết sai nhất khi tự cài future. Ba điều đầu nằm ở đây, điều (d) ở phần Đi sâu.
 
-**(a) `Pending` đi kèm một lời hứa wake.** Doc của `Poll::Pending`: hàm trả `Pending` thì cũng phải đảm bảo task hiện tại được lên lịch đánh thức khi có thể tiến triển.[^std-poll-pending] Docs của `Future::poll` cụ thể hóa: khi chưa sẵn sàng, `poll` trả `Pending` và lưu một bản clone của `Waker` lấy từ `Context`.[^std-future-clone] Trả `Pending` mà không để ai giữ waker thì không ai có lý do poll lại, và task treo mãi (hệ quả logic; người soạn).
+**(a) `Pending` đi kèm một lời hứa wake.** Docs của `Poll::Pending` nói hàm trả `Pending` thì cũng phải bảo đảm task hiện tại được lên lịch đánh thức khi có thể tiến triển.[^std-poll-pending] Docs của `Future::poll` cụ thể hóa lời hứa đó: khi chưa sẵn sàng, `poll` trả `Pending` và lưu một bản clone của `Waker` lấy từ `Context`.[^std-future-clone] Trả `Pending` mà không để ai giữ waker thì không ai có lý do poll lại, nên task treo mãi (hệ quả logic; người soạn). Với `orders`, đó là một request không bao giờ có phản hồi.
 
-**(b) Chỉ waker của lần poll gần nhất cần được lên lịch.**[^std-future-latest] Mỗi lần poll có thể mang một `Context` khác (ví dụ future được chuyển sang task khác), nên future giữ waker phải làm tươi nó mỗi lần bị poll (suy luận của người soạn từ câu trích). Mục 4.3 nói `clone_from` làm việc này mà tránh clone thừa khi hai waker cùng đánh thức một task.
+**(b) Chỉ waker của lần poll gần nhất cần được lên lịch.**[^std-future-latest] Mỗi lần poll có thể mang một `Context` khác, chẳng hạn khi future được chuyển sang task khác. Vì vậy future đang giữ waker phải làm tươi nó mỗi lần bị poll (suy luận của người soạn từ câu trích). Mục 4.3 cho thấy `clone_from` làm việc này mà tránh clone thừa khi hai waker cùng đánh thức một task.
 
-**(c) `poll` có thể bị gọi khi chưa có gì mới.** Hợp đồng "wake ⇒ ít nhất một poll" không có chiều ngược lại. Docs `Future::poll` chỉ nói rằng sau khi task được đánh thức thì nó nên poll lại và lần poll đó "có thể hoặc không" ra giá trị cuối;[^std-future-maybe] docs std (các trang đã đọc) không tuyên bố rõ chuyện poll khi chưa có wake. Docs cũng nói mỗi lần task được đánh thức, nó nên poll lại các future còn quan tâm đang chờ;[^std-future-inert] vì vậy một future có thể bị poll lại dù sự kiện của riêng nó chưa tới (suy luận của người soạn từ câu trích). Tokio thì nói thẳng rằng nó có thể lên lịch task chưa được wake, gọi là spurious wakeup.[^tokio-spurious] Vì thế `poll` đúng luôn *kiểm tra lại điều kiện thật* và trả `Pending` nếu chưa đủ (nhận xét của người soạn). Mục 7.1, phần 4, minh họa điều này: poll tay lần hai khi chưa ai wake, Timer trả lại `Pending`.
+**(c) `poll` có thể bị gọi khi chưa có gì mới.** Lời hứa của waker chỉ đi một chiều: có wake thì sẽ có ít nhất một poll, nhưng có poll không có nghĩa là đã có wake. Docs nói sau khi được đánh thức, task nên poll lại, và lần poll đó có thể hoặc không ra giá trị cuối.[^std-future-maybe] Docs cũng dặn mỗi lần task được đánh thức thì nên poll lại các future còn quan tâm đang chờ;[^std-future-inert] vì vậy một future vẫn có thể bị poll dù sự kiện riêng của nó chưa tới (suy luận của người soạn từ câu trích). Tokio nói thẳng rằng trong vài trường hợp nó lên lịch cả task chưa được wake, và gọi đó là spurious wakeup.[^tokio-spurious] (Các trang docs std đã đọc không tuyên bố rõ chuyện poll khi chưa có wake.) Vậy một `poll` đúng luôn *kiểm tra lại điều kiện thật* và trả `Pending` nếu chưa đủ (nhận xét của người soạn). Với `orders`: handler bị poll mà chưa nhận được byte nào từ `inventory` thì phải trả `Pending`, không được coi như đã có dữ liệu. Mục 7.1, phần 4, minh họa điều này: poll tay lần hai khi chưa ai wake, Timer trả lại `Pending`.
+
+Luồng điển hình của ba điều khoản trên:
+
 
 ```mermaid
 sequenceDiagram
@@ -103,7 +118,7 @@ sequenceDiagram
 
 <details><summary>Đi sâu: điều khoản (d) — sau <code>Ready</code> đừng poll nữa — và cảnh báo busy-poll</summary>
 
-**(d) Sau `Ready`, đừng poll nữa.** Docs: client không nên poll lại future đã xong.[^std-future-once] Nếu làm vậy, `poll` có thể panic, chặn mãi hay gây vấn đề khác; trait không đặt yêu cầu nào lên hiệu ứng, nhưng vì `poll` không phải `unsafe` nên nó không bao giờ được gây undefined behavior.[^std-future-panic] Rust Book: nhiều future sẽ panic nếu bị poll lại, giống `Iterator::next`.[^book-poll-again] Quan sát: `async { 7 }` poll lần hai panic với thông báo `` `async fn` resumed after completion `` (mục 7.2); đó là hành vi của kiểu compiler sinh, không phải điều trait hứa.
+**(d) Sau `Ready`, đừng poll nữa.** Docs dặn client không nên poll lại future đã xong.[^std-future-once] Nếu làm vậy, `poll` có thể panic, chặn mãi hay gây vấn đề khác; trait không đặt yêu cầu nào lên hiệu ứng, nhưng vì `poll` không phải `unsafe` nên nó không bao giờ được gây undefined behavior.[^std-future-panic] Rust Book cũng ghi nhiều future sẽ panic nếu bị poll lại, giống `Iterator::next`.[^book-poll-again] Quan sát: `async { 7 }` poll lần hai panic với thông báo `` `async fn` resumed after completion `` (mục 7.2); đó là hành vi của kiểu compiler sinh, không phải điều trait hứa.
 
 Docs còn dặn: không gọi `poll` lặp trong vòng lặp chặt, chỉ gọi khi future cho biết nó có thể tiến triển bằng `wake()`.[^std-future-tight] Đó là ranh giới giữa executor đúng và busy-poll.
 
@@ -111,34 +126,43 @@ Docs còn dặn: không gọi `poll` lặp trong vòng lặp chặt, chỉ gọi
 
 **Quay lại Q2:** `Pending` đi kèm lời hứa wake (lưu clone waker), và vì `poll` có thể bị gọi dư, nó phải luôn kiểm tra lại điều kiện thật.
 
+
 ## 4. `Context` và `Waker` (Q3)
 
-> **Trả lời ngắn.** `Context` hiện chỉ để cung cấp truy cập tới một `&Waker`;[^std-context] `Waker` là tay cầm để đánh thức một task bằng cách báo cho executor rằng task sẵn sàng chạy.[^std-waker-def] `wake` tiêu thụ waker còn `wake_by_ref` thì không,[^std-waker-wake-doc][^std-waker-noconsume] và `will_wake` cho biết (best-effort) hai waker có đánh thức cùng task không.[^std-waker-will] Chừng nào executor còn chạy và task chưa xong, mỗi lần wake được bảo đảm theo sau bởi ít nhất một `poll`, nhưng nhiều lần wake có thể bị gộp thành một.[^std-waker-wake][^std-waker-coalesce]
+> **Trả lời ngắn.** Future lấy `Waker` qua `Context`, thứ hiện chỉ để đưa tới một `&Waker`.[^std-context] `Waker` là tay cầm để đánh thức một task: nó báo cho executor rằng task sẵn sàng chạy.[^std-waker-def] `wake` tiêu thụ waker còn `wake_by_ref` thì không; `will_wake` chỉ trả lời best-effort xem hai waker có đánh thức cùng task không.[^std-waker-will] Chừng nào executor còn chạy và task chưa xong, mỗi lần wake được bảo đảm theo sau bởi ít nhất một `poll`, nhưng nhiều lần wake có thể bị gộp thành một.[^std-waker-coalesce]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Waker` là chiếc nút bấm chuông gọi riêng của một task, được trao cho nguồn sự kiện. Bấm nhiều lần trước khi executor kịp ra thì executor chỉ cần ra một lần.
+*Với service `orders`.* Reactor của `orders` canh các socket tới `inventory` bằng epoll. Khi một socket đọc được, reactor phải báo đúng handler đang đợi socket đó. Việc báo tin ấy là việc của `Waker`: executor tạo waker cho từng task, future giữ một bản, và reactor gọi nó khi sự kiện tới. `Context` chỉ là đường để executor đưa waker vào `poll`. (Mô tả này là của người soạn, khớp với vòng đời nêu ở 4.2.)
 
 ### 4.1 `Context` chỉ là cái túi đựng `&Waker`
 
-Docs 1.95.0: hiện tại `Context` chỉ phục vụ việc cung cấp truy cập tới một `&Waker` dùng để đánh thức task hiện tại.[^std-context] Tạo bằng `Context::from_waker(&waker)` và lấy lại bằng `cx.waker()`.[^std-context-api] (Docs liệt kê thêm `local_waker` và `ext` nhưng đánh dấu nightly-only; chương này không dùng.) `Context` cũng được ghi là `!Send` và `!Sync`.[^std-context-send] Lý do tách khỏi `Waker` là để std có thể bổ sung dữ liệu vào `Context` về sau mà không đổi chữ ký `poll` (suy luận của người soạn từ chữ "Currently"). Docs `Context` 1.95.0 không có câu nào nói thẳng mục đích tách này; chỉ có `Context::ext` ("extension data", nightly-only) là dấu hiệu cùng hướng, chưa phải bảo đảm.[^std-context-ext]
+Docs 1.95.0 nói hiện tại `Context` chỉ phục vụ việc cung cấp truy cập tới một `&Waker` dùng để đánh thức task hiện tại.[^std-context] Tạo bằng `Context::from_waker(&waker)` và lấy lại bằng `cx.waker()`.[^std-context-api] `Context` cũng là `!Send` và `!Sync`.[^std-context-send] (Docs còn liệt kê `local_waker` và `ext`, nhưng đều là API nightly-only nên chương này bỏ qua.)
+
+Vậy sao không truyền thẳng `&Waker` vào `poll`? Docs không trả lời câu này. Chữ "Currently" trong câu trên gợi ý rằng std chừa chỗ để thêm dữ liệu vào `Context` về sau mà không phải đổi chữ ký `poll` (suy luận của người soạn).
 
 ### 4.2 `Waker`: tay cầm để đánh thức một task
 
-Docs: `Waker` là tay cầm để đánh thức một task bằng cách báo cho executor của nó rằng task sẵn sàng chạy.[^std-waker-def] Vòng đời điển hình: executor dựng waker, bọc trong `Context`, truyền vào `poll`; nếu future trả `Pending` thì nó phải lưu waker và gọi `wake()` khi nên được poll lại.[^std-waker-life] `Waker` là `Clone`, `Send` và `Sync`, nên có thể được gọi từ bất kỳ thread nào, kể cả thread không do executor quản lý; docs đưa ví dụ đánh thức future khi một lời gọi chặn kết thúc trên thread khác.[^std-waker-send] Mục 7 làm đúng điều đó: Timer sinh một thread, thread đó giữ clone của waker rồi gọi `wake()` sau khi ngủ.
+`Waker` là tay cầm để đánh thức một task, bằng cách báo cho executor của task rằng nó sẵn sàng chạy.[^std-waker-def] Vòng đời điển hình: executor dựng waker, bọc trong `Context` rồi truyền vào `poll`; nếu future trả `Pending` thì nó phải lưu waker và gọi `wake()` khi nên được poll lại.[^std-waker-life]
+
+Điểm đáng chú ý là `Waker` là `Clone`, `Send` và `Sync`, nên gọi được từ bất kỳ thread nào, kể cả thread không do executor quản lý.[^std-waker-send] Với `orders`, một thread reactor riêng vẫn wake được handler đang nằm trên worker thread khác (ví dụ giả định). Mục 7 làm đúng chuyện đó: Timer sinh một thread phụ, thread này giữ clone của waker rồi gọi `wake()` sau khi ngủ.
 
 ### 4.3 `wake`, `wake_by_ref`, `will_wake`, `clone_from`
+
+Bốn phương thức bạn sẽ gặp nhiều nhất:
 
 | Phương thức | Ý nghĩa (theo docs) |
 |---|---|
 | `wake(self)` | Đánh thức task, **tiêu thụ** waker (nhận `self`).[^std-waker-wake-doc] |
-| `wake_by_ref(&self)` | Giống `wake` nhưng không tiêu thụ waker;[^std-waker-noconsume] docs nói nó có thể kém hiệu quả hơn chút khi bạn đang có waker sở hữu, nhưng nên được ưu tiên hơn `waker.clone().wake()`.[^std-waker-byref] |
-| `will_wake(&self, &Waker)` | `true` nếu hai waker sẽ đánh thức cùng một task; làm theo kiểu best-effort, có thể trả `false` dù thực tế cùng task, nhưng nếu trả `true` thì đảm bảo cùng task.[^std-waker-will] |
-| `clone_from(&mut self, &Waker)` | Gán bản clone của nguồn, *trừ khi* `self.will_wake(source)`; docs khuyên dùng thay cho `*waker = new_waker.clone()` vì tránh clone thừa.[^std-waker-clonefrom] |
+| `wake_by_ref(&self)` | Giống `wake` nhưng không tiêu thụ waker.[^std-waker-noconsume] Docs nói nó có thể kém hiệu quả hơn chút khi bạn đang có waker sở hữu, nhưng vẫn nên được ưu tiên hơn `waker.clone().wake()`.[^std-waker-byref] |
+| `will_wake(&self, &Waker)` | `true` nếu hai waker sẽ đánh thức cùng một task. Hàm làm theo kiểu best-effort nên có thể trả `false` dù thực tế cùng task, nhưng nếu trả `true` thì đảm bảo cùng task.[^std-waker-will] |
+| `clone_from(&mut self, &Waker)` | Gán bản clone của nguồn, *trừ khi* `self.will_wake(source)`. Docs khuyên dùng nó thay cho `*waker = new_waker.clone()` vì tránh clone thừa.[^std-waker-clonefrom] |
 
-`will_wake` được docs mô tả là chủ yếu dùng để tối ưu, ví dụ `clone_from` dùng nó để khỏi clone khi hai waker cùng đánh thức một task.[^std-waker-will-opt] Trong ví dụ mục 7, Timer dùng `clone_from` mỗi lần bị poll mà chưa xong.
+`will_wake` chủ yếu để tối ưu, ví dụ `clone_from` dùng nó để khỏi clone khi hai waker cùng đánh thức một task.[^std-waker-will-opt] Timer ở mục 7 gọi `clone_from` mỗi lần bị poll mà chưa xong.
 
-**Lời hứa cốt lõi của `wake`.** Chừng nào executor còn chạy và task chưa xong, mỗi lần gọi `wake()` (hay `wake_by_ref()`) được đảm bảo theo sau bởi ít nhất một lần `poll()` task đó.[^std-waker-wake] Hệ quả mà docs ghi rõ: nhiều lần wake có thể bị gộp (coalesce) thành một lần `poll`.[^std-waker-coalesce] Docs cũng lưu ý executor không bắt buộc phải nhường cho task khác: nó có thể chọn chạy lại ngay chính task đó.[^std-waker-yield] Với backend (nhận xét của người soạn): giống ready list của epoll tích lũy các fd giữa hai lần `epoll_wait` (xem [Chương 02, mục 4](02-select-poll-epoll.md)), một lần `poll` có thể xử lý "gộp" cả loạt wake, nên đừng suy số lần `poll` từ số lần `wake`.
+**Lời hứa cốt lõi của `wake`.** Chừng nào executor còn chạy và task chưa xong, mỗi lần gọi `wake()` (hay `wake_by_ref()`) được đảm bảo theo sau bởi ít nhất một lần `poll()` task đó.[^std-waker-wake] Chiều ngược lại không đúng: nhiều lần wake có thể bị gộp (coalesce) thành một lần `poll`.[^std-waker-coalesce] Executor cũng không bắt buộc phải nhường cho task khác, nó có thể chạy lại ngay chính task đó.[^std-waker-yield]
+
+Với `orders`, giả sử `inventory` trả lời bằng ba gói tin liền nhau và reactor wake handler ba lần trước khi worker kịp tới; khi đó một lần `poll` có thể đọc hết cả ba. Cơ chế này giống ready list của epoll, vốn tích lũy các fd giữa hai lần `epoll_wait` (xem [Chương 02, mục 4](02-select-poll-epoll.md)). Vì vậy đừng suy số lần `poll` từ số lần `wake` (nhận xét của người soạn).
 
 Quan sát: ở mục 7.1 phần 3, future gọi `wake` ba lần rồi trả `Pending`; `block_on` của ta chỉ poll thêm một lần (polls = 2), hợp với quyền gộp của docs.
 
@@ -146,40 +170,42 @@ Quan sát: ở mục 7.1 phần 3, future gọi `wake` ba lần rồi trả `Pen
 
 ### 4.4 `Waker::noop`
 
-`Waker::noop()` (ổn định từ 1.85.0, nên có trong 1.95.0;[^std-waker-noop-since] kiểu trả về `&'static Waker`) trả về waker không làm gì, chủ yếu cho test cần một `Context`; docs cảnh báo dùng nó để poll nghĩa là bỏ đi thông báo "khi nào nên poll lại", nên chỉ dùng khi thông báo đó không cần để tiến triển.[^std-waker-noop] Mục 7 dùng nó để poll tay.
+`Waker::noop()` ổn định từ 1.85.0 nên có trong 1.95.0, kiểu trả về là `&'static Waker`.[^std-waker-noop-since] Nó trả về một waker không làm gì, chủ yếu cho test cần một `Context`. Docs cảnh báo dùng nó để poll nghĩa là bỏ đi thông báo "khi nào nên poll lại", nên chỉ dùng khi thông báo đó không cần để tiến triển.[^std-waker-noop] Mục 7 dùng nó để poll tay.
 
 </details>
 
 **Quay lại Q3:** `Context` mang `&Waker`; `wake` tiêu thụ, `wake_by_ref` không; `will_wake` chỉ best-effort; wake được bảo đảm ít nhất một `poll` nhưng có thể gộp.
 
+
 ## 5. `RawWaker` và `RawWakerVTable` (Q4)
 
-> **Trả lời ngắn.** Bên trong, `Waker` bọc một `RawWaker`: một con trỏ dữ liệu cộng một bảng con trỏ hàm ảo (vtable) tùy biến hành vi đánh thức.[^std-rawwaker-def] Dựng `Waker` từ `RawWaker` là `unsafe`, còn trait `Wake` là phương án an toàn nhưng cần cấp phát bộ nhớ;[^std-waker-unsafe] vì `Wake` có thể không dùng được ở một số executor, đặc biệt trên hệ nhúng, `RawWaker` tồn tại như phương án thay thế.[^std-wake-embedded]
+> **Trả lời ngắn.** Bên trong, `Waker` bọc một `RawWaker`: một con trỏ dữ liệu cộng một bảng con trỏ hàm ảo (vtable) tùy biến hành vi đánh thức.[^std-rawwaker-def] Dựng `Waker` từ `RawWaker` là `unsafe`, còn cài trait `Wake` là phương án an toàn nhưng cần cấp phát bộ nhớ.[^std-waker-unsafe] Vì `Wake` có thể không dùng được ở một số executor, nhất là trên hệ nhúng, `RawWaker` tồn tại như phương án thay thế.[^std-wake-embedded]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): giống một interface viết tay kiểu C, gồm một con trỏ thô và một bảng hàm `clone`/`wake`/`wake_by_ref`/`drop`; mỗi executor tự quyết dữ liệu đánh thức nằm ở đâu.
+*Với service `orders`.* Nếu `orders` chạy trên một executor có sẵn thì bạn gần như không bao giờ đụng tới `RawWaker`. Mục này cho thấy chiếc `Waker` mà reactor của `orders` cầm bên trong là gì, và vì sao std để lộ nó ra (nhận xét của người soạn).
 
-Một `Waker` là gì bên trong? Docs: nó bọc một `RawWaker`, vốn định nghĩa hành vi đánh thức đặc thù của executor.[^std-waker-raw] `RawWaker` gồm một con trỏ dữ liệu và một bảng con trỏ hàm ảo (vtable) tùy biến hành vi.[^std-rawwaker-def] Con trỏ dữ liệu chứa dữ liệu tùy ý mà executor cần, ví dụ con trỏ đã xóa kiểu (type-erased) tới một `Arc` gắn với task, và giá trị này được truyền làm tham số đầu cho mọi hàm trong vtable.[^std-rawwaker-data]
+Bên trong, `Waker` bọc một `RawWaker`, vốn định nghĩa hành vi đánh thức đặc thù của executor.[^std-waker-raw] `RawWaker` gồm một con trỏ dữ liệu và một bảng con trỏ hàm ảo (vtable) tùy biến hành vi.[^std-rawwaker-def] Con trỏ dữ liệu chứa bất cứ thứ gì executor cần, ví dụ con trỏ đã xóa kiểu (type-erased) tới một `Arc` gắn với task. Giá trị này được truyền làm tham số đầu cho mọi hàm trong vtable.[^std-rawwaker-data]
 
-`RawWakerVTable::new` nhận bốn hàm `unsafe fn`, mỗi hàm nhận `*const ()` (riêng `clone` còn trả về một `RawWaker`): `clone`, `wake`, `wake_by_ref`, `drop`.[^std-vtable-new] Vai trò từng hàm theo docs:
+`RawWakerVTable::new` nhận bốn hàm `unsafe fn`, mỗi hàm nhận `*const ()` (riêng `clone` còn trả về một `RawWaker`): `clone`, `wake`, `wake_by_ref`, `drop`.[^std-vtable-new] Vai trò từng hàm:
 
 - `clone`: phải giữ lại mọi tài nguyên cần cho bản thể mới, và `wake` trên bản đó phải đánh thức cùng task với bản gốc.[^std-vtable-clone]
 - `wake`: phải đánh thức task và *giải phóng* tài nguyên gắn với bản thể này (nó tiêu thụ waker).[^std-vtable-wake]
 - `wake_by_ref`: tương tự `wake` nhưng không được tiêu thụ con trỏ dữ liệu.[^std-vtable-byref]
 - `drop`: được gọi khi waker bị hủy và phải giải phóng tài nguyên gắn với nó.[^std-vtable-drop]
 
-**Vì sao có đường "thủ công" này?** Docs chỉ nói hai điều có thể trích: (1) dựng `Waker` từ `RawWaker` là `unsafe`, còn cài trait `Wake` là phương án an toàn nhưng *cần cấp phát bộ nhớ*;[^std-waker-unsafe] (2) trait `Wake` có thể không dùng được ở một số executor, đặc biệt trên hệ nhúng, và đó là lý do `RawWaker` tồn tại như phương án thay thế cho những hệ ấy.[^std-wake-embedded] Vtable là type erasure kiểu C: một `*const ()` thô cộng bảng hàm, để mỗi executor tự chọn cách lưu dữ liệu đánh thức (suy luận của người soạn: docs không nêu "no_std" bằng chữ ở các trang đã đọc, chỉ nêu hệ nhúng và yêu cầu cấp phát của `Wake`).
+**Vì sao std còn đường thủ công này?** Docs nêu hai điều. Một: dựng `Waker` từ `RawWaker` là `unsafe`, còn cài trait `Wake` là phương án an toàn nhưng *cần cấp phát bộ nhớ*.[^std-waker-unsafe] Hai: `Wake` có thể không dùng được ở một số executor, nhất là trên hệ nhúng, và `RawWaker` tồn tại làm phương án thay thế cho những hệ ấy.[^std-wake-embedded] Nói cách khác, vtable là type erasure kiểu C: một `*const ()` thô cộng bảng hàm, để mỗi executor tự chọn chỗ lưu dữ liệu đánh thức (suy luận của người soạn; docs không nêu chữ "no_std" ở các trang đã đọc, chỉ nêu hệ nhúng và yêu cầu cấp phát của `Wake`).
 
 <details><summary>Đi sâu: an toàn luồng của vtable, và vì sao so sánh vtable không đáng tin</summary>
 
-**An toàn luồng.** Dù `RawWaker` là `!Send + !Sync`, nếu dùng nó để dựng `Waker` thì mọi hàm trong vtable phải thread-safe, vì `Waker` là `Send + Sync`; ví dụ nếu `clone` và `drop` đếm tham chiếu thì phải làm *nguyên tử*.[^std-vtable-thread]
+**An toàn luồng.** `RawWaker` là `!Send + !Sync`, nhưng `Waker` dựng từ nó lại là `Send + Sync`, nên mọi hàm trong vtable phải thread-safe. Chẳng hạn nếu `clone` và `drop` đếm tham chiếu thì phải đếm *nguyên tử*.[^std-vtable-thread]
 
-Docs cũng cảnh báo so sánh vtable không đáng tin: con trỏ hàm cùng hàm có thể so sánh khác nhau (do nhân bản qua codegen unit), và con trỏ hàm khác nhau có thể bằng nhau (do gộp hàm giống nhau).[^std-vtable-eq] Source 1.95.0 của `Waker::will_wake` so sánh địa chỉ vtable thay vì nội dung vtable,[^src-core-willwake-cmp] và chú thích ngay đó nói việc này được phép vì hàm được tài liệu hóa là best-effort.[^src-core-willwake] Hai điều trên là lý do hợp lý để `will_wake` chỉ "best-effort" (mục 4.3; liên hệ nhân quả là suy luận của người soạn).
+**So sánh vtable.** Docs cảnh báo so sánh vtable không đáng tin: con trỏ hàm cùng một hàm có thể so sánh khác nhau (do nhân bản qua codegen unit), và con trỏ hàm khác nhau có thể bằng nhau (do gộp hàm giống nhau).[^std-vtable-eq] Source 1.95.0 của `Waker::will_wake` so sánh địa chỉ vtable thay vì nội dung vtable.[^src-core-willwake-cmp] Chú thích ngay đó nói việc này được phép vì hàm được tài liệu hóa là best-effort.[^src-core-willwake] Hai điều trên là lý do hợp lý để `will_wake` chỉ "best-effort" (mục 4.3; liên hệ nhân quả là suy luận của người soạn).
 
 </details>
 
 **Quay lại Q4:** `RawWaker` = con trỏ dữ liệu + vtable bốn hàm, `unsafe`, dành cho executor không dùng được `Wake`.
+
 
 ## 6. Trait `Wake` và `From<Arc<W>> for Waker` (Q5)
 
@@ -187,9 +213,10 @@ Docs cũng cảnh báo so sánh vtable không đáng tin: con trỏ hàm cùng h
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì tự làm bảng hàm, bạn chỉ viết `wake` cho một đối tượng dùng chung qua `Arc`, còn std dựng vtable hộ.
+*Với service `orders`.* Giả sử bạn tự viết một executor nhỏ cho `orders`. Mỗi task thường là một `Arc<Task>` nằm trong hàng đợi chung, và `wake` chỉ cần đẩy task đó trở lại hàng đợi (phác thảo của người soạn). Trait `Wake` sinh ra cho đúng thiết kế này: bạn chỉ viết `wake` cho `Task`, còn std dựng vtable hộ.
 
-Docs mô tả `Wake` là cài đặt cho việc đánh thức một task trên executor; nó là phương án an toàn bộ nhớ và tiện hơn `RawWaker`, hỗ trợ thiết kế phổ biến trong đó dữ liệu dùng để đánh thức task lưu trong một `Arc`.[^std-wake] Để dựng `Waker` từ kiểu `W` cài `Wake`, bọc nó trong `Arc<W>` rồi gọi `Waker::from()`.[^std-wake-from]
+Docs mô tả `Wake` là phương án an toàn bộ nhớ và tiện hơn `RawWaker`, vì nó hỗ trợ thiết kế phổ biến trong đó dữ liệu dùng để đánh thức task lưu trong một `Arc`.[^std-wake] Để có `Waker` từ kiểu `W` cài `Wake`, bọc `W` trong `Arc<W>` rồi gọi `Waker::from()`.[^std-wake-from]
+
 
 ```rust
 pub trait Wake {
@@ -198,11 +225,11 @@ pub trait Wake {
 }
 ```
 
-`wake_by_ref` có cài đặt mặc định; docs ghi nếu executor có cách đánh thức rẻ hơn mà không cần tiêu thụ waker thì nên override, còn mặc định là clone `Arc` rồi gọi `wake` trên bản clone.[^std-wake-byref]
+`wake_by_ref` có cài đặt mặc định: docs ghi mặc định là clone `Arc` rồi gọi `wake` trên bản clone, và nếu executor có cách đánh thức rẻ hơn mà không cần tiêu thụ waker thì nên override.[^std-wake-byref]
 
 <details><summary>Đi sâu: source của <code>From&lt;Arc&lt;W&gt;&gt;</code> và quan sát đếm tham chiếu</summary>
 
-Phép chuyển đổi nằm trong source: `impl<W: Wake + Send + Sync + 'static> From<Arc<W>> for Waker`.[^src-from-arc] Ràng buộc `Send + Sync + 'static` có lý do: `Waker` là `Send + Sync` (mục 4.2) nên `W` phải thế; `'static` vì waker có thể được giữ lâu hơn bất kỳ vùng stack nào (lý do thứ hai là suy luận của người soạn). Source cũng cho thấy vtable do std dựng sẵn: `clone` tăng strong count của `Arc` bằng `Arc::increment_strong_count`.[^src-clone-waker] Quan sát (mục 7.2): `Arc::strong_count` tăng 1 khi `w.clone()`, giảm 1 sau `w2.wake()` (wake tiêu thụ waker) và giảm tiếp sau `drop`.
+Phép chuyển đổi nằm trong source: `impl<W: Wake + Send + Sync + 'static> From<Arc<W>> for Waker`.[^src-from-arc] Ràng buộc `Send + Sync + 'static` có lý do: `Waker` là `Send + Sync` (mục 4.2) nên `W` phải thế, còn `'static` vì waker có thể được giữ lâu hơn bất kỳ vùng stack nào (lý do thứ hai là suy luận của người soạn). Source cũng cho thấy vtable do std dựng sẵn, trong đó `clone` tăng strong count của `Arc` bằng `Arc::increment_strong_count`.[^src-clone-waker] Quan sát (mục 7.2): `Arc::strong_count` tăng 1 khi `w.clone()`, giảm 1 sau `w2.wake()` (wake tiêu thụ waker) và giảm tiếp sau `drop`.
 
 Mặc định của `wake_by_ref` cũng thấy được ở chương trình đó: `CountWake` chỉ cài `wake`, nhưng gọi `w.wake_by_ref()` vẫn làm bộ đếm `wake` tăng lên 1.
 
@@ -210,19 +237,19 @@ Mặc định của `wake_by_ref` cũng thấy được ở chương trình đó
 
 **Quay lại Q5:** `Wake` + `Arc` là đường an toàn để có `Waker`, đổi lại cần cấp phát và `W: Wake + Send + Sync + 'static`.
 
+
 ## 7. Thực hành: một Timer thủ công và `block_on` bằng `park`/`unpark` (Q6)
 
 > **Trả lời ngắn.** Timer thủ công lưu clone waker ở lần poll đầu và nhờ một thread phụ gọi `wake()` sau khi ngủ; các lần poll sau làm tươi waker và vẫn trả `Pending` nếu chưa xong. `block_on` `park` thread khi future `Pending` và `unpark` trong `wake`; sườn của nó lấy từ ví dụ trong docs của `Wake`.[^std-wake-example-note] Kết quả chạy thật nằm ở mục 7.1 bên dưới.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): Timer là người giao hàng hẹn "xong thì gọi bạn"; `block_on` là người ngồi cạnh điện thoại, ngủ cho đến khi chuông reo.
-
-Mục tiêu: cài hai nửa của hợp đồng. *Future* (Timer) lưu waker và đảm bảo có người gọi `wake`; *executor* (`block_on`) ngủ khi `Pending` và thức khi waker được gọi.
+*Với service `orders`.* Ta dựng bản thu nhỏ của chuyện `orders` đợi `inventory`. `Timer` đóng vai "phản hồi sẽ tới sau 50 ms", với một thread phụ giả làm reactor. `block_on` là executor một thread, chạy một future cho tới khi xong. Hai nửa này cài đúng hợp đồng ở mục 3: future (`Timer`) lưu waker và bảo đảm có người gọi `wake`; executor (`block_on`) ngủ khi `Pending` và thức khi waker được gọi. (Ví dụ minh họa của người soạn.)
 
 ### 7.1 Chương trình 1: `block_on`, `Timer`, `Burst`
 
-Sườn `block_on` lấy từ ví dụ trong docs của `Wake`, kèm lời cảnh báo của chính docs: ví dụ đó "đánh đổi tính đúng đắn lấy sự đơn giản" và bản production phải xử lý các lời gọi `thread::unpark` xen giữa cũng như lời gọi lồng nhau.[^std-wake-example-note] Bản dưới thêm một cờ `AtomicBool` để không tin việc `park` trả về (xem file `labs/crates/lab-io-async/src/bin/mini_executor.rs` trong repo, nơi lab cũ có cùng cách làm).
+Sườn `block_on` lấy từ ví dụ trong docs của `Wake`, và chính docs cảnh báo rằng ví dụ đó đánh đổi tính đúng đắn lấy sự đơn giản: bản production còn phải xử lý các lời gọi `thread::unpark` xen giữa và các lời gọi lồng nhau.[^std-wake-example-note] Bản dưới thêm một cờ `AtomicBool` để không tin việc `park` trả về (file `labs/crates/lab-io-async/src/bin/mini_executor.rs` trong repo có cùng cách làm).
+
 
 ```rust
 use std::future::Future;
@@ -266,7 +293,8 @@ fn block_on<F: Future>(fut: F) -> (F::Output, u32) {
 }
 ```
 
-`pin!(fut)` ghim future trên stack của `block_on` ([Chương 06, mục 5](06-async-await-pin.md)); thread gọi `block_on` tự `park` khi `Pending`, và `wake` (có thể từ thread khác) `unpark` nó. Cờ `woken` là nơi executor kiểm tra điều kiện thật, vì docs của `thread::park` ghi rằng nó có thể trả về "giả" (spuriously) mà không tiêu thụ token.[^std-thread-park]
+`pin!(fut)` ghim future trên stack của `block_on` ([Chương 06, mục 5](06-async-await-pin.md)). Thread gọi `block_on` tự `park` khi `Pending`, và `wake` (có thể chạy từ thread khác) sẽ `unpark` nó. Cờ `woken` là nơi executor kiểm tra điều kiện thật, vì `thread::park` có thể trả về "giả" (spuriously) mà không tiêu thụ token.[^std-thread-park]
+
 
 ```rust
 // ---- future thủ công: Timer ----
@@ -322,7 +350,8 @@ impl Future for Timer {
 }
 ```
 
-`Timer` là state machine hai trạng thái viết tay (chưa khởi động, tức `shared == None` / đang chờ), cài các điều khoản của mục 3. Lần poll đầu lưu clone waker và thread phụ gọi `wake()` sau khi ngủ (thay `epoll_wait` bằng `thread::sleep`); các lần sau làm tươi waker bằng `clone_from`; poll khi `done == false` chỉ trả lại `Pending`. `done` và `waker` nằm chung dưới một `Mutex` để không mất wake (suy luận của người soạn về tính đúng của thiết kế).
+`Timer` là state machine hai trạng thái viết tay: chưa khởi động (`shared == None`) và đang chờ. Nó cài các điều khoản của mục 3. Lần poll đầu lưu clone waker, còn thread phụ gọi `wake()` sau khi ngủ (ta thay `epoll_wait` bằng `thread::sleep`). Các lần sau làm tươi waker bằng `clone_from`, và nếu `done == false` thì chỉ trả lại `Pending`. `done` và `waker` nằm chung dưới một `Mutex` để không mất wake (suy luận của người soạn về tính đúng của thiết kế).
+
 
 ```rust
 // ---- future gọi wake nhiều lần rồi mới Pending ----
@@ -369,6 +398,7 @@ fn main() {
 
 Biên dịch bằng `rustc --edition 2024` (rustc 1.95.0, macOS aarch64) và chạy; đầu ra:
 
+
 ```text
 1) async block là lười:
   đã tạo future, chưa in gì
@@ -387,11 +417,12 @@ Biên dịch bằng `rustc --edition 2024` (rustc 1.95.0, macOS aarch64) và ch�
   #2 pending=true
 ```
 
-Kết quả: (1) thân `async` chỉ chạy khi bị poll; (2) hai lần poll, số lần này phụ thuộc lịch của OS; (3) ba lần `wake` gộp thành một lần poll thêm vì executor của ta dùng một cờ bool, hợp với quyền gộp mà docs cho phép; (4) poll "giả" không gây hại vì Timer kiểm tra lại điều kiện thật.
+Đọc kết quả: (1) thân `async` chỉ chạy khi bị poll; (2) Timer cần hai lần poll, và con số này phụ thuộc lịch của OS; (3) ba lần `wake` gộp thành một lần poll thêm vì executor của ta dùng một cờ bool, hợp với quyền gộp mà docs cho phép; (4) poll "giả" không gây hại vì Timer kiểm tra lại điều kiện thật.
 
 <details><summary>Đi sâu: chương trình 2 — các thuộc tính của <code>Waker</code> (đếm tham chiếu, <code>will_wake</code>, poll lần hai, kích thước)</summary>
 
 ### 7.2 Chương trình 2: các thuộc tính của `Waker`
+
 
 ```rust
 use std::future::Future;
@@ -435,6 +466,7 @@ fn main() {
 
 Đầu ra (thông báo panic in ra stderr; tên thread có thể khác mỗi lần):
 
+
 ```text
 strong_count sau Waker::from(d.clone()) = 2
 wake_by_ref mặc định -> wake đếm = 1, strong_count = 2
@@ -452,11 +484,18 @@ note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 poll #2 panic? true
 ```
 
-`size_of::<Waker>() = 16` và `Context = 32` là số đo trên macOS aarch64 với rustc 1.95.0; đó là chi tiết cài đặt, không phải bảo đảm của std. Giải thích từ source 1.95.0 (phần cộng số là suy luận của người soạn): `Waker` chỉ bọc một `RawWaker`,[^src-core-waker] mà `RawWaker` gồm một con trỏ dữ liệu và một con trỏ vtable;[^std-rawwaker-def] con trỏ tới kiểu có kích thước cố định cùng cỡ `usize`,[^ref-layout-thin] nên trên máy 64-bit là 8 + 8 = 16 byte. `Context` có ba trường dữ liệu: `waker: &'a Waker`, `local_waker: &'a LocalWaker` và `ext`,[^src-core-context] cộng hai `PhantomData` không chiếm byte. Hai tham chiếu đầu mỗi cái 8 byte; `ext` bọc enum `ExtData` có biến thể `Some(&'a mut dyn Any)`,[^src-core-extdata] mà con trỏ tới kiểu động (DST) hiện lớn gấp đôi `usize`,[^ref-layout-dst] tức 16 byte. 8 + 8 + 16 = 32 khớp số đo, với giả định enum hai biến thể này không thêm byte nhãn (tận dụng giá trị không hợp lệ của con trỏ; source không nói kích thước). Ý nghĩa: `local_waker` và `ext` đều là API nightly-only (mục 4.1) nhưng đã có chỗ trong struct, nên `Context` lớn hơn một `&Waker` đơn thuần dù docs nói nó "hiện" chỉ cung cấp `&Waker`; điều này nhất quán với suy luận ở mục 4.1 rằng `Context` là chỗ để std mở rộng.
+`size_of::<Waker>() = 16` và `Context = 32` là số đo trên macOS aarch64 với rustc 1.95.0; đó là chi tiết cài đặt, không phải bảo đảm của std. Phần dưới giải thích hai con số từ source 1.95.0; các phép cộng là suy luận của người soạn.
+
+`Waker` chỉ bọc một `RawWaker`.[^src-core-waker] `RawWaker` gồm một con trỏ dữ liệu và một con trỏ vtable.[^std-rawwaker-def] Con trỏ tới kiểu có kích thước cố định cùng cỡ `usize`,[^ref-layout-thin] nên trên máy 64-bit `Waker` là 8 + 8 = 16 byte.
+
+`Context` có ba trường dữ liệu: `waker: &'a Waker`, `local_waker: &'a LocalWaker` và `ext`, cộng hai `PhantomData` không chiếm byte.[^src-core-context] Hai tham chiếu đầu mỗi cái 8 byte. `ext` bọc enum `ExtData` có biến thể `Some(&'a mut dyn Any)`,[^src-core-extdata] mà con trỏ tới kiểu động (DST) hiện lớn gấp đôi `usize`,[^ref-layout-dst] tức 16 byte. Vậy 8 + 8 + 16 = 32, khớp số đo, với giả định enum hai biến thể này không thêm byte nhãn (nó tận dụng giá trị không hợp lệ của con trỏ; source không nói kích thước).
+
+Ý nghĩa: `local_waker` và `ext` đều là API nightly-only (mục 4.1) nhưng đã có chỗ trong struct, nên `Context` lớn hơn một `&Waker` đơn thuần dù docs nói nó "hiện" chỉ cung cấp `&Waker`. Điều này nhất quán với suy luận ở mục 4.1 rằng `Context` là chỗ để std mở rộng.
 
 </details>
 
 **Quay lại Q6:** hai nửa của hợp đồng đều chạy được: Timer giữ waker và có người gọi `wake`, `block_on` ngủ khi `Pending` và thức khi bị wake.
+
 
 ## 8. `IntoFuture` và `.await` (Q7)
 
@@ -464,11 +503,12 @@ poll #2 panic? true
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `IntoFuture` như phiếu đặt hàng; `.await` đổi phiếu thành món (future) trước, rồi mới ngồi chờ món.
+*Với service `orders`.* Trong handler bạn viết `inventory.get(42).await`. Bạn không bao giờ viết `poll` bằng tay, vì `.await` làm hộ, và nó làm hai bước: đổi toán hạng thành một future trước, rồi mới poll future đó. Bước đổi là chỗ `IntoFuture` xuất hiện. (Ví dụ `inventory.get(42)` là của người soạn.)
 
-`.await` không gọi trực tiếp `poll` trên toán hạng. Reference: một biểu thức await bắt đầu bằng việc tạo future bằng cách gọi `IntoFuture::into_future` trên toán hạng.[^ref-await-intofuture] Docs của `IntoFuture` nói cùng điều: `.await` desugar thành một lời gọi `IntoFuture::into_future` trước khi poll future đến khi xong.[^std-intofuture-desugar] Sau đó, theo Reference, future được ghim (`Pin::new_unchecked`) và poll bằng `Future::poll` với task context hiện tại.[^ref-await-steps] Nếu `poll` trả `Pending` thì chính future bao ngoài trả `Pending`, tạm dừng trạng thái của nó để khi context async bao quanh được poll lại thì việc thực thi quay lại bước poll đó.[^ref-await]
+Reference mô tả biểu thức await bắt đầu bằng việc tạo future: gọi `IntoFuture::into_future` trên toán hạng.[^ref-await-intofuture] Docs của `IntoFuture` nói cùng điều: `.await` desugar thành một lời gọi `IntoFuture::into_future` trước khi poll future đến khi xong.[^std-intofuture-desugar] Sau đó future được ghim bằng `Pin::new_unchecked` và poll bằng `Future::poll` với task context hiện tại.[^ref-await-steps] Nếu `poll` trả `Pending` thì chính future bao ngoài trả `Pending`, tạm dừng trạng thái của nó để khi context async bao quanh được poll lại thì việc thực thi quay lại bước poll đó.[^ref-await] Trong `orders`, đó là lúc handler nhường worker thread.
 
-Trait (chữ ký theo docs):[^std-intofuture-sig]
+Chữ ký của trait:[^std-intofuture-sig]
+
 
 ```rust
 pub trait IntoFuture {
@@ -480,7 +520,7 @@ pub trait IntoFuture {
 
 <details><summary>Đi sâu: lời khuyên của docs, ví dụ builder và bound <code>IntoFuture</code></summary>
 
-Mọi `T: Future` đều đã cài `IntoFuture` (nên `into_future` có sẵn trên mọi future).[^std-intofuture-blanket] Docs khuyên: khi cài future thủ công, cài `Future` là lựa chọn tốt trong đa số trường hợp; `IntoFuture` hữu ích nhất cho các kiểu "async builder", cho phép sửa giá trị nhiều lần trước khi `.await`.[^std-intofuture-builder] Ví dụ trong docs là `Multiply::new(0, 0).number(2).factor(2).await`, trong đó `Multiply` cài `IntoFuture` với `type IntoFuture = Ready<Self::Output>` (và `Output = u16`).[^std-intofuture-multiply] Tương tự, bound `Fut: IntoFuture` cho phép hàm generic nhận cả `Future` lẫn `IntoFuture` mà người gọi khỏi gọi `into_future` thủ công.[^std-intofuture-bound]
+Mọi `T: Future` đều đã cài `IntoFuture`, nên `into_future` có sẵn trên mọi future.[^std-intofuture-blanket] Khi cài future thủ công, docs khuyên rằng cài `Future` là lựa chọn tốt trong đa số trường hợp; `IntoFuture` hữu ích nhất cho các kiểu "async builder", cho phép sửa giá trị nhiều lần trước khi `.await`.[^std-intofuture-builder] Ví dụ trong docs là `Multiply::new(0, 0).number(2).factor(2).await`, trong đó `Multiply` cài `IntoFuture` với `type IntoFuture = Ready<Self::Output>` (và `Output = u16`).[^std-intofuture-multiply] Tương tự, bound `Fut: IntoFuture` cho phép hàm generic nhận cả `Future` lẫn `IntoFuture` mà người gọi khỏi gọi `into_future` thủ công.[^std-intofuture-bound]
 
 Việc compiler biến `async fn` thành state machine nằm ở [Chương 06, mục 3](06-async-await-pin.md); cách `.await` poll future con và lan `Pending` lên trên nằm ở [mục 2 của chương đó](06-async-await-pin.md).
 
@@ -488,15 +528,16 @@ Việc compiler biến `async fn` thành state machine nằm ở [Chương 06, m
 
 **Quay lại Q7:** `.await` = `into_future` rồi ghim và poll; `IntoFuture` là cổng chuyển đổi, `Future` vẫn là lựa chọn mặc định khi tự cài.
 
+
 ## 9. Liên hệ: poll-based so với Promise của JavaScript/C# (Q8)
 
-> **Trả lời ngắn.** Future của Rust là lười và poll-based: nó không làm gì cho đến khi `await`.[^book-lazy] Ngược lại, task trả về từ các phương thức TAP của C# đã được khởi động ("hot"),[^tap-hot] còn `Promise` của JavaScript gọi hàm executor ngay trong constructor[^ecma-promise-executor] và khi được resolve thì xếp các handler đã đăng ký vào hàng đợi job để đẩy kết quả cho chúng.[^ecma-promise-react]
+> **Trả lời ngắn.** Future của Rust là lười và poll-based: nó không làm gì cho đến khi `await`.[^book-lazy] Task trả về từ các phương thức TAP của C# thì ngược lại, đã được khởi động ("hot") khi tới tay bạn.[^tap-hot] `Promise` của JavaScript cũng chạy sớm: nó gọi hàm executor ngay trong constructor,[^ecma-promise-executor] và khi được resolve thì xếp các handler đã đăng ký vào hàng đợi job để đẩy kết quả cho chúng.[^ecma-promise-react]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): với Rust bạn tự đi hỏi bếp "xong chưa"; với Promise bếp nấu ngay và bấm chuông gọi bạn khi xong.
+*Với service `orders`.* Một đồng nghiệp viết cùng handler bằng JavaScript hoặc C# sẽ thấy hành vi khác hẳn: promise hay task trả về đã bắt đầu việc rồi, và khi `inventory` xong thì kết quả được đẩy tới callback. Còn trong `orders` bằng Rust, future chỉ chạy khi executor poll, và nguồn sự kiện chỉ nhắc "hãy poll lại" qua `wake` (nhận xét của người soạn, tóm lại các mục 2–4).
 
-Rust Book nói khái niệm future cũng xuất hiện trong nhiều ngôn ngữ với tên khác, như task hoặc promise,[^book-concept] và đồng thời mô tả future Rust là lười: không làm gì cho đến khi `await`.[^book-lazy] Bảng dưới đây dẫn nguồn cho phía JavaScript/C# và Rust Book; ô nào ghi "nhận xét của người soạn" thì không có nguồn:
+Rust Book cũng nhắc khái niệm future xuất hiện ở nhiều ngôn ngữ dưới tên khác như task hay promise.[^book-concept] Điểm khác nằm ở chỗ future Rust là lười: nó không làm gì cho đến khi bạn `await`.[^book-lazy] Bảng dưới dẫn nguồn cho phía JavaScript/C# và Rust Book; ô nào ghi "nhận xét của người soạn" thì không có nguồn:
 
 | | Rust `Future` | `Promise` (JS) / `Task` (C#) |
 |---|---|---|
@@ -507,11 +548,12 @@ Rust Book nói khái niệm future cũng xuất hiện trong nhiều ngôn ngữ
 
 <details><summary>Đi sâu: tạo future mà quên await</summary>
 
-Vì future không chạy cho đến khi được poll, tạo mà quên await nghĩa là không làm gì cả (Book ghi compiler cảnh báo nếu future không được dùng[^book-warning]), khác với promise đã bắt đầu việc (nhận xét của người soạn).
+Vì future không chạy cho đến khi được poll, tạo mà quên await nghĩa là không làm gì cả, và Book ghi rằng compiler sẽ cảnh báo nếu future không được dùng.[^book-warning] Promise thì khác: nó đã bắt đầu việc rồi (nhận xét của người soạn).
 
 </details>
 
 **Quay lại Q8:** Rust kéo (poll) và lười; Promise đẩy và chạy sớm.
+
 
 ## Tóm tắt
 
@@ -615,6 +657,7 @@ Future lười, kéo bằng poll;[^book-lazy] promise thường chạy ngay và 
 - [Chương 07 — Executor và mio](07-executor-va-mio.md): executor nhiều task (mục 2) và reactor thật; mục 5 phân biệt `mio::Waker` với `std::task::Waker`.
 - Lab cũ: file `labs/crates/lab-io-async/src/bin/mini_executor.rs` trong repo — bản có đếm `polls/parks/wakes` và so sánh kích thước state machine.
 
+
 [^book-concept]: The Rust Book 1.95.0, ch17.1 Futures and the Async Syntax — <https://doc.rust-lang.org/1.95.0/book/ch17-01-futures-and-syntax.html> — "sometimes under other names such as task or promise."
 [^std-future-def]: Rust std 1.95.0, trait Future — <https://doc.rust-lang.org/1.95.0/std/future/trait.Future.html> — "A future is a value that might not have finished computing yet."
 [^std-future-sig]: Rust std 1.95.0, trait Future — <https://doc.rust-lang.org/1.95.0/std/future/trait.Future.html> — "fn poll(self: Pin<&mut Self>, cx: &mut Context\<'_>) -> Poll\<Self::Output>;"
@@ -653,7 +696,6 @@ Future lười, kéo bằng poll;[^book-lazy] promise thường chạy ngay và 
 [^std-waker-wake]: Rust std 1.95.0, struct Waker, method wake — <https://doc.rust-lang.org/1.95.0/std/task/struct.Waker.html> — "it is guaranteed that each invocation of wake() (or wake_by_ref()) will be followed by at least one poll() of the task to which this Waker belongs."
 [^std-waker-coalesce]: Rust std 1.95.0, struct Waker, method wake — <https://doc.rust-lang.org/1.95.0/std/task/struct.Waker.html> — "multiple wake-ups may be coalesced into a single poll() invocation by the runtime."
 [^std-waker-yield]: Rust std 1.95.0, struct Waker, method wake — <https://doc.rust-lang.org/1.95.0/std/task/struct.Waker.html> — "it is the executor’s choice which task to run and the executor may choose to run the current task again."
-[^std-context-ext]: Rust std 1.95.0, struct Context, method ext — <https://doc.rust-lang.org/1.95.0/std/task/struct.Context.html> — "Returns a reference to the extension data for the current task."
 [^std-waker-noop-since]: Rust std 1.95.0, struct Waker, method noop — <https://doc.rust-lang.org/1.95.0/std/task/struct.Waker.html> — "1.85.0 (const: 1.85.0) · Source pub const fn noop() -> &'static Waker"
 [^std-waker-noop]: Rust std 1.95.0, struct Waker, method noop — <https://doc.rust-lang.org/1.95.0/std/task/struct.Waker.html> — "using Waker::noop() to poll a future means discarding the notification of when the future should be polled again."
 [^std-waker-raw]: Rust std 1.95.0, struct Waker — <https://doc.rust-lang.org/1.95.0/std/task/struct.Waker.html> — "This handle encapsulates a RawWaker instance, which defines the executor-specific wakeup behavior."

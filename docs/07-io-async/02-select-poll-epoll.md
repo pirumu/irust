@@ -1,70 +1,77 @@
 # P7 · Chương 02 — select, poll và epoll
 
-> Mọi khẳng định về kernel/syscall là về **Linux** (man page Debian bookworm = Linux man-pages 6.03; source kernel ghim tag `v6.8`). Thí nghiệm chạy trong container lab (`./labs/linux.sh`, kernel 6.8, **aarch64**, glibc, `gcc`, `strace`); kết quả là *quan sát* một lần chạy, không phải bảo đảm của tài liệu. epoll là API riêng của Linux;[^epoll-linux] cơ chế tương ứng ở BSD/macOS nằm ở [Chương 03](03-kqueue-io-uring.md).
+> Phạm vi: mọi khẳng định về kernel và syscall trong chương này là về **Linux** (man page Debian bookworm, tức Linux man-pages 6.03; source kernel ghim tag `v6.8`). Các thí nghiệm chạy trong container lab (`./labs/linux.sh`, kernel 6.8, **aarch64**, glibc, `gcc`, `strace`); kết quả chỉ là *quan sát* một lần chạy, không phải bảo đảm của tài liệu. epoll là API riêng của Linux;[^epoll-linux] cơ chế tương ứng trên BSD và macOS nằm ở [Chương 03](03-kqueue-io-uring.md).
 
 ## Bạn sẽ hiểu được gì
 
-1. **Q1.** `select(2)` giới hạn ở 1024 fd là giới hạn của ai — kernel hay glibc? Vì sao phải dựng lại `fd_set` trước mỗi lần gọi? → mục 2
-2. **Q2.** `poll(2)` sửa được những gì của `select`, và `revents` khác `events` ở đâu? Điều gì xảy ra với fd âm hoặc fd đã đóng? → mục 3
-3. **Q3.** Interest list và ready list của epoll là gì; ai đưa fd vào ready list, ai lấy ra? → mục 4
+1. **Q1.** Giới hạn 1024 fd của `select(2)` là của kernel hay của glibc? Vì sao mỗi vòng lặp phải dựng lại `fd_set`? → mục 2
+2. **Q2.** `poll(2)` sửa được gì so với `select`; `revents` khác `events` ở đâu; fd âm hoặc fd chưa mở thì chuyện gì xảy ra? → mục 3
+3. **Q3.** Interest list và ready list của epoll là gì; ai đưa fd vào ready list, ai lấy ra; vì sao epoll không phải quét cả tập mỗi lần? → mục 4
 4. **Q4.** Level-triggered khác edge-triggered thế nào; vì sao ví dụ 2 KB trong `epoll(7)` làm `epoll_wait` treo ở chế độ ET, và quy tắc "đọc tới `EAGAIN`" ra đời từ đó? → mục 5
 5. **Q5.** Vì sao `close(fd)` đôi khi *không* làm fd biến mất khỏi epoll (và event cache là gì)? Vì sao `epoll_ctl` với file thường trả `EPERM`? → mục 6
-6. **Q6.** `EPOLLONESHOT` và `EPOLLEXCLUSIVE` giải quyết vấn đề gì; "một hoặc nhiều" nghĩa là gì; `EPOLLRDHUP`/`EPOLLHUP`/`EPOLLERR` và giới hạn bộ nhớ nói gì? → mục 7
-7. **Q7.** mio đăng ký mọi fd với epoll ở chế độ nào, tài liệu mio nói gì về nó, và điều đó đặt nghĩa vụ gì lên code của bạn? → mục 8
+6. **Q6.** `EPOLLONESHOT` và `EPOLLEXCLUSIVE` giải quyết vấn đề gì; "một hoặc nhiều" nghĩa là gì; `EPOLLRDHUP`, `EPOLLHUP`, `EPOLLERR` và giới hạn bộ nhớ ra sao? → mục 7
+7. **Q7.** mio đăng ký mọi fd với epoll ở chế độ nào, docs mio nói gì về nó, và điều đó đặt nghĩa vụ gì lên code của bạn? → mục 8
 
 ## Kiến thức cần trước
 
 - [Chương 01 — Mô hình I/O](01-mo-hinh-io.md), mục 2–3: `O_NONBLOCK`, `EAGAIN`, khái niệm *readiness* (fd "sẵn sàng" nghĩa là gì) và vì sao cần chờ nhiều fd cùng lúc.
-- [P1 · Chương 04 — File descriptor và VFS](../01-linux/04-file-descriptor-va-vfs.md), mục 1–3: fd, *open file description* (OFD), `dup`/`fork` — nền cho mục 6 (fd đã đóng nhưng vẫn nằm trong interest list).
+- [P1 · Chương 04 — File descriptor và VFS](../01-linux/04-file-descriptor-va-vfs.md), mục 1–3: fd, *open file description* (OFD), `dup` và `fork`. Đây là nền cho mục 6, nơi fd đã đóng mà vẫn nằm trong interest list.
 
 ## 1. Bài toán: một thread, nhiều fd
 
-Một server giữ hàng nghìn kết nối; với fd non-blocking, thread phải biết *khi nào* gọi `read` lại. `O_NONBLOCK` không báo điều đó; các giao diện `poll`/`select`/`epoll` chỉ báo fd "sẵn sàng", nghĩa là một I/O trên fd đó (với `O_NONBLOCK` tắt) sẽ không chặn.[^open-poll] ([Chương 01, mục 2–3](01-mo-hinh-io.md) đã bàn kỹ phần này.) Chương này đi qua ba thế hệ giao diện "cái nào sẵn sàng?" của Linux, dừng ở epoll — trên Linux là nền của mio, và qua mio là của Tokio ([Chương 07](07-executor-va-mio.md), [Chương 08](08-tokio.md)).
+Suốt chương này ta bám theo `gateway`, một service giả định (nhận xét của người soạn: ví dụ minh họa, không phải code trong repo). `gateway` là một process Rust giữ kết nối TCP lâu dài với hàng chục nghìn client để đẩy thông báo xuống cho họ. Phần lớn kết nối nằm im, và ở mỗi thời điểm chỉ một nhúm nhỏ có dữ liệu cần đọc. Ta muốn một thread phục vụ hết chúng.
+
+Muốn vậy, mọi socket phải ở chế độ non-blocking, nếu không một `read` trên socket im lặng sẽ treo cả thread. Nhưng `O_NONBLOCK` mới giải được nửa bài toán: nó cho `read` trả lỗi ngay khi chưa có dữ liệu, chứ không cho thread biết *khi nào* nên thử lại và thử trên socket nào. Gọi `read` quay vòng qua 10.000 socket thì chỉ đốt CPU (nhận xét của người soạn). Thứ ta cần là một syscall cho thread nằm chờ, và chỉ dậy khi có socket đáng đọc. Đó là việc của `select`, `poll` và `epoll`. Cả ba chỉ báo fd *sẵn sàng*, tức một thao tác I/O trên fd đó (với `O_NONBLOCK` tắt) sẽ không chặn.[^open-poll] [Chương 01, mục 2–3](01-mo-hinh-io.md) đã bàn kỹ phần readiness này.
+
+Chương này đi qua ba giao diện đó theo thứ tự `select`, `poll`, `epoll`, vì mỗi cái bỏ bớt một vướng mắc của cái trước. Ta dừng ở epoll: trên Linux nó là nền của mio, và qua mio là của Tokio ([Chương 07](07-executor-va-mio.md), [Chương 08](08-tokio.md)).
 
 ## 2. `select(2)`: giới hạn 1024 và value-result (Q1)
 
-> **Trả lời ngắn.** Giới hạn 1024 là của glibc, không phải của kernel: glibc làm `fd_set` thành kiểu có kích thước cố định `FD_SETSIZE` = 1024.[^sel-glibc] Nó áp cho *số* của fd (phải nhỏ hơn 1024), không phải số lượng fd.[^sel-warn] Phải dựng lại `fd_set` trước mỗi lần gọi vì `select` sửa chính các tập đó để báo fd nào ready.[^sel-reinit]
+> **Trả lời ngắn.** Giới hạn 1024 là của glibc, không phải của kernel: glibc làm `fd_set` thành kiểu có kích thước cố định, `FD_SETSIZE` = 1024.[^sel-glibc] Nó áp lên *số* của fd (phải nhỏ hơn 1024), không phải lên số lượng fd.[^sel-warn] Mỗi vòng lặp phải dựng lại `fd_set` vì `select` sửa chính các tập đó để báo fd nào ready.[^sel-reinit]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `fd_set` giống tờ phiếu điểm danh có đúng 1024 ô, mỗi fd một ô theo số thứ tự; kernel gạch bỏ các ô chưa sẵn sàng ngay trên tờ phiếu bạn đưa, nên lần sau phải đưa tờ mới.
+*Với `gateway`.* Vòng lặp của `gateway` dùng `select` sẽ như sau: dựng tập gồm mọi socket cần theo dõi, gọi `select`, duyệt tập xem socket nào ready, đọc ở những socket đó, rồi lặp lại. Hai chỗ vướng xuất hiện ngay khi số kết nối tăng: tập này có kích thước cố định, và sau mỗi lần gọi nó không còn là tập bạn đã đưa vào. Mục này giải thích cả hai.
 
-**Giao diện.**
+### 2.1 Giao diện
 
-`select` nhận ba `fd_set` — đọc, ghi, "exceptional" — cộng với `nfds` và `timeout`.[^sel-sets] Một fd "ready" khi có thể thực hiện I/O tương ứng mà không chặn (ví dụ `read`, hoặc một `write` đủ nhỏ).[^sel-ready] `nfds` phải là số fd lớn nhất trong ba tập *cộng 1*.[^sel-nfds] Thao tác trên tập qua macro `FD_ZERO`, `FD_SET`, `FD_CLR`, `FD_ISSET`.[^sel-macros]
+`select` nhận ba `fd_set`, mỗi tập dành cho một loại sự kiện: đọc, ghi và "exceptional". Ngoài ba tập còn có `nfds` và `timeout`.[^sel-sets] Một fd được coi là ready khi có thể làm I/O tương ứng mà không chặn, ví dụ `read`, hoặc một `write` đủ nhỏ.[^sel-ready] Tham số `nfds` phải bằng số fd lớn nhất trong ba tập, cộng 1.[^sel-nfds] Bạn thao tác trên tập bằng bốn macro `FD_ZERO`, `FD_SET`, `FD_CLR` và `FD_ISSET`.[^sel-macros]
 
-**Giới hạn 1024 là của glibc.**
+### 2.2 Giới hạn 1024 là của glibc
 
-Man page mở đầu bằng cảnh báo: `select()` chỉ theo dõi được fd có *số* nhỏ hơn `FD_SETSIZE` (1024), giới hạn này "sẽ không đổi", và ứng dụng hiện đại nên dùng `poll` hoặc `epoll`.[^sel-warn] Chữ quan trọng là **số** của fd, không phải *số lượng* fd: một process có 10 kết nối nhưng fd mang số 1500 vẫn không đưa được vào `fd_set`. Mục BUGS nói rõ giới hạn nằm ở đâu: kernel Linux không áp giới hạn cố định; chính glibc làm `fd_set` thành kiểu kích thước cố định với `FD_SETSIZE` = 1024.[^sel-glibc]
+Giới hạn này hay bị hiểu nhầm ở hai chỗ. Chỗ thứ nhất: nó nói về **số** của fd, không phải số lượng. `select` chỉ theo dõi được fd có số nhỏ hơn `FD_SETSIZE` (1024); man page nói giới hạn này sẽ không đổi và khuyên ứng dụng hiện đại dùng `poll` hoặc `epoll`.[^sel-warn] Vậy nếu `gateway` mới có 10 kết nối nhưng một socket của nó mang số 1500, socket đó vẫn không đưa vào `fd_set` được.
 
-Quan sát trong container (glibc, aarch64): `FD_SETSIZE=1024`, `sizeof(fd_set)=128` byte — tức 1024 bit, mỗi fd một bit. Con số 128 khớp với việc `fd_set` là bitmap kích thước cố định; nó là kết quả đo, không phải điều man page hứa.
+Chỗ thứ hai: giới hạn không nằm trong kernel. Kernel Linux không áp giới hạn cố định nào; chính glibc làm `fd_set` thành kiểu kích thước cố định, với `FD_SETSIZE` bằng 1024.[^sel-glibc]
 
-**Value-result: phải dựng lại tập mỗi lần.**
+Tôi đo thử trong container (glibc, aarch64): `FD_SETSIZE` = 1024 và `sizeof(fd_set)` = 128 byte, tức 1024 bit, mỗi fd một bit. Con số 128 khớp với việc `fd_set` là bitmap cỡ cố định, nhưng đó là kết quả đo, không phải điều man page hứa.
 
-Khi `select` trả về, **chính các `fd_set` bị sửa** để chỉ ra fd nào đang ready; vì vậy gọi trong vòng lặp thì phải khởi tạo lại các tập trước mỗi lần gọi.[^sel-reinit] Man page còn đánh giá thẳng: việc `fd_set` là đối số value-result là "a design error" mà `poll` và `epoll` tránh được.[^sel-design]
+### 2.3 Value-result: phải dựng lại tập mỗi lần
 
-Quan sát: hai pipe `a`, `b`, cả hai đều nằm trong `fd_set` đọc, chỉ ghi vào `a`, gọi `select` với timeout 0 → trả về 1, và *sau* lời gọi `FD_ISSET(a)`=1, `FD_ISSET(b)`=0. Tập đầu vào của `b` đã bị xóa; lần gọi sau mà không `FD_SET(b)` lại thì `b` không còn được theo dõi.
+Khi `select` trả về, kernel ghi đè lên chính các `fd_set` bạn truyền vào để đánh dấu fd nào đang ready. Vì vậy nếu gọi trong vòng lặp, bạn phải khởi tạo lại các tập trước mỗi lần.[^sel-reinit] Với `gateway`, nghĩa là mỗi vòng lặp lại `FD_SET` từng socket đang theo dõi (nhận xét của người soạn). Chính man page cũng coi việc dùng `fd_set` làm đối số value-result là một lỗi thiết kế (design error), và nói `poll` với `epoll` tránh được lỗi đó.[^sel-design]
+
+Tôi thử như sau trong container: hai pipe `a` và `b` cùng nằm trong `fd_set` đọc, chỉ ghi vào `a`, rồi gọi `select` với timeout 0. Nó trả về 1; sau lời gọi, `FD_ISSET(a)` = 1 còn `FD_ISSET(b)` = 0. Bit của `b` đã bị xóa khỏi tập, nên lần sau mà không `FD_SET(b)` lại thì `b` rơi khỏi danh sách theo dõi.
 
 <details><summary>Đi sâu: <code>select</code> báo ready giả; tên syscall thật</summary>
 
-- Trên Linux `select` có thể báo socket là sẵn sàng đọc mà `read` sau đó vẫn chặn (ví dụ dữ liệu đến nhưng bị bỏ vì sai checksum);[^sel-spurious] man page khuyên dùng `O_NONBLOCK` trên socket không được phép chặn.[^sel-spurious-nb] ([Chương 01, mục 3](01-mo-hinh-io.md) nêu cùng điểm này từ góc độ readiness.)
-- Quan sát bằng strace trên aarch64: lời gọi `select` trong C hiện ra là `pselect6(6, [3 5], NULL, NULL, {tv_sec=0, tv_nsec=0}, NULL)`. Tên syscall khác tên hàm libc: man page nêu syscall nằm dưới `pselect()` của glibc tên là `pselect6()`.[^sel-pselect6] Trên aarch64 đây có vẻ là con đường duy nhất (suy luận của người soạn): arm64 lấy bảng syscall từ `asm-generic/unistd.h`,[^k-arm64-unistd] bảng đó có `pselect6` (số 72)[^k-generic-pselect6] và khi grep tệp v6.8 tôi không tìm thấy dòng nào cho `select`. Hiện tượng tương tự với `epoll_wait` (mục 4).
+**Ready giả.** Trên Linux, `select` có thể báo một socket sẵn sàng đọc mà `read` ngay sau đó vẫn chặn, chẳng hạn khi dữ liệu đã đến nhưng bị bỏ vì sai checksum.[^sel-spurious] Man page khuyên đặt `O_NONBLOCK` cho socket nào không được phép chặn.[^sel-spurious-nb] ([Chương 01, mục 3](01-mo-hinh-io.md) nêu cùng điểm này từ góc độ readiness.)
+
+**Tên syscall thật.** Lời gọi `select` trong C hiện ra dưới `strace` (aarch64) là `pselect6(6, [3 5], NULL, NULL, {tv_sec=0, tv_nsec=0}, NULL)`. Tên syscall khác tên hàm libc: man page nói syscall nằm dưới `pselect()` của glibc tên là `pselect6()`.[^sel-pselect6] Trên aarch64, đây có vẻ là đường duy nhất (suy luận của người soạn). Lý do: arm64 lấy bảng syscall từ `asm-generic/unistd.h`;[^k-arm64-unistd] bảng đó có `pselect6` với số 72;[^k-generic-pselect6] và khi grep tệp v6.8, tôi không tìm thấy dòng nào cho `select`. Hiện tượng tương tự xảy ra với `epoll_wait` (mục 4).
 
 </details>
 
-**Quay lại Q1:** giới hạn 1024 là `FD_SETSIZE` của glibc áp lên *số* của fd, và `fd_set` là value-result nên phải dựng lại mỗi lần gọi.
+**Quay lại Q1:** giới hạn 1024 là `FD_SETSIZE` của glibc, áp lên *số* của fd; `fd_set` là value-result nên `gateway` phải dựng lại nó ở mỗi vòng lặp.
 
 ## 3. `poll(2)`: mảng `pollfd`, `events` và `revents` (Q2)
 
-> **Trả lời ngắn.** `poll` nhận tập fd là một mảng `struct pollfd`; `events` là đầu vào, `revents` là đầu ra do kernel điền,[^poll-revents] nên không phải dựng lại tập giữa các lần gọi như `select`. fd âm bị bỏ qua (`revents` = 0),[^poll-neg] còn fd chưa mở được báo bằng `POLLNVAL` trong `revents`.[^poll-nval]
+> **Trả lời ngắn.** `poll` nhận tập fd dưới dạng một mảng `struct pollfd`. Trong mỗi phần tử, `events` là đầu vào còn `revents` là đầu ra do kernel điền,[^poll-revents] nên giữa các lần gọi bạn không phải dựng lại tập như với `select`. fd âm bị bỏ qua (`revents` = 0),[^poll-neg] còn fd chưa mở được báo bằng `POLLNVAL` trong `revents`.[^poll-nval]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì một tờ phiếu bị gạch xóa, bạn đưa một bảng hai cột — cột "tôi muốn biết gì" kernel không đụng tới, cột "đã xảy ra gì" kernel tự điền.
+*Với `gateway`.* Chuyển `gateway` từ `select` sang `poll`, bitmap cố định nhường chỗ cho một mảng `pollfd`, mỗi socket một phần tử. Cột "tôi muốn biết gì" của mảng đó kernel không đụng tới, còn kết quả nó ghi sang một cột riêng. Nhờ vậy vòng lặp không còn phải dựng lại tập sau mỗi lần gọi. Mục này xem giao diện đó cụ thể ra sao và hai trường hợp biên: fd âm và fd chưa mở.
 
-**Giao diện.**
+### 3.1 Giao diện
 
-`poll` làm việc tương tự `select`: chờ một trong một tập fd sẵn sàng I/O.[^poll-desc] Tập fd là một **mảng** `struct pollfd` truyền qua đối số `fds`:[^poll-fds]
+`poll` làm việc giống `select`: chờ tới khi một trong một tập fd sẵn sàng I/O.[^poll-desc] Khác ở chỗ tập fd là một **mảng** `struct pollfd`, truyền qua đối số `fds`:[^poll-fds]
 
 ```c
 struct pollfd {
@@ -74,55 +81,54 @@ struct pollfd {
 };
 ```
 
-`events` là tham số vào (mặt nạ bit những sự kiện ta quan tâm); `revents` là tham số ra do kernel điền những sự kiện thực sự xảy ra.[^poll-revents] Vì đầu vào và đầu ra nằm ở hai trường khác nhau nên **không cần dựng lại `events`** giữa các lần gọi — đó là điểm mà man page `select(2)` nói `poll` tránh được lỗi thiết kế value-result.[^sel-design] Quan sát: `sizeof(struct pollfd)` = 8 byte trên máy thử.
+`events` là tham số vào: mặt nạ bit những sự kiện bạn quan tâm. `revents` là tham số ra: kernel điền những sự kiện thực sự xảy ra.[^poll-revents] Vì đầu vào và đầu ra nằm ở hai trường khác nhau, bạn **không cần dựng lại `events`** giữa các lần gọi. Đó đúng là điểm man page `select(2)` nói `poll` tránh được lỗi value-result.[^sel-design] Trên máy thử, `sizeof(struct pollfd)` là 8 byte (quan sát một lần chạy).
 
-**Những điểm tinh tế (có nguồn, kèm quan sát một lần chạy).**
+### 3.2 Hai trường hợp biên
 
-- **fd âm bị bỏ qua**: trường `events` của phần tử đó bị bỏ qua và `revents` trả 0; man page nêu đây là cách dễ để "tắt" một phần tử cho một lần gọi.[^poll-neg] Quan sát: phần tử với `fd = ~5` cho `revents = 0`.
-- **`POLLNVAL`** ("invalid request: fd not open") chỉ xuất hiện trong `revents`.[^poll-nval] Quan sát: `poll` trên fd 999 chưa mở trả `revents = 0x20` (= `POLLNVAL`).
+**fd âm bị bỏ qua.** Với phần tử có `fd` âm, kernel bỏ qua trường `events` và trả `revents` bằng 0; man page nêu đây là cách dễ để "tắt" một phần tử trong một lần gọi.[^poll-neg] Tôi thử với phần tử `fd = ~5` và thấy `revents = 0`.
+
+**`POLLNVAL` cho fd chưa mở.** Bit `POLLNVAL` ("invalid request: fd not open") chỉ xuất hiện trong `revents`.[^poll-nval] Tôi thử `poll` trên fd 999 chưa mở và nhận `revents = 0x20`, đúng giá trị của `POLLNVAL`.
 
 <details><summary>Đi sâu: <code>POLLHUP</code>, <code>POLLERR</code> không cần đăng ký</summary>
 
-- **`POLLHUP`, `POLLERR` không cần đăng ký**: ba bit `POLLERR`, `POLLHUP`, `POLLNVAL` vô nghĩa trong `events` và được đặt vào `revents` bất cứ khi nào điều kiện tương ứng đúng.[^poll-always] Với pipe hoặc stream socket, `POLLHUP` chỉ nghĩa là peer đã đóng đầu của nó; `read` chỉ trả 0 (EOF) *sau khi* dữ liệu còn lại đã được đọc hết.[^poll-hup]
+Ba bit `POLLERR`, `POLLHUP`, `POLLNVAL` vô nghĩa trong `events`, và được đặt vào `revents` bất cứ khi nào điều kiện tương ứng đúng.[^poll-always] Với pipe hoặc stream socket, `POLLHUP` chỉ nghĩa là peer đã đóng đầu của nó. `read` chỉ trả 0 (EOF) *sau khi* dữ liệu còn lại đã được đọc hết.[^poll-hup]
 
 </details>
 
-**Quay lại Q2:** `poll` tách `events` (vào) khỏi `revents` (ra) nên không dựng lại tập; fd âm bị bỏ qua, fd chưa mở báo `POLLNVAL`.
+**Quay lại Q2:** `poll` tách `events` (vào) khỏi `revents` (ra) nên `gateway` không phải dựng lại tập; fd âm bị bỏ qua, fd chưa mở báo `POLLNVAL`.
 
 ## 4. epoll: interest list, ready list và vì sao không phải quét (Q3)
 
-> **Trả lời ngắn.** Một epoll instance trong kernel chứa hai danh sách: *interest list* là các fd bạn đã đăng ký, *ready list* là các fd đang sẵn sàng.[^epoll-lists] Khi một fd có I/O, một callback cài sẵn trên wait queue của nó đưa fd vào ready list (kernel 6.8), rồi `epoll_wait` lấy các phần tử từ ready list.[^k-ep-ready][^ep-wait-fetch] Vì thế epoll không phải quét lại toàn bộ tập đã đăng ký mỗi lần gọi như `select`/`poll`, mà chỉ xét các fd đã nằm trong ready list (suy luận của người soạn từ source).
+> **Trả lời ngắn.** Một epoll instance trong kernel chứa hai danh sách: *interest list* là các fd bạn đã đăng ký, *ready list* là các fd đang sẵn sàng.[^epoll-lists] Khi một fd có I/O, một callback cài sẵn trên wait queue của nó đưa fd vào ready list (kernel 6.8).[^k-ep-ready] `epoll_wait` chỉ việc lấy các phần tử từ ready list ra.[^ep-wait-fetch] Vì thế epoll không phải quét lại toàn bộ tập đã đăng ký ở mỗi lần gọi như `select` và `poll`, mà chỉ xét các fd đã nằm trong ready list (suy luận của người soạn từ source).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `select`/`poll` giống giáo viên mỗi tiết gọi tên cả lớp để hỏi "ai làm xong rồi?"; epoll giống để học sinh làm xong tự ghi tên lên bảng, giáo viên chỉ đọc bảng.
+*Với `gateway`.* Với 10.000 kết nối mà mỗi lượt chỉ vài chục cái có dữ liệu, `select` và `poll` bắt `gateway` đưa lại cả 10.000 fd vào từng lần gọi. epoll đảo ngược cách làm: `gateway` đăng ký mỗi socket một lần, kernel nhớ danh sách đó, và ở mỗi lần chờ `gateway` chỉ nhận về những socket đã sẵn sàng. Câu hỏi của mục này là kernel làm được điều đó bằng cấu trúc nào.
 
-**Vì sao `select` và `poll` quét toàn bộ tập mỗi lần.**
+### 4.1 Vì sao `select` và `poll` duyệt cả tập mỗi lần
 
-Các man page `select(2)`, `poll(2)`, `epoll(7)` **không** nêu độ phức tạp tiệm cận, nên chương này **không** ghi Big-O cho chúng. Điều có nguồn: `select` kiểm tra các fd trong ba tập tới giới hạn `nfds`;[^sel-nfds2] `poll` nhận tập fd là đối số `fds` ở mỗi lần gọi;[^poll-fds] epoll chỉ được man page mô tả là mở rộng tốt với số lượng lớn fd được theo dõi.[^epoll-intro]
+Trước hết, lưu ý các man page `select(2)`, `poll(2)` và `epoll(7)` **không** nêu độ phức tạp tiệm cận, nên chương này không ghi Big-O cho chúng. Điều có nguồn chỉ là: `select` kiểm tra các fd trong ba tập tới giới hạn `nfds`;[^sel-nfds2] `poll` nhận tập fd làm đối số `fds` ở mỗi lần gọi;[^poll-fds] còn epoll chỉ được man page mô tả là mở rộng tốt với số lượng lớn fd được theo dõi.[^epoll-intro]
 
-*Đọc source kernel 6.8 (chi tiết cài đặt, có thể đổi).*
+Để thấy cấu trúc cụ thể, ta đọc source Linux `v6.8`, `fs/select.c`. Đây là **chi tiết cài đặt của một phiên bản**, không phải bảo đảm giao diện.
 
-Để thấy cấu trúc, ta đọc source Linux `v6.8`, `fs/select.c` — **chi tiết cài đặt của một phiên bản**, không phải bảo đảm giao diện.
+- `do_poll` có vòng ngoài `for (;;)`; bên trong, nó duyệt từng phần tử `pollfd` và gọi `do_pollfd` cho mỗi phần tử. Comment trong code mô tả việc kernel dò sự kiện ở từng fd.[^k-poll-fish] Vòng duyệt từng entry nằm ở dòng `for (; pfd != pfd_end; pfd++) {`.[^k-poll-loop]
+- `do_select` cũng có `for (;;)`; nó duyệt các bit của bitmap và gọi `vfs_poll` (hỏi file "bây giờ có sự kiện không?") cho mỗi fd có bit đặt.[^k-select-loop]
 
-- `do_poll` có vòng ngoài `for (;;)` và bên trong duyệt từng phần tử `pollfd`, gọi `do_pollfd` ở mỗi phần tử; comment mô tả việc kernel dò sự kiện ở từng fd.[^k-poll-fish] Vòng duyệt từng entry nằm ở dòng `for (; pfd != pfd_end; pfd++) {`.[^k-poll-loop]
-- `do_select` cũng có `for (;;)`, duyệt các bit của bitmap và gọi `vfs_poll` (hỏi file "bây giờ có sự kiện không?") cho mỗi fd có bit đặt.[^k-select-loop]
+Đọc cấu trúc đó, ta thấy ở **mỗi lần gọi** (và mỗi lần vòng ngoài chạy lại sau khi bị đánh thức) kernel đi qua từng fd được truyền vào và hỏi từng file. Chi phí một lần gọi vì thế gắn với *kích thước tập truyền vào*, chứ không chỉ với số fd ready (suy luận của người soạn từ source). Tôi không nêu hàm Big-O vì không có nguồn tài liệu nào phát biểu; muốn con số thì phải đo.
 
-Cấu trúc đọc được: **mỗi lần gọi** (và mỗi lần vòng ngoài chạy lại sau khi bị đánh thức) kernel đi qua từng fd được truyền vào và hỏi từng file, nên chi phí một lần gọi gắn với *kích thước tập truyền vào* chứ không chỉ với số fd ready (suy luận của người soạn từ source; không nêu hàm Big-O vì không có nguồn tài liệu phát biểu — muốn con số, đo).
+Cũng đừng hiểu `select` và `poll` là vòng lặp bận thuần túy. `do_poll` đăng ký waiter vào wait queue của các file ở lượt quét đầu, và comment nói các lượt sau không đăng ký lại.[^k-poll-waiters] Khác biệt nằm ở chỗ tập fd là đối số của *từng lần gọi*, nên việc theo dõi này gắn với một lần gọi. epoll thì giữ interest list trong kernel qua nhiều lần `epoll_wait` (suy luận của người soạn, dựa trên cấu trúc code ở trên và mô tả interest list trong `epoll(7)`).
 
-Đừng hiểu `select`/`poll` là vòng lặp bận thuần túy: `do_poll` cũng đăng ký waiter vào wait queue của các file ở lượt quét đầu, và comment nói lượt sau không đăng ký lại.[^k-poll-waiters] Khác biệt nằm ở chỗ tập fd là đối số của *từng lần gọi*, nên việc theo dõi này gắn với một lần gọi; epoll giữ interest list trong kernel giữa các lần `epoll_wait` (suy luận của người soạn, dựa trên cấu trúc code trên và mô tả interest list của `epoll(7)`).
+### 4.2 Hai danh sách của epoll instance
 
-**Hai danh sách trong kernel (epoll).**
+epoll làm việc giống `poll`: theo dõi nhiều fd xem I/O có khả thi trên fd nào không. Nó dùng được ở cả kiểu edge-triggered lẫn level-triggered, và mở rộng tốt với số lượng lớn fd.[^epoll-intro] Khái niệm trung tâm là **epoll instance**, một cấu trúc dữ liệu trong kernel mà từ phía user space trông như một container chứa hai danh sách:[^epoll-lists]
 
-`epoll` làm việc tương tự `poll` — theo dõi nhiều fd xem I/O có khả thi — dùng được ở cả kiểu edge-triggered lẫn level-triggered, và mở rộng tốt với số lượng lớn fd.[^epoll-intro] Khái niệm trung tâm là **epoll instance**: một cấu trúc dữ liệu trong kernel mà từ góc nhìn user space là container của hai danh sách:[^epoll-lists]
-
-- **interest list** (còn gọi là epoll set): tập fd process đã đăng ký quan tâm;
-- **ready list**: tập fd đang "ready" cho I/O; là tập con (chính xác hơn, tập *tham chiếu* tới) các fd trong interest list, và được kernel *điền động* theo hoạt động I/O trên các fd đó.[^epoll-lists]
+- **interest list** (còn gọi là epoll set): các fd mà process đã đăng ký quan tâm. Với `gateway`, đó là 10.000 socket.
+- **ready list**: các fd đang "ready" cho I/O. Chính xác hơn, nó là tập *tham chiếu* tới một phần các fd trong interest list, và kernel *điền động* theo hoạt động I/O trên các fd đó.[^epoll-lists]
 
 ```mermaid
 flowchart LR
   subgraph user[User space]
-    L[event loop]
+    L[event loop của gateway]
   end
   subgraph kernel[Kernel: epoll instance]
     I[interest list<br/>fd đã đăng ký]
@@ -134,21 +140,23 @@ flowchart LR
   L -- "epoll_wait: ngủ nếu R rỗng<br/>(đến khi có sự kiện, tín hiệu hoặc hết timeout),<br/>lấy tối đa maxevents phần tử" --> R
 ```
 
-Ba system call tương ứng:
+### 4.3 Ba system call
 
-| Syscall | Việc | Nguồn |
-|---|---|---|
-| `epoll_create1(flags)` | tạo instance, trả fd tham chiếu tới nó; `EPOLL_CLOEXEC` đặt close-on-exec; `epoll_create(size)` cũ bỏ qua `size` (từ Linux 2.6.8) nhưng phải > 0 | [^ep-create][^ep-create1] |
-| `epoll_ctl(epfd, op, fd, &event)` | `EPOLL_CTL_ADD` / `MOD` / `DEL` thêm, sửa, gỡ entry của interest list | [^ep-ctl] |
-| `epoll_wait(epfd, events, maxevents, timeout)` | chờ sự kiện; trả thông tin lấy từ ready list, tối đa `maxevents`; `timeout` = −1 chặn vô hạn, 0 trả ngay | [^ep-wait][^ep-wait-timeout] |
+`gateway` làm việc với epoll qua ba syscall:
 
-`epoll(7)` mô tả `epoll_wait` như thao tác "fetching items from the ready list".[^ep-wait-fetch] Trường `data` bạn đặt trong `epoll_ctl` được trả lại nguyên vẹn ở `epoll_wait`;[^ep-wait-data] đó là chỗ nhét số fd hay token để biết sự kiện thuộc về ai.
+| Syscall | Việc |
+|---|---|
+| `epoll_create1(flags)` | Tạo instance và trả về một fd tham chiếu tới nó; cờ `EPOLL_CLOEXEC` đặt close-on-exec cho fd đó.[^ep-create1] |
+| `epoll_ctl(epfd, op, fd, &event)` | `EPOLL_CTL_ADD`, `MOD`, `DEL` lần lượt thêm, sửa, gỡ entry trong interest list.[^ep-ctl] |
+| `epoll_wait(epfd, events, maxevents, timeout)` | Chờ sự kiện và trả về tối đa `maxevents` sự kiện.[^ep-wait] |
 
-**Ai cập nhật ready list? (đọc source, có nhãn)**
+Về `timeout` của `epoll_wait`: -1 nghĩa là chặn vô hạn, 0 nghĩa là trả ngay kể cả khi chưa có sự kiện nào.[^ep-wait-timeout] `epoll(7)` mô tả lời gọi này là "lấy các phần tử từ ready list".[^ep-wait-fetch] Còn trường `data` bạn đặt trong `epoll_ctl` sẽ được trả lại nguyên vẹn ở `epoll_wait`;[^ep-wait-data] vì vậy đó là chỗ nhét số fd hoặc token để biết sự kiện thuộc về kết nối nào.
 
-Cơ chế cụ thể, theo một comment minh họa epoll lồng nhau trong `fs/eventpoll.c` (kernel 6.8): khi có gói tin tới thiết bị bên dưới một socket, code mạng gọi `wake_up()` trên *poll wake list* của file; epoll đã cài sẵn một *callback entry* trên hàng đợi đó.[^k-ep-callback] Hàm `ep_poll_callback` được gán làm hàm đánh thức của entry này (`init_waitqueue_func_entry(&pwq->wait, ep_poll_callback)` trong `ep_ptable_queue_proc`);[^k-ep-func-entry] ở trường hợp thông thường nó thêm entry vào ready list.[^k-ep-ready]
+### 4.4 Ai đưa fd vào ready list
 
-Vậy thứ tự cơ chế là (đọc từ source 6.8, chi tiết cài đặt):
+Phần này đọc từ source kernel 6.8 (chi tiết cài đặt, có thể đổi). Một comment minh họa epoll lồng nhau trong `fs/eventpoll.c` mô tả đường đi như sau: khi gói tin đến thiết bị bên dưới một socket, code mạng gọi `wake_up()` trên *poll wake list* của file, và epoll đã cài sẵn một *callback entry* trên hàng đợi đó.[^k-ep-callback] Hàm `ep_poll_callback` là hàm đánh thức của entry này, gán trong `ep_ptable_queue_proc` bằng dòng `init_waitqueue_func_entry(&pwq->wait, ep_poll_callback)`.[^k-ep-func-entry] Ở trường hợp thông thường, hàm đó thêm entry vào ready list.[^k-ep-ready]
+
+Ghép các bước lại, một kết nối của `gateway` đi như sau:
 
 ```mermaid
 sequenceDiagram
@@ -164,7 +172,7 @@ sequenceDiagram
   EP-->>App: epoll_wait trả sự kiện lấy từ ready list
 ```
 
-Khác với phần quét ở trên: giữa hai lần `epoll_wait`, kernel đã tích lũy sẵn các fd ready nhờ callback (suy luận của người soạn từ cấu trúc code trên; man page không phát biểu như vậy, nên mục này không kèm khẳng định về tốc độ).
+So với phần quét ở §4.1, điểm khác là giữa hai lần `epoll_wait`, kernel đã tích lũy sẵn các fd ready nhờ callback. Đó là suy luận của người soạn từ cấu trúc code; man page không phát biểu như vậy, nên mục này không kèm khẳng định nào về tốc độ.
 
 <details><summary>Đi sâu: quan sát strace một server echo dùng epoll thô</summary>
 
@@ -184,36 +192,36 @@ read(5, "", 4096)                 = 0
 epoll_ctl(4, EPOLL_CTL_DEL, 5, 0xffffc4cdce90) = 0
 ```
 
-Cách đọc từng bước (quan sát một lần chạy; phần giải nghĩa dựa trên man page, chỗ nào là suy luận thì ghi rõ):
+Đây là quan sát một lần chạy. Đọc từng bước:
 
-- `epoll_create1(EPOLL_CLOEXEC) = 4`: tạo epoll instance và trả fd 4 tham chiếu tới nó, có cờ close-on-exec.[^ep-create][^ep-create1] Từ `accept4(3, …)` bên dưới suy ra fd 3 là socket lắng nghe (các lời gọi tạo nó đã bị rút gọn).
-- `epoll_ctl(4, EPOLL_CTL_ADD, 3, {events=EPOLLIN, …})`: đăng ký listener chỉ với `EPOLLIN`, không có `EPOLLET` nên là level-triggered (mặc định).[^ep-et] Code nhét chính số fd vào `data`, và `epoll_wait` trả lại đúng giá trị đó để biết sự kiện thuộc fd nào.[^ep-wait-data]
+- `epoll_create1(EPOLL_CLOEXEC) = 4`: tạo epoll instance và trả fd 4 tham chiếu tới nó, có cờ close-on-exec.[^ep-create1] Từ `accept4(3, …)` bên dưới ta suy ra fd 3 là socket lắng nghe (các lời gọi tạo nó đã bị rút gọn). Bản `epoll_create(size)` cũ bỏ qua `size` từ Linux 2.6.8, nhưng `size` vẫn phải lớn hơn 0.[^ep-create]
+- `epoll_ctl(4, EPOLL_CTL_ADD, 3, {events=EPOLLIN, …})`: đăng ký listener chỉ với `EPOLLIN`, không có `EPOLLET`, nên là level-triggered (mặc định).[^ep-et] Code nhét chính số fd vào `data`, và `epoll_wait` trả lại đúng giá trị đó để biết sự kiện thuộc fd nào.[^ep-wait-data]
 - `epoll_pwait(4, [...], 64, -1, NULL, 8) = 1`: `64` là `maxevents`; `-1` là timeout vô hạn nên thread ngủ ở đây tới khi có sự kiện;[^ep-wait-timeout] `= 1` là số fd ready (listener có kết nối đến).
-- Tên `epoll_pwait` và hai đối số cuối `NULL, 8`: code gọi `epoll_wait` (libc) nhưng strace hiện `epoll_pwait`. Man page nói khi `sigmask` là `NULL` thì `epoll_pwait()` tương đương `epoll_wait()`,[^ep-pwait] và syscall thô có đối số thứ sáu `sigsetsize` là kích thước (byte) của `sigmask`[^ep-pwait-size] — số `8` ở cuối ứng với đối số này (suy luận của người soạn). Trên aarch64, `epoll_pwait` có vẻ là con đường duy nhất (suy luận của người soạn): arm64 lấy bảng syscall từ `asm-generic/unistd.h`,[^k-arm64-unistd] bảng đó có `epoll_pwait` (số 22)[^k-generic-pwait] và khi grep tệp v6.8 tôi không tìm thấy dòng nào cho `epoll_wait`.
-- `accept4(3, …) = 5` rồi `epoll_ctl(4, EPOLL_CTL_ADD, 5, {EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET})`: kết nối mới (fd 5) được đăng ký edge-triggered, một lần cho cả đọc lẫn ghi — cách man page nêu để khỏi `EPOLL_CTL_MOD` mỗi lần chuyển giữa đọc và ghi;[^ep-both] `EPOLLRDHUP` để biết peer đóng hoặc shutdown.[^ep-rdhup]
+- Tên `epoll_pwait` cùng hai đối số cuối `NULL, 8`: code gọi `epoll_wait` của libc nhưng strace hiện `epoll_pwait`. Man page nói khi `sigmask` là `NULL` thì `epoll_pwait()` tương đương `epoll_wait()`.[^ep-pwait] Syscall thô có đối số thứ sáu `sigsetsize`, là kích thước tính bằng byte của `sigmask`;[^ep-pwait-size] số `8` ở cuối ứng với đối số này (suy luận của người soạn). Trên aarch64, `epoll_pwait` có vẻ là đường duy nhất (suy luận của người soạn): arm64 lấy bảng syscall từ `asm-generic/unistd.h`,[^k-arm64-unistd] bảng đó có `epoll_pwait` với số 22,[^k-generic-pwait] và khi grep tệp v6.8, tôi không tìm thấy dòng nào cho `epoll_wait`.
+- `accept4(3, …) = 5` rồi `epoll_ctl(4, EPOLL_CTL_ADD, 5, {EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET})`: kết nối mới (fd 5) được đăng ký edge-triggered, một lần cho cả đọc lẫn ghi. Man page nêu cách này để khỏi `EPOLL_CTL_MOD` mỗi lần chuyển giữa đọc và ghi.[^ep-both] `EPOLLRDHUP` để biết peer đóng hoặc shutdown.[^ep-rdhup]
 - `accept4(3, …) = -1 EAGAIN`: vòng accept chạy tới khi hết kết nối chờ rồi mới quay lại chờ. Listener là LT nên không bắt buộc phải làm vậy; đây là lựa chọn của code (nhận xét của người soạn).
-- `epoll_pwait(…) = 1` với `EPOLLIN|EPOLLOUT` trên fd 5: kết nối vừa đọc được vừa ghi được. Sau đó là hai `read` 64 byte rồi `read = 0`: 0 byte là EOF, và `read` chỉ trả 0 sau khi dữ liệu còn lại đã được đọc hết.[^poll-hup] Vòng đọc kết thúc ở EOF nên trích đoạn này không có `read = -1 EAGAIN`.
-- `epoll_ctl(4, EPOLL_CTL_DEL, 5, 0xffffc4cdce90) = 0`: gỡ fd 5 khỏi interest list. Với `DEL`, đối số `event` bị bỏ qua và có thể là `NULL`;[^ep-ctl-del] việc strace in một địa chỉ thay vì `NULL` nghĩa là code truyền con trỏ không-NULL mà kernel không dùng (suy luận của người soạn). Gỡ tường minh tránh được bẫy ở mục 6 nếu fd có bản sao (nhận xét của người soạn).
+- `epoll_pwait(…) = 1` với `EPOLLIN|EPOLLOUT` trên fd 5: kết nối vừa đọc được vừa ghi được. Sau đó là hai `read` 64 byte rồi `read = 0`. 0 byte là EOF, và `read` chỉ trả 0 sau khi dữ liệu còn lại đã được đọc hết.[^poll-hup] Vòng đọc kết thúc ở EOF nên trích đoạn này không có `read = -1 EAGAIN`.
+- `epoll_ctl(4, EPOLL_CTL_DEL, 5, 0xffffc4cdce90) = 0`: gỡ fd 5 khỏi interest list. Với `DEL`, đối số `event` bị bỏ qua và có thể là `NULL`.[^ep-ctl-del] Việc strace in một địa chỉ thay vì `NULL` nghĩa là code truyền con trỏ không-NULL mà kernel không dùng (suy luận của người soạn). Gỡ tường minh tránh được bẫy ở mục 6 nếu fd có bản sao (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q3:** epoll giữ interest list (fd đã đăng ký) và ready list (fd sẵn sàng); callback trên wait queue của file điền ready list, `epoll_wait` lấy ra.
+**Quay lại Q3:** epoll giữ interest list (fd đã đăng ký) và ready list (fd sẵn sàng); callback trên wait queue của file điền ready list, `epoll_wait` lấy ra, nên `gateway` chỉ nhận về những socket đã có dữ liệu.
 
 ## 5. Level-triggered và edge-triggered (Q4)
 
-> **Trả lời ngắn.** Mặc định epoll là level-triggered (LT): còn dữ liệu thì còn báo (cùng ngữ nghĩa với `poll`);[^ep-lt] cờ `EPOLLET` chuyển sang edge-triggered (ET), chỉ báo khi có thay đổi.[^ep-et][^ep-et-change] Vì thế ở ET, ví dụ 2 kB của `epoll(7)` (đọc 1 kB rồi chờ lại) nhiều khả năng treo dù buffer còn dữ liệu;[^ep-et-scenario] quy tắc dùng ET đúng là fd non-blocking và chỉ chờ sau khi `read`/`write` trả `EAGAIN`.[^ep-et-rule]
+> **Trả lời ngắn.** Mặc định epoll là level-triggered (LT): còn dữ liệu thì còn báo, cùng ngữ nghĩa với `poll`.[^ep-lt] Cờ `EPOLLET` yêu cầu edge-triggered (ET).[^ep-et] Chế độ này chỉ báo khi có thay đổi trên fd.[^ep-et-change] Vì thế ở ET, ví dụ 2 KB của `epoll(7)` (đọc 1 KB rồi chờ lại) nhiều khả năng treo dù buffer còn dữ liệu.[^ep-et-scenario] Cách dùng ET đúng là fd non-blocking, và chỉ chờ sau khi `read` hoặc `write` trả `EAGAIN`.[^ep-et-rule]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): LT giống chuông reo mãi chừng nào còn thư trong hộp; ET chỉ reo đúng lúc có thư mới bỏ vào — lấy một nửa rồi ngồi chờ chuông thì chuông không reo nữa.
+*Với `gateway`.* Giả sử một client gửi cho `gateway` một frame 2 KB, còn handler đọc mỗi lần vào buffer 1 KB (nhận xét của người soạn: tình huống giả định, cùng khuôn với ví dụ trong `epoll(7)`). Đọc xong 1 KB đầu rồi quay lại chờ, thread có được báo về 1 KB còn lại không? Tùy chế độ: ở LT thì có, ở ET nhiều khả năng không. Mục này giải thích vì sao, và từ đó rút ra quy tắc mà mọi code dùng ET phải theo.
 
-**Định nghĩa.**
+### 5.1 Hai chế độ
 
-Mặc định epoll là **level-triggered** (LT); cờ `EPOLLET` yêu cầu **edge-triggered** (ET).[^ep-et] Ở chế độ LT, epoll đơn giản là một `poll(2)` nhanh hơn và dùng được ở mọi nơi `poll` dùng vì cùng ngữ nghĩa.[^ep-lt] Chế độ ET chỉ phát sự kiện khi có thay đổi trên fd được theo dõi.[^ep-et-change]
+Mặc định epoll là **level-triggered**; cờ `EPOLLET` chuyển sang **edge-triggered**.[^ep-et] Ở LT, epoll đơn giản là một `poll(2)` nhanh hơn, dùng được ở mọi chỗ `poll` dùng được vì cùng ngữ nghĩa.[^ep-lt] Ở ET, epoll chỉ phát sự kiện khi có thay đổi trên fd được theo dõi.[^ep-et-change]
 
-**Ví dụ 2 KB trong `epoll(7)`.**
+### 5.2 Ví dụ 2 KB trong `epoll(7)`
 
-Man page dựng kịch bản: (1) đầu đọc của pipe, `rfd`, đăng ký vào epoll; (2) writer ghi 2 kB; (3) `epoll_wait` trả `rfd` ready; (4) reader đọc 1 kB; (5) gọi `epoll_wait` lần nữa. Nếu `rfd` đăng ký với `EPOLLET`, lần gọi ở bước 5 nhiều khả năng sẽ treo dù dữ liệu vẫn còn trong buffer.[^ep-et-scenario] Lý do: sự kiện sinh ra do lần ghi và bị tiêu thụ ở bước 3; lần đọc ở bước 4 không tiêu thụ hết buffer nên `epoll_wait` ở bước 5 có thể chặn vô thời hạn.[^ep-et-hang]
+Kịch bản trong man page gồm năm bước: (1) đầu đọc của pipe, `rfd`, được đăng ký vào epoll; (2) writer ghi 2 KB; (3) `epoll_wait` trả `rfd` ready; (4) reader đọc 1 KB; (5) gọi `epoll_wait` lần nữa. Nếu `rfd` đăng ký với `EPOLLET`, lần gọi ở bước 5 nhiều khả năng sẽ treo dù dữ liệu vẫn còn trong buffer.[^ep-et-scenario] Lý do: sự kiện sinh ra từ lần ghi và đã bị tiêu thụ ở bước 3; lần đọc ở bước 4 không rút cạn buffer, nhưng cũng không tạo thay đổi mới, nên `epoll_wait` ở bước 5 có thể chặn vô thời hạn.[^ep-et-hang]
 
 ```mermaid
 sequenceDiagram
@@ -228,19 +236,21 @@ sequenceDiagram
   Note over K,R: không có thay đổi mới → không có sự kiện → treo
 ```
 
-**Quy tắc dùng ET đúng.**
+### 5.3 Quy tắc dùng ET đúng
 
-Man page nêu cách dùng ET được đề nghị: (1) với fd non-blocking, và (2) chỉ chờ sự kiện *sau khi* `read`/`write` trả `EAGAIN`.[^ep-et-rule] Fd phải non-blocking để một `read`/`write` bị chặn không làm đói các fd khác mà thread đang phục vụ.[^ep-et-nonblock]
+Cách dùng ET được man page đề nghị gồm hai vế: (1) dùng fd non-blocking, và (2) chỉ chờ sự kiện *sau khi* `read` hoặc `write` trả `EAGAIN`.[^ep-et-rule] Vế đầu nhằm tránh chuyện một `read` hoặc `write` bị chặn làm đói các fd khác mà thread đang phục vụ.[^ep-et-nonblock]
 
-Vì sao "đến `EAGAIN`"? Nhận được sự kiện nghĩa là fd "ready", và bạn phải coi nó ready cho đến khi `read`/`write` non-blocking kế tiếp trả `EAGAIN`.[^ep-qa-eagain] Với file hướng gói/token (datagram socket, terminal canonical mode), cách *duy nhất* để biết đã hết là đọc/ghi tới `EAGAIN`.[^ep-qa-packet] Với file hướng stream (pipe, FIFO, stream socket), `read` trả ít byte hơn yêu cầu cho biết đã rút cạn — nhưng man page dặn tránh kỹ thuật này nếu không chắc fd luôn là stream.[^ep-qa-short][^ep-qa-short-caveat] Và vì nhiều sự kiện xảy ra giữa hai lần `epoll_wait` được gộp lại thành một báo cáo,[^ep-combine] một lần đánh thức có thể ứng với nhiều đợt dữ liệu (suy luận của người soạn).
+Vì sao phải đi "đến `EAGAIN`"? Vì khi nhận được sự kiện, bạn phải coi fd là ready cho tới khi lần `read` hoặc `write` non-blocking kế tiếp trả `EAGAIN`.[^ep-qa-eagain] Với file hướng gói hay token (datagram socket, terminal ở canonical mode), cách *duy nhất* để biết đã hết là đọc hoặc ghi tới `EAGAIN`.[^ep-qa-packet] Với file hướng stream (pipe, FIFO, stream socket), `read` trả ít byte hơn mức yêu cầu thì có thể chắc là đã rút cạn.[^ep-qa-short] Nhưng man page dặn tránh đường tắt này nếu bạn không chắc fd luôn thuộc loại stream.[^ep-qa-short-caveat] Thêm một lý do nữa: nhiều sự kiện xảy ra giữa hai lần `epoll_wait` sẽ được gộp lại thành một báo cáo,[^ep-combine] nên một lần đánh thức có thể ứng với nhiều đợt dữ liệu (suy luận của người soạn).
 
-**Cái giá và phần được lợi của ET.** Kegel (C10k) nhận xét readiness-change (kiểu edge) kém tha thứ lỗi lập trình — bỏ sót một sự kiện thì kết nối đó kẹt vĩnh viễn.[^c10k-edge] Phần được lợi (nhận xét của người soạn): ít sự kiện lặp, và đăng ký một lần `EPOLLIN|EPOLLOUT` để khỏi `epoll_ctl(MOD)` mỗi khi đổi giữa đọc và ghi — man page nêu điều này vì lý do hiệu năng.[^ep-both]
+### 5.4 Cái giá, phần được lợi và starvation
 
-**Starvation ở ET.** Nếu một fd có lượng I/O rất lớn và bạn cố rút cạn nó trong một lần, các fd khác có thể bị bỏ đói.[^ep-starve] Man page đề xuất giữ một ready list ở user space và round-robin giữa các fd ready.[^ep-starve-fix]
+Cái giá của ET là ít tha thứ lỗi lập trình: bỏ sót một sự kiện thì kết nối đó kẹt vĩnh viễn.[^c10k-edge] Phần được lợi (nhận xét của người soạn) là ít sự kiện lặp, và `gateway` có thể đăng ký một lần `EPOLLIN|EPOLLOUT` để khỏi `epoll_ctl(MOD)` mỗi khi đổi giữa đọc và ghi. Man page nêu cách này vì lý do hiệu năng.[^ep-both]
+
+ET còn một bẫy nữa là starvation. Nếu một fd có lượng I/O rất lớn và bạn cố rút cạn nó trong một lần, các fd khác có thể bị bỏ đói.[^ep-starve] Man page đề xuất giữ một ready list ở user space và round-robin giữa các fd ready.[^ep-starve-fix] Với `gateway`, một client đẩy dữ liệu liên tục là loại fd như vậy (nhận xét của người soạn).
 
 <details><summary>Đi sâu: cơ chế LT/ET trong kernel 6.8, thí nghiệm "đọc một lần" và tái hiện ví dụ 2 KB (quan sát một lần chạy)</summary>
 
-**Cơ chế trong source (kernel 6.8, chi tiết cài đặt).** Khi `epoll_wait` lấy sự kiện, `ep_send_events` duyệt các entry của ready list, gọi lại `ep_item_poll` để lấy mặt nạ sự kiện *hiện tại* của từng entry và chỉ giao cho user space nếu mặt nạ giao với mặt nạ người gọi yêu cầu.[^k-ep-send-mask] Entry vừa được giao bị gỡ khỏi ready list; chỉ entry *không* đặt `EPOLLET` (và không `EPOLLONESHOT`) được xếp lại vào cuối ready list để lần `epoll_wait` kế tiếp kiểm tra lại.[^k-ep-lt-requeue] Từ đó suy ra khác biệt LT/ET ở mức code (suy luận của người soạn): fd LT còn nằm trong ready list nên lần sau được hỏi lại và thấy còn dữ liệu; fd ET chỉ quay lại ready list khi callback ở mục 4 chạy lần nữa, nên buffer còn dữ liệu mà không có đánh thức mới thì `epoll_wait` không thấy gì. Callback ấy còn lọc theo mặt nạ: đánh thức có mặt nạ không giao với `events` đã đăng ký bị bỏ qua.[^k-ep-mask-filter]
+**Cơ chế trong source (kernel 6.8, chi tiết cài đặt).** Khi `epoll_wait` lấy sự kiện, `ep_send_events` duyệt các entry của ready list và gọi lại `ep_item_poll` để lấy mặt nạ sự kiện *hiện tại* của từng entry. Nó chỉ giao entry cho user space nếu mặt nạ đó giao với mặt nạ người gọi yêu cầu.[^k-ep-send-mask] Entry vừa được giao bị gỡ khỏi ready list; chỉ entry *không* đặt `EPOLLET` (và không `EPOLLONESHOT`) mới được xếp lại vào cuối ready list để lần `epoll_wait` kế tiếp kiểm tra lại.[^k-ep-lt-requeue] Từ đó suy ra khác biệt LT/ET ở mức code (suy luận của người soạn): fd LT còn nằm trong ready list nên lần sau được hỏi lại và thấy còn dữ liệu; fd ET chỉ quay lại ready list khi callback ở mục 4 chạy lần nữa, nên buffer còn dữ liệu mà không có đánh thức mới thì `epoll_wait` không thấy gì. Callback ấy còn lọc theo mặt nạ: đánh thức có mặt nạ không giao với `events` đã đăng ký thì bị bỏ qua.[^k-ep-mask-filter]
 
 **Bug "đọc một lần" (thí nghiệm của lab).** Server echo `epoll_echo` có cờ `--read-once` cố tình vi phạm quy tắc ET: mỗi sự kiện chỉ `read` đúng 16 byte rồi quay lại `epoll_wait`. Chạy lại trong container với một kết nối gửi một message 64 byte:
 
@@ -252,46 +262,56 @@ Vì sao "đến `EAGAIN`"? Nhận được sự kiện nghĩa là fd "ready", v�
 [epoll] served 1 conns: epoll_wait calls=4, events=4, reads with data=3, reads -> EAGAIN=0, bytes echoed=48, threads=1
 ```
 
-(Dòng `[epoll] fd 5: Broken pipe` bị trộn vào output vì hai tiến trình cùng ghi stderr.) Server echo được 48 byte (3 lần đọc × 16) rồi ngủ trong `epoll_wait`; 16 byte còn lại nằm trong buffer nhưng không có edge mới. Client có read timeout ~3 s nên báo `WouldBlock` (`os error 11` = `EAGAIN`) — không có lỗi mạng, chỉ là một phản hồi không bao giờ tới. Cách đọc số liệu: `reads -> EAGAIN=0` cho thấy server không bao giờ chạy tới `EAGAIN` — đúng điều quy tắc ET cấm; `bytes echoed=48` khớp 3 × 16. Đừng đọc `events=4` như "bốn edge do dữ liệu": theo ghi chú của lab (`docs/labs/07-io-async-lab.md`), server còn được đánh thức thêm một lần sau khi client timeout và đóng kết nối, và tôi không tách được từng sự kiện thuộc thời điểm nào. Đối chứng ở chế độ đọc tới `EAGAIN` (số liệu có sẵn trong lab, tải khác: 4 kết nối × 200 message × 64 B): `bytes echoed=51200` và `reads -> EAGAIN=798`.
+(Dòng `[epoll] fd 5: Broken pipe` bị trộn vào output vì hai tiến trình cùng ghi stderr.) Server echo được 48 byte (3 lần đọc × 16) rồi ngủ trong `epoll_wait`; 16 byte còn lại nằm trong buffer nhưng không có edge mới. Client có read timeout khoảng 3 s nên báo `WouldBlock` (`os error 11` = `EAGAIN`). Không có lỗi mạng nào ở đây, chỉ là một phản hồi không bao giờ tới.
 
-**Tái hiện thật.** Người soạn dựng đúng kịch bản bằng C (pipe non-blocking, `epoll_wait` timeout 200 ms để "treo" hiện ra thành `0`), trong container:
+Cách đọc số liệu: `reads -> EAGAIN=0` cho thấy server không bao giờ chạy tới `EAGAIN`, đúng điều quy tắc ET cấm; `bytes echoed=48` khớp 3 × 16. Đừng đọc `events=4` như "bốn edge do dữ liệu": theo ghi chú của lab (`docs/labs/07-io-async-lab.md`), server còn được đánh thức thêm một lần sau khi client timeout và đóng kết nối, và tôi không tách được từng sự kiện thuộc thời điểm nào. Đối chứng ở chế độ đọc tới `EAGAIN` (số liệu có sẵn trong lab, tải khác: 4 kết nối × 200 message × 64 B): `bytes echoed=51200` và `reads -> EAGAIN=798`.
+
+**Tái hiện thật.** Người soạn dựng đúng kịch bản bằng C (pipe non-blocking, `epoll_wait` timeout 200 ms để "treo" hiện ra thành `0`), chạy trong container:
 
 | Chế độ | wait #1 | read 1024 | wait #2 | read 1024 nữa | wait #3 |
 |---|---|---|---|---|---|
 | LT | 1 | 1024 | **1** | 1024 | 0 |
 | ET (`EPOLLET`) | 1 | 1024 | **0** (treo) | 1024 | 0 |
 
-(Sau khi đọc nốt, `read` tiếp theo trả `-1 EAGAIN` ở cả hai chế độ.) Cách đọc bảng: `wait #1 = 1` ở cả hai chế độ vì lần ghi đầu tiên là thay đổi mới. Sau `read 1024` còn 1024 byte trong buffer, và ô đậm là chỗ hai chế độ tách ra: LT báo lại vì fd còn dữ liệu (khớp cơ chế xếp lại ready list ở trên, suy luận của người soạn), ET không có đánh thức mới nên `epoll_wait` hết timeout 200 ms và trả `0`. `wait #3 = 0` ở cả hai chế độ vì buffer đã rỗng — không còn gì để báo, kể cả LT; đây là đối chứng cho thấy LT im lặng đúng khi hết dữ liệu chứ không phải vì timeout quá ngắn. Strace xác nhận chuỗi `epoll_pwait(..., 200, ...) = 1, 1, 0` cho LT và `= 1, 0` cho ET. `0` chỉ nghĩa là hết timeout 200 ms không có sự kiện, trong một lần chạy; man page chỉ nói nhiều khả năng sẽ treo.
+(Sau khi đọc nốt, `read` tiếp theo trả `-1 EAGAIN` ở cả hai chế độ.) Cách đọc bảng: `wait #1 = 1` ở cả hai chế độ vì lần ghi đầu tiên là thay đổi mới. Sau `read 1024` còn 1024 byte trong buffer, và ô đậm là chỗ hai chế độ tách ra. LT báo lại vì fd còn dữ liệu (khớp cơ chế xếp lại ready list ở trên, suy luận của người soạn). ET không có đánh thức mới nên `epoll_wait` hết timeout 200 ms và trả `0`. `wait #3 = 0` ở cả hai chế độ vì buffer đã rỗng, không còn gì để báo, kể cả với LT; đây là đối chứng cho thấy LT im lặng đúng khi hết dữ liệu chứ không phải vì timeout quá ngắn. Strace xác nhận chuỗi `epoll_pwait(..., 200, ...) = 1, 1, 0` cho LT và `= 1, 0` cho ET. `0` chỉ nghĩa là hết timeout 200 ms không có sự kiện, trong một lần chạy; man page chỉ nói nhiều khả năng sẽ treo.
 
 </details>
 
-**Quay lại Q4:** ET chỉ báo khi có thay đổi, nên phải dùng fd non-blocking và đọc/ghi tới `EAGAIN`; bỏ sót thì fd kẹt như ở ví dụ 2 KB.
+**Quay lại Q4:** ET chỉ báo khi có thay đổi, nên `gateway` phải dùng fd non-blocking và đọc, ghi tới `EAGAIN`; bỏ sót thì fd kẹt như ở ví dụ 2 KB.
 
 ## 6. Đóng fd, event cache và file thường (Q5)
 
-> **Trả lời ngắn.** Interest list nhận diện fd bằng cả số fd lẫn open file description (OFD), nên `close(fd)` chỉ gỡ fd khi mọi fd cùng trỏ vào OFD đó đã đóng.[^ep-key][^ep-close] `epoll_ctl` trả `EPERM` khi file đích không hỗ trợ epoll, ví dụ file thường.[^ep-eperm]
+> **Trả lời ngắn.** Interest list nhận diện fd bằng cả số fd lẫn open file description (OFD).[^ep-key] Vì vậy `close(fd)` chưa chắc gỡ fd khỏi epoll: nó chỉ bị gỡ khi mọi fd cùng trỏ vào OFD đó đã đóng.[^ep-close] Còn `epoll_ctl` trả `EPERM` khi file đích không hỗ trợ epoll, ví dụ file thường.[^ep-eperm]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn trả thẻ thư viện của mình nhưng bản sao thẻ vẫn nằm trong tay người khác, nên hệ thống vẫn nhận ra phiếu mượn cũ.
+*Với `gateway`.* Giả sử `gateway` đóng một kết nối, nhưng ở đâu đó trong process còn một bản `dup` của socket đó, hoặc một process con vừa `fork` đã thừa kế nó (`fork` nhân bản các fd đang mở, xem P1 · Chương 04). Lúc này `gateway` tưởng đã dọn xong, nhưng epoll vẫn có thể báo sự kiện cho kết nối ấy. Mục này giải thích vì sao, rồi nói thêm hai cái bẫy liên quan: cái event cache, và cái fd mà epoll không nhận.
 
-**Đóng fd không chắc gỡ nó khỏi interest list.**
+### 6.1 Đóng fd không chắc gỡ nó khỏi interest list
 
-Khóa phân biệt các fd trong interest list là tổ hợp *số fd* **và** *open file description*.[^ep-key] `EPOLL_CTL_ADD` lưu một tham chiếu tới open file description tương ứng.[^ep-ctl-ofd] Hệ quả (Q&A trong `epoll(7)`): fd chỉ bị gỡ sau khi *mọi* fd cùng tham chiếu OFD đó đã đóng; nên kể cả sau khi bạn `close` fd đã đăng ký, sự kiện vẫn có thể được báo nếu còn fd khác (do `dup`, `fork`...) trỏ tới OFD đó. Cách phòng: `EPOLL_CTL_DEL` tường minh *trước khi* nhân bản fd, hoặc bảo đảm mọi bản sao đều đóng — khó khi thư viện tự `dup`/`fork` sau lưng.[^ep-close] (Về OFD và `dup`: [P1 · Chương 04, mục 1–3](../01-linux/04-file-descriptor-va-vfs.md).)
+Interest list phân biệt các entry bằng khóa gồm *số fd* **và** *open file description*.[^ep-key] Khi bạn `EPOLL_CTL_ADD`, entry giữ một tham chiếu tới OFD tương ứng.[^ep-ctl-ofd] Từ đó có hệ quả mà phần Q&A của `epoll(7)` nêu rõ: fd chỉ bị gỡ sau khi *mọi* fd cùng tham chiếu OFD đó đã đóng. Nên kể cả sau khi bạn `close` fd đã đăng ký, sự kiện vẫn có thể được báo nếu còn fd khác (do `dup`, `fork`…) trỏ tới OFD đó.[^ep-close]
 
-**Event cache: sự kiện thứ 47 đóng fd của sự kiện thứ 13.**
+Cách phòng là `EPOLL_CTL_DEL` tường minh *trước khi* nhân bản fd, hoặc bảo đảm mọi bản sao đều đóng. Việc sau khó làm khi một thư viện tự `dup` hay `fork` sau lưng bạn (nhận xét của người soạn). Về OFD và `dup`, xem [P1 · Chương 04, mục 1–3](../01-linux/04-file-descriptor-va-vfs.md).
 
-Nếu bạn giữ cả mảng sự kiện của một `epoll_wait` (event cache: nơi lưu các sự kiện hoặc fd mà `epoll_wait` trả về để xử lý dần), hãy có cách đánh dấu việc đóng xảy ra *giữa chừng*: nhận 100 sự kiện, ở #47 có điều kiện làm đóng fd của sự kiện #13 → `close(2)` fd #13 mà cache vẫn nói có sự kiện cho nó.[^ep-cache] Man page đề xuất: ở #47 gọi `EPOLL_CTL_DEL` cho fd 13 rồi `close(2)`, đánh dấu cấu trúc của nó là `removed` để nhận ra khi gặp sự kiện #13 trong cùng lô.[^ep-cache-fix]
+### 6.2 Event cache: sự kiện thứ 47 đóng fd của sự kiện thứ 13
 
-**File thường không dùng được với epoll.** `epoll_ctl` trả `EPERM` khi file đích không hỗ trợ epoll, ví dụ `fd` là file thường hoặc thư mục.[^ep-eperm] Ở source 6.8, `do_epoll_ctl` kiểm tra file đích có hỗ trợ poll không và trả `-EPERM` nếu không.[^k-ep-eperm] Hệ quả (nhận xét của người soạn): readiness không giúp đọc đĩa không chặn; cần thread pool hoặc cơ chế completion — [Chương 03](03-kqueue-io-uring.md).
+Bẫy thứ hai đến từ việc giữ nguyên mảng sự kiện mà một lần `epoll_wait` trả về. Mảng đó là một *event cache*, nơi lưu các sự kiện hoặc fd để xử lý dần. Giả sử `gateway` nhận 100 sự kiện trong một lần `epoll_wait`; khi xử lý sự kiện #47, nó phát hiện phải đóng kết nối của sự kiện #13. Nếu cứ `close(2)` fd đó, mảng vẫn còn sự kiện #13 chờ xử lý cho một fd đã đóng.[^ep-cache] Man page đề xuất: ở #47, gọi `EPOLL_CTL_DEL` cho fd 13 rồi `close(2)`, và đánh dấu cấu trúc dữ liệu của nó là `removed` để nhận ra khi gặp sự kiện #13 trong cùng lô.[^ep-cache-fix]
+
+### 6.3 File thường không dùng được với epoll
+
+`epoll_ctl` trả `EPERM` khi file đích không hỗ trợ epoll, ví dụ `fd` là file thường hoặc thư mục.[^ep-eperm] Trong source 6.8, `do_epoll_ctl` kiểm tra file đích có hỗ trợ poll không, và trả `-EPERM` nếu không.[^k-ep-eperm] Hệ quả với `gateway` (nhận xét của người soạn): muốn đọc một file trên đĩa, nó không thể nhờ readiness để tránh bị chặn; phải dùng thread pool hoặc cơ chế completion, xem [Chương 03](03-kqueue-io-uring.md).
 
 <details><summary>Đi sâu: quan sát bẫy <code>dup</code>, <code>EEXIST</code>, <code>EPOLL_CTL_MOD</code> và <code>EPERM</code></summary>
 
-Quan sát (container): đăng ký đầu đọc pipe `q0`, `dup` ra `d`, `close(q0)`, rồi ghi vào pipe → `epoll_wait` trả **1 sự kiện** với `data.fd` bằng số của `q0` — số fd *đã đóng*. Đối chứng: đăng ký, ghi, `close` mà không `dup` → `epoll_wait` trả 0. Đây là bẫy kinh điển (nhận xét của người soạn): ứng dụng nhận sự kiện cho một số fd mà nó tưởng đã dọn xong.
+**Bẫy `dup`.** Tôi thử trong container: đăng ký đầu đọc pipe `q0`, `dup` ra `d`, `close(q0)`, rồi ghi vào pipe. `epoll_wait` trả **1 sự kiện** với `data.fd` bằng số của `q0`, tức số fd *đã đóng*. Đối chứng: đăng ký, ghi, `close` mà không `dup` thì `epoll_wait` trả 0. Đây là bẫy kinh điển (nhận xét của người soạn): ứng dụng nhận sự kiện cho một số fd mà nó tưởng đã dọn xong.
 
-Ba điều liên quan trong Q&A của `epoll(7)`: hai epoll instance cùng chờ một fd thì sự kiện được báo cho cả hai;[^ep-two-instances] đăng ký *cùng* fd hai lần trên một instance nhiều khả năng nhận `EEXIST` (quan sát: `errno=File exists`), nhưng thêm một bản `dup` thì được — hữu ích để lọc sự kiện nếu các bản dup đăng ký mặt nạ khác nhau;[^ep-eexist] và `EPOLL_CTL_MOD` trên fd đã có sẽ đọc lại I/O khả dụng.[^ep-mod]
+**Ba điều liên quan trong Q&A của `epoll(7)`.**
 
-Quan sát về `EPERM`: `EPOLL_CTL_ADD` cho `/etc/hostname` mở bằng `open` → `-1 EPERM`. Trong khi đó `poll` trên cùng fd trả ngay `revents = 0x1` (`POLLIN`) (quan sát một file, không phải bảo đảm cho mọi filesystem).
+- Hai epoll instance cùng chờ một fd thì sự kiện được báo cho cả hai.[^ep-two-instances]
+- Đăng ký *cùng* fd hai lần trên một instance nhiều khả năng nhận `EEXIST` (quan sát: `errno=File exists`), nhưng thêm một bản `dup` thì được.[^ep-eexist]
+- `EPOLL_CTL_MOD` trên fd đã có sẽ đọc lại I/O khả dụng.[^ep-mod]
+
+**`EPERM`.** Tôi thử `EPOLL_CTL_ADD` cho `/etc/hostname` mở bằng `open` và nhận `-1 EPERM`. Trong khi đó `poll` trên cùng fd trả ngay `revents = 0x1` (`POLLIN`). Đây là quan sát trên một file, không phải bảo đảm cho mọi filesystem.
 
 </details>
 
@@ -299,17 +319,17 @@ Quan sát về `EPERM`: `EPOLL_CTL_ADD` cho `/etc/hostname` mở bằng `open` �
 
 ## 7. `EPOLLONESHOT`, `EPOLLEXCLUSIVE` và các cờ trạng thái (Q6)
 
-> **Trả lời ngắn.** `EPOLLONESHOT` vô hiệu fd trong interest list sau khi báo một sự kiện, cho tới khi bạn `EPOLL_CTL_MOD` để bật lại.[^ep-oneshot][^ep-oneshot-rearm] `EPOLLEXCLUSIVE` có thể giúp tránh thundering herd (nhiều bên cùng bị đánh thức) trong một số tình huống, nhưng chỉ hứa "một hoặc nhiều" epoll fd nhận event, không hứa đúng một.[^ep-excl-one]
+> **Trả lời ngắn.** `EPOLLONESHOT` vô hiệu fd trong interest list sau khi báo một sự kiện.[^ep-oneshot] Muốn nhận sự kiện tiếp, bạn phải `EPOLL_CTL_MOD` để bật lại.[^ep-oneshot-rearm] `EPOLLEXCLUSIVE` có thể giúp tránh thundering herd (nhiều bên cùng bị đánh thức) trong một số tình huống, nhưng chỉ hứa "một hoặc nhiều" epoll fd nhận event, không hứa đúng một.[^ep-excl-one]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `EPOLLONESHOT` giống thẻ "đã có người nhận việc": nhân viên nhận việc thì thẻ bị gỡ, họ phải treo thẻ lại thì mới có việc mới tới; `EPOLLEXCLUSIVE` giống chỉ gọi bớt nhân viên dậy, nhưng không cam kết chỉ gọi đúng một người.
+*Với `gateway`.* Một thread có thể không đủ khi `gateway` phải parse và xử lý nhiều frame. Giả sử ta chạy vài worker thread, mỗi thread gọi `epoll_wait` trên cùng một epoll fd, hoặc mỗi worker có epoll fd riêng cùng theo dõi một socket (nhận xét của người soạn: hai cách tổ chức giả định). Hai cờ trong mục này sinh ra để giữ cho các worker khỏi giẫm chân nhau; ngoài ra mục còn nói tới các cờ báo trạng thái kết nối và giới hạn bộ nhớ.
 
-**`EPOLLONESHOT`.**
+### 7.1 `EPOLLONESHOT`
 
-Với `EPOLLONESHOT`, sau khi `epoll_wait` báo một sự kiện cho fd, fd bị **vô hiệu hóa trong interest list** và epoll không báo thêm sự kiện nào cho nó; người dùng phải gọi `epoll_ctl(EPOLL_CTL_MOD)` với mặt nạ mới để *re-arm* (bật lại).[^ep-oneshot][^ep-oneshot-rearm]
+Với `EPOLLONESHOT`, sau khi `epoll_wait` báo một sự kiện cho fd, fd bị **vô hiệu hóa trong interest list** và epoll không báo thêm sự kiện nào cho nó.[^ep-oneshot] Muốn nhận sự kiện tiếp, bạn phải gọi `epoll_ctl(EPOLL_CTL_MOD)` với mặt nạ mới để *re-arm* (bật lại).[^ep-oneshot-rearm]
 
-Man page `epoll(7)` giải thích động cơ: ngay cả ở ET, nhiều sự kiện có thể được sinh ra khi nhận nhiều "chunk" dữ liệu; caller có thể chỉ định `EPOLLONESHOT` để epoll vô hiệu fd sau khi nhận một sự kiện, và trách nhiệm bật lại thuộc về caller.[^ep-oneshot-et]
+Lý do cờ này tồn tại, theo `epoll(7)`: ngay cả ở ET, việc nhận nhiều "chunk" dữ liệu có thể sinh ra nhiều sự kiện, nên caller có thể đặt `EPOLLONESHOT` để epoll vô hiệu fd sau khi nhận một sự kiện, và việc bật lại là trách nhiệm của caller.[^ep-oneshot-et]
 
 ```mermaid
 stateDiagram-v2
@@ -319,29 +339,40 @@ stateDiagram-v2
   Disabled --> Disabled: dữ liệu mới đến — không có sự kiện
 ```
 
-**Thundering herd: ET trên cùng epoll fd, và `EPOLLEXCLUSIVE`.**
+### 7.2 Thundering herd: hai tình huống khác nhau
 
-Có hai tình huống khác nhau, đừng lẫn:
+Có hai tình huống dễ lẫn với nhau.
 
-1. **Nhiều thread/process cùng chờ trên *một* epoll fd.** Nếu fd trong interest list đánh dấu ET trở nên ready thì *chỉ một* thread (hoặc process) được đánh thức khỏi `epoll_wait`; man page gọi đây là tối ưu hữu ích để tránh "thundering herd" ở một số kịch bản.[^ep-herd]
-2. **Nhiều epoll fd (instance khác nhau) cùng gắn vào *một* fd đích.** Mặc định *tất cả* epoll fd nhận sự kiện. Với `EPOLLEXCLUSIVE` (từ Linux 4.5) trên các lần gắn, **một hoặc nhiều** epoll fd sẽ nhận event, nên cờ hữu ích để tránh thundering herd trong một số tình huống.[^ep-excl][^ep-excl-one]
+**Tình huống 1: nhiều thread hoặc process cùng chờ trên *một* epoll fd.** Nếu một fd trong interest list được đánh dấu ET và trở nên ready, thì *chỉ một* thread (hoặc process) được đánh thức khỏi `epoll_wait`. Man page gọi đây là một tối ưu hữu ích để tránh "thundering herd" ở một số kịch bản.[^ep-herd] Với `gateway`, đây là kịch bản các worker chung epoll fd.
 
-"Một hoặc **nhiều**" quan trọng: tài liệu **không hứa đúng một**; nếu cần độc quyền tuyệt đối (đúng một worker xử lý) phải tự bảo đảm bằng cơ chế khác. Quy tắc cờ: `EPOLLEXCLUSIVE` chỉ dùng trong `EPOLL_CTL_ADD`; `EPOLL_CTL_MOD` có cờ này trả `EINVAL`;[^ep-excl-add][^ep-excl-einval] nếu cùng fd nằm trong nhiều instance mà có instance không đặt cờ, sự kiện đến *tất cả* instance không đặt cờ và ít nhất một instance có đặt cờ;[^ep-excl-mixed] cờ khác ngoài một tập nhỏ (`EPOLLIN`, `EPOLLOUT`, `EPOLLWAKEUP`, `EPOLLET`, cùng `EPOLLHUP`/`EPOLLERR`) đi kèm gây `EINVAL`.[^ep-excl-flags] (Không có thí nghiệm cho `EPOLLEXCLUSIVE`; chỉ dựa trên man page.)
+**Tình huống 2: nhiều epoll fd (instance khác nhau) cùng gắn vào *một* fd đích.** Mặc định *tất cả* các epoll fd đều nhận sự kiện. `EPOLLEXCLUSIVE` (từ Linux 4.5), đặt khi gắn, đổi điều đó thành: **một hoặc nhiều** epoll fd sẽ nhận event.[^ep-excl-one] Vì vậy cờ này hữu ích để tránh thundering herd trong một số tình huống.[^ep-excl]
 
-**`EPOLLRDHUP`, `EPOLLHUP`, `EPOLLERR`.**
+Chữ "một hoặc **nhiều**" quan trọng: tài liệu **không hứa đúng một**. Nếu cần độc quyền tuyệt đối (đúng một worker xử lý), bạn phải tự bảo đảm bằng cơ chế khác (nhận xét của người soạn). Ngoài ra `EPOLLEXCLUSIVE` có mấy quy tắc riêng:
 
-- `EPOLLRDHUP` (từ Linux 2.6.17): peer của stream socket đóng kết nối hoặc đóng nửa ghi; man page ghi cờ này đặc biệt hữu ích để phát hiện peer shutdown khi dùng ET.[^ep-rdhup] Quan sát (container, `socketpair`): đăng ký `EPOLLIN|EPOLLRDHUP`, phía kia `shutdown(SHUT_WR)` → `epoll_wait` trả `events = 0x2001` = `EPOLLIN | EPOLLRDHUP` (không có `EPOLLHUP`).
-- `EPOLLHUP` và `EPOLLERR` được `epoll_wait` luôn báo, không cần đặt trong `events`.[^ep-hup-always][^ep-err-always] Với pipe/stream socket, `EPOLLHUP` chỉ nghĩa peer đã đóng đầu của nó; các `read` tiếp theo trả 0 chỉ sau khi dữ liệu còn lại đã được tiêu thụ.[^ep-hup] `EPOLLERR` cũng được báo cho đầu ghi của pipe khi đầu đọc đã đóng.[^ep-err]
+- Chỉ dùng được trong `EPOLL_CTL_ADD`; gắn nó vào `EPOLL_CTL_MOD` là lỗi.[^ep-excl-add]
+- Cụ thể, `EPOLL_CTL_MOD` mà `events` có `EPOLLEXCLUSIVE` thì trả `EINVAL`.[^ep-excl-einval]
+- Nếu cùng một fd nằm trong nhiều instance mà có instance không đặt cờ, sự kiện đến *tất cả* instance không đặt cờ, và ít nhất một instance có đặt cờ.[^ep-excl-mixed]
+- Đi kèm cờ này mà đặt các cờ ngoài một tập nhỏ (`EPOLLIN`, `EPOLLOUT`, `EPOLLWAKEUP`, `EPOLLET`, cùng `EPOLLHUP` và `EPOLLERR`) thì gây `EINVAL`.[^ep-excl-flags]
 
-**Giới hạn bộ nhớ.**
+Tôi không có thí nghiệm nào cho `EPOLLEXCLUSIVE`; phần này chỉ dựa trên man page.
 
-Mỗi fd đăng ký tốn bộ nhớ kernel — khoảng 160 byte trên kernel 64-bit — và tổng số fd một user đăng ký bị giới hạn bởi `/proc/sys/fs/epoll/max_user_watches`;[^ep-watches] vượt ra thì `epoll_ctl(ADD)` lỗi `ENOSPC`.[^ep-enospc]
+### 7.3 `EPOLLRDHUP`, `EPOLLHUP`, `EPOLLERR`
+
+Ba cờ này báo trạng thái của kết nối, và `gateway` dùng chúng để biết client đã rời.
+
+- `EPOLLRDHUP` (từ Linux 2.6.17) báo peer của stream socket đã đóng kết nối, hoặc đóng nửa ghi. Man page ghi cờ này đặc biệt hữu ích để viết code đơn giản phát hiện peer shutdown khi dùng ET.[^ep-rdhup] Tôi thử trong container với `socketpair`: đăng ký `EPOLLIN|EPOLLRDHUP`, phía kia `shutdown(SHUT_WR)`, thì `epoll_wait` trả `events = 0x2001`, tức `EPOLLIN | EPOLLRDHUP` (không có `EPOLLHUP`).
+- `EPOLLHUP` luôn được `epoll_wait` báo, không cần đặt trong `events`.[^ep-hup-always] Với pipe hoặc stream socket, nó chỉ nghĩa là peer đã đóng đầu của nó; các `read` tiếp theo chỉ trả 0 sau khi dữ liệu còn lại đã được tiêu thụ.[^ep-hup]
+- `EPOLLERR` cũng luôn được báo mà không cần đặt trong `events`.[^ep-err-always] Nó còn được báo cho đầu ghi của pipe khi đầu đọc đã đóng.[^ep-err]
+
+### 7.4 Giới hạn bộ nhớ
+
+Mỗi fd đăng ký tốn khoảng 160 byte bộ nhớ kernel trên kernel 64-bit.[^ep-watches] Với 10.000 socket, `gateway` tốn cỡ 1,6 MB cho phần này (tính nhẩm của người soạn từ con số trên). Tổng số fd mà một user đăng ký bị giới hạn bởi `/proc/sys/fs/epoll/max_user_watches`; vượt giới hạn thì `epoll_ctl(ADD)` lỗi `ENOSPC`.[^ep-enospc]
 
 <details><summary>Đi sâu: quan sát <code>EPOLLONESHOT</code> và vì sao nó hữu ích cho đa luồng (suy luận)</summary>
 
-Quan sát (container): fd đăng ký `EPOLLIN|EPOLLET|EPOLLONESHOT`; ghi 1 byte → `epoll_wait` = 1; đọc xong rồi ghi thêm 1 byte → `epoll_wait` = **0**; gọi `EPOLL_CTL_MOD` re-arm → `epoll_wait` = 1. Về cài đặt (kernel 6.8): sau khi giao một sự kiện cho entry có `EPOLLONESHOT`, `ep_send_events` xóa các bit sự kiện công khai khỏi mặt nạ của entry;[^k-ep-oneshot-clear] trong `ep_poll_callback`, comment nói khi mặt nạ không còn bit nào của `poll(2)` thì fd được coi là bị vô hiệu, nhiều khả năng do bit `EPOLLONESHOT`, cho tới khi có `EPOLL_CTL_MOD` kế tiếp.[^k-ep-oneshot] Hai đoạn code ghép lại giải thích vì sao quan sát cho `0` (suy luận của người soạn).
+**Quan sát và cài đặt.** Tôi thử trong container: đăng ký fd với `EPOLLIN|EPOLLET|EPOLLONESHOT`; ghi 1 byte thì `epoll_wait` = 1; đọc xong rồi ghi thêm 1 byte thì `epoll_wait` = **0**; gọi `EPOLL_CTL_MOD` để re-arm thì `epoll_wait` = 1. Về cài đặt (kernel 6.8): sau khi giao một sự kiện cho entry có `EPOLLONESHOT`, `ep_send_events` xóa các bit sự kiện công khai khỏi mặt nạ của entry.[^k-ep-oneshot-clear] Trong `ep_poll_callback`, comment nói khi mặt nạ không còn bit nào của `poll(2)` thì fd được coi là bị vô hiệu, nhiều khả năng do bit `EPOLLONESHOT`, cho tới khi có `EPOLL_CTL_MOD` kế tiếp.[^k-ep-oneshot] Hai đoạn code ghép lại giải thích vì sao quan sát cho `0` (suy luận của người soạn).
 
-**Mục đích đa luồng** (suy luận của người soạn): đã đọc lại `epoll(7)`, `epoll_ctl(2)` và `epoll_wait(2)` (bookworm) — không trang nào nêu thẳng mục đích đa luồng của `EPOLLONESHOT`; chỉ có lý do "nhiều chunk → nhiều sự kiện" ở trên. Nếu nhiều worker thread cùng `epoll_wait` trên một epoll fd, hai sự kiện liên tiếp của một kết nối có thể đánh thức hai thread khác nhau và cả hai cùng xử lý kết nối đó; `EPOLLONESHOT` giữ cho mỗi lúc chỉ một sự kiện "mở" cho fd, nên thread nhận nó xử lý độc quyền cho tới khi tự re-arm. **Không** có câu nào trong tài liệu nói thẳng điều này, đừng trích như tài liệu.
+**Mục đích đa luồng** (suy luận của người soạn). Tôi đã đọc lại `epoll(7)`, `epoll_ctl(2)` và `epoll_wait(2)` (bookworm) và không trang nào nêu thẳng mục đích đa luồng của `EPOLLONESHOT`; chỉ có lý do "nhiều chunk → nhiều sự kiện" ở trên. Nếu nhiều worker thread cùng `epoll_wait` trên một epoll fd, hai sự kiện liên tiếp của một kết nối có thể đánh thức hai thread khác nhau và cả hai cùng xử lý kết nối đó. `EPOLLONESHOT` giữ cho mỗi lúc chỉ một sự kiện "mở" cho fd, nên thread nhận nó xử lý độc quyền cho tới khi tự re-arm. **Không** có câu nào trong tài liệu nói thẳng điều này, đừng trích như tài liệu.
 
 </details>
 
@@ -349,36 +380,40 @@ Quan sát (container): fd đăng ký `EPOLLIN|EPOLLET|EPOLLONESHOT`; ghi 1 byte 
 
 ## 8. Liên hệ với Rust: mio và `EPOLLET` (Q7)
 
-> **Trả lời ngắn.** Source mio 1.2.4 đặt `EPOLLET` trong mọi lần đăng ký fd với epoll trên Linux.[^mio-src] Tài liệu `Poll` của mio không gọi tên chế độ này và không nêu lý do; nó chỉ đặt nghĩa vụ lặp thao tác tới khi nhận `WouldBlock` sau mỗi readiness event,[^mio-drain] khớp với quy tắc "đọc tới `EAGAIN`" của ET ở mục 5.
+> **Trả lời ngắn.** Source mio 1.2.4 đặt `EPOLLET` trong mọi lần đăng ký fd với epoll trên Linux.[^mio-src] Tài liệu `Poll` của mio không gọi tên chế độ này và không nêu lý do. Nó chỉ đặt nghĩa vụ lặp thao tác tới khi nhận `WouldBlock` sau mỗi readiness event,[^mio-drain] khớp với quy tắc "đọc tới `EAGAIN`" của ET ở mục 5.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mio đưa bạn một chuông kiểu ET; mỗi lần chuông reo bạn phải lấy hết thư trong hộp, vì chuông sẽ không reo lại cho số thư cũ.
+*Với `gateway`.* Nếu `gateway` viết bằng Rust, bạn sẽ không gọi `epoll_ctl` trực tiếp mà đi qua mio, hoặc qua Tokio (Tokio dùng mio, xem Chương 08). Câu hỏi thực tế là: mio đã chọn sẵn chế độ nào cho các socket của bạn, và code đọc của `gateway` phải tuân theo điều gì.
 
-Mio dùng epoll trên Linux và kqueue trên macOS theo bảng Implementation notes của `Poll`.[^mio-impl] Hợp đồng chung của `Poll` là: sau khi nhận readiness event, thao tác tương ứng phải được lặp lại cho tới khi trả `WouldBlock`.[^mio-drain] Đó là quy tắc "đọc tới `EAGAIN`" của `epoll(7)` với tên lỗi Rust (`WouldBlock`); quên nó, bạn gặp lại đúng bug `--read-once` ở mục 5. Mối liên hệ nhân quả (ET là lý do hợp đồng này cần thiết trên Linux) là suy luận của người soạn: docs mio không nối hai điều đó.
+### 8.1 Hợp đồng "lặp tới `WouldBlock`"
 
-**Vì sao mio chọn ET?** Không tài liệu hay source nào đã tải nêu lý do. Điều có nguồn: backend kqueue của mio đăng ký với `EV_CLEAR`,[^mio-kq] và `EV_CLEAR` đặt lại trạng thái sự kiện sau khi người dùng lấy nó.[^kq-clear] Từ đó suy luận (của người soạn) rằng mio muốn hai backend cùng một ngữ nghĩa "báo theo thay đổi" để dùng chung một hợp đồng drain ([Chương 03, mục 2](03-kqueue-io-uring.md) so sánh `EV_CLEAR` với `EPOLLET`).
+Mio dùng epoll trên Linux và kqueue trên macOS, theo bảng Implementation notes của `Poll`.[^mio-impl] Hợp đồng chung của `Poll` là: sau khi nhận một readiness event, thao tác tương ứng phải được lặp lại cho tới khi trả `WouldBlock`.[^mio-drain] Đó chính là quy tắc "đọc tới `EAGAIN`" của `epoll(7)`, chỉ khác tên lỗi theo kiểu Rust. Quên nó, `gateway` sẽ gặp lại đúng bug `--read-once` ở mục 5. Quan hệ nhân quả (ET là lý do hợp đồng này cần thiết trên Linux) là suy luận của người soạn: docs mio không nối hai điều đó với nhau.
 
-Phần còn lại của mio (`Poll`, `Registry`, `Token`, `Waker`; spurious event và draining readiness với log `strace` đầy đủ) thuộc [Chương 07, mục 4–6](07-executor-va-mio.md), Tokio ở [Chương 08](08-tokio.md), kiến trúc event loop ở [Chương 04](04-kien-truc-event-loop.md).
+### 8.2 Vì sao mio chọn ET
+
+Không tài liệu hay source nào tôi đã tải nêu lý do. Điều có nguồn là backend kqueue của mio đăng ký với `EV_CLEAR`,[^mio-kq] và `EV_CLEAR` đặt lại trạng thái sự kiện sau khi người dùng lấy nó.[^kq-clear] Từ đó tôi suy luận (suy luận của người soạn) rằng mio muốn hai backend cùng một ngữ nghĩa "báo theo thay đổi", để dùng chung một hợp đồng drain. [Chương 03, mục 2](03-kqueue-io-uring.md) so sánh `EV_CLEAR` với `EPOLLET`.
+
+Phần còn lại của mio (`Poll`, `Registry`, `Token`, `Waker`; spurious event và draining readiness với log `strace` đầy đủ) thuộc [Chương 07, mục 4–6](07-executor-va-mio.md). Tokio ở [Chương 08](08-tokio.md), còn kiến trúc event loop ở [Chương 04](04-kien-truc-event-loop.md).
 
 <details><summary>Đi sâu: bằng chứng mio đặt <code>EPOLLET</code> (source và strace)</summary>
 
-- Source mio `v1.2.4`, `src/sys/unix/selector/epoll.rs`, hàm `interests_to_epoll`, bắt đầu bằng `let mut kind = EPOLLET;` rồi cộng `EPOLLIN | EPOLLRDHUP` cho interest đọc, `EPOLLOUT` cho ghi.[^mio-src] (Chi tiết cài đặt của phiên bản 1.2.4.)
-- Quan sát (strace `mio_echo`; log đầy đủ ở [Chương 07, mục 6](07-executor-va-mio.md)): `epoll_ctl(3, EPOLL_CTL_ADD, 5, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data={u32=1, u64=1}})` cho kết nối, và `EPOLLIN|EPOLLRDHUP|EPOLLET` cho listener — **kể cả listener** đều ET; `data` mang `Token` của mio. (Server echo thô ở mục 4 chọn khác: listener giữ LT.)
+- Source mio `v1.2.4`, `src/sys/unix/selector/epoll.rs`, hàm `interests_to_epoll`: hàm bắt đầu bằng `let mut kind = EPOLLET;`, rồi cộng `EPOLLIN | EPOLLRDHUP` cho interest đọc và `EPOLLOUT` cho ghi.[^mio-src] Đây là chi tiết cài đặt của phiên bản 1.2.4.
+- Quan sát (strace `mio_echo`; log đầy đủ ở [Chương 07, mục 6](07-executor-va-mio.md)): `epoll_ctl(3, EPOLL_CTL_ADD, 5, {events=EPOLLIN|EPOLLOUT|EPOLLRDHUP|EPOLLET, data={u32=1, u64=1}})` cho kết nối, và `EPOLLIN|EPOLLRDHUP|EPOLLET` cho listener. **Kể cả listener** đều ET; `data` mang `Token` của mio. (Server echo thô ở mục 4 chọn khác: listener giữ LT.)
 
 </details>
 
-**Quay lại Q7:** source mio đặt `EPOLLET` cho mọi fd (docs không gọi tên nó), nên sau mỗi readiness event bạn phải lặp tới `WouldBlock`.
+**Quay lại Q7:** source mio đặt `EPOLLET` cho mọi fd (docs không gọi tên nó), nên code của `gateway` phải lặp tới `WouldBlock` sau mỗi readiness event.
 
 ## Tóm tắt
 
-- `select` chặn ở fd có *số* < 1024 vì glibc làm `fd_set` cố định, không phải kernel; `fd_set` là value-result nên phải dựng lại mỗi lần gọi.
+- `select` chặn ở fd có *số* ≥ 1024 vì glibc làm `fd_set` cố định, không phải kernel; `fd_set` là value-result nên phải dựng lại mỗi lần gọi.
 - `poll` tách `events` (vào) khỏi `revents` (ra), bỏ qua fd âm, báo `POLLNVAL` cho fd không mở.
-- Man page không nêu Big-O. Source 6.8: `select`/`poll` duyệt từng fd truyền vào mỗi lần gọi; epoll dùng callback đưa fd vào ready list (hệ quả hiệu năng là suy luận — hãy đo).
-- epoll = interest list + ready list, qua `epoll_create1` / `epoll_ctl` / `epoll_wait`; trên aarch64 strace hiện `epoll_pwait`.
-- ET chỉ báo khi có thay đổi: fd non-blocking, đọc/ghi tới `EAGAIN`; `--read-once` làm echo kẹt ở 48/64 byte.
+- Man page không nêu Big-O. Trong source 6.8, `select` và `poll` duyệt từng fd truyền vào ở mỗi lần gọi, còn epoll dùng callback đưa fd vào ready list; hệ quả hiệu năng là suy luận, hãy đo.
+- epoll = interest list + ready list, qua `epoll_create1`, `epoll_ctl`, `epoll_wait`; trên aarch64 strace hiện `epoll_pwait`.
+- ET chỉ báo khi có thay đổi: dùng fd non-blocking, đọc và ghi tới `EAGAIN`; chế độ `--read-once` làm echo kẹt ở 48/64 byte.
 - `EPOLLONESHOT` vô hiệu fd tới khi `EPOLL_CTL_MOD`; `EPOLLEXCLUSIVE` cho "một hoặc nhiều" epoll fd nhận event.
-- Đóng fd không chắc gỡ nó khỏi interest list khi OFD còn tham chiếu; file thường bị `EPERM`.
+- Đóng fd không chắc gỡ nó khỏi interest list khi OFD còn được tham chiếu; file thường bị `EPERM`.
 - mio (source 1.2.4) đặt `EPOLLET` cho mọi fd; docs mio đòi lặp tới `WouldBlock`.
 
 ## Câu hỏi tự kiểm tra
@@ -386,7 +421,7 @@ Phần còn lại của mio (`Poll`, `Registry`, `Token`, `Waker`; spurious even
 1. Giới hạn 1024 của `select` nằm ở kernel hay glibc? Giới hạn "số lượng" hay "số của" fd?
 <details><summary>Đáp án</summary>
 
-Ở glibc: kernel không áp giới hạn cố định.[^sel-glibc] Man page nói `select` chỉ theo dõi fd có *số* nhỏ hơn `FD_SETSIZE`[^sel-warn] — giới hạn theo số của fd.
+Ở glibc: kernel không áp giới hạn cố định.[^sel-glibc] `select` chỉ theo dõi fd có *số* nhỏ hơn `FD_SETSIZE`,[^sel-warn] tức giới hạn theo số của fd.
 
 </details>
 
@@ -400,28 +435,28 @@ Phần còn lại của mio (`Poll`, `Registry`, `Token`, `Waker`; spurious even
 3. Interest list và ready list khác nhau thế nào; ai điền ready list?
 <details><summary>Đáp án</summary>
 
-Interest list là tập fd đã đăng ký; ready list là tập tham chiếu tới fd đang ready, được kernel điền động theo I/O.[^epoll-lists] Theo source 6.8, callback cài trên wait queue của file đưa entry vào ready list.[^k-ep-callback][^k-ep-ready]
+Interest list là tập fd đã đăng ký; ready list là tập tham chiếu tới fd đang ready, được kernel điền động theo I/O.[^epoll-lists] Theo source 6.8, callback cài trên wait queue của file đưa entry vào ready list.[^k-ep-ready]
 
 </details>
 
 4. Trong ví dụ 2 KB của `epoll(7)`, vì sao bước 5 treo ở ET mà không treo ở LT?
 <details><summary>Đáp án</summary>
 
-ET chỉ phát sự kiện khi có thay đổi;[^ep-et-change] sự kiện bị tiêu thụ ở bước 3 và lần đọc 1 kB không rút cạn buffer.[^ep-et-hang] LT về bản chất là một `poll(2)` nhanh hơn nên còn dữ liệu thì còn báo.[^ep-lt]
+ET chỉ phát sự kiện khi có thay đổi;[^ep-et-change] sự kiện bị tiêu thụ ở bước 3 và lần đọc 1 KB không rút cạn buffer.[^ep-et-hang] LT về bản chất là một `poll(2)` nhanh hơn nên còn dữ liệu thì còn báo.[^ep-lt]
 
 </details>
 
 5. Hai quy tắc dùng ET đúng cách? Với stream socket có đường tắt nào, và vì sao dặn thận trọng?
 <details><summary>Đáp án</summary>
 
-Fd non-blocking và chỉ chờ sau khi `read`/`write` trả `EAGAIN`.[^ep-et-rule] `read` trả ít byte hơn yêu cầu cho biết đã rút cạn, nhưng tránh kỹ thuật này nếu không chắc fd luôn là stream-oriented.[^ep-qa-short][^ep-qa-short-caveat]
+Fd non-blocking và chỉ chờ sau khi `read` hoặc `write` trả `EAGAIN`.[^ep-et-rule] `read` trả ít byte hơn yêu cầu cho biết đã rút cạn,[^ep-qa-short] nhưng nên tránh kỹ thuật này nếu không chắc fd luôn là stream-oriented.[^ep-qa-short-caveat]
 
 </details>
 
 6. `EPOLLONESHOT` làm gì? Câu nào trong tài liệu nói về dùng nó cho đa luồng?
 <details><summary>Đáp án</summary>
 
-Sau một sự kiện, fd bị vô hiệu hóa đến khi `EPOLL_CTL_MOD`.[^ep-oneshot][^ep-oneshot-rearm] Tài liệu chỉ nêu lý do "nhiều chunk → nhiều sự kiện";[^ep-oneshot-et] phần đa luồng là suy luận của người soạn.
+Sau một sự kiện, fd bị vô hiệu hóa đến khi `EPOLL_CTL_MOD`.[^ep-oneshot] Tài liệu chỉ nêu lý do "nhiều chunk → nhiều sự kiện";[^ep-oneshot-et] phần đa luồng là suy luận của người soạn.
 
 </details>
 
@@ -435,7 +470,7 @@ Nhiều epoll fd gắn vào cùng fd đích: một hoặc nhiều nhận event, 
 8. `close(fd)` mà epoll vẫn báo sự kiện cho số fd đó: nguyên nhân và cách chữa?
 <details><summary>Đáp án</summary>
 
-OFD còn tham chiếu qua `dup`/`fork`;[^ep-close] chữa bằng `EPOLL_CTL_DEL` trước. Hoặc event cache còn sự kiện cũ trong cùng lô;[^ep-cache] chữa bằng đánh dấu "removed".[^ep-cache-fix]
+OFD còn được tham chiếu qua `dup` hoặc `fork`;[^ep-close] chữa bằng `EPOLL_CTL_DEL` trước. Hoặc event cache còn sự kiện cũ trong cùng lô;[^ep-cache] chữa bằng đánh dấu "removed".[^ep-cache-fix]
 
 </details>
 

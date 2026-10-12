@@ -1,38 +1,40 @@
 # P12 · Chương 16 — Redis bên trong: event loop, cấu trúc dữ liệu, persistence, replication, cluster
 
-> Chương này là **case study**: nó không dạy lại khái niệm đã có ở chương khác (replication, partitioning, transaction, fencing…) mà chỉ tóm 1–3 câu rồi link, và đi sâu vào phần *chỉ Redis mới có*. Mọi khẳng định về **source code** là về **Redis 7.2.5** (tag ghim `7.2.5` trên GitHub `redis/redis`); mọi khẳng định về **tài liệu** lấy từ repo `redis/redis-doc` ghim ở commit `1044224` (đó là bản markdown của các trang redis.io tại thời điểm commit; trang redis.io hiện tại có thể đã đổi nội dung — người soạn không đối chiếu từng trang sống). Redis 8.x không được đọc source trong chương này; nơi nào hành vi là *chi tiết cài đặt của 7.2.5* thì có ghi. Không có thí nghiệm nào được chạy: mọi hành vi lấy từ source và tài liệu, không có số đo.
+> Chương này là **case study**: nó không dạy lại những khái niệm đã có ở chương khác (replication, partitioning, transaction, fencing…) mà chỉ nhắc 1–3 câu rồi link, còn phần lớn dành cho những gì *chỉ Redis mới có*. Về nguồn: mọi khẳng định về **source code** là về **Redis 7.2.5** (tag ghim `7.2.5` trên GitHub `redis/redis`). Mọi khẳng định về **tài liệu** lấy từ repo `redis/redis-doc` ghim ở commit `1044224`, tức bản markdown của các trang redis.io tại thời điểm đó; trang redis.io hiện tại có thể đã đổi nội dung, người soạn không đối chiếu từng trang sống. Redis 8.x không được đọc source trong chương này, và chỗ nào hành vi chỉ là *chi tiết cài đặt của 7.2.5* thì có ghi. Không có thí nghiệm nào được chạy: mọi hành vi lấy từ source và tài liệu, không có số đo.
 
-> Các pattern dựng trên những cơ chế này — cache + stampede, rate limiter, lock + idempotency, job queue, leaderboard, đếm, session — nằm ở [P12 · Chương 17 — Redis pattern thực chiến](17-redis-patterns.md); chương này chỉ dừng ở cơ chế bên dưới.
+> Các pattern dựng trên những cơ chế này (cache + stampede, rate limiter, lock + idempotency, job queue, leaderboard, đếm, session) nằm ở [P12 · Chương 17 — Redis pattern thực chiến](17-redis-patterns.md). Chương này chỉ dừng ở cơ chế bên dưới.
 
 ## Bạn sẽ hiểu được gì
 
-- **Q1.** Vì sao Redis xử lý lệnh trong một thread mà vẫn nhanh; event loop `ae` chạy gì trên epoll/kqueue; `io-threads` và các thread nền làm gì và *không* làm gì; một lệnh O(N) ảnh hưởng ai? → mục 1
+- **Q1.** Vì sao Redis xử lý lệnh trong một thread mà vẫn nhanh? Event loop `ae` chạy gì trên epoll/kqueue, `io-threads` và các thread nền làm gì và *không* làm gì, và một lệnh O(N) ảnh hưởng đến ai? → mục 1
 - **Q2.** Một key `string`/`list`/`hash`/`set`/`zset` thực sự nằm trong RAM dưới dạng cấu trúc nào (SDS, listpack, quicklist, intset, skiplist + dict), và ngưỡng nào trong `redis.conf` làm Redis đổi encoding? → mục 2
-- **Q3.** `maxmemory` + `maxmemory-policy` hoạt động ra sao; LRU/LFU "xấp xỉ" nghĩa là gì; key hết hạn (expire) được xóa lúc nào? → mục 3
-- **Q4.** RDB (fork + copy-on-write) và AOF (`appendfsync`, rewrite, mixed) làm gì; crash thì có thể mất tối đa bao nhiêu dữ liệu? → mục 4
-- **Q5.** Replication của Redis: bất đồng bộ, PSYNC và replication backlog; `WAIT` có biến Redis thành CP không; Sentinel failover ra sao? → mục 5
+- **Q3.** `maxmemory` và `maxmemory-policy` hoạt động ra sao? LRU/LFU "xấp xỉ" nghĩa là gì? Key hết hạn (expire) bị xóa lúc nào? → mục 3
+- **Q4.** RDB (fork + copy-on-write) và AOF (`appendfsync`, rewrite, mixed) làm gì, và crash thì có thể mất tối đa bao nhiêu dữ liệu? → mục 4
+- **Q5.** Replication của Redis: vì sao bất đồng bộ, PSYNC và replication backlog hoạt động ra sao, `WAIT` có biến Redis thành CP không, và Sentinel failover diễn ra thế nào? → mục 5
 - **Q6.** Redis Cluster thêm gì so với replication + sharding thủ công, và vì sao spec nói thẳng là không có strong consistency? → mục 6
-- **Q7.** `MULTI`/`EXEC`, `WATCH`, Lua/Functions bảo đảm gì (và *không* bảo đảm gì); khi nào dùng Pub/Sub, khi nào dùng Streams + consumer group? → mục 7
-- **Q8.** Ở mức cơ chế: `SET NX PX` đúng cách ra sao và vì sao nguyên tử, Redlock bị tranh luận ở đâu (hai phía), và Redis làm cache hay rate limiter dựa trên nút vặn nào của chương này? (Cách *ghép* cache, rate limiter, lock + idempotency thành pattern hoàn chỉnh nằm ở [Chương 17](17-redis-patterns.md).) → mục 8
+- **Q7.** `MULTI`/`EXEC`, `WATCH`, Lua/Functions bảo đảm gì (và *không* bảo đảm gì)? Khi nào dùng Pub/Sub, khi nào dùng Streams + consumer group? → mục 7
+- **Q8.** Ở mức cơ chế: `SET NX PX` đúng cách ra sao và vì sao nguyên tử, Redlock bị tranh luận ở đâu (hai phía), và Redis làm cache hay rate limiter dựa trên những nút vặn nào của chương này? Cách *ghép* cache, rate limiter, lock + idempotency thành pattern hoàn chỉnh nằm ở [Chương 17](17-redis-patterns.md). → mục 8
 
 ## Kiến thức cần trước
 
-- [P7 · Chương 02 — select, poll và epoll](../07-io-async/02-select-poll-epoll.md) và [P7 · Chương 04 — Kiến trúc event loop](../07-io-async/04-kien-truc-event-loop.md): Redis là một event loop kiểu reactor; chương này chỉ chỉ ra *nơi nó nằm trong source Redis*.
+- [P7 · Chương 02 — select, poll và epoll](../07-io-async/02-select-poll-epoll.md) và [P7 · Chương 04 — Kiến trúc event loop](../07-io-async/04-kien-truc-event-loop.md): Redis là một event loop kiểu reactor; chương này chỉ chỉ ra *nó nằm ở đâu trong source Redis*.
 - [P10 · Chương 09 — Bên trong collection của std](../10-rust-internals/09-collections-internals.md): để so `Vec`/`VecDeque`/`HashMap`/`BTreeMap` của Rust với listpack/quicklist/dict/skiplist của Redis.
 - [P1 · Chương 03 — Process](../01-linux/03-process.md) (mục `fork` và copy-on-write), [P3 · Chương 04 — Page fault](../03-memory/04-page-fault-va-swapping.md) và [P5 · Chương 06 — Durability trong thực tế](../05-storage/06-durability-trong-thuc-te.md) (`fsync`): nền cho persistence ở mục 4.
-- [P12 · Chương 05 — Replication](05-replication.md), [Chương 06 — Partitioning](06-partitioning.md), [Chương 07 — Transaction](07-transaction.md), [Chương 08 — Sự cố của hệ phân tán](08-su-co-he-phan-tan.md) (lease, fencing), [Chương 11 — Stream processing](11-stream-processing.md): khái niệm chung; chương này chỉ nói cách Redis hiện thực chúng.
+- [P12 · Chương 05 — Replication](05-replication.md), [Chương 06 — Partitioning](06-partitioning.md), [Chương 07 — Transaction](07-transaction.md), [Chương 08 — Sự cố của hệ phân tán](08-su-co-he-phan-tan.md) (lease, fencing), [Chương 11 — Stream processing](11-stream-processing.md): khái niệm chung. Chương này chỉ nói cách Redis hiện thực chúng.
 - [P13 · Chương 09 — Mô hình hóa hệ backend](../13-tla-plus/09-mo-hinh-hoa-he-backend.md): mục 2 (lease + fencing) và mục 4 (cache-aside và cuộc đua stale cache) được mô hình hóa ở đó bằng TLA+.
-- [P12 · Chương 15 — PostgreSQL bên trong](15-postgresql-ben-trong.md): mục 1–2 (một process mỗi connection, pooler) và mục 4 (WAL, `COMMIT`) để đối chiếu với mô hình của Redis ở mục 1 và 4; cache-aside với Redis đứng trước PostgreSQL được nối ở mục 8.4 của chương này.
+- [P12 · Chương 15 — PostgreSQL bên trong](15-postgresql-ben-trong.md): mục 1–2 (một process mỗi connection, pooler) và mục 4 (WAL, `COMMIT`) để đối chiếu với mô hình của Redis ở mục 1 và 4. Cache-aside với Redis đứng trước PostgreSQL được nối ở mục 8.4 của chương này.
 
 ## 1. Một luồng, một event loop, và cái giá của lệnh chậm (Q1)
 
-> **Trả lời ngắn.** Redis chạy mọi lệnh của mọi client trong một thread chính, lần lượt từng lệnh[^lat-seq]; thread đó là một event loop gọi `epoll_wait` (Linux)[^ae-epoll][^ae-cfg-epoll] hoặc `kevent` (macOS/BSD)[^ae-kqueue][^ae-cfg-kqueue] để biết socket nào sẵn sàng rồi xử lý[^ae-order]. Nó nhanh vì lệnh thường chỉ chạm cấu trúc dữ liệu trong RAM và (theo thiết kế) không bị chặn ở system call[^lat-nonblock], và mỗi lệnh nguyên tử vì không có lệnh nào chen vào giữa (suy luận của người soạn). Cái giá: một lệnh chậm làm mọi client khác phải chờ[^lat-slow].
+> **Trả lời ngắn.** Redis chạy mọi lệnh của mọi client trên một thread chính, lần lượt từng lệnh[^lat-seq]. Thread đó là một event loop: nó hỏi kernel socket nào đã sẵn sàng bằng `epoll_wait` trên Linux[^ae-epoll]. Trên macOS/BSD lời gọi tương ứng là `kevent`[^ae-kqueue]. Sau đó nó xử lý các socket sẵn sàng. Redis nhanh vì lệnh thường chỉ chạm cấu trúc dữ liệu trong RAM và, theo thiết kế, không bị chặn ở system call[^lat-nonblock]; mỗi lệnh còn nguyên tử vì không lệnh nào chen vào giữa (suy luận của người soạn). Đổi lại, một lệnh chậm làm mọi client khác phải chờ[^lat-slow].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một quầy thu ngân duy nhất, nhưng khách nào cũng chỉ mua một món đã có sẵn trên quầy — quét xong là đi. Quầy không bao giờ phải "đợi hàng về" (không block I/O), nên một người thu ngân đủ phục vụ cả hàng dài. Nhưng nếu một khách đẩy cả xe 10.000 món vào, cả hàng đứng chờ.
+*Với service của bạn.* Ta sẽ bám theo một service giả định tên `shop-api`: một service Rust chạy vài instance sau load balancer, cùng nói chuyện với một Redis tên `redis-main`. Mỗi request `GET /products/42` đọc key `product:42` trong cache; request đặt hàng sửa giỏ `cart:u1` và tăng bộ đếm rate limit theo IP (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này: vì sao một thread mà `redis-main` vẫn phục vụ nổi cả đội instance `shop-api`, và chuyện gì xảy ra với `shop-api` khi có ai đó chạy một lệnh chậm?
 
-*Vòng lặp.* Hàm `aeMain` lặp vô hạn gọi `aeProcessEvents`[^ae-main-call]. Mỗi vòng, `aeProcessEvents` làm theo thứ tự: gọi hook `beforesleep`; gọi `aeApiPoll` — lớp bọc quanh epoll/kqueue — rồi chờ tới khi có sự kiện hoặc tới hạn timer gần nhất[^ae-poll]; chạy handler đọc/ghi cho từng fd sẵn sàng; cuối cùng chạy các *time event*[^ae-time] (ví dụ `serverCron`, được đăng ký làm một time event[^srv-cron-timer]). Lớp đa hợp (multiplexing) được chọn lúc biên dịch theo thứ tự "tốt nhất trước": evport, epoll, kqueue, select[^ae-order]. Kiến thức epoll/kqueue nằm ở [P7 · Chương 02](../07-io-async/02-select-poll-epoll.md) và [Chương 03](../07-io-async/03-kqueue-io-uring.md); vòng lặp reactor ở [P7 · Chương 04](../07-io-async/04-kien-truc-event-loop.md).
+### 1.1 Vòng lặp của thread chính
+
+Hàm `aeMain` lặp vô hạn, mỗi lần lặp gọi `aeProcessEvents`[^ae-main-call]. Một vòng gọi hook `beforesleep` trước, rồi gọi `aeApiPoll` (lớp bọc quanh epoll/kqueue) và ngủ cho tới khi có sự kiện hoặc tới hạn timer gần nhất[^ae-poll]. Tiếp theo nó chạy handler đọc/ghi cho từng fd sẵn sàng. Cuối cùng là các *time event*[^ae-time]. Việc định kỳ `serverCron` là một time event như vậy[^srv-cron-timer]. Cách epoll/kqueue hoạt động nằm ở [P7 · Chương 02](../07-io-async/02-select-poll-epoll.md) và [Chương 03](../07-io-async/03-kqueue-io-uring.md); vòng lặp reactor nằm ở [P7 · Chương 04](../07-io-async/04-kien-truc-event-loop.md).
 
 ```mermaid
 flowchart TD
@@ -43,181 +45,272 @@ flowchart TD
   E --> A
 ```
 
-*(Sơ đồ là tổng hợp của người soạn từ các nguồn trong mục này: thứ tự vòng lặp theo `aeProcessEvents`[^ae-poll][^ae-time]; `beforeSleep` ghi AOF buffer và reply[^bs-aof-write][^net-pending-write] và có chu kỳ expire "nhanh"[^bs-expire-fast]; `readQueryFromClient` là hàm handler đọc trong `networking.c`[^net-readquery].)*
+(Sơ đồ là tổng hợp của người soạn từ các nguồn trong mục này; các mục 1.2 và 3.5 giải thích từng hộp.)
 
-*Một lệnh đi qua đâu.* Handler đọc đọc byte từ socket vào buffer, parse, rồi `processInputBuffer` gọi `processCommandAndResetClient` → `processCommand` → `call`[^net-process][^net-proc-cmd][^srv-call]. Ở cấu hình mặc định (không bật `io-threads-do-reads`, mục dưới) cả chuỗi này chạy trên thread chính; khi bật thì chỉ phần *thực thi lệnh* luôn ở thread chính (suy luận của người soạn từ mô tả io-threads ở mục dưới). `beforeSleep` — chạy *trước* mỗi lần ngủ trong poll — gom các việc cần làm một lần mỗi vòng: ghi AOF buffer xuống file, ghi reply của các client đang chờ ghi[^bs-aof-write]. Ghi reply ngay tại đó là để khỏi tốn một system call đăng ký "writable event" rồi chờ nó nổ[^net-pending-write].
+### 1.2 Một lệnh đi qua đâu
 
-*Vì sao đủ nhanh.* Tài liệu Redis giải thích: một request được phục vụ trong khoảng thời gian rất ngắn, nhưng lý do chính là Redis (cũng như Node.js) được thiết kế để không block ở system call như đọc/ghi socket[^lat-nonblock]. Chi phí đắt nhất nằm ở I/O socket chứ không ở thao tác trên cấu trúc dữ liệu: mỗi `read()`/`write()` là một lần chuyển từ user sang kernel, "một sự phạt tốc độ rất lớn"[^pipe-ctxsw]; vì thế pipelining (gửi nhiều lệnh, đọc nhiều reply trong ít system call) cải thiện thông lượng nhiều[^pipe-batch] — theo tài liệu, số truy vấn mỗi giây ban đầu tăng gần tuyến tính theo độ dài pipeline rồi đạt khoảng 10 lần mốc không pipeline (số của tài liệu trên setup của họ; chương này không tự đo)[^pipe-10x].
+Khi `shop-api` gửi `GET product:42`, handler đọc `readQueryFromClient` trong `networking.c` lấy byte từ socket vào buffer[^net-readquery]. Parse xong, `processInputBuffer` gọi `processCommandAndResetClient`[^net-process]. Hàm này gọi `processCommand`[^net-proc-cmd]. Rồi `processCommand` gọi `call` để chạy lệnh thật[^srv-call]. Ở cấu hình mặc định (không bật `io-threads-do-reads`, xem phần Đi sâu) cả chuỗi này chạy trên thread chính. Khi bật, chỉ phần *thực thi lệnh* luôn ở thread chính (suy luận của người soạn từ mô tả io-threads ở phần Đi sâu).
 
-*Mỗi lệnh nguyên tử.* Vì thread chính phục vụ lần lượt từng request[^lat-seq], nên (suy luận của người soạn) không có request nào của client khác xen vào giữa một lệnh. (Cũng suy luận của người soạn: đó là lý do `INCR`, `LPUSH`, `SADD`… không cần lock; còn *chuỗi* nhiều lệnh thì chỉ nguyên tử nếu dùng `MULTI`/`EXEC` hoặc script — mục 7.)
+`beforeSleep` chạy *trước* mỗi lần ngủ trong poll, và gom những việc nên làm một lần mỗi vòng: ghi buffer AOF xuống file, rồi ghi reply của các client đang chờ ghi[^bs-aof-write]. Ghi reply ngay tại đó là để khỏi tốn một system call đăng ký "writable event" rồi chờ nó nổ[^net-pending-write].
 
-*Lệnh chậm chặn tất cả.* Tài liệu nói thẳng hệ quả: khi một request chậm, mọi client khác chờ nó; `GET`/`SET`/`LPUSH` là thời gian hằng nên không sao, nhưng các lệnh làm việc trên nhiều phần tử như `SORT`, `LREM`, `SUNION` có thể mất đáng kể; độ phức tạp của mọi lệnh đều được ghi trong tài liệu và nên kiểm tra[^lat-slow]. `KEYS` là ví dụ kinh điển: O(N) trên toàn bộ keyspace, tài liệu cảnh báo dùng "cực kỳ cẩn thận" ở production và gợi ý `SCAN` hoặc dùng set[^keys-warn]. Xóa một key khổng lồ bằng `DEL` cũng block; `UNLINK` chỉ gỡ key khỏi keyspace rồi thu hồi bộ nhớ ở thread khác[^unlink-doc] (chi tiết cài đặt 7.2.5: object nhỏ dưới một ngưỡng vẫn được giải phóng đồng bộ ngay, chỉ object đủ lớn mới đẩy sang thread nền[^lazyfree-threshold]). `SLOWLOG` ghi các lệnh vượt ngưỡng thời gian, nhưng thời gian đó *chỉ tính phần thực thi lệnh*, không tính I/O với client[^slowlog-doc].
+### 1.3 Vì sao một thread vẫn đủ nhanh
 
-*Vậy "đơn luồng" có thật không?* Chỉ "chủ yếu". Source 7.2.5 ghi trong `redis.conf`: Redis chủ yếu là đơn luồng, nhưng một số thao tác như `UNLINK`, I/O chậm chạy ở thread phụ[^conf-mostly]; tài liệu latency cũng nói từ 2.4 có thread nền cho I/O đĩa nhưng vẫn "phục vụ mọi request bằng một thread"[^lat-bg].
+Phần lớn lệnh của `shop-api` là `GET`/`HSET` trên RAM nên xong rất nhanh. Tài liệu Redis cho rằng lý do chính là Redis được thiết kế để không block ở system call như đọc/ghi socket[^lat-nonblock]. Chi phí đắt nhất nằm ở I/O socket chứ không ở thao tác trên cấu trúc dữ liệu: mỗi `read()`/`write()` là một lần chuyển từ user sang kernel, mà tài liệu gọi là một "sự phạt tốc độ rất lớn"[^pipe-ctxsw].
 
-(Nhận xét của người soạn: mô hình ngược lại — một process cho mỗi connection — là của PostgreSQL, xem [P12 · Chương 15, mục 1 và 2](15-postgresql-ben-trong.md); hai hệ trả giá ở hai chỗ khác nhau: PostgreSQL ở số connection, Redis ở độ dài của lệnh chậm nhất.)
+Vì vậy `shop-api` nên dùng pipelining: gửi nhiều lệnh một lượt thì Redis đọc được nhiều lệnh bằng ít `read()` và trả nhiều reply bằng ít `write()`[^pipe-batch]. Theo tài liệu, số truy vấn mỗi giây ban đầu tăng gần tuyến tính theo độ dài pipeline rồi đạt khoảng 10 lần mốc không pipeline (đây là số của tài liệu trên setup của họ; chương này không tự đo)[^pipe-10x].
+
+### 1.4 Mỗi lệnh là nguyên tử
+
+Thread chính phục vụ tuần tự từng request[^lat-seq], nên không có request nào của client khác xen vào giữa một lệnh (suy luận của người soạn). Cũng suy luận của người soạn: đó là lý do `INCR`, `LPUSH`, `SADD`… không cần lock. Còn một *chuỗi* nhiều lệnh thì chỉ nguyên tử nếu dùng `MULTI`/`EXEC` hoặc script (mục 7).
+
+### 1.5 Lệnh chậm chặn tất cả
+
+Cái giá là chuyện này: hãy tưởng tượng một job dọn dẹp chạy `KEYS *` trên `redis-main`. Trong lúc lệnh đó quét, mọi `GET product:42` của mọi instance `shop-api` đều đứng chờ, nên latency của cả service tăng vọt (nhận xét của người soạn). Tài liệu nói thẳng hệ quả này: khi một request chậm, mọi client khác chờ nó xong[^lat-slow]. `GET`/`SET`/`LPUSH` là thời gian hằng nên không sao; các lệnh làm việc trên nhiều phần tử như `SORT`, `LREM`, `SUNION` có thể mất đáng kể, và độ phức tạp của mọi lệnh đều được ghi trong tài liệu nên cần kiểm tra[^lat-slow].
+
+`KEYS` là ví dụ kinh điển: O(N) trên toàn bộ keyspace. Tài liệu cảnh báo chỉ dùng nó ở production "cực kỳ cẩn thận" và gợi ý `SCAN` hoặc dùng set[^keys-warn]. Xóa một key khổng lồ bằng `DEL` cũng block; `UNLINK` chỉ gỡ key khỏi keyspace rồi thu hồi bộ nhớ ở thread khác[^unlink-doc]. Khi nghi ngờ lệnh nào đó chậm, `SLOWLOG` ghi các lệnh vượt ngưỡng thời gian, nhưng thời gian này *chỉ tính phần thực thi lệnh*, không tính I/O với client[^slowlog-doc].
+
+### 1.6 "Đơn luồng" có thật không?
+
+Chỉ "chủ yếu". `redis.conf` của 7.2.5 ghi: Redis chủ yếu là đơn luồng, nhưng một số thao tác như `UNLINK` và I/O chậm chạy ở thread phụ[^conf-mostly]. Tài liệu latency cũng nói từ 2.4 có thread nền cho I/O đĩa, nhưng Redis vẫn phục vụ mọi request bằng một thread[^lat-bg].
+
+(Nhận xét của người soạn: mô hình ngược lại, một process cho mỗi connection, là của PostgreSQL, xem [P12 · Chương 15, mục 1 và 2](15-postgresql-ben-trong.md). Hai hệ trả giá ở hai chỗ khác nhau: PostgreSQL ở số connection, Redis ở độ dài của lệnh chậm nhất.)
 
 <details><summary>Đi sâu: io-threads (7.2.5), thread nền <code>bio</code>, và vì sao chúng không phá tính tuần tự</summary>
 
-- **`io-threads`.** Ở 7.2.5 có thể đẩy việc *ghi* reply xuống socket (system call `write`) sang thread khác. `redis.conf` 7.2.5: khi bật I/O thread, mặc định chỉ dùng cho việc ghi[^conf-io-writes]; có thể bật cả đọc + parse bằng `io-threads-do-reads yes`, nhưng "thường thì thread hóa việc đọc không giúp nhiều"[^conf-io-reads]; mặc định tắt, tài liệu cấu hình gợi ý chỉ bật khi máy có ≥ 4 core[^conf-io-default] và thực sự có vấn đề hiệu năng[^conf-io-problems] (nhận xét: đừng bật vì "nghe nói nhanh hơn").
-- **Lệnh vẫn chạy trên thread chính.** Khi đọc được thread hóa, handler đọc chỉ xếp client vào hàng đợi; các I/O thread (thread chính cũng nhận một lát danh sách client[^net-main-slice]) đọc và parse *lệnh đầu tiên* vào cấu trúc client[^net-reads-queue]. Sau đó thread chính chờ mọi I/O thread xong (fan-in) rồi mới gọi `processPendingCommandAndInputBuffer` để thực thi từng lệnh[^net-fanin]. Mô hình "fan-out → fan-in" này giữ nguyên tính tuần tự của việc *thực thi*; chỉ I/O socket và parse được song song (đọc từ code 7.2.5; chương này không đọc source Redis 8 nên không nói gì về cách bản đó cài I/O threading).
-- **Thread nền (`bio`).** `bio.c` có các worker riêng cho việc đóng file, `fsync` AOF và lazy free[^bio-workers]; mỗi loại job giao cho một worker cụ thể, job cùng worker chạy theo thứ tự từ cũ tới mới[^bio-design]. `lazyfree-lazy-eviction`, `lazyfree-lazy-expire`, `lazyfree-lazy-server-del` đều mặc định `no` trong `redis.conf` 7.2.5[^conf-lazyfree-default] (nghĩa là mặc định eviction/expire xóa key theo kiểu block như `DEL`[^conf-lazyfree-del]; xem mục 3).
-- **Tiến trình con.** RDB và AOF rewrite dùng `fork` — một *process* khác, không phải thread; xem mục 4.
-- **Event loop vẫn xử lý được khi đang bận.** `beforeSleep` có nhánh riêng khi vòng lặp được vào lại từ `processEventsWhileBlocked()` (để trả lỗi `-LOADING` khi đang nạp dữ liệu[^net-while-blocked], hoặc khi một script chạy quá lâu[^net-script-timeout]), chỉ chạy một tập con việc thiết yếu[^bs-while-blocked].
+- **Chọn lớp multiplexing.** Lớp đa hợp được chọn lúc biên dịch theo thứ tự hiệu năng giảm dần: evport, epoll, kqueue, select[^ae-order].
+- **Giải phóng key lớn.** Ở 7.2.5, object nhỏ dưới một ngưỡng vẫn được `UNLINK` giải phóng đồng bộ ngay; chỉ object đủ lớn mới đẩy sang thread nền[^lazyfree-threshold].
+- **`io-threads`.** Ở 7.2.5 có thể đẩy việc *ghi* reply xuống socket (system call `write`) sang thread khác; khi bật I/O thread, mặc định chỉ dùng cho việc ghi[^conf-io-writes]. Có thể bật cả đọc + parse bằng `io-threads-do-reads yes`, nhưng `redis.conf` nhận xét rằng thường thì thread hóa việc đọc không giúp nhiều[^conf-io-reads]. Mặc định tính năng này tắt, và tài liệu cấu hình gợi ý chỉ bật khi máy có ≥ 4 core[^conf-io-default]. Nó cũng chỉ đáng bật khi thực sự có vấn đề hiệu năng[^conf-io-problems] (nhận xét của người soạn: đừng bật vì "nghe nói nhanh hơn").
+- **Lệnh vẫn chạy trên thread chính.** Khi đọc được thread hóa, handler đọc chỉ xếp client vào hàng đợi, và các I/O thread đọc rồi parse *lệnh đầu tiên* vào cấu trúc client[^net-reads-queue]. Thread chính cũng nhận một lát danh sách client[^net-main-slice]. Sau đó nó chờ mọi I/O thread xong (fan-in) rồi mới gọi `processPendingCommandAndInputBuffer` để thực thi từng lệnh[^net-fanin]. Mô hình "fan-out → fan-in" này giữ nguyên tính tuần tự của việc *thực thi*; chỉ I/O socket và parse được song song (đọc từ code 7.2.5; chương này không đọc source Redis 8 nên không nói gì về cách bản đó cài I/O threading).
+- **Thread nền (`bio`).** `bio.c` có các worker riêng cho việc đóng file, `fsync` AOF và lazy free[^bio-workers]. Mỗi loại job giao cho một worker cụ thể, và job cùng worker chạy theo thứ tự từ cũ tới mới[^bio-design]. Ba tùy chọn `lazyfree-lazy-eviction`, `lazyfree-lazy-expire`, `lazyfree-lazy-server-del` đều mặc định `no` trong `redis.conf` 7.2.5[^conf-lazyfree-default]. Nghĩa là mặc định eviction/expire xóa key theo kiểu block như `DEL`[^conf-lazyfree-del] (xem mục 3).
+- **Tiến trình con.** RDB và AOF rewrite dùng `fork`, tạo một *process* khác chứ không phải thread (xem mục 4).
+- **Event loop vẫn xử lý được khi đang bận.** `beforeSleep` có nhánh riêng khi vòng lặp được vào lại từ `processEventsWhileBlocked()`, và nhánh đó chỉ chạy một tập con việc thiết yếu[^bs-while-blocked]. Trường hợp thứ nhất là trả lỗi `-LOADING` khi đang nạp dữ liệu[^net-while-blocked]. Trường hợp thứ hai là khi một script chạy quá lâu[^net-script-timeout].
 
 </details>
 
-**Quay lại Q1:** một thread chính chạy event loop trên epoll/kqueue, thực thi từng lệnh một nên mỗi lệnh nguyên tử và không có lock giữa các lệnh; nhanh vì lệnh nhỏ, dữ liệu trong RAM, I/O không block — và đổi lại, mọi lệnh O(N) chặn toàn bộ instance (`io-threads` chỉ song song hóa I/O socket, không song song hóa việc thực thi lệnh).
+**Quay lại Q1:** một thread chính chạy event loop trên epoll/kqueue, thực thi từng lệnh một nên mỗi lệnh nguyên tử và không cần lock giữa các lệnh. Redis nhanh vì lệnh nhỏ, dữ liệu trong RAM, I/O không block; đổi lại, mọi lệnh O(N) chặn cả instance (`io-threads` chỉ song song hóa I/O socket, không song song hóa việc thực thi lệnh).
 
 ## 2. Giá trị trong RAM: encoding theo kích thước (Q2)
 
-> **Trả lời ngắn.** Mỗi key trỏ tới một `redisObject` mang *kiểu* (`string`, `list`…) và *encoding* (cách biểu diễn bên trong)[^obj-struct]. Với dữ liệu nhỏ, Redis dùng biểu diễn gọn trong một khối nhớ liền (`listpack`, `intset`, string nhúng); khi số phần tử hoặc kích thước phần tử vượt ngưỡng cấu hình trong `redis.conf`, nó tự đổi sang cấu trúc "thật" (hash table, `quicklist`, skiplist)[^memopt-convert]. Người dùng không thấy sự khác biệt qua API[^memopt-transparent], chỉ thấy trong bộ nhớ và độ trễ (nhận xét của người soạn).
+> **Trả lời ngắn.** Mỗi key trỏ tới một `redisObject` mang *kiểu* (`string`, `list`…) và *encoding* (cách biểu diễn bên trong)[^obj-struct]. Với dữ liệu nhỏ, Redis dùng biểu diễn gọn trong một khối nhớ liền (`listpack`, `intset`, string nhúng). Khi số phần tử hoặc kích thước phần tử vượt ngưỡng cấu hình trong `redis.conf`, nó tự đổi sang cấu trúc "thật" (hash table, `quicklist`, skiplist)[^memopt-convert]. Người dùng không thấy khác biệt qua API[^memopt-transparent], chỉ thấy trong bộ nhớ và độ trễ (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hồ sơ vài tờ thì kẹp vào một cặp file mỏng, tìm bằng cách lật từ đầu — rẻ, nhanh vì ít; hồ sơ hàng nghìn tờ thì phải dựng tủ hồ sơ có chỉ mục. Redis đổi "cặp file" sang "tủ" ngay khi dữ liệu vượt ngưỡng, vì lật tuần tự thì O(N) còn chỉ mục thì tốn thêm bộ nhớ.
+*Với `shop-api`.* Giỏ hàng `cart:u1` chỉ có vài field, còn bảng xếp hạng bán chạy `top:sold` có thể lên tới hàng chục nghìn sản phẩm. Redis không dùng chung một cấu trúc cho cả hai: dữ liệu nhỏ thì quét tuần tự trong một khối nhớ liền vừa rẻ vừa nhanh, còn dữ liệu lớn thì quét O(N) quá chậm nên đáng dựng cấu trúc có chỉ mục, dù tốn thêm bộ nhớ (nhận xét của người soạn). Redis tự đổi giữa hai kiểu biểu diễn theo ngưỡng cấu hình. Mục này cho thấy từng kiểu dữ liệu của `shop-api` nằm trong RAM ra sao.
 
-*Khung chung.* Header của `redisObject` có `type` (4 bit), `encoding` (4 bit), 24 bit cho dữ liệu LRU/LFU (mục 3), `refcount` và con trỏ `ptr` tới dữ liệu thật[^obj-struct]. Keyspace — ánh xạ `key → redisObject` — là một hash table `dict`: dùng chaining (mỗi entry có con trỏ `next` tới entry cùng bucket)[^dict-next], và *rehash tăng dần*: mỗi "bước" chuyển một bucket từ bảng cũ sang bảng mới, và số bucket rỗng bị duyệt qua mỗi bước bị chặn để thời gian không vô hạn[^dict-rehash]. `redis.conf` nói rõ hệ quả: càng nhiều thao tác chạy trên bảng đang rehash thì càng nhiều "bước" được thực hiện, nên khi server rảnh thì rehash không bao giờ xong và tốn thêm chút bộ nhớ[^conf-lazyrehash]; vì thế có `activerehashing`, dành 1 ms mỗi 100 ms CPU để giúp rehash bảng keyspace chính[^conf-activerehash]. (So với `HashMap` của Rust — cách bảng tăng trưởng nằm ở mục 4 của [P10 · Chương 09](../10-rust-internals/09-collections-internals.md): Redis chọn chia nhỏ việc chuyển bảng để không chặn event loop lâu; đây là suy luận của người soạn từ comment giới hạn công việc mỗi bước.)
+### 2.1 Khung chung: `redisObject` và keyspace
 
-*Bảng encoding (7.2.5).*
+Header của `redisObject` có `type` (4 bit), `encoding` (4 bit), 24 bit cho dữ liệu LRU/LFU (mục 3), `refcount` và con trỏ `ptr` tới dữ liệu thật[^obj-struct]. Keyspace, tức ánh xạ `key → redisObject`, là một hash table `dict` dùng chaining: mỗi entry có con trỏ `next` tới entry cùng bucket[^dict-next].
+
+Khi bảng cần nở, `dict` *rehash tăng dần* thay vì chuyển một lần. Mỗi "bước" chuyển một bucket từ bảng cũ sang bảng mới, và số bucket rỗng bị duyệt qua mỗi bước bị chặn để thời gian không vô hạn[^dict-rehash]. `redis.conf` nói rõ một hệ quả: càng nhiều thao tác chạy trên bảng đang rehash thì càng nhiều bước được thực hiện, nên khi server rảnh thì rehash không bao giờ xong và tốn thêm chút bộ nhớ[^conf-lazyrehash]. Vì thế có `activerehashing`, dành 1 ms mỗi 100 ms CPU để giúp rehash bảng keyspace chính[^conf-activerehash].
+
+(So với `HashMap` của Rust, cách bảng tăng trưởng nằm ở mục 4 của [P10 · Chương 09](../10-rust-internals/09-collections-internals.md). Redis chọn chia nhỏ việc chuyển bảng để không chặn event loop lâu; đây là suy luận của người soạn từ comment giới hạn công việc mỗi bước.)
+
+### 2.2 Bảng encoding (7.2.5)
 
 | Kiểu | Biểu diễn gọn | Biểu diễn "thật" | Ngưỡng mặc định (`redis.conf`) |
 |---|---|---|---|
 | string | `int` (số nguyên 64-bit có dấu)[^objenc-int], `embstr` (≤ 44 byte, nhúng cùng object) | `raw` (SDS riêng) | giới hạn 44 byte cố định trong source[^obj-embstr] |
 | list | `listpack` (một khối) | `quicklist` (danh sách liên kết đôi các listpack)[^ql-def] | `list-max-listpack-size -2` (nút tối đa 8 KB)[^conf-list] |
 | hash | `listpack` | hash table `dict`[^objenc-hash] | `hash-max-listpack-entries 512`, `hash-max-listpack-value 64`[^conf-hash] |
-| set | `intset` (toàn số nguyên) → `listpack`[^objenc-set] | hash table | `set-max-intset-entries 512`[^conf-set]; `set-max-listpack-entries 128`, `set-max-listpack-value 64`[^conf-set-lp] |
+| set (toàn số nguyên) | `intset`[^objenc-set] | hash table | `set-max-intset-entries 512`[^conf-set] |
+| set (chuỗi nhỏ, từ 7.2) | `listpack` | hash table | `set-max-listpack-entries 128`, `set-max-listpack-value 64`[^conf-set-lp] |
 | sorted set | `listpack` | `skiplist` + `dict`[^objenc-zset] | `zset-max-listpack-entries 128`, `zset-max-listpack-value 64`[^conf-zset] |
 | stream | — | radix tree các listpack[^enc-stream] | `stream-node-max-bytes 4096`, `stream-node-max-entries 100`[^conf-stream] |
 
-Giá trị trong bảng là mặc định ghi trong `redis.conf` 7.2.5; mọi thứ chỉnh được. Encoding `listpack` cho `set` chỉ có từ Redis 7.2[^objenc-set72]; với list/hash/sorted set thì `listpack` thay `ziplist` từ Redis 7.0 (tài liệu ghi `ziplist` dùng cho Redis ≤ 6.2)[^objenc-ziplist][^objenc-lp70]. Lệnh `OBJECT ENCODING` cho biết encoding hiện tại của một key[^objenc-doc].
+Giá trị trong bảng là mặc định ghi trong `redis.conf` 7.2.5, và mọi thứ đều chỉnh được. Lệnh `OBJECT ENCODING` cho biết encoding hiện tại của một key[^objenc-doc].
 
-*String và SDS.* Chuỗi của Redis là *SDS* (simple dynamic string): một con trỏ `char*` trỏ vào buffer, nằm ngay sau một header nhỏ lưu độ dài đã dùng (`len`) và độ dài đã cấp (`alloc`, không tính header và byte null cuối)[^sds-hdr]. Độ dài nằm sẵn trong header nên có thể lấy O(1) và string chứa được byte bất kỳ kể cả `\0` (binary safe) — cả hai là suy luận của người soạn từ cấu trúc header, không phải khẳng định của nguồn. Header có nhiều cỡ (`sdshdr8/16/32/64`) để chuỗi ngắn không phải trả hai trường 8 byte `len`/`alloc` của cỡ lớn nhất[^sds-hdr][^sds-hdr64] (suy luận của người soạn từ việc các trường `len`/`alloc` có kiểu `uint8_t`…`uint64_t`). Chuỗi ≤ 44 byte dùng `embstr`: object và SDS nằm trong *một* lần cấp phát; 44 được chọn để object lớn nhất vẫn vừa một "arena" 64 byte của jemalloc[^obj-embstr].
+### 2.3 String và SDS
 
-*List: quicklist.* List nhỏ nằm trong một `listpack`. Khi vượt `list-max-listpack-size`, thành `quicklist` — danh sách liên kết đôi mà mỗi nút là một listpack[^ql-def]; tham số âm `-1…-5` là giới hạn byte mỗi nút (4 KB…64 KB), tham số dương là số phần tử tối đa mỗi nút[^conf-list]. Có thể nén các nút giữa (`list-compress-depth`), đầu và đuôi luôn không nén để push/pop nhanh[^conf-compress]. Có một chi tiết hay: khi list *co lại*, Redis chỉ đổi ngược quicklist → listpack nếu kích thước/độ dài xuống dưới *một nửa* giới hạn, để tránh đổi qua đổi lại liên tục khi thêm/xóa[^list-shrink], và chỉ khi quicklist chỉ còn đúng một nút[^ql-one-node] (đây là hysteresis — "độ trễ" trong ngưỡng đổi).
+Chuỗi của Redis là *SDS* (simple dynamic string): một buffer `char*` nằm ngay sau một header nhỏ, header lưu độ dài đã dùng (`len`) và độ dài đã cấp (`alloc`, không tính header và byte null cuối)[^sds-hdr]. Vì độ dài có sẵn trong header nên lấy được trong O(1), và string chứa được byte bất kỳ kể cả `\0` (binary safe). Cả hai điều này là suy luận của người soạn từ cấu trúc header, không phải khẳng định của nguồn.
 
-*Set: intset.* Set toàn số nguyên (biểu diễn thập phân trong miền int64) và không vượt quá `set-max-intset-entries` phần tử dùng `intset`[^conf-set-intset]; set chuỗi nhỏ dùng listpack (từ 7.2); còn lại là hash table.
+Chuỗi ≤ 44 byte dùng `embstr`: object và SDS nằm trong *một* lần cấp phát. Con số 44 được chọn để object lớn nhất vẫn vừa một "arena" 64 byte của jemalloc[^obj-embstr]. Với `shop-api`, JSON của một trang sản phẩm thường dài hơn 44 byte nên sẽ là `raw` (nhận xét của người soạn).
 
-*Sorted set: skiplist + dict.* Sorted set lớn giữ *cùng các phần tử trong hai cấu trúc*: hash table ánh xạ phần tử → score[^zset-map] (suy luận của người soạn: nên tra điểm O(1)) và skiplist sắp theo score (để đạt O(log N) khi chèn/xóa)[^zset-dual]; chuỗi SDS của phần tử được dùng chung giữa hai cấu trúc để tiết kiệm bộ nhớ[^zset-sharedsds]. Skiplist của Redis là bản dịch gần như nguyên văn thuật toán của William Pugh, sửa ba điểm: cho phép score trùng, so sánh theo cả dữ liệu đi kèm, và có con trỏ `backward` ở tầng 1 để duyệt ngược cho `ZREVRANGE`[^zset-pugh]. Số tầng tối đa là 32 "đủ cho 2^64 phần tử"[^zset-maxlevel]. Mỗi tầng của một node có `forward` và `span`[^zskiplist-node]; `span` là số node mà liên kết `forward` bỏ qua và là thứ cho phép tính *rank* (`ZRANK`) mà không duyệt hết (cả hai là suy luận của người soạn từ cách `zslInsert`/`zslGetRank` dùng trường này). Tài liệu sorted set mô tả đúng cấu trúc "hai cổng" này và nói mỗi lần thêm phần tử Redis làm một thao tác O(log N)[^zset-doc].
+### 2.4 List: quicklist
 
-(Cách dùng sorted set làm bảng xếp hạng — tie-break, phân trang, vòng đời bảng — ở [Chương 17, mục 5](17-redis-patterns.md).)
+Một list nhỏ (ví dụ hàng đợi gửi mail của `shop-api` lúc ít việc) nằm trong một `listpack`. Khi vượt `list-max-listpack-size`, nó thành `quicklist`, danh sách liên kết đôi mà mỗi nút là một listpack[^ql-def]. Tham số âm `-1…-5` là giới hạn byte mỗi nút (4 KB…64 KB), còn tham số dương là số phần tử tối đa mỗi nút[^conf-list]. Có thể nén các nút giữa bằng `list-compress-depth`; đầu và đuôi luôn không nén để push/pop nhanh[^conf-compress].
 
-(Nhận xét của người soạn, liên hệ P10·09: skiplist đóng vai trò mà `BTreeMap` đóng trong Rust — khóa có thứ tự, range query — nhưng chọn cấu trúc xác suất vì cài đặt đơn giản và range/rank rẻ; còn listpack ứng với một `Vec` các phần tử tuần tự mà bạn quét tuyến tính, thắng nhờ locality khi N nhỏ.)
+Có một chi tiết hay khi list *co lại*. Redis chỉ đổi ngược quicklist → listpack nếu kích thước hoặc độ dài xuống dưới *một nửa* giới hạn, để khỏi đổi qua đổi lại liên tục khi thêm/xóa[^list-shrink]. Nó cũng chỉ đổi khi quicklist còn đúng một nút[^ql-one-node]. Đó là hysteresis: ngưỡng đổi đi và ngưỡng đổi về cách nhau một khoảng "độ trễ".
 
-<details><summary>Đi sâu: listpack, hysteresis, và khi bạn đổi ngưỡng</summary>
+### 2.5 Set: intset
 
-- `listpack.c` mở đầu bằng "Listpack — một định dạng tuần tự hóa danh sách chuỗi", với đặc tả ở repo `antirez/listpack`[^lp-head]; nó thay `ziplist` (encoding `ziplist` đã bị đánh dấu "không còn dùng" trong enum, còn `OBJ_ENCODING_LISTPACK` là encoding mới)[^enc-enum]. Chương này không đi vào định dạng byte vì không đọc đặc tả đó.
-- Tài liệu memory optimization: các kiểu nhỏ dùng encoding đặc biệt tốn "tới 10 lần ít bộ nhớ hơn" (trung bình tiết kiệm 5 lần)[^memopt-10x]; đó là *lời tài liệu*, không phải số đo của chương này. Đổi CPU lấy bộ nhớ: nếu bạn nâng ngưỡng để dùng encoding gọn cho aggregate lớn hơn nhiều, tài liệu khuyên benchmark thời gian chuyển đổi[^memopt-bench].
-- `dict` còn có một ràng buộc liên quan fork: khi có tiến trình con đang lưu RDB/AOF, Redis tạm tắt/hạn chế resize hash table vì "dùng copy-on-write và không muốn di chuyển nhiều bộ nhớ khi có child đang lưu"[^dict-cow]; `updateDictResizePolicy` đặt `DICT_RESIZE_AVOID` khi có child và `DICT_RESIZE_FORBID` trong chính child[^srv-resize-policy]; ở chế độ `AVOID` bảng vẫn được nở nếu tỉ lệ phần tử/bucket vượt một ngưỡng[^dict-avoid-ratio] (xem mục 4).
+Set toàn số nguyên (biểu diễn thập phân trong miền int64) và không vượt quá `set-max-intset-entries` phần tử thì dùng `intset`[^conf-set-intset]. Set chuỗi nhỏ dùng listpack (từ 7.2), còn lại là hash table.
+
+### 2.6 Sorted set: skiplist + dict
+
+Bảng `top:sold` của `shop-api` cần hai kiểu truy cập: tra điểm bán của một sản phẩm, và lấy N sản phẩm đứng đầu. Sorted set lớn phục vụ cả hai bằng cách giữ *cùng các phần tử trong hai cấu trúc*: hash table ánh xạ phần tử → score[^zset-map], nhờ vậy tra điểm trong O(1) (suy luận của người soạn). Cấu trúc kia là skiplist sắp theo score, để chèn/xóa trong O(log N)[^zset-dual]. Chuỗi SDS của phần tử được dùng chung giữa hai cấu trúc để tiết kiệm bộ nhớ[^zset-sharedsds]. Tài liệu sorted set mô tả đúng cấu trúc "hai cổng" này và nói mỗi lần thêm phần tử Redis làm một thao tác O(log N)[^zset-doc].
+
+(Cách dùng sorted set làm bảng xếp hạng, gồm tie-break, phân trang và vòng đời bảng, nằm ở [Chương 17, mục 5](17-redis-patterns.md).)
+
+(Nhận xét của người soạn, liên hệ P10·09: skiplist đóng vai mà `BTreeMap` đóng trong Rust, tức khóa có thứ tự và range query, nhưng chọn cấu trúc xác suất vì cài đặt đơn giản và range/rank rẻ. Còn listpack giống một `Vec` các phần tử tuần tự mà bạn quét tuyến tính, và thắng nhờ locality khi N nhỏ.)
+
+<details><summary>Đi sâu: skiplist, SDS, phiên bản listpack, và khi bạn đổi ngưỡng</summary>
+
+- **Skiplist của Redis.** Nó là bản dịch gần như nguyên văn thuật toán của William Pugh, sửa ba điểm: cho phép score trùng, so sánh theo cả dữ liệu đi kèm, và có con trỏ `backward` ở tầng 1 để duyệt ngược cho `ZREVRANGE`[^zset-pugh]. Số tầng tối đa là 32, "đủ cho 2^64 phần tử"[^zset-maxlevel]. Mỗi tầng của một node có `forward` và `span`[^zskiplist-node]. `span` là số node mà liên kết `forward` bỏ qua, và nó là thứ cho phép tính *rank* (`ZRANK`) mà không duyệt hết; cả hai điều này là suy luận của người soạn từ cách `zslInsert`/`zslGetRank` dùng trường này.
+- **Cỡ header SDS.** Header có nhiều cỡ (`sdshdr8/16/32/64`) để chuỗi ngắn không phải trả hai trường 8 byte `len`/`alloc` của cỡ lớn nhất[^sds-hdr64] (suy luận của người soạn từ việc các trường `len`/`alloc` có kiểu `uint8_t`…`uint64_t`).
+- **`ziplist` → `listpack`.** Encoding `listpack` cho `set` chỉ có từ Redis 7.2[^objenc-set72]. Với hash, `listpack` thay `ziplist` từ Redis 7.0[^objenc-lp70]. Tài liệu ghi `ziplist` dùng cho Redis ≤ 6.2[^objenc-ziplist]. Chương này không đi vào định dạng byte của listpack.
+- **Bộ nhớ.** Tài liệu memory optimization nói các kiểu nhỏ dùng encoding đặc biệt tốn "tới 10 lần ít bộ nhớ hơn", trung bình tiết kiệm 5 lần[^memopt-10x]. Đó là *lời tài liệu*, không phải số đo của chương này. Đổi CPU lấy bộ nhớ: nếu bạn nâng ngưỡng để dùng encoding gọn cho aggregate lớn hơn nhiều, tài liệu khuyên benchmark thời gian chuyển đổi[^memopt-bench].
+- **`dict` và fork.** Khi có tiến trình con đang lưu RDB/AOF, Redis tạm tắt hoặc hạn chế resize hash table, vì nó dùng copy-on-write và không muốn di chuyển nhiều bộ nhớ lúc child đang lưu[^dict-cow]. `updateDictResizePolicy` đặt `DICT_RESIZE_AVOID` khi có child và `DICT_RESIZE_FORBID` trong chính child[^srv-resize-policy]. Ở chế độ `AVOID`, bảng vẫn được nở nếu tỉ lệ phần tử/bucket vượt một ngưỡng[^dict-avoid-ratio] (xem mục 4).
 
 </details>
 
-**Quay lại Q2:** key nhỏ nằm trong khối nhớ liền (listpack/intset/embstr) để tiết kiệm RAM, vượt ngưỡng `*-max-*` thì Redis tự đổi sang hash table/quicklist/skiplist+dict; sorted set lớn giữ cùng phần tử ở hai cấu trúc để có cả tra điểm O(1) lẫn thứ tự O(log N).
+**Quay lại Q2:** key nhỏ nằm trong khối nhớ liền (listpack/intset/embstr) để tiết kiệm RAM; vượt ngưỡng `*-max-*` thì Redis tự đổi sang hash table/quicklist/skiplist+dict. Sorted set lớn giữ cùng phần tử ở hai cấu trúc để có cả tra điểm O(1) lẫn thứ tự O(log N).
 
 ## 3. Bộ nhớ, eviction và expire (Q3)
 
-> **Trả lời ngắn.** `maxmemory` đặt trần dữ liệu (mặc định `0` = không giới hạn trên hệ 64-bit)[^evict-max0]; chạm trần thì `maxmemory-policy` quyết định: mặc định `noeviction` từ chối lệnh ghi[^conf-policy-default][^conf-noevict], còn các policy LRU/LFU/random/TTL xóa bớt key[^evict-policies][^evict-policies-ttl]. LRU/LFU của Redis là *xấp xỉ* — lấy mẫu vài key rồi xóa key tệ nhất trong mẫu, không giữ danh sách LRU chính xác[^evict-approx]. Key hết hạn bị xóa theo hai đường: xóa lười khi có người truy cập, và quét chủ động theo chu kỳ[^expire-two].
+> **Trả lời ngắn.** `maxmemory` đặt trần dữ liệu (mặc định `0`, tức không giới hạn trên hệ 64-bit)[^evict-max0]. Chạm trần thì `maxmemory-policy` quyết định, và mặc định là `noeviction`[^conf-policy-default]. Policy này từ chối lệnh ghi[^conf-noevict]. Các policy LRU/LFU/random/TTL thì xóa bớt key[^evict-policies]. LRU/LFU của Redis chỉ là *xấp xỉ*: nó lấy mẫu vài key rồi xóa key tệ nhất trong mẫu, không giữ danh sách LRU chính xác[^evict-approx]. Key hết hạn bị xóa theo hai đường: xóa lười khi có người truy cập, và quét chủ động theo chu kỳ[^expire-two].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): kho lạnh sắp đầy. Cách "đúng" là giữ sổ ghi từng món lần cuối ai lấy — tốn giấy mực và tốn thời gian ghi. Redis thay bằng: mỗi lần cần chỗ, bốc ngẫu nhiên vài món, vứt món để lâu nhất trong nhóm đó. Không hoàn hảo, nhưng gần đúng mà gần như không tốn thêm bộ nhớ.
+*Với `shop-api`.* `redis-main` chủ yếu là cache trang sản phẩm, và mỗi session đăng nhập là một key có TTL. Cache chỉ biết lớn lên còn RAM thì có hạn, nên cuối cùng sẽ có lúc đầy. Mục này trả lời hai câu hỏi: khi chạm trần, Redis bỏ key nào, và những session đã hết hạn bị xóa lúc nào mà không làm chậm request.
 
-*Eviction chạy ở đâu và lúc nào.* Ngay trong `processCommand` — tức là trên thread chính, *trước khi chạy lệnh*: nếu `maxmemory` bật thì gọi `performEvictions()`[^srv-evict-call]; nếu không xóa đủ chỗ và lệnh thuộc loại "deny OOM" (lệnh có thể ăn thêm bộ nhớ) thì trả lỗi OOM[^srv-oom-reject]. Tài liệu mô tả đúng vòng đó: client chạy lệnh làm thêm dữ liệu → Redis kiểm tra bộ nhớ, nếu vượt trần thì xóa theo policy → lệnh kế tiếp; vì vậy Redis liên tục *vượt qua rồi quay lại dưới trần*[^evict-loop], và một lệnh tạo nhiều dữ liệu (như giao hai set lớn rồi lưu) có thể làm vượt trần đáng kể trong một lúc[^evict-overshoot]. (Nhận xét của người soạn: `maxmemory` là mục tiêu mềm, không phải tường cứng — chừa headroom cho child fork, buffer client, v.v.)
+### 3.1 Eviction chạy ở đâu và lúc nào
 
-*Bộ nhớ nào không tính vào `maxmemory`.* `redis.conf` nói: khi có replica, kích thước output buffer dùng để nuôi replica *bị trừ khỏi* số bộ nhớ đã dùng, để mất kết nối/resync không kích hoạt vòng lặp "xóa key → sinh `DEL` đẩy vào buffer replica → buffer đầy → xóa thêm key…" làm trống cả database; vì thế nên đặt `maxmemory` thấp hơn RAM để chừa chỗ cho buffer replica[^conf-repl-buf].
+Eviction chạy ngay trong `processCommand`, tức trên thread chính và *trước khi chạy lệnh*: nếu `maxmemory` bật thì gọi `performEvictions()`[^srv-evict-call]. Nếu xóa không đủ chỗ và lệnh thuộc loại "deny OOM" (lệnh có thể ăn thêm bộ nhớ) thì Redis trả lỗi OOM[^srv-oom-reject].
 
-*Các policy.* Có `noeviction`, `allkeys-lru/lfu/random`, `volatile-lru/lfu/random`, `volatile-ttl`[^evict-policies][^evict-policies-ttl]; nhóm `volatile-*` chỉ xét key có expire và *hành xử như `noeviction`* nếu không có key nào đủ điều kiện[^evict-policies-fallback]. Quy tắc ngón tay cái của tài liệu: `allkeys-lru` khi phân bố độ phổ biến theo power-law (và là lựa chọn tốt nếu chưa chắc)[^evict-rule-lru]; `allkeys-random` khi truy cập quay vòng hoặc đồng đều[^evict-rule-random]; `volatile-ttl` khi muốn gợi ý ứng viên bằng TTL[^evict-rule-ttl]. `volatile-lru`/`volatile-random` hợp khi một instance vừa làm cache vừa giữ key bền, nhưng tài liệu nói thường nên chạy hai instance riêng[^evict-volatile].
+Tài liệu mô tả đúng vòng đó: client chạy lệnh làm thêm dữ liệu, Redis kiểm tra bộ nhớ, nếu vượt trần thì xóa theo policy, rồi tới lệnh kế tiếp. Vì vậy Redis liên tục vượt qua trần rồi quay lại dưới trần[^evict-loop]. Một lệnh tạo nhiều dữ liệu (như giao hai set lớn rồi lưu kết quả) có thể làm vượt trần đáng kể trong một lúc[^evict-overshoot]. Nhận xét của người soạn: `maxmemory` là mục tiêu mềm chứ không phải tường cứng, nên chừa headroom cho child fork, buffer client…
 
-*LRU xấp xỉ.* Mỗi object có 24 bit `lru` lưu "đồng hồ" truy cập[^obj-struct], độ phân giải 1 giây[^srv-lru-res]. Mỗi lần tra key, Redis cập nhật `lru`/LFU — *trừ khi đang có tiến trình con lưu RDB/AOF*, vì cập nhật sẽ gây "điên cuồng copy-on-write"[^db-lru-cow] (đây là mối nối trực tiếp giữa eviction và persistence). Khi cần xóa, `evictionPoolPopulate` lấy mẫu `maxmemory-samples` key (mặc định 5)[^evict-samples-doc][^conf-samples] rồi đưa vào một *pool* ứng viên cỡ `EVPOOL_SIZE = 16`[^evict-poolsize], giữ lại những key "tệ nhất" qua các lần gọi; chọn ứng viên tốt nhất trong pool để xóa[^evict-pool]. Tài liệu: nâng mẫu lên 10 thì xấp xỉ gần LRU thật hơn, tốn thêm CPU[^evict-samples10]; với truy cập power-law, chênh lệch giữa LRU thật và xấp xỉ là nhỏ hoặc không có (theo mô phỏng của chính tài liệu)[^evict-powerlaw].
+Có một khoản bộ nhớ không tính vào `maxmemory`. `redis.conf` nói: khi có replica, kích thước output buffer dùng để nuôi replica *bị trừ khỏi* số bộ nhớ đã dùng. Lý do là để mất kết nối hay resync không kích hoạt vòng lặp "xóa key → sinh `DEL` đẩy vào buffer replica → buffer đầy → xóa thêm key…" làm trống cả database. Vì thế nên đặt `maxmemory` thấp hơn RAM để chừa chỗ cho buffer replica[^conf-repl-buf].
 
-*LFU.* Từ Redis 4.0 có LFU: đếm *tần suất* truy cập bằng bộ đếm xác suất Morris chỉ vài bit mỗi object, có chu kỳ suy giảm (decay) để key từng nóng nhưng nguội đi sẽ bị đẩy ra[^evict-lfu]. Mặc định: bộ đếm bão hòa quanh một triệu request, suy giảm mỗi phút[^evict-lfu-default]; tham số `lfu-log-factor 10`, `lfu-decay-time 1`[^evict-lfu-params]. Trong source, `LFULogIncr` tăng bộ đếm theo xác suất càng thấp khi giá trị càng cao và chặn ở 255[^evict-lfu-incr]; 8 bit thấp của trường `lru` là tần suất và 16 bit cao là thời điểm truy cập[^obj-struct] (tính theo phút[^evict-lfu-minutes]).
+### 3.2 Các policy
 
-*Expire: lazy + active.* Một key bị xóa *thụ động* khi có client truy cập và thấy nó quá hạn[^expire-two]. Chưa đủ vì key không ai truy cập sẽ nằm mãi, nên Redis còn quét *chủ động*. Theo mô tả của tài liệu EXPIRE: 10 lần mỗi giây, lấy 20 key ngẫu nhiên trong tập key có expire, xóa key quá hạn, và nếu hơn 25% số mẫu quá hạn thì lặp lại[^expire-active]. Tài liệu suy ra: số key đã quá hạn nhưng còn chiếm bộ nhớ tối đa vào cỡ (số thao tác ghi mỗi giây)/4[^expire-active-bound]. (Nhận xét của người soạn: con số 25% là của tài liệu; trong source 7.2.5 ngưỡng "chấp nhận được" để cố thêm là hằng `ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE` = 10 (%)[^expire-stale-src], và ngưỡng này phụ thuộc `active_expire_effort` được cấu hình[^expire-stale-effort].) Trong source, chu kỳ chậm bị giới hạn ~25% CPU (`ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC 25`)[^expire-cpu]; `beforeSleep` còn chạy thêm một chu kỳ "nhanh" nếu cần — chỉ trên master[^bs-expire-fast].
+Redis có các policy `allkeys-lru/lfu/random` và `volatile-lru/lfu/random`[^evict-policies]. Ngoài ra còn `volatile-ttl`, xóa key có thời điểm hết hạn gần nhất[^evict-policies-ttl]. Nhóm `volatile-*` chỉ xét key có expire, và *hành xử như `noeviction`* nếu không có key nào đủ điều kiện[^evict-policies-fallback].
 
-*Expire và replication.* Replica không tự xóa key hết hạn: master tổng hợp lệnh `DEL` đẩy vào AOF và tới mọi replica để việc hết hạn tập trung ở master và không sinh bất nhất[^expire-repl]. Trong source, `expireIfNeeded` trên replica chỉ *báo* key đã quá hạn chứ không xóa — việc xóa do `DEL` từ master gửi tới (ngoại lệ trong comment: khi có lệnh ghi trên replica ghi được)[^db-expire-replica]. Nhưng replica vẫn giữ trạng thái expire nên khi được bầu làm master thì tự hết hạn key được[^expire-repl-promote].
+Với `shop-api`, quy tắc ngón tay cái của tài liệu cho ra lựa chọn khá rõ. Cache trang sản phẩm có độ phổ biến theo power-law (vài sản phẩm hot, đuôi dài), và đó chính là lúc nên dùng `allkeys-lru`; tài liệu còn nói đây là lựa chọn tốt nếu bạn chưa chắc[^evict-rule-lru]. `allkeys-random` hợp khi truy cập quay vòng hoặc đồng đều[^evict-rule-random]. `volatile-ttl` hợp khi bạn muốn gợi ý cho Redis bằng TTL xem key nào đáng xóa[^evict-rule-ttl]. Nếu `shop-api` để cả cache lẫn session (key bền) trên một instance thì `volatile-lru` hay `volatile-random` dùng được, nhưng tài liệu nói thường nên chạy hai instance riêng[^evict-volatile].
+
+### 3.3 LRU xấp xỉ
+
+Giữ danh sách LRU chính xác cho hàng triệu key vừa tốn bộ nhớ vừa tốn thời gian cập nhật mỗi lần truy cập (nhận xét của người soạn). Redis chọn cách rẻ hơn. Mỗi object dành 24 bit `lru` để lưu "đồng hồ" truy cập[^obj-struct]. Đồng hồ này có độ phân giải 1 giây[^srv-lru-res]. Mỗi lần tra key, Redis cập nhật `lru`/LFU, *trừ khi đang có tiến trình con lưu RDB/AOF*, vì cập nhật lúc đó sẽ gây "điên cuồng copy-on-write"[^db-lru-cow]. Đây là mối nối trực tiếp giữa eviction và persistence (mục 4).
+
+Khi cần xóa, `evictionPoolPopulate` lấy mẫu `maxmemory-samples` key, mặc định là 5[^conf-samples]. Số mẫu này chỉnh được để đổi độ chính xác của thuật toán[^evict-samples-doc]. Các key lấy mẫu được đưa vào một *pool* ứng viên cỡ `EVPOOL_SIZE = 16`[^evict-poolsize]. Pool giữ lại những key "tệ nhất" qua các lần gọi, và Redis xóa ứng viên tốt nhất trong pool[^evict-pool]. Nâng mẫu lên 10 thì xấp xỉ gần LRU thật hơn, đổi lại tốn thêm CPU[^evict-samples10]. Với truy cập power-law, chênh lệch giữa LRU thật và xấp xỉ là nhỏ hoặc không có, theo mô phỏng của chính tài liệu[^evict-powerlaw].
+
+### 3.4 LFU
+
+Từ Redis 4.0 có LFU. Nó đếm *tần suất* truy cập bằng bộ đếm xác suất kiểu Morris chỉ tốn vài bit mỗi object, kèm chu kỳ suy giảm (decay) để key từng nóng rồi nguội đi sẽ bị đẩy ra[^evict-lfu]. Mặc định bộ đếm bão hòa quanh một triệu request và suy giảm mỗi phút[^evict-lfu-default]. Tham số mặc định là `lfu-log-factor 10`, `lfu-decay-time 1`[^evict-lfu-params].
+
+Trong source, `LFULogIncr` tăng bộ đếm với xác suất càng thấp khi giá trị càng cao, và chặn ở 255[^evict-lfu-incr]. Trường `lru` được chia: 8 bit thấp là tần suất, 16 bit cao là thời điểm truy cập[^obj-struct]. Thời điểm ấy tính theo phút[^evict-lfu-minutes].
+
+### 3.5 Expire: lười và chủ động
+
+Với session của `shop-api`, TTL 30 phút nghĩa là key phải biến mất sau 30 phút. Redis xóa key quá hạn theo hai đường. Đường *thụ động*: khi có client truy cập và thấy key đã quá hạn, nó bị xóa[^expire-two]. Chưa đủ, vì key không ai truy cập sẽ nằm mãi trong RAM, nên Redis còn quét *chủ động*. Theo tài liệu EXPIRE, mỗi giây 10 lần Redis lấy 20 key ngẫu nhiên trong tập key có expire, xóa những key quá hạn, và nếu hơn 25% số mẫu quá hạn thì lặp lại[^expire-active]. Từ đó tài liệu suy ra số key đã quá hạn mà còn chiếm bộ nhớ tối đa vào cỡ (số thao tác ghi mỗi giây)/4[^expire-active-bound].
+
+Trong source, chu kỳ chậm bị giới hạn ~25% CPU (`ACTIVE_EXPIRE_CYCLE_SLOW_TIME_PERC 25`)[^expire-cpu]. `beforeSleep` còn chạy thêm một chu kỳ "nhanh" nếu cần, và chỉ trên master[^bs-expire-fast].
+
+### 3.6 Expire và replication
+
+Giả sử `shop-api` đọc session từ một replica. Replica không tự xóa key hết hạn: master tổng hợp một lệnh `DEL` đẩy vào AOF và tới mọi replica, để việc hết hạn tập trung ở master và không sinh bất nhất[^expire-repl]. Trong source, `expireIfNeeded` trên replica chỉ *báo* key đã quá hạn chứ không xóa; việc xóa do `DEL` từ master gửi tới, với ngoại lệ ghi trong comment là khi có lệnh ghi trên replica ghi được[^db-expire-replica]. Tuy vậy replica vẫn giữ trạng thái expire, nên khi được bầu làm master nó tự hết hạn key được[^expire-repl-promote].
 
 <details><summary>Đi sâu: xóa key lớn, <code>lazyfree</code>, tenacity, và key hết hạn "trôi" trong RAM</summary>
 
-- **Xóa đồng bộ là mặc định.** Các tùy chọn `lazyfree-lazy-eviction`, `lazyfree-lazy-expire`, `lazyfree-lazy-server-del`, `lazyfree-lazy-user-del` đều mặc định `no`[^conf-lazyfree-userdel]; mặc định là xóa kiểu block như `DEL`[^conf-lazyfree-del]. Nghĩa là mặc định eviction và expire của một key khổng lồ (list hàng triệu phần tử) giải phóng bộ nhớ ngay trên thread chính (suy luận của người soạn từ cấu hình; `evict.c` truyền `server.lazyfree_lazy_eviction` vào `dbGenericDelete`[^evict-del-lazy]).
-- **`maxmemory-eviction-tenacity`** (mặc định 10; 0 = độ trễ tối thiểu, 100 = xử lý bất chấp độ trễ) điều chỉnh mức Redis chịu trễ để theo kịp tốc độ ghi[^conf-tenacity] (suy luận của người soạn: tức eviction không phải lúc nào cũng chạy hết một mạch).
-- **Mức "effort" của expire chủ động.** Giới hạn "(số ghi mỗi giây)/4" ở trên là *ước lượng của tài liệu*, không phải bảo đảm cứng. Source có tham số `active_expire_effort` (mặc định 1, tối đa 10) để điều chỉnh các thông số của chu kỳ quét[^expire-effort]; việc nó nâng số mẫu mỗi vòng và hạ ngưỡng chấp nhận key quá hạn là suy luận của người soạn từ cách tính `config_keys_per_loop`/`config_cycle_acceptable_stale` trong `activeExpireCycle`.
-- **Pause và expire.** Nếu hành động `expire` đang bị tạm dừng (pause), `activeExpireCycle` thoát ngay; comment giải thích: hết pause thì key sẽ được xóa đúng, hoặc đã failover và primary mới sẽ gửi lệnh xóa tới[^expire-pause].
+- **Xóa đồng bộ là mặc định.** Các tùy chọn `lazyfree-lazy-eviction`, `lazyfree-lazy-expire`, `lazyfree-lazy-server-del`, `lazyfree-lazy-user-del` đều mặc định `no`[^conf-lazyfree-userdel]. Mặc định là xóa kiểu block như `DEL`[^conf-lazyfree-del]. Nghĩa là mặc định eviction và expire của một key khổng lồ (list hàng triệu phần tử) giải phóng bộ nhớ ngay trên thread chính; đây là suy luận của người soạn từ cấu hình. `evict.c` truyền `server.lazyfree_lazy_eviction` vào `dbGenericDelete`[^evict-del-lazy].
+- **`maxmemory-eviction-tenacity`** (mặc định 10; 0 = độ trễ tối thiểu, 100 = xử lý bất chấp độ trễ) điều chỉnh mức Redis chịu trễ để theo kịp tốc độ ghi[^conf-tenacity]. Suy luận của người soạn: tức eviction không phải lúc nào cũng chạy hết một mạch.
+- **Ngưỡng của chu kỳ quét expire.** Con số 25% ở trên là của tài liệu. Trong source 7.2.5, ngưỡng "chấp nhận được" để cố thêm là hằng `ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE` = 10 (%)[^expire-stale-src]. Ngưỡng này còn phụ thuộc `active_expire_effort` được cấu hình[^expire-stale-effort].
+- **Mức "effort" của expire chủ động.** Giới hạn "(số ghi mỗi giây)/4" là *ước lượng của tài liệu*, không phải bảo đảm cứng. Source có tham số `active_expire_effort` (mặc định 1, tối đa 10) để điều chỉnh các thông số của chu kỳ quét[^expire-effort]. Việc nó nâng số mẫu mỗi vòng và hạ ngưỡng chấp nhận key quá hạn là suy luận của người soạn từ cách tính `config_keys_per_loop`/`config_cycle_acceptable_stale` trong `activeExpireCycle`.
+- **Pause và expire.** Nếu hành động `expire` đang bị tạm dừng (pause), `activeExpireCycle` thoát ngay. Comment giải thích: hết pause thì key sẽ được xóa đúng, hoặc đã failover và primary mới sẽ gửi lệnh xóa tới[^expire-pause].
 
 </details>
 
-**Quay lại Q3:** `maxmemory` + policy là cơ chế *trước mỗi lệnh* trên thread chính; LRU/LFU lấy mẫu vài key thay vì giữ sổ chính xác (rẻ, gần đúng); expire = xóa lười khi chạm vào + quét chủ động xác suất, và replica chờ `DEL` từ master chứ không tự xóa.
+**Quay lại Q3:** `maxmemory` + policy là cơ chế chạy *trước mỗi lệnh* trên thread chính; LRU/LFU lấy mẫu vài key thay vì giữ sổ chính xác (rẻ, gần đúng); expire gồm xóa lười khi chạm vào cộng quét chủ động theo xác suất, và replica chờ `DEL` từ master chứ không tự xóa.
 
 ## 4. Persistence: RDB, AOF và "crash thì mất bao nhiêu" (Q4)
 
-> **Trả lời ngắn.** RDB là ảnh chụp (snapshot) toàn bộ dữ liệu do một *tiến trình con* ghi sau `fork` nhờ copy-on-write[^pers-rdb-def][^pers-rdb-fork][^pers-fork-cow]; AOF là nhật ký mọi lệnh ghi, được `fsync` theo `appendfsync` (`always`/`everysec`/`no`)[^pers-aof-def][^pers-aof-policies]. Mất bao nhiêu khi crash tùy cấu hình: chỉ RDB thì có thể mất vài phút gần nhất[^pers-rdb-lose]; AOF `everysec` thì tài liệu nói khoảng 1 giây[^aof-everysec]; `always` thì `fsync` trước khi trả lời client[^aof-always]. Đó mới là một node — replication bất đồng bộ (mục 5) thêm một cửa sổ mất dữ liệu nữa.
+> **Trả lời ngắn.** RDB là ảnh chụp (snapshot) dữ liệu tại một thời điểm[^pers-rdb-def]. Việc ghi do một *tiến trình con* làm sau `fork`[^pers-rdb-fork]. Cách này hưởng lợi từ copy-on-write[^pers-fork-cow]. AOF là nhật ký mọi lệnh ghi[^pers-aof-def]. Nó được `fsync` theo `appendfsync` (`always`/`everysec`/`no`)[^pers-aof-policies]. Crash thì mất bao nhiêu tùy cấu hình. Chỉ RDB thì có thể mất vài phút gần nhất[^pers-rdb-lose]. AOF `everysec` thì tài liệu nói khoảng 1 giây[^aof-everysec]. Còn `always` thì `fsync` trước khi trả lời client[^aof-always]. Đó mới là một node; replication bất đồng bộ (mục 5) thêm một cửa sổ mất dữ liệu nữa.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): RDB là chụp ảnh cả kho hàng mỗi ngày — khôi phục nhanh nhưng mất hết biến động từ lúc chụp. AOF là cuốn sổ ghi từng phiếu xuất/nhập — gần như không mất gì, nhưng sổ cứ dày lên nên thỉnh thoảng phải chép lại gọn (rewrite).
+*Với `shop-api`.* `redis-main` giữ giỏ hàng `cart:u1` và session. Nếu process Redis chết, hoặc cả máy mất điện, người dùng mất giỏ hàng bao nhiêu phút gần nhất? Câu trả lời nằm ở hai cơ chế và cách chỉnh chúng: RDB cho khôi phục nhanh nhưng mất mọi biến động từ lần chụp cuối, còn AOF gần như không mất gì nhưng file cứ dày lên nên thỉnh thoảng phải ghi lại cho gọn (rewrite).
 
-*RDB — snapshot bằng `fork`.* Mặc định `redis.conf` 7.2.5 lưu snapshot nếu ≥ 1 thay đổi sau 3600 giây, ≥ 100 thay đổi sau 300 giây, hoặc ≥ 10000 thay đổi sau 60 giây[^conf-save-default]. Khi tới lúc, `rdbSaveBackground` gọi `redisFork`; con ghi dữ liệu ra file tạm rồi thay file cũ[^rdb-src-fork][^pers-rdb-fork]. Process cha chỉ làm đúng một việc: `fork` — tài liệu nói cha không bao giờ làm disk I/O ở đây[^pers-rdb-parent]. Con ghi vào file tạm `temp-<pid>.rdb`, `fflush` + `fsync` cho chắc dữ liệu không còn nằm trong buffer của OS[^rdb-src-fsync], rồi `rename` để file đích chỉ bị thay *nguyên tử* khi file mới đã đúng[^rdb-src-rename], rồi `fsync` cả thư mục chứa[^rdb-src-dirsync]. Đó đúng là mẫu "tạo tạm → fsync → rename → fsync thư mục" của [P5 · Chương 06, mục 4](../05-storage/06-durability-trong-thuc-te.md).
+### 4.1 RDB: snapshot bằng `fork`
 
-*Vì sao `fork` đủ rẻ để snapshot một dataset hàng chục GB.* Sau `fork`, cha và con dùng chung các trang bộ nhớ; chỉ khi một bên *ghi* vào trang thì kernel mới sao chép trang đó (copy-on-write, COW; cơ chế ở [P1 · Chương 03, mục 3.2](../01-linux/03-process.md) và page fault ở [P3 · Chương 04](../03-memory/04-page-fault-va-swapping.md)). Tài liệu persistence nói đúng ý đó: phương pháp này cho phép Redis hưởng lợi từ copy-on-write[^pers-fork-cow]. Hệ quả cần nhớ: con thấy *đúng* dữ liệu tại thời điểm `fork`, còn cha tiếp tục nhận ghi — mỗi trang cha sửa trong lúc con còn chạy sẽ tốn thêm một trang RAM (suy luận của người soạn từ cơ chế COW). Redis có `INFO` báo lượng bộ nhớ COW của con đang chạy (`current_cow_size`, `current_cow_peak`)[^info-cow].
+Mặc định `redis.conf` 7.2.5 lưu snapshot nếu có ≥ 1 thay đổi sau 3600 giây, ≥ 100 thay đổi sau 300 giây, hoặc ≥ 10000 thay đổi sau 60 giây[^conf-save-default]. Khi tới lúc, `rdbSaveBackground` gọi `redisFork`[^rdb-src-fork]. Tiến trình con ghi dữ liệu ra file tạm rồi thay file cũ[^pers-rdb-fork]. Process cha chỉ làm đúng một việc là `fork`; tài liệu nói cha không bao giờ làm disk I/O ở đây[^pers-rdb-parent].
 
-*Chi phí của `fork`, và những chỗ Redis né COW.*
+Con ghi vào file tạm `temp-<pid>.rdb`, rồi `fflush` + `fsync` để chắc dữ liệu không còn nằm trong buffer của OS[^rdb-src-fsync]. Sau đó nó `rename` để file đích chỉ bị thay *nguyên tử* khi file mới đã đúng[^rdb-src-rename]. Cuối cùng nó `fsync` cả thư mục chứa[^rdb-src-dirsync]. Đó đúng là mẫu "tạo tạm → fsync → rename → fsync thư mục" của [P5 · Chương 06, mục 4](../05-storage/06-durability-trong-thuc-te.md).
 
-- Bản thân `fork` chạy trên thread chính và có thể gây trễ: nó phải sao chép page table; tài liệu tính ví dụ một instance 24 GB trên Linux/AMD64 (trang 4 KB) cần page table cỡ 24 GB / 4 KB × 8 = 48 MB phải cấp phát và sao chép[^lat-fork-pt][^lat-fork-main].
-- Transparent Huge Pages (THP) làm COW tệ đi: sau `fork` hai process dùng chung các trang lớn; chỉ vài vòng event loop có thể chạm vài nghìn trang và buộc sao chép gần như toàn bộ bộ nhớ process, dẫn tới trễ lớn và tốn RAM; tài liệu bảo tắt THP[^lat-thp]. Source 7.2.5 có kiểm tra lúc khởi động với cùng lý do (chỉ Linux; cảnh báo khi THP đang ở chế độ `always`)[^sys-thp].
-- `vm.overcommit_memory`: khi overcommit bị tắt, Linux có thể giết con của background save nếu không đủ RAM trống cho *gấp đôi* bộ nhớ đang dùng, dù con dùng COW[^sys-overcommit] (overcommit: [P3 · Chương 05, mục 5](../03-memory/05-bo-nho-tien-trinh-linux.md); OOM killer: [P3 · Chương 04, mục 5](../03-memory/04-page-fault-va-swapping.md)).
-- Redis tự tránh làm bẩn trang khi có con đang chạy: không cập nhật trường LRU/LFU của object khi có child lưu (nếu không sẽ gây "copy on write madness")[^db-lru-cow], và hạn chế/cấm resize hash table `dict`[^dict-cow] (mục 2–3).
+### 4.2 Vì sao `fork` đủ rẻ để snapshot cả chục GB
 
-*AOF — nhật ký lệnh.* `appendonly` mặc định là `no` trong `redis.conf` 7.2.5[^conf-appendonly]. Khi bật, mỗi lệnh làm đổi dữ liệu được nối vào buffer AOF; `beforeSleep` (mục 1) gọi `flushAppendOnlyFile` để `write(2)` buffer xuống file *trước khi* ghi reply cho client[^bs-aof-write]; sau `write`, `fsync` chạy theo chính sách:
+Sau `fork`, cha và con dùng chung các trang bộ nhớ, và chỉ khi một bên *ghi* vào trang thì kernel mới sao chép trang đó. Đó là copy-on-write (COW); cơ chế ở [P1 · Chương 03, mục 3.2](../01-linux/03-process.md) và page fault ở [P3 · Chương 04](../03-memory/04-page-fault-va-swapping.md). Tài liệu persistence nói đúng ý này: cách làm đó cho phép Redis hưởng lợi từ copy-on-write[^pers-fork-cow].
+
+Hệ quả cần nhớ: con thấy *đúng* dữ liệu tại thời điểm `fork`, còn cha tiếp tục nhận ghi từ `shop-api`. Mỗi trang cha sửa trong lúc con còn chạy sẽ tốn thêm một trang RAM (suy luận của người soạn từ cơ chế COW). Redis có `INFO` báo lượng bộ nhớ COW của con đang chạy (`current_cow_size`, `current_cow_peak`)[^info-cow].
+
+### 4.3 Chi phí của `fork`, và những chỗ Redis né COW
+
+- Bản thân `fork` chạy trên thread chính và có thể gây trễ[^lat-fork-main]. Lý do là nó phải sao chép page table; tài liệu tính ví dụ một instance 24 GB trên Linux/AMD64 (trang 4 KB) cần page table cỡ 24 GB / 4 KB × 8 = 48 MB phải cấp phát và sao chép[^lat-fork-pt].
+- Transparent Huge Pages (THP) làm COW tệ đi. Sau `fork` hai process dùng chung các trang lớn, và chỉ vài vòng event loop có thể chạm vài nghìn trang, buộc sao chép gần như toàn bộ bộ nhớ process, dẫn tới trễ lớn và tốn RAM; tài liệu bảo tắt THP[^lat-thp]. Source 7.2.5 có kiểm tra lúc khởi động với cùng lý do (chỉ Linux; cảnh báo khi THP đang ở chế độ `always`)[^sys-thp].
+- `vm.overcommit_memory`: khi overcommit bị tắt, Linux có thể giết con của background save nếu không đủ RAM trống cho *gấp đôi* bộ nhớ đang dùng, dù con dùng COW[^sys-overcommit]. (Overcommit: [P3 · Chương 05, mục 5](../03-memory/05-bo-nho-tien-trinh-linux.md); OOM killer: [P3 · Chương 04, mục 5](../03-memory/04-page-fault-va-swapping.md).)
+- Redis tự tránh làm bẩn trang khi có con đang chạy. Nó không cập nhật trường LRU/LFU của object khi có child lưu, vì nếu không sẽ gây "copy on write madness"[^db-lru-cow]. Nó cũng hạn chế hoặc cấm resize hash table `dict`[^dict-cow] (xem mục 2–3).
+
+### 4.4 AOF: nhật ký lệnh
+
+`appendonly` mặc định là `no` trong `redis.conf` 7.2.5[^conf-appendonly]. Khi bật, mỗi lệnh làm đổi dữ liệu được nối vào buffer AOF. `beforeSleep` (mục 1) gọi `flushAppendOnlyFile` để `write(2)` buffer xuống file *trước khi* ghi reply cho client[^bs-aof-write]. Sau `write`, `fsync` chạy theo chính sách:
 
 | `appendfsync` | Hành vi | Lời tài liệu |
 |---|---|---|
-| `always` | `fsync` sau mỗi lần ghi buffer; gom các lệnh của nhiều client/pipeline trong một vòng thành một `write` + một `fsync` *trước khi trả lời*[^aof-always] | rất chậm, rất an toàn[^aof-always] |
+| `always` | `fsync` sau mỗi lần ghi buffer; các lệnh của nhiều client/pipeline trong một vòng được gom thành một `write` + một `fsync` *trước khi trả lời* | rất chậm, rất an toàn[^aof-always] |
 | `everysec` (mặc định[^aof-default-everysec]) | `fsync` mỗi giây, bằng thread nền[^aof-everysec-thread] | "có thể mất 1 giây dữ liệu nếu có thảm họa"[^aof-everysec] |
 | `no` | không `fsync`; để OS xả | Linux thường xả sau ~30 giây nhưng tùy tinh chỉnh kernel[^aof-no] |
 
-Với `always`, Redis không để cùng một fd vừa được đọc vừa được ghi trong cùng một vòng event loop (*write barrier*) để `beforeSleep` kịp `fsync` giữa lúc nhận lệnh và trả lời[^aof-barrier]. Trên Linux, `redis_fsync` được định nghĩa là `fdatasync()` để khỏi xả metadata[^aof-fdatasync] (khác biệt `fsync`/`fdatasync`: [P5 · Chương 06, mục 2](../05-storage/06-durability-trong-thuc-te.md)). Nếu `write`/`fsync` lỗi ở chế độ `always`, Redis *thoát* thay vì tiếp tục — vì reply đã nằm trong output buffer và thay đổi không thể rollback, trong khi đã hứa với user là ghi đã báo xong thì đã nằm trên đĩa[^aof-always-exit] (so với "fsyncgate" ở [P5 · Chương 06, mục 5](../05-storage/06-durability-trong-thuc-te.md)).
+Nếu `write`/`fsync` lỗi ở chế độ `always`, Redis *thoát* thay vì tiếp tục. Lý do là reply đã nằm trong output buffer và thay đổi không thể rollback, trong khi Redis đã hứa với user rằng ghi đã báo xong thì nằm trên đĩa[^aof-always-exit]. (So với "fsyncgate" ở [P5 · Chương 06, mục 5](../05-storage/06-durability-trong-thuc-te.md).)
 
-*Rewrite: giữ AOF không phình mãi.* Tăng một counter 100 lần thì dataset chỉ có một key giữ giá trị cuối nhưng AOF có 100 dòng[^pers-aof-incr] — rewrite sinh ra dãy lệnh ngắn nhất tái tạo dataset hiện tại, trong nền[^pers-aof-rewrite-why]. Từ 7.0, AOF là *multi part*: một file *base* (tối đa một, dạng RDB hoặc AOF[^conf-aof-preamble]) cộng các file *incremental*[^aof-multipart], có file manifest theo dõi[^aof-manifest]. Khi rewrite, cha mở ngay một file incremental mới để tiếp tục ghi, con sinh base mới; xong thì Redis đổi manifest tạm thành manifest chính một cách nguyên tử[^aof-rewrite-7][^aof-rewrite-swap]. Tự động kích hoạt khi AOF lớn hơn 100% so với kích thước sau lần rewrite trước và ≥ 64 MB (mặc định)[^conf-aof-rewrite-auto]. Base mặc định ở dạng RDB (`aof-use-rdb-preamble yes`; `redis.conf` nói định dạng RDB luôn nhanh và hiệu quả hơn)[^conf-aof-preamble], còn các file incremental chứa các thay đổi lệnh từ lần tạo base gần nhất[^aof-manifest].
+### 4.5 Rewrite: giữ AOF không phình mãi
 
-*Khởi động lại.* Nếu AOF bật, Redis nạp AOF vì đó là file có bảo đảm bền hơn[^conf-aof-load-pref]. AOF có thể bị cụt ở cuối khi máy/OS crash lúc đang ghi hoặc đĩa đầy[^pers-aof-trunc-cause] (`redis.conf` nói rõ điều này không xảy ra khi chỉ riêng tiến trình Redis crash mà OS vẫn chạy đúng[^conf-aof-trunc-ossafe]); mặc định Redis nạp phần hợp lệ rồi chạy tiếp (`aof-load-truncated yes`)[^conf-aof-trunc-default]; còn AOF hỏng *giữa* file thì Redis thoát với lỗi[^conf-aof-trunc]; công cụ `redis-check-aof` nên chạy trước, không kèm tùy chọn sửa, để hiểu vấn đề[^pers-aof-trunc-tool]; chế độ sửa có thể bỏ toàn bộ phần AOF từ chỗ hỏng đến cuối file[^pers-aof-fix-discard].
+Giả sử `shop-api` tăng một bộ đếm 100 lần. Dataset chỉ có một key giữ giá trị cuối, nhưng AOF có 100 dòng[^pers-aof-incr]. Rewrite sinh ra dãy lệnh ngắn nhất tái tạo dataset hiện tại, và làm việc đó trong nền[^pers-aof-rewrite-why].
 
-*Mất bao nhiêu khi crash?* Bảng dưới đây gộp lời tài liệu và source; "process crash" là Redis chết nhưng OS còn sống (ví dụ `kill -9`), "mất điện/OS crash" là cả máy dừng.
+Từ 7.0, AOF là *multi part*: một file *base* (tối đa một, dạng RDB hoặc AOF) cộng các file *incremental*[^aof-multipart]. Một file manifest theo dõi chúng[^aof-manifest]. Khi rewrite, cha mở ngay một file incremental mới để tiếp tục ghi, còn con sinh base mới[^aof-rewrite-7]. Xong thì Redis đổi manifest tạm thành manifest chính một cách nguyên tử[^aof-rewrite-swap]. Mặc định rewrite tự kích hoạt khi AOF lớn hơn 100% so với kích thước sau lần rewrite trước và ≥ 64 MB[^conf-aof-rewrite-auto]. Base mặc định ở dạng RDB (`aof-use-rdb-preamble yes`), vì `redis.conf` nói định dạng RDB luôn nhanh và hiệu quả hơn[^conf-aof-preamble].
+
+### 4.6 Khởi động lại
+
+Nếu AOF bật, Redis nạp AOF vì đó là file có bảo đảm bền hơn[^conf-aof-load-pref]. AOF có thể bị cụt ở cuối khi máy/OS crash lúc đang ghi hoặc đĩa đầy[^pers-aof-trunc-cause]. Mặc định Redis nạp phần hợp lệ rồi chạy tiếp (`aof-load-truncated yes`)[^conf-aof-trunc-default]. Còn AOF hỏng *giữa* file thì Redis thoát với lỗi[^conf-aof-trunc]. Cách xử lý và lưu ý về công cụ `redis-check-aof` nằm ở phần Đi sâu.
+
+### 4.7 Mất bao nhiêu khi crash
+
+Bảng dưới gộp lời tài liệu và source. "Process crash" là Redis chết nhưng OS còn sống (ví dụ `kill -9`); "mất điện/OS crash" là cả máy dừng.
 
 | Cấu hình | Process crash | Mất điện / OS crash |
 |---|---|---|
-| Chỉ RDB | mất mọi thứ từ snapshot cuối — "chuẩn bị mất vài phút gần nhất"[^pers-rdb-lose] | như bên trái |
+| Chỉ RDB | mất mọi thứ từ snapshot cuối: "chuẩn bị mất vài phút gần nhất"[^pers-rdb-lose] | như bên trái |
 | AOF `no` | không có bảo đảm riêng của Redis về `fsync`; dữ liệu đã `write(2)` thuộc về OS (suy luận của người soạn) | tùy OS; Linux ~30 giây[^aof-no] |
-| AOF `everysec` | `redis.conf`: "một lệnh ghi" nếu lỗi nằm ở process Redis nhưng OS vẫn chạy đúng[^conf-aof-loss] | tối đa ~1 giây theo `redis.conf` và tài liệu[^conf-aof-loss][^aof-everysec-thread] |
+| AOF `everysec` | `redis.conf`: "một lệnh ghi" nếu lỗi nằm ở process Redis nhưng OS vẫn chạy đúng[^conf-aof-loss] | tối đa ~1 giây theo tài liệu[^aof-everysec] |
 | AOF `always` | ghi đã được trả lời thì đã `fsync`[^aof-always] | như bên trái, *với điều kiện đĩa thật sự bền* (cache ghi của đĩa: [P5 · Chương 06, mục 7](../05-storage/06-durability-trong-thuc-te.md)) |
 
-Có hai ngoại lệ quan trọng mà bảng "mất ~1 giây" không nói: (1) khi `fsync` nền của `everysec` còn đang chạy, Redis *trì hoãn* `write(2)` tối đa khoảng hai giây (vì `write` trên Linux có thể bị block khi đang `fsync` cùng file), rồi vẫn ghi dù `fsync` chưa xong[^lat-everysec-postpone][^aof-postpone]; từ source đó suy ra (suy luận của người soạn) cửa sổ mất dữ liệu khi *process* crash lúc đang trì hoãn có thể dài hơn "một lệnh". (2) `no-appendfsync-on-rewrite yes` (mặc định `no`[^conf-norewrite-default]) tắt `fsync` ở main process khi có child đang lưu: lúc đó độ bền *bằng* `appendfsync no`, tức có thể mất tới 30 giây log trong trường hợp xấu nhất với cấu hình Linux mặc định[^conf-aof-norewrite-fsync].
+Có hai ngoại lệ quan trọng mà con số "mất ~1 giây" không nói. Thứ nhất, khi `fsync` nền của `everysec` còn đang chạy, Redis *trì hoãn* `write(2)` (vì `write` trên Linux có thể bị block khi đang `fsync` cùng file)[^lat-everysec-postpone]. Nó chỉ trì hoãn tối đa khoảng hai giây rồi vẫn ghi dù `fsync` chưa xong[^aof-postpone]. Từ source đó suy ra (suy luận của người soạn) rằng cửa sổ mất dữ liệu khi *process* crash lúc đang trì hoãn có thể dài hơn "một lệnh".
 
-<details><summary>Đi sâu: nên dùng RDB hay AOF; <code>WAITAOF</code>; lỗi <code>bgsave</code>; mã nguồn <code>flushAppendOnlyFile</code></summary>
+Thứ hai, `no-appendfsync-on-rewrite yes` tắt `fsync` ở main process khi có child đang lưu. Mặc định tùy chọn này là `no`[^conf-norewrite-default]. Nếu bật, độ bền trong lúc đó *bằng* `appendfsync no`, tức có thể mất tới 30 giây log trong trường hợp xấu nhất với cấu hình Linux mặc định[^conf-aof-norewrite-fsync].
 
-- **Khuyến nghị của tài liệu.** Nếu muốn mức an toàn dữ liệu "tương đương PostgreSQL" thì dùng cả hai[^pers-both]; tài liệu không khuyến khích AOF-only vì snapshot RDB hữu ích để backup, restart nhanh và đề phòng bug của engine AOF[^pers-aof-only]. (Nhận xét của người soạn: "tương đương PostgreSQL" là phát biểu của tài liệu về *ý định*; chương này không có nguồn để kiểm chứng ngang hàng — nên coi `appendfsync everysec` + replication là rủi ro mất dữ liệu có chủ ý.)
-- **`WAITAOF` (7.2).** Chặn client tới khi các lệnh ghi *của client đó* được báo là đã `fsync` vào AOF của local và/hoặc tối thiểu số replica chỉ định[^waitaof-doc]. Đây là cách *hỏi* độ bền mà không phải chuyển cả instance sang `always` (nhận xét của người soạn).
-- **`stop-writes-on-bgsave-error`.** Mặc định, nếu có ít nhất một save point và lần background save gần nhất lỗi thì Redis ngừng nhận lệnh ghi — để người vận hành biết "một cách cứng rắn" rằng dữ liệu không xuống đĩa[^conf-stop-writes].
-- **`flushAppendOnlyFile` trong source.** Nếu buffer rỗng, hàm vẫn có nhánh `fsync` lúc `everysec` để dữ liệu đã nằm trong page cache được xả đúng hạn dù người dùng ngừng ghi[^aof-flush-empty]. Mọi flush là một lệnh `write` duy nhất; comment trong source nói thao tác này *nên* nguyên tử ít nhất nếu filesystem là filesystem vật lý thật — nhằm chống trường hợp server bị kill, còn cả máy dừng vì mất điện thì comment thừa nhận không làm gì thêm được[^aof-single-write]; `ftruncate` bỏ ghi dở khi short write[^aof-short-write].
-- **Replica không persistence + auto restart.** Master tắt persistence và tự khởi động lại sẽ lên với dataset rỗng; replica đồng bộ từ nó sẽ tự xóa dữ liệu — tài liệu mô tả đúng kịch bản này[^repl-nopersist-wipe].
+<details><summary>Đi sâu: nên dùng RDB hay AOF; <code>WAITAOF</code>; lỗi <code>bgsave</code>; mã nguồn <code>flushAppendOnlyFile</code>; AOF hỏng</summary>
+
+- **Khuyến nghị của tài liệu.** Nếu muốn mức an toàn dữ liệu "tương đương PostgreSQL" thì dùng cả hai[^pers-both]. Tài liệu không khuyến khích AOF-only vì snapshot RDB hữu ích để backup, restart nhanh và đề phòng bug của engine AOF[^pers-aof-only]. Nhận xét của người soạn: "tương đương PostgreSQL" là phát biểu của tài liệu về *ý định*; chương này không có nguồn để kiểm chứng ngang hàng, nên coi `appendfsync everysec` + replication là rủi ro mất dữ liệu có chủ ý.
+- **`WAITAOF` (7.2).** Lệnh này chặn client tới khi các lệnh ghi *của client đó* được báo là đã `fsync` vào AOF của local và/hoặc tối thiểu số replica chỉ định[^waitaof-doc]. Đây là cách *hỏi* độ bền mà không phải chuyển cả instance sang `always` (nhận xét của người soạn).
+- **`stop-writes-on-bgsave-error`.** Mặc định, nếu có ít nhất một save point và lần background save gần nhất lỗi thì Redis ngừng nhận lệnh ghi, để người vận hành biết "một cách cứng rắn" rằng dữ liệu không xuống đĩa[^conf-stop-writes].
+- **Write barrier của `always`.** Redis không để cùng một fd vừa được đọc vừa được ghi trong cùng một vòng event loop, để `beforeSleep` kịp `fsync` giữa lúc nhận lệnh và trả lời[^aof-barrier]. Trên Linux, `redis_fsync` được định nghĩa là `fdatasync()` để khỏi xả metadata[^aof-fdatasync] (khác biệt `fsync`/`fdatasync`: [P5 · Chương 06, mục 2](../05-storage/06-durability-trong-thuc-te.md)).
+- **`flushAppendOnlyFile` trong source.** Nếu buffer rỗng, hàm vẫn có nhánh `fsync` lúc `everysec`, để dữ liệu đã nằm trong page cache được xả đúng hạn dù người dùng ngừng ghi[^aof-flush-empty]. Mọi flush là một lệnh `write` duy nhất; comment trong source nói thao tác này *nên* nguyên tử ít nhất nếu filesystem là filesystem vật lý thật, nhằm chống trường hợp server bị kill, còn cả máy dừng vì mất điện thì comment thừa nhận không làm gì thêm được[^aof-single-write]. Khi short write, `ftruncate` bỏ phần ghi dở[^aof-short-write].
+- **AOF cụt khi chỉ process Redis crash.** `redis.conf` nói rõ cụt cuối file không xảy ra khi chỉ riêng tiến trình Redis crash mà OS vẫn chạy đúng[^conf-aof-trunc-ossafe].
+- **Sửa AOF hỏng.** Công cụ `redis-check-aof` nên chạy trước, không kèm tùy chọn sửa, để hiểu vấn đề[^pers-aof-trunc-tool]. Chế độ sửa có thể bỏ toàn bộ phần AOF từ chỗ hỏng đến cuối file[^pers-aof-fix-discard].
+- **Replica không persistence + auto restart.** Master tắt persistence và tự khởi động lại sẽ lên với dataset rỗng; replica đồng bộ từ nó sẽ tự xóa dữ liệu. Tài liệu mô tả đúng kịch bản này[^repl-nopersist-wipe].
 
 </details>
 
-**Quay lại Q4:** RDB = snapshot do con `fork` ghi nhờ COW (nhanh khi restart, mất tới vài phút); AOF = log theo `appendfsync` (`always` không mất lệnh đã trả lời nếu đĩa bền, `everysec` ≈ 1 giây nhưng có ngoại lệ trì hoãn ~2 giây, `no` tùy OS); AOF rewrite + base dạng RDB giữ log gọn; và con `fork` luôn đi kèm chi phí page table và COW.
+**Quay lại Q4:** RDB là snapshot do con `fork` ghi nhờ COW (restart nhanh, mất tới vài phút); AOF là log theo `appendfsync` (`always` không mất lệnh đã trả lời nếu đĩa bền, `everysec` ≈ 1 giây nhưng có ngoại lệ trì hoãn ~2 giây, `no` tùy OS). AOF rewrite với base dạng RDB giữ log gọn, và con `fork` luôn đi kèm chi phí page table và COW.
 
 ## 5. Replication: bất đồng bộ, PSYNC, backlog, `WAIT` và Sentinel (Q5)
 
-> **Trả lời ngắn.** Replication của Redis mặc định **bất đồng bộ**[^repl-async-default], replica chỉ báo lại bất đồng bộ là đã nhận tới đâu[^repl-async]. Replica nối lại bằng `PSYNC` với `(replication ID, offset)`; còn đủ dữ liệu trong *backlog* thì chỉ nhận phần thiếu, không thì phải đồng bộ toàn bộ bằng RDB[^repl-psync]. `WAIT` chờ replica xác nhận nhưng *không* biến Redis thành hệ CP[^repl-wait-cp], và Sentinel failover cũng không bảo đảm giữ ghi đã báo xong[^sent-async].
+> **Trả lời ngắn.** Replication của Redis mặc định **bất đồng bộ**[^repl-async-default]. Replica cũng chỉ báo lại bất đồng bộ lượng dữ liệu nó đã nhận[^repl-async]. Khi nối lại, replica gửi `PSYNC` kèm `(replication ID, offset)`; nếu master còn đủ dữ liệu trong *backlog* thì chỉ gửi phần thiếu, không thì phải đồng bộ toàn bộ bằng RDB[^repl-psync]. `WAIT` chờ replica xác nhận nhưng *không* biến Redis thành hệ CP[^repl-wait-cp]. Sentinel failover cũng không bảo đảm giữ ghi đã báo xong[^sent-async].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư ký (master) ghi sổ rồi báo "xong" với sếp, đồng thời photo từng trang gửi cho các chi nhánh. Nếu thư ký ngất ngay sau khi báo "xong" mà chưa kịp photo, chi nhánh được đôn lên thay sẽ không có trang đó.
+*Với `shop-api`.* Để `shop-api` còn chạy khi `redis-main` chết, bạn thêm một replica ở zone khác. Nhưng master báo `OK` cho `shop-api` *trước khi* replica nhận được lệnh. Nếu master chết đúng lúc đó, replica được đôn lên sẽ không có lệnh ấy, chẳng hạn một lần giảm tồn kho hoặc một đơn vừa đặt (nhận xét của người soạn). Mục này đi qua cơ chế để thấy cửa sổ mất dữ liệu đó nằm ở đâu và bao nhiêu thứ có thể thu hẹp nó.
 
 Khái niệm chung (single-leader, replication lag, failover, split brain) có ở [P12 · Chương 05, mục 1–2](05-replication.md); sự cố hệ phân tán (failure detector, timeout, lease) ở [Chương 08](08-su-co-he-phan-tan.md). Dưới đây là phần *chỉ Redis*.
 
-*Luồng cập nhật.* Khi master và replica nối tốt, master gửi một *luồng lệnh* để tái tạo ảnh hưởng lên dataset: lệnh ghi của client, key hết hạn hoặc bị evict, và mọi hành động khác làm đổi dataset[^repl-stream] (nối với mục 3: expire/evict của master thành lệnh `DEL` trong luồng này). Replica *không chặn* master: master vẫn phục vụ client khi replica đang đồng bộ lần đầu hoặc nối lại một phần[^repl-nonblock]. Đọc từ replica là đọc dữ liệu có thể cũ (replication lag, chương 05 mục 4).
+### 5.1 Luồng cập nhật
 
-*Replication ID và offset.* Mỗi master có một replication ID — chuỗi giả ngẫu nhiên đánh dấu một "lịch sử" của dataset — và một offset tăng theo từng byte của luồng replication[^repl-id]; theo tài liệu, offset vẫn tăng kể cả khi không có replica nào nối[^repl-id-pair] (chi tiết cài đặt 7.2.5: khi không có backlog lẫn replica, master chỉ cộng 1 cho mỗi lệnh để theo dõi fsync AOF[^repl-offset-noreplica]); cặp `(ID, offset)` xác định chính xác một phiên bản dataset[^repl-id-pair]. Offset đóng vai "đồng hồ logic": cùng ID mà offset 1000 so với 1023 nghĩa là bên 1000 thiếu vài lệnh[^repl-offset-clock].
+Khi master và replica nối tốt, master gửi một *luồng lệnh* để tái tạo ảnh hưởng lên dataset: lệnh ghi của client, key hết hạn hoặc bị evict, và mọi hành động khác làm đổi dataset[^repl-stream]. Đây là chỗ nối với mục 3: expire/evict của master trở thành lệnh `DEL` trong luồng này. Replica không chặn master, vì master vẫn phục vụ client khi replica đang đồng bộ lần đầu hoặc nối lại một phần[^repl-nonblock]. Đọc từ replica nghĩa là đọc dữ liệu có thể cũ (replication lag, [Chương 05, mục 4](05-replication.md)).
 
-*PSYNC: chọn partial hay full.* Replica gửi `PSYNC <replid cũ> <offset đã xử lý>`; master chỉ gửi phần thiếu nếu còn đủ trong backlog, và nếu replica trỏ vào một lịch sử không còn biết thì phải full resync[^repl-psync]. Source 7.2.5 `masterTryPartialResynchronization` làm đúng hai bước kiểm: (1) replication ID của replica phải khớp ID chính hoặc ID phụ (ID phụ chỉ hợp lệ tới một offset nhất định)[^repl-src-id]; (2) offset yêu cầu phải nằm trong khoảng backlog còn giữ — nếu không thì log "lack of backlog" và đi đường full[^repl-src-backlog].
+### 5.2 Replication ID và offset
+
+Mỗi master có một replication ID, một chuỗi giả ngẫu nhiên đánh dấu một "lịch sử" của dataset, cùng một offset tăng theo từng byte của luồng replication[^repl-id]. Theo tài liệu, offset vẫn tăng kể cả khi không có replica nào nối, nên cặp `(ID, offset)` xác định chính xác một phiên bản dataset[^repl-id-pair]. Về chi tiết cài đặt 7.2.5: khi không có backlog lẫn replica, master chỉ cộng 1 cho mỗi lệnh để theo dõi fsync AOF[^repl-offset-noreplica]. Offset đóng vai "đồng hồ logic": cùng ID mà offset 1000 so với 1023 nghĩa là bên 1000 thiếu vài lệnh[^repl-offset-clock].
+
+### 5.3 PSYNC: chọn partial hay full
+
+Replica gửi `PSYNC <replid cũ> <offset đã xử lý>`. Master chỉ gửi phần thiếu nếu còn đủ trong backlog; nếu replica trỏ vào một lịch sử mà master không còn biết thì phải full resync[^repl-psync]. Source 7.2.5, hàm `masterTryPartialResynchronization`, làm đúng hai bước kiểm. Bước một: replication ID của replica phải khớp ID chính hoặc ID phụ, và ID phụ chỉ hợp lệ tới một offset nhất định[^repl-src-id]. Bước hai: offset yêu cầu phải nằm trong khoảng backlog còn giữ; nếu không thì log "lack of backlog" và đi đường full[^repl-src-backlog].
 
 ```mermaid
 flowchart TD
@@ -229,169 +322,263 @@ flowchart TD
   F --> G["Master BGSAVE (fork, mục 4) hoặc diskless,<br/>gửi RDB, rồi gửi luồng lệnh đã dồn"]
 ```
 
-*(Sơ đồ tóm tắt hai bước kiểm của `masterTryPartialResynchronization` ở trên[^repl-src-id][^repl-src-backlog]; `+CONTINUE` là câu master dùng để báo replica rằng partial resync được chấp nhận[^repl-continue]; nhánh full resync mô tả ở đoạn "Full resync" bên dưới[^repl-full].)*
+(Sơ đồ của người soạn, tóm hai bước kiểm ở trên. `+CONTINUE` là câu master dùng để báo replica rằng partial resync được chấp nhận[^repl-continue]; nhánh full resync mô tả ở mục 5.5.)
 
-*Replication backlog.* Là bộ đệm tích lũy dữ liệu luồng replication để replica mất kết nối một lúc có thể nối lại *một phần*; backlog càng lớn thì replica chịu được mất kết nối càng lâu; mặc định `repl-backlog-size 1mb`, và chỉ được cấp khi có ít nhất một replica nối[^conf-backlog]. Replica không bao giờ giải phóng backlog do timeout, vì nó có thể được thăng làm master sau này[^conf-backlog-ttl].
+### 5.4 Replication backlog
 
-*Full resync.* Master bắt đầu một tiến trình nền tạo file RDB (cùng `fork` như mục 4), đồng thời đệm mọi lệnh ghi mới; RDB xong thì chuyển cho replica, replica lưu rồi nạp vào RAM, rồi master gửi các lệnh đã đệm[^repl-full]. Nhiều replica yêu cầu cùng lúc thì dùng chung một lần background save[^repl-share-save]; với diskless, replica đến sau khi transfer đã bắt đầu phải xếp hàng chờ lần transfer kế[^conf-diskless-queue]. Bản 7.2.5 mặc định `repl-diskless-sync yes` (con gửi RDB thẳng qua socket, không qua đĩa)[^conf-diskless] với `repl-diskless-sync-delay 5` giây để chờ gom thêm replica[^conf-diskless-delay]. Replica phải xóa dataset cũ (theo docs, từ 4.0 có thể cấu hình để việc xóa chạy ở thread khác; mặc định `replica-lazy-flush no`) rồi nạp dataset mới trên thread chính, nên có thể chặn kết nối vài giây với dataset rất lớn[^repl-replica-block].
+Backlog là bộ đệm tích lũy dữ liệu luồng replication, để replica mất kết nối một lúc có thể nối lại *một phần*. Backlog càng lớn thì replica chịu được mất kết nối càng lâu; mặc định `repl-backlog-size 1mb`, và backlog chỉ được cấp khi có ít nhất một replica nối[^conf-backlog]. Replica không bao giờ giải phóng backlog do timeout, vì nó có thể được thăng làm master sau này[^conf-backlog-ttl].
 
-*Hai replication ID sau failover.* Mỗi lần một instance khởi động từ đầu với vai master, hoặc một replica được thăng lên master, nó tạo replication ID *mới* vì lịch sử mới bắt đầu[^repl-newid]. Replica vừa được thăng nhớ lại ID cũ làm ID phụ cùng offset lúc đổi, nên các replica khác nối vào master mới vẫn partial resync được — sau failover không phải full sync[^repl-id2]. Lý do phải đổi ID: master cũ có thể vẫn đang chạy như master trong một network partition; giữ nguyên ID sẽ phá điều "cùng ID, cùng offset ⇒ cùng dữ liệu"[^repl-newid-why].
+### 5.5 Full resync
 
-*`WAIT` — đồng bộ tùy chọn, không phải CP.* `WAIT numreplicas timeout` chặn *client gọi nó* tới khi mọi lệnh ghi trước đó của *cùng kết nối* được ít nhất `numreplicas` replica xác nhận[^wait-doc]; Redis nhớ offset luồng replication tại lệnh ghi cuối của mỗi client và kiểm xem đủ replica đã ack offset đó (hoặc lớn hơn) chưa[^wait-impl]. Nhưng tài liệu nói: `WAIT` không biến một tập instance Redis thành hệ CP với strong consistency — ghi đã ack vẫn có thể mất khi failover, tùy cách cấu hình persistence[^repl-wait-cp]; replication đồng bộ chỉ là một phần của replicated state machine, không phải tất cả[^wait-notcp]. Cụ thể, Sentinel/Cluster chỉ *cố gắng hết sức* chọn replica cập nhật nhất để thăng, nên vẫn có thể mất một ghi đã đồng bộ tới nhiều replica[^wait-besteffort]. (Nhận xét của người soạn, đối chiếu [P12 · Chương 09](09-consistency-va-consensus.md): thiếu một thuật toán consensus quyết định *ai được làm master* và chỉ bầu trong số bản sao đã commit thì quorum-ack một mình không đủ.) Một cấu hình hỗ trợ khác là `min-replicas-to-write N` + `min-replicas-max-lag M`: master từ chối ghi khi ít hơn N replica có lag ≤ M giây; `redis.conf` nói rõ nó *không bảo đảm* N replica sẽ nhận ghi, chỉ giới hạn cửa sổ mất dữ liệu[^conf-minreplicas].
+Khi partial resync không được, master bắt đầu một tiến trình nền tạo file RDB (cùng `fork` như mục 4), đồng thời đệm mọi lệnh ghi mới. RDB xong thì chuyển cho replica, replica lưu rồi nạp vào RAM, rồi master gửi các lệnh đã đệm[^repl-full]. Nhiều replica yêu cầu cùng lúc thì dùng chung một lần background save[^repl-share-save]. Với diskless, replica đến sau khi transfer đã bắt đầu phải xếp hàng chờ lần transfer kế[^conf-diskless-queue].
 
-*Sentinel.* Sentinel là hệ giám sát chạy như tiến trình riêng (nhận xét của người soạn: không phải node chứa dữ liệu) với nhiệm vụ failover tự động[^sent-caps]; ngoài ra nó giám sát, thông báo và làm "nhà cung cấp cấu hình" cho client[^sent-tasks]. Nó là một hệ phân tán nhiều tiến trình: phát hiện lỗi cần nhiều Sentinel đồng ý (giảm dương tính giả) và hệ vẫn chạy khi một phần Sentinel chết[^sent-distributed]; tài liệu yêu cầu ít nhất ba Sentinel, đặt ở máy hỏng độc lập[^sent-three].
+Bản 7.2.5 mặc định `repl-diskless-sync yes`, tức con gửi RDB thẳng qua socket mà không qua đĩa[^conf-diskless]. Ngoài ra có `repl-diskless-sync-delay 5` giây để chờ gom thêm replica[^conf-diskless-delay]. Replica phải xóa dataset cũ rồi nạp dataset mới trên thread chính, nên có thể chặn kết nối vài giây với dataset rất lớn. Theo docs, từ 4.0 có thể cấu hình để việc xóa chạy ở thread khác; mặc định `replica-lazy-flush no`[^repl-replica-block].
 
-- *Phát hiện lỗi.* Một Sentinel đánh dấu master là **SDOWN** (subjectively down) nếu không nhận được trả lời PING hợp lệ trong thời gian cấu hình bởi `down-after-milliseconds`[^sent-sdown]; **ODOWN** (objectively down) khi đủ số Sentinel (quorum) cùng SDOWN và trao đổi qua `SENTINEL is-master-down-by-addr`[^sent-odown]. Từ SDOWN lên ODOWN chỉ dùng một dạng *gossip*, không dùng thuật toán đồng thuận mạnh[^sent-gossip]. (Đây chính là failure detector kiểu timeout ở [P12 · Chương 08, mục 4](08-su-co-he-phan-tan.md).)
-- *Quorum ≠ đa số.* Quorum chỉ dùng để *phát hiện* lỗi; để thực sự failover, một Sentinel phải được đa số các Sentinel ủy quyền[^sent-quorum]. Không bao giờ failover ở phân vùng thiểu số[^sent-minority].
-- *Epoch.* Khi được ủy quyền, Sentinel nhận một *configuration epoch* duy nhất cho master đang failover; cấu hình sau failover được đánh phiên bản bằng epoch đó, nên — vì đa số đã đồng ý gán version đó cho một Sentinel — không Sentinel nào khác dùng lại được số này[^sent-epoch], và epoch lớn hơn luôn thắng khi cấu hình được loan truyền[^sent-prop]. (Suy luận của người soạn: cùng họ ý tưởng "số thế hệ tăng đơn điệu" với fencing token ở [Chương 08, mục 8](08-su-co-he-phan-tan.md) và nhiệm kỳ Raft ở [Chương 09](09-consistency-va-consensus.md).)
-- *Chọn replica.* Loại những replica đã mất kết nối với master quá `down-after-milliseconds × 10` cộng thời gian master SDOWN[^sent-select]; rồi xếp theo `replica-priority` (thấp hơn được ưu tiên) rồi theo replication offset đã xử lý (nhiều hơn được ưu tiên)[^sent-order], rồi theo run ID nhỏ hơn[^sent-runid]. `replica-priority 0` nghĩa là không bao giờ được chọn[^sent-prio0].
-- *Tính nhất quán dưới partition.* Tài liệu: Redis + Sentinel nói chung là một hệ *eventually consistent*; hợp nhất theo "last failover wins", dữ liệu của master cũ bị bỏ để nhân bản dữ liệu của master hiện tại — nên luôn có cửa sổ mất ghi đã báo xong[^sent-lfw]. Ví dụ trong tài liệu: client ở phân vùng với master cũ vẫn ghi được; khi phân vùng lành, master cũ thành replica và mọi dữ liệu ghi trong phân vùng bị mất[^sent-lost]. Giảm thiểu bằng `min-replicas-to-write 1` + `min-replicas-max-lag 10`: master cũ ngừng nhận ghi sau ~10 giây[^sent-minrep].
+### 5.6 Hai replication ID sau failover
+
+Mỗi lần một instance khởi động từ đầu với vai master, hoặc một replica được thăng lên master, nó tạo replication ID *mới* vì một lịch sử mới bắt đầu[^repl-newid]. Replica vừa được thăng nhớ lại ID cũ làm ID phụ cùng offset lúc đổi. Nhờ vậy các replica khác nối vào master mới vẫn partial resync được, và sau failover không phải full sync[^repl-id2]. Lý do phải đổi ID: master cũ có thể vẫn đang chạy như master trong một network partition, và giữ nguyên ID sẽ phá điều "cùng ID, cùng offset ⇒ cùng dữ liệu"[^repl-newid-why].
+
+### 5.7 `WAIT`: đồng bộ tùy chọn, không phải CP
+
+`WAIT numreplicas timeout` chặn *client gọi nó* tới khi mọi lệnh ghi trước đó của *cùng kết nối* được ít nhất `numreplicas` replica xác nhận[^wait-doc]. Redis nhớ offset luồng replication tại lệnh ghi cuối của mỗi client, rồi kiểm xem đủ replica đã ack offset đó (hoặc lớn hơn) chưa[^wait-impl].
+
+Nhưng tài liệu nói: `WAIT` không biến một tập instance Redis thành hệ CP với strong consistency, vì ghi đã ack vẫn có thể mất khi failover, tùy cách cấu hình persistence[^repl-wait-cp]. Replication đồng bộ chỉ là một phần của replicated state machine, không phải tất cả[^wait-notcp]. Cụ thể, Sentinel/Cluster chỉ *cố gắng hết sức* chọn replica cập nhật nhất để thăng, nên vẫn có thể mất một ghi đã đồng bộ tới nhiều replica[^wait-besteffort]. (Nhận xét của người soạn, đối chiếu [P12 · Chương 09](09-consistency-va-consensus.md): thiếu một thuật toán consensus quyết định *ai được làm master* và chỉ bầu trong số bản sao đã commit thì quorum-ack một mình không đủ.)
+
+Một cấu hình hỗ trợ khác là `min-replicas-to-write N` + `min-replicas-max-lag M`: master từ chối ghi khi ít hơn N replica có lag ≤ M giây. `redis.conf` nói rõ cấu hình này *không bảo đảm* N replica sẽ nhận ghi, nó chỉ giới hạn cửa sổ mất dữ liệu[^conf-minreplicas].
+
+### 5.8 Sentinel
+
+Sentinel là hệ giám sát chạy như tiến trình riêng, không phải node chứa dữ liệu (nhận xét của người soạn). Nhiệm vụ chính là failover tự động[^sent-caps]. Ngoài ra nó giám sát, thông báo và làm "nhà cung cấp cấu hình" cho client[^sent-tasks]. Nó là một hệ phân tán nhiều tiến trình: phát hiện lỗi cần nhiều Sentinel đồng ý (giảm dương tính giả), và hệ vẫn chạy khi một phần Sentinel chết[^sent-distributed]. Tài liệu yêu cầu ít nhất ba Sentinel, đặt ở những máy hỏng độc lập[^sent-three].
+
+- *Phát hiện lỗi.* Một Sentinel đánh dấu master là **SDOWN** (subjectively down) nếu không nhận được trả lời PING hợp lệ trong thời gian cấu hình bởi `down-after-milliseconds`[^sent-sdown]. Master là **ODOWN** (objectively down) khi đủ số Sentinel (quorum) cùng SDOWN và trao đổi qua `SENTINEL is-master-down-by-addr`[^sent-odown]. Từ SDOWN lên ODOWN chỉ dùng một dạng *gossip*, không dùng thuật toán đồng thuận mạnh[^sent-gossip]. Đây chính là failure detector kiểu timeout ở [P12 · Chương 08, mục 4](08-su-co-he-phan-tan.md).
+- *Quorum ≠ đa số.* Quorum chỉ dùng để *phát hiện* lỗi; để thực sự failover, một Sentinel phải được đa số các Sentinel ủy quyền[^sent-quorum]. Sentinel không bao giờ failover ở phân vùng thiểu số[^sent-minority].
+- *Epoch.* Khi được ủy quyền, Sentinel nhận một *configuration epoch* duy nhất cho master đang failover. Cấu hình sau failover được đánh phiên bản bằng epoch đó, và vì đa số đã đồng ý gán version ấy cho một Sentinel nên không Sentinel nào khác dùng lại được số này[^sent-epoch]. Epoch lớn hơn luôn thắng khi cấu hình được loan truyền[^sent-prop]. (Suy luận của người soạn: cùng họ ý tưởng "số thế hệ tăng đơn điệu" với fencing token ở [Chương 08, mục 8](08-su-co-he-phan-tan.md) và nhiệm kỳ Raft ở [Chương 09](09-consistency-va-consensus.md).)
+- *Chọn replica.* Sentinel loại những replica đã mất kết nối với master quá `down-after-milliseconds × 10` cộng thời gian master SDOWN[^sent-select]. Các replica còn lại được xếp theo `replica-priority` (thấp hơn được ưu tiên), rồi theo replication offset đã xử lý (nhiều hơn được ưu tiên)[^sent-order]. Cuối cùng là run ID nhỏ hơn[^sent-runid]. `replica-priority 0` nghĩa là không bao giờ được chọn[^sent-prio0].
+- *Tính nhất quán dưới partition.* Tài liệu viết rằng Redis + Sentinel nói chung là một hệ *eventually consistent*, hợp nhất theo "last failover wins": dữ liệu của master cũ bị bỏ để nhân bản dữ liệu của master hiện tại, nên luôn có cửa sổ mất ghi đã báo xong[^sent-lfw]. Ví dụ trong tài liệu: client ở phân vùng với master cũ vẫn ghi được; khi phân vùng lành, master cũ thành replica và mọi dữ liệu ghi trong phân vùng bị mất[^sent-lost]. Giảm thiểu bằng `min-replicas-to-write 1` + `min-replicas-max-lag 10`: master cũ ngừng nhận ghi sau ~10 giây[^sent-minrep].
 
 <details><summary>Đi sâu: cấu hình dùng Sentinel đúng, và hai cách duy nhất tài liệu nêu để không mất ghi</summary>
 
-- Tài liệu Sentinel nêu cách tránh hoàn toàn mất ghi đã báo xong chỉ có hai: replication đồng bộ cùng một thuật toán consensus cho replicated state machine, hoặc hệ eventually consistent có hợp nhất phiên bản; và nói Redis hiện *không* dùng cách nào, và việc đó nằm ngoài mục tiêu phát triển[^sent-two-ways]. Đó là một lập trường thiết kế (nhận xét của người soạn: chọn Redis làm *cache/cấu trúc dữ liệu nhanh* và làm nguồn chân lý ở nơi khác là hệ quả trực tiếp).
-- `SENTINEL CKQUORUM <master>` kiểm cấu hình Sentinel có đạt quorum và đa số để failover hay không — nên đưa vào monitoring[^sent-ckquorum].
-- Bài học vận hành (từ tài liệu Sentinel): hai Sentinel mà quorum 1 là cấu hình "đừng làm vậy"[^sent-two-bad]; và kiểm thử failover định kỳ vì "không có HA setup nào an toàn nếu không được test"[^sent-test].
+- Tài liệu Sentinel nêu chỉ có hai cách tránh hoàn toàn mất ghi đã báo xong: replication đồng bộ cùng một thuật toán consensus cho replicated state machine, hoặc hệ eventually consistent có hợp nhất phiên bản. Tài liệu nói Redis hiện *không* dùng cách nào, và việc đó nằm ngoài mục tiêu phát triển[^sent-two-ways]. Đó là một lập trường thiết kế (nhận xét của người soạn: chọn Redis làm *cache/cấu trúc dữ liệu nhanh* và làm nguồn chân lý ở nơi khác là hệ quả trực tiếp).
+- `SENTINEL CKQUORUM <master>` kiểm cấu hình Sentinel có đạt quorum và đa số để failover hay không, nên đưa vào monitoring[^sent-ckquorum].
+- Bài học vận hành từ tài liệu Sentinel: hai Sentinel mà quorum 1 là cấu hình "đừng làm vậy"[^sent-two-bad]. Ngoài ra nên kiểm thử failover định kỳ, vì "không có HA setup nào an toàn nếu không được test"[^sent-test].
 - Cluster (mục 6) không dùng Sentinel: failover do chính các node master bầu bằng giao thức riêng.
 
 </details>
 
-**Quay lại Q5:** replication là luồng lệnh bất đồng bộ định danh bởi `(replid, offset)`; PSYNC cho nối lại rẻ nếu backlog đủ, không thì fork + RDB; `WAIT` thu hẹp nhưng không đóng cửa sổ mất ghi; Sentinel bầu replica nhờ quorum + đa số + epoch nhưng "last failover wins" nên Redis + Sentinel vẫn có thể mất ghi đã ack.
+**Quay lại Q5:** replication là luồng lệnh bất đồng bộ định danh bởi `(replid, offset)`. PSYNC cho nối lại rẻ nếu backlog đủ, không thì fork + RDB. `WAIT` thu hẹp nhưng không đóng cửa sổ mất ghi; Sentinel bầu replica nhờ quorum + đa số + epoch, nhưng vì "last failover wins" nên Redis + Sentinel vẫn có thể mất ghi đã ack.
 
 ## 6. Redis Cluster: slot, bus gossip, failover — và không phải strong consistency (Q6)
 
-> **Trả lời ngắn.** Redis Cluster chia keyspace thành 16384 slot (đã nói ở [P12 · Chương 06](06-partitioning.md)) và thêm hai thứ so với "shard thủ công + Sentinel": các node nói chuyện với nhau qua *cluster bus* (gossip) để tự phát hiện lỗi, và các master tự *bầu* replica lên thay bằng epoch. Mục tiêu thiết kế được xếp theo thứ tự quan trọng: hiệu năng + scale tuyến tính trước, rồi mới tới "mức an toàn ghi chấp nhận được" và availability[^cl-goals]. Tài liệu nói thẳng: Cluster không bảo đảm strong consistency — dưới một số điều kiện, ghi đã được ack có thể mất[^cl-no-strong].
+> **Trả lời ngắn.** Redis Cluster chia keyspace thành 16384 slot (đã nói ở [P12 · Chương 06](06-partitioning.md)) và thêm hai thứ so với "shard thủ công + Sentinel": các node nói chuyện với nhau qua *cluster bus* (gossip) để tự phát hiện lỗi, và các master tự *bầu* replica lên thay bằng epoch. Mục tiêu thiết kế được xếp theo thứ tự quan trọng: hiệu năng + scale tuyến tính trước, rồi mới tới "mức an toàn ghi chấp nhận được" và availability[^cl-goals]. Tài liệu nói thẳng: Cluster không bảo đảm strong consistency, và dưới một số điều kiện, ghi đã được ack có thể mất[^cl-no-strong].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một chuỗi cửa hàng không có tổng đài; mỗi cửa hàng giữ một dải mã hàng, ai hỏi nhầm cửa hàng thì được chỉ sang cửa hàng đúng; các cửa hàng hay nhắn nhau "anh còn sống không", và khi đủ nhiều cửa hàng thấy một cửa hàng im lặng thì kho phó của nó được bầu lên thay.
+*Với `shop-api`.* Một thread của `redis-main` có trần: khi lượng ghi hoặc dataset của `shop-api` vượt một máy, bạn phải chia key ra nhiều node (nhận xét của người soạn, nối từ mục 1). Làm thủ công thì client tự nhớ key nào ở node nào và tự lo failover từng node. Cluster đưa việc chia slot, phát hiện lỗi và bầu replica vào trong chính Redis, và mục này xem nó làm vậy ra sao, cùng cái giá về consistency.
 
-*Phần đã có chương khác.* Slot = `CRC16(key) mod 16384`[^cl-hash-slot]; node không proxy mà trả `-MOVED`/`-ASK` để client tự đi tới node đúng[^cl-noproxy]; hash tag `{...}` ép nhiều key vào một slot[^cl-hashtag]; lệnh nhiều key chỉ chạy khi mọi key cùng slot[^cl-multikey] — xem [P12 · Chương 06, mục 5 (rebalancing), 6 (request routing) và 7 (cái giá của sharding)](06-partitioning.md). Chỉ thêm một chi tiết: `MOVED` nghĩa là "slot được phục vụ *lâu dài* ở node khác", còn `ASK` nghĩa là "chỉ gửi *truy vấn kế tiếp* tới node kia"[^cl-ask], và node đích chỉ phục vụ slot đang `IMPORTING` nếu client gửi lệnh `ASKING` ngay trước[^cl-asking]. Cluster chỉ có database `0`; `SELECT` bị cấm[^cl-db0].
+### 6.1 Phần đã có chương khác
 
-*Cluster bus.* Mỗi node nối TCP với *mọi* node khác qua cluster bus, dùng gossip để khám phá node mới, gửi ping kiểm tra sống, và gửi các thông điệp báo những điều kiện đặc biệt; bus cũng chở Pub/Sub trong cụm và điều phối manual failover[^cl-bus][^cl-bus-pubsub]. Mỗi master quảng bá `configEpoch` cùng một *bitmap* các slot nó phục vụ trong ping/pong[^cl-slot-bitmap]; với 16384 slot, bitmap trong source là `CLUSTER_SLOTS/8` byte[^cl-slots-const] — tức 16384/8 = 2048 byte (phép chia của người soạn). (Vì sao chọn đúng 16384: tài liệu cluster spec và source không nêu lý do; chương này không khẳng định.)
+Slot của một key là `CRC16(key) mod 16384`[^cl-hash-slot]. Node không làm proxy: khi client hỏi nhầm node, nó trả `-MOVED` hoặc `-ASK` để client tự đi tới node đúng[^cl-noproxy]. Hash tag `{...}` ép nhiều key vào cùng một slot[^cl-hashtag]; với `shop-api`, đặt `{u1}` trong cả `{u1}:cart` lẫn `{u1}:session` thì hai key cùng slot (nhận xét của người soạn). Lệnh nhiều key chỉ chạy khi mọi key cùng slot[^cl-multikey]. Chi tiết nằm ở [P12 · Chương 06, mục 5 (rebalancing), 6 (request routing) và 7 (cái giá của sharding)](06-partitioning.md).
 
-*Phát hiện lỗi: PFAIL → FAIL.* Một node gắn cờ `PFAIL` (possible failure) lên node khác nếu không liên lạc được quá `NODE_TIMEOUT`[^cl-pfail-def]. Cờ `FAIL` nghĩa là lỗi đã được *đa số master* xác nhận trong một khoảng thời gian cố định[^cl-pfail]. Tài liệu nhấn mạnh sự đồng thuận ở bước PFAIL→FAIL là *yếu*[^cl-weak], vì trạng thái "đa số master" được thu thập từ các node ở những thời điểm khác nhau, và không có cách nào bảo đảm thông điệp `FAIL` tới được mọi node[^cl-fail-reach]; `FAIL` chỉ là *tín hiệu kích hoạt* phần an toàn của thuật toán bầu replica[^cl-fail-trigger]. Mặc định `cluster-node-timeout` trong `redis.conf` là 15000 ms (dòng ví dụ bị comment)[^conf-nodetimeout].
+Chỉ thêm vài chi tiết riêng của Redis. `MOVED` nghĩa là "slot được phục vụ *lâu dài* ở node khác", còn `ASK` nghĩa là "chỉ gửi *truy vấn kế tiếp* tới node kia"[^cl-ask]. Node đích chỉ phục vụ slot đang `IMPORTING` nếu client gửi lệnh `ASKING` ngay trước[^cl-asking]. Cluster chỉ có database `0`, và `SELECT` bị cấm[^cl-db0].
 
-*Bầu replica.* Khi master ở trạng thái `FAIL`, các replica của nó chờ một độ trễ rồi xin phiếu: `DELAY = 500 ms + ngẫu nhiên 0–500 ms + REPLICA_RANK × 1000 ms`[^cl-rank], trong đó rank thấp hơn thuộc về replica có replication offset mới hơn[^cl-rank-offset] — tức replica cập nhật nhất thường được thử trước (best-effort, không bắt buộc[^cl-rank-soft]). Replica tăng `currentEpoch` rồi gửi yêu cầu bỏ phiếu tới các master[^cl-epoch-election]; được *đa số master* đồng ý thì thắng[^cl-vote-majority], nhận một `configEpoch` mới, duy nhất và lớn hơn `configEpoch` của mọi master hiện có[^cl-new-epoch]. `configEpoch` là thứ phân xử khi hai node cùng tuyên bố một slot trong phân vùng[^cl-configepoch]. `currentEpoch`/`configEpoch` được lưu và `fsync` xuống `nodes.conf` trước khi node tiếp tục hoạt động[^cl-epoch-fsync] (nối với [P5 · Chương 06](../05-storage/06-durability-trong-thuc-te.md)). (Suy luận của người soạn: đây là họ ý tưởng "term" của Raft — [Chương 09, mục 7](09-consistency-va-consensus.md) — nhưng được dùng bởi các master theo cách riêng của Redis, và tài liệu không tuyên bố nó là Raft.)
+### 6.2 Cluster bus
 
-*Vì sao vẫn có thể mất ghi đã ack.* Hai nguồn mất ghi được tài liệu nêu. Một: replication giữa node là bất đồng bộ — master B trả `OK` cho client rồi mới chuyển ghi cho replica, không chờ ack vì như vậy sẽ là một cái giá độ trễ quá lớn (prohibitive)[^cl-async]; nếu B chết trước khi kịp gửi, replica chưa nhận ghi có thể được thăng và ghi mất vĩnh viễn. Hai: hợp nhất theo "last failover wins": dataset của master được bầu cuối cùng sẽ thay thế mọi bản khác[^cl-lfw]. Cụ thể tài liệu liệt kê hai kịch bản: (a) ghi tới master nhưng chưa tới replica, master chết lâu đủ để replica được thăng; (b) master bị cô lập, bị failover, quay lại, và một client có bảng định tuyến cũ ghi vào nó trước khi nó thành replica — tài liệu đánh giá (b) ít khả năng vì master không liên lạc được với đa số sẽ ngừng nhận ghi[^cl-write-safety]. Phía thiểu số của một phân vùng thì cửa sổ mất ghi lớn hơn[^cl-minority-larger]; nhưng nó ngừng nhận ghi ngay khi hết `NODE_TIMEOUT` mà không liên lạc được đa số, nên có một cửa sổ tối đa[^cl-minority]. `WAIT` có hỗ trợ nhưng tài liệu viết rõ: ngay cả khi dùng replication đồng bộ, Cluster vẫn không hiện thực strong consistency[^cl-wait]. Cơ chế này đồng dạng với Sentinel (mục 5), khác chỗ failover do chính các master quyết định.
+Mỗi node nối TCP với *mọi* node khác qua cluster bus, dùng gossip để khám phá node mới, gửi ping kiểm tra sống, và gửi các thông điệp báo những điều kiện đặc biệt[^cl-bus]. Bus cũng chở Pub/Sub trong cụm và điều phối manual failover[^cl-bus-pubsub]. Mỗi master quảng bá `configEpoch` cùng một *bitmap* các slot nó phục vụ trong ping/pong[^cl-slot-bitmap]. Với 16384 slot, bitmap trong source là `CLUSTER_SLOTS/8` byte[^cl-slots-const], tức 16384/8 = 2048 byte (phép chia của người soạn). Vì sao chọn đúng 16384 thì tài liệu cluster spec và source không nêu lý do, nên chương này không khẳng định.
 
-*Availability.* Cluster sống sót qua phân vùng nếu đa số master còn liên lạc được và mỗi master mất liên lạc có ít nhất một replica[^cl-survive]; phía thiểu số của phân vùng thì không available[^cl-avail]. Mặc định `cluster-require-full-coverage yes`: cả cụm ngừng nhận truy vấn nếu *một* slot không có node phục vụ (đặt `no` để phần còn lại vẫn chạy)[^conf-fullcov].
+### 6.3 Phát hiện lỗi: PFAIL → FAIL
+
+Một node gắn cờ `PFAIL` (possible failure) lên node khác nếu không liên lạc được quá `NODE_TIMEOUT`[^cl-pfail-def]. Cờ `FAIL` nghĩa là lỗi đã được *đa số master* xác nhận trong một khoảng thời gian cố định[^cl-pfail]. Tài liệu nhấn mạnh rằng sự đồng thuận ở bước PFAIL→FAIL là *yếu*[^cl-weak]. Lý do là trạng thái "đa số master" được thu thập từ các node ở những thời điểm khác nhau, và không có cách nào bảo đảm thông điệp `FAIL` tới được mọi node[^cl-fail-reach]. `FAIL` chỉ là *tín hiệu kích hoạt* phần an toàn của thuật toán bầu replica[^cl-fail-trigger]. Mặc định `cluster-node-timeout` trong `redis.conf` là 15000 ms (dòng ví dụ bị comment)[^conf-nodetimeout].
+
+### 6.4 Bầu replica
+
+Khi master ở trạng thái `FAIL`, các replica của nó chờ một độ trễ rồi mới xin phiếu: `DELAY = 500 ms + ngẫu nhiên 0–500 ms + REPLICA_RANK × 1000 ms`[^cl-rank]. Rank thấp hơn thuộc về replica có replication offset mới hơn[^cl-rank-offset], nên replica cập nhật nhất thường được thử trước. Đây là best-effort, không bắt buộc[^cl-rank-soft].
+
+Replica tăng `currentEpoch` rồi gửi yêu cầu bỏ phiếu tới các master[^cl-epoch-election]. Được *đa số master* đồng ý thì nó thắng[^cl-vote-majority]. Replica thắng nhận một `configEpoch` mới, duy nhất và lớn hơn `configEpoch` của mọi master hiện có[^cl-new-epoch]. `configEpoch` là thứ phân xử khi hai node cùng tuyên bố một slot trong phân vùng[^cl-configepoch]. `currentEpoch`/`configEpoch` được lưu và `fsync` xuống `nodes.conf` trước khi node tiếp tục hoạt động[^cl-epoch-fsync] (nối với [P5 · Chương 06](../05-storage/06-durability-trong-thuc-te.md)). Suy luận của người soạn: đây là họ ý tưởng "term" của Raft ([Chương 09, mục 7](09-consistency-va-consensus.md)), nhưng được các master dùng theo cách riêng của Redis, và tài liệu không tuyên bố nó là Raft.
+
+### 6.5 Vì sao vẫn có thể mất ghi đã ack
+
+Tài liệu nêu hai nguồn mất ghi. Nguồn thứ nhất: replication giữa các node là bất đồng bộ. Master B trả `OK` cho client rồi mới chuyển ghi cho replica, và không chờ ack vì như vậy sẽ là một cái giá độ trễ quá lớn (prohibitive)[^cl-async]. Nếu B chết trước khi kịp gửi, một replica chưa nhận ghi có thể được thăng, và ghi đó mất vĩnh viễn.
+
+Nguồn thứ hai: hợp nhất theo "last failover wins", nghĩa là dataset của master được bầu cuối cùng sẽ thay thế mọi bản khác[^cl-lfw]. Cụ thể tài liệu liệt kê hai kịch bản: (a) ghi tới master nhưng chưa tới replica, rồi master chết đủ lâu để replica được thăng; (b) master bị cô lập, bị failover, quay lại, và một client có bảng định tuyến cũ ghi vào nó trước khi nó thành replica. Tài liệu đánh giá (b) ít khả năng vì master không liên lạc được với đa số sẽ ngừng nhận ghi[^cl-write-safety].
+
+Phía thiểu số của một phân vùng có cửa sổ mất ghi lớn hơn[^cl-minority-larger]. Nhưng nó ngừng nhận ghi ngay khi hết `NODE_TIMEOUT` mà không liên lạc được đa số, nên cửa sổ đó có giới hạn tối đa[^cl-minority]. `WAIT` có hỗ trợ, nhưng tài liệu viết rõ rằng ngay cả khi dùng replication đồng bộ, Cluster vẫn không hiện thực strong consistency[^cl-wait]. Cơ chế này đồng dạng với Sentinel (mục 5), chỉ khác ở chỗ failover do chính các master quyết định.
+
+### 6.6 Availability
+
+Cluster sống sót qua phân vùng nếu đa số master còn liên lạc được và mỗi master mất liên lạc có ít nhất một replica[^cl-survive]. Phía thiểu số của phân vùng thì không available[^cl-avail]. Mặc định `cluster-require-full-coverage yes`: cả cụm ngừng nhận truy vấn nếu *một* slot không có node phục vụ, và đặt `no` thì phần còn lại vẫn chạy[^conf-fullcov].
 
 <details><summary>Đi sâu: cờ <code>FAIL</code> được xóa và xác nhận ra sao, chi phí ping, và client Rust</summary>
 
-- Cờ `FAIL` chỉ xóa được trong vài trường hợp (node đã liên lạc lại và là replica[^cl-fail-clear], hoặc là master không phục vụ slot nào[^cl-fail-clear2], hoặc đã quá lâu không có replica nào được thăng[^cl-fail-clear3]); để `FAIL` được xác nhận, báo cáo `PFAIL`/`FAIL` từ đa số master phải nằm trong cửa sổ `NODE_TIMEOUT × FAIL_REPORT_VALIDITY_MULT` (hằng số này là 2 trong source 7.2.5)[^cl-fail-window][^cl-fail-mult].
-- Cluster bus ping mỗi node chưa gửi ping hoặc chưa nhận pong từ node đó quá nửa `NODE_TIMEOUT`[^cl-ping-half], nên số thông điệp toàn cục có thể lớn nếu `NODE_TIMEOUT` nhỏ và N rất lớn; ví dụ trong tài liệu: cụm 100 node với timeout 60 giây thì mỗi node ping 99 node mỗi 30 giây[^cl-ping-cost] (ví dụ của tài liệu, không phải số đo của chương này).
-- Lớp Rust (mục "Liên hệ với Rust") cần một client hiểu cluster, vì phải xử lý `MOVED`/`ASK` và cập nhật topology: crate `redis` có module `cluster`, kết nối cụm tự định tuyến request và hỏi lại topology khi nhận chỉ báo thay đổi[^rs-cluster] (docs.rs không nói rõ nó xử lý `MOVED`/`ASK` thế nào nên chương này không khẳng định chi tiết đó).
+- Cờ `FAIL` chỉ xóa được trong vài trường hợp:
+  - node đã liên lạc lại và là replica[^cl-fail-clear];
+  - hoặc node đã liên lạc lại và là master không phục vụ slot nào[^cl-fail-clear2];
+  - hoặc node là master đã liên lạc lại nhưng đã quá lâu không có replica nào được thăng[^cl-fail-clear3].
+
+  Để `FAIL` được xác nhận, báo cáo `PFAIL`/`FAIL` từ đa số master phải nằm trong cửa sổ `NODE_TIMEOUT × FAIL_REPORT_VALIDITY_MULT`[^cl-fail-window]. Hằng số này là 2 trong source 7.2.5[^cl-fail-mult].
+- Cluster bus ping mỗi node chưa gửi ping hoặc chưa nhận pong từ node đó quá nửa `NODE_TIMEOUT`[^cl-ping-half]. Vì vậy số thông điệp toàn cục có thể lớn nếu `NODE_TIMEOUT` nhỏ và N rất lớn. Ví dụ trong tài liệu: cụm 100 node với timeout 60 giây thì mỗi node ping 99 node mỗi 30 giây[^cl-ping-cost] (ví dụ của tài liệu, không phải số đo của chương này).
+- Lớp Rust (mục "Liên hệ với Rust") cần một client hiểu cluster, vì phải xử lý `MOVED`/`ASK` và cập nhật topology. Crate `redis` có module `cluster`: kết nối cụm tự định tuyến request và hỏi lại topology khi nhận chỉ báo thay đổi[^rs-cluster]. docs.rs không nói rõ nó xử lý `MOVED`/`ASK` thế nào nên chương này không khẳng định chi tiết đó.
 
 </details>
 
-**Quay lại Q6:** Cluster = slot + gossip bus + bầu replica bằng epoch do các master tự làm, được thiết kế ưu tiên hiệu năng và availability trong đa số; vì replication bất đồng bộ và "last failover wins", nó *không* strong consistent — `WAIT` thu hẹp nhưng không đóng cửa sổ mất ghi.
+**Quay lại Q6:** Cluster là slot + gossip bus + bầu replica bằng epoch do các master tự làm, được thiết kế ưu tiên hiệu năng và availability trong đa số. Vì replication bất đồng bộ và "last failover wins", nó *không* strong consistent: `WAIT` thu hẹp nhưng không đóng cửa sổ mất ghi.
 
 ## 7. `MULTI`/`EXEC`, `WATCH`, Lua/Functions; Pub/Sub và Streams (Q7)
 
-> **Trả lời ngắn.** `MULTI`/`EXEC` chạy một nhóm lệnh *liên tục*, không lệnh nào của client khác chen vào giữa[^tx-serial] — nhưng *không rollback*: một lệnh lỗi lúc chạy thì các lệnh còn lại vẫn chạy[^tx-runtime-err]. `WATCH` thêm optimistic locking kiểu check-and-set (CAS)[^tx-watch]; Lua script và Functions nguyên tử vì chặn cả server khi chạy[^sc-atomic][^fn-atomic]. Pub/Sub là "gửi rồi quên" (at-most-once)[^ps-at-most-once], còn Streams là log nối thêm có consumer group với xác nhận tường minh[^st-log][^st-cg-ack].
+> **Trả lời ngắn.** `MULTI`/`EXEC` chạy một nhóm lệnh *liên tục*, không lệnh nào của client khác chen vào giữa[^tx-serial]. Nhưng nó *không rollback*: một lệnh lỗi lúc chạy thì các lệnh còn lại vẫn chạy[^tx-runtime-err]. `WATCH` thêm optimistic locking kiểu check-and-set (CAS)[^tx-watch]. Lua script nguyên tử vì chặn cả server khi chạy[^sc-atomic]. Functions cũng nguyên tử như mọi thao tác Redis[^fn-atomic]. Pub/Sub là "gửi rồi quên" (at-most-once)[^ps-at-most-once]. Streams là log nối thêm[^st-log]. Nó có consumer group với xác nhận tường minh[^st-cg-ack].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `MULTI`/`EXEC` giống đặt cả giỏ hàng lên băng chuyền một lượt — không ai chen vào giữa giỏ — nhưng nếu món thứ ba hỏng thì thu ngân không trả lại hai món đầu. `WATCH` là "tôi chỉ mua nếu giá niêm yết chưa đổi từ lúc tôi xem".
+*Với `shop-api`.* Đặt một đơn hàng cần nhiều bước trên `redis-main`: trừ tồn kho `stock:42`, ghi đơn vào `order:9001`, rồi báo cho các service khác (gửi mail, tính điểm thưởng). Mục này trả lời hai câu: nhóm lệnh nào thì chạy liền mạch và có rollback không, và thông báo "có đơn mới" nên đi qua Pub/Sub hay Streams.
 
-*`MULTI`/`EXEC` chạy ra sao.* Sau `MULTI`, mọi lệnh được xếp hàng và trả `QUEUED`; `EXEC` mới chạy cả hàng[^tx-usage]. Hai bảo đảm của tài liệu: các lệnh được tuần tự hóa và chạy liên tiếp, không có request nào của client khác được phục vụ *giữa chừng*[^tx-serial]; và nếu client mất kết nối trước `EXEC` thì không lệnh nào chạy, còn đã gọi `EXEC` thì mọi lệnh được chạy[^tx-exec-all]. Điều này là hệ quả trực tiếp của event loop một luồng ở mục 1 (suy luận của người soạn).
+### 7.1 `MULTI`/`EXEC` chạy ra sao
 
-*Hai loại lỗi.* (1) Lỗi lúc *xếp hàng* (sai cú pháp, sai tên lệnh, hết bộ nhớ khi có `maxmemory`): từ 2.6.5 server phát hiện và `EXEC` từ chối cả transaction, trả `EXECABORT`[^tx-queue-err]; ví dụ lỗi xếp hàng gồm sai số đối số, sai tên lệnh, hoặc hết bộ nhớ khi server có `maxmemory`[^tx-errs-list]. (2) Lỗi lúc *chạy* (ví dụ gọi lệnh list lên một key kiểu string): *không* xử lý đặc biệt — các lệnh khác vẫn chạy[^tx-runtime-err]. Trong source `execCommand`: nếu cờ `CLIENT_DIRTY_CAS` (key `WATCH` bị đổi) thì `EXEC` trả một "null array"; nếu cờ `CLIENT_DIRTY_EXEC` (lỗi khi xếp hàng) thì trả `EXECABORT`[^tx-exec-src]. Vì thế `MULTI`/`EXEC` *không* là "A" (atomicity: tất cả hoặc không) của ACID theo nghĩa [P12 · Chương 07, mục 1](07-transaction.md) — nó cho *isolation* kiểu tuần tự và cho "không xen kẽ", còn all-or-nothing chỉ khi mọi lệnh thành công (nhận xét của người soạn đối chiếu hai chương). Về crash giữa chừng: AOF cố ghi cả transaction bằng một `write(2)`, nhưng nếu server bị kill cứng thì có thể chỉ một phần được ghi; Redis phát hiện lúc khởi động và thoát với lỗi[^tx-partial-aof], và `redis-check-aof` sửa được bằng cách cắt transaction dở[^tx-check-aof].
+Sau `MULTI`, mọi lệnh được xếp hàng và trả `QUEUED`; `EXEC` mới chạy cả hàng[^tx-usage]. Tài liệu bảo đảm hai điều. Một là các lệnh được tuần tự hóa và chạy liên tiếp, không có request nào của client khác được phục vụ *giữa chừng*[^tx-serial]. Hai là nếu client mất kết nối trước `EXEC` thì không lệnh nào chạy, còn đã gọi `EXEC` thì mọi lệnh được chạy[^tx-exec-all]. Điều này là hệ quả trực tiếp của event loop một luồng ở mục 1 (suy luận của người soạn).
 
-*`WATCH` = CAS.* `WATCH key…` làm `EXEC` có điều kiện: transaction chỉ chạy nếu *không* key nào được `WATCH` bị đổi — kể cả do chính Redis đổi như expire hay evict[^tx-watch-expire]; ngược lại `EXEC` trả null và client thử lại[^tx-watch-retry] — đúng vòng retry optimistic của [P12 · Chương 07, mục 5 và 8](07-transaction.md). Trong source, mỗi lần một key bị sửa, `touchWatchedKey` đánh dấu mọi client đang `WATCH` key đó bằng `CLIENT_DIRTY_CAS`[^tx-watch-src]; `EXEC` xong (dù thành công hay bị hủy) mọi key được `UNWATCH`[^tx-unwatch].
+### 7.2 Hai loại lỗi, và vì sao không rollback
 
-*Lua script — nguyên tử vì chặn.* `EVAL` chạy script Lua trong server; tài liệu: Redis bảo đảm script chạy nguyên tử — trong lúc chạy *mọi hoạt động của server bị chặn*, nên effect của script hoặc chưa xảy ra hoặc đã xảy ra[^sc-atomic]. Đây là cùng cơ chế "một luồng" của mục 1, với hệ quả cùng loại: script chậm chặn tất cả (suy luận của người soạn). Vì vậy có ngưỡng thời gian: khi script chạy quá `busy-reply-threshold` (mặc định 5 giây), Redis bắt đầu trả lỗi `BUSY` cho hầu hết các lệnh[^sc-busy][^sc-busy-default]; `SCRIPT KILL`/`FUNCTION KILL` chỉ dừng được script *chưa gọi lệnh ghi nào*[^sc-kill]. Một ràng buộc cho cluster: mọi tên key script truy cập phải được truyền tường minh qua `KEYS`, để chạy đúng cả ở standalone lẫn cluster[^sc-keys] (và các key khai báo phải cùng slot — mục 6[^sc-keys-slot]). Về replication: từ Redis 5.0 mặc định replicate *effect* (các lệnh ghi script đã gọi) chứ không phải script; từ 7.0 chế độ chép nguyên văn script không còn[^sc-effects].
+Lỗi lúc *xếp hàng* thì khác lỗi lúc *chạy*. Với lỗi xếp hàng, từ 2.6.5 server phát hiện và `EXEC` từ chối cả transaction, trả `EXECABORT`[^tx-queue-err]. Ví dụ lỗi xếp hàng gồm sai số đối số, sai tên lệnh, hoặc hết bộ nhớ khi server có `maxmemory`[^tx-errs-list].
 
-*Functions (7.0+).* Là bước tiến hóa của script "tạm thời": được quản lý như một phần của database, bảo đảm có mặt nhờ persistence và replication[^fn-persist]; thực thi nguyên tử như mọi thao tác Redis[^fn-atomic]. Ngược lại, cache script của `EVAL` là *không bền*: restart Redis xóa nó[^sc-cache-volatile] — nên client dùng `EVALSHA` phải có đường lui sang `EVAL` khi gặp `NOSCRIPT` (thư viện thường làm sẵn).
+Lỗi lúc *chạy* (ví dụ gọi lệnh list lên một key kiểu string) thì *không* được xử lý đặc biệt: các lệnh khác vẫn chạy[^tx-runtime-err]. Tài liệu giải thích Redis không hỗ trợ rollback vì rollback sẽ ảnh hưởng lớn tới sự đơn giản và hiệu năng[^tx-no-rollback]. Trong source `execCommand`, nếu cờ `CLIENT_DIRTY_CAS` (key `WATCH` bị đổi) thì `EXEC` trả một "null array"; nếu cờ `CLIENT_DIRTY_EXEC` (lỗi khi xếp hàng) thì trả `EXECABORT`[^tx-exec-src].
 
-*Pub/Sub.* Tài liệu: ngữ nghĩa giao tin *at-most-once* — tin được gửi tối đa một lần; nếu subscriber không xử lý được (lỗi hoặc đứt mạng) thì tin mất vĩnh viễn[^ps-at-most-once][^ps-lost]. Hợp cho thông báo "nóng" mà mất cũng được (ví dụ invalidate cache cục bộ, nhận xét của người soạn); không hợp cho việc cần giao đủ.
+Vì thế `MULTI`/`EXEC` *không* là "A" (atomicity: tất cả hoặc không) của ACID theo nghĩa [P12 · Chương 07, mục 1](07-transaction.md). Nó cho *isolation* kiểu tuần tự và cho "không xen kẽ", còn all-or-nothing chỉ đúng khi mọi lệnh thành công (nhận xét của người soạn đối chiếu hai chương). Với `shop-api`, nếu bước "ghi đơn" lỗi `WRONGTYPE` thì bước "trừ tồn kho" trước đó vẫn có hiệu lực.
 
-*Streams.* Là cấu trúc dữ liệu hoạt động như append-only log nhưng có thêm O(1) random access và các kiểu tiêu thụ phức tạp như consumer group[^st-log]. Khác Pub/Sub: tin được lưu và giữ vô thời hạn (trừ khi người dùng xóa), mỗi consumer nhớ ID tin cuối đã nhận[^st-vs]. *Consumer group* là một "consumer giả" phục vụ nhiều consumer thật: nó nhớ *ID đầu tiên chưa từng giao*[^st-cg-first]; việc tiêu thụ đòi hỏi `XACK` tường minh[^st-cg-ack]; và nó theo dõi danh sách *pending* (đã giao nhưng chưa ack)[^st-cg-pending]. `XREADGROUP ... >` trả tin chưa giao cho ai; với ID thật thì trả *lịch sử pending* của chính consumer đó, dùng để xử lý lại sau crash[^st-pending]. Consumer chết thì consumer khác có thể `XCLAIM` các tin pending đã nhàn rỗi quá lâu[^st-claim]. Nhờ vậy Streams hỗ trợ cả at-most-once lẫn at-least-once[^st-at-least]. Tài liệu lưu ý consumer group của Redis *không liên quan gì về cài đặt* với consumer group của Kafka dù tương tự về chức năng[^st-kafka]. Khái niệm queue-vs-log, delivery semantics, idempotent consumer: [P12 · Chương 11, mục 2 và 4](11-stream-processing.md), [Chương 12, mục 4](12-dung-dan-va-tich-hop-du-lieu.md).
+### 7.3 `WATCH`: check-and-set
+
+`WATCH key…` làm `EXEC` có điều kiện: transaction chỉ chạy nếu *không* key nào được `WATCH` bị đổi, kể cả khi chính Redis đổi nó như expire hay evict[^tx-watch-expire]. Ngược lại `EXEC` trả null và client thử lại[^tx-watch-retry]. Đó đúng là vòng retry optimistic của [P12 · Chương 07, mục 5 và 8](07-transaction.md).
+
+Trong source, mỗi lần một key bị sửa, `touchWatchedKey` đánh dấu mọi client đang `WATCH` key đó bằng `CLIENT_DIRTY_CAS`[^tx-watch-src]. Sau `EXEC` (dù thành công hay bị hủy), mọi key được `UNWATCH`[^tx-unwatch].
+
+### 7.4 Lua script: nguyên tử vì chặn
+
+`EVAL` chạy script Lua trong server. Theo tài liệu, Redis bảo đảm script chạy nguyên tử: trong lúc chạy *mọi hoạt động của server bị chặn*, nên effect của script hoặc chưa xảy ra hoặc đã xảy ra[^sc-atomic]. Đây là cùng cơ chế "một luồng" của mục 1, với hệ quả cùng loại là script chậm chặn tất cả (suy luận của người soạn).
+
+Vì vậy có ngưỡng thời gian. Khi script chạy quá `busy-reply-threshold`, Redis bắt đầu trả lỗi `BUSY` cho hầu hết các lệnh[^sc-busy]. Mặc định ngưỡng là 5 giây[^sc-busy-default]. `SCRIPT KILL`/`FUNCTION KILL` chỉ dừng được script *chưa gọi lệnh ghi nào*[^sc-kill].
+
+Còn một ràng buộc cho cluster: mọi tên key script truy cập phải được truyền tường minh qua `KEYS`, để chạy đúng cả ở standalone lẫn cluster[^sc-keys]. Các key khai báo đó phải cùng slot (mục 6)[^sc-keys-slot]. Về replication: từ Redis 5.0 mặc định replicate *effect* (các lệnh ghi script đã gọi) chứ không phải script, và từ 7.0 chế độ chép nguyên văn script không còn[^sc-effects].
+
+### 7.5 Functions (7.0+)
+
+Functions là bước tiến hóa của script "tạm thời". Redis quản lý chúng như một phần của database và bảo đảm chúng có mặt nhờ persistence và replication[^fn-persist]. Việc thực thi cũng nguyên tử như mọi thao tác Redis[^fn-atomic]. Ngược lại, cache script của `EVAL` là *không bền*, vì restart Redis xóa nó[^sc-cache-volatile]. Vì vậy client dùng `EVALSHA` phải có đường lui sang `EVAL` khi gặp `NOSCRIPT` (thư viện thường làm sẵn).
+
+### 7.6 Pub/Sub
+
+Pub/Sub có ngữ nghĩa giao tin *at-most-once*: tin được gửi tối đa một lần[^ps-at-most-once]. Nếu subscriber không xử lý được (lỗi hoặc đứt mạng) thì tin mất vĩnh viễn[^ps-lost]. Vì vậy nó hợp cho thông báo "nóng" mà mất cũng được, ví dụ báo các instance `shop-api` xóa cache cục bộ (nhận xét của người soạn). Nó không hợp cho việc cần giao đủ, như "gửi mail xác nhận đơn".
+
+### 7.7 Streams và consumer group
+
+Với "gửi mail xác nhận đơn", `shop-api` cần thứ gì đó lưu tin lại. Stream là cấu trúc dữ liệu hoạt động như append-only log nhưng có thêm O(1) random access và các kiểu tiêu thụ phức tạp như consumer group[^st-log]. Khác Pub/Sub, tin được lưu và giữ vô thời hạn (trừ khi người dùng xóa), và mỗi consumer nhớ ID tin cuối đã nhận[^st-vs].
+
+*Consumer group* là một "consumer giả" phục vụ nhiều consumer thật. Nó nhớ *ID đầu tiên chưa từng giao*[^st-cg-first]. Mỗi tin chỉ được giao cho một consumer trong group[^st-cg-multi]. Việc tiêu thụ đòi hỏi `XACK` tường minh[^st-cg-ack]. Group cũng theo dõi danh sách *pending*, tức các tin đã giao nhưng chưa ack[^st-cg-pending].
+
+`XREADGROUP ... >` trả tin chưa giao cho ai; với ID thật thì nó trả *lịch sử pending* của chính consumer đó, dùng để xử lý lại sau crash[^st-pending]. Consumer chết thì consumer khác có thể `XCLAIM` các tin pending đã nhàn rỗi quá lâu[^st-claim]. Nhờ vậy Streams hỗ trợ cả at-most-once lẫn at-least-once[^st-at-least]. Tài liệu lưu ý rằng consumer group của Redis *không liên quan gì về cài đặt* với consumer group của Kafka dù tương tự về chức năng[^st-kafka]. Khái niệm queue-vs-log, delivery semantics, idempotent consumer: [P12 · Chương 11, mục 2 và 4](11-stream-processing.md), [Chương 12, mục 4](12-dung-dan-va-tich-hop-du-lieu.md).
 
 (Job queue bằng List `BLMOVE` so với Stream + consumer group, và khi nào nên đổi sang broker thật: [Chương 17, mục 4](17-redis-patterns.md). Chọn giữa lệnh đơn, `MULTI`/`EXEC`, `WATCH` và Lua cho một thao tác: [Chương 17, mục 8.1](17-redis-patterns.md).)
 
 | | Pub/Sub | List (`BLPOP`) | Stream + consumer group |
 |---|---|---|---|
-| Lưu tin | không[^st-vs-others] | có, nhưng pop là xóa[^st-vs-others] | có, đến khi bị xóa/trim[^st-vs][^st-capped] |
-| Giao tin | at-most-once[^ps-at-most-once] | một consumer mỗi tin[^st-fanout] | ack tường minh, pending, claim[^st-cg-ack][^st-cg-pending][^st-claim] |
-| Fan-out nhiều consumer | có[^st-fanout] | không[^st-fanout] | có (nhiều group[^st-cg-groups]) và chia tải trong group[^st-cg-multi] |
+| Lưu tin | không[^st-vs-others] | có, nhưng pop là xóa | có, đến khi bị xóa/trim[^st-vs] |
+| Giao tin | at-most-once[^ps-at-most-once] | một consumer mỗi tin[^st-fanout] | ack tường minh[^st-cg-ack] |
+| Fan-out nhiều consumer | có | không | có, qua nhiều group[^st-cg-groups] |
 
-*Độ bền và replication của Streams.* Stream được replicate bất đồng bộ và persist vào AOF/RDB như mọi cấu trúc khác[^st-persist], và trạng thái consumer group cũng được propagate tới AOF, RDB và replica[^st-persist-group]; nên nếu cần giữ tin, phải dùng AOF với chính sách `fsync` mạnh[^st-persist-warn]; `WAIT` làm giảm khả năng mất nhưng failover vẫn chỉ best-effort[^st-wait-warn]. `XREADGROUP` là *lệnh ghi* (nó đổi trạng thái group) nên chỉ gọi được trên master[^st-write-cmd]. Stream không tự giới hạn kích thước: có `MAXLEN` trong `XADD`[^st-capped] và `XTRIM` để cắt[^st-xtrim] (và vì Redis giữ dữ liệu trong RAM — mục 3 — việc cắt là cần thiết trong thực tế; nhận xét của người soạn).
+### 7.8 Độ bền và replication của Streams
 
-<details><summary>Đi sâu: <code>MULTI</code> + <code>maxmemory</code>, <code>WAIT</code> trong script, và sharded Pub/Sub</summary>
+Stream được replicate bất đồng bộ và persist vào AOF/RDB như mọi cấu trúc khác[^st-persist]. Trạng thái consumer group cũng được propagate tới AOF, RDB và replica[^st-persist-group]. Nên nếu cần giữ tin, phải dùng AOF với chính sách `fsync` mạnh[^st-persist-warn]. `WAIT` làm giảm khả năng mất, nhưng failover vẫn chỉ best-effort[^st-wait-warn]. `XREADGROUP` là *lệnh ghi* vì nó đổi trạng thái group, nên chỉ gọi được trên master[^st-write-cmd].
+
+Stream không tự giới hạn kích thước. Có `MAXLEN` trong `XADD` để giới hạn[^st-capped]. Ngoài ra `XTRIM` cắt stream theo cách tương tự[^st-xtrim]. Vì Redis giữ dữ liệu trong RAM (mục 3), việc cắt là cần thiết trong thực tế (nhận xét của người soạn).
+
+<details><summary>Đi sâu: <code>MULTI</code> + <code>maxmemory</code>, crash giữa transaction, <code>WAIT</code> trong script, và sharded Pub/Sub</summary>
 
 - Trong `processCommand`, nếu client đang ở `MULTI` thì *mọi* lệnh xếp hàng (trừ `EXEC`, `DISCARD`, `QUIT`, `RESET`) bị từ chối khi hết bộ nhớ, vì xếp hàng có thể ăn bộ nhớ không giới hạn[^srv-multi-oom].
+- Về crash giữa chừng: AOF cố ghi cả transaction bằng một `write(2)`, nhưng nếu server bị kill cứng thì có thể chỉ một phần được ghi. Redis phát hiện lúc khởi động và thoát với lỗi[^tx-partial-aof]. `redis-check-aof` sửa được bằng cách cắt transaction dở[^tx-check-aof].
 - `WAIT` trong `MULTI` (hoặc ngữ cảnh không cho phép block như script từ 7.0) không chặn mà trả ngay số replica đã ack lệnh ghi trước đó[^wait-multi].
-- Từ 7.0 có *sharded* Pub/Sub: channel được gán vào slot theo cùng thuật toán như key, dùng `SSUBSCRIBE`/`SPUBLISH`[^ps-sharded] — nhằm giữ việc lan tin trong phạm vi một shard của cluster, trong khi Pub/Sub thường là toàn cục và lan tới mọi node qua cluster bus[^ps-sharded-scale].
-- Với client Rust: `Pipeline::atomic()` của crate `redis` bọc pipeline trong `MULTI`/`EXEC` (mục "Liên hệ với Rust") — nên cũng *không rollback* và có thể trả lỗi từng lệnh[^rs-atomic-norollback].
+- Từ 7.0 có *sharded* Pub/Sub: channel được gán vào slot theo cùng thuật toán như key, dùng `SSUBSCRIBE`/`SPUBLISH`[^ps-sharded]. Mục đích là giữ việc lan tin trong phạm vi một shard của cluster, trong khi Pub/Sub thường là toàn cục và lan tới mọi node qua cluster bus[^ps-sharded-scale].
+- Với client Rust: `Pipeline::atomic()` của crate `redis` bọc pipeline trong `MULTI`/`EXEC` (mục "Liên hệ với Rust"), nên cũng *không rollback* và có thể trả lỗi từng lệnh[^rs-atomic-norollback].
 
 </details>
 
-**Quay lại Q7:** transaction Redis là "chạy liền mạch, không rollback" (isolation tuần tự, không all-or-nothing khi lỗi lúc chạy); `WATCH` cho CAS; Lua/Functions nguyên tử nhờ chặn server nên script chậm là sự cố; Pub/Sub không lưu và mất tin, Streams lưu và có consumer group + ack để giao ít nhất một lần.
+**Quay lại Q7:** transaction Redis là "chạy liền mạch, không rollback" (isolation tuần tự, không all-or-nothing khi lỗi lúc chạy); `WATCH` cho CAS; Lua/Functions nguyên tử nhờ chặn server nên script chậm là sự cố. Pub/Sub không lưu và mất tin, còn Streams lưu và có consumer group + ack để giao ít nhất một lần.
 
 ## 8. Redis làm lock, cache và rate limiter (Q8)
 
-> **Trả lời ngắn.** Khóa trên *một* instance: `SET resource_name <giá trị ngẫu nhiên> NX PX <ttl>` để lấy và một script "xóa nếu giá trị còn là của tôi" để nhả[^lk-set][^lk-unlock]. Thêm replica thì mutual exclusion vỡ vì replication bất đồng bộ[^lk-replica-race]; Redlock (5 master độc lập, đa số) cố sửa nhưng bị tranh luận — Kleppmann cho rằng nó dựa vào giả định thời gian và không sinh fencing token[^kb-timing][^kb-fencing], còn tài liệu Redis (bản ghim) tự khuyên cài fencing token[^lk-disclaimer-fence]. Cache và rate limiter dùng đúng các nút vặn ở mục 1–3 (`maxmemory`, TTL, nguyên tử của lệnh đơn/`MULTI`/Lua); cách ghép chúng nằm ở [Chương 17, mục 1–3](17-redis-patterns.md).
+> **Trả lời ngắn.** Khóa trên *một* instance: lấy bằng `SET resource_name <giá trị ngẫu nhiên> NX PX <ttl>`[^lk-set]. Nhả khóa bằng một script "xóa nếu giá trị còn là của tôi"[^lk-unlock]. Thêm replica thì mutual exclusion vỡ vì replication bất đồng bộ[^lk-replica-race]. Redlock (5 master độc lập, đa số) cố sửa nhưng bị tranh luận. Kleppmann cho rằng nó dựa vào giả định thời gian[^kb-timing]. Ông cũng chỉ ra nó không sinh fencing token[^kb-fencing]. Còn tài liệu Redis (bản ghim) tự khuyên cài fencing token[^lk-disclaimer-fence]. Cache và rate limiter dùng đúng các nút vặn ở mục 1–3 (`maxmemory`, TTL, nguyên tử của lệnh đơn/`MULTI`/Lua); cách ghép chúng nằm ở [Chương 17, mục 1–3](17-redis-patterns.md).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): khóa Redis là một tấm biển "đang dùng" có hạn tự gỡ treo trên cửa phòng. Biển tự rơi sau 30 giây dù người trong phòng chưa xong — phòng an toàn *miễn là* người trong phòng làm xong trước khi biển rơi, và không ai tin biển hơn thực tế.
+*Với `shop-api`.* Cả ba việc xuất hiện trong `shop-api` rất tự nhiên. Một job dọn đơn treo chỉ được chạy ở *một* instance tại một thời điểm, nên cần khóa. Trang sản phẩm đọc nhiều nên cần cache. Và endpoint đăng nhập cần giới hạn số lần gọi mỗi IP. Cả ba đều là cách dùng các nút vặn ở trên; riêng khóa thì có một vấn đề an toàn đáng nói kỹ.
 
 ### 8.1 Khóa trên một instance
 
-Lấy khóa: `SET resource_name my_random_value NX PX 30000` — đặt key *chỉ khi chưa tồn tại* (`NX`), với hạn 30000 ms (`PX`); giá trị phải duy nhất giữa mọi client và mọi lần xin khóa[^lk-set]. Một lệnh duy nhất nên "kiểm tra + đặt + hạn" là nguyên tử (suy luận của người soạn từ mục 1; còn `SETNX` rồi `EXPIRE` riêng thì không). Nhả khóa phải bằng script kiểm giá trị trước khi xóa, vì chỉ `DEL` không an toàn: một client có thể xóa khóa của client khác[^lk-del-unsafe]; giá trị ngẫu nhiên "ký" khóa để chỉ chủ sở hữu mới xóa được[^lk-unlock]. TTL vừa là thời gian tự giải phóng, vừa là khoảng thời gian client có để làm xong việc mà chưa vi phạm mutual exclusion[^lk-window] — nếu làm lâu hơn TTL thì hai client cùng "giữ khóa" (đúng kịch bản pause ở [P12 · Chương 08, mục 7](08-su-co-he-phan-tan.md)). Gia hạn bằng script và giới hạn số lần gia hạn (nếu không vi phạm liveness[^lk-extend]), cùng cách ghép khóa với idempotency key, nằm ở [Chương 17, mục 3](17-redis-patterns.md).
+Lấy khóa: `SET resource_name my_random_value NX PX 30000`. Lệnh này đặt key *chỉ khi chưa tồn tại* (`NX`), với hạn 30000 ms (`PX`), và giá trị phải duy nhất giữa mọi client và mọi lần xin khóa[^lk-set]. Vì chỉ là một lệnh nên "kiểm tra + đặt + hạn" nguyên tử (suy luận của người soạn từ mục 1); còn `SETNX` rồi `EXPIRE` riêng thì không.
+
+Nhả khóa phải bằng script kiểm giá trị trước khi xóa, vì chỉ `DEL` thì không an toàn: một client có thể xóa khóa của client khác[^lk-del-unsafe]. Giá trị ngẫu nhiên "ký" khóa để chỉ chủ sở hữu mới xóa được[^lk-unlock]. TTL vừa là thời gian tự giải phóng, vừa là khoảng thời gian client có để làm xong việc mà chưa vi phạm mutual exclusion[^lk-window]. Nếu làm lâu hơn TTL thì hai client cùng "giữ khóa", đúng kịch bản pause ở [P12 · Chương 08, mục 7](08-su-co-he-phan-tan.md). Gia hạn bằng script và giới hạn số lần gia hạn (nếu không sẽ vi phạm liveness[^lk-extend]), cùng cách ghép khóa với idempotency key, nằm ở [Chương 17, mục 3](17-redis-patterns.md).
 
 ### 8.2 Vì sao replica không cứu được, và Redlock
 
-Tài liệu mô tả đúng kịch bản: A lấy khóa ở master; master chết trước khi ghi tới replica; replica được thăng; B lấy khóa của cùng tài nguyên — vi phạm an toàn[^lk-race-steps]; lý do là replication bất đồng bộ[^lk-replica-race] (mục 5). Redlock chạy trên N master *độc lập* (không replication, không phối hợp ngầm)[^lk-redlock-n], lấy khóa tuần tự ở cả N instance với timeout nhỏ so với hạn của khóa[^lk-timeout], và coi là đã lấy được nếu được đa số (≥ 3 trên 5) *và* tổng thời gian lấy chưa hết hạn hiệu lực của khóa[^lk-redlock-majority]. Thời gian hiệu lực còn lại là TTL trừ thời gian đã tốn[^lk-validity]. Chính tài liệu thừa nhận thuật toán dựa vào giả định đồng hồ cục bộ các process chạy cùng tốc độ xấp xỉ[^lk-clock]. Về crash: nếu Redis không persistence, một instance khởi động lại có thể cho client khác lấy lại khóa đang được giữ[^lk-restart]; AOF với `fsync` mỗi giây vẫn có thể làm mất key sau mất điện; tài liệu đề xuất *delayed restart* — để instance chết không tham gia lâu hơn TTL tối đa[^lk-fsync][^lk-delayed].
+Tài liệu mô tả đúng kịch bản: A lấy khóa ở master; master chết trước khi ghi tới replica; replica được thăng; B lấy khóa của cùng tài nguyên, vi phạm an toàn[^lk-race-steps]. Lý do là replication bất đồng bộ[^lk-replica-race] (mục 5).
+
+Redlock chạy trên N master *độc lập*, không replication, không phối hợp ngầm[^lk-redlock-n]. Client lấy khóa tuần tự ở cả N instance với timeout nhỏ so với hạn của khóa[^lk-timeout]. Nó coi là đã lấy được nếu được đa số (≥ 3 trên 5) *và* tổng thời gian lấy chưa hết hạn hiệu lực của khóa[^lk-redlock-majority]. Thời gian hiệu lực còn lại là TTL trừ thời gian đã tốn[^lk-validity]. Chính tài liệu thừa nhận thuật toán dựa vào giả định đồng hồ cục bộ của các process chạy cùng tốc độ xấp xỉ[^lk-clock].
+
+Về crash: nếu Redis không persistence, một instance khởi động lại có thể cho client khác lấy lại khóa đang được giữ[^lk-restart]. AOF với `fsync` mỗi giây vẫn có thể làm mất key sau mất điện[^lk-fsync]. Vì vậy tài liệu đề xuất *delayed restart*: để instance chết không tham gia lâu hơn TTL tối đa[^lk-delayed].
 
 ### 8.3 Tranh luận
 
-Đây là phần đã có ở [P12 · Chương 08, mục 8](08-su-co-he-phan-tan.md) và [P13 · Chương 09, mục 2](../13-tla-plus/09-mo-hinh-hoa-he-backend.md); chỉ tóm các luận điểm có nguồn:
+Đây là phần đã có ở [P12 · Chương 08, mục 8](08-su-co-he-phan-tan.md) và [P13 · Chương 09, mục 2](../13-tla-plus/09-mo-hinh-hoa-he-backend.md); ở đây chỉ tóm các luận điểm có nguồn.
 
-- *Kleppmann (2016).* (1) Redlock không có cách sinh fencing token: thuật toán không tạo ra số nào bảo đảm tăng mỗi lần lấy khóa, nên dù thuật toán hoàn hảo thì client bị pause hoặc gói tin bị trễ vẫn gây race[^kb-fencing]; đếm trên một node Redis thì không đủ vì node đó có thể hỏng[^kb-counter]. (2) Safety dựa nhiều vào giả định về thời gian: các node Redis giữ key đúng thời lượng, trễ mạng nhỏ so với hạn, và pause của process ngắn so với hạn[^kb-timing]. Kết luận: cho khóa chỉ để tối ưu hiệu quả thì dùng thuật toán một node đơn giản và ghi rõ trong code rằng khóa chỉ gần đúng[^kb-efficiency]; còn khóa cho tính đúng đắn thì đừng dùng Redlock, dùng hệ consensus kiểu ZooKeeper và buộc dùng fencing token ở mọi truy cập tài nguyên[^kb-conclusion]. (Phân tích kịch bản pause và cách kiểm token ở tài nguyên đích: [P12 · Chương 08, mục 8](08-su-co-he-phan-tan.md).)
-- *Antirez (phản hồi).* Đồng ý rằng nên chuyển sang API thời gian monotonic[^ar-agree]; nói phê phán về fencing token đúng với *mọi* khóa phân tán có tự giải phóng mà không có bộ đếm tăng dần[^ar-fencing]; lập luận thêm rằng một định danh duy nhất cho mỗi lần lấy khóa vẫn dùng được cho cùng mục đích (ví dụ check-and-set) mà không đòi store bảo đảm mạnh[^ar-token]; nhưng không thấy các điểm khác trong phân tích ảnh hưởng safety của Redlock và không đồng ý với kết luận "đừng dùng Redlock khi cần mutual exclusion"[^ar-disagree].
-- *Tài liệu Redis (bản ghim)* có một mục "Disclaimer about consistency": nếu quan tâm tính đúng đắn thì nên cài fencing token[^lk-disclaimer-fence]; và Redis không dùng đồng hồ monotonic cho cơ chế hết hạn TTL nên một bước nhảy đồng hồ có thể khiến khóa bị nhiều process giữ cùng lúc[^lk-disclaimer-clock].
+- *Kleppmann (2016).* Luận điểm một: Redlock không có cách sinh fencing token. Thuật toán không tạo ra số nào bảo đảm tăng mỗi lần lấy khóa, nên dù thuật toán hoàn hảo thì client bị pause hoặc gói tin bị trễ vẫn gây race[^kb-fencing]. Đếm trên một node Redis thì không đủ vì node đó có thể hỏng[^kb-counter]. Luận điểm hai: safety dựa nhiều vào giả định về thời gian, rằng các node Redis giữ key đúng thời lượng, trễ mạng nhỏ so với hạn, và pause của process ngắn so với hạn[^kb-timing]. Kết luận: cho khóa chỉ để tối ưu hiệu quả thì dùng thuật toán một node đơn giản và ghi rõ trong code rằng khóa chỉ gần đúng[^kb-efficiency]. Còn khóa cho tính đúng đắn thì đừng dùng Redlock, hãy dùng hệ consensus kiểu ZooKeeper và buộc dùng fencing token ở mọi truy cập tài nguyên[^kb-conclusion]. (Phân tích kịch bản pause và cách kiểm token ở tài nguyên đích: [P12 · Chương 08, mục 8](08-su-co-he-phan-tan.md).)
+- *Antirez (phản hồi).* Ông đồng ý rằng nên chuyển sang API thời gian monotonic[^ar-agree]. Ông nói phê phán về fencing token đúng với *mọi* khóa phân tán có tự giải phóng mà không có bộ đếm tăng dần[^ar-fencing]. Ông lập luận thêm rằng một định danh duy nhất cho mỗi lần lấy khóa vẫn dùng được cho cùng mục đích (ví dụ check-and-set) mà không đòi store bảo đảm mạnh[^ar-token]. Nhưng ông không thấy các điểm khác trong phân tích ảnh hưởng safety của Redlock, và không đồng ý với kết luận "đừng dùng Redlock khi cần mutual exclusion"[^ar-disagree].
+- *Tài liệu Redis (bản ghim)* có một mục "Disclaimer about consistency": nếu quan tâm tính đúng đắn thì nên cài fencing token[^lk-disclaimer-fence]. Tài liệu cũng nói Redis không dùng đồng hồ monotonic cho cơ chế hết hạn TTL, nên một bước nhảy đồng hồ có thể khiến khóa bị nhiều process giữ cùng lúc[^lk-disclaimer-clock].
 
-(Nhận xét của người soạn: lấy cả hai phía làm dữ kiện, không phán ai thắng — nhưng quy tắc thực hành ở chương 08 mục 8 vẫn đứng: khóa "vì hiệu quả" thì Redis `SET NX PX` là đủ; khóa "vì đúng đắn" thì tài nguyên đích phải kiểm fencing token. Bộ đếm `INCR` trên Redis không tự giải quyết được vì nó nằm trên node có replication bất đồng bộ, suy luận từ mục 5 và từ nhận xét của Kleppmann ở trên. Khi dữ liệu cần bảo vệ đã nằm sẵn trong PostgreSQL, khóa ngay trong DB — row lock `SELECT ... FOR UPDATE` ([P12 · Chương 15, mục 6](15-postgresql-ben-trong.md)) hoặc advisory lock ([Chương 15, mục 2d](15-postgresql-ben-trong.md)) — tránh phải vận hành thêm một hệ khóa thứ hai; đây là so sánh của người soạn, không phải kết luận của nguồn nào.)
+(Nhận xét của người soạn: lấy cả hai phía làm dữ kiện, không phán ai thắng. Quy tắc thực hành ở chương 08 mục 8 vẫn đứng: khóa "vì hiệu quả" thì Redis `SET NX PX` là đủ; khóa "vì đúng đắn" thì tài nguyên đích phải kiểm fencing token. Bộ đếm `INCR` trên Redis không tự giải quyết được vì nó nằm trên node có replication bất đồng bộ, suy luận từ mục 5 và từ nhận xét của Kleppmann ở trên. Khi dữ liệu cần bảo vệ đã nằm sẵn trong PostgreSQL, khóa ngay trong DB, bằng row lock `SELECT ... FOR UPDATE` ([P12 · Chương 15, mục 6](15-postgresql-ben-trong.md)) hoặc advisory lock ([Chương 15, mục 2d](15-postgresql-ben-trong.md)), tránh phải vận hành thêm một hệ khóa thứ hai. Đây là so sánh của người soạn, không phải kết luận của nguồn nào.)
 
 ### 8.4 Cache
 
-Cache-aside (đọc cache, trượt thì đọc DB rồi nạp; ghi DB rồi xóa key cache), cuộc đua "stale set" và cách chặn stampede được phân tích ở [Chương 17, mục 1](17-redis-patterns.md) (kèm phần phía Facebook) và được mô hình hóa bằng TLA+ ở [P13 · Chương 09, mục 4](../13-tla-plus/09-mo-hinh-hoa-he-backend.md). Phần *cơ chế Redis* mà chúng dựa vào đã ở các mục trên: `maxmemory` + policy (thường `allkeys-lru` khi phân bố truy cập lệch[^evict-rule-lru], mục 3), TTL để giới hạn "mãi mãi" của giá trị cũ (mục 3), single-flight dựng từ `SET NX PX` (mục 8.1), và `noeviction` *không* hợp với cache vì sẽ từ chối ghi khi đầy (mục 3; nhận xét của người soạn).
+Cache-aside (đọc cache, trượt thì đọc DB rồi nạp; ghi DB rồi xóa key cache), cuộc đua "stale set" và cách chặn stampede được phân tích ở [Chương 17, mục 1](17-redis-patterns.md) (kèm phần phía Facebook) và được mô hình hóa bằng TLA+ ở [P13 · Chương 09, mục 4](../13-tla-plus/09-mo-hinh-hoa-he-backend.md). *Cơ chế Redis* mà chúng dựa vào đã nằm ở các mục trên:
 
-*Cache đứng trước PostgreSQL.* Trong cache-aside, "DB" ở trên thường là một PostgreSQL như [P12 · Chương 15](15-postgresql-ben-trong.md): mỗi lần trượt cache là một truy vấn tới nó. Khi cache trượt hàng loạt (hết hạn cùng lúc, bị evict, stampede), tải dồn xuống PostgreSQL chỉ bị chặn bởi những gì bạn đã đặt phía đó — kích thước pool, `max_connections` và hàng đợi của PgBouncer ([Chương 15, mục 2](15-postgresql-ben-trong.md) và mục R5 trong phần Rust của chương đó) (suy luận của người soạn dựa trên chương 15). `EXPLAIN` và `pg_stat_statements` ([Chương 15, mục 7 và 8](15-postgresql-ben-trong.md)) giúp biết truy vấn nào đáng cache (nhận xét của người soạn). Hai hệ cùng gặp câu hỏi "báo thành công lúc nào so với lúc dữ liệu xuống đĩa" nhưng trả lời khác nhau: PostgreSQL flush WAL trước khi báo `COMMIT` thành công ([Chương 15, mục 4](15-postgresql-ben-trong.md)), còn Redis tùy cấu hình persistence — chỉ RDB, hoặc AOF theo `appendfsync` (mục 4 của chương này). Vì vậy (nhận xét của người soạn) nguồn chân lý của dữ liệu trong mẫu cache-aside vẫn là PostgreSQL, Redis là bản sao có thể mất.
+- `maxmemory` + policy, thường `allkeys-lru` khi phân bố truy cập lệch (mục 3)[^evict-rule-lru].
+- TTL để giới hạn "mãi mãi" của giá trị cũ (mục 3).
+- Single-flight dựng từ `SET NX PX` (mục 8.1).
+- `noeviction` *không* hợp với cache vì sẽ từ chối ghi khi đầy (mục 3; nhận xét của người soạn).
 
-*Stampede* (nhiều request cùng trượt một key nóng rồi cùng đổ xuống DB) là chủ đề của [Chương 17, mục 1.4](17-redis-patterns.md): ở đó có single-flight, TTL có jitter và refresh sớm; chương này chỉ nhắc rằng bản thân `SET NX PX` ở mục 8.1 là primitive cho single-flight (suy luận của người soạn).
+*Cache đứng trước PostgreSQL.* Trong cache-aside, "DB" ở trên thường là một PostgreSQL như [P12 · Chương 15](15-postgresql-ben-trong.md): mỗi lần trượt cache là một truy vấn tới nó. Khi cache trượt hàng loạt (hết hạn cùng lúc, bị evict, stampede), tải dồn xuống PostgreSQL chỉ bị chặn bởi những gì bạn đã đặt phía đó: kích thước pool, `max_connections` và hàng đợi của PgBouncer ([Chương 15, mục 2](15-postgresql-ben-trong.md) và mục R5 trong phần Rust của chương đó). Đây là suy luận của người soạn dựa trên chương 15. `EXPLAIN` và `pg_stat_statements` ([Chương 15, mục 7 và 8](15-postgresql-ben-trong.md)) giúp biết truy vấn nào đáng cache (nhận xét của người soạn).
+
+Hai hệ cùng gặp câu hỏi "báo thành công lúc nào so với lúc dữ liệu xuống đĩa" nhưng trả lời khác nhau. PostgreSQL flush WAL trước khi báo `COMMIT` thành công ([Chương 15, mục 4](15-postgresql-ben-trong.md)), còn Redis tùy cấu hình persistence: chỉ RDB, hoặc AOF theo `appendfsync` (mục 4 của chương này). Vì vậy (nhận xét của người soạn) nguồn chân lý của dữ liệu trong mẫu cache-aside vẫn là PostgreSQL, và Redis là bản sao có thể mất.
+
+*Stampede* (nhiều request cùng trượt một key nóng rồi cùng đổ xuống DB) là chủ đề của [Chương 17, mục 1.4](17-redis-patterns.md): ở đó có single-flight, TTL có jitter và refresh sớm. Chương này chỉ nhắc rằng bản thân `SET NX PX` ở mục 8.1 là primitive cho single-flight (suy luận của người soạn).
 
 ### 8.5 Rate limiter
 
-Tài liệu Redis mô tả rate limiter là một *counter đặc biệt* dùng để giới hạn tần suất một thao tác, ví dụ mười request mỗi giây mỗi IP[^rl-pattern]. Điểm cơ chế: `INCR` rồi `EXPIRE` phải đặt trong `MULTI`/`EXEC` để chắc chắn *vừa tăng vừa đặt hạn* ở mỗi lần gọi[^rl-multi]; nếu client chạy `INCR` mà không chạy `EXPIRE` thì key rò rỉ tới khi gặp lại IP đó, và tài liệu sửa bằng một script Lua chạy bằng `EVAL`[^rl-race][^rl-lua]. Tài liệu xếp mẫu counter vào nhóm thao tác tăng nguyên tử của Redis[^rl-incr]; vì `INCR` là nguyên tử (mục 1), đếm không bị mất cập nhật dù nhiều client đồng thời (suy luận của người soạn). Các biến thể (fixed window, sliding window log, token bucket), chỗ hỏng ở biên cửa sổ và khi nào không dùng Redis: [Chương 17, mục 2](17-redis-patterns.md).
+Tài liệu Redis mô tả rate limiter là một *counter đặc biệt* dùng để giới hạn tần suất một thao tác, ví dụ mười request mỗi giây mỗi IP[^rl-pattern]. Với `shop-api`, đó là endpoint đăng nhập nói ở đầu mục. Điểm cơ chế: `INCR` rồi `EXPIRE` phải đặt trong `MULTI`/`EXEC` để chắc chắn *vừa tăng vừa đặt hạn* ở mỗi lần gọi[^rl-multi]. Nếu client chạy `INCR` mà không chạy `EXPIRE` thì key rò rỉ tới khi gặp lại IP đó[^rl-race]. Tài liệu sửa bằng một script Lua chạy bằng `EVAL`[^rl-lua].
+
+Tài liệu xếp mẫu counter vào nhóm thao tác tăng nguyên tử của Redis[^rl-incr]. Vì `INCR` nguyên tử (mục 1), đếm không bị mất cập nhật dù nhiều client đồng thời (suy luận của người soạn). Các biến thể (fixed window, sliding window log, token bucket), chỗ hỏng ở biên cửa sổ và khi nào không dùng Redis: [Chương 17, mục 2](17-redis-patterns.md).
 
 <details><summary>Đi sâu: các bước của Redlock, <code>SETNX</code> cũ, và ghi chú vận hành</summary>
 
-- Trang `SET` của tài liệu ghi `NX`, `PX`, `EX`, `XX`, `KEEPTTL`, `GET` và nói các option này có thể thay thế `SETNX`, `SETEX`, `PSETEX`, `GETSET` (có thể bị deprecate về sau)[^set-options]. Trong source 7.2.5, `OBJ_SET_NX` và `OBJ_PX` là cờ bit của `SET`[^set-flags][^set-flags-px] (suy luận của người soạn: nên các option được gộp thành một lần parse rồi thực thi một lệnh trên thread chính).
-- Năm bước của client Redlock: lấy giờ; lấy khóa tuần tự ở N instance với timeout nhỏ (ví dụ 5–50 ms nếu hạn là 10 giây)[^lk-steps-timeout]; tính thời gian đã tốn; nếu được đa số và chưa hết hạn thì thời gian hiệu lực = hạn ban đầu − thời gian đã tốn; nếu thất bại thì nhả khóa ở *tất cả* instance, kể cả instance tưởng là chưa lấy được[^lk-steps].
+- Trang `SET` của tài liệu ghi `NX`, `PX`, `EX`, `XX`, `KEEPTTL`, `GET` và nói các option này có thể thay thế `SETNX`, `SETEX`, `PSETEX`, `GETSET` (những lệnh đó có thể bị deprecate về sau)[^set-options]. Trong source 7.2.5, `OBJ_SET_NX` là cờ bit của `SET`[^set-flags]. `OBJ_PX` cũng vậy[^set-flags-px]. Suy luận của người soạn: các option được gộp thành một lần parse rồi thực thi một lệnh trên thread chính.
+- Năm bước của client Redlock:
+  1. Lấy giờ hiện tại.
+  2. Lấy khóa tuần tự ở N instance với timeout nhỏ (ví dụ 5–50 ms nếu hạn là 10 giây)[^lk-steps-timeout].
+  3. Tính thời gian đã tốn.
+  4. Nếu được đa số và chưa hết hạn thì thời gian hiệu lực = hạn ban đầu − thời gian đã tốn.
+  5. Nếu thất bại thì nhả khóa ở *tất cả* instance, kể cả instance tưởng là chưa lấy được[^lk-steps].
 - Khi không lấy được khóa, client nên thử lại sau một độ trễ ngẫu nhiên để các client không đồng bộ nhịp nhau[^lk-retry].
 - Hạn chế ghi nhận trong chính tài liệu: có thể trả giá availability bằng đúng thời gian TTL khi có partition liên tục[^lk-liveness].
-- Tài liệu Redis liệt kê một cài đặt Redlock bằng Rust (`Rslock`)[^lk-rslock]; chương này không đọc mã nguồn của nó nên không đánh giá.
+- Tài liệu Redis liệt kê một cài đặt Redlock bằng Rust (`Rslock`)[^lk-rslock]. Chương này không đọc mã nguồn của nó nên không đánh giá.
 
 </details>
 
-**Quay lại Q8:** `SET NX PX` + script nhả có kiểm giá trị là khóa đúng cách trên một instance (an toàn ở mức "có thể thỉnh thoảng vi phạm"); replica và Redlock đều không đủ khi cần *đúng đắn* mà không có fencing token ở tài nguyên đích; cache và rate limiter chỉ là cách dùng các nút vặn ở mục 1–3 và 7, ghép lại ở [Chương 17](17-redis-patterns.md).
+**Quay lại Q8:** `SET NX PX` + script nhả có kiểm giá trị là khóa đúng cách trên một instance (an toàn ở mức "có thể thỉnh thoảng vi phạm"). Replica và Redlock đều không đủ khi cần *đúng đắn* mà không có fencing token ở tài nguyên đích. Cache và rate limiter chỉ là cách dùng các nút vặn ở mục 1–3 và 7, ghép lại ở [Chương 17](17-redis-patterns.md).
 
 ## Liên hệ với Rust
 
-Phần này dùng docs.rs ghim phiên bản: `redis` 1.7.1, `deadpool-redis` 0.23.1, `bb8-redis` 0.26.0, `fred` 10.1.0 (phiên bản mới nhất trên crates.io tại thời điểm người soạn truy cập API crates.io; người soạn không đối chiếu từng changelog). Ví dụ code dưới đây *chỉ minh họa* — chương này không biên dịch hay chạy chúng, và không khẳng định kết quả chạy.
+Phần này dùng docs.rs ghim phiên bản: `redis` 1.7.1, `deadpool-redis` 0.23.1, `bb8-redis` 0.26.0, `fred` 10.1.0 (phiên bản mới nhất trên crates.io tại thời điểm người soạn truy cập API crates.io; người soạn không đối chiếu từng changelog). Ví dụ code dưới đây *chỉ minh họa*: chương này không biên dịch hay chạy chúng, và không khẳng định kết quả chạy.
 
-*Kết nối: `MultiplexedConnection` và `ConnectionManager`.* `MultiplexedConnection` có thể clone để gửi request đồng thời qua *cùng một* kết nối TCP/unix socket[^rs-mux-shared]; nó an toàn khi hủy future (bỏ future không poll) nhưng request đã gửi *không* bị hủy ở server[^rs-mux]. `ConnectionManager` bọc một multiplexed connection và tự kết nối lại khi cần; khi lệnh lỗi vì "kết nối rớt", lỗi được trả cho người dùng *và* kích hoạt reconnect nền[^rs-cm]. Nối với đạo lý P12·08 mục 1 và Q8: lệnh lỗi vì rớt kết nối có thể đã được server thực thi hoặc chưa — `SET NX PX` hay `INCR` không tự retry an toàn; hoặc dùng lệnh idempotent, hoặc chấp nhận kết quả không chắc (suy luận của người soạn).
+*Kết nối: `MultiplexedConnection` và `ConnectionManager`.* `shop-api` thường dùng một `MultiplexedConnection` cho cả process. Nó có thể clone để gửi request đồng thời qua *cùng một* kết nối TCP/unix socket[^rs-mux-shared]. Nó an toàn khi hủy future (bỏ future không poll), nhưng request đã gửi *không* bị hủy ở server[^rs-mux]. `ConnectionManager` bọc một multiplexed connection và tự kết nối lại khi cần: khi lệnh lỗi vì "kết nối rớt", lỗi được trả cho người dùng *và* kích hoạt reconnect nền[^rs-cm]. Nối với đạo lý P12·08 mục 1 và Q8: lệnh lỗi vì rớt kết nối có thể đã được server thực thi hoặc chưa, nên `SET NX PX` hay `INCR` không tự retry an toàn. Hoặc dùng lệnh idempotent, hoặc chấp nhận kết quả không chắc (suy luận của người soạn).
 
-*Một kết nối, nhiều task — và lệnh block.* Vì Redis chạy các lệnh trong pipeline của *một* kết nối theo đúng thứ tự gửi[^sc-pipe-order] và `processInputBuffer` dừng xử lý khi client đang ở trạng thái blocked[^net-blocked], một lệnh block (`BLPOP`, `XREADGROUP ... BLOCK`, `WAIT`) trên kết nối multiplexed dùng chung sẽ giữ các lệnh sau đó của *cả các task khác chung kết nối* phía sau nó (suy luận của người soạn từ hai sự kiện trên; tài liệu `redis` crate nói riêng về việc tài nguyên kết nối có thể không được giải phóng khi có lệnh block, không nói điều này[^rs-mux-leak]). Quy tắc thực dụng: lệnh block dùng kết nối riêng (hoặc lấy từ pool) — không dùng chung với traffic bình thường.
+*Một kết nối, nhiều task, và lệnh block.* Redis chạy các lệnh trong pipeline của *một* kết nối theo đúng thứ tự gửi[^sc-pipe-order]. Còn `processInputBuffer` dừng xử lý khi client đang ở trạng thái blocked[^net-blocked]. Từ hai sự kiện đó suy ra (suy luận của người soạn) rằng một lệnh block (`BLPOP`, `XREADGROUP ... BLOCK`, `WAIT`) trên kết nối multiplexed dùng chung sẽ giữ các lệnh sau nó của *cả các task khác chung kết nối* phía sau. Tài liệu `redis` crate chỉ nói riêng về việc tài nguyên kết nối có thể không được giải phóng khi có lệnh block, không nói điều này[^rs-mux-leak]. Quy tắc thực dụng: lệnh block dùng kết nối riêng (hoặc lấy từ pool), không dùng chung với traffic bình thường.
 
-*Pool.* `deadpool-redis` 0.23.1 là một `deadpool` manager cho Redis[^rs-dp]: `pool.get().await` trả kết nối, có feature `cluster` và `sentinel`[^rs-dp-features]. `bb8-redis` 0.26.0 cung cấp `RedisConnectionManager` cho pool `bb8`[^rs-bb8]. (Nhận xét của người soạn, kết hợp mục 1: vì server là một luồng nên *thêm connection không làm Redis nhanh hơn* khi nó đã bão hòa CPU — pool để tránh head-of-line blocking giữa lệnh chậm và lệnh nhanh trên cùng kết nối multiplexed, và để cô lập lệnh block, không phải để tăng thông lượng của server.)
+*Pool.* `deadpool-redis` 0.23.1 là một `deadpool` manager cho Redis[^rs-dp]. `pool.get().await` trả kết nối, và crate có feature `cluster` và `sentinel`[^rs-dp-features]. `bb8-redis` 0.26.0 cung cấp `RedisConnectionManager` cho pool `bb8`[^rs-bb8]. Nhận xét của người soạn, kết hợp mục 1: vì server là một luồng nên *thêm connection không làm Redis nhanh hơn* khi nó đã bão hòa CPU. Pool để tránh head-of-line blocking giữa lệnh chậm và lệnh nhanh trên cùng kết nối multiplexed, và để cô lập lệnh block, không phải để tăng thông lượng của server.
 
-*Pipeline, transaction, script.* `redis::pipe()` gửi nhiều lệnh một lượt[^rs-pipe]; `.atomic()` bọc cả pipeline trong `MULTI`/`EXEC`[^rs-atomic] — cùng ngữ nghĩa không rollback ở mục 7[^rs-atomic-norollback]; mặc định nếu một lệnh trong pipeline trả lỗi thì `query()` chỉ trả lỗi, và `ignore_errors()` đổi thành trả từng kết quả[^rs-ignore]. `redis::Script` biểu diễn một script Lua, "lo việc upload và thực thi tự động"[^rs-script]; truyền key bằng `.key(..)` và đối số bằng `.arg(..)` để khớp quy ước `KEYS`/`ARGV` ở mục 7[^rs-script-key].
+*Pipeline, transaction, script.* `redis::pipe()` gửi nhiều lệnh một lượt[^rs-pipe]. `.atomic()` bọc cả pipeline trong `MULTI`/`EXEC`[^rs-atomic]. Nó có cùng ngữ nghĩa không rollback như ở mục 7[^rs-atomic-norollback]. Mặc định nếu một lệnh trong pipeline trả lỗi thì `query()` chỉ trả lỗi, và `ignore_errors()` đổi thành trả từng kết quả[^rs-ignore]. `redis::Script` biểu diễn một script Lua, "lo việc upload và thực thi tự động"[^rs-script]. Truyền key bằng `.key(..)` và đối số bằng `.arg(..)` để khớp quy ước `KEYS`/`ARGV` ở mục 7[^rs-script-key].
 
 ```rust
 // Minh họa, KHÔNG được biên dịch trong chương này.
@@ -411,21 +598,21 @@ let acquired: Option<String> = redis::cmd("SET")
     .query_async(&mut conn).await?;
 ```
 
-*Cluster.* Module `redis::cluster` duy trì kết nối tới từng node, định tuyến request và hỏi lại topology khi nhận chỉ báo cụm đã đổi; tự kết nối lại node rớt[^rs-cluster]. Pub/Sub trên module đồng bộ này chưa được hỗ trợ[^rs-cluster-pubsub]; còn bản async hỗ trợ pubsub/push với RESP3 và một `AsyncPushSender`[^rs-cluster-async]. Pipeline trên cluster dùng `cluster_pipe()` (ví dụ trong docs)[^rs-cluster-pipe]. Nhớ mục 6: lệnh nhiều key và script phải dùng key cùng slot — trong Rust hãy dựng khóa có hash tag một cách tường minh (ví dụ `format!("{{user:{id}}}:cart")`), và tránh tự tính slot trừ khi đã đọc phụ lục CRC16 của spec ([P12 · Chương 06, mục 8](06-partitioning.md)).
+*Cluster.* Module `redis::cluster` duy trì kết nối tới từng node, định tuyến request và hỏi lại topology khi nhận chỉ báo cụm đã đổi, đồng thời tự kết nối lại node rớt[^rs-cluster]. Pub/Sub trên module đồng bộ này chưa được hỗ trợ[^rs-cluster-pubsub]. Bản async thì hỗ trợ pubsub/push với RESP3 và một `AsyncPushSender`[^rs-cluster-async]. Pipeline trên cluster dùng `cluster_pipe()` (ví dụ trong docs)[^rs-cluster-pipe]. Nhớ mục 6: lệnh nhiều key và script phải dùng key cùng slot. Trong Rust hãy dựng khóa có hash tag một cách tường minh (ví dụ `format!("{{user:{id}}}:cart")`), và tránh tự tính slot trừ khi đã đọc phụ lục CRC16 của spec ([P12 · Chương 06, mục 8](06-partitioning.md)).
 
-*`fred`.* Client async cho Valkey/Redis; trang gốc 10.1.0 liệt kê hỗ trợ RESP2/RESP3, triển khai clustered/centralized/sentinel, kết nối lại tự động, pub/sub, pooling round-robin, Lua scripts/functions, transactions, pipelining, tự động pipelining và client tracking[^rs-fred]. Chương này không so sánh chi tiết `fred` với `redis`.
+*`fred`.* Đây là client async cho Valkey/Redis. Trang gốc 10.1.0 liệt kê hỗ trợ RESP2/RESP3, triển khai clustered/centralized/sentinel, kết nối lại tự động, pub/sub, pooling round-robin, Lua scripts/functions, transactions, pipelining, tự động pipelining và client tracking[^rs-fred]. Chương này không so sánh chi tiết `fred` với `redis`.
 
 ## Tóm tắt
 
-- Redis thực thi lệnh trong một thread chính chạy event loop `ae` (epoll/kqueue); nhanh vì lệnh nhỏ trên RAM và (theo thiết kế) không block ở system call; mỗi lệnh nguyên tử; lệnh O(N), script dài hay xóa key lớn chặn cả instance. `io-threads` (7.2.5) chỉ song song hóa I/O socket, không phải việc thực thi lệnh.
-- Giá trị nhỏ dùng encoding gọn (listpack, intset, embstr), vượt ngưỡng `*-max-*` thì đổi sang hash table/quicklist/skiplist+dict; sorted set lớn = skiplist + dict chung SDS.
-- `maxmemory` + policy chạy trước mỗi lệnh trên thread chính; LRU/LFU lấy mẫu (mặc định 5) vào pool 16; expire = xóa lười + quét chủ động (theo tài liệu: 20 key mỗi lượt, lặp nếu > 25% quá hạn; ngưỡng trong source 7.2.5 là 10%); replica chờ `DEL` từ master.
-- RDB = `fork` + COW + file tạm + `fsync` + `rename`; chi phí: page table, COW, THP, overcommit; AOF theo `appendfsync` (`always`/`everysec`/`no`), rewrite multi-part với base RDB; `everysec` có ngoại lệ trì hoãn `write` ~2 giây.
-- Replication bất đồng bộ định danh `(replid, offset)`; PSYNC cần replid khớp và offset còn trong backlog, không thì full resync (fork + RDB); `WAIT` không biến Redis thành CP.
-- Sentinel: SDOWN → ODOWN (quorum) → ủy quyền bởi đa số → epoch; "last failover wins" nên vẫn có cửa sổ mất ghi đã ack; `min-replicas-to-write` giới hạn cửa sổ.
-- Cluster: slot + cluster bus gossip + PFAIL/FAIL + bầu replica bằng epoch; không strong consistency theo chính tài liệu.
-- `MULTI`/`EXEC` không rollback; `WATCH` là CAS; Lua/Functions nguyên tử vì chặn; Pub/Sub at-most-once, Streams + consumer group cho ack/pending/claim.
-- Khóa Redis: `SET NX PX` + script nhả có kiểm giá trị; replica và Redlock đều không thay được fencing token khi cần đúng đắn; rate limiter = counter + hạn đặt nguyên tử.
+- Redis thực thi lệnh trong một thread chính chạy event loop `ae` (epoll/kqueue). Nó nhanh vì lệnh nhỏ trên RAM và (theo thiết kế) không block ở system call, và mỗi lệnh nguyên tử. Lệnh O(N), script dài hay xóa key lớn chặn cả instance; `io-threads` (7.2.5) chỉ song song hóa I/O socket, không phải việc thực thi lệnh.
+- Giá trị nhỏ dùng encoding gọn (listpack, intset, embstr); vượt ngưỡng `*-max-*` thì đổi sang hash table/quicklist/skiplist+dict. Sorted set lớn là skiplist + dict chung SDS.
+- `maxmemory` + policy chạy trước mỗi lệnh trên thread chính. LRU/LFU lấy mẫu (mặc định 5) vào pool 16. Expire là xóa lười + quét chủ động (theo tài liệu: 20 key mỗi lượt, lặp nếu > 25% quá hạn; ngưỡng trong source 7.2.5 là 10%), và replica chờ `DEL` từ master.
+- RDB là `fork` + COW + file tạm + `fsync` + `rename`, với chi phí page table, COW, THP, overcommit. AOF theo `appendfsync` (`always`/`everysec`/`no`) với rewrite multi-part và base RDB; `everysec` có ngoại lệ trì hoãn `write` ~2 giây.
+- Replication bất đồng bộ, định danh bởi `(replid, offset)`. PSYNC cần replid khớp và offset còn trong backlog, không thì full resync (fork + RDB). `WAIT` không biến Redis thành CP.
+- Sentinel đi qua SDOWN → ODOWN (quorum) → ủy quyền bởi đa số → epoch. "Last failover wins" nên vẫn có cửa sổ mất ghi đã ack, và `min-replicas-to-write` giới hạn cửa sổ đó.
+- Cluster là slot + cluster bus gossip + PFAIL/FAIL + bầu replica bằng epoch; theo chính tài liệu, nó không strong consistent.
+- `MULTI`/`EXEC` không rollback; `WATCH` là CAS; Lua/Functions nguyên tử vì chặn. Pub/Sub at-most-once, còn Streams + consumer group cho ack/pending/claim.
+- Khóa Redis: `SET NX PX` + script nhả có kiểm giá trị. Replica và Redlock đều không thay được fencing token khi cần đúng đắn. Rate limiter là counter + hạn đặt nguyên tử.
 - Rust: `MultiplexedConnection`/`ConnectionManager` (lỗi rớt kết nối được trả về cho người gọi, reconnect chạy nền), lệnh block cần kết nối riêng, `Pipeline::atomic` = `MULTI`/`EXEC`, `Script`, `redis::cluster`, pool `deadpool-redis`/`bb8-redis`.
 
 ## Câu hỏi tự kiểm tra
@@ -434,7 +621,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
    <details><summary>Đáp án</summary>
 
-   Mỗi vòng: `beforeSleep` → `aeApiPoll` (`epoll_wait`/`kevent`) → handler đọc/ghi → time event[^ae-poll][^ae-main-call][^ae-epoll][^ae-kqueue][^ae-time]. `io-threads` chỉ thread hóa ghi (và tùy chọn đọc + parse); lệnh vẫn thực thi trên thread chính[^conf-io-writes][^net-reads-queue][^net-fanin].
+   Mỗi vòng đi theo thứ tự: `beforeSleep`, rồi `aeApiPoll` (`epoll_wait`/`kevent`), rồi handler đọc/ghi, rồi time event[^ae-main-call]. Poll ngủ tới khi có sự kiện hoặc timer tới hạn[^ae-poll]. Time event chạy ở cuối vòng[^ae-time]. `io-threads` chỉ thread hóa ghi, và tùy chọn đọc + parse[^conf-io-writes]. Lệnh vẫn thực thi trên thread chính sau khi các I/O thread xong[^net-fanin].
 
    </details>
 
@@ -442,7 +629,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
    <details><summary>Đáp án</summary>
 
-   O(N) trên toàn keyspace, chạy trên thread chính nên mọi client khác chờ[^lat-slow]; tài liệu cảnh báo và gợi ý `SCAN` hoặc set[^keys-warn]. Xóa key lớn thì dùng `UNLINK`[^unlink-doc].
+   Nó O(N) trên toàn keyspace và chạy trên thread chính, nên mọi client khác chờ[^lat-slow]. Tài liệu cảnh báo và gợi ý `SCAN` hoặc set[^keys-warn]. Xóa key lớn thì dùng `UNLINK`[^unlink-doc].
 
    </details>
 
@@ -458,7 +645,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
    <details><summary>Đáp án</summary>
 
-   Lấy mẫu `maxmemory-samples` key đưa vào pool rồi xóa key tệ nhất[^evict-samples-doc][^evict-pool]; có child thì không cập nhật để tránh "copy on write madness"[^db-lru-cow]; expire = xóa lười + quét chủ động[^expire-two][^expire-active], và replica chờ `DEL` từ master[^expire-repl].
+   Redis lấy mẫu `maxmemory-samples` key đưa vào pool rồi xóa key tệ nhất[^evict-pool]. Khi có child thì không cập nhật trường LRU, để tránh "copy on write madness"[^db-lru-cow]. Expire là xóa lười + quét chủ động[^expire-two]. Theo tài liệu, quét chủ động lấy 20 key mỗi lượt[^expire-active]. Replica chờ `DEL` từ master[^expire-repl].
 
    </details>
 
@@ -466,7 +653,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
    <details><summary>Đáp án</summary>
 
-   Sao chép page table trên thread chính[^lat-fork-pt][^lat-fork-main]; COW làm tốn RAM và THP làm tệ hơn[^lat-thp]; overcommit phải bật[^sys-overcommit]; tránh cập nhật LRU và resize `dict`[^db-lru-cow][^dict-cow].
+   `fork` sao chép page table trên thread chính[^lat-fork-main]. COW làm tốn RAM, và THP làm tệ hơn[^lat-thp]. Overcommit phải bật[^sys-overcommit]. Khi có child, Redis tránh cập nhật LRU[^db-lru-cow]. Nó cũng tránh resize `dict`[^dict-cow].
 
    </details>
 
@@ -474,15 +661,15 @@ let acquired: Option<String> = redis::cmd("SET")
 
    <details><summary>Đáp án</summary>
 
-   Tài liệu: ~1 giây[^aof-everysec]; ngoại lệ: khi `fsync` nền đang chạy, `write` có thể bị trì hoãn tới ~2 giây[^lat-everysec-postpone][^aof-postpone]; và `no-appendfsync-on-rewrite yes` hạ độ bền xuống như `no`[^conf-aof-norewrite-fsync].
+   Tài liệu nói ~1 giây[^aof-everysec]. Ngoại lệ thứ nhất: khi `fsync` nền đang chạy, `write` có thể bị trì hoãn tới ~2 giây[^aof-postpone]. Ngoại lệ thứ hai: `no-appendfsync-on-rewrite yes` hạ độ bền xuống như `no`[^conf-aof-norewrite-fsync].
 
    </details>
 
-7. Replica mất kết nối 10 phút rồi nối lại — khi nào được partial resync?
+7. Replica mất kết nối 10 phút rồi nối lại: khi nào được partial resync?
 
    <details><summary>Đáp án</summary>
 
-   Khi replid khớp ID chính hoặc ID phụ (trong giới hạn offset) *và* offset còn nằm trong backlog[^repl-src-id][^repl-src-backlog]; backlog mặc định 1 MB[^conf-backlog]; không thì full resync bằng RDB[^repl-full].
+   Khi replid khớp ID chính hoặc ID phụ (trong giới hạn offset)[^repl-src-id]. Ngoài ra offset còn phải nằm trong backlog[^repl-src-backlog]. Backlog mặc định 1 MB[^conf-backlog]. Không thì full resync bằng RDB[^repl-full].
 
    </details>
 
@@ -490,7 +677,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
    <details><summary>Đáp án</summary>
 
-   Không: `WAIT` không biến Redis thành CP[^repl-wait-cp][^wait-notcp], thăng replica chỉ best-effort nên vẫn có thể mất một ghi đã đồng bộ tới nhiều replica[^wait-besteffort]. Sentinel là các tiến trình riêng cần quorum để phát hiện và đa số để ủy quyền[^sent-quorum]; Cluster do chính các master bầu replica bằng epoch[^cl-epoch-election][^cl-vote-majority].
+   Không: `WAIT` không biến Redis thành CP[^repl-wait-cp]. Thăng replica chỉ best-effort nên vẫn có thể mất một ghi đã đồng bộ tới nhiều replica[^wait-besteffort]. Sentinel là các tiến trình riêng, cần quorum để phát hiện và đa số để ủy quyền[^sent-quorum]. Cluster thì do chính các master bầu replica bằng epoch[^cl-epoch-election]. Replica thắng khi được đa số master đồng ý[^cl-vote-majority].
 
    </details>
 
@@ -498,7 +685,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
    <details><summary>Đáp án</summary>
 
-   Replication bất đồng bộ và "last failover wins"[^cl-async][^cl-lfw]; dù có `WAIT` vẫn không strong consistent[^cl-wait].
+   Vì replication giữa các node bất đồng bộ[^cl-async]. Ngoài ra còn nguyên tắc "last failover wins"[^cl-lfw]. Dù có `WAIT` vẫn không strong consistent[^cl-wait].
 
    </details>
 
@@ -506,7 +693,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
     <details><summary>Đáp án</summary>
 
-    Cả hai xếp hàng; lúc chạy `LPOP` lỗi `WRONGTYPE` nhưng `SET` vẫn có hiệu lực — không rollback[^tx-runtime-err][^tx-no-rollback]. `EXEC` trả null khi một key được `WATCH` bị đổi[^tx-watch][^tx-exec-src]; client thử lại cả chu trình[^tx-watch-retry].
+    Cả hai xếp hàng. Lúc chạy `LPOP` lỗi `WRONGTYPE` nhưng `SET` vẫn có hiệu lực, không rollback[^tx-runtime-err]. `EXEC` trả null khi một key được `WATCH` bị đổi[^tx-exec-src]. Khi đó client thử lại cả chu trình[^tx-watch-retry].
 
     </details>
 
@@ -514,7 +701,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
     <details><summary>Đáp án</summary>
 
-    `SET resource_name my_random_value NX PX 30000`[^lk-set]; `DEL` trần có thể xóa khóa của client khác[^lk-del-unsafe], phải dùng script so giá trị[^lk-unlock]. Kleppmann: Redlock không sinh fencing token[^kb-fencing] và safety phụ thuộc giả định thời gian[^kb-timing].
+    Lệnh là `SET resource_name my_random_value NX PX 30000`[^lk-set]. `DEL` trần có thể xóa khóa của client khác[^lk-del-unsafe]. Vì vậy phải dùng script so giá trị[^lk-unlock]. Kleppmann phê phán rằng Redlock không sinh fencing token[^kb-fencing]. Ông cũng nói safety của nó phụ thuộc giả định thời gian[^kb-timing].
 
     </details>
 
@@ -522,7 +709,7 @@ let acquired: Option<String> = redis::cmd("SET")
 
     <details><summary>Đáp án</summary>
 
-    Kết nối multiplexed được chia sẻ giữa nhiều task[^rs-mux-shared]; Redis xử lý lệnh của một kết nối theo thứ tự[^sc-pipe-order] và ngừng xử lý buffer khi client blocked[^net-blocked] — nên lệnh của các task khác chung kết nối phải chờ (suy luận của người soạn); dùng kết nối riêng hoặc pool (suy luận của người soạn)[^rs-dp].
+    Kết nối multiplexed được chia sẻ giữa nhiều task[^rs-mux-shared]. Redis xử lý lệnh của một kết nối theo thứ tự[^sc-pipe-order]. Nó cũng ngừng xử lý buffer khi client blocked[^net-blocked]. Nên lệnh của các task khác chung kết nối phải chờ (suy luận của người soạn). Hãy dùng kết nối riêng hoặc lấy từ pool[^rs-dp] (suy luận của người soạn).
 
     </details>
 
@@ -531,17 +718,16 @@ let acquired: Option<String> = redis::cmd("SET")
 - [P12 · Chương 05 — Replication](05-replication.md): single-leader, failover, lag; so với mục 5.
 - [P12 · Chương 06 — Partitioning](06-partitioning.md): hash slot, MOVED/ASK, hash tag ở mức khái niệm.
 - [P12 · Chương 07 — Transaction](07-transaction.md): ACID, CAS, retry loop; so với mục 7.
-- [P12 · Chương 08 — Sự cố của hệ phân tán](08-su-co-he-phan-tan.md): mục 8 lease và fencing — nền cho mục 8 của chương này.
-- [P12 · Chương 09 — Consistency và consensus](09-consistency-va-consensus.md): CAP, total order broadcast, Raft — để đặt Sentinel/Cluster vào bản đồ.
+- [P12 · Chương 08 — Sự cố của hệ phân tán](08-su-co-he-phan-tan.md): mục 8 lease và fencing, nền cho mục 8 của chương này.
+- [P12 · Chương 09 — Consistency và consensus](09-consistency-va-consensus.md): CAP, total order broadcast, Raft, để đặt Sentinel/Cluster vào bản đồ.
 - [P12 · Chương 11 — Stream processing](11-stream-processing.md) và [Chương 12 — Đúng đắn và tích hợp dữ liệu](12-dung-dan-va-tich-hop-du-lieu.md): queue vs log, delivery semantics, idempotency.
 - [P13 · Chương 09 — Mô hình hóa hệ backend](../13-tla-plus/09-mo-hinh-hoa-he-backend.md): lease + fencing và cache-aside bằng TLA+.
-- [P12 · Chương 15 — PostgreSQL bên trong](15-postgresql-ben-trong.md): mục 2 (connection, pooler), mục 4 (WAL và `COMMIT`) và mục R5 (cache và hàng đợi đứng cạnh PostgreSQL) — phía PostgreSQL của cache-aside và của câu hỏi "báo thành công lúc nào".
-- [P12 · Chương 17 — Redis pattern thực chiến](17-redis-patterns.md): cache + stampede (mục 1), rate limiter (mục 2), lock + idempotency (mục 3), job queue (mục 4) và các pattern còn lại — phần *ghép* mà chương này chỉ dừng ở cơ chế.
+- [P12 · Chương 15 — PostgreSQL bên trong](15-postgresql-ben-trong.md): mục 2 (connection, pooler), mục 4 (WAL và `COMMIT`) và mục R5 (cache và hàng đợi đứng cạnh PostgreSQL), tức phía PostgreSQL của cache-aside và của câu hỏi "báo thành công lúc nào".
+- [P12 · Chương 17 — Redis pattern thực chiến](17-redis-patterns.md): cache + stampede (mục 1), rate limiter (mục 2), lock + idempotency (mục 3), job queue (mục 4) và các pattern còn lại; phần *ghép* mà chương này chỉ dừng ở cơ chế.
 - [P7 · Chương 02](../07-io-async/02-select-poll-epoll.md), [Chương 04](../07-io-async/04-kien-truc-event-loop.md): epoll và reactor.
 - [P5 · Chương 06 — Durability trong thực tế](../05-storage/06-durability-trong-thuc-te.md): `fsync`, rename + fsync thư mục.
-- Redis docs (pin ở redis-doc commit `1044224`): Persistence, Replication, Sentinel, Cluster spec, Eviction, Latency, Distributed locks — các URL nằm ở phần chú thích bên dưới.
-- Kleppmann, "How to do distributed locking" và antirez, "Is Redlock safe?" — hai phía của tranh luận Redlock: <https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html>, <http://antirez.com/news/101>.
-
+- Redis docs (pin ở redis-doc commit `1044224`): Persistence, Replication, Sentinel, Cluster spec, Eviction, Latency, Distributed locks; các URL nằm ở phần chú thích bên dưới.
+- Kleppmann, "How to do distributed locking" và antirez, "Is Redlock safe?", hai phía của tranh luận Redlock: <https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html>, <http://antirez.com/news/101>.
 
 [^lat-seq]: Redis docs, Latency diagnosis (redis-doc commit 1044224), Single threaded nature of Redis — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/docs/management/optimization/latency.md> — "This means that Redis can serve a single request in every given moment, so all the requests are served sequentially."
 [^ae-order]: Redis 7.2.5, src/ae.c — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/ae.c> — "The following should be ordered by performances, descending."
@@ -601,8 +787,6 @@ let acquired: Option<String> = redis::cmd("SET")
 [^zset-maxlevel]: Redis 7.2.5, src/server.h — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/server.h> — "#define ZSKIPLIST_MAXLEVEL 32 /* Should be enough for 2^64 elements */"
 [^zskiplist-node]: Redis 7.2.5, src/server.h, zskiplistNode — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/server.h> — "struct zskiplistLevel { struct zskiplistNode *forward; unsigned long span; } level[];"
 [^zset-doc]: Redis docs, Sorted sets — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/docs/data-types/sorted-sets.md> — "Sorted sets are implemented via a dual-ported data structure containing both a skip list and a hash table, so every time we add an element Redis performs an O(log(N)) operation."
-[^lp-head]: Redis 7.2.5, src/listpack.c — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/listpack.c> — "Listpack -- A lists of strings serialization format * * This file implements the specification you can find at: * * https://github.com/antirez/listpack"
-[^enc-enum]: Redis 7.2.5, src/server.h — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/server.h> — "#define OBJ_ENCODING_ZIPLIST 5 /* No longer used: old list/hash/zset encoding. */"
 [^dict-cow]: Redis 7.2.5, src/dict.c — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/dict.c> — "as we use copy-on-write and don't want to move too much memory around when there is a child performing saving operations."
 [^srv-resize-policy]: Redis 7.2.5, src/server.c, updateDictResizePolicy — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/server.c> — "if (server.in_fork_child != CHILD_TYPE_NONE) dictSetResizeEnabled(DICT_RESIZE_FORBID); else if (hasActiveChildProcess()) dictSetResizeEnabled(DICT_RESIZE_AVOID);"
 [^evict-max0]: Redis docs, Key eviction — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/docs/reference/eviction/index.md> — "Setting maxmemory to zero results into no memory limits. This is the default behavior for 64 bit systems"
@@ -923,8 +1107,6 @@ let acquired: Option<String> = redis::cmd("SET")
 [^rs-mux-leak]: redis crate 1.7.1, struct redis::aio::MultiplexedConnection — <https://docs.rs/redis/1.7.1/redis/aio/struct.MultiplexedConnection.html> — "A side-effect of this is that the underlying connection won’t be closed until all sent requests have been answered, which means that in case of blocking commands, the underlying connection resource might not be released, even when all clones of the multiplexed connection have been dropped"
 [^rs-mux-shared]: redis crate 1.7.1, struct redis::aio::MultiplexedConnection — <https://docs.rs/redis/1.7.1/redis/aio/struct.MultiplexedConnection.html> — "A connection object which can be cloned, allowing requests to be be sent concurrently on the same underlying connection (tcp/unix socket)."
 [^rs-dp-features]: deadpool-redis 0.23.1, crate docs, Features — <https://docs.rs/deadpool-redis/0.23.1/deadpool_redis/> — "Enable support for Redis Cluster redis/cluster-async no sentinel Enable high-level interfaces for communication with Redis sentinels"
-[^ae-cfg-epoll]: Redis 7.2.5, src/config.h — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/config.h> — "#ifdef __linux__ #define HAVE_EPOLL 1 #endif"
-[^ae-cfg-kqueue]: Redis 7.2.5, src/config.h — <https://raw.githubusercontent.com/redis/redis/7.2.5/src/config.h> — "#if (defined(__APPLE__) && defined(MAC_OS_10_6_DETECTED)) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined (__NetBSD__) #define HAVE_KQUEUE 1 #endif"
 [^pers-aof-policies]: Redis docs, Redis persistence, AOF advantages — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/docs/management/persistence.md> — "Using AOF Redis is much more durable: you can have different fsync policies: no fsync at all, fsync every second, fsync at every query."
 [^objenc-int]: Redis docs, OBJECT ENCODING — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/commands/object-encoding.md> — "int, strings representing integers in a 64-bit signed interval, encoded in this way to save space."
 [^objenc-hash]: Redis docs, OBJECT ENCODING — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/commands/object-encoding.md> — "Hashes can be encoded as: zipmap, no longer used, an old hash encoding. hashtable, normal hash encoding. ziplist, Redis <= 6.2, a space-efficient encoding used for small hashes. listpack, Redis >= 7.0, a space-efficient encoding used for small hashes."

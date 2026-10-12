@@ -1,6 +1,6 @@
 # P12 · Chương 06 — Partitioning (sharding)
 
-> Chương này lấy *khung chủ đề* từ sách *Designing Data-Intensive Applications* (DDIA, ấn bản 1, chương 6 "Partitioning"[^ddia-toc-ch]), nhưng **không trích sách**: mọi khẳng định dựa trên paper gốc (Dynamo, Bigtable, Karger và cộng sự 1997, Jump Consistent Hash) và tài liệu có phiên bản của hệ thống thật (Cassandra 4.1/5.0, Elasticsearch 8.15, MongoDB 7.0, Kafka 3.7.0, PostgreSQL 16, Redis Cluster spec, DynamoDB, Bigtable). Khi viết "(nhận xét của người soạn)" hoặc "(suy luận của người soạn)" thì đó không phải fact từ nguồn. Phần Rust theo **Rust 1.95.0** và các crate có số phiên bản ghi rõ. Chương không chạy thí nghiệm nào; code chỉ để minh họa và không kèm khẳng định về output.
+> Chương này mượn *khung chủ đề* từ sách *Designing Data-Intensive Applications* (DDIA, ấn bản 1, chương 6 "Partitioning"[^ddia-toc-ch]) nhưng **không trích sách**. Mọi khẳng định dựa trên paper gốc (Dynamo, Bigtable, Karger và cộng sự 1997, Jump Consistent Hash) và tài liệu có phiên bản của hệ thống thật (Cassandra 4.1/5.0, Elasticsearch 8.15, MongoDB 7.0, Kafka 3.7.0, PostgreSQL 16, Redis Cluster spec, DynamoDB, Bigtable). Chỗ nào ghi "(nhận xét của người soạn)" hoặc "(suy luận của người soạn)" thì đó không phải fact từ nguồn. Phần Rust theo **Rust 1.95.0** và các crate có ghi số phiên bản. Chương không chạy thí nghiệm nào; code chỉ để minh họa, không kèm khẳng định về output.
 
 ## Bạn sẽ hiểu được gì
 
@@ -17,35 +17,58 @@
 
 - [Chương 01 — Reliability, scalability, maintainability](01-reliability-scalability-maintainability.md): *scalability* và tham số tải; chương này là cách *scale-out* dữ liệu.
 - [Chương 02 — Mô hình dữ liệu](02-mo-hinh-du-lieu.md) và [Chương 03 — Storage engine](03-storage-engine.md): SSTable/LSM và B-tree, vì mỗi partition bên trong vẫn là một storage engine như thế.
-- [Chương 05 — Replication](05-replication.md): partition và replication thường đi cùng nhau; chương này chỉ nói *chia*, mỗi partition được sao chép thế nào là chương 05.
+- [Chương 05 — Replication](05-replication.md): partition và replication thường đi cùng nhau; chương này chỉ nói *chia*, còn mỗi partition được sao chép thế nào là chuyện của chương 05.
 - [P10 · Chương 09 — Collection của std](../10-rust-internals/09-collections-internals.md): `HashMap`, SipHash, `RandomState` (mục 5) và `BTreeMap::range` (mục 6); mục 8 dùng lại.
 
 Các chương sau dùng chương này: [Chương 07 — Transaction](07-transaction.md) (giao dịch xuyên partition), [Chương 08 — Sự cố hệ phân tán](08-su-co-he-phan-tan.md) (phát hiện node chết), [Chương 09 — Consistency và consensus](09-consistency-va-consensus.md) (bản đồ partition cần đồng thuận), [Chương 11 — Stream processing](11-stream-processing.md) (partition của Kafka). Khi nào *không* nên chia dữ liệu: [Chương 13 — Kiến trúc hệ dữ liệu](13-kien-truc-he-du-lieu.md).
 
 ## 0. Từ vựng: partition, shard, tablet, vnode… cùng là một ý
 
-Mỗi hệ thống đặt một tên cho "một mảnh dữ liệu": Bigtable gọi *tablet*[^bt-tablet], MongoDB gọi *chunk* (một khoảng giá trị shard key thuộc về một shard)[^mongo-chunk], Cassandra gọi *partition* (tập các hàng cùng giá trị partition key)[^cass-partition-def], Elasticsearch gọi *shard*[^es-shard-hit], Kafka gọi *partition* của topic[^kafka-partitioned], Redis Cluster gọi *hash slot*[^redis-slots]. Chương này dùng "partition" cho khái niệm chung và "shard" khi nói về hệ cụ thể dùng chữ đó. Mỗi mảnh nằm trên một (hoặc một nhóm replica) node; mục tiêu là *scale-out*: mỗi node chỉ giữ và phục vụ một phần dữ liệu (định nghĩa làm việc của người soạn).
+Cả chương bám theo một tình huống: `orders`, kho đơn hàng của một sàn thương mại điện tử có nhiều người bán. Mỗi đơn có `order_id`, `customer_id`, `seller_id`, `created_at` và email người mua. Service `orders-api` viết bằng Rust nhận request rồi đọc ghi vào kho này. Ta giả định kho đã to đến mức một node không chứa nổi hay không phục vụ nổi, nên phải chia ra nhiều node. Bốn truy vấn của `orders-api` sẽ quay lại ở mọi mục: lấy một đơn theo `order_id`; liệt kê đơn của một khách theo thời gian; báo cáo mọi đơn trong một khoảng ngày; tìm đơn theo email. Mỗi quyết định chia dữ liệu làm vài truy vấn rẻ đi và vài truy vấn đắt lên, và chương này đi qua từng quyết định như vậy. (Nhận xét của người soạn: `orders` là ví dụ giả định, không phải code trong repo.)
 
-Hai lưu ý để khỏi nhầm:
+Trước hết là chuyện tên gọi. Mỗi hệ thống đặt một tên riêng cho "một mảnh dữ liệu", nhưng ý thì giống nhau:
 
-- **Partition của PostgreSQL ≠ sharding.** *Declarative partitioning* của PostgreSQL 16 chia một bảng thành các bảng con *trong cùng một server*: bảng cha là bảng "ảo" không có storage riêng, dữ liệu nằm ở các partition là bảng thường[^pg-virtual]. Lợi ích chính là *partition pruning* (planner chứng minh được partition nào không thể chứa dòng thỏa `WHERE` rồi bỏ qua nó)[^pg-prune] và xóa dữ liệu cũ theo partition — không phải scale-out qua nhiều máy. Cách chia (range/list/hash) tương tự khung dưới đây (nhận xét của người soạn).
+| Hệ thống | Gọi là | Mảnh đó là gì |
+|---|---|---|
+| Bigtable | *tablet* | một khoảng hàng (row range), vừa là đơn vị phân phối vừa là đơn vị cân tải[^bt-tablet] |
+| MongoDB | *chunk* | một khoảng dữ liệu đã shard, tức một khoảng giá trị shard key[^mongo-chunk] |
+| Cassandra | *partition* | tập các hàng có cùng giá trị partition key[^cass-partition-def] |
+| Elasticsearch | *shard* | mỗi index chia thành một hoặc nhiều shard, mỗi shard có thể sao chép ra nhiều node[^es-shard-hit] |
+| Kafka | *partition* của topic | mỗi event mới được ghi vào một partition của topic[^kafka-partitioned] |
+| Redis Cluster | *hash slot* | mỗi master giữ một tập con của 16384 slot[^redis-slots] |
+
+Chương này dùng "partition" cho khái niệm chung, và dùng "shard" khi nói về hệ cụ thể gọi như vậy. Mỗi mảnh nằm trên một node (hoặc một nhóm replica). Mục tiêu là *scale-out*: mỗi node chỉ giữ và phục vụ một phần dữ liệu (định nghĩa làm việc của người soạn).
+
+Hai chỗ dễ nhầm:
+
+- **Partition của PostgreSQL ≠ sharding.** *Declarative partitioning* của PostgreSQL 16 chia một bảng thành các bảng con *trong cùng một server*. Bảng cha là bảng "ảo" không có storage riêng, còn dữ liệu nằm ở các partition là bảng thường[^pg-virtual]. Lợi ích chính là *partition pruning*: planner chứng minh được partition nào không thể chứa dòng thỏa `WHERE` rồi bỏ qua nó[^pg-prune]. Lợi ích thứ hai là xóa dữ liệu cũ theo từng partition. Không có chuyện scale-out qua nhiều máy ở đây. Cách chia (range/list/hash) thì tương tự khung dưới đây (nhận xét của người soạn).
 - **Partition mạng ≠ partition dữ liệu.** "Network partition" (đứt mạng giữa các node) là chuyện của [Chương 08](08-su-co-he-phan-tan.md). Chương này chỉ nói chia *dữ liệu*.
 
 ## 1. Chia theo khoảng khóa hay theo băm (Q1)
 
-> **Trả lời ngắn.** *Key range*: sắp khóa theo thứ tự rồi cắt thành các khoảng liên tiếp, mỗi khoảng một partition — truy vấn theo dải rẻ nhưng khóa tăng dần dễ dồn hết ghi vào một partition. *Hash*: băm khóa rồi chia theo giá trị băm — phân tán đều nhưng mất tính kề nhau, nên truy vấn dải phải hỏi mọi partition. Hệ thống thật dùng cả hai và có cách lai (khóa ghép) để lấy lợi ích của cả hai.
+> **Trả lời ngắn.** *Key range*: sắp khóa theo thứ tự rồi cắt thành các khoảng liên tiếp, mỗi khoảng một partition. Quét theo dải thì rẻ, nhưng khóa tăng dần dễ dồn hết ghi vào một partition. *Hash*: băm khóa rồi chia theo giá trị băm. Tải rải đều, nhưng các khóa kề nhau bị tách ra, nên truy vấn dải phải hỏi mọi partition. Hệ thống thật dùng cả hai, và có cách lai (khóa ghép) để lấy một phần lợi ích của cả hai.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn chia một bộ từ điển giấy cho 26 người giữ. Cách 1: người A giữ các từ bắt đầu bằng "a–c", người B giữ "d–f"… — muốn tra "tất cả từ bắt đầu bằng 'con'" chỉ hỏi một người, nhưng nếu hôm nay mọi người đều tra từ chữ "t" thì một người quá tải. Cách 2: tung xúc xắc theo từng từ để quyết định ai giữ — tải đều, nhưng "các từ bắt đầu bằng 'con'" nằm rải rác ở mọi người.
+*Với `orders`.* Việc đầu tiên khi chia `orders` là chọn cột để cắt. Hai ứng viên tự nhiên là `created_at`, cắt thành các khoảng ngày liên tiếp, và `order_id`, băm rồi chia. Hai cách này làm truy vấn "báo cáo đơn tuần trước" và "lấy đơn 42" rẻ hay đắt rất khác nhau, nên ta xét từng cách.
 
-*Key range.* Bigtable giữ dữ liệu theo thứ tự từ điển (lexicographic) của row key, và "tablet" là một khoảng hàng liên tiếp, là đơn vị phân phối và cân tải[^bt-tablet]. Hệ quả: đọc một dải hàng ngắn thường chỉ cần liên lạc vài máy; client khai thác bằng cách chọn row key sao cho dữ liệu hay truy cập cùng nhau nằm kề nhau[^bt-short]. Ví dụ trong paper: đảo thành phần hostname của URL để các trang cùng domain nằm liên tiếp[^bt-reverse]. MongoDB ranged sharding nói cùng ý: các tài liệu có shard key "gần nhau" nhiều khả năng ở cùng chunk/shard, nên truy vấn đọc dải liên tục hiệu quả[^mongo-range].
+### 1.1 Chia theo khoảng khóa
 
-*Hash.* Cassandra tính hash từ các cột partition key, và giá trị hash quyết định vị trí partition[^cass-hash]. MongoDB hashed sharding cho phân bố đều hơn trên cụm, đổi lại giảm số truy vấn "targeted" (chỉ tới một shard) và tăng số truy vấn "broadcast" (hỏi mọi shard)[^mongo-hash]. Với bản ghi có khóa, partitioner tích hợp của producer Java chọn partition từ hash của khóa: mã nguồn `partitionForKey` là `murmur2(key)` rồi lấy dương và `% numPartitions`[^kafka-bip].
+Nếu cắt `orders` theo `created_at`, mỗi partition giữ một khoảng ngày liền nhau. Bigtable thiết kế đúng như vậy: dữ liệu xếp theo thứ tự từ điển (lexicographic) của row key, và *tablet* là một khoảng hàng liên tiếp[^bt-tablet]. Vì thế đọc một dải hàng ngắn thường chỉ cần liên lạc vài máy, và client tận dụng điều đó bằng cách chọn row key sao cho dữ liệu hay truy cập cùng nhau nằm kề nhau[^bt-short]. Paper lấy ví dụ đảo các thành phần của hostname trong URL, để các trang cùng domain nằm liền nhau[^bt-reverse]. MongoDB ranged sharding nói cùng ý: các document có shard key gần nhau nhiều khả năng ở cùng chunk, cùng shard, nên truy vấn đọc dải liên tục hiệu quả[^mongo-range]. Với `orders`, báo cáo "đơn tuần trước" chỉ chạm một hai partition.
 
-*Vì sao khóa tăng dần nguy hiểm với range.* Mọi cụm range-sharded có một chunk chứa cận trên `MaxKey`; với shard key tăng đơn điệu (ObjectId, timestamp), chunk đó nhận hầu hết lượng insert, nên ghi bị bó vào một shard và mất lợi thế ghi phân tán[^mongo-mono-hot]. MongoDB khuyên dùng hashed sharding cho khóa đơn điệu[^mongo-hash-mono]. Bigtable cũng cảnh báo row key bắt đầu bằng timestamp đẩy ghi tuần tự lên một node, tạo hotspot[^bt-ts-hot].
+Cái giá hiện ra ngay ở đường ghi. Đơn mới luôn có `created_at` lớn nhất, nên luôn rơi vào partition cuối. MongoDB mô tả đúng hiện tượng này: mọi cụm range-sharded có một chunk chứa cận trên `MaxKey`, và với shard key tăng đơn điệu như ObjectId hay timestamp, chunk đó nhận hầu hết lượng insert. Ghi bị bó vào một shard và mất lợi thế ghi phân tán[^mongo-mono-hot]. Vì vậy MongoDB khuyên dùng hashed sharding cho khóa đơn điệu[^mongo-hash-mono]. Bigtable cảnh báo tương tự: row key bắt đầu bằng timestamp đẩy ghi tuần tự lên một node, tạo hotspot[^bt-ts-hot].
 
-*Lai: khóa ghép.* Cassandra chia khóa chính thành *partition key* (băm để chọn nơi lưu) và *clustering columns* (sắp thứ tự các hàng *bên trong* partition)[^cass-clustering]; mọi hàng cùng partition key nằm trên cùng tập replica[^cass-colocate]. Bigtable khuyên nếu đặt timestamp vào row key thì đặt trước nó một giá trị có độ phân biệt cao như user ID[^bt-ts-prefix]. Mẫu chung (nhận xét của người soạn): băm ở thành phần đầu để rải tải, giữ thứ tự ở thành phần sau để quét dải trong một partition ("tất cả sự kiện của user U theo thời gian").
+### 1.2 Chia theo băm
+
+Cách còn lại là băm `order_id` rồi chia theo giá trị băm. Cassandra làm vậy: nó tính hash từ các cột partition key, và giá trị hash quyết định vị trí partition[^cass-hash]. Producer Java của Kafka cũng thế với bản ghi có khóa: mã nguồn `partitionForKey` là `murmur2(key)`, lấy dương rồi `% numPartitions`[^kafka-bip]. Đơn mới giờ rải đều qua mọi partition, hết dồn một chỗ.
+
+Đổi lại, các khóa kề nhau bị xáo ra khắp nơi. MongoDB nói thẳng cả hai mặt: hashed sharding cho phân bố đều hơn trên cụm, nhưng giảm số truy vấn *targeted* (chỉ tới một shard) và tăng số truy vấn *broadcast* (hỏi mọi shard)[^mongo-hash]. Với `orders`, báo cáo "đơn tuần trước" bây giờ phải hỏi mọi partition.
+
+### 1.3 Khóa ghép: băm trước, sắp sau
+
+Hai cách trên không loại trừ nhau. Cassandra tách khóa chính thành *partition key*, được băm để chọn nơi lưu, và *clustering columns*, xếp thứ tự các hàng *bên trong* partition[^cass-clustering]. Mọi hàng cùng partition key nằm trên cùng tập replica[^cass-colocate]. Bigtable cũng khuyên: nếu đặt timestamp vào row key thì đặt trước nó một giá trị có độ phân biệt cao như user ID[^bt-ts-prefix]. Mẫu chung (nhận xét của người soạn) là băm ở thành phần đầu để rải tải, giữ thứ tự ở thành phần sau để quét dải trong một partition.
+
+Với `orders`, khóa `(customer_id, created_at)` làm truy vấn "đơn của khách C theo thời gian" nằm gọn trong một partition, còn đơn của những khách khác nhau vẫn rải khắp cụm. Báo cáo theo ngày cho toàn sàn thì vẫn phải hỏi mọi partition (nhận xét của người soạn).
 
 ```mermaid
 flowchart LR
@@ -71,58 +94,68 @@ flowchart LR
 
 <details><summary>Đi sâu: tên khóa, điều kiện unique, và những chi tiết PostgreSQL/MongoDB hay quên</summary>
 
-- PostgreSQL 16 định nghĩa range partitioning là các khoảng của cột khóa, không chồng lấn, cận dưới bao gồm và cận trên loại trừ[^pg-range]; hash partitioning chỉ định một modulus và một remainder cho từng partition[^pg-hash]. Chỉ ba kiểu (range, list, hash) được hỗ trợ declarative; kiểu khác dùng inheritance/UNION ALL view và mất một số lợi ích hiệu năng[^pg-other].
-- Với chia theo thứ tự, *thứ tự phải ổn định giữa các máy*. `pg_dump --load-via-partition-root` có thể hữu ích khi khôi phục sang server mà dòng không luôn rơi vào cùng partition như ở server gốc; ví dụ trong docs: cột partition kiểu text và hai hệ có định nghĩa collation khác nhau[^pg-collation]. (Nhận xét của người soạn: bài học chung là hàm xác định partition — thứ tự hay hash — là một phần của *định dạng dữ liệu*; đổi nó là migration. Mục 8 nói điều này cho hash.)
-- MongoDB: nếu shard collection đã có dữ liệu thì ban đầu chỉ có một chunk, balancer tách và di chuyển sau đó[^mongo-initial-chunk]; collection rỗng với hashed key thì mặc định tạo 2 chunk mỗi shard, đổi được bằng `numInitialChunks`[^mongo-init-hashed].
-- Hashed index của MongoDB cắt số thực về số nguyên 64-bit trước khi băm, nên 2.3, 2.2, 2.9 cho cùng giá trị băm; docs khuyên không dùng hashed index cho số thực không chuyển về nguyên được[^mongo-hash-float].
+- PostgreSQL 16 định nghĩa range partitioning là các khoảng của cột khóa, không chồng lấn, cận dưới bao gồm và cận trên loại trừ[^pg-range]. Hash partitioning thì chỉ định một modulus và một remainder cho từng partition[^pg-hash]. Declarative chỉ hỗ trợ ba kiểu (range, list, hash); kiểu khác phải dùng inheritance hoặc UNION ALL view và mất một số lợi ích hiệu năng[^pg-other].
+- Với chia theo thứ tự, *thứ tự phải ổn định giữa các máy*. `pg_dump --load-via-partition-root` có thể hữu ích khi khôi phục sang server mà dòng không luôn rơi vào cùng partition như ở server gốc; ví dụ trong docs là cột partition kiểu text và hai hệ có định nghĩa collation khác nhau[^pg-collation]. (Nhận xét của người soạn: bài học chung là hàm xác định partition, thứ tự hay hash, là một phần của *định dạng dữ liệu*; đổi nó là migration. Mục 8 nói điều này cho hash.)
+- MongoDB: nếu shard collection đã có dữ liệu thì ban đầu chỉ có một chunk, balancer tách và di chuyển sau đó[^mongo-initial-chunk]. Collection rỗng với hashed key thì mặc định tạo 2 chunk mỗi shard, đổi được bằng `numInitialChunks`[^mongo-init-hashed].
+- Hashed index của MongoDB cắt số thực về số nguyên 64-bit trước khi băm, nên 2.3, 2.2, 2.9 cho cùng giá trị băm. Docs khuyên không dùng hashed index cho số thực không chuyển về nguyên được[^mongo-hash-float].
 
 </details>
 
-**Quay lại Q1:** key range giữ thứ tự (truy vấn dải rẻ, dễ hot spot với khóa tăng dần); hash rải đều (mất truy vấn dải); khóa ghép "băm trước, sắp sau" là thỏa hiệp phổ biến.
+**Quay lại Q1:** key range giữ thứ tự (báo cáo theo ngày của `orders` rẻ, nhưng đơn mới dồn vào partition cuối); hash rải đều (đơn mới phân tán, nhưng báo cáo phải hỏi mọi partition); khóa ghép "băm trước, sắp sau" là thỏa hiệp phổ biến.
 
 ## 2. Skew và hot spot (Q2)
 
-> **Trả lời ngắn.** *Skew* là dữ liệu hoặc tải phân bố lệch giữa các partition; partition nhận nhiều hơn phần của mình là *hot spot*. Băm đều khóa chỉ rải đều *các khóa khác nhau*; nếu một khóa duy nhất nhận quá nhiều request (người nổi tiếng, một tenant khổng lồ) thì partition chứa nó vẫn nóng. Cách giảm nhẹ chủ yếu nằm ở *thiết kế khóa* và đều có giá riêng.
+> **Trả lời ngắn.** *Skew* là dữ liệu hoặc tải phân bố lệch giữa các partition; partition nhận nhiều hơn phần của mình là *hot spot*. Băm chỉ rải đều các khóa *khác nhau*. Nếu một khóa nhận quá nhiều request (người nổi tiếng, một tenant khổng lồ) thì partition chứa nó vẫn nóng. Cách giảm nhẹ nằm ở thiết kế khóa, và cách nào cũng có giá riêng.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): quầy thu ngân siêu thị chia theo chữ cái đầu họ khách. Dù chia đều chữ cái, hôm nào cả đoàn họ "Nguyễn" kéo vào thì một quầy tắc. Đổi sang chia theo số thứ tự ngẫu nhiên thì hết tắc theo họ — nhưng một người mua cả xe hàng vẫn chiếm quầy của mình.
+*Với `orders`.* Giả sử `orders` băm theo `seller_id` để mọi đơn của một người bán nằm chung chỗ. Đến ngày sale, một seller lớn nhận cả triệu đơn trong khi hàng chục nghìn seller nhỏ gần như im lặng. Hash không cứu được: mọi đơn của seller đó có cùng `seller_id`, nên cùng giá trị băm, nên cùng partition. Partition ấy bị quá tải dù cả cụm còn rảnh (giả định minh họa của người soạn).
 
-*Hai loại lệch.* (a) Lệch do *thiết kế khóa*: khóa tăng đơn điệu (mục 1), khóa có ít giá trị phân biệt. MongoDB gọi hai yếu tố này là *cardinality* và *frequency*: cardinality thấp giới hạn số chunk tối đa và làm giảm hiệu quả scale-out[^mongo-card]; nếu phần lớn tài liệu chỉ mang một vài giá trị khóa thì các chunk chứa chúng thành nút cổ chai, và có thể thành chunk không chia được nữa[^mongo-freq]. DynamoDB đánh giá: User ID khi có nhiều user là tốt, còn status code chỉ có vài giá trị hay ngày tạo làm tròn theo giờ là xấu[^ddb-uniform]. (b) Lệch do *tải trên một khóa*: dù phân phối khóa đều, tải truy cập có thể không đều; Dynamo thừa nhận giả định của họ là dù truy cập lệch nhiều, vẫn có đủ khóa ở đầu "nổi tiếng" để tải được rải đều qua partitioning[^dyn-skew-assume] — một giả định mà một khóa quá nóng phá vỡ.
+### 2.1 Hai loại lệch
 
-*Nhận biết.* Paper Dynamo coi một node là "in balance" nếu tải request của nó lệch khỏi trung bình dưới một ngưỡng (15%), ngược lại là "out-of-balance"[^dyn-imbalance]; tỷ lệ node mất cân bằng giảm khi tải hệ thống tăng[^dyn-imbalance2] (lý giải của paper: tải cao thì nhiều khóa phổ biến được truy cập nên tải rải đều hơn). (Nhận xét của người soạn: trong vận hành, theo dõi tải *theo từng partition*, không chỉ trung bình toàn cụm — chỉ số trung bình che mất một partition nóng, vốn là loại sự cố "cả cụm rảnh mà một node 100% CPU".)
+Loại thứ nhất là lệch do *thiết kế khóa*: khóa tăng đơn điệu (mục 1), hoặc khóa có ít giá trị phân biệt. MongoDB gọi hai yếu tố này là *cardinality* (số giá trị khác nhau) và *frequency* (mức độ lặp của từng giá trị). Cardinality thấp giới hạn số chunk tối đa và làm giảm hiệu quả scale-out[^mongo-card]. Nếu phần lớn document chỉ mang vài giá trị khóa thì các chunk chứa chúng thành nút cổ chai, và có thể thành chunk không chia được nữa[^mongo-freq]. DynamoDB đưa ví dụ cụ thể: User ID khi có nhiều user là khóa tốt, còn status code chỉ có vài giá trị hay ngày tạo làm tròn theo giờ là khóa xấu[^ddb-uniform]. Theo cách đánh giá đó, `customer_id` là khóa tốt còn `status` của đơn là khóa xấu (suy luận của người soạn).
 
-*Giảm nhẹ khi một khóa quá nóng.*
+Loại thứ hai là lệch do *tải trên một khóa*: phân phối khóa có đều thì tải truy cập vẫn có thể không đều. Dynamo thừa nhận giả định của họ là dù truy cập lệch nhiều, vẫn có đủ khóa ở đầu "nổi tiếng" để tải rải đều qua partitioning[^dyn-skew-assume]. Một khóa quá nóng, như seller lớn ở trên, phá đúng giả định đó.
 
-- **Khóa phụ có hậu tố (write sharding).** DynamoDB: thêm một số ngẫu nhiên vào cuối partition key để rải ghi qua không gian khóa lớn hơn[^ddb-suffix]. Cái giá: muốn đọc tất cả mục của một ngày phải truy vấn mọi hậu tố rồi gộp kết quả ở ứng dụng[^ddb-suffix-read]. Biến thể "hậu tố tính được" (hash của một thuộc tính hay tìm) giúp đọc một mục cụ thể mà vẫn rải ghi[^ddb-calc-suffix].
-- **Chia khóa nóng sang một tập shard nhỏ.** Elasticsearch `index.routing_partition_size`: giá trị routing chỉ chọn một *tập* shard, rồi `_id` chọn shard trong tập đó; tăng kích thước tập làm dữ liệu đều hơn nhưng mỗi request phải tìm trên nhiều shard hơn[^es-routing-partition].
-- **Đổi khóa chính để thêm độ phân biệt.** MongoDB gợi ý dùng compound key kết hợp giá trị duy nhất hoặc tần suất thấp khi khóa có giá trị tần suất cao[^mongo-freq-fix]; Bigtable gợi ý đặt định danh có độ phân biệt cao (user ID) trước timestamp[^bt-ts-prefix].
+### 2.2 Nhận biết
 
-Không công cụ nào trong số này *tự động* biết khóa nào nóng; ứng dụng phải chọn khóa nào cần chia nhỏ (nhận xét của người soạn — các tài liệu trên mô tả cơ chế chứ không hứa tự phát hiện).
+Paper Dynamo coi một node là "in balance" nếu tải request của nó lệch khỏi trung bình dưới một ngưỡng (15%), còn lại là "out-of-balance"[^dyn-imbalance]. Tỷ lệ node mất cân bằng giảm khi tải hệ thống tăng, vì tải cao thì nhiều khóa phổ biến được truy cập nên tải rải đều hơn (lý giải của paper)[^dyn-imbalance2]. Trong vận hành, hãy theo dõi tải *theo từng partition*, không chỉ trung bình toàn cụm. Chỉ số trung bình che mất một partition nóng, vốn là loại sự cố "cả cụm rảnh mà một node 100% CPU" (nhận xét của người soạn).
+
+### 2.3 Giảm nhẹ khi một khóa quá nóng
+
+- **Khóa phụ có hậu tố (write sharding).** DynamoDB thêm một số ngẫu nhiên vào cuối partition key để rải ghi qua không gian khóa lớn hơn[^ddb-suffix]. Với `orders`, đơn của seller lớn sẽ ghi vào `seller_id#0` đến `seller_id#9` (nhận xét của người soạn). Cái giá là muốn đọc tất cả mục của một ngày thì phải truy vấn mọi hậu tố rồi gộp kết quả ở ứng dụng[^ddb-suffix-read]. Biến thể "hậu tố tính được", tức hash của một thuộc tính hay tìm, cho phép đọc một mục cụ thể mà vẫn rải được ghi[^ddb-calc-suffix].
+- **Chia khóa nóng sang một tập shard nhỏ.** Với `index.routing_partition_size` của Elasticsearch, giá trị routing chỉ chọn một *tập* shard, rồi `_id` chọn shard trong tập đó. Tăng kích thước tập thì dữ liệu đều hơn, nhưng mỗi request phải tìm trên nhiều shard hơn[^es-routing-partition].
+- **Đổi khóa chính để thêm độ phân biệt.** MongoDB gợi ý dùng compound key kết hợp giá trị duy nhất hoặc tần suất thấp khi khóa có giá trị tần suất cao[^mongo-freq-fix]. Bigtable gợi ý đặt định danh có độ phân biệt cao (user ID) trước timestamp[^bt-ts-prefix].
+
+Không công cụ nào trong số này *tự động* biết khóa nào nóng, nên ứng dụng phải chọn khóa nào cần chia nhỏ (nhận xét của người soạn: các tài liệu trên mô tả cơ chế chứ không hứa tự phát hiện).
 
 <details><summary>Đi sâu: partition quá lớn cũng là skew, và Cassandra "hotspot đọc/ghi"</summary>
 
-- Cassandra nêu rõ mặt trái của khả năng "mọi hàng cùng partition key nằm trên cùng node": nó tạo hotspot cho cả đọc lẫn ghi; partition phải "vừa phải, không quá lớn không quá nhỏ"[^cass-hotspot]. Tức là thiết kế khóa luôn là cân bằng giữa *đồng-nơi* (ít node phải hỏi, batch nguyên tử trong partition[^cass-atomic]) và *phân tán* (tải đều).
+- Cassandra nêu rõ mặt trái của việc "mọi hàng cùng partition key nằm trên cùng node": nó tạo hotspot cho cả đọc lẫn ghi[^cass-hotspot]. Partition phải "vừa phải, không quá lớn không quá nhỏ". Thiết kế khóa luôn là cân bằng giữa *đồng-nơi*, tức ít node phải hỏi và batch nguyên tử trong partition[^cass-atomic], với *phân tán*, tức tải đều (nhận xét của người soạn).
 - Bigtable lưu ý hotspot ở một bảng ảnh hưởng độ trễ của các bảng khác trong cùng instance, vì mọi bảng trong một instance được lưu trên cùng các tablet[^bt-hotspot-shared]. (Nguồn là tài liệu vendor không đánh số phiên bản.)
-- Dynamo đánh giá hiệu quả cân tải bằng "mean load / max load" (tải trung bình chia tải của node nóng nhất)[^dyn-efficiency] — thước đo đáng dùng cho dashboard của chính bạn (nhận xét của người soạn).
+- Dynamo đánh giá hiệu quả cân tải bằng "mean load / max load", tức tải trung bình chia tải của node nóng nhất[^dyn-efficiency]. Đây là thước đo đáng đưa lên dashboard của chính bạn (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q2:** hot spot đến từ khóa tăng đơn điệu, khóa ít giá trị phân biệt, hoặc một khóa quá nóng; hash không cứu được trường hợp cuối, nên phải đổi khóa hoặc chia khóa nóng bằng hậu tố/tập shard và chấp nhận chi phí đọc nhiều nơi.
+**Quay lại Q2:** hot spot đến từ khóa tăng đơn điệu, khóa ít giá trị phân biệt, hoặc một khóa quá nóng như seller lớn của `orders`; hash không cứu được trường hợp cuối, nên phải đổi khóa hoặc chia khóa nóng bằng hậu tố/tập shard và chấp nhận chi phí đọc nhiều nơi.
 
 ## 3. Consistent hashing và virtual node (Q3)
 
-> **Trả lời ngắn.** Với `hash(key) mod N`, đổi N có thể làm gần như mọi ánh xạ khóa → node mất hiệu lực[^cass-naive]. Consistent hashing đặt cả node và khóa lên một vòng băm; khóa thuộc về node đầu tiên gặp khi đi theo chiều kim đồng hồ, nên thêm/bớt một node chỉ ảnh hưởng hàng xóm kề nó[^dyn-ring-neighbors]. Mỗi node giữ nhiều điểm trên vòng (virtual node) để cân tải tốt hơn và tận dụng máy mạnh yếu khác nhau[^dyn-vnodes].
+> **Trả lời ngắn.** Với `hash(key) mod N`, đổi N có thể làm gần như mọi ánh xạ khóa → node mất hiệu lực[^cass-naive]. Consistent hashing đặt cả node và khóa lên một vòng băm; khóa thuộc về node đầu tiên gặp khi đi theo chiều kim đồng hồ, nên thêm hay bớt một node chỉ ảnh hưởng hàng xóm kề nó[^dyn-ring-neighbors]. Mỗi node giữ nhiều điểm trên vòng (virtual node) để cân tải tốt hơn và tận dụng máy mạnh yếu khác nhau[^dyn-vnodes].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `mod N` giống xếp ghế theo số thứ tự rồi chia cho số bàn; thêm một bàn là cả phòng đứng dậy đổi chỗ. Vòng băm giống chiếc đồng hồ: mỗi bàn đứng ở một giờ nào đó, khách ngồi ở bàn đầu tiên gặp khi đi theo chiều kim đồng hồ từ "giờ" của mình; thêm bàn mới chỉ lấy khách của đoạn ngay trước nó.
+*Với `orders`.* Giả sử cụm đang có 10 node và `orders-api` chọn node bằng `hash(order_id) mod 10`. Khi đĩa đầy bạn thêm hai node, công thức thành `mod 12`. Câu hỏi là bao nhiêu đơn hàng phải chuyển sang node khác sau thay đổi đó, và liệu có cách nào để chỉ chuyển phần tối thiểu.
 
-*Vì sao `mod N` hỏng.* Cassandra docs: với hash modulo số bucket, thêm một node có thể làm hỏng gần như mọi ánh xạ[^cass-naive]. Paper Jump Consistent Hash lấy ví dụ 10 shard lên 12: `h(key) mod 12` thường khác `h(key) mod 10` nên dữ liệu phải sắp xếp lại gần hết, trong khi chỉ cần di chuyển 1/6 dữ liệu để cân bằng lại[^jump-1-6]. (Suy luận số học của người soạn: với `mod 10` rồi `mod 12`, một khóa không đổi chỗ chỉ khi cả hai số dư bằng nhau; trong mỗi chu kỳ 60 giá trị băm chỉ 10 giá trị thỏa — tức khoảng 5/6 khóa đổi chỗ so với mức tối thiểu 1/6.)
+### 3.1 Vì sao `mod N` hỏng
 
-*Ý tưởng của Karger và cộng sự (1997).* Paper mô tả hàm băm "consistent" là hàm thay đổi tối thiểu khi miền giá trị của nó thay đổi[^kar-def]. Tính chất *smoothness*: khi thêm/bớt một máy, tỷ lệ kỳ vọng các đối tượng phải chuyển sang cache mới là mức tối thiểu cần để giữ tải cân bằng[^kar-smooth]; tính chất *monotonicity*: nếu thêm bucket, một đối tượng chỉ có thể chuyển từ bucket cũ sang bucket *mới*, không chuyển giữa hai bucket cũ[^kar-mono]. Bài toán gốc là cache web, nơi các client có thể có những "góc nhìn" (view) không nhất quán về những máy nào đang sẵn sàng[^kar-views]; dùng cho sharding dữ liệu là ứng dụng sau đó.
+Câu trả lời của `mod N` là gần hết. Cassandra docs nói gọn: với cách chia modulo, thêm một node có thể làm hỏng gần như mọi ánh xạ[^cass-naive]. Paper Jump Consistent Hash lấy đúng ví dụ 10 shard lên 12. `h(key) mod 12` thường khác `h(key) mod 10`, nên dữ liệu phải sắp xếp lại gần hết, trong khi chỉ cần chuyển 1/6 dữ liệu là đủ cân bằng lại[^jump-1-6]. Số 5/6 ở đây là phép tính của người soạn: với `mod 10` rồi `mod 12`, một khóa chỉ không đổi chỗ khi hai số dư bằng nhau; trong mỗi chu kỳ 60 giá trị băm chỉ 10 giá trị thỏa, tức khoảng 5/6 khóa đổi chỗ so với mức tối thiểu 1/6.
 
-*Vòng băm trong Dynamo.* Miền giá trị của hàm băm được coi là không gian tròn cố định (vòng); mỗi node nhận một giá trị ngẫu nhiên làm "vị trí" trên vòng; khóa được băm ra vị trí rồi đi theo chiều kim đồng hồ đến node đầu tiên có vị trí lớn hơn[^dyn-ring]. Mỗi node chịu trách nhiệm vùng giữa nó và node đứng trước, nên node đến/đi chỉ ảnh hưởng hàng xóm gần nhất[^dyn-ring-neighbors]. Cassandra mô tả cùng cơ chế: băm khóa ra token, đi theo chiều kim đồng hồ cho tới khi gặp đủ số node khác nhau bằng replication factor (RF) thì đó là các replica của khóa[^cass-rf-walk].
+### 3.2 Vòng băm
+
+Consistent hashing sinh ra để tránh chuyện đó. Paper Karger và cộng sự (1997) định nghĩa hàm băm "consistent" là hàm thay đổi tối thiểu khi miền giá trị của nó thay đổi[^kar-def]. Bài toán gốc là cache web, nơi các client có thể có những "góc nhìn" (view) không nhất quán về việc máy nào đang sẵn sàng[^kar-views]. Dùng cho chia dữ liệu là ứng dụng đến sau.
+
+Dynamo biến ý tưởng đó thành vòng băm. Miền giá trị của hàm băm được coi là một không gian tròn cố định, và mỗi node nhận một giá trị ngẫu nhiên làm "vị trí" trên vòng. Muốn tìm node cho một khóa, ta băm khóa ra một vị trí rồi đi theo chiều kim đồng hồ đến node đầu tiên có vị trí lớn hơn[^dyn-ring]. Mỗi node chịu trách nhiệm vùng giữa nó và node đứng trước, nên node đến hay đi chỉ ảnh hưởng hàng xóm gần nhất[^dyn-ring-neighbors]. Cassandra mô tả cùng cơ chế. Nó băm khóa ra token rồi đi theo chiều kim đồng hồ cho tới khi gặp đủ số node khác nhau bằng replication factor (RF), và đó là các replica của khóa[^cass-rf-walk].
 
 ```mermaid
 flowchart LR
@@ -135,15 +168,20 @@ flowchart LR
 
 (Con số vị trí chỉ để minh họa; khóa có hash 120 rơi vào khoảng (90, 170] nên thuộc node C, theo quy tắc "node đầu tiên có vị trí lớn hơn".)
 
-*Hai khuyết điểm của vòng đơn giản → vnode.* Dynamo nêu: gán vị trí ngẫu nhiên khiến phân bố dữ liệu và tải không đều, và thuật toán cơ bản không biết gì về việc các node có hiệu năng khác nhau[^dyn-challenges]. Cách khắc phục là mỗi node nhận *nhiều* điểm trên vòng, gọi là virtual node[^dyn-vnodes]. Ba lợi ích theo paper: node ngừng hoạt động thì tải của nó rải đều lên các node còn lại; node mới/trở lại nhận lượng tải xấp xỉ bằng nhau từ mọi node khác; số vnode của một node có thể chọn theo năng lực để tính đến sự không đồng nhất phần cứng[^dyn-vnode-adv]. Paper Karger gốc cũng đã cần mỗi bucket có nhiều hơn một điểm trên đoạn đơn vị[^kar-multipoint]. Cassandra thể hiện bằng `num_tokens`: nhiều token hơn (so với node khác) thì node chứa tỷ lệ dữ liệu lớn hơn, và nên cho các node cùng phần cứng cùng số token[^cass-num-tokens].
+Quay lại `orders`: thêm node E vào vị trí 130 thì chỉ những đơn có hash trong (90, 130] chuyển từ C sang E. Đơn của A, B, D không động đến (suy luận của người soạn từ quy tắc ở trên).
 
-*Cái giá của vnode.* Cassandra liệt kê: mỗi token thêm tối đa `2 × (RF − 1)` hàng xóm trên vòng, nên có nhiều tổ hợp lỗi node hơn làm mất khả dụng một phần vòng, và càng nhiều token xác suất sự cố càng cao[^cass-vnode-cost]; các thao tác bảo trì toàn cụm (như repair) chậm hơn khi số token mỗi node tăng[^cass-vnode-repair]. Ở Cassandra 2.x chỉ có thuật toán chọn token ngẫu nhiên nên mặc định phải 256 token để cân bằng; từ 3.x có bộ cấp phát xác định cho phép dùng ít token hơn nhiều[^cass-256].
+### 3.3 Virtual node
 
-<details><summary>Đi sâu: Jump Consistent Hash, và vì sao Dynamo bỏ "mỗi node T token ngẫu nhiên"</summary>
+Vòng đơn giản có hai khuyết điểm. Gán vị trí ngẫu nhiên khiến phân bố dữ liệu và tải không đều, và thuật toán cơ bản không biết gì về việc các node có hiệu năng khác nhau[^dyn-challenges]. Cách khắc phục là cho mỗi node *nhiều* điểm trên vòng, gọi là virtual node (vnode)[^dyn-vnodes]. Paper nêu ba lợi ích: node ngừng hoạt động thì tải của nó rải đều lên các node còn lại; node mới hay node trở lại nhận lượng tải xấp xỉ bằng nhau từ mọi node khác; và có thể chọn số vnode theo năng lực từng máy để tính đến phần cứng không đồng nhất[^dyn-vnode-adv]. Ngay paper Karger gốc cũng đã cần mỗi bucket có nhiều hơn một điểm trên đoạn đơn vị[^kar-multipoint]. Trong Cassandra, ý này nằm ở `num_tokens`: node có nhiều token hơn thì chứa tỷ lệ dữ liệu lớn hơn, và nên cho các node cùng phần cứng cùng số token[^cass-num-tokens].
 
-- **Jump Consistent Hash** (Lamping & Veach, Google): không cần lưu trữ, nhanh hơn thuật toán Karger và chia đều hơn, nhưng hạn chế chính là bucket phải đánh số tuần tự — hợp với lưu trữ dữ liệu hơn là web cache phân tán[^jump-abstract]. Hệ quả (suy luận của người soạn): bỏ bucket ở *giữa* dải số không biểu diễn được, nên chỉ hợp khi thêm/bớt ở cuối (số shard tăng dần), không hợp khi node chết bất kỳ. Crate Rust `jump-consistent-hash` 0.1.0 cài thuật toán này: hàm `hash` nhận khóa 64 bit và số bucket, trả số bucket trong `0..buckets`[^jump-crate].
-- **Dynamo đổi chiến lược ba lần.** Chiến lược 1: mỗi node T token ngẫu nhiên, phân vùng theo giá trị token; kích thước bộ nhớ lưu membership tăng tuyến tính theo số node[^dyn-s1]. Chiến lược 2: T token ngẫu nhiên + Q phân vùng bằng nhau — tách phân vùng khỏi vị trí đặt; nhưng khi node mới "đánh cắp" khoảng khóa, node cũ phải quét kho dữ liệu cục bộ (tốn tài nguyên, chạy ưu tiên thấp) và có lúc mùa mua sắm bootstrap mất gần một ngày; Merkle tree phải tính lại; và không có cách dễ để snapshot toàn bộ không gian khóa[^dyn-s2]. Chiến lược 3: Q/S token mỗi node (S là số node), phân vùng bằng nhau; so với chiến lược 1, hiệu quả cân tải tốt hơn và kích thước membership giảm ba bậc độ lớn[^dyn-s3-better]; vì ranh giới cố định nên mỗi partition có thể là một file riêng và chuyển như một đơn vị bằng cách chép file[^dyn-s3-files]; nhược điểm là đổi membership đòi hỏi phối hợp để giữ các tính chất của phép gán[^dyn-s3-cost]. Đây chính là chiến lược "số partition cố định" của mục 5.
-- Elasticsearch ghi rõ cách chọn shard: `shard_num = (hash(_routing) % num_routing_shards) / routing_factor`, với `routing_factor = num_routing_shards / num_primary_shards`; routing mặc định là `_id`[^es-formula]. Docs mô tả không gian `num_routing_shards` này là không gian băm dùng consistent hashing để chia tài liệu[^es-split]; nhìn công thức thì cơ chế là `mod` trên không gian cố định rồi chia gộp theo `routing_factor` (suy luận của người soạn) — xem mục 5 về cách nó cho phép *split*.
+Vnode có giá. Cassandra liệt kê rằng mỗi token thêm tối đa `2 × (RF − 1)` hàng xóm trên vòng, nên có nhiều tổ hợp lỗi node hơn làm mất khả dụng một phần vòng, và càng nhiều token thì xác suất sự cố càng cao[^cass-vnode-cost]. Các thao tác bảo trì toàn cụm như repair cũng chậm hơn khi số token mỗi node tăng[^cass-vnode-repair]. Ở Cassandra 2.x chỉ có thuật toán chọn token ngẫu nhiên nên mặc định phải 256 token để cân bằng; từ 3.x có bộ cấp phát xác định cho phép dùng ít token hơn nhiều[^cass-256].
+
+<details><summary>Đi sâu: tính chất của Karger, Jump Consistent Hash, và vì sao Dynamo bỏ "mỗi node T token ngẫu nhiên"</summary>
+
+- **Hai tính chất của Karger.** *Smoothness*: khi thêm hay bớt một máy, tỷ lệ kỳ vọng các đối tượng phải chuyển sang cache mới là mức tối thiểu cần để giữ tải cân bằng[^kar-smooth]. *Monotonicity*: nếu thêm bucket, một đối tượng chỉ có thể chuyển từ bucket cũ sang bucket *mới*, không chuyển giữa hai bucket cũ[^kar-mono].
+- **Jump Consistent Hash** (Lamping & Veach, Google) không cần lưu trữ, nhanh hơn thuật toán Karger và chia đều hơn. Hạn chế chính là bucket phải đánh số tuần tự, nên hợp với lưu trữ dữ liệu hơn là web cache phân tán[^jump-abstract]. Hệ quả (suy luận của người soạn): không biểu diễn được việc bỏ bucket ở *giữa* dải số, nên chỉ hợp khi thêm hay bớt ở cuối (số shard tăng dần), không hợp khi node chết bất kỳ. Crate Rust `jump-consistent-hash` 0.1.0 cài thuật toán này: hàm `hash` nhận khóa 64 bit và số bucket, trả số bucket trong `0..buckets`[^jump-crate].
+- **Dynamo đổi chiến lược ba lần.** Chiến lược 1: mỗi node T token ngẫu nhiên, phân vùng theo giá trị token, và kích thước bộ nhớ lưu membership tăng tuyến tính theo số node[^dyn-s1]. Chiến lược 2: T token ngẫu nhiên cộng Q phân vùng bằng nhau, tức tách phân vùng khỏi vị trí đặt. Nhưng khi node mới "đánh cắp" khoảng khóa, node cũ phải quét kho dữ liệu cục bộ (tốn tài nguyên, chạy ưu tiên thấp), có lúc mùa mua sắm bootstrap mất gần một ngày, Merkle tree phải tính lại, và không có cách dễ để snapshot toàn bộ không gian khóa[^dyn-s2]. Chiến lược 3: Q/S token mỗi node (S là số node) với phân vùng bằng nhau. So với chiến lược 1, hiệu quả cân tải tốt hơn và kích thước membership giảm ba bậc độ lớn[^dyn-s3-better]. Vì ranh giới cố định nên mỗi partition có thể là một file riêng và chuyển như một đơn vị bằng cách chép file[^dyn-s3-files]. Nhược điểm là đổi membership đòi hỏi phối hợp để giữ các tính chất của phép gán[^dyn-s3-cost]. Đây chính là chiến lược "số partition cố định" của mục 5.
+- **Elasticsearch** ghi rõ cách chọn shard: `shard_num = (hash(_routing) % num_routing_shards) / routing_factor`, với `routing_factor = num_routing_shards / num_primary_shards`, và routing mặc định là `_id`[^es-formula]. Docs mô tả không gian `num_routing_shards` này là không gian băm dùng consistent hashing để chia document[^es-split]. Nhìn công thức thì cơ chế là `mod` trên không gian cố định rồi chia gộp theo `routing_factor` (suy luận của người soạn); mục 5 nói cách nó cho phép *split*.
 
 </details>
 
@@ -151,13 +189,19 @@ flowchart LR
 
 ## 4. Secondary index: local và global (Q4)
 
-> **Trả lời ngắn.** Khi dữ liệu đã chia theo khóa chính, tìm theo cột khác (secondary index) có hai cách. *Local index* (còn gọi *document-partitioned*): mỗi partition giữ index chỉ cho dữ liệu *của chính nó* — ghi rẻ (một partition) nhưng đọc theo cột phụ *không kèm khóa partition* phải hỏi *mọi* partition rồi gộp. *Global index* (*term-partitioned*): index riêng được chia theo *giá trị được index*, nên đọc theo cột phụ trúng ít partition, nhưng một lần ghi có thể phải cập nhật index nằm ở partition khác — thường làm bất đồng bộ nên index có thể cũ. (Phần tổng quát hóa này là của người soạn; bằng chứng từng hệ nằm ở dưới.)
+> **Trả lời ngắn.** Khi dữ liệu đã chia theo khóa chính, tìm theo cột khác (secondary index) có hai cách. *Local index* (*document-partitioned*): mỗi partition giữ index chỉ cho dữ liệu *của chính nó*. Ghi rẻ vì chỉ chạm một partition, nhưng đọc theo cột phụ *không kèm khóa partition* phải hỏi *mọi* partition rồi gộp. *Global index* (*term-partitioned*): index riêng được chia theo *giá trị được index*. Đọc theo cột phụ trúng ít partition, nhưng một lần ghi có thể phải cập nhật index nằm ở partition khác, thường bất đồng bộ nên index có thể cũ. (Phần tổng quát hóa này là của người soạn; bằng chứng từng hệ nằm ở dưới.)
 
-(Thuật ngữ *document-partitioned* và *term-partitioned* là cách gọi quen trong khung DDIA — mục lục sách có hai mục "Partitioning Secondary Indexes by Document" và "by Term"[^ddia-toc-index]; các tài liệu vendor dưới đây dùng tên riêng — nhận xét của người soạn.)
+(Thuật ngữ *document-partitioned* và *term-partitioned* là cách gọi quen trong khung DDIA: mục lục sách có hai mục "Partitioning Secondary Indexes by Document" và "by Term"[^ddia-toc-index]. Các tài liệu vendor dưới đây dùng tên riêng; nhận xét của người soạn.)
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư viện chia sách vào 10 phòng theo mã số sách (khóa chính). *Local index*: mỗi phòng có một sổ mục lục theo tác giả cho riêng sách trong phòng đó. Tìm "sách của tác giả X" phải đi 10 phòng. *Global index*: một cuốn mục lục theo tác giả cho cả thư viện, chia ra theo chữ cái của tên tác giả (A–C ở tủ 1…). Tìm tác giả X chỉ mở một tủ — nhưng khi nhập sách mới vào phòng 7, thủ thư phải chạy sang tủ mục lục khác để cập nhật.
+*Với `orders`.* Giả sử `orders` chia theo `order_id` (hoặc `customer_id`). Truy vấn "lấy đơn 42" và "đơn của khách C" đi thẳng tới một partition, nhưng truy vấn thứ tư, "tìm đơn theo email", thì không: email nằm trong document của bất kỳ partition nào. Muốn tìm nhanh phải có một index trên cột `email`, tức một secondary index, và câu hỏi là index đó nằm ở đâu khi dữ liệu đã bị chia.
+
+### 4.1 Hai cách đặt index
+
+Cách thứ nhất là để mỗi partition tự giữ index cho dữ liệu của nó: đó là *local index*. Ghi một đơn mới chỉ cần cập nhật partition chứa đơn đó, nhưng tìm theo email thì không biết đơn nằm ở partition nào, nên `orders-api` phải hỏi tất cả rồi gộp kết quả.
+
+Cách thứ hai là dựng một index toàn cục, tự nó cũng được chia ra, nhưng chia theo *giá trị được index* (email) chứ không theo khóa chính: đó là *global index*. Tìm theo email chỉ trúng một partition của index. Đổi lại, đơn mới nằm ở partition này mà entry email của nó nằm ở partition index khác, nên một lần ghi đụng tới hai nơi.
 
 ```mermaid
 flowchart TB
@@ -178,84 +222,93 @@ flowchart TB
 
 (Sơ đồ minh họa của người soạn, tóm tắt lập luận ở trên.)
 
-*Local index trong hệ thống thật.*
+### 4.2 Local index trong hệ thống thật
 
-- **Cassandra SAI** (Storage-Attached Index): index được gắn với memtable và SSTable, được tạo khi chúng được ghi, và sự khác biệt giữa các index được xử lý lúc đọc[^sai-attach]. Khi bootstrap/decommission node, index được stream cùng SSTable thay vì dựng lại ở node nhận[^sai-stream]. Khi đọc, một "SAI Coordinator" gửi *token range read* tới các replica, và mỗi replica chạy truy vấn index cục bộ[^sai-local]; coordinator chọn số range cần liên lạc theo lượng hàng ước tính và `LIMIT`[^sai-concurrency]. Đây là mô hình local: index nằm cùng dữ liệu, nên truy vấn theo cột phụ không kèm khóa partition phải được gửi tới nhiều range của vòng (suy luận của người soạn từ các mô tả trên).
-- **Elasticsearch**: một request tìm kiếm thường chạm nhiều shard và mỗi shard chạy tìm kiếm trên một thread[^es-multi-shard]. Thống kê tần suất term để tính điểm mặc định được tính cục bộ trên từng shard — nhanh hơn nhưng điểm có thể kém chính xác; `dfs_query_then_fetch` tính toàn cục bằng thông tin từ mọi shard, chính xác hơn nhưng thêm một vòng đi về tới mỗi shard[^es-dfs]. Phân trang sâu đắt vì mỗi shard phải nạp hit của cả các trang trước vào bộ nhớ[^es-deep-page]. Nếu biết trước khóa routing, tìm kiếm có thể chỉ gửi tới shard tương ứng thay vì fan-out toàn bộ[^es-custom-routing].
-- **DynamoDB local secondary index (LSI)**: tổ chức theo *cùng partition key* với bảng nhưng khác sort key[^lsi-def] — nên index đi cùng partition của dữ liệu (suy luận của người soạn). Khác SAI và Elasticsearch, truy vấn LSI chỉ định một giá trị partition key nên không fan-out qua mọi partition (suy luận của người soạn; docs dẫn chỉ nói LSI dùng cùng partition key với bảng).
-- **PostgreSQL** (partition trong một server): index của bảng partition là các index riêng trên từng partition; vì mỗi index chỉ đảm bảo unique *trong partition của nó*, ràng buộc unique/primary key trên bảng partition phải gồm mọi cột partition key (và không dùng biểu thức/hàm) để cấu trúc partition tự bảo đảm không trùng giữa các partition[^pg-unique].
+**Cassandra SAI** (Storage-Attached Index) gắn index vào memtable và SSTable: index được tạo lúc chúng được ghi, và chênh lệch giữa các index được xử lý lúc đọc[^sai-attach]. Khi bootstrap hay decommission node, index đi theo SSTable sang node nhận chứ không phải dựng lại[^sai-stream]. Lúc đọc, một "SAI Coordinator" gửi *token range read* tới các replica, và mỗi replica chạy truy vấn index cục bộ[^sai-local]. Coordinator chọn số range cần liên lạc theo lượng hàng ước tính và `LIMIT`[^sai-concurrency]. Đây là mô hình local: index nằm cùng dữ liệu, nên truy vấn theo cột phụ không kèm khóa partition phải gửi tới nhiều range của vòng (suy luận của người soạn từ các mô tả trên).
 
-*Global index trong hệ thống thật.*
+**Elasticsearch** cũng fan-out. Một request tìm kiếm thường chạm nhiều shard, và mỗi shard chạy tìm kiếm trên một thread[^es-multi-shard]. Thống kê tần suất term để tính điểm mặc định được tính cục bộ trên từng shard: nhanh hơn nhưng điểm có thể kém chính xác. `dfs_query_then_fetch` tính toàn cục bằng thông tin từ mọi shard, chính xác hơn nhưng thêm một vòng đi về tới mỗi shard[^es-dfs]. Phân trang sâu đắt vì mỗi shard phải nạp hit của cả các trang trước vào bộ nhớ[^es-deep-page]. Nếu biết trước khóa routing thì tìm kiếm có thể chỉ gửi tới shard tương ứng thay vì fan-out toàn bộ[^es-custom-routing].
 
-- **DynamoDB global secondary index (GSI)**: tổ chức theo khóa chính *khác* khóa của bảng; khóa index không cần có thuộc tính nào của khóa bảng, thậm chí không cần cùng lược đồ khóa[^gsi-def]. GSI được cập nhật *bất đồng bộ* theo mô hình eventually consistent khi ghi hoặc xóa trên bảng[^gsi-async]; thay đổi thường lan tới GSI trong một phần giây, nhưng có kịch bản lỗi hiếm làm trễ lâu hơn, nên ứng dụng phải chấp nhận truy vấn GSI trả kết quả cũ[^gsi-stale]. GSI còn có công suất ghi riêng: nếu GSI thiếu write capacity, ghi vào bảng chính cũng bị throttle[^gsi-throttle].
+**DynamoDB local secondary index (LSI)** tổ chức theo *cùng partition key* với bảng nhưng khác sort key[^lsi-def]. Vì vậy index đi cùng partition của dữ liệu (suy luận của người soạn). Khác SAI và Elasticsearch, truy vấn LSI chỉ định một giá trị partition key nên không fan-out qua mọi partition (suy luận của người soạn; docs dẫn chỉ nói LSI dùng cùng partition key với bảng).
 
-*Vì sao đổi lại như vậy.* Local: ghi chạm một partition nên đơn giản hơn (nhận xét của người soạn); đổi lại đọc theo cột phụ không kèm khóa partition là fan-out tới mọi partition — MongoDB mô tả điều tương tự cho truy vấn không có shard key: mongos phải hỏi mọi shard, đợi phản hồi rồi mới trả về[^mongo-broadcast]. Global: đọc nhanh, nhưng một lần ghi trở thành thao tác xuyên partition; nếu muốn index luôn khớp dữ liệu thì cần giao dịch phân tán ([Chương 07](07-transaction.md)), còn nếu không thì chấp nhận index trễ như GSI (suy luận của người soạn từ hai mô tả trên).
+**PostgreSQL** (partition trong một server) tạo index của bảng partition thành các index riêng trên từng partition. Mỗi index chỉ bảo đảm unique *trong partition của nó*, nên ràng buộc unique hay primary key trên bảng partition phải gồm mọi cột partition key (và không dùng biểu thức hay hàm), để cấu trúc partition tự bảo đảm không trùng giữa các partition[^pg-unique].
+
+### 4.3 Global index trong hệ thống thật
+
+**DynamoDB global secondary index (GSI)** tổ chức theo khóa chính *khác* khóa của bảng. Khóa index không cần có thuộc tính nào của khóa bảng, thậm chí không cần cùng lược đồ khóa[^gsi-def]. GSI được cập nhật *bất đồng bộ* theo mô hình eventually consistent mỗi khi ghi hoặc xóa trên bảng[^gsi-async]. Thay đổi thường lan tới GSI trong một phần giây, nhưng có kịch bản lỗi hiếm làm trễ lâu hơn, nên ứng dụng phải chấp nhận truy vấn GSI trả kết quả cũ[^gsi-stale]. GSI còn có công suất ghi riêng: nếu GSI thiếu write capacity thì ghi vào bảng chính cũng bị throttle[^gsi-throttle].
+
+### 4.4 Vì sao đổi lại như vậy
+
+Local: ghi chạm một partition nên đơn giản hơn (nhận xét của người soạn). Đổi lại, đọc theo cột phụ không kèm khóa partition là fan-out tới mọi partition. MongoDB mô tả điều tương tự cho truy vấn không có shard key: mongos phải hỏi mọi shard, đợi phản hồi rồi mới trả về[^mongo-broadcast]. Global: đọc nhanh, nhưng một lần ghi trở thành thao tác xuyên partition. Nếu muốn index luôn khớp dữ liệu thì cần giao dịch phân tán ([Chương 07](07-transaction.md)); nếu không thì chấp nhận index trễ như GSI (suy luận của người soạn từ hai mô tả trên).
+
+Với `orders`, nếu tìm theo email là truy vấn hiếm thì local index với fan-out là đủ; nếu đó là đường đăng nhập chạy cả ngày thì global index (hoặc một bảng tra email → `order_id` tự duy trì) đáng giá, kèm việc chấp nhận index có thể trễ (nhận xét của người soạn).
 
 <details><summary>Đi sâu: unique constraint là secondary index đặc biệt</summary>
 
-- MongoDB: nếu `_id` không phải shard key thì ràng buộc unique của `_id` chỉ áp trong phạm vi shard lưu tài liệu — hai tài liệu cùng `_id` có thể tồn tại ở hai shard khác nhau, ứng dụng phải tự đảm bảo `_id` duy nhất toàn cụm[^mongo-unique-id]. Với collection đã shard, không thể tạo unique index trên trường khác trừ khi shard key là tiền tố của index[^mongo-unique-prefix].
-- Đây chính là bài toán "index cục bộ không thấy được dữ liệu partition khác": chỉ khi giá trị cần unique *quyết định* partition (là khóa partition hoặc tiền tố) thì mọi bản trùng mới gặp nhau ở cùng một nơi (suy luận của người soạn, khớp với điều kiện của PostgreSQL ở trên).
-- Cassandra chia khóa chính thành partition key và clustering; index SAI là thứ dùng khi cần truy vấn ngoài partition key, và chi phí của nó là fan-out như trên (nhận xét của người soạn — nguồn không đưa ra con số).
+- MongoDB: nếu `_id` không phải shard key thì ràng buộc unique của `_id` chỉ áp trong phạm vi shard lưu document. Hai document cùng `_id` có thể tồn tại ở hai shard khác nhau, và ứng dụng phải tự bảo đảm `_id` duy nhất toàn cụm[^mongo-unique-id]. Với collection đã shard, không thể tạo unique index trên trường khác trừ khi shard key là tiền tố của index[^mongo-unique-prefix].
+- Đây chính là bài toán "index cục bộ không thấy được dữ liệu partition khác". Chỉ khi giá trị cần unique *quyết định* partition (là khóa partition hoặc tiền tố) thì mọi bản trùng mới gặp nhau ở cùng một nơi (suy luận của người soạn, khớp với điều kiện của PostgreSQL ở trên).
+- Cassandra chia khóa chính thành partition key và clustering; index SAI là thứ dùng khi cần truy vấn ngoài partition key, và chi phí của nó là fan-out như trên (nhận xét của người soạn; nguồn không đưa ra con số).
 
 </details>
 
-**Quay lại Q4:** local index = ghi một nơi, đọc cột phụ hỏi mọi partition; global index = đọc cột phụ trúng ít nơi, ghi phải cập nhật partition khác và thường để index hơi cũ.
+**Quay lại Q4:** local index = ghi một nơi, đọc cột phụ (như email của `orders`) hỏi mọi partition; global index = đọc cột phụ trúng ít nơi, ghi phải cập nhật partition khác và thường để index hơi cũ.
 
 ## 5. Rebalancing: thêm node thì dữ liệu chuyển thế nào (Q5)
 
-> **Trả lời ngắn.** Rebalancing là chuyển partition giữa các node khi thêm/bớt node hoặc khi tải lệch. Có ba chiến lược quen thuộc (cách phân loại của người soạn theo khung DDIA; mục lục sách chỉ ghi tên mục "Strategies for Rebalancing"[^ddia-toc-rebal]): (1) *số partition cố định* tạo sẵn rất nhiều partition, node mới nhận một số partition nguyên vẹn; (2) *partition động* tách partition khi quá lớn, gộp khi quá nhỏ; (3) *tỷ lệ theo số node* mỗi node giữ một số partition cố định nên số partition tăng theo số node. Điểm chung: *không* dùng `hash mod N` để chọn node — partition là lớp trung gian giữa khóa và node.
+> **Trả lời ngắn.** Rebalancing là chuyển partition giữa các node khi thêm hoặc bớt node, hoặc khi tải lệch. Có ba chiến lược quen thuộc (cách phân loại của người soạn theo khung DDIA; mục lục sách chỉ ghi tên mục "Strategies for Rebalancing"[^ddia-toc-rebal]). Một là *số partition cố định*: tạo sẵn rất nhiều partition, node mới nhận một số partition nguyên vẹn. Hai là *partition động*: tách partition khi quá lớn, gộp khi quá nhỏ. Ba là *tỷ lệ theo số node*: mỗi node giữ một số partition cố định nên số partition tăng theo số node. Điểm chung là *không* dùng `hash mod N` để chọn node: partition là lớp trung gian giữa khóa và node.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì chia khách thẳng cho từng bàn, bạn chia khách vào 1.000 "nhóm" cố định; mỗi bàn phụ trách vài chục nhóm. Thêm bàn thì chuyển vài nhóm sang bàn mới — không ai bị chia lại từ đầu.
+*Với `orders`.* Cụm đang 10 node, đĩa sắp đầy nên bạn thêm node thứ 11. Câu hỏi là node mới nhận dữ liệu gì, và `orders-api` có phải xếp lại cả kho không. Cả ba chiến lược trả lời bằng cùng một ý: chèn một lớp partition vào giữa khóa và node. Khóa → partition có ranh giới ổn định, còn partition → node là bảng có thể sửa. Thêm node chỉ đổi vế sau, nên chỉ cần chuyển vài partition nguyên vẹn, không ai bị băm lại từ đầu như với `mod N`.
 
-*Điều kiện của rebalancing tốt* (nhận xét của người soạn): trong lúc di chuyển cụm vẫn phải phục vụ đọc/ghi, chỉ nên di chuyển phần cần thiết, và phải kiểm soát băng thông. Kafka cho phép đặt throttle cho lưu lượng replication khi rebalance, bootstrap hay thêm/bớt broker, để chặn trên băng thông dùng cho di chuyển[^kafka-throttle]. MongoDB balancer chỉ cho mỗi shard tham gia tối đa một di chuyển tại một thời điểm, và với n shard thì tối đa n/2 (làm tròn xuống) di chuyển song song[^mongo-one-migration].
+Một rebalancing tốt phải thỏa ba điều (nhận xét của người soạn): cụm vẫn phục vụ đọc ghi trong lúc di chuyển, chỉ di chuyển phần cần thiết, và băng thông di chuyển được kiểm soát. Về điều cuối, Kafka cho đặt throttle cho lưu lượng replication khi rebalance, bootstrap hay thêm bớt broker, để chặn trên băng thông dùng cho di chuyển[^kafka-throttle]. MongoDB balancer thì chỉ cho mỗi shard tham gia tối đa một di chuyển tại một thời điểm[^mongo-one-migration].
 
 ### 5.1. Số partition cố định
 
-Tạo trước nhiều partition hơn số node và giữ nguyên số đó; thêm node thì chuyển một số partition nguyên vẹn sang. Trong chiến lược này ranh giới khóa → partition không đổi khi thêm node, chỉ ánh xạ partition → node đổi (nhận xét của người soạn; Elasticsearch có ngoại lệ qua API split, xem dưới).
+Cách đơn giản nhất là tạo trước nhiều partition hơn số node và giữ nguyên số đó. Thêm node thì chuyển một số partition nguyên vẹn sang. Ranh giới khóa → partition không đổi khi thêm node, chỉ ánh xạ partition → node đổi (nhận xét của người soạn; Elasticsearch có ngoại lệ qua API split, xem dưới).
 
-- **Dynamo chiến lược 3**: Q phân vùng bằng nhau, mỗi node Q/S token; khi node vào nó "đánh cắp" token từ các node khác để giữ tính chất đó, khi node ra token của nó được chia ngẫu nhiên cho node còn lại[^dyn-s3-def]. Lợi ích đã nêu: partition là file riêng, chuyển bằng cách chép file[^dyn-s3-files].
-- **Redis Cluster**: không gian khóa chia thành 16384 hash slot, `HASH_SLOT = CRC16(key) mod 16384`[^redis-formula]; mỗi master giữ một tập slot[^redis-slots]. Thêm node = chuyển một số slot từ các node hiện có sang node trống; bớt node = chuyển slot của nó đi; cân lại = chuyển slot giữa các node — mọi thao tác quy về "di chuyển một hash slot"[^redis-reconf]. Slot vẫn chỉ là tập khóa, nên di chuyển slot là di chuyển các khóa băm vào slot đó[^redis-slot-keys].
-- **Kafka**: topic chia thành P partition xác định trước, đánh số 0…P−1[^kafka-pdef]. Có thể *thêm* partition nhưng không giảm[^kafka-no-reduce]; và thêm partition không đổi phân vùng của dữ liệu cũ, nên nếu khóa được chia theo `hash(key) % number_of_partitions` thì ánh xạ có thể bị xáo, mà Kafka không tự phân phối lại dữ liệu cũ[^kafka-add-part].
-- **Elasticsearch**: `index.number_of_shards` chỉ đặt được lúc tạo index[^es-shards-create]. Để vẫn tách được, API *split* biến mỗi shard thành hai hoặc nhiều shard của index mới, theo các thừa số cho phép bởi `number_of_routing_shards` — kích thước "không gian băm" nội bộ[^es-split] — ví dụ trong docs: 5 shard với routing shards 30 (= 5×2×3) tách được theo hệ số 2 hoặc 3[^es-split-example]. Yêu cầu: index phải read-only[^es-split-req] và cluster health phải green[^es-split-green].
+- **Dynamo chiến lược 3**: Q phân vùng bằng nhau, mỗi node Q/S token. Khi node vào, nó "đánh cắp" token từ các node khác để giữ tính chất đó; khi node ra, token của nó được chia ngẫu nhiên cho node còn lại[^dyn-s3-def]. Lợi ích đã nêu ở mục 3: partition là file riêng, chuyển bằng cách chép file[^dyn-s3-files].
+- **Redis Cluster**: không gian khóa chia thành 16384 hash slot, với `HASH_SLOT = CRC16(key) mod 16384`[^redis-formula]. Mỗi master giữ một tập slot[^redis-slots]. Thêm node là chuyển một số slot từ các node hiện có sang node trống, bớt node là chuyển slot của nó đi, cân lại là chuyển slot giữa các node: mọi thao tác quy về "di chuyển một hash slot"[^redis-reconf]. Slot vẫn chỉ là tập khóa, nên di chuyển slot là di chuyển các khóa băm vào slot đó[^redis-slot-keys].
+- **Kafka**: topic chia thành P partition xác định trước, đánh số 0…P−1[^kafka-pdef]. Có thể *thêm* partition nhưng không giảm[^kafka-no-reduce]. Thêm partition không đổi vị trí của dữ liệu cũ, nên nếu khóa được chia theo `hash(key) % number_of_partitions` thì ánh xạ bị xáo, mà Kafka không tự phân phối lại dữ liệu cũ[^kafka-add-part].
+- **Elasticsearch**: `index.number_of_shards` chỉ đặt được lúc tạo index[^es-shards-create]. Để vẫn tách được, API *split* biến mỗi shard thành hai hoặc nhiều shard của index mới, theo các thừa số mà `number_of_routing_shards` cho phép; số này là kích thước "không gian băm" nội bộ[^es-split]. Ví dụ trong docs: 5 shard với routing shards 30 (= 5×2×3) tách được theo hệ số 2 hoặc 3[^es-split-example]. Index phải read-only[^es-split-req]. Cluster health phải green[^es-split-green].
 
-*Chọn số partition ban đầu là quyết định khó đảo ngược.* Quá ít: partition sau này quá lớn, khó di chuyển/khôi phục (nhận xét của người soạn; ES nêu riêng việc shard rất lớn làm phục hồi lâu hơn, bên dưới). Quá nhiều: Elasticsearch cảnh báo mỗi shard đều có overhead (quản lý cluster và tìm kiếm), cụm có quá nhiều shard ("oversharding") sẽ chậm hơn khi tìm kiếm và nặng hơn có thể mất ổn định[^es-oversharding]; tìm trên một nghìn shard 50MB đắt hơn đáng kể một shard 50GB cùng dữ liệu, nhưng shard rất lớn cũng làm tìm kiếm chậm và phục hồi lâu hơn[^es-shard-size]. Docs gợi ý khoảng 10–50 GB mỗi shard trong nhiều trường hợp, kèm dưới 200 triệu document[^es-10-50].
+Số partition ban đầu là quyết định khó đảo ngược. Chọn quá ít thì partition sau này quá lớn, khó di chuyển và khó khôi phục (nhận xét của người soạn; Elasticsearch nêu riêng việc shard rất lớn làm phục hồi lâu hơn, ngay bên dưới). Chọn quá nhiều cũng không miễn phí: mỗi shard của Elasticsearch đều có overhead cho quản lý cluster và tìm kiếm, nên cụm có quá nhiều shard ("oversharding") chậm hơn khi tìm kiếm và nặng hơn có thể mất ổn định[^es-oversharding]. Tìm trên một nghìn shard 50MB đắt hơn đáng kể một shard 50GB cùng dữ liệu, nhưng shard rất lớn cũng làm tìm kiếm chậm và phục hồi lâu hơn[^es-shard-size]. Docs gợi ý khoảng 10–50 GB mỗi shard trong nhiều trường hợp, kèm dưới 200 triệu document[^es-10-50].
 
 ### 5.2. Partition động
 
-Bắt đầu với ít partition; tách khi lớn, gộp khi nhỏ — hợp với key range, nơi khó chia sẵn ranh giới có nghĩa trước khi biết phân bố khóa (nhận xét của người soạn).
+Chiến lược thứ hai hợp với key range, nơi khó chia sẵn ranh giới có nghĩa trước khi biết phân bố khóa: bắt đầu với ít partition, tách khi lớn, gộp khi nhỏ (nhận xét của người soạn).
 
-- **Bigtable**: ban đầu mỗi bảng chỉ có một tablet; khi bảng lớn lên được tự động tách thành nhiều tablet, mỗi cái xấp xỉ 100–200 MB mặc định[^bt-split-size]. Mỗi tablet server quản lý khoảng 10 đến 1000 tablet và tự tách tablet quá lớn[^bt-per-server]; master gán tablet cho server và cân tải[^bt-master].
-- **MongoDB**: chunk mặc định 128 MB; range nhỏ cho phân bố đều hơn nhưng di chuyển thường xuyên hơn, thêm overhead ở tầng định tuyến mongos[^mongo-small-range]; docs nhận xét với phần lớn triển khai, phân bố hơi lệch tốt hơn di chuyển liên tục[^mongo-range-size]. Balancer là tiến trình nền theo dõi lượng dữ liệu mỗi shard và di chuyển khi chênh lệch chạm ngưỡng[^mongo-balancer]. Khi thêm shard mới, nó trống nên có mất cân bằng; MongoDB bắt đầu di chuyển ngay nhưng cần thời gian mới cân[^mongo-add-shard].
-- Rủi ro (nhận xét của người soạn): với *một khóa duy nhất* quá nóng, chia range không giúp vì nhỏ nhất của chunk là một giá trị khóa duy nhất[^mongo-smallest-chunk].
+- **Bigtable**: ban đầu mỗi bảng chỉ có một tablet. Khi bảng lớn lên, nó tự động tách thành nhiều tablet, mỗi cái xấp xỉ 100–200 MB mặc định[^bt-split-size]. Mỗi tablet server quản lý khoảng 10 đến 1000 tablet và tự tách tablet quá lớn[^bt-per-server]. Master gán tablet cho server và cân tải[^bt-master].
+- **MongoDB**: chunk mặc định 128 MB. Range nhỏ cho phân bố đều hơn nhưng di chuyển thường xuyên hơn, và thêm overhead ở tầng định tuyến mongos[^mongo-small-range]. Docs nhận xét với phần lớn triển khai, phân bố hơi lệch còn tốt hơn di chuyển liên tục[^mongo-range-size]. Balancer là tiến trình nền theo dõi lượng dữ liệu mỗi shard và di chuyển khi chênh lệch chạm ngưỡng[^mongo-balancer]. Shard mới thêm vào còn trống nên cụm mất cân bằng; MongoDB bắt đầu di chuyển ngay nhưng cần thời gian mới cân xong[^mongo-add-shard].
+- Rủi ro (nhận xét của người soạn): với *một khóa duy nhất* quá nóng, chia range không giúp, vì chunk nhỏ nhất cũng chỉ bằng một giá trị khóa[^mongo-smallest-chunk].
 
 ### 5.3. Tỷ lệ theo số node
 
-Ý tưởng: kích thước *mỗi* partition giữ ổn định còn số partition tăng theo số node, thay vì số partition cố định (5.1) hay chỉ phụ thuộc kích thước dữ liệu (5.2). Hệ thống gần nhất trong nguồn đã tải là **Cassandra vnode**: mỗi node nhận `num_tokens` token, nên số vnode của cả cụm tăng theo số node (suy luận của người soạn); khi dùng bộ cấp phát token tự động thì tải gán cho node gần tỷ lệ với số vnode của nó[^cass-alloc], và node mới nhận xấp xỉ bằng nhau từ các node khác[^cass-vnode-benefit].
+Chiến lược thứ ba giữ kích thước *mỗi* partition ổn định và để số partition tăng theo số node, thay vì cố định số partition (5.1) hay chỉ phụ thuộc kích thước dữ liệu (5.2). Hệ thống gần nhất trong nguồn đã tải là **Cassandra vnode**: mỗi node nhận `num_tokens` token, nên số vnode của cả cụm tăng theo số node (suy luận của người soạn). Khi dùng bộ cấp phát token tự động, tải gán cho node gần tỷ lệ với số vnode của nó[^cass-alloc]. Node mới nhận xấp xỉ bằng nhau từ các node khác[^cass-vnode-benefit].
 
 ### 5.4. Tự động hay thủ công?
 
-Dynamo cố ý *không* rebalance khi node chỉ tạm ngừng: một lần ngừng hiếm khi nghĩa là node rời hẳn, nên không nên kích hoạt rebalance hay sửa replica; việc thêm/bớt node trong vòng do quản trị viên ra lệnh tường minh, và thay đổi membership được lan bằng gossip[^dyn-explicit]. (Nhận xét của người soạn: rebalance tự động kết hợp phát hiện lỗi sai — vd. một node chậm bị tưởng là chết — có thể chuyển cả đống dữ liệu đúng lúc cụm đang chịu tải, làm sự cố trầm trọng hơn. Một người trong vòng quyết định hay ít nhất xác nhận là phương án an toàn hơn.)
+Dynamo cố ý *không* rebalance khi node chỉ tạm ngừng: một lần ngừng hiếm khi nghĩa là node rời hẳn, nên không nên kích hoạt rebalance hay sửa replica. Việc thêm bớt node trong vòng do quản trị viên ra lệnh tường minh, và thay đổi membership được lan bằng gossip[^dyn-explicit]. Lý do còn thấy rõ ở phía vận hành (nhận xét của người soạn): rebalance tự động kết hợp phát hiện lỗi sai, chẳng hạn một node chậm bị tưởng là chết, có thể chuyển cả đống dữ liệu đúng lúc cụm đang chịu tải và làm sự cố trầm trọng hơn. Để một người trong vòng quyết định, hay ít nhất xác nhận, là phương án an toàn hơn.
 
 <details><summary>Đi sâu: di chuyển một partition mà không dừng ghi</summary>
 
-- MongoDB range migration: nguồn nhận lệnh `moveRange`; trong khi di chuyển, thao tác trên range vẫn gửi tới shard nguồn và shard nguồn chịu trách nhiệm ghi[^mongo-migration-source]; đích yêu cầu tài liệu rồi nhận bản sao; sau tài liệu cuối, đích đồng bộ các thay đổi xảy ra trong lúc di chuyển[^mongo-migration-sync]. Đọc từ secondary trong lúc di chuyển có thể bỏ sót tài liệu nếu truy vấn chạy lâu[^mongo-secondary-miss].
-- Redis Cluster: khi cấu hình ổn định, một slot do một node phục vụ[^redis-stable]; node có thể trả `-MOVED` (slot thuộc node khác) và `-ASK` (slot đang di chuyển) và client phải xử lý cả hai[^redis-asks].
-- Bigtable tách tablet: tablet server commit việc tách bằng cách ghi thông tin tablet mới vào bảng METADATA rồi báo master; nếu thông báo mất, master phát hiện tablet đã tách khi yêu cầu tải tablet[^bt-split-commit].
-- Dynamo: node X vào vòng giữa A và B thì các node B, C, D đề nghị và chuyển khóa cho X khi X xác nhận; vòng xác nhận đó nhằm tránh chuyển trùng[^dyn-bootstrap].
+- MongoDB range migration: shard nguồn nhận lệnh `moveRange`. Trong khi di chuyển, thao tác trên range vẫn gửi tới shard nguồn và shard nguồn chịu trách nhiệm ghi[^mongo-migration-source]. Shard đích yêu cầu document rồi nhận bản sao; sau document cuối, đích đồng bộ các thay đổi xảy ra trong lúc di chuyển[^mongo-migration-sync]. Đọc từ secondary trong lúc di chuyển có thể bỏ sót document nếu truy vấn chạy lâu[^mongo-secondary-miss].
+- Redis Cluster: khi cấu hình ổn định, một slot do một node phục vụ[^redis-stable]. Node có thể trả `-MOVED` (slot thuộc node khác) hoặc `-ASK` (slot đang di chuyển), và client phải xử lý cả hai[^redis-asks].
+- Bigtable tách tablet: tablet server commit việc tách bằng cách ghi thông tin tablet mới vào bảng METADATA rồi báo master. Nếu thông báo mất, master phát hiện tablet đã tách khi yêu cầu tải tablet[^bt-split-commit].
+- Dynamo: node X vào vòng giữa A và B thì các node B, C, D đề nghị và chuyển khóa cho X khi X xác nhận. Vòng xác nhận đó nhằm tránh chuyển trùng[^dyn-bootstrap].
 
 </details>
 
-**Quay lại Q5:** đặt lớp partition giữa khóa và node rồi di chuyển *partition nguyên vẹn*; chọn số cố định (Dynamo, Redis, Kafka, ES), động theo kích thước (Bigtable, MongoDB), hoặc tỷ lệ số node (Cassandra vnode); tốc độ di chuyển nên bị chặn để không làm sập cụm (nhận xét của người soạn; Kafka có throttle, MongoDB giới hạn số migration song song — mục đầu 5).
+**Quay lại Q5:** đặt lớp partition giữa khóa và node rồi di chuyển *partition nguyên vẹn*; chọn số cố định (Dynamo, Redis, Kafka, ES), động theo kích thước (Bigtable, MongoDB), hoặc tỷ lệ số node (Cassandra vnode); tốc độ di chuyển nên bị chặn để không làm sập cụm (nhận xét của người soạn; Kafka có throttle, MongoDB giới hạn số migration song song, xem đầu mục 5).
 
 ## 6. Request routing: gửi tới đúng node (Q6)
 
-> **Trả lời ngắn.** Cần *bản đồ* "khóa → partition → node" và ai đó giữ nó. Ba kiểu: client gửi tới node bất kỳ rồi node đó chuyển tiếp hoặc chỉ đường; một tầng router riêng; hoặc client tự giữ bản đồ và gửi thẳng. Bản đồ được giữ ở một dịch vụ phối hợp (ZooKeeper, etcd, Chubby, config server) hoặc tự lan giữa các node bằng gossip. Bản đồ của client có thể cũ; hệ thống tốt nhận biết lỗi "sai node" và làm tươi bản đồ.
+> **Trả lời ngắn.** Cần một *bản đồ* "khóa → partition → node" và ai đó giữ nó. Có ba kiểu: client gửi tới node bất kỳ rồi node đó chuyển tiếp hoặc chỉ đường; một tầng router riêng; hoặc client tự giữ bản đồ và gửi thẳng. Bản đồ gốc nằm ở một dịch vụ phối hợp (ZooKeeper, etcd, Chubby, config server) hoặc tự lan giữa các node bằng gossip. Bản đồ ở client có thể cũ, nên hệ thống tốt phải nhận ra lỗi "sai node" và làm tươi bản đồ.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tổng đài chuyển cuộc gọi tới đúng chi nhánh. Bạn có thể gọi chi nhánh bất kỳ và nhờ họ chuyển máy, gọi một số tổng đài trung tâm, hoặc tự lưu danh bạ. Danh bạ thay đổi khi chi nhánh chuyển địa chỉ; phải có cách nhận ra danh bạ đã cũ.
+*Với `orders`.* Request `GET /orders/42` tới `orders-api`. Service tính được khóa, nhưng để gửi query đi nó còn phải biết đơn 42 nằm ở partition nào và partition đó hiện ở node nào. Partition lại di chuyển mỗi khi cụm rebalance (mục 5), nên bản đồ này không đứng yên. Hai câu hỏi của mục này: ai giữ bản đồ, và `orders-api` lấy câu trả lời từ đâu.
+
+### 6.1 Ba kiểu định tuyến
 
 ```mermaid
 flowchart TB
@@ -272,26 +325,30 @@ flowchart TB
 
 (Sơ đồ minh họa của người soạn cho ba kiểu định tuyến mô tả bên dưới.)
 
-*Kiểu 1 — node bất kỳ.* Cassandra: khi có mutation, coordinator băm partition key để xác định token range rồi sao chép mutation tới các replica theo replication strategy[^cass-coordinator]. Redis Cluster: client được tự do gửi truy vấn tới bất kỳ node nào; nếu node không phục vụ slot đó nó trả lỗi `-MOVED` kèm slot và địa chỉ node đúng[^redis-moved]; node *không* proxy yêu cầu mà chỉ chuyển hướng bằng `-MOVED`/`-ASK`[^redis-no-proxy]. Dynamo hỗ trợ client đi qua load balancer chung, rồi node nhận chuyển tiếp tới node đúng[^dyn-lb-or-client].
+*Kiểu 1: node bất kỳ.* Client chưa cần biết gì, cứ gửi tới một node và node đó lo phần còn lại. Ở Cassandra, khi có mutation, coordinator băm partition key để xác định token range rồi sao chép mutation tới các replica theo replication strategy[^cass-coordinator]. Redis Cluster thì để client tự do gửi truy vấn tới bất kỳ node nào; nếu node không phục vụ slot đó, nó trả lỗi `-MOVED` kèm slot và địa chỉ node đúng[^redis-moved]. Node *không* proxy yêu cầu mà chỉ chuyển hướng bằng `-MOVED` hoặc `-ASK`[^redis-no-proxy]. Dynamo hỗ trợ client đi qua một load balancer chung, rồi node nhận chuyển tiếp tới node đúng[^dyn-lb-or-client].
 
-*Kiểu 2 — router riêng.* MongoDB `mongos` là query router giữa ứng dụng và cụm; nó không có trạng thái bền vững, mà cache metadata lấy từ config server để biết dữ liệu nào ở shard nào[^mongo-mongos]; config server là một replica set lưu metadata và cấu hình cụm[^mongo-config]. Nếu có proxy/load balancer đặt trước mongos, phải bật client affinity để mọi kết nối của một client tới cùng một mongos[^mongo-affinity]. Elasticsearch có node điều phối: với search, nó chọn node chứa bản sao của dữ liệu và chuyển yêu cầu tới shard của node đó, mặc định bằng adaptive replica selection[^es-search-routing].
+*Kiểu 2: router riêng.* Giữa ứng dụng và cụm có một tầng chuyên định tuyến. MongoDB `mongos` là query router; nó không có trạng thái bền vững mà cache metadata lấy từ config server để biết dữ liệu nào ở shard nào[^mongo-mongos]. Config server là một replica set lưu metadata và cấu hình cụm[^mongo-config]. Nếu đặt proxy hay load balancer trước mongos, phải bật client affinity để mọi kết nối của một client tới cùng một mongos[^mongo-affinity]. Elasticsearch có node điều phối: với search, nó chọn node chứa bản sao của dữ liệu rồi chuyển yêu cầu tới shard của node đó, mặc định bằng adaptive replica selection[^es-search-routing].
 
-*Kiểu 3 — client giữ bản đồ.* Kafka: producer gửi thẳng tới broker là leader của partition, không qua tầng định tuyến trung gian; mọi broker có thể trả lời metadata request cho biết broker nào sống và leader của từng partition ở đâu[^kafka-direct]. Client bootstrap bằng một danh sách hai ba URL broker[^kafka-bootstrap-list], lấy metadata rồi cache cho đến khi nhận lỗi báo metadata cũ (lỗi socket, hoặc mã lỗi cho biết broker không còn giữ partition)[^kafka-bootstrap]. Dynamo hỗ trợ cả "thư viện client nhận biết partition" — định tuyến thẳng tới coordinator, độ trễ thấp hơn vì bỏ một bước chuyển tiếp[^dyn-client-lib]; client định kỳ (10 giây trong paper) hỏi một node ngẫu nhiên để tải về trạng thái membership, và paper chọn kéo thay vì đẩy vì kéo scale tốt hơn với số client lớn[^dyn-client-poll]. Bigtable: client dùng cache vị trí tablet; cache rỗng cần ba round-trip (gồm một lần đọc Chubby), cache cũ có thể tới sáu round-trip vì chỉ phát hiện cũ khi trượt[^bt-location-cache].
+*Kiểu 3: client giữ bản đồ.* Đây là kiểu gửi thẳng, ít bước nhất. Ở Kafka, producer gửi thẳng tới broker là leader của partition, không qua tầng định tuyến trung gian, và mọi broker đều trả lời được metadata request cho biết broker nào đang sống và leader của từng partition ở đâu[^kafka-direct]. Client bootstrap bằng danh sách hai ba URL broker[^kafka-bootstrap-list]. Sau đó nó lấy metadata và cache cho tới khi gặp lỗi báo metadata cũ, tức lỗi socket hoặc mã lỗi cho biết broker không còn giữ partition[^kafka-bootstrap]. Dynamo hỗ trợ cả "thư viện client nhận biết partition", định tuyến thẳng tới coordinator với độ trễ thấp hơn vì bỏ một bước chuyển tiếp[^dyn-client-lib]. Client đó định kỳ (10 giây trong paper) hỏi một node ngẫu nhiên để tải trạng thái membership, và paper chọn kéo thay vì đẩy vì kéo scale tốt hơn với số client lớn[^dyn-client-poll]. Bigtable cũng cho client cache vị trí tablet: cache rỗng cần ba round-trip, gồm một lần đọc Chubby, còn cache cũ có thể tới sáu round-trip vì chỉ phát hiện cũ khi trượt[^bt-location-cache].
 
-*Ai giữ bản đồ (sự thật gốc)?*
+### 6.2 Ai giữ bản đồ gốc
 
-- **Dịch vụ phối hợp (ưu tiên nhất quán).** Bigtable: file Chubby chứa vị trí root tablet, root tablet trỏ tới các tablet METADATA, các tablet này trỏ tới tablet của người dùng — ba tầng giống B+ tree[^bt-3level][^bt-root]; Bigtable cũng dùng Chubby để theo dõi tablet server[^bt-chubby]; Chubby dùng thuật toán Paxos để giữ các bản sao nhất quán khi có lỗi[^bt-paxos]. ZooKeeper tự mô tả là dịch vụ phối hợp cho ứng dụng phân tán, cung cấp primitive để cài đặt đồng bộ, duy trì cấu hình, nhóm và đặt tên[^zk-overview]; client có thể đặt *watch* lên znode để được báo khi nó đổi[^zk-watch], và cập nhật từ một client được áp theo đúng thứ tự gửi[^zk-seq]. Kafka 3.7.0 với cụm dùng ZooKeeper nhận biết broker chết qua node ephemeral của phiên ZooKeeper, controller phát hiện node bị xóa qua ZooKeeper watch[^kafka-zk-watch]; với cụm KRaft thì phiên được duy trì bằng heartbeat gửi tới controller[^kafka-kraft-hb]. etcd được mô tả là kho key-value nhất quán cho quản lý cấu hình, service discovery và điều phối công việc phân tán[^etcd-use]; nó dành cho hệ không chấp nhận split-brain và chịu hy sinh availability để đạt điều đó[^etcd-cap]. Cơ chế đồng thuận bên dưới ở [Chương 09](09-consistency-va-consensus.md).
-- **Gossip.** Dynamo: thay đổi membership được lan bằng giao thức gossip để duy trì một view membership *eventually consistent*; mỗi giây mỗi node liên lạc một peer ngẫu nhiên và hai bên đối chiếu lịch sử thay đổi[^dyn-gossip]. Thông tin token cũng lan theo đường gossip nên mỗi node biết peer giữ khoảng token nào và chuyển tiếp trực tiếp được[^dyn-gossip-token]; đó là lý do paper gọi Dynamo là "DHT zero-hop" — mỗi node giữ đủ thông tin định tuyến cục bộ để gửi thẳng tới node đúng[^dyn-zero-hop]. Cassandra: gossip lan thông tin token và schema, "dạy" các node biết endpoint nào sở hữu dữ liệu nào[^cass-gossip-token]. Redis Cluster: các node nối với nhau bằng cluster bus và dùng gossip để phát hiện node mới và kiểm tra sức sống[^redis-gossip].
-- Cái giá của gossip toàn phần: Dynamo thừa nhận mô hình "mỗi node biết dữ liệu của mọi peer" chạy tốt với vài trăm node nhưng khó scale lên hàng chục nghìn, vì chi phí duy trì bảng định tuyến tăng theo kích thước hệ thống[^dyn-full-membership]. (Nhận xét của người soạn: chọn coordination service hay gossip chính là chọn *nhất quán* hay *luôn sẵn sàng* cho metadata — liên quan [Chương 09](09-consistency-va-consensus.md).)
+*Dịch vụ phối hợp (ưu tiên nhất quán).* Bigtable giữ vị trí tablet trong ba tầng giống B+ tree[^bt-3level]. Tầng đầu là một file Chubby chứa vị trí root tablet; root tablet trỏ tới các tablet METADATA, và các tablet này trỏ tới tablet của người dùng[^bt-root]. Bigtable cũng dùng Chubby để theo dõi tablet server[^bt-chubby]. Chubby dùng thuật toán Paxos để giữ các bản sao nhất quán khi có lỗi[^bt-paxos]. ZooKeeper tự mô tả là dịch vụ phối hợp cho ứng dụng phân tán, cung cấp primitive để cài đặt đồng bộ, duy trì cấu hình, nhóm và đặt tên[^zk-overview]. Client có thể đặt *watch* lên znode để được báo khi nó đổi[^zk-watch]. Cập nhật từ một client được áp theo đúng thứ tự gửi[^zk-seq]. Kafka 3.7.0 với cụm dùng ZooKeeper nhận biết broker chết qua node ephemeral của phiên ZooKeeper, và controller phát hiện node bị xóa qua ZooKeeper watch[^kafka-zk-watch]. Với cụm KRaft, phiên được duy trì bằng heartbeat gửi tới controller[^kafka-kraft-hb]. etcd được mô tả là kho key-value nhất quán cho quản lý cấu hình, service discovery và điều phối công việc phân tán[^etcd-use]. Nó dành cho hệ không chấp nhận split-brain và chịu hy sinh availability để đạt điều đó[^etcd-cap]. Cơ chế đồng thuận bên dưới ở [Chương 09](09-consistency-va-consensus.md).
 
-*Bản đồ cũ thì sao?* Không hệ thống nào đòi client luôn đúng; chúng *phát hiện sai và sửa*: Redis trả `-MOVED` mỗi khi slot thuộc node khác, kể cả khi client đợi lâu rồi gửi lại sau khi cấu hình đổi[^redis-moved-again]; khi gặp redirect, nhiều khả năng nhiều slot đã đổi nên cách tốt thường là làm tươi cả bản đồ[^redis-refresh]; cluster ổn định thì cuối cùng mọi client có bản đồ và gửi thẳng không cần redirect hay proxy[^redis-stable-map]. Kafka cũng dùng mã lỗi và metadata mới[^kafka-bootstrap].
+*Gossip (ưu tiên luôn sẵn sàng).* Không có node trung tâm; các node tự kể cho nhau nghe. Ở Dynamo, thay đổi membership được lan bằng giao thức gossip để duy trì một view membership *eventually consistent*; mỗi giây mỗi node liên lạc một peer ngẫu nhiên và hai bên đối chiếu lịch sử thay đổi[^dyn-gossip]. Thông tin token cũng lan theo đường gossip, nên mỗi node biết peer giữ khoảng token nào và chuyển tiếp trực tiếp được[^dyn-gossip-token]. Đó là lý do paper gọi Dynamo là "DHT zero-hop": mỗi node giữ đủ thông tin định tuyến cục bộ để gửi thẳng tới node đúng[^dyn-zero-hop]. Cassandra cũng dùng gossip để lan thông tin token và schema, "dạy" các node biết endpoint nào sở hữu dữ liệu nào[^cass-gossip-token]. Redis Cluster nối các node với nhau bằng cluster bus và dùng gossip để phát hiện node mới và kiểm tra sức sống[^redis-gossip].
+
+Gossip toàn phần có giá. Dynamo thừa nhận mô hình "mỗi node biết dữ liệu của mọi peer" chạy tốt với vài trăm node nhưng khó scale lên hàng chục nghìn, vì chi phí duy trì bảng định tuyến tăng theo kích thước hệ thống[^dyn-full-membership]. Chọn coordination service hay gossip thực chất là chọn *nhất quán* hay *luôn sẵn sàng* cho metadata (nhận xét của người soạn; xem thêm [Chương 09](09-consistency-va-consensus.md)).
+
+### 6.3 Bản đồ cũ thì sao?
+
+Không hệ thống nào đòi client luôn đúng. Chúng *phát hiện sai và sửa*. Redis trả `-MOVED` mỗi khi slot thuộc node khác, kể cả khi client đợi lâu rồi gửi lại sau khi cấu hình đổi[^redis-moved-again]. Khi gặp redirect, nhiều khả năng nhiều slot đã đổi, nên cách tốt thường là làm tươi cả bản đồ chứ không chỉ một slot[^redis-refresh]. Cụm ổn định thì cuối cùng mọi client có bản đồ và gửi thẳng, không cần redirect hay proxy[^redis-stable-map]. Kafka cũng dùng mã lỗi rồi lấy metadata mới[^kafka-bootstrap]. Với `orders-api`, hệ quả là: đừng coi một lần định tuyến sai là lỗi nghiệp vụ, mà hãy xử lý như tín hiệu làm tươi bản đồ rồi gửi lại (nhận xét của người soạn).
 
 <details><summary>Đi sâu: partition quyết định ai ghi — và vì sao bản đồ sai nguy hiểm hơn "chậm"</summary>
 
-- Kafka: các request ghi/đọc phải gửi tới broker đang là leader; broker kiểm tra điều này và trả lỗi `NotLeaderForPartition` nếu gửi sai[^kafka-leader-enforced]. Tức là *sự thật* về ai là leader được broker bảo vệ, bản đồ ở client chỉ là gợi ý (nhận xét của người soạn).
-- Kafka cũng nói rõ rằng *client* quyết định ánh xạ khóa → partition; broker không áp đặt ngữ nghĩa nào; hai client muốn dùng cùng cách chia phải dùng cùng phương pháp tính ánh xạ[^kafka-client-controls]. Đây là chỗ mục 8 (Rust) quan trọng: producer Rust và producer Java phải dùng cùng hàm băm.
-- Bigtable master không phải đường dữ liệu: client nói chuyện trực tiếp với tablet server, nên hầu hết client không bao giờ liên lạc master và master ít tải[^bt-master-light].
-- Ở Cassandra, vì mỗi node đều biết token map qua gossip, bất kỳ node nào cũng làm được coordinator (nhận xét của người soạn từ [^cass-coordinator] và [^cass-gossip-token]).
+- Kafka: các request ghi/đọc phải gửi tới broker đang là leader; broker kiểm tra điều này và trả lỗi `NotLeaderForPartition` nếu gửi sai[^kafka-leader-enforced]. Tức là *sự thật* về ai là leader do broker bảo vệ, còn bản đồ ở client chỉ là gợi ý (nhận xét của người soạn).
+- Kafka cũng nói rõ rằng *client* quyết định ánh xạ khóa → partition, broker không áp đặt ngữ nghĩa nào. Hai client muốn dùng cùng cách chia phải dùng cùng phương pháp tính ánh xạ[^kafka-client-controls]. Đây là chỗ mục 8 (Rust) quan trọng: producer Rust và producer Java phải dùng cùng hàm băm.
+- Bigtable master không nằm trên đường dữ liệu: client nói chuyện trực tiếp với tablet server, nên hầu hết client không bao giờ liên lạc master và master ít tải[^bt-master-light].
+- Ở Cassandra, vì mỗi node đều biết token map qua gossip, bất kỳ node nào cũng làm được coordinator (nhận xét của người soạn, suy ra từ hai mô tả ở mục 6.1 và 6.2).
 
 </details>
 
@@ -299,25 +356,41 @@ flowchart TB
 
 ## 7. Giá phải trả của việc chia dữ liệu (Q7)
 
-> **Trả lời ngắn.** Chia dữ liệu cho phép scale-out, nhưng mọi thứ từng "miễn phí" trong một node đều thành bài toán phân tán: truy vấn không kèm khóa phải hỏi mọi partition; ràng buộc unique chỉ rẻ khi khóa unique chứa khóa chia; thứ tự (như ở Kafka) chỉ được bảo đảm trong một partition; giao dịch qua nhiều partition cần cơ chế riêng. Vì vậy chọn khóa chia là quyết định thiết kế chính.
+> **Trả lời ngắn.** Chia dữ liệu cho phép scale-out, nhưng mọi thứ từng "miễn phí" trong một node đều thành bài toán phân tán. Truy vấn không kèm khóa phải hỏi mọi partition; ràng buộc unique chỉ rẻ khi khóa unique chứa khóa chia; thứ tự (như ở Kafka) chỉ được bảo đảm trong một partition; giao dịch qua nhiều partition cần cơ chế riêng. Vì vậy chọn khóa chia là quyết định thiết kế chính.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một cuốn sổ cái chia thành 10 quyển cho 10 kế toán. Mỗi kế toán làm nhanh phần của mình, nhưng "tổng toàn công ty" và "chuyển tiền từ quyển 3 sang quyển 8 mà không ai thấy trạng thái dở dang" đòi hỏi họp và quy trình.
+*Với `orders`.* Khi kho còn một node, `orders-api` làm gì cũng được: join, `COUNT(*)`, chuyển tiền giữa hai đơn trong một transaction. Sau khi chia, mỗi thao tác đó đều phải hỏi "dữ liệu cần dùng có nằm cùng một partition không?". Các mục dưới đi qua từng chi phí và quay lại với bốn truy vấn của `orders`.
 
-- **Truy vấn không kèm khóa chia.** MongoDB: truy vấn nhanh nhất thường là truy vấn mongos định tuyến tới một shard nhờ shard key và metadata từ config server (targeted)[^mongo-targeted]; truy vấn không có shard key phải hỏi mọi shard và chờ phản hồi — loại truy vấn có thể chạy lâu, tùy tải cụm, độ trễ mạng, tải từng shard và số tài liệu mỗi shard trả về[^mongo-broadcast]. `updateMany` và `deleteMany` là broadcast trừ khi truy vấn chỉ định đủ shard key[^mongo-multi]. Elasticsearch: phân trang sâu buộc mỗi shard nạp hit của các trang trước[^es-deep-page].
-- **Thao tác nhiều khóa.** Redis Cluster hiện thực các lệnh nhiều khóa phức tạp (hợp/giao tập) chỉ khi mọi khóa băm vào cùng một slot[^redis-multikey]; *hash tag* `{...}` ép nhiều khóa vào cùng slot — chỉ phần giữa cặp ngoặc đầu tiên được băm[^redis-hashtag]; nhưng khi resharding thủ công, thao tác nhiều khóa có thể tạm thời không dùng được trong khi thao tác một khóa vẫn luôn sẵn sàng[^redis-reshard-multikey]. (Nhận xét của người soạn: hash tag là cách chủ động *đồng-nơi* dữ liệu, đổi lấy nguy cơ hot spot — mọi khóa cùng tag nằm một slot.)
-- **Thứ tự.** Kafka chia topic thành các partition có thứ tự toàn phần, mỗi partition được đúng một consumer trong mỗi consumer group đọc tại một thời điểm[^kafka-order2]; sự kiện cùng khóa được ghi vào cùng partition[^kafka-order]. Vậy thứ tự *giữa các partition* không có bảo đảm trong nguồn này; muốn thứ tự theo thực thể phải chọn khóa là thực thể đó (suy luận của người soạn).
-- **Atomic trong một partition.** Cassandra: chọn khóa chính nhóm các hàng giúp batch update và có thể bảo đảm các cập nhật atomic và cô lập[^cass-atomic] — phạm vi là *một partition*. Giao dịch xuyên partition là chủ đề của [Chương 07](07-transaction.md).
-- **Unique và index.** Xem mục 4: unique chỉ rẻ khi khóa unique chứa khóa chia[^pg-unique][^mongo-unique-prefix].
-- **Chọn khóa chia cũng chọn truy vấn nào rẻ.** PostgreSQL: cột partition nên là cột hay xuất hiện nhất trong `WHERE` vì mệnh đề tương thích với cận partition mới cắt được partition thừa; nhưng yêu cầu PRIMARY KEY/UNIQUE và nhu cầu xóa dữ liệu cũ cũng ảnh hưởng quyết định[^pg-choose].
-- **Đổi hàm băm hoặc khóa chia thường kéo theo di chuyển dữ liệu.** Cassandra: *partitioner* (hàm băm gán partition key vào vòng) không thể đổi nếu không nạp lại toàn bộ dữ liệu[^cass-partitioner-fixed]; mặc định là Murmur3Partitioner[^cass-murmur3]. MongoDB cho phép *sửa giá trị* shard key của tài liệu (trừ `_id` bất biến)[^mongo-update-key]; từ MongoDB 5.0 còn đổi được chính shard key và phân phối lại dữ liệu bằng `reshardCollection`[^mongo-reshard] — tức việc phân phối lại vẫn xảy ra, chỉ khác là hệ thống làm giúp (suy luận của người soạn).
+### 7.1 Truy vấn không kèm khóa chia
 
-*Khi nào chưa nên chia.* Vì cả chuỗi chi phí trên, quyết định "có cần chia không" nên đến sau khi tìm hiểu một node lớn, replication để đọc, partition *trong* một server (PostgreSQL, mục 0) — xem [Chương 13](13-kien-truc-he-du-lieu.md) (nhận xét của người soạn).
+Truy vấn nhanh nhất ở MongoDB thường là truy vấn mà mongos định tuyến được tới một shard nhờ shard key và metadata từ config server (targeted)[^mongo-targeted]. Truy vấn không có shard key phải hỏi mọi shard và chờ phản hồi. Loại này có thể chạy lâu, tùy tải cụm, độ trễ mạng, tải từng shard và số document mỗi shard trả về[^mongo-broadcast]. `updateMany` và `deleteMany` là broadcast trừ khi truy vấn chỉ định đủ shard key[^mongo-multi]. Elasticsearch gặp chuyện tương tự ở phân trang sâu, vì mỗi shard phải nạp hit của các trang trước[^es-deep-page]. Với `orders` chia theo `customer_id`, "đơn của khách C" là targeted, còn báo cáo theo ngày toàn sàn là broadcast (nhận xét của người soạn).
+
+### 7.2 Thao tác nhiều khóa
+
+Redis Cluster hiện thực các lệnh nhiều khóa phức tạp, như hợp và giao tập, chỉ khi mọi khóa băm vào cùng một slot[^redis-multikey]. *Hash tag* `{...}` ép nhiều khóa vào cùng slot: chỉ phần giữa cặp ngoặc đầu tiên được băm[^redis-hashtag]. Dù vậy, khi resharding thủ công, thao tác nhiều khóa có thể tạm thời không dùng được trong khi thao tác một khóa vẫn luôn sẵn sàng[^redis-reshard-multikey]. Hash tag là cách chủ động *đồng-nơi* dữ liệu, đổi lấy nguy cơ hot spot vì mọi khóa cùng tag nằm một slot (nhận xét của người soạn).
+
+### 7.3 Thứ tự và atomic
+
+Kafka chia topic thành các partition có thứ tự toàn phần, và mỗi partition chỉ được đúng một consumer trong mỗi consumer group đọc tại một thời điểm[^kafka-order2]. Các sự kiện cùng khóa được ghi vào cùng partition[^kafka-order]. Nguồn này không bảo đảm thứ tự *giữa các partition*. Vì vậy muốn thứ tự theo thực thể, chẳng hạn mọi sự kiện của một đơn hàng, phải chọn khóa chính là thực thể đó (suy luận của người soạn).
+
+Cassandra nói cùng ý cho atomic: chọn khóa chính nhóm các hàng giúp batch update và có thể bảo đảm các cập nhật atomic và cô lập[^cass-atomic]. Phạm vi của bảo đảm đó là *một partition*. Giao dịch xuyên partition là chủ đề của [Chương 07](07-transaction.md).
+
+### 7.4 Unique, index, và việc chọn khóa
+
+Ràng buộc unique chỉ rẻ khi khóa unique chứa khóa chia (xem mục 4): PostgreSQL đòi vậy[^pg-unique]. MongoDB đòi shard key là tiền tố của unique index[^mongo-unique-prefix].
+
+Chọn khóa chia cũng là chọn truy vấn nào rẻ. PostgreSQL khuyên cột partition nên là cột hay xuất hiện nhất trong `WHERE`, vì chỉ mệnh đề tương thích với cận partition mới cắt được partition thừa. Yêu cầu PRIMARY KEY/UNIQUE và nhu cầu xóa dữ liệu cũ cũng ảnh hưởng quyết định[^pg-choose].
+
+### 7.5 Đổi hàm băm hoặc khóa chia
+
+Đổi hàm băm hay khóa chia thường kéo theo di chuyển dữ liệu. Ở Cassandra, *partitioner*, tức hàm băm gán partition key vào vòng, không thể đổi nếu không nạp lại toàn bộ dữ liệu[^cass-partitioner-fixed]. Mặc định là Murmur3Partitioner[^cass-murmur3]. MongoDB cho phép *sửa giá trị* shard key của document, trừ `_id` bất biến[^mongo-update-key]. Từ MongoDB 5.0 còn đổi được chính shard key và phân phối lại dữ liệu bằng `reshardCollection`[^mongo-reshard]. Việc phân phối lại vẫn xảy ra, chỉ khác là hệ thống làm giúp (suy luận của người soạn).
+
+Vì cả chuỗi chi phí này, quyết định "có cần chia không" nên đến sau khi đã thử một node lớn hơn, replication để đọc, và partition *trong* một server (PostgreSQL, mục 0); xem [Chương 13](13-kien-truc-he-du-lieu.md) (nhận xét của người soạn).
 
 <details><summary>Đi sâu: vì sao "shard theo tenant" thường là điểm bắt đầu hợp lý</summary>
 
-- (Suy luận của người soạn từ các điểm trên.) Nếu truy vấn nghiệp vụ gần như luôn nằm trong một tenant/khách hàng/tổ chức, chọn tenant làm khóa chia làm hầu hết truy vấn thành *targeted*, unique theo tenant dễ giữ trong một partition, giao dịch thường nằm gọn một partition. Cái giá là tenant lớn thành hot spot (mục 2) và tenant quá lớn thành partition không chia được nếu khóa chỉ là tenant — nên thường cần khóa ghép hoặc tách riêng tenant lớn.
+- (Suy luận của người soạn từ các điểm trên.) Nếu truy vấn nghiệp vụ gần như luôn nằm trong một tenant, khách hàng hay tổ chức, thì chọn tenant làm khóa chia biến hầu hết truy vấn thành *targeted*, unique theo tenant dễ giữ trong một partition, và giao dịch thường nằm gọn một partition. Cái giá là tenant lớn thành hot spot (mục 2), và tenant quá lớn thành partition không chia được nếu khóa chỉ là tenant. Vì thế thường cần khóa ghép hoặc tách riêng tenant lớn. Với `orders`, tenant chính là `seller_id`, nên seller lớn ở mục 2 là đúng ví dụ này.
 - DynamoDB nói về cách phân tán khóa: khóa phân vùng quyết định các partition logic nơi dữ liệu bảng được lưu, từ đó ảnh hưởng partition vật lý bên dưới[^ddb-pk].
 
 </details>
@@ -326,19 +399,21 @@ Hình dung (nhận xét của người soạn): một cuốn sổ cái chia thà
 
 ## Liên hệ với Rust (mục 8, Q8)
 
-> **Trả lời ngắn.** Đừng dùng `std::hash::Hash` + `DefaultHasher`/`RandomState` để chọn shard hoặc partition: docs std nói dữ liệu `Hash` đưa cho `Hasher` không portable giữa nền tảng và không ổn định giữa phiên bản compiler, còn `RandomState` cho kết quả khác nhau giữa các instance (seed ngẫu nhiên, xem [P10 · Chương 09, mục 5](../10-rust-internals/09-collections-internals.md)). Hãy mã hóa khóa thành *chuỗi byte do bạn định nghĩa* rồi băm bằng thuật toán có đặc tả và kết quả ổn định (xxHash, MurmurHash3, SipHash với khóa cố định, CRC16…), và khi nói chuyện với hệ thống khác (Kafka, Redis) phải dùng đúng hàm của hệ đó.
+> **Trả lời ngắn.** Đừng dùng `std::hash::Hash` cùng `DefaultHasher`/`RandomState` để chọn shard hay partition. Docs std nói dữ liệu `Hash` đưa cho `Hasher` không portable giữa nền tảng và không ổn định giữa phiên bản compiler, còn `RandomState` cho kết quả khác nhau giữa các instance (seed ngẫu nhiên, xem [P10 · Chương 09, mục 5](../10-rust-internals/09-collections-internals.md)). Hãy mã hóa khóa thành *chuỗi byte do bạn định nghĩa* rồi băm bằng thuật toán có đặc tả và kết quả ổn định (xxHash, MurmurHash3, SipHash với khóa cố định, CRC16…). Khi nói chuyện với hệ thống khác (Kafka, Redis) phải dùng đúng hàm của hệ đó.
+
+*Với `orders-api`.* Service Rust phải tự tính `partition_of(customer_id)` mỗi khi nhận request, rồi dùng kết quả để chọn connection pool, hoặc để gắn khóa khi ghi lên Kafka. Hàm đó chạy trong nhiều instance và qua nhiều lần deploy, nên mọi instance phải cho cùng một đáp án với cùng một khóa. Điều kiện này loại hầu hết hàm băm "tiện tay" của Rust, như mục 8.1 giải thích.
 
 ### 8.1. Vì sao `Hash` của std không dùng được để chia shard
 
-Dữ liệu một giá trị đưa vào `Hasher` qua `Hash` không được coi là portable giữa các nền tảng (do endianness và kích thước kiểu) và với hầu hết kiểu của thư viện chuẩn thì cũng không được coi là ổn định giữa các phiên bản compiler[^std-hash-portable]. Docs khuyên test không nên so với giá trị băm cứng[^std-hash-hardcoded], và định dạng tuần tự hóa muốn portable thì tránh mã hóa hash, hoặc chỉ dựa vào các cài đặt `Hash`/`Hasher` có thêm bảo đảm[^std-hash-tests]. Trait `Hasher` không bảo đảm các hàm `write_*` được định nghĩa thế nào: không thể giả định `write_u32` tương đương bốn lần `write_u8`[^std-hasher-write].
+Dữ liệu một giá trị đưa vào `Hasher` qua `Hash` không được coi là portable giữa các nền tảng, do endianness và kích thước kiểu. Với hầu hết kiểu của thư viện chuẩn, nó cũng không được coi là ổn định giữa các phiên bản compiler[^std-hash-portable]. Docs khuyên test không nên so với giá trị băm cứng[^std-hash-hardcoded]. Định dạng tuần tự hóa muốn portable thì tránh mã hóa hash, hoặc chỉ dựa vào các cài đặt `Hash`/`Hasher` có thêm bảo đảm[^std-hash-tests]. Trait `Hasher` cũng không bảo đảm các hàm `write_*` được định nghĩa thế nào: không thể giả định `write_u32` tương đương bốn lần `write_u8`[^std-hasher-write].
 
-`HashMap` mặc định dùng `RandomState`: một instance tạo các hasher giống nhau, nhưng hasher của hai instance khác nhau khó có khả năng cho cùng kết quả với cùng giá trị[^std-randomstate]. `DefaultHasher::new`/`default` giống nhau với nhau nhưng không bảo đảm giống mọi `DefaultHasher` khác[^std-defaulthasher]. Lý do SipHash có seed ngẫu nhiên (chống HashDoS) đã nói ở [P10 · Chương 09, mục 5](../10-rust-internals/09-collections-internals.md); *chính* thuộc tính đó khiến nó vô dụng cho sharding, vì hai tiến trình (hoặc một tiến trình sau khi khởi động lại) sẽ đặt cùng khóa vào hai shard khác nhau (suy luận của người soạn từ docs trên).
+`HashMap` mặc định dùng `RandomState`. Một instance tạo ra các hasher giống nhau, nhưng hasher của hai instance khác nhau khó có khả năng cho cùng kết quả với cùng giá trị[^std-randomstate]. `DefaultHasher::new` và `default` giống nhau với nhau nhưng không bảo đảm giống mọi `DefaultHasher` khác[^std-defaulthasher]. SipHash có seed ngẫu nhiên là để chống HashDoS, lý do đã nói ở [P10 · Chương 09, mục 5](../10-rust-internals/09-collections-internals.md). Nhưng *chính* thuộc tính đó khiến nó vô dụng cho sharding: hai tiến trình, hoặc một tiến trình sau khi khởi động lại, sẽ đặt cùng khóa vào hai shard khác nhau (suy luận của người soạn từ docs trên).
 
 ### 8.2. Quy trình đúng: mã hóa khóa → băm có đặc tả → ánh xạ vào partition
 
-1. **Mã hóa khóa bằng byte do bạn kiểm soát.** Ví dụ `u64` thì `to_be_bytes()` (độ rộng và thứ tự byte cố định), chuỗi thì UTF-8; *đừng* `#[derive(Hash)]` rồi tin kết quả (nhận xét của người soạn từ 8.1). Crate `twox-hash` nói thẳng: các thuật toán xxHash cho kết quả nhất quán với đầu vào nhất quán và không phụ thuộc nền tảng (32/64-bit, little/big-endian giống nhau)[^twox-portable]; nhưng trait `Hash` không bảo đảm đưa dữ liệu vào `Hasher` theo kiểu độc lập nền tảng — chẳng hạn `Vec<T>`/`&[T]` hay `BTreeMap` băm độ dài theo cách phụ thuộc nền tảng, cho kết quả khác nhau giữa hệ 32 và 64-bit[^twox-hash-trait].
-2. **Chọn hàm băm có đặc tả.** `siphasher` 1.0.4 cài SipHash-2-4 và SipHash-1-3 và cho phép đặt khóa 16 byte tường minh qua `new_with_key`[^siphasher-key]; crate cảnh báo các phương thức của trait `Hasher` chuẩn cho kết quả không portable, và chỉ `write()` và `finish()` là an toàn[^siphasher-note]. `murmur3` 0.5.2 là bản Rust thuần của MurmurHash3, cung cấp biến thể 32 bit và 128 bit đọc từ một `Read`[^murmur3-crate]. `twox-hash` 2.1.5 có `XxHash64::oneshot(seed, bytes)`[^twox-oneshot].
-3. **Ánh xạ hash → partition.** `hash % n_partitions` cho *số partition cố định* (mục 5.1); nếu `n_partitions` có thể đổi thì dùng lớp partition trung gian hoặc consistent hashing (mục 3), đừng `% số_node`.
+1. **Mã hóa khóa bằng byte do bạn kiểm soát.** Với `u64` thì dùng `to_be_bytes()` (độ rộng và thứ tự byte cố định), với chuỗi thì UTF-8. Đừng `#[derive(Hash)]` rồi tin kết quả (nhận xét của người soạn, từ 8.1). Crate `twox-hash` nói thẳng: các thuật toán xxHash cho kết quả nhất quán với đầu vào nhất quán và không phụ thuộc nền tảng (32/64-bit, little/big-endian giống nhau)[^twox-portable]. Nhưng trait `Hash` không bảo đảm đưa dữ liệu vào `Hasher` theo kiểu độc lập nền tảng: chẳng hạn `Vec<T>`, `&[T]` hay `BTreeMap` băm độ dài theo cách phụ thuộc nền tảng, nên cho kết quả khác nhau giữa hệ 32 và 64-bit[^twox-hash-trait].
+2. **Chọn hàm băm có đặc tả.** `siphasher` 1.0.4 cài SipHash-2-4 và SipHash-1-3, và cho đặt khóa 16 byte tường minh qua `new_with_key`[^siphasher-key]. Crate cảnh báo các phương thức của trait `Hasher` chuẩn cho kết quả không portable, và chỉ `write()` và `finish()` là an toàn[^siphasher-note]. `murmur3` 0.5.2 là bản Rust thuần của MurmurHash3, cung cấp biến thể 32 bit và 128 bit đọc từ một `Read`[^murmur3-crate]. `twox-hash` 2.1.5 có `XxHash64::oneshot(seed, bytes)`[^twox-oneshot].
+3. **Ánh xạ hash → partition.** `hash % n_partitions` dùng cho *số partition cố định* (mục 5.1). Nếu `n_partitions` có thể đổi thì dùng lớp partition trung gian hoặc consistent hashing (mục 3), đừng `% số_node`.
 
 ```rust
 // Minh họa, không biên dịch ở đây; cần bật feature `xxhash64` của twox-hash 2.1.5.
@@ -348,24 +423,28 @@ use twox_hash::XxHash64;
 const N_PARTITIONS: u64 = 1024;
 const SEED: u64 = 0;
 
-fn partition_of(tenant_id: u64) -> u32 {
+fn partition_of(customer_id: u64) -> u32 {
     // Mã hóa tường minh: 8 byte big-endian, không phụ thuộc nền tảng.
-    let h = XxHash64::oneshot(SEED, &tenant_id.to_be_bytes());
+    let h = XxHash64::oneshot(SEED, &customer_id.to_be_bytes());
     (h % N_PARTITIONS) as u32
 }
 ```
 
-Hợp đồng dữ liệu (nhận xét của người soạn): `SEED`, hàm băm, cách mã hóa khóa, và `N_PARTITIONS` đều là một phần *định dạng lưu trữ*. Đổi bất kỳ thứ nào là di chuyển dữ liệu; nên viết test với vài cặp (khóa → partition) cố định để bắt thay đổi vô ý khi nâng cấp crate (docs std khuyên *không* làm vậy với `Hash` của std vì nó không ổn định[^std-hash-hardcoded], nhưng với thuật toán có đặc tả như trên thì test vector là hợp lý).
+`SEED`, hàm băm, cách mã hóa khóa và `N_PARTITIONS` hợp thành một "hợp đồng dữ liệu" (nhận xét của người soạn): cả bốn đều là một phần *định dạng lưu trữ*, và đổi bất kỳ thứ nào là di chuyển dữ liệu. Nên viết test với vài cặp (khóa → partition) cố định để bắt thay đổi vô ý khi nâng cấp crate. Docs std khuyên *không* làm vậy với `Hash` của std vì nó không ổn định[^std-hash-hardcoded], nhưng với thuật toán có đặc tả như trên thì test vector là hợp lý.
 
 ### 8.3. Khi phải khớp với hệ khác
 
-- **Kafka.** Kafka protocol: client điều khiển phép gán khóa → partition và broker không áp ngữ nghĩa nào; hai client muốn dùng chung cách chia phải dùng cùng phương pháp tính ánh xạ[^kafka-client-controls]. Java producer dùng `murmur2` trên byte của khóa đã tuần tự hóa[^kafka-bip]. Crate `rdkafka` 0.39.0 là client Rust dựa trên librdkafka[^rdkafka-crate]; nó phụ thuộc `rdkafka-sys` 4.10.0[^rdkafka-sys-dep], và changelog của `rdkafka-sys` ghi bản 4.10.0+2.12.1 nâng librdkafka lên v2.12.1[^rdkafka-sys-ver]. Mặc định `rdkafka-sys` build và liên kết tĩnh bản librdkafka đi kèm[^rdkafka-sys-readme]; với feature `dynamic-linking` thì bản cài trong hệ thống phải khớp đúng bản đi kèm[^rdkafka-sys-dyn]. (Nhận xét của người soạn: ràng buộc `4.10.0` là semver, nên bản `rdkafka-sys` cụ thể — và librdkafka kèm theo — phụ thuộc `Cargo.lock` của bạn; hãy đọc lại changelog khi nâng.) Trong tài liệu cấu hình librdkafka v2.12.1, `partitioner` mặc định là `consistent_random` (CRC32 của khóa)[^librdkafka-default], còn `murmur2_random` được mô tả là "tương thích với Java Producer" và tương đương partitioner mặc định của Java producer[^librdkafka-partitioner]. (Suy luận của người soạn: nếu cùng topic có producer Java và producer Rust dùng mặc định, cùng một khóa có thể vào hai partition khác nhau và phá thứ tự theo khóa; hãy đặt `partitioner=murmur2_random` ở phía Rust.) Cũng có thể chỉ định partition tường minh: `FutureRecord` có trường `partition: Option<i32>`[^rdkafka-record].
-- **Redis Cluster.** Slot là `CRC16(key) mod 16384`, và nếu khóa chứa `{...}` có nội dung thì chỉ phần đó được băm[^redis-formula][^redis-hashtag]. Client Rust tự tính slot (hoặc dùng crate client hỗ trợ cluster) phải dùng đúng biến thể CRC16 mà spec mô tả; spec có cài đặt tham chiếu ở Phụ lục A[^redis-crc-appendix].
-- **Elasticsearch** chọn shard theo công thức của docs dựa trên `hash(_routing)`[^es-formula] (mục 3, Đi sâu). (Nhận xét của người soạn: cách dùng thông thường là gửi tài liệu qua API và để cụm tính shard, nên client không cần tự băm; docs dẫn chỉ nêu công thức.)
+**Kafka.** Kafka protocol để client điều khiển phép gán khóa → partition, và broker không áp ngữ nghĩa nào. Hai client muốn dùng chung cách chia phải dùng cùng phương pháp tính ánh xạ[^kafka-client-controls]. Producer Java dùng `murmur2` trên byte của khóa đã tuần tự hóa[^kafka-bip]. Phía Rust, crate `rdkafka` 0.39.0 là client dựa trên librdkafka[^rdkafka-crate]. Nó phụ thuộc `rdkafka-sys` 4.10.0[^rdkafka-sys-dep]. Changelog của `rdkafka-sys` ghi bản 4.10.0+2.12.1 nâng librdkafka lên v2.12.1[^rdkafka-sys-ver]. Mặc định `rdkafka-sys` build và liên kết tĩnh bản librdkafka đi kèm[^rdkafka-sys-readme]. Với feature `dynamic-linking` thì bản cài trong hệ thống phải khớp đúng bản đi kèm[^rdkafka-sys-dyn]. (Nhận xét của người soạn: ràng buộc `4.10.0` là semver, nên bản `rdkafka-sys`, và librdkafka kèm theo, phụ thuộc `Cargo.lock` của bạn; hãy đọc lại changelog khi nâng.)
+
+Điểm cần cẩn thận là partitioner mặc định. Trong tài liệu cấu hình librdkafka v2.12.1, `partitioner` mặc định là `consistent_random` (CRC32 của khóa)[^librdkafka-default]. Còn `murmur2_random` được mô tả là "tương thích với Java Producer" và tương đương partitioner mặc định của Java producer[^librdkafka-partitioner]. Suy luận của người soạn: nếu cùng một topic có producer Java và producer Rust đều dùng mặc định, cùng một khóa có thể vào hai partition khác nhau và phá thứ tự theo khóa, nên hãy đặt `partitioner=murmur2_random` ở phía Rust. Cũng có thể chỉ định partition tường minh: `FutureRecord` có trường `partition: Option<i32>`[^rdkafka-record].
+
+**Redis Cluster.** Slot là `CRC16(key) mod 16384`, và nếu khóa chứa `{...}` có nội dung thì chỉ phần đó được băm[^redis-formula]. Quy tắc hash tag này nằm trong spec[^redis-hashtag]. Client Rust tự tính slot (hoặc dùng crate client hỗ trợ cluster) phải dùng đúng biến thể CRC16 mà spec mô tả; spec có cài đặt tham chiếu ở Phụ lục A[^redis-crc-appendix].
+
+**Elasticsearch** chọn shard theo công thức của docs dựa trên `hash(_routing)`[^es-formula] (mục 3, Đi sâu). Cách dùng thông thường là gửi document qua API và để cụm tự tính shard, nên client không cần tự băm (nhận xét của người soạn; docs dẫn chỉ nêu công thức).
 
 ### 8.4. Partition theo khoảng khóa: `BTreeMap` làm bảng định tuyến
 
-Với key range, bản đồ "cận dưới của khoảng → partition" là một `BTreeMap<Key, PartitionId>` và tìm partition của khóa k là tìm khóa lớn nhất ≤ k. `BTreeMap::range` dựng một iterator hai chiều trên một dải con của map, nhận cú pháp `min..max` hoặc cặp `Bound`[^std-btree-range]; theo bảng trong docs `std::collections`, `range` là O(log n) và `HashMap` thì không có `range`[^coll-btree-range] (xem [P10 · Chương 09, mục 6](../10-rust-internals/09-collections-internals.md)). Do đó cần `BTreeMap` chứ không phải `HashMap` cho bảng này.
+Với key range, bản đồ "cận dưới của khoảng → partition" là một `BTreeMap<Key, PartitionId>`, và tìm partition của khóa k là tìm khóa lớn nhất ≤ k. `BTreeMap::range` dựng một iterator hai chiều trên một dải con của map, nhận cú pháp `min..max` hoặc cặp `Bound`[^std-btree-range]. Theo bảng trong docs `std::collections`, `range` là O(log n) và `HashMap` thì không có `range`[^coll-btree-range] (xem [P10 · Chương 09, mục 6](../10-rust-internals/09-collections-internals.md)). Vì vậy bảng này cần `BTreeMap` chứ không phải `HashMap`.
 
 ```rust
 // Minh họa, không biên dịch ở đây.
@@ -388,30 +467,30 @@ impl RangeRouter {
 
 ### 8.5. Consistent hashing và client: crate có sẵn
 
-`hashring` 0.3.6 cài consistent hashing theo paper Karger với API `add`, `remove`, `get`; tác giả chủ ý để API tối giản và để client tự dựng virtual node phía trên (ví dụ trong docs bọc một `VNode { id, addr }` có `Hash`)[^hashring-doc]. `HashRing<T, S>` nhận hash builder tường minh qua `with_hasher`[^hashring-hasher], còn hasher mặc định của nó là `DefaultHashBuilder` với `Hasher = SipHasher`[^hashring-default]. Mã nguồn 0.3.6 cho `build_hasher` trả `SipHasher::new()`[^hashring-src]; crate phụ thuộc `siphasher` `0.3.1`[^hashring-dep], và docs `siphasher` 0.3.11 ghi `SipHasher::new` đặt hai khóa ban đầu bằng 0[^siphasher-new]. Tức hasher mặc định không có seed ngẫu nhiên như `RandomState` và cho kết quả lặp lại giữa các tiến trình (suy luận của người soạn từ mã nguồn trên); khóa 0 cố định thì không chống được kẻ đoán hash (xem Đi sâu bên dưới), và kết quả vẫn phụ thuộc cách kiểu node/khóa bạn đưa vào cài `Hash` (mục 8.1). Với sharding đánh số tuần tự, `jump-consistent-hash` nhỏ gọn hơn (mục 3, Đi sâu).
+`hashring` 0.3.6 cài consistent hashing theo paper Karger với API `add`, `remove`, `get`. Tác giả chủ ý để API tối giản và để client tự dựng virtual node phía trên; ví dụ trong docs bọc một `VNode { id, addr }` có `Hash`[^hashring-doc]. `HashRing<T, S>` nhận hash builder tường minh qua `with_hasher`[^hashring-hasher]. Hasher mặc định của nó là `DefaultHashBuilder` với `Hasher = SipHasher`[^hashring-default]. Mã nguồn 0.3.6 cho `build_hasher` trả `SipHasher::new()`[^hashring-src]. Crate phụ thuộc `siphasher` `0.3.1`[^hashring-dep]. Docs `siphasher` 0.3.11 ghi `SipHasher::new` đặt hai khóa ban đầu bằng 0[^siphasher-new]. Từ đó suy ra (suy luận của người soạn từ mã nguồn trên) hasher mặc định không có seed ngẫu nhiên như `RandomState`, và cho kết quả lặp lại giữa các tiến trình. Khóa 0 cố định thì không chống được kẻ đoán hash (xem Đi sâu bên dưới), và kết quả vẫn phụ thuộc cách kiểu node/khóa bạn đưa vào cài `Hash` (mục 8.1). Với sharding đánh số tuần tự, `jump-consistent-hash` nhỏ gọn hơn (mục 3, Đi sâu).
 
-(Kết nối chương khác, nhận xét của người soạn: mỗi shard thường là một connection pool riêng tới một DB/node; timeout và backpressure theo từng shard xem [P7 · Chương 09](../07-io-async/09-async-trong-production.md) — một shard chậm không nên kéo cả pool.)
+(Kết nối chương khác, nhận xét của người soạn: mỗi shard thường là một connection pool riêng tới một DB/node; timeout và backpressure theo từng shard xem [P7 · Chương 09](../07-io-async/09-async-trong-production.md). Một shard chậm không nên kéo cả pool.)
 
 <details><summary>Đi sâu: vì sao std vẫn dùng SipHash seed ngẫu nhiên và điều đó mâu thuẫn gì ở đây</summary>
 
-- Không mâu thuẫn với P10: seed ngẫu nhiên phục vụ `HashMap` *trong bộ nhớ một tiến trình*, chống va chạm do kẻ tấn công điều khiển (nguồn ở [P10 · Chương 09, mục 5](../10-rust-internals/09-collections-internals.md)); chia shard cần thuộc tính ngược lại — mọi tiến trình và mọi lần khởi động đồng ý hàm băm — nên hai mục tiêu cần hai công cụ khác nhau (nhận xét của người soạn).
-- Nếu khóa shard do bên ngoài kiểm soát và hash đoán được, kẻ tấn công có thể cố ý đẩy khóa vào một shard — một dạng "hash flooding" ở tầng shard (suy luận của người soạn); khi đó cân nhắc hash có khóa bí mật (SipHash với khóa riêng) thay vì hash không khóa, đổi lại khóa phải đồng bộ giữa mọi tiến trình và đổi khóa là di chuyển dữ liệu.
+- Không mâu thuẫn với P10: seed ngẫu nhiên phục vụ `HashMap` *trong bộ nhớ một tiến trình*, chống va chạm do kẻ tấn công điều khiển (nguồn ở [P10 · Chương 09, mục 5](../10-rust-internals/09-collections-internals.md)). Chia shard cần thuộc tính ngược lại: mọi tiến trình và mọi lần khởi động đồng ý hàm băm. Hai mục tiêu cần hai công cụ khác nhau (nhận xét của người soạn).
+- Nếu khóa shard do bên ngoài kiểm soát và hash đoán được, kẻ tấn công có thể cố ý đẩy khóa vào một shard: một dạng "hash flooding" ở tầng shard (suy luận của người soạn). Khi đó cân nhắc hash có khóa bí mật (SipHash với khóa riêng) thay vì hash không khóa, đổi lại khóa phải đồng bộ giữa mọi tiến trình và đổi khóa là di chuyển dữ liệu.
 
 </details>
 
-**Quay lại Q8:** hàm băm chọn shard là một phần định dạng dữ liệu; `Hash`/`DefaultHasher` của std không được bảo đảm ổn định, nên mã hóa khóa bằng byte tường minh và băm bằng thuật toán có đặc tả — và khớp đúng hàm của Kafka/Redis khi tương tác.
+**Quay lại Q8:** hàm băm chọn shard là một phần định dạng dữ liệu; `Hash`/`DefaultHasher` của std không được bảo đảm ổn định, nên mã hóa khóa bằng byte tường minh và băm bằng thuật toán có đặc tả, rồi khớp đúng hàm của Kafka/Redis khi tương tác.
 
 ## Tóm tắt
 
-- Partition = chia dữ liệu để scale-out; mỗi hệ thống đặt tên khác nhau (tablet, chunk, shard, slot) nhưng cùng ý. Partition trong một server của PostgreSQL là tối ưu truy vấn/vòng đời dữ liệu, không phải scale-out.
+- Partition là chia dữ liệu để scale-out; mỗi hệ thống đặt tên khác nhau (tablet, chunk, shard, slot) nhưng cùng ý. Partition trong một server của PostgreSQL là tối ưu truy vấn và vòng đời dữ liệu, không phải scale-out.
 - Key range giữ thứ tự (quét dải rẻ) nhưng dễ hot spot với khóa tăng đơn điệu; hash rải đều nhưng mất quét dải; khóa ghép (băm trước, sắp sau) là thỏa hiệp.
-- Hot spot đến từ khóa lệch, cardinality thấp, hoặc một khóa quá nóng; giảm nhẹ bằng hậu tố khóa, chia khóa nóng sang tập shard, đổi khóa — mỗi cách tăng chi phí đọc.
-- `hash mod N` di chuyển gần hết dữ liệu khi N đổi; consistent hashing + vnode chỉ di chuyển phần tối thiểu và cho phép trọng số theo năng lực, với giá là nhiều hàng xóm hơn.
-- Secondary index: local = ghi một nơi/đọc cột phụ fan-out; global = đọc trúng ít nơi/ghi xuyên partition và thường bất đồng bộ.
-- Rebalancing: số partition cố định (Dynamo, Redis, Kafka, ES), động (Bigtable, MongoDB), tỷ lệ số node (Cassandra vnode); băng thông di chuyển thường cần được chặn (Kafka throttle, MongoDB giới hạn migration song song), và Dynamo cố ý không rebalance tự động khi node chỉ tạm ngừng.
-- Request routing: node bất kỳ + chuyển hướng, router riêng, hoặc client giữ bản đồ; bản đồ ở coordination service hoặc gossip; client phải xử lý "sai node".
-- Chia dữ liệu làm truy vấn không kèm khóa thành fan-out, unique/atomic/thứ tự chỉ trong một partition; chọn khóa chia là quyết định thiết kế chính.
-- Rust: `Hash`/`DefaultHasher`/`RandomState` không được bảo đảm ổn định — dùng byte tường minh + hàm băm có đặc tả (xxHash, MurmurHash3, SipHash khóa cố định) và khớp hàm của Kafka/Redis khi tương tác.
+- Hot spot đến từ khóa lệch, cardinality thấp, hoặc một khóa quá nóng; giảm nhẹ bằng hậu tố khóa, chia khóa nóng sang tập shard, đổi khóa; mỗi cách đều tăng chi phí đọc.
+- `hash mod N` di chuyển gần hết dữ liệu khi N đổi; consistent hashing cộng vnode chỉ di chuyển phần tối thiểu và cho phép trọng số theo năng lực, với giá là nhiều hàng xóm hơn.
+- Secondary index: local là ghi một nơi, đọc cột phụ fan-out; global là đọc trúng ít nơi, ghi xuyên partition và thường bất đồng bộ.
+- Rebalancing: số partition cố định (Dynamo, Redis, Kafka, ES), động (Bigtable, MongoDB), tỷ lệ số node (Cassandra vnode). Băng thông di chuyển thường cần được chặn (Kafka throttle, MongoDB giới hạn migration song song), và Dynamo cố ý không rebalance tự động khi node chỉ tạm ngừng.
+- Request routing: node bất kỳ cộng chuyển hướng, router riêng, hoặc client giữ bản đồ; bản đồ nằm ở coordination service hoặc gossip; client phải xử lý "sai node".
+- Chia dữ liệu làm truy vấn không kèm khóa thành fan-out, còn unique, atomic và thứ tự chỉ bảo đảm trong một partition; chọn khóa chia là quyết định thiết kế chính.
+- Rust: `Hash`/`DefaultHasher`/`RandomState` không được bảo đảm ổn định; dùng byte tường minh cộng hàm băm có đặc tả (xxHash, MurmurHash3, SipHash khóa cố định) và khớp hàm của Kafka/Redis khi tương tác.
 
 ## Câu hỏi tự kiểm tra
 
@@ -419,7 +498,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Ghi mới rơi vào partition chứa cận trên cao nhất (MongoDB: chunk có cận `MaxKey`), nên ghi bị bó vào một shard[^mongo-mono-hot]. Khắc phục: hashed sharding hoặc khóa ghép đặt giá trị phân biệt cao (user ID) trước timestamp[^mongo-hash-mono][^bt-ts-prefix]; mất truy vấn dải theo thời gian rẻ ở mức toàn cục (hash: truy vấn dải nhiều khả năng phải broadcast tới nhiều shard[^mongo-hash]).
+   Ghi mới rơi vào partition chứa cận trên cao nhất (MongoDB: chunk có cận `MaxKey`), nên ghi bị bó vào một shard[^mongo-mono-hot]. Khắc phục bằng hashed sharding[^mongo-hash-mono]. Cách khác là khóa ghép đặt giá trị phân biệt cao (user ID) trước timestamp[^bt-ts-prefix]. Cái mất là truy vấn dải theo thời gian không còn rẻ ở mức toàn cục: với hash, truy vấn dải nhiều khả năng phải broadcast tới nhiều shard[^mongo-hash].
 
    </details>
 
@@ -427,7 +506,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Hash chỉ rải đều các khóa khác nhau; một khóa nhận tải quá lớn thì partition chứa nó vẫn nóng (Dynamo giả định có đủ khóa nóng để rải đều nên giả định này bị phá[^dyn-skew-assume]). Ví dụ: hậu tố ngẫu nhiên vào partition key rải ghi, nhưng đọc phải truy vấn mọi hậu tố và gộp[^ddb-suffix][^ddb-suffix-read].
+   Hash chỉ rải đều các khóa khác nhau; một khóa nhận tải quá lớn thì partition chứa nó vẫn nóng. Dynamo giả định có đủ khóa nổi tiếng để rải đều, và giả định này vỡ trong trường hợp đó[^dyn-skew-assume]. Ví dụ: hậu tố ngẫu nhiên vào partition key rải được ghi[^ddb-suffix]. Nhưng đọc phải truy vấn mọi hậu tố rồi gộp kết quả[^ddb-suffix-read].
 
    </details>
 
@@ -435,7 +514,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Paper Jump Consistent Hash: chỉ cần di chuyển 1/6 dữ liệu, trong khi `mod` làm dữ liệu phải sắp xếp lại gần như hoàn toàn[^jump-1-6]; theo tính toán của người soạn, khoảng 5/6 khóa đổi chỗ (mục 3).
+   Paper Jump Consistent Hash: chỉ cần di chuyển 1/6 dữ liệu, trong khi `mod` làm dữ liệu phải sắp xếp lại gần như hoàn toàn[^jump-1-6]. Theo tính toán của người soạn, khoảng 5/6 khóa đổi chỗ (mục 3).
 
    </details>
 
@@ -443,7 +522,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Chỉ hàng xóm gần nhất bị ảnh hưởng[^dyn-ring-neighbors]; vnode cho node mới nhận lượng tải xấp xỉ bằng nhau từ mọi node khác và cho phép chọn số vnode theo năng lực[^dyn-vnode-adv].
+   Chỉ hàng xóm gần nhất bị ảnh hưởng[^dyn-ring-neighbors]. Vnode cho node mới nhận lượng tải xấp xỉ bằng nhau từ mọi node khác, và cho phép chọn số vnode theo năng lực[^dyn-vnode-adv].
 
    </details>
 
@@ -451,7 +530,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Mỗi token thêm tối đa `2×(RF−1)` hàng xóm, nhiều tổ hợp lỗi hơn làm mất khả dụng một phần vòng; các thao tác bảo trì như repair chậm hơn[^cass-vnode-cost][^cass-vnode-repair].
+   Mỗi token thêm tối đa `2×(RF−1)` hàng xóm, tức nhiều tổ hợp lỗi hơn làm mất khả dụng một phần vòng[^cass-vnode-cost]. Các thao tác bảo trì như repair cũng chậm hơn[^cass-vnode-repair].
 
    </details>
 
@@ -459,7 +538,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Local: index nằm cùng dữ liệu. Cassandra SAI: coordinator gửi token range read tới các replica, mỗi replica chạy truy vấn index cục bộ[^sai-local]; DynamoDB LSI: cùng partition key với bảng, khác sort key[^lsi-def]. (Suy luận của người soạn: ghi chỉ chạm partition chứa dữ liệu; đọc theo cột phụ không kèm khóa partition như ở SAI phải đi qua nhiều range, còn LSI truy vấn trong một partition key.) Global (DynamoDB GSI): khóa index khác khóa bảng[^gsi-def], cập nhật bất đồng bộ nên truy vấn có thể trả kết quả cũ[^gsi-async][^gsi-stale].
+   Local: index nằm cùng dữ liệu. Với Cassandra SAI, coordinator gửi token range read tới các replica và mỗi replica chạy truy vấn index cục bộ[^sai-local]. DynamoDB LSI dùng cùng partition key với bảng, khác sort key[^lsi-def]. (Suy luận của người soạn: ghi chỉ chạm partition chứa dữ liệu; đọc theo cột phụ không kèm khóa partition như ở SAI phải đi qua nhiều range, còn LSI truy vấn trong một partition key.) Global (DynamoDB GSI): khóa index khác khóa bảng[^gsi-def]. Việc cập nhật bất đồng bộ nên truy vấn có thể trả kết quả cũ[^gsi-async]. Chính độ trễ đó là điều ứng dụng phải chấp nhận[^gsi-stale].
 
    </details>
 
@@ -467,7 +546,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Vì định tuyến dùng không gian băm `num_routing_shards` cố định rồi chia gộp theo `routing_factor`[^es-formula]; split tăng số shard theo thừa số của `number_of_routing_shards`, cần index read-only[^es-split][^es-split-req].
+   Vì định tuyến dùng không gian băm `num_routing_shards` cố định rồi chia gộp theo `routing_factor`[^es-formula]. Split tăng số shard theo thừa số của `number_of_routing_shards`[^es-split]. Split cần index read-only[^es-split-req].
 
    </details>
 
@@ -475,7 +554,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Dữ liệu cũ không được phân phối lại và nếu dùng `hash(key) % số_partition` thì phép chia khóa thay đổi với khóa mới; không thể giảm số partition[^kafka-add-part][^kafka-no-reduce].
+   Dữ liệu cũ không được phân phối lại, và nếu dùng `hash(key) % số_partition` thì phép chia khóa thay đổi với khóa mới[^kafka-add-part]. Số partition không thể giảm[^kafka-no-reduce].
 
    </details>
 
@@ -483,7 +562,7 @@ impl RangeRouter {
 
    <details><summary>Đáp án</summary>
 
-   Node bất kỳ + chuyển hướng: Redis `-MOVED`[^redis-moved]. Router: MongoDB mongos[^mongo-mongos]. Client giữ bản đồ: Kafka metadata[^kafka-direct] hoặc client thư viện của Dynamo[^dyn-client-lib].
+   Node bất kỳ cộng chuyển hướng: Redis `-MOVED`[^redis-moved]. Router: MongoDB mongos[^mongo-mongos]. Client giữ bản đồ: Kafka metadata[^kafka-direct]. Client thư viện của Dynamo cũng thuộc kiểu này[^dyn-client-lib].
 
    </details>
 
@@ -491,7 +570,7 @@ impl RangeRouter {
 
     <details><summary>Đáp án</summary>
 
-    Slot thuộc node khác; lỗi kèm slot và địa chỉ node đúng[^redis-moved]; client gửi lại tới node đó, nên nhớ ánh xạ[^redis-moved-again] và thường làm tươi toàn bản đồ[^redis-refresh].
+    Slot thuộc node khác; lỗi kèm slot và địa chỉ node đúng[^redis-moved]. Client gửi lại tới node đó và nên nhớ ánh xạ[^redis-moved-again]. Thường nên làm tươi toàn bản đồ[^redis-refresh].
 
     </details>
 
@@ -499,7 +578,7 @@ impl RangeRouter {
 
     <details><summary>Đáp án</summary>
 
-    Docs std: dữ liệu `Hash` không portable giữa nền tảng và không ổn định giữa phiên bản compiler[^std-hash-portable]; `RandomState` cho kết quả khác nhau giữa các instance[^std-randomstate]. Dùng byte tường minh + hàm băm có đặc tả như xxHash/MurmurHash3/SipHash khóa cố định[^twox-portable][^siphasher-key][^murmur3-crate].
+    Docs std: dữ liệu `Hash` không portable giữa nền tảng và không ổn định giữa phiên bản compiler[^std-hash-portable]. `RandomState` cho kết quả khác nhau giữa các instance[^std-randomstate]. Thay vào đó, dùng byte tường minh rồi băm bằng thuật toán có đặc tả. xxHash cho kết quả nhất quán giữa các nền tảng[^twox-portable]. SipHash cho đặt khóa tường minh[^siphasher-key]. MurmurHash3 có bản Rust thuần[^murmur3-crate].
 
     </details>
 
@@ -507,14 +586,14 @@ impl RangeRouter {
 
     <details><summary>Đáp án</summary>
 
-    Java dùng murmur2[^kafka-bip]; librdkafka (docs v2.12.1, bản đi kèm `rdkafka` 0.39.0 theo changelog `rdkafka-sys`[^rdkafka-sys-ver]) mặc định `consistent_random` CRC32[^librdkafka-default], `murmur2_random` mới tương thích Java[^librdkafka-partitioner]; hai bên có thể chọn partition khác nhau cho cùng khóa nếu không cấu hình lại, và broker không áp đặt phép chia[^kafka-client-controls] (suy luận của người soạn về hậu quả).
+    Java dùng murmur2[^kafka-bip]. Bản librdkafka đi kèm `rdkafka` 0.39.0 theo changelog `rdkafka-sys` là v2.12.1[^rdkafka-sys-ver]. Docs của v2.12.1 ghi partitioner mặc định là `consistent_random` CRC32[^librdkafka-default]. Chỉ `murmur2_random` mới tương thích Java[^librdkafka-partitioner]. Hai bên có thể chọn partition khác nhau cho cùng khóa nếu không cấu hình lại, và broker không áp đặt phép chia[^kafka-client-controls] (suy luận của người soạn về hậu quả).
 
     </details>
 
 ## Đọc thêm
 
-- DDIA chương 6 "Partitioning" (ấn bản 1, Phần II *Distributed Data*) — khung chủ đề của chương này; tên chương và các mục con (key range, hash, skewed workloads, secondary index theo document/term, rebalancing, request routing) theo mục lục do ETH Library lưu: <https://toc.library.ethz.ch/objects/pdf03/z01_978-1-4493-7332-0_01.pdf>. Trang chủ sách: <https://dataintensive.net/>.
-- Karger và cộng sự, *Consistent Hashing and Random Trees* (STOC 1997): <https://people.csail.mit.edu/karger/Papers/web.pdf> — mục 4 định nghĩa smoothness/spread/load/balance/monotonicity.
+- DDIA chương 6 "Partitioning" (ấn bản 1, Phần II *Distributed Data*): khung chủ đề của chương này; tên chương và các mục con (key range, hash, skewed workloads, secondary index theo document/term, rebalancing, request routing) theo mục lục do ETH Library lưu: <https://toc.library.ethz.ch/objects/pdf03/z01_978-1-4493-7332-0_01.pdf>. Trang chủ sách: <https://dataintensive.net/>.
+- Karger và cộng sự, *Consistent Hashing and Random Trees* (STOC 1997): <https://people.csail.mit.edu/karger/Papers/web.pdf>. Mục 4 định nghĩa smoothness/spread/load/balance/monotonicity.
 - DeCandia và cộng sự, *Dynamo* (SOSP 2007), mục 4.2 (vòng băm, vnode), 4.8 (membership, gossip), 6.2 (ba chiến lược phân vùng), 6.4 (client-driven coordination): <https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf>.
 - Chang và cộng sự, *Bigtable* (OSDI 2006), mục 2 (row, tablet) và 5 (tablet location/assignment): <https://research.google.com/archive/bigtable-osdi06.pdf>.
 - Lamping & Veach, *A Fast, Minimal Memory, Consistent Hash Algorithm*: <https://arxiv.org/pdf/1406.2294>.

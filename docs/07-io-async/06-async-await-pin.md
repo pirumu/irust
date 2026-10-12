@@ -21,7 +21,7 @@
 
 ## 0. Tiện ích dùng chung cho các ví dụ
 
-Mọi ví dụ được biên dịch và chạy bằng `rustc 1.95.0` (macOS, aarch64, edition 2024), không cần Tokio, với hai tiện ích dưới đây đặt cùng file. `Waker::noop()` là waker không làm gì khi được dùng.[^waker-noop]
+Mọi ví dụ trong chương đều được biên dịch và chạy bằng `rustc 1.95.0` (macOS, aarch64, edition 2024), không cần Tokio. Chúng dùng chung hai tiện ích dưới đây, đặt cùng file: `yield_now()` giả lập một việc phải chờ (trả `Pending` đúng một lần), và `block_on` là executor tí hon cứ poll liên tục cho tới khi xong. `block_on` dùng `Waker::noop()`, một waker không làm gì khi được dùng,[^waker-noop] vì executor này không ngủ nên không cần ai đánh thức.
 
 ```rust
 use std::future::Future;
@@ -46,37 +46,37 @@ pub fn block_on<F: Future>(f: F) -> F::Output {   // busy-poll, không ngủ
 
 ## 1. `async fn` và async block: một future ẩn danh (Q1)
 
-> **Trả lời ngắn.** Gọi `async fn` không làm việc gì: nó chỉ capture đối số vào một future, và thân hàm chỉ chạy khi future đó bị poll.[^ref-async-fn] Future ấy là một kiểu dữ liệu vô danh, duy nhất, implement `Future`.[^book-anon]
+> **Trả lời ngắn.** Gọi `async fn` chưa làm việc gì: nó chỉ gói các đối số vào một future, và thân hàm chỉ chạy khi có ai poll future đó.[^ref-async-fn] Future này là một kiểu dữ liệu vô danh, duy nhất, implement `Future`.[^book-anon]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): gọi hàm async giống điền một phiếu công việc; chưa ai làm gì cho đến khi có người nhận phiếu và bắt đầu poll.
+*Với service của bạn.* Giả sử service đặt hàng có một handler `handle_order(req)`: đọc request vào một buffer, hỏi database một lần, rồi dựng response. Ta viết nó bằng `async fn`, và trong các ví dụ của chương, "hỏi database" được thay bằng `yield_now().await`, một chỗ phải chờ (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Ta sẽ bám theo `handle_order` đến hết chương. Câu hỏi của mục này: dòng `let fut = handle_order(req);` làm gì?
 
-**Vấn đề.** Ta muốn viết code tuần tự (`a().await; b().await`) nhưng thực thi theo kiểu tạm dừng được giữa chừng để thread đi làm việc khác. Cần một biểu diễn cho "phép tính chưa chạy xong, chạy được từng nhịp".
+Câu trả lời là chưa gì cả. Chưa có query nào xuống database, chưa byte nào của request bị đọc; `fut` chỉ là một giá trị nằm đó. Thân hàm chỉ chạy khi một bên poll `fut`: executor nếu bạn `spawn` nó, hoặc future bao ngoài nếu bạn `.await` nó. Ai quen với hàm thường ("gọi là chạy") rất hay hiểu nhầm điểm này.
 
-**Cơ chế.** Reference khử đường gần đúng: một hàm thường trả `impl Future` với thân là một `async move` block.[^ref-fn-desugar] Async move block đó capture **mọi tham số, kể cả tham số không dùng hoặc gán cho `_`**, để thứ tự drop tham số giống hàm thường (chỉ khác là drop xảy ra khi future đã được await xong).[^ref-fn-param]
+Vì sao thiết kế như vậy? Ta muốn viết code tuần tự (`a().await; b().await`) mà thread không phải đứng chờ giữa chừng. Muốn thế cần một giá trị biểu diễn "phép tính chưa xong, chạy được từng nhịp", và future chính là giá trị đó.
 
-**Hiểu lầm phổ biến.** "Gọi async fn là bắt đầu chạy." Sai theo Reference: gọi chỉ tạo future; bên poll (executor hoặc `.await` của future bao ngoài) mới chạy nó.
+Về cơ chế, một `async fn` gần tương đương một hàm thường trả về `impl Future`, với thân hàm là một `async move` block.[^ref-fn-desugar] Block này capture mọi tham số, kể cả tham số không dùng hoặc gán cho `_`, để thứ tự drop tham số giống hệt hàm thường, chỉ khác là việc drop xảy ra khi future đã được await xong.[^ref-fn-param] Vì vậy, `req` truyền vào `handle_order` nằm trong future từ lúc gọi, dù bạn chưa poll nó lần nào.
 
 <details><summary>Đi sâu: khử đường của <code>async fn</code>, async block và tên kiểu của future</summary>
 
-Async block là biến thể của block expression, đánh giá ra một future;[^ref-async-block] thực thi nó giống closure: tác dụng tức thì là tạo và trả về một kiểu vô danh.[^ref-async-block-anon] Book: Rust biên dịch nó thành kiểu dữ liệu vô danh, duy nhất, implement `Future`.[^book-anon] `async move { .. }` chuyển mọi biến được tham chiếu vào future.[^ref-async-move]
+Async block là một biến thể của block expression, và nó đánh giá ra một future.[^ref-async-block] Chạy một async block giống chạy một closure: tác dụng tức thì là tạo ra và trả về một kiểu vô danh.[^ref-async-block-anon] Rust biên dịch nó thành kiểu dữ liệu vô danh, duy nhất, implement `Future`.[^book-anon] Riêng `async move { .. }` thì chuyển mọi biến mà nó tham chiếu vào trong future.[^ref-async-move]
 
-Hệ quả: tên kiểu của future không viết ra được (đó là kiểu vô danh), nên chữ ký dùng `impl Future<Output = T>`, và rustc báo lỗi bằng cụm `{async block@file:dòng:cột}` (quan sát ở mục 5.3).
+Hệ quả thực tế: ta không viết ra được tên kiểu của future. Chữ ký hàm vì thế dùng `impl Future<Output = T>`, và khi lỗi, rustc gọi nó bằng cụm `{async block@file:dòng:cột}` (xem quan sát ở mục 5.3).
 
 </details>
 
-**Quay lại Q1:** gọi `async fn` chỉ tạo một future vô danh; thân hàm chạy khi bên poll (executor hoặc `.await` bao ngoài) poll nó.
+**Quay lại Q1:** gọi `async fn` chỉ tạo một future vô danh; `handle_order(req)` chưa chạm vào request hay database cho đến khi bên poll (executor hoặc `.await` bao ngoài) poll nó.
 
 ## 2. `.await`: poll future con, `Pending` lan lên trên (Q2)
 
-> **Trả lời ngắn.** `.await` poll future con ngay tại chỗ đó; nếu `poll` trả `Pending` thì future bao ngoài cũng trả `Pending`, tạm dừng trạng thái để lần poll lại quay về đúng bước poll đó.[^ref-await] Nó không chặn thread: đó là điểm hàm có thể trả quyền điều khiển cho executor (nhận xét của người soạn).
+> **Trả lời ngắn.** `.await` poll future con ngay tại chỗ nó đứng. Nếu `poll` trả `Pending` thì future bao ngoài cũng trả `Pending`, và giữ lại trạng thái để lần poll sau quay về đúng bước poll đó.[^ref-await] Nó không chặn thread: đó là điểm hàm có thể trả quyền điều khiển cho executor (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như gấp góc trang sách đang đọc rồi đặt xuống làm việc khác; lần sau mở đúng trang đã gấp.
+*Với `handle_order`.* Giữa hàm có dòng `let row = db.get(id).await;`. Database chưa trả lời thì future của `db.get` trả `Pending`. Lúc đó `handle_order` không đứng chờ trên thread: nó cũng trả `Pending` cho executor, và thread rảnh để poll request khác. Khi database trả lời, waker báo cho executor, executor poll lại `handle_order`, và hàm chạy tiếp từ ngay dòng `.await` ấy. Phần còn lại của mục này làm rõ chuyện đó diễn ra thế nào.
 
-Await expression là cấu trúc để tạm dừng một phép tính cho tới khi future được await sẵn sàng cho ra giá trị.[^ref-await-intro] Sơ đồ dưới minh họa hai lần executor poll future ngoài, lần đầu gặp `Pending` ở future con (người soạn vẽ lại từ các bước Reference mô tả ở phần Đi sâu):
+Về mặt ngữ nghĩa, await expression là cấu trúc để tạm dừng một phép tính cho đến khi future được await sẵn sàng cho ra giá trị.[^ref-await-intro] Sơ đồ dưới cho thấy hai lần executor poll future ngoài; lần đầu gặp `Pending` ở future con (người soạn vẽ lại từ các bước mà Reference mô tả, xem phần Đi sâu):
 
 ```mermaid
 sequenceDiagram
@@ -93,27 +93,29 @@ sequenceDiagram
   I-->>O: Ready(v)
 ```
 
-`.await` **không** chặn thread: nó là điểm hàm có thể trả quyền điều khiển cho executor rồi được tiếp tục từ đúng chỗ. Trạng thái giữa hai lần poll phải được cất đâu đó, đó là mục sau.
+Điểm cần nhớ: `.await` **không** chặn thread. Nó chỉ là chỗ hàm có thể trả quyền điều khiển cho executor rồi được chạy tiếp từ đúng chỗ đó. Muốn chạy tiếp được thì trạng thái giữa hai lần poll phải được cất ở đâu đó, và đó là chuyện của mục 3.
 
 <details><summary>Đi sâu: điều kiện hợp lệ của <code>.await</code> và các bước Reference mô tả</summary>
 
-Await chỉ hợp lệ trong async context (async fn, async closure, async block).[^ref-await-legal] Theo Reference, nó tạo future bằng `IntoFuture::into_future`, ghim bằng `Pin::new_unchecked` rồi poll với task context hiện tại.[^ref-await-steps] Book thêm: await trực tiếp một future thì future được ghim ngầm, nên không cần `pin!` ở mọi nơi.[^book-await-pins]
+Await chỉ hợp lệ trong một async context: async fn, async closure hoặc async block.[^ref-await-legal] Reference mô tả các bước: tạo future bằng `IntoFuture::into_future`, ghim nó bằng `Pin::new_unchecked`, rồi poll với task context hiện tại.[^ref-await-steps] Vì ghim ngầm như vậy, khi bạn await trực tiếp một future thì không cần gọi `pin!` ở mọi nơi.[^book-await-pins]
 
 </details>
 
-**Quay lại Q2:** `.await` poll future con; `Pending` lan lên, trạng thái được giữ và tiếp tục đúng chỗ, không chặn thread.
+**Quay lại Q2:** `.await` poll future con; `Pending` lan lên, trạng thái được giữ và `handle_order` chạy tiếp đúng chỗ, không chặn thread.
 
 ## 3. State machine: biến sống qua `.await` nằm trong future (Q3)
 
-> **Trả lời ngắn.** Compiler theo dõi trạng thái giữa các điểm await để runtime làm việc khác rồi quay lại: một "state machine vô hình", như thể bạn viết một `enum` lưu trạng thái ở mỗi điểm await.[^book-state] Reference chỉ nói "roughly equivalent" và ghi định dạng dữ liệu thực tế là unspecified,[^ref-layout-enum][^ref-layout-unspec] nên layout và kích thước không được bảo đảm. Kích thước future phụ thuộc các biến phải sống qua `.await` (quan sát bằng phép đo ở đầu phần Đi sâu, không phải bảo đảm).
+> **Trả lời ngắn.** Compiler theo dõi trạng thái giữa các điểm await để runtime làm việc khác rồi quay lại: một "state machine vô hình", như thể bạn đã viết một `enum` lưu trạng thái ở mỗi điểm await.[^book-state] Nhưng Reference chỉ nói "roughly equivalent" và ghi rõ định dạng dữ liệu thực tế là unspecified,[^ref-layout-unspec] nên layout và kích thước không được bảo đảm. Kích thước future phụ thuộc vào các biến phải sống qua `.await` (đây là quan sát từ phép đo ở phần Đi sâu, không phải bảo đảm).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như cuốn sổ ghi dở khi bị gọi đi chỗ khác; sổ chỉ ghi những gì còn cần khi quay lại, không giữ cả căn phòng như stack của thread.
+*Với `handle_order`.* Giả sử handler đọc request vào một `buf` lớn, `.await` database, rồi vẫn dùng `buf` để dựng response. Trong lúc handler chờ database, `buf` phải nằm ở đâu đó. Thread thường tạm dừng bằng cách để nguyên cả stack; future thì không có stack riêng, nên `buf` phải nằm ngay trong future. Mục này nói compiler làm việc đó thế nào và hệ quả với kích thước.
 
 ### 3.1 Nguồn chính thức nói gì
 
-Book: Rust phải theo dõi trạng thái để runtime làm việc khác rồi quay lại; đó là "invisible state machine", *như thể* bạn viết một `enum` lưu trạng thái ở mỗi điểm await.[^book-state] Rust xét dữ liệu cần giữa một điểm await và điểm kế, rồi tạo variant tương ứng, mỗi variant có quyền truy cập dữ liệu nó cần bằng ownership hoặc mượn tham chiếu.[^book-variants] Reference có Note rõ hơn: kiểu future do rustc sinh "roughly equivalent to an enum with one variant per await point";[^ref-layout-enum] ngay đó ghi định dạng dữ liệu thực tế là *unspecified*.[^ref-layout-unspec]
+Rust Book mô tả: Rust phải theo dõi trạng thái để runtime làm việc khác rồi quay lại, và kết quả là một "invisible state machine", như thể ta viết một `enum` lưu trạng thái ở mỗi điểm await.[^book-state] Cụ thể, Rust xét dữ liệu cần giữ giữa một điểm await và điểm kế tiếp, rồi tạo variant tương ứng, mỗi variant có quyền truy cập dữ liệu nó cần, bằng ownership hoặc bằng mượn tham chiếu.[^book-variants] Reference có một Note rõ hơn: kiểu future do rustc sinh ra "roughly equivalent to an enum with one variant per await point".[^ref-layout-enum] Ngay sau đó, Reference ghi định dạng dữ liệu thực tế là *unspecified*.[^ref-layout-unspec]
+
+Bảng dưới phân loại từng khẳng định theo mức chắc chắn:
 
 | Khẳng định | Mức |
 |---|---|
@@ -122,7 +124,7 @@ Book: Rust phải theo dõi trạng thái để runtime làm việc khác rồi 
 | "Gần như `enum` mỗi điểm await một variant" | Mô hình, Reference tự ghi "roughly" |
 | Layout, kích thước, tên variant | **Không bảo đảm** |
 
-Hàm `async fn f(n: usize) -> usize { let buf = vec![0u8; n]; yield_now().await; buf.len() }` có thể hình dung (mô hình giải thích, không phải code thật của rustc) là `enum F { Start{n}, Suspended1{buf, inner: YieldNow}, Done }` với `poll` là một `match`: ở `Suspended1`, nếu future con `Pending` thì trả `Pending` và *giữ nguyên* `buf` trong variant. `pin!` docs xác nhận phần lưu trữ: trong async fn/block, mọi local vắt qua `.await` là một phần trạng thái future bắt giữ và dùng chỗ lưu của future.[^std-pin-macro] Khác thread: thread tạm dừng bằng cách kernel giữ cả stack; future chỉ giữ những gì còn cần (nhận xét của người soạn).
+Hãy lấy `async fn f(n: usize) -> usize { let buf = vec![0u8; n]; yield_now().await; buf.len() }` làm ví dụ thu nhỏ của `handle_order`. Ta hình dung nó (mô hình giải thích, không phải code thật của rustc) là `enum F { Start{n}, Suspended1{buf, inner: YieldNow}, Done }`, còn `poll` là một `match`. Ở `Suspended1`, nếu future con trả `Pending` thì `poll` trả `Pending` và *giữ nguyên* `buf` trong variant. Docs của `pin!` xác nhận chỗ lưu này: trong async fn hoặc block, mọi local vắt qua một điểm `.await` là một phần trạng thái mà future bắt giữ, và dùng chỗ lưu của future.[^std-pin-macro] Tóm lại: thread tạm dừng thì kernel giữ cả stack, còn future chỉ giữ những gì còn cần khi quay lại (nhận xét của người soạn).
 
 <details><summary>Đi sâu: đo kích thước future (quan sát, không phải bảo đảm)</summary>
 
@@ -162,25 +164,25 @@ with_arg_unused 258
 
 Mọi điểm dưới đây là quan sát trên một phiên bản compiler; Reference nói layout là unspecified.[^ref-layout-unspec]
 
-- `big_across` là 1026 byte, `big_not_across` chỉ 2: mảng chết trước `.await` không phình future. Khớp docs `pin!`: chỉ local *vắt qua* `.await` mới là phần trạng thái của future.[^std-pin-macro]
-- `nested2` (await `big_across()` hai lần) vẫn 1027, không phải ~2053: hai future con không sống cùng lúc nên có thể dùng chung chỗ; từ đó kích thước phụ thuộc *tập biến sống đồng thời tại mỗi điểm await* (cả hai điều đều là suy luận của người soạn từ số đo).
-- `with_arg_unused` là 258 dù `_a` không dùng, khớp điều Reference nói về việc capture mọi tham số.[^ref-fn-param] `with_arg` là 514, gần gấp đôi: người soạn không có nguồn giải thích, coi đây là hiện tượng quan sát.
+- `big_across` là 1026 byte còn `big_not_across` chỉ 2: mảng đã chết trước `.await` thì không làm phình future. Điều này khớp với docs của `pin!`: chỉ local *vắt qua* `.await` mới là phần trạng thái của future.[^std-pin-macro]
+- `nested2` (await `big_across()` hai lần) vẫn chỉ 1027 byte, không phải khoảng 2053. Hai future con không sống cùng lúc nên có thể dùng chung chỗ; từ đó kích thước phụ thuộc vào *tập biến sống đồng thời tại mỗi điểm await* (cả hai điều này là suy luận của người soạn từ số đo).
+- `with_arg_unused` là 258 dù `_a` không được dùng, khớp với điều Reference nói về việc capture mọi tham số.[^ref-fn-param] Còn `with_arg` là 514, gần gấp đôi: người soạn không có nguồn giải thích, nên coi đây là hiện tượng quan sát.
 
-**Hệ quả (nhận xét của người soạn).** Với server có hàng chục nghìn task treo, một buffer lớn làm biến cục bộ vắt qua `.await` nhân lên theo số task, giống mỗi connection giữ một receive buffer. Thu hẹp scope của buffer trước điểm await hoặc đặt nó vào `Box`/pool; và đo lại bằng `size_of_val` thay vì tin con số của chương này.
+**Hệ quả (nhận xét của người soạn).** Một service có hàng chục nghìn request đang chờ database sẽ có hàng chục nghìn future `handle_order` cùng sống. Nếu mỗi future ôm một buffer lớn vắt qua `.await`, bộ nhớ nhân lên theo số request, y như mỗi connection giữ một receive buffer. Cách xử lý: thu hẹp scope của buffer để nó chết trước điểm await, hoặc đặt nó vào `Box` hay một pool; và đo lại bằng `size_of_val` thay vì tin con số của chương này.
 
 </details>
 
-**Quay lại Q3:** state machine là mô hình giải thích (layout unspecified); kích thước theo tập biến sống đồng thời tại mỗi điểm await.
+**Quay lại Q3:** state machine là mô hình giải thích (layout unspecified); kích thước future theo tập biến sống đồng thời tại mỗi điểm await, nên `buf` của `handle_order` chỉ nằm trong future nếu nó còn sống qua `.await`.
 
 ## 4. Self-referential: vì sao move future nguy hiểm (Q4)
 
-> **Trả lời ngắn.** Khi một biến và tham chiếu tới nó cùng sống qua một `.await`, chúng cùng là trường của một future, nên future có tham chiếu đến chính mình;[^book-selfref] move future là move cả state machine.[^book-move-future] Sau khi move, con trỏ vẫn trỏ địa chỉ cũ chứ không phải vị trí mới của `self`.[^std-pin-sr2]
+> **Trả lời ngắn.** Khi một biến và một tham chiếu tới nó cùng sống qua một `.await`, cả hai là trường của cùng một future, nên future chứa tham chiếu tới chính mình.[^book-selfref] Mà move future là move cả state machine.[^book-move-future] Sau khi move, con trỏ vẫn trỏ về địa chỉ cũ chứ không phải vị trí mới của `self`.[^std-pin-sr2]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn chuyển nhà nhưng mẩu giấy dán trong nhà vẫn ghi "đồ ở góc phòng địa chỉ cũ"; đồ đã đi, mẩu giấy thì chỉ về chỗ cũ.
+*Với `handle_order`.* Trong handler, bạn đọc request vào `buf` rồi cắt lấy dòng đầu: `let line = &buf[..n];`. Nếu cả `buf` lẫn `line` còn dùng sau `.await` database, thì cả hai sống qua điểm await, tức là cả hai là trường của future `handle_order`, và `line` trỏ vào chính future đó. Chuyện này vô hại cho tới khi có ai move future, và bạn move future rất dễ, chẳng hạn chỉ cần truyền nó vào một hàm như `spawn` (nhận xét của người soạn). Mục này giải thích vì sao đó là rắc rối.
 
-**Vấn đề.** `x` và tham chiếu `r = &x` có thể *cùng sống qua một `.await`*, tức cùng là trường của một future:
+**Vấn đề.** Ví dụ nhỏ hơn: `x` và tham chiếu `r = &x` cùng sống qua một `.await`:
 
 ```rust
 let f = async { let x = [1u64; 4]; let r = &x; yield_now().await; r[0] + x[1] };
@@ -188,9 +190,9 @@ println!("size = {}", std::mem::size_of_val(&f));   // size = 48 (quan sát)
 println!("{}", block_on(f));                          // 2
 ```
 
-Chương trình biên dịch và in `size = 48`, rồi `2` (quan sát). 48 byte đủ chứa `x` (32 byte) và `r` (8 byte), nên `r` là con trỏ *vào bên trong chính future* (suy luận của người soạn từ số đo). Nguồn nói thẳng ý này: future của async block "có thể có tham chiếu đến chính chúng trong các trường của một variant", và move future là move cả state machine;[^book-selfref][^book-move-future] ví dụ điển hình của kiểu tự trỏ chính là state machine sinh cho `async fn`.[^std-pin-sr]
+Chương trình biên dịch và in `size = 48`, rồi `2` (quan sát). 48 byte đủ chứa `x` (32 byte) và `r` (8 byte), nên `r` là con trỏ *vào bên trong chính future* (suy luận của người soạn từ số đo). Rust Book nói thẳng ý này: future mà Rust tạo cho async block có thể chứa tham chiếu đến chính nó trong các trường của một variant.[^book-selfref] Ví dụ điển hình của kiểu tự trỏ cũng chính là state machine mà compiler sinh ra cho `async fn`.[^std-pin-sr]
 
-**Vì sao move gây hại.** Move là sao chép bit sang địa chỉ mới, không chạy code nào báo cho giá trị. `std::pin`: sau khi move, con trỏ vẫn trỏ địa chỉ cũ, không phải vị trí mới của `self`.[^std-pin-sr2] Struct tự trỏ viết tay cho thấy cơ chế (chỉ so sánh địa chỉ, không dereference):
+**Vì sao move gây hại.** Move là sao chép bit sang địa chỉ mới, và không có đoạn code nào báo cho giá trị biết nó vừa bị chuyển. Sau khi move, con trỏ bên trong vẫn trỏ về địa chỉ cũ, không phải vị trí mới của `self`.[^std-pin-sr2] Struct tự trỏ viết tay dưới đây cho thấy cơ chế (chỉ so sánh địa chỉ, không dereference):
 
 ```rust
 struct SelfRef { value: u64, ptr: *const u64 }
@@ -211,38 +213,38 @@ Output thật: `truoc move: true`, `sau move:   false`.
 
 <details><summary>Đi sâu: hai hướng giải quyết và vì sao <code>Pin</code> là phương án còn lại</summary>
 
-**Hai hướng giải quyết.** `std::pin` nêu (1) để giá trị tự phát hiện move và cập nhật con trỏ, (2) bảo đảm địa chỉ không đổi. Rust có thể move mà không báo giá trị, nên (1) bị loại.[^pin-first-ruled] Book thêm góc nhìn chi phí: cập nhật mọi tham chiếu mỗi lần move có thể tốn nhiều hiệu năng nếu cả một mạng tham chiếu cần sửa.[^book-overhead] Với (2), phương án "mỗi kiểu tự giữ dữ liệu trong `Box`" bị loại vì ghép future lồng nhau sẽ ép indirection và allocation ở từng tầng, điều docs gọi là "không chấp nhận được".[^pin-indirection] `Pin` là phương án còn lại: một hợp đồng chung.
+Docs của `std::pin` nêu hai hướng: (1) để giá trị tự phát hiện việc bị move và cập nhật con trỏ của nó, hoặc (2) bảo đảm địa chỉ không đổi. Rust có thể move giá trị mà không báo cho nó, nên hướng (1) bị loại.[^pin-first-ruled] Book bổ sung góc nhìn chi phí: nếu compiler cố cập nhật mọi tham chiếu mỗi lần move thì có thể tốn nhiều hiệu năng, nhất là khi cả một mạng tham chiếu cần sửa.[^book-overhead] Còn trong hướng (2), có một phương án là để mỗi kiểu tự giữ dữ liệu trong `Box`. Phương án này bị loại vì khi ghép các future lồng nhau, mỗi tầng ghép sẽ phải thêm indirection và allocation, điều mà docs gọi là không chấp nhận được.[^pin-indirection] `Pin` là phương án còn lại: một hợp đồng chung cho mọi kiểu.
 
 </details>
 
-**Quay lại Q4:** future có tham chiếu vào chính nó, và move để lại con trỏ ở địa chỉ cũ; vì vậy phải cấm move sau khi đã poll.
+**Quay lại Q4:** future có thể chứa tham chiếu vào chính nó, và move để lại con trỏ ở địa chỉ cũ; vì vậy một `handle_order` đã poll không được phép bị move nữa.
 
 ## 5. `Pin`: không move cho tới khi drop (Q5)
 
-> **Trả lời ngắn.** `Pin<Ptr>` bọc một con trỏ và ghim pointee tại chỗ: ngăn giá trị bị move hoặc làm mất hiệu lực tại vị trí đó trừ khi pointee `Unpin`.[^std-pin-struct] `Unpin` là auto trait của các kiểu không nhạy địa chỉ nên phần lớn kiểu không bị ảnh hưởng;[^pin-unpin-vast] future của async block là `!Unpin` (quan sát bằng lỗi E0277 trên rustc 1.95.0; nguyên nhân ở source rustc, là chi tiết cài đặt).[^rustc-static-unpin] `pin!` khác `Box::pin` ở chỗ không tạo heap allocation mới.[^std-pin-macro-heap]
+> **Trả lời ngắn.** `Pin<Ptr>` bọc một con trỏ và ghim giá trị mà con trỏ trỏ tới (pointee) tại chỗ: giá trị đó không bị move hay làm mất hiệu lực tại vị trí ấy, trừ khi nó là `Unpin`.[^std-pin-struct] `Unpin` là auto trait của các kiểu không nhạy địa chỉ, nên phần lớn kiểu không bị ảnh hưởng.[^pin-unpin-vast] Future của async block là `!Unpin` (quan sát bằng lỗi E0277 trên rustc 1.95.0; nguyên nhân nằm trong source rustc, là chi tiết cài đặt).[^rustc-static-unpin] `pin!` khác `Box::pin` ở chỗ nó không tạo heap allocation mới.[^std-pin-macro-heap]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Pin` như đóng đinh biển địa chỉ vào một chỗ để người khác yên tâm ghi nhớ địa chỉ đó; chỉ khi bảng được gỡ đúng cách (drop) thì mới được dọn.
+*Với `handle_order`.* Để poll `handle_order` bằng tay, như `block_on` ở mục 0 hay executor của bạn, bạn phải đưa cho `poll` một `Pin<&mut Future>`. Lời hứa kèm theo: future không bị move nữa cho tới lúc drop, nên con trỏ nội bộ như `line` ở mục 4 vẫn đúng. Mục này nói lời hứa ấy chính xác là gì, ai giữ nó, và hai cách ghim future trong thực tế.
 
 ### 5.1 Pin là gì
 
-`Pin<Ptr>` là lớp bọc quanh một *con trỏ* (`&mut`, `Box`, ...); chính con trỏ đó làm nhiệm vụ ghim pointee tại chỗ.[^std-pin-struct] Thứ bị ghim là *giá trị được trỏ tới*: `Pin<Ptr>` không ghim `Ptr`.[^pin-pointee] Vì vậy Book nói `Box` vẫn di chuyển tự do miễn dữ liệu nó trỏ tới đứng yên.[^book-box-moves]
+`Pin<Ptr>` là lớp bọc quanh một *con trỏ* (`&mut`, `Box`, ...); chính con trỏ đó làm nhiệm vụ ghim giá trị mà nó trỏ tới.[^std-pin-struct] Cái bị ghim là *giá trị được trỏ tới*, còn bản thân `Ptr` thì không bị ghim.[^pin-pointee] Vì vậy Book nói `Box` vẫn di chuyển tự do, miễn là dữ liệu nó trỏ tới đứng yên.[^book-box-moves]
 
-Trong safe code, với pointee `!Unpin`, `Pin<&mut T>` không cho lấy `&mut T`, vì với `&mut T` có thể `mem::replace` để move giá trị ra;[^pin-getmut] với pointee `Unpin` thì `Pin<&mut T>` không thêm hạn chế nào so với `&mut T`.[^pin-unpin-vast] Hai điểm trung thực:
+Trong safe code, nếu pointee là `!Unpin` thì `Pin<&mut T>` không cho ta lấy ra `&mut T`, vì có `&mut T` là có thể dùng `mem::replace` để move giá trị ra ngoài.[^pin-getmut] Nếu pointee là `Unpin` thì `Pin<&mut T>` không thêm hạn chế nào so với `&mut T`.[^pin-unpin-vast] Có hai điểm cần hiểu cho đúng:
 
-- *Không có phép màu compiler.* Tạo `Pin<Ptr>` không đổi cách compiler đối xử với giá trị; đó là hợp đồng giữa phần unsafe của API và người dùng, và dùng `unsafe` sai có thể move giá trị đã ghim.[^pin-nomagic]
+- *Không có phép màu compiler.* Tạo một `Pin<Ptr>` không làm compiler đối xử với giá trị khác đi. Đó là hợp đồng giữa phần unsafe của API và người dùng, và dùng `unsafe` sai vẫn có thể move một giá trị đã ghim.[^pin-nomagic]
 - *Hợp đồng kéo dài đến drop.* Từ lúc ghim, giá trị phải còn hợp lệ ở cùng địa chỉ cho đến khi drop handler của nó được gọi.[^pin-drop-inv]
 
 ### 5.2 `Unpin`: trường hợp bình thường
 
-Phần lớn kiểu không có trạng thái nhạy địa chỉ; chúng implement auto trait `Unpin`, làm mất tác dụng hạn chế của `Pin`: khi `T: Unpin`, `Pin<Box<T>>` chạy như `Box<T>` thường.[^pin-unpin-vast] `Unpin` được tự implement cho gần như mọi kiểu;[^std-unpin-auto] gồm mọi kiểu nguyên thủy, `&T`/`&mut T`, `Box<T>`, `String`.[^pin-unpin-builtin] Book: `Unpin` là trường hợp "bình thường", `!Unpin` là trường hợp đặc biệt.[^book-unpin-normal] Implement `Unpin` nghĩa là `T` "pinning-agnostic": không phơi ra, không dựa vào bảo đảm pinning nào.[^std-unpin]
+Phần lớn kiểu không có trạng thái nhạy địa chỉ. Chúng implement auto trait `Unpin`, và trait này làm mất tác dụng hạn chế của `Pin`: khi `T: Unpin`, `Pin<Box<T>>` chạy như `Box<T>` thường.[^pin-unpin-vast] `Unpin` được tự implement cho gần như mọi kiểu,[^std-unpin-auto] gồm mọi kiểu nguyên thủy, `&T` và `&mut T`, `Box<T>`, `String`.[^pin-unpin-builtin] Book gói lại: `Unpin` là trường hợp "bình thường", còn `!Unpin` là trường hợp đặc biệt.[^book-unpin-normal] Một kiểu implement `Unpin` nghĩa là nó "pinning-agnostic": không phơi ra và không dựa vào bảo đảm pinning nào.[^std-unpin]
 
-Chi tiết hay sai: tính `Unpin` của *pointee* mới quyết định hành vi `Pin<Ptr>`; việc `Ptr` (như `Box`) có `Unpin` hay không không ảnh hưởng.[^pin-unpin-pointee] Kiểu cần pinning phải tự chặn `Unpin` tự động bằng trường `PhantomPinned`.[^pin-phantom] Hệ quả API: `Pin::new` chỉ nhận pointee `Unpin`;[^std-pin-new] `Pin::new_unchecked` là hàm `unsafe` nhận cả pointee có thể `!Unpin`, người gọi tự cam kết không move giá trị.[^std-pin-new-unchecked]
+Có một chỗ hay hiểu sai: chỉ tính `Unpin` của *pointee* mới quyết định hành vi của `Pin<Ptr>`; việc bản thân `Ptr` (như `Box`) có `Unpin` hay không không ảnh hưởng.[^pin-unpin-pointee] Ngược lại, kiểu nào cần pinning để đúng đắn thì phải tự chặn `Unpin` tự động, bằng cách thêm một trường `PhantomPinned`.[^pin-phantom] Hai hàm tạo `Pin` phản ánh điều đó. `Pin::new` chỉ nhận pointee `Unpin`.[^std-pin-new] Còn `Pin::new_unchecked` là hàm `unsafe` nhận cả pointee có thể `!Unpin`, và người gọi tự cam kết không move giá trị.[^std-pin-new-unchecked]
 
 ### 5.3 Async block là `!Unpin`: lỗi E0277 thật
 
-Quan sát bằng rustc 1.95.0 (người soạn chạy trước đó): future của async block là `!Unpin` kể cả khi không tự trỏ. Mã thử:
+Quan sát bằng rustc 1.95.0 (người soạn chạy trước đó): future của async block là `!Unpin` kể cả khi nó không tự trỏ. Mã thử:
 
 ```rust
 use std::pin::Pin;
@@ -261,11 +263,13 @@ error[E0277]: `{async block@e0277.rs:4:15: 4:20}` cannot be unpinned
 note: required by a bound in `Pin::<Ptr>::new`
 ```
 
-Quan sát thêm, cũng bằng rustc 1.95.0: một phép thử bound `fn assert_unpin<T: Unpin>()` cho kết quả `u32`, `String`, `Vec<u8>` qua; `PhantomPinned` và một async block bị E0277. Tương tự `pin!(async {..}).as_mut().get_mut()` bị E0277 ở bound `T: Unpin` của `Pin::<&mut T>::get_mut`.
+Quan sát thêm, cũng bằng rustc 1.95.0: một phép thử bound `fn assert_unpin<T: Unpin>()` cho `u32`, `String`, `Vec<u8>` qua; `PhantomPinned` và một async block bị E0277. Tương tự, `pin!(async {..}).as_mut().get_mut()` bị E0277 ở bound `T: Unpin` của `Pin::<&mut T>::get_mut`.
 
-**Vì sao rustc làm vậy?** Rust Book 17.5 giải thích ở mức động cơ: các future đó có thể có tham chiếu nội bộ nên không tự động `Unpin`.[^book-async-notunpin] Các trang Reference về async block, hàm async, closure và auto trait cùng docs `std::marker::Unpin` mà người soạn đã đọc không có câu nào nêu async block là `!Unpin`; `std::pin` chỉ nói state machine sinh cho `async fn` là ví dụ kiểu tự trỏ (mục 4).[^std-pin-sr] Quy tắc thực tế chỉ thấy ở source rustc 1.95.0 (chi tiết cài đặt, có thể đổi): `CoroutineKind::movability` trả `Movability::Static` cho async,[^rustc-async-static] truy vấn `coroutine_movability` lấy kết quả đó,[^rustc-movability] và coroutine immovable thì không bao giờ `Unpin`.[^rustc-static-unpin] Suy ra (suy luận của người soạn từ ba đoạn source): rustc đánh dấu *mọi* async block `!Unpin` theo kiểu coroutine, không xét block cụ thể có tham chiếu chéo qua `.await` hay không, khớp quan sát ở trên là `async { yield_now().await; }` (không tự trỏ) vẫn bị E0277.
+**Vì sao rustc làm vậy?** Rust Book 17.5 giải thích ở mức động cơ: các future đó có thể có tham chiếu nội bộ nên không tự động `Unpin`.[^book-async-notunpin] Nhưng các trang Reference về async block, hàm async, closure và auto trait, cùng docs `std::marker::Unpin` mà người soạn đã đọc, không có câu nào nêu thẳng rằng async block là `!Unpin`. `std::pin` chỉ nói state machine sinh cho `async fn` là ví dụ của kiểu tự trỏ (mục 4).[^std-pin-sr] Quy tắc thực tế chỉ thấy trong source rustc 1.95.0 (chi tiết cài đặt, có thể đổi), theo ba bước. Thứ nhất, `CoroutineKind::movability` trả `Movability::Static` cho async.[^rustc-async-static] Thứ hai, truy vấn `coroutine_movability` lấy đúng kết quả đó.[^rustc-movability] Thứ ba, coroutine immovable thì không bao giờ `Unpin`.[^rustc-static-unpin] Suy ra (suy luận của người soạn từ ba đoạn source): rustc đánh dấu *mọi* async block là `!Unpin` theo kiểu coroutine, không xét block cụ thể có tham chiếu chéo qua `.await` hay không. Điều này khớp quan sát ở trên: `async { yield_now().await; }`, không hề tự trỏ, vẫn bị E0277.
 
 ### 5.4 Ghim để poll: `pin!` và `Box::pin`
+
+Vậy muốn poll một future `!Unpin`, ta ghim nó bằng một trong hai cách:
 
 | | `pin!(fut)` | `Box::pin(fut)` |
 |---|---|---|
@@ -274,7 +278,7 @@ Quan sát thêm, cũng bằng rustc 1.95.0: một phép thử bound `fn assert_u
 | Sống | Trong scope của biến cục bộ | Tới khi Box drop; trả về/lưu được |
 | Dùng khi | Poll tại chỗ | Trả ra khỏi hàm, `Vec`, `dyn Future`, đệ quy |
 
-Hàng *Heap* theo docs `pin!`;[^std-pin-macro-heap] hai hàng *Sống* và *Dùng khi* là nhận xét của người soạn. Nếu kiểu là `Unpin`, `Pin<&mut T>` hành xử như `&mut T` và `mem::replace`/`mem::take` vẫn cho move.[^pin-macro-unpin] Ví dụ chạy thật:
+Hàng *Heap* lấy từ docs của `pin!`;[^std-pin-macro-heap] hai hàng *Sống* và *Dùng khi* là nhận xét của người soạn. Một lưu ý: nếu kiểu là `Unpin` thì `Pin<&mut T>` hành xử như `&mut T`, và `mem::replace` hay `mem::take` vẫn cho move giá trị.[^pin-macro-unpin] Ví dụ chạy thật dùng một `work()` thay cho `handle_order`:
 
 ```rust
 async fn work() -> u32 { yield_now().await; 42 }
@@ -293,9 +297,9 @@ fn main() {
 }
 ```
 
-Output: `pin!: 42 sau 2 lan poll`, `Box::pin: 42 sau 2 lan poll`. Hai lần poll: lần đầu gặp `Pending` của `yield_now`, lần hai chạy tiếp từ đúng điểm await. Dòng `is_unpin` biên dịch (quan sát): `Pin<Box<async block>>` là `Unpin` dù pointee `!Unpin`. Giải thích hợp lý (suy luận của người soạn): `Box<T>` là `Unpin`[^pin-unpin-builtin] và `Pin` chỉ là lớp bọc quanh con trỏ. Chiều ngược lại cũng có trong Book: `Box<T>` chỉ implement `Future` khi `T` là future `Unpin`, nên `join_all` trên `Vec<Box<dyn Future>>` không biên dịch nếu chưa ghim.[^book-join-all]
+Output: `pin!: 42 sau 2 lan poll`, `Box::pin: 42 sau 2 lan poll`. Hai lần poll vì lần đầu gặp `Pending` của `yield_now`, lần hai chạy tiếp từ đúng điểm await. Dòng `is_unpin` biên dịch được (quan sát): `Pin<Box<async block>>` là `Unpin` dù pointee là `!Unpin`. Giải thích hợp lý (suy luận của người soạn): `Box<T>` là `Unpin`[^pin-unpin-builtin] và `Pin` chỉ là lớp bọc quanh con trỏ. Chiều ngược lại cũng có trong Book: `Box<T>` chỉ implement `Future` khi `T` là future `Unpin`, nên `join_all` trên `Vec<Box<dyn Future>>` không biên dịch nếu chưa ghim.[^book-join-all]
 
-**Đệ quy cần Box.** `async fn` đệ quy trực tiếp bị rustc từ chối với `E0733: recursion in an async fn requires boxing` (quan sát, chạy trên 1.95.0, edition 2024; rustc còn ghi chú rằng lời gọi đệ quy phải đưa vào một tầng gián tiếp như `Box::pin` để tránh future kích thước vô hạn). Error index của rustc cũng nêu lỗi này (async function dùng đệ quy mà không boxing)[^rustc-e0733] và giải thích: `Box<...>` làm kết quả có kích thước biết trước, còn `pin` giữ nó đứng yên.[^rustc-e0733-box] Bản dùng `Box::pin` chạy được (quan sát):
+**Đệ quy cần Box.** `async fn` đệ quy trực tiếp bị rustc từ chối với `E0733: recursion in an async fn requires boxing` (quan sát, chạy trên 1.95.0, edition 2024; rustc còn ghi chú rằng lời gọi đệ quy phải đưa vào một tầng gián tiếp như `Box::pin` để tránh future kích thước vô hạn). Error index của rustc cũng nêu lỗi này: async function dùng đệ quy mà không boxing.[^rustc-e0733] Lời giải thích đi kèm: `Box<...>` làm kết quả có kích thước biết trước, còn `pin` giữ nó đứng yên.[^rustc-e0733-box] Bản dùng `Box::pin` chạy được (quan sát):
 
 ```rust
 fn sum(n: u32) -> Pin<Box<dyn Future<Output = u32>>> {
@@ -303,40 +307,40 @@ fn sum(n: u32) -> Pin<Box<dyn Future<Output = u32>>> {
 }   // block_on(sum(4)) == 10
 ```
 
-Chuyện này nối với mục 3 (suy luận của người soạn): future chứa future con *by value*, nên đệ quy tạo kiểu vô hạn nếu thiếu tầng con trỏ.
+Chuyện này nối với mục 3 (suy luận của người soạn): future chứa future con *by value*, nên đệ quy tạo ra kiểu vô hạn nếu thiếu một tầng con trỏ.
 
 <details><summary>Đi sâu: drop guarantee và projection</summary>
 
 ### 5.5 Drop guarantee
 
-Pinning cho phép code khác *dựa vào* việc giá trị còn ở một địa chỉ. Docs lấy ví dụ danh sách liên kết intrusive: `Drop` của mỗi phần tử phải báo cho phần tử kề gỡ mình ra, nên ta phải tin `drop` *luôn* được gọi trước khi phần tử bị làm mất hiệu lực.[^pin-drop-crucial] Từ đó: bất cứ khi nào có thể ghi đè một giá trị đã ghim, `drop` của nó phải được gọi trước (trừ khi `Unpin`).[^std-pin-drop] Với bộ nhớ cấp phát thủ công, code unsafe phải gọi `ptr::drop_in_place` trước khi giải phóng hoặc dùng lại vùng nhớ.[^pin-drop-cases] `Pin::set` hợp lệ chính vì nó chạy `drop` trên pointee trước khi gán.[^pin-set]
+Pinning cho phép code khác *dựa vào* việc một giá trị còn ở một địa chỉ. Docs lấy ví dụ danh sách liên kết intrusive: `Drop` của mỗi phần tử phải báo cho phần tử kề gỡ mình ra, nên ta phải tin rằng `drop` *luôn* được gọi trước khi phần tử bị làm mất hiệu lực.[^pin-drop-crucial] Từ đó có quy tắc: bất cứ khi nào có thể ghi đè một giá trị đã ghim, `drop` của nó phải được gọi trước (trừ khi nó `Unpin`).[^std-pin-drop] Với bộ nhớ cấp phát thủ công, code unsafe phải gọi `ptr::drop_in_place` trước khi giải phóng hoặc dùng lại vùng nhớ đó.[^pin-drop-cases] `Pin::set` hợp lệ chính vì nó chạy `drop` trên pointee trước khi gán giá trị mới.[^pin-set]
 
-Docs mô tả vòng đời *thường gặp* của kiểu có trạng thái nhạy địa chỉ, và dùng future làm ví dụ ở từng bước:
+Docs cũng mô tả vòng đời *thường gặp* của kiểu có trạng thái nhạy địa chỉ, và dùng future làm ví dụ ở từng bước:
 
-1. Giá trị được tạo và move tự do (ví dụ gọi một async fn trả về state machine).[^pin-lc-create]
+1. Giá trị được tạo ra và move tự do (ví dụ gọi một async fn để nhận về state machine).[^pin-lc-create]
 2. Một thao tác khiến giá trị phụ thuộc vào việc địa chỉ không đổi (ví dụ lần `poll` đầu tiên).[^pin-lifecycle]
 3. Các phần safe khác của kiểu dùng thao tác unsafe nội bộ với giả định địa chỉ ổn định (ví dụ các lần poll sau).[^pin-lc-stable]
-4. Trước khi giá trị bị làm mất hiệu lực nó được drop, để báo cho mọi thứ trỏ tới nó (ví dụ drop future).[^pin-lc-drop]
+4. Trước khi giá trị bị làm mất hiệu lực, nó được drop để báo cho mọi thứ trỏ tới nó (ví dụ drop future).[^pin-lc-drop]
 
-Drop là cách *hợp lệ* kết thúc pinning, nên hủy một future bằng drop (mục 8) nhất quán với `Pin` (nhận xét của người soạn).
+Drop là cách *hợp lệ* để kết thúc pinning, nên hủy một future bằng drop (mục 8) nhất quán với `Pin` (nhận xét của người soạn).
 
 ### 5.6 Projection
 
-Khi tự viết future bọc future con (như combinator), `poll` nhận `self: Pin<&mut Self>`, và với từng field con phải quyết định lấy `&mut Field` hay `Pin<&mut Field>` (áp dụng của người soạn). Docs nói chính tác giả của struct quyết định kiểu mà phép "projection" trả về,[^pin-proj-choice] và gọi việc phơi một field của giá trị đã ghim qua pinning pointer là *projecting* a pin.[^pin-projecting] Ví dụ trong docs cho field không ghim cấu trúc phải dùng một lời gọi `unsafe`;[^pin-proj-unsafe] crate `pin-project` tự mô tả là công cụ cho pin-projection an toàn và tiện dụng.[^pin-project-crate] Chương này chỉ nhắc khái niệm để bạn nhận ra khi đọc code combinator.
+Khi tự viết một future bọc future con (như một combinator), `poll` nhận `self: Pin<&mut Self>`, và với từng field con ta phải quyết định lấy `&mut Field` hay `Pin<&mut Field>` (áp dụng của người soạn). Docs nói rằng chính tác giả của struct quyết định kiểu mà phép "projection" trả về,[^pin-proj-choice] và gọi việc phơi một field của giá trị đã ghim qua pinning pointer là *projecting* a pin.[^pin-projecting] Trong ví dụ của docs, field không được ghim cấu trúc thì phải dùng một lời gọi `unsafe`.[^pin-proj-unsafe] Crate `pin-project` tự mô tả là công cụ cho pin-projection an toàn và tiện dụng.[^pin-project-crate] Chương này chỉ nhắc khái niệm để bạn nhận ra khi đọc code combinator.
 
 </details>
 
-**Quay lại Q5:** `Pin` cấm move pointee cho tới khi drop (trừ `Unpin`); async block là `!Unpin` nên cần `pin!` hoặc `Box::pin` để poll.
+**Quay lại Q5:** `Pin` cấm move pointee cho tới khi drop (trừ `Unpin`); future của `handle_order` là `!Unpin` nên muốn poll tại chỗ thì `pin!`, muốn trả ra khỏi hàm hay lưu vào collection thì `Box::pin` (nhận xét của người soạn).
 
 ## 6. Async closure (Q6)
 
-> **Trả lời ngắn.** Có: async closure được stabilize ở Rust 1.85.0,[^rel-185] nên ở 1.95.0 là stable. Closure đánh dấu `async` là bất đồng bộ theo cách tương tự async function; gọi nó không làm việc gì mà chỉ cho ra một future ứng với thân closure.[^ref-async-closure]
+> **Trả lời ngắn.** Có: async closure được stabilize ở Rust 1.85.0,[^rel-185] nên ở 1.95.0 nó stable. Closure đánh dấu `async` là bất đồng bộ theo cách tương tự async function: gọi nó không làm việc gì mà chỉ cho ra một future ứng với thân closure.[^ref-async-closure]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): closure thường là một hàm mini; async closure là hàm mini mà mỗi lần gọi trao ra một phiếu công việc.
+*Với `handle_order`.* Giả sử bạn muốn truyền "cách tra database" vào một hàm tiện ích dưới dạng closure, và mỗi lần hàm đó gọi closure sẽ có một lần tra, tức là một future. Câu hỏi là closure kiểu đó có viết trực tiếp được không.
 
-Mỗi lần gọi async closure chỉ tạo future chứ chưa chạy thân,[^ref-async-closure] đúng như phiếu công việc ở hình dung trên. Release notes xếp việc stabilize async closures vào Version 1.85.0 (2025-02-20) và trỏ tới RFC 3668,[^rel-185] nên ở 1.95.0 nó stable. Ví dụ chạy thật (cả edition 2021 và 2024) với bound `AsyncFn`:
+Được, từ Rust 1.85. Mỗi lần gọi một async closure chỉ tạo future chứ chưa chạy thân của nó,[^ref-async-closure] đúng như `handle_order(req)` ở mục 1. Release notes xếp việc stabilize async closures vào Version 1.85.0 (2025-02-20) và trỏ tới RFC 3668,[^rel-185] nên ở 1.95.0 nó đã stable. Ví dụ chạy thật (cả edition 2021 và 2024) với bound `AsyncFn`:
 
 ```rust
 async fn call_twice<F: AsyncFn(u32) -> u32>(f: F) -> u32 { f(1).await + f(2).await }
@@ -349,25 +353,25 @@ fn main() {
 
 <details><summary>Đi sâu: <code>AsyncFn*</code> không dyn-compatible và lý do thiết kế</summary>
 
-Reference ghi `AsyncFn`, `AsyncFnMut`, `AsyncFnOnce` *không* dyn-compatible.[^ref-asyncfn-dyn] Về lý do thiết kế, RFC 3668 (mà release notes trỏ tới) nêu hai điểm vướng khi dùng closure trả async block với bound `Fn`: không diễn đạt được chữ ký hàm async higher-ranked,[^rfc-hr] và closure không trả được future mượn từ captures của chính closure.[^rfc-borrow]
+Reference ghi `AsyncFn`, `AsyncFnMut` và `AsyncFnOnce` *không* dyn-compatible.[^ref-asyncfn-dyn] Về lý do thiết kế, RFC 3668 (mà release notes trỏ tới) nêu hai điểm vướng khi dùng một closure trả async block với bound `Fn`. Một là không diễn đạt được chữ ký hàm async higher-ranked.[^rfc-hr] Hai là closure không trả được future mượn từ chính các giá trị nó capture.[^rfc-borrow]
 
 </details>
 
-**Quay lại Q6:** async closure stable từ 1.85.0 và gọi nó cho ra một future.
+**Quay lại Q6:** async closure stable từ 1.85.0 và gọi nó cho ra một future, như một `async fn` nhỏ gọn.
 
 ## 7. `async fn` trong trait và vấn đề `Send` (Q7)
 
-> **Trả lời ngắn.** `async fn` trong trait được stabilize ở Rust 1.75.0.[^rel-175] Có hai giới hạn: method `async` làm trait không dyn-compatible,[^ref-trait-dyn] và trong code generic, future trả về không tự `Send` (quan sát bằng lỗi rustc ở dưới); vì người dùng trait không thêm được bound về sau, tác giả trait phải chọn có bảo đảm `Send` hay không.[^blog-send]
+> **Trả lời ngắn.** `async fn` trong trait được stabilize ở Rust 1.75.0.[^rel-175] Có hai giới hạn. Thứ nhất, method `async` làm trait không dyn-compatible.[^ref-trait-dyn] Thứ hai, trong code generic, future trả về không tự `Send` (quan sát bằng lỗi rustc ở dưới); người dùng trait không thêm được bound này về sau, nên tác giả trait phải chọn có bảo đảm `Send` hay không.[^blog-send]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): trait là bản hợp đồng in sẵn; nếu hợp đồng không ghi "phiếu này chuyền được giữa các bàn (Send)", người dùng generic không được tự giả định điều đó.
+*Với `handle_order`.* Thực tế `handle_order` không gọi một database cụ thể mà gọi qua một trait, để test thì thay bằng bản giả: `trait Store { async fn get(&self, k: u32) -> u32; }`. Và bạn muốn viết `handle_order` generic theo `S: Store`, rồi `tokio::spawn` nó. Hai việc này vướng nhau ở chỗ `Send`.
 
-Release notes ghi ở Version 1.75.0 (2023-12-28) rằng async fn và return-position impl Trait trong trait đã được stabilize.[^rel-175] Ví dụ `trait Store { async fn get(&self, k: u32) -> u32; }` với `impl Store for Mem { async fn get(..) {..} }` biên dịch và chạy trên 1.95.0 (quan sát).
+Trước hết, `async fn` trong trait đã stable: release notes ghi ở Version 1.75.0 (2023-12-28) rằng async fn và return-position impl Trait trong trait đã được stabilize.[^rel-175] Với `trait Store { async fn get(&self, k: u32) -> u32; }` và `impl Store for Mem { async fn get(..) {..} }`, code biên dịch và chạy trên 1.95.0 (quan sát).
 
-**Giới hạn 1: không dyn-compatible.** Reference: method dyn-compatible không được là `async fn` (kiểu `Future` ẩn).[^ref-trait-dyn] rustc xác nhận: `&dyn Store` cho `E0038`, "because method `get` is `async`" (quan sát).
+**Giới hạn 1: không dyn-compatible.** Một method muốn dyn-compatible thì không được là `async fn`, vì nó có kiểu `Future` ẩn.[^ref-trait-dyn] rustc xác nhận: `&dyn Store` cho lỗi `E0038`, "because method `get` is `async`" (quan sát). Nghĩa là bạn không giữ được `Box<dyn Store>` kiểu này.
 
-**Giới hạn 2: `Send` của future trả về.** Trong code generic, compiler chỉ biết *chữ ký trait*: một `impl Future` ẩn, không biết nó `Send` (suy luận của người soạn, khớp lỗi quan sát bên dưới). Output của rustc 1.95.0:
+**Giới hạn 2: `Send` của future trả về.** Trong code generic, compiler chỉ biết *chữ ký trait*: một `impl Future` ẩn, không biết nó có `Send` hay không (suy luận của người soạn, khớp với lỗi quan sát bên dưới). Ví dụ dưới mô phỏng `tokio::spawn` bằng một hàm đòi `Send`; output là của rustc 1.95.0:
 
 ```rust
 trait Store { async fn get(&self, k: u32) -> u32; }
@@ -384,25 +388,25 @@ help: `Send` can be made part of the associated future's guarantees for all impl
 3 + trait Store { fn get(&self, k: u32) -> impl std::future::Future<Output = u32> + Send; }
 ```
 
-rustc gợi ý khử đường trong *định nghĩa trait* (quan sát từ output trên). Bản sửa biên dịch và chạy (quan sát); mỗi impl vẫn viết `async fn` được (`impl Store for Mem { async fn get(..) {..} }`, `block_on(Mem.get(21)) == 42`). Thông báo trên Rust Blog giải thích đây là quyết định của *tác giả trait*: họ viết rằng tác giả phải chọn xem trait có dùng được với executor work-stealing đa luồng không,[^blog-send] và `Send` là bound đáng quan tâm nhất trên future trả về.[^blog-send-interest] (Blog nhắc crate `trait-variant`; người soạn chưa chạy thử.)
+Gợi ý của rustc là khử đường ngay trong *định nghĩa trait* (quan sát từ output trên). Bản sửa biên dịch và chạy được (quan sát), và mỗi impl vẫn viết `async fn` bình thường (`impl Store for Mem { async fn get(..) {..} }`, `block_on(Mem.get(21)) == 42`). Vì sao rustc không tự suy ra được? Vì đây là quyết định của *tác giả trait*, như thông báo trên Rust Blog giải thích: họ viết rằng tác giả phải chọn xem trait có dùng được với executor work-stealing đa luồng hay không.[^blog-send] Cũng bài đó nói `Send` là bound đáng quan tâm nhất trên future trả về.[^blog-send-interest] (Blog nhắc crate `trait-variant`; người soạn chưa chạy thử.)
 
 <details><summary>Đi sâu: nối với <code>tokio::spawn</code> và vì sao chỉ biến sống qua <code>.await</code> mới tính</summary>
 
-Nối với Tokio: `spawn` đòi `F: Future + Send + 'static`;[^tokio-spawn-sig] giá trị `!Send` vẫn dùng được nếu chỉ tồn tại giữa các lần `.await`.[^tokio-spawn-send] Khớp mục 3: chỉ biến sống *qua* `.await` mới thành phần của future. Thử bằng rustc (quan sát): `async { let r = Rc::new(1); yield_now().await; println!("{r}"); }` không qua `require_send` (note của rustc nói giá trị `Rc<i32>` không `Send` được dùng qua một `.await`); đặt `Rc` trong block con chết trước `.await` thì biên dịch được. `Send` là các kiểu có thể chuyển qua ranh giới thread.[^std-send] Chi tiết `spawn` ở [08-tokio.md](08-tokio.md).
+`tokio::spawn` đòi `F: Future + Send + 'static`.[^tokio-spawn-sig] Dù vậy, giá trị `!Send` vẫn dùng được trong task nếu nó chỉ tồn tại giữa các lần `.await`.[^tokio-spawn-send] Điều này khớp mục 3: chỉ biến sống *qua* `.await` mới là thành phần của future. Thử bằng rustc (quan sát): `async { let r = Rc::new(1); yield_now().await; println!("{r}"); }` không qua được `require_send` (note của rustc nói giá trị `Rc<i32>` không `Send` được dùng qua một `.await`); đặt `Rc` trong một block con chết trước `.await` thì biên dịch được. `Send` là các kiểu có thể chuyển qua ranh giới thread.[^std-send] Chi tiết `spawn` ở [08-tokio.md](08-tokio.md).
 
 </details>
 
-**Quay lại Q7:** `async fn` trong trait stable từ 1.75.0, nhưng không dyn-compatible và future trả về không tự `Send` trong code generic.
+**Quay lại Q7:** `async fn` trong trait stable từ 1.75.0, nhưng không dyn-compatible, và future trả về không tự `Send` trong code generic nên `handle_order<S: Store>` không `spawn` được nếu trait `Store` không cam kết `Send`.
 
 ## 8. Hủy bằng drop: code sau `.await` không chạy (Q8)
 
-> **Trả lời ngắn.** Hủy một future là thôi poll và drop nó: code sau `.await` không chạy, còn các biến đang sống trong state machine được drop (quan sát ở ví dụ bên dưới). Tokio nói cùng chiều: khi task bị shut down, nó dừng ở `.await` đã nhường và mọi biến cục bộ bị hủy bằng cách chạy destructor.[^tokio-cancel-drop] Việc bắt buộc phải chạy nên đặt trong `Drop` của guard (nhận xét của người soạn).
+> **Trả lời ngắn.** Hủy một future là thôi poll và drop nó: code sau `.await` không chạy, còn các biến đang sống trong state machine được drop (quan sát ở ví dụ bên dưới). Tokio nói cùng chiều: khi task bị shut down, nó dừng ở `.await` mà nó đã nhường, và mọi biến cục bộ bị hủy bằng cách chạy destructor.[^tokio-cancel-drop] Việc bắt buộc phải chạy nên đặt trong `Drop` của guard (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bỏ dở một phiếu công việc giữa chừng, các bước chưa làm sẽ không bao giờ được làm, nhưng đồ đã lấy ra bàn thì phải được dọn.
+*Với `handle_order`.* Client đóng kết nối giữa chừng, hoặc request quá timeout, hoặc nhánh `select!` chứa handler thua một nhánh khác. Mỗi trường hợp đó, handler đang treo ở một `.await` nào đó và không ai poll nó nữa. Chuyện gì xảy ra với các dòng sau `.await`, ví dụ dòng trả connection về pool? Mục này trả lời.
 
-**Vấn đề.** Server cần hủy việc dở dang (client ngắt, timeout, nhánh `select!` thua). Với future, "hủy" là thôi poll và drop nó.
+Với future, "hủy" nghĩa là thôi poll và drop nó. Ví dụ dưới thay `handle_order` bằng `job()` có một `Guard` đóng vai connection lấy từ pool, và in ra khi drop:
 
 ```rust
 struct Guard(&'static str);
@@ -441,35 +445,35 @@ C) chay den het:
   drop(g1)
 ```
 
-- **A**: dòng `job: sau await` *không bao giờ in*, `g2` không bao giờ được tạo; nhưng `g1` (biến đã sống tại điểm dừng) **được drop** khi future bị drop. Hủy = chạy destructor của các biến đang sống trong state machine rồi thôi (nhận xét của người soạn, rút từ output).
-- **B**: future chưa poll thì thân hàm không chạy gì, khớp Reference.[^ref-async-fn]
-- **C**: chạy hết thì drop theo thứ tự ngược.
+- **A**: dòng `job: sau await` *không bao giờ in*, và `g2` không bao giờ được tạo. Nhưng `g1`, biến đã sống tại điểm dừng, **được drop** khi future bị drop. Tức là hủy = chạy destructor của các biến đang sống trong state machine rồi thôi (nhận xét của người soạn, rút từ output).
+- **B**: future chưa poll thì thân hàm không chạy gì, khớp với Reference.[^ref-async-fn]
+- **C**: chạy hết thì các biến drop theo thứ tự ngược với thứ tự tạo.
 
-`select!` chờ nhiều nhánh và *hủy các nhánh còn lại* khi một nhánh xong.[^tokio-select] Tokio định nghĩa cancellation safety là chuyện xảy ra khi future bị drop trước khi hoàn thành.[^tokio-cs-def]
+Bài toán hủy này xuất hiện nhiều nhất ở `select!`: nó chờ nhiều nhánh cùng lúc và *hủy các nhánh còn lại* khi một nhánh xong.[^tokio-select] Tokio định nghĩa cancellation safety là chuyện xảy ra khi một future bị drop trước khi hoàn thành.[^tokio-cs-def]
 
 **Hệ quả với backend (nhận xét của người soạn, dựa trên các quan sát trên):**
 
-- Mọi dòng sau một `.await` là *có điều kiện*. Việc phải chạy bất kể bị hủy (trả connection về pool, giải phóng khóa nghiệp vụ) phải đặt trong `Drop` của guard (như `g1`), không nằm sau `.await`.
-- Hai bước có tác dụng phụ ngăn cách bởi `.await` (ghi A, await, ghi B) có thể chỉ dừng ở A: không còn tính nguyên tử. Thiết kế để dở dang vẫn nhất quán.
+- Mọi dòng sau một `.await` đều là *có điều kiện*. Việc phải chạy bất kể bị hủy (trả connection về pool, giải phóng khóa nghiệp vụ) phải đặt trong `Drop` của một guard như `g1`, không nằm sau `.await`.
+- Hai bước có tác dụng phụ ngăn cách bởi một `.await` (ghi A, await, ghi B) có thể chỉ dừng ở A, nên không còn tính nguyên tử. Hãy thiết kế sao cho trạng thái dở dang vẫn nhất quán.
 
 <details><summary>Đi sâu: cancellation safety của Tokio</summary>
 
-- Tokio định nghĩa an toàn là "drop rồi tạo lại future" phải là no-op;[^tokio-cs-noop] `read` nằm trong danh sách an toàn,[^tokio-cs-safe] còn `read_exact`, `read_to_end`, `write_all` "can lead to loss of data".[^tokio-cs-list] Dữ liệu đã đọc dở nằm trong future bị hủy nên mất (suy luận của người soạn từ mô hình state machine).
+- Tokio định nghĩa an toàn là "drop rồi tạo lại future" phải là no-op.[^tokio-cs-noop] `read` nằm trong danh sách an toàn,[^tokio-cs-safe] còn `read_exact`, `read_to_end`, `write_all` thì "can lead to loss of data".[^tokio-cs-list] Dữ liệu đã đọc dở nằm trong future bị hủy nên mất (suy luận của người soạn từ mô hình state machine).
 
 </details>
 
-**Quay lại Q8:** hủy = drop: các dòng sau `.await` không chạy và việc bắt buộc phải nằm trong `Drop`.
+**Quay lại Q8:** hủy = drop: client ngắt hay timeout thì các dòng sau `.await` của `handle_order` không chạy, và việc bắt buộc (như trả connection về pool) phải nằm trong `Drop`.
 
 ## Tóm tắt
 
-- Gọi `async fn`/async block chỉ tạo future vô danh; thân hàm chạy khi bị poll.[^ref-async-fn]
+- Gọi `async fn` hay async block chỉ tạo một future vô danh; thân hàm chạy khi có ai poll nó.[^ref-async-fn]
 - `.await` poll future con; `Pending` lan lên và trạng thái được giữ để tiếp tục đúng chỗ.[^ref-await]
-- "State machine / enum mỗi điểm await" là mô hình Reference ghi "roughly"; layout là unspecified.[^ref-layout-enum][^ref-layout-unspec]
-- Kích thước future theo biến sống qua `.await` (đo: 1026 byte so với 2 byte); là quan sát, không phải bảo đảm.
-- Tham chiếu giữa biến cùng sống qua `.await` làm future tự trỏ; move để lại con trỏ ở địa chỉ cũ.[^book-selfref]
-- `Pin<Ptr>` ghim pointee, cấm move trong safe code trừ khi `Unpin`; hợp đồng kéo dài đến drop.[^std-pin-struct][^pin-drop-inv]
-- Async block là `!Unpin` (quan sát bằng E0277; nguyên nhân là chi tiết cài đặt của rustc); ghim bằng `pin!` (không heap) hoặc `Box::pin`.[^std-pin-macro-heap]
-- Async closure stable từ 1.85, `async fn` trong trait từ 1.75;[^rel-185][^rel-175] future trả về của trait không tự `Send` trong code generic (quan sát), tác giả trait phải chọn.[^blog-send]
+- "State machine, enum mỗi điểm await" là mô hình mà Reference chỉ ghi "roughly".[^ref-layout-enum] Layout thật là unspecified.[^ref-layout-unspec]
+- Kích thước future theo các biến sống qua `.await` (đo được 1026 byte so với 2 byte); đó là quan sát, không phải bảo đảm.
+- Tham chiếu giữa các biến cùng sống qua `.await` làm future tự trỏ,[^book-selfref] và move để lại con trỏ ở địa chỉ cũ.[^std-pin-sr2]
+- `Pin<Ptr>` ghim pointee và cấm move trong safe code trừ khi pointee `Unpin`.[^std-pin-struct] Hợp đồng ghim kéo dài đến lúc drop.[^pin-drop-inv]
+- Async block là `!Unpin` (quan sát bằng E0277; nguyên nhân là chi tiết cài đặt của rustc). Muốn poll thì ghim bằng `pin!`, không heap, hoặc `Box::pin`.[^std-pin-macro-heap]
+- Async closure stable từ 1.85,[^rel-185] `async fn` trong trait stable từ 1.75.[^rel-175] Future trả về của trait không tự `Send` trong code generic (quan sát), nên tác giả trait phải chọn.[^blog-send]
 - Hủy = drop future: code sau `.await` không chạy, biến đang sống được drop; việc bắt buộc phải đặt trong `Drop`.[^tokio-cancel-drop]
 
 ## Câu hỏi tự kiểm tra
@@ -484,21 +488,21 @@ C) chay den het:
 2. Khi future con trả `Pending` trong `.await`, điều gì xảy ra với future ngoài?
    <details><summary>Đáp án</summary>
 
-   Nó cũng trả `Pending`, giữ trạng thái; lần poll lại quay về đúng bước poll đó.[^ref-await]
+   Nó cũng trả `Pending` và giữ trạng thái; lần poll lại quay về đúng bước poll đó.[^ref-await]
 
    </details>
 
 3. "Async fn là enum mỗi điểm await một variant" đúng đến đâu?
    <details><summary>Đáp án</summary>
 
-   Là mô hình Reference tự ghi "roughly equivalent"; định dạng dữ liệu thực tế là unspecified.[^ref-layout-enum][^ref-layout-unspec]
+   Đó là mô hình mà Reference tự ghi "roughly equivalent".[^ref-layout-enum] Định dạng dữ liệu thực tế là unspecified.[^ref-layout-unspec]
 
    </details>
 
 4. Vì sao `big_not_across` 2 byte còn `big_across` 1026 byte? Vì sao `with_arg_unused` vẫn 258?
    <details><summary>Đáp án</summary>
 
-   Mảng chỉ nằm trong future khi sống qua `.await` (quan sát; `pin!` docs nói local vắt qua await là trạng thái future[^std-pin-macro]). Tham số unused vẫn bị capture theo Reference.[^ref-fn-param]
+   Mảng chỉ nằm trong future khi sống qua `.await` (quan sát; docs của `pin!` nói local vắt qua await là trạng thái future[^std-pin-macro]). Tham số unused vẫn bị capture theo Reference.[^ref-fn-param]
 
    </details>
 
@@ -512,21 +516,21 @@ C) chay den het:
 6. `Pin` ghim con trỏ hay pointee? `Pin<Box<async block>>` có `Unpin` không?
    <details><summary>Đáp án</summary>
 
-   Ghim pointee.[^pin-pointee] Có: `Box` là `Unpin` và `Unpin` của pointee mới quyết định hành vi `Pin`.[^pin-unpin-builtin][^pin-unpin-pointee] Ví dụ `is_unpin` biên dịch.
+   Ghim pointee.[^pin-pointee] Có: `Box` là `Unpin`,[^pin-unpin-builtin] và chỉ `Unpin` của pointee mới quyết định hành vi của `Pin`.[^pin-unpin-pointee] Ví dụ `is_unpin` biên dịch.
 
    </details>
 
 7. `pin!` khác `Box::pin` thế nào? Khi nào bắt buộc `Box::pin`?
    <details><summary>Đáp án</summary>
 
-   `pin!` không cấp phát heap.[^std-pin-macro-heap] Cần `Box::pin` khi future phải sống lâu hơn scope tạo ra nó, lưu vào collection/`dyn Future` (nhận xét của người soạn), hoặc đệ quy async: error index của rustc nêu `Box::pin` làm cách sửa E0733.[^rustc-e0733-box]
+   `pin!` không cấp phát heap.[^std-pin-macro-heap] Cần `Box::pin` khi future phải sống lâu hơn scope tạo ra nó hoặc phải lưu vào collection/`dyn Future` (nhận xét của người soạn). Đệ quy async cũng cần: error index của rustc nêu `Box::pin` làm cách sửa E0733.[^rustc-e0733-box]
 
    </details>
 
 8. Drop guarantee là gì?
    <details><summary>Đáp án</summary>
 
-   Giá trị đã ghim còn hợp lệ ở cùng địa chỉ cho đến khi drop được gọi; ghi đè thì `drop` phải chạy trước.[^pin-drop-inv][^std-pin-drop]
+   Giá trị đã ghim còn hợp lệ ở cùng địa chỉ cho đến khi drop được gọi;[^pin-drop-inv] ghi đè thì `drop` phải chạy trước.[^std-pin-drop]
 
    </details>
 

@@ -1,6 +1,6 @@
 # P12 · Chương 17 — Redis trong thực chiến: kết hợp primitive thành pattern
 
-> Chương 16 đã mở Redis ra từ bên trong (event loop, encoding, persistence, replication, cluster). Chương này làm việc ngược lại: lấy các *primitive* của Redis (một lệnh, một cấu trúc dữ liệu, một script) và **ghép** chúng thành pattern giải bài toán backend — cache, rate limiter, lock/idempotency, job queue, leaderboard, thống kê, session — rồi chỉ ra *chỗ mỗi pattern hỏng*. Quy ước nguồn giữ nguyên chương 16: **tài liệu** lấy từ repo `redis/redis-doc` ghim ở commit `1044224477fceacc5af56a636b0a7495d19e533c` (các trang `commands/*.md` có sẵn mục "Pattern"); **source code** là Redis **7.2.5**; client Rust là crate `redis` **1.7.1** trên docs.rs. Ví dụ code (Lua, Rust) *chỉ minh họa* — chương này không biên dịch, không chạy chúng và không khẳng định kết quả chạy. Những gì nguồn không nói (công thức, ngưỡng, lời khuyên thiết kế) được ghi rõ là nhận xét/suy luận của người soạn.
+> Phạm vi: chương 16 mở Redis từ bên trong; chương này làm ngược lại, lấy các *primitive* (một lệnh, một cấu trúc dữ liệu, một script) **ghép** thành pattern cho backend — cache, rate limiter, lock/idempotency, job queue, leaderboard, thống kê, session — rồi chỉ ra *chỗ mỗi pattern hỏng*. Nguồn ghim giống chương 16: **tài liệu** là repo `redis/redis-doc` ở commit `1044224477fceacc5af56a636b0a7495d19e533c` (các trang `commands/*.md` có mục "Pattern"), **source code** là Redis **7.2.5**, client Rust là crate `redis` **1.7.1** trên docs.rs. Ví dụ code (Lua, Rust) *chỉ để minh họa*: chương không biên dịch, không chạy và không khẳng định kết quả chạy chúng. Chỗ nào nguồn không nói (công thức, ngưỡng, lời khuyên thiết kế) đều ghi rõ là nhận xét hoặc suy luận của người soạn.
 
 ## Bạn sẽ hiểu được gì
 
@@ -15,30 +15,48 @@
 
 ## Kiến thức cần trước
 
-- [P12 · Chương 16 — Redis bên trong](16-redis-ben-trong.md): chương này *dùng* kết luận của nó mà không chứng minh lại — một thread thực thi lệnh nên mỗi lệnh/script nguyên tử và lệnh chậm chặn tất cả (mục 1); encoding và eviction (mục 2–3); persistence (mục 4); replication bất đồng bộ (mục 5); Cluster và slot (mục 6); `MULTI`/`WATCH`/Lua/Streams (mục 7); khóa, cache, rate limiter ở mức cơ bản (mục 8). Chương này đào sâu *cách ghép*, không lặp phần cơ chế đó.
+- [P12 · Chương 16 — Redis bên trong](16-redis-ben-trong.md): chương này *dùng* kết luận của nó mà không chứng minh lại. Đó là: một thread thực thi lệnh, nên mỗi lệnh/script nguyên tử và một lệnh chậm chặn mọi client (mục 1); encoding và eviction (mục 2–3); persistence (mục 4); replication bất đồng bộ (mục 5); Cluster và slot (mục 6); `MULTI`/`WATCH`/Lua/Streams (mục 7); khóa, cache, rate limiter ở mức cơ bản (mục 8). Chương này đi sâu vào *cách ghép*, không nhắc lại cơ chế.
 - [P12 · Chương 08 — Sự cố trong hệ phân tán](08-su-co-he-phan-tan.md) (mục 1 partial failure, mục 5 đồng hồ, mục 7 process pause, mục 8 lease và fencing token): nền cho mục 3.
 - [P12 · Chương 07 — Transaction](07-transaction.md) (mục 5: `UPDATE` nguyên tử, compare-and-set) và [P12 · Chương 12 — Dữ liệu đúng đắn](12-dung-dan-va-tich-hop-du-lieu.md) (mục 1 dữ liệu dẫn xuất, mục 4–5 idempotency, mục 6 outbox).
 - [P12 · Chương 11 — Stream processing](11-stream-processing.md) (mục 2 queue hay log, mục 4 ngữ nghĩa giao tin): nền cho mục 4.
-- [P12 · Chương 15 — PostgreSQL bên trong](15-postgresql-ben-trong.md): phía DB của cache, lock và queue (mỗi connection là một process — mục 1–2 — nên stampede đổ xuống Postgres rất đắt).
-- [P13 · Chương 09 — Mô hình hóa hệ backend](../13-tla-plus/09-mo-hinh-hoa-he-backend.md) (mục 2 lock + fencing, mục 4 cache-aside và cuộc đua stale): mô hình hình thức của hai pattern mà chương này dùng ở mức thực hành.
+- [P12 · Chương 15 — PostgreSQL bên trong](15-postgresql-ben-trong.md): phía DB của cache, lock và queue. Mỗi connection là một process (mục 1–2), nên một đợt stampede đổ xuống Postgres rất đắt.
+- [P13 · Chương 09 — Mô hình hóa hệ backend](../13-tla-plus/09-mo-hinh-hoa-he-backend.md) (mục 2 lock + fencing, mục 4 cache-aside và cuộc đua stale): mô hình hình thức của hai pattern mà chương này làm ở mức thực hành.
 
 ## 0. Khung chung: năm câu hỏi cho mọi pattern, và sáu cách hỏng lặp lại
 
-Mỗi pattern trong chương đi qua cùng năm câu hỏi: **(1)** bài toán là gì; **(2)** ghép primitive nào; **(3)** *nguyên tử ở đâu* — tức bước nào là một lệnh/một script duy nhất, bước nào là hai round trip có thể bị chen; **(4)** hỏng ở đâu; **(5)** khi nào *không* nên dùng Redis. Câu (3) quan trọng nhất: Redis không có transaction kiểu DB quan hệ, nên "đúng" luôn quy về việc *chọn ranh giới nguyên tử* (nhận xét của người soạn; cơ chế nền ở [chương 16, mục 7](16-redis-ben-trong.md)).
+**Ví dụ chạy xuyên chương: `shop`.** Mọi mục sau đều bám theo `shop`, backend của một cửa hàng online: một service Rust (axum + tokio, crate `redis` 1.7.1) chạy thành 12 pod sau load balancer, dữ liệu chính nằm trong Postgres, và bên cạnh có Redis kèm một replica. Ở đầu chương ta cứ coi đó là một instance; mục 1.5 và mục 8 sẽ nói vì sao nên tách cache khỏi dữ liệu không được mất. Mỗi mục lấy một phần việc của `shop` làm đề bài: `GET /products/42` đọc rất nhiều nên cần cache (mục 1); API công khai dùng API key bị giới hạn 100 request/phút (mục 2); `POST /payments` mang header `Idempotency-Key`, cùng job đối soát cuối ngày mà chỉ một pod được chạy (mục 3); email xác nhận đơn và job xuất hóa đơn đi qua queue (mục 4); bảng xếp hạng sản phẩm bán chạy và khách hàng nhiều điểm thưởng nhất (mục 5); số lượt xem, số khách duy nhất và cờ "hôm nay có hoạt động" (mục 6); session đăng nhập, feature flag và cache cục bộ trong từng pod (mục 7). `shop` là ví dụ giả định (nhận xét của người soạn: ví dụ giả định, không phải code trong repo).
 
-Câu (4) có sáu đáp án lặp lại ở gần như mọi pattern. Gọi tên chúng một lần ở đây để các mục sau chỉ cần nhắc **F1…F6**.
+Mỗi pattern trong chương đi qua cùng năm câu hỏi:
 
-**F1 — Mất write khi failover.** Replication của Redis mặc định bất đồng bộ[^repl-async]; `WAIT` làm giảm khả năng mất nhưng không biến Redis thành hệ CP — write đã ack vẫn có thể mất khi failover[^repl-wait-cp]. Redis Cluster tự mô tả đúng như vậy: thường có những cửa sổ nhỏ trong đó write đã ack có thể mất[^cl-ack-lost]. Hệ quả cho pattern: counter lùi lại và job biến mất (suy luận của người soạn), còn khóa có thể được cấp hai lần — tài liệu khóa của Redis mô tả đúng kịch bản (A lấy khóa, master chết trước khi key tới replica, B lấy khóa trên replica được thăng) và quy cho replication bất đồng bộ[^lk-replica-race]. Cơ chế đầy đủ: [chương 16, mục 5](16-redis-ben-trong.md).
+1. Bài toán là gì?
+2. Ghép primitive nào?
+3. *Nguyên tử ở đâu*: bước nào là một lệnh hoặc một script duy nhất, bước nào là hai round trip mà request khác có thể chen vào?
+4. Hỏng ở đâu?
+5. Khi nào *không* nên dùng Redis?
 
-**F2 — TTL không như bạn nghĩ.** Ba cái bẫy khác nhau. (a) `SET` thường *xóa* TTL đang có của key[^set-ttl-cleared] (muốn giữ phải dùng `KEEPTTL`[^set-keepttl]); ngược lại `INCR`, `LPUSH`, `HSET` để TTL nguyên vẹn[^expire-untouched] — nên key tạo bằng `INCR` không tự có TTL, bạn phải đặt (suy luận của người soạn). (b) TTL dựa vào *đồng hồ tường* của máy chạy Redis: chỉnh giờ máy tiến 2000 giây thì key có TTL 1000 giây hết hạn ngay[^expire-clock]; tài liệu khóa nhắc rõ Redis không dùng đồng hồ monotonic cho hết hạn nên bước nhảy đồng hồ có thể làm khóa bị nhiều process cùng giữ[^lk-disclaimer-clock]. (c) Key có thể *biến mất trước TTL* nếu `maxmemory` + policy eviction chọn trúng nó[^evict-policies] — nên lock, idempotency key hay job không nên sống chung instance với cache đang bật eviction (nhận xét của người soạn; mục 1.5 và mục 8).
+Câu (3) quan trọng nhất. Redis không có transaction kiểu DB quan hệ, nên chuyện "đúng hay sai" luôn quy về việc *chọn ranh giới nguyên tử* (nhận xét của người soạn; cơ chế nền ở [chương 16, mục 7](16-redis-ben-trong.md)).
 
-**F3 — Đồng hồ của chính app.** Pattern nào lấy `now` từ đồng hồ của pod (window id của rate limiter, timestamp trong ZSET) thì lệch đồng hồ giữa các pod làm kết quả lệch; xem [chương 08, mục 5–6](08-su-co-he-phan-tan.md). Cách tránh trong chương này: hoặc để Redis cấp thời gian (`TIME` trong script — mục 2), hoặc dùng cửa sổ tính từ lúc key được tạo (TTL-based) để khỏi cần đồng hồ của pod (việc hết hạn vẫn dựa vào đồng hồ của máy chạy Redis — F2b).
+Câu (4) có sáu đáp án lặp lại ở gần như mọi pattern. Ta gọi tên chúng một lần ở đây, các mục sau chỉ cần nhắc **F1…F6**.
 
-**F4 — Cross-slot trong Cluster.** Lệnh nhiều key chỉ chạy được khi mọi key cùng slot[^cl-subset]; không thì server trả `CROSSSLOT`[^src-crossslot]. Với script, tài liệu yêu cầu khai báo *mọi* key script đụng tới trong `KEYS`[^sc-keys], và các key đã khai báo phải cùng slot (chú thích trong source 7.2.5: nếu script đã khai báo key trước thì lỗi cross-slot đã được ném sẵn[^script-crossslot]). Công cụ để ép cùng slot là *hash tag* `{...}`[^cl-hashtag] (cơ chế: [chương 16, mục 6](16-redis-ben-trong.md)). Hệ quả thiết kế: pattern nào cần nhiều key trong một thao tác nguyên tử (khóa + fence counter, queue + processing list, nhiều bitmap) phải đặt tên key có hash tag ngay từ đầu — mục 8 nói cách chọn tag. Đồng thời, đang resharding thủ công thì thao tác nhiều key có thể tạm không dùng được[^cl-resharding-multikey] (server trả `TRYAGAIN`[^src-tryagain]).
+**F1 — Mất write khi failover.** Replication của Redis mặc định bất đồng bộ[^repl-async]. `WAIT` làm giảm khả năng mất write nhưng không biến Redis thành hệ CP: write đã ack vẫn có thể mất khi failover[^repl-wait-cp]. Redis Cluster cũng tự nhận như vậy: thường có những cửa sổ nhỏ mà write đã ack bị mất[^cl-ack-lost].
 
-**F5 — Big key.** Mọi lệnh chạy trên thread chính nên một lệnh chậm làm mọi client khác chờ[^lat-slow]; `DEL` một key chứa list/set/zset/hash tốn O(M) theo số phần tử[^del-cx], nên xóa key khổng lồ là ví dụ điển hình của lệnh chậm (nhận xét của người soạn), còn `UNLINK` thu hồi bộ nhớ ở thread khác nên không chặn[^unlink-doc] (cơ chế và ngoại lệ: [chương 16, mục 1](16-redis-ben-trong.md)).
+Với pattern, hậu quả có hai dạng. Counter có thể lùi lại và job có thể biến mất (suy luận của người soạn). Khóa thì có thể được cấp hai lần: A lấy khóa, master chết trước khi key kịp sang replica, rồi B lấy lại khóa trên replica vừa được thăng làm master. Tài liệu khóa của Redis mô tả đúng kịch bản này và quy nguyên nhân cho replication bất đồng bộ[^lk-replica-race]. Cơ chế đầy đủ nằm ở [chương 16, mục 5](16-redis-ben-trong.md).
 
-**F6 — Hot key.** Một key ánh xạ tới đúng một slot (`CRC16(key) mod 16384`[^cl-hashslot]), nên mọi lệnh ghi vào key đó dồn vào một master — thêm node không chia nhỏ được *một* key (suy luận của người soạn từ công thức slot); riêng tải đọc thì tài liệu Cluster nói replica của master đó dùng được để mở rộng khi chấp nhận dữ liệu cũ[^cl-replicas-read].
+**F2 — TTL không như bạn nghĩ.** Có ba cái bẫy khác nhau.
+
+- **(a) Lệnh ghi có thể xóa TTL.** `SET` thường *xóa* TTL đang có của key[^set-ttl-cleared]; muốn giữ phải thêm `KEEPTTL`[^set-keepttl]. Ngược lại `INCR`, `LPUSH`, `HSET` không đụng tới TTL[^expire-untouched]. Vì vậy key mới tạo bằng `INCR` không tự có TTL và bạn phải tự đặt (suy luận của người soạn).
+- **(b) TTL chạy theo đồng hồ tường của máy Redis.** Chỉnh giờ máy tiến 2000 giây thì key có TTL 1000 giây hết hạn ngay[^expire-clock]. Tài liệu khóa cũng nói Redis không dùng đồng hồ monotonic cho việc hết hạn, nên một bước nhảy đồng hồ có thể khiến nhiều process cùng giữ một khóa[^lk-disclaimer-clock].
+- **(c) Key có thể biến mất trước TTL.** Khi `maxmemory` đầy, policy eviction có thể chọn trúng nó[^evict-policies]. Vì vậy lock, idempotency key và job không nên sống chung instance với một cache đang bật eviction (nhận xét của người soạn; mục 1.5 và mục 8).
+
+**F3 — Đồng hồ của chính app.** Pattern nào lấy `now` từ đồng hồ của pod (window id của rate limiter, timestamp trong ZSET) thì lệch giờ giữa các pod sẽ làm kết quả lệch theo; xem [chương 08, mục 5–6](08-su-co-he-phan-tan.md). Chương này tránh bằng một trong hai cách. Cách thứ nhất là để Redis cấp thời gian, tức gọi `TIME` trong script (mục 2). Cách thứ hai là dùng cửa sổ tính từ lúc key được tạo (dựa vào TTL) để khỏi cần đồng hồ của pod; việc hết hạn lúc đó vẫn dựa vào đồng hồ của máy Redis, tức F2b.
+
+**F4 — Cross-slot trong Cluster.** Lệnh nhiều key chỉ chạy được khi mọi key cùng slot[^cl-subset]. Nếu không, server trả `CROSSSLOT`[^src-crossslot]. Script cũng vậy: tài liệu yêu cầu khai báo *mọi* key script đụng tới trong `KEYS`[^sc-keys], và các key đó phải cùng slot.
+
+Công cụ để ép nhiều key về cùng slot là *hash tag* `{...}`[^cl-hashtag] (cơ chế: [chương 16, mục 6](16-redis-ben-trong.md)). Hệ quả thiết kế: pattern nào cần nhiều key trong một thao tác nguyên tử (khóa + fence counter, queue + processing list, nhiều bitmap) phải đặt tên key có hash tag ngay từ đầu. Mục 8 nói cách chọn tag.
+
+**F5 — Big key.** Mọi lệnh chạy trên thread chính, nên một lệnh chậm làm mọi client khác phải chờ[^lat-slow]. `DEL` một key chứa list/set/zset/hash tốn O(M) theo số phần tử[^del-cx], nên xóa một key khổng lồ là ví dụ điển hình của lệnh chậm (nhận xét của người soạn). `UNLINK` thu hồi bộ nhớ ở thread khác nên không chặn[^unlink-doc]. Cơ chế và ngoại lệ: [chương 16, mục 1](16-redis-ben-trong.md).
+
+**F6 — Hot key.** Một key chỉ ánh xạ tới đúng một slot, `CRC16(key) mod 16384`[^cl-hashslot]. Vì vậy mọi lệnh ghi vào key đó dồn về một master, và thêm node không chia nhỏ được *một* key (suy luận của người soạn từ công thức slot). Tải đọc thì khác: tài liệu Cluster nói replica của master đó có thể gánh bớt khi chấp nhận dữ liệu cũ[^cl-replicas-read].
 
 | | Hỏng thế nào | Pattern chịu ảnh hưởng nặng nhất (nhận xét của người soạn) |
 |---|---|---|
@@ -49,37 +67,86 @@ Câu (4) có sáu đáp án lặp lại ở gần như mọi pattern. Gọi tên
 | F5 | lệnh chậm do key lớn | cache value lớn (1), leaderboard (5), bitmap (6), stream (4) |
 | F6 | một key quá nóng | cache (1), rate limiter (2), counter (6), flag (7) |
 
+<details><summary>Đi sâu: hai chi tiết nhỏ của F4 (script và resharding)</summary>
+
+Với script, chú thích trong source 7.2.5 cho biết: nếu script đã khai báo key trước thì lỗi cross-slot đã được ném sẵn[^script-crossslot].
+
+Khi đang resharding thủ công, thao tác nhiều key có thể tạm không dùng được[^cl-resharding-multikey]. Lúc đó server trả `TRYAGAIN`[^src-tryagain].
+
+</details>
+
 ## 1. Cache: cache-aside, stampede, negative caching (Q1)
 
-> **Trả lời ngắn.** Mẫu cache điển hình là *cache-aside*: app đọc cache trước; trượt thì đọc DB rồi nạp vào cache; khi ghi thì ghi DB rồi *xóa* key cache thay vì cập nhật nó[^fb-lookaside][^fb-delete]. Ba chỗ hỏng hay gặp: dữ liệu cũ do thứ tự đọc/ghi xen kẽ, *stampede* (một key nóng hết hạn và hàng loạt request cùng nạp lại nó[^xf-def]), và key "không tồn tại" bị hỏi đi hỏi lại — cách chữa lần lượt là xóa-sau-khi-commit kèm TTL làm lưới an toàn, single-flight bằng `SET NX PX` cộng TTL có jitter hoặc refresh sớm xác suất, và *negative caching* (cache cả câu trả lời "không có").
+> **Trả lời ngắn.** Cách dùng cache điển hình là *cache-aside*: app hỏi Redis trước; nếu key chưa có (trượt cache) thì đọc DB rồi nạp kết quả vào Redis[^fb-lookaside]. Khi dữ liệu đổi, app ghi DB rồi *xóa* key trong cache chứ không sửa nó[^fb-delete]. Cách này hay hỏng ở ba chỗ: cache giữ dữ liệu cũ vì đọc và ghi xen kẽ nhau; *stampede*, tức là khi một key nóng vừa hết hạn thì hàng loạt request cùng chạy xuống DB để nạp lại nó[^xf-def]; và những key "không tồn tại" bị hỏi đi hỏi lại. Ba cách chữa tương ứng là xóa key sau khi commit DB và lấy TTL (thời gian sống của key) làm lưới an toàn; chặn stampede bằng cách cho đúng một request đi nạp lại key (*single-flight*), cộng thêm một chút ngẫu nhiên vào TTL (*jitter*) hoặc làm mới key trước khi hết hạn; và cache luôn cả câu trả lời "không có" (*negative caching*).
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): trang sản phẩm `GET /products/42` nhận hàng chục nghìn request/giây, 99% là đọc, dữ liệu nằm ở Postgres. Một ngày sản phẩm 42 lên báo; key cache của nó hết hạn đúng lúc đang nóng nhất, 3.000 request cùng thấy "trượt" và cùng gửi `SELECT` xuống DB; pool connection cạn ([chương 15, mục 2](15-postgresql-ben-trong.md)) và cả site chậm theo. Cache giúp nhanh, nhưng *chính cách cache hết hạn* có thể là nguồn sự cố.
+*Với `shop`.* Trang sản phẩm `GET /products/42` nhận hàng chục nghìn request mỗi giây, 99% là đọc, dữ liệu gốc nằm ở Postgres, nên `shop` cho Redis đứng trước làm cache. Một hôm sản phẩm 42 lên báo, đúng lúc nó nóng nhất thì key cache của nó hết hạn. 3.000 request cùng thấy "trượt" và cùng gửi `SELECT` xuống DB; pool connection cạn ([chương 15, mục 2](15-postgresql-ben-trong.md)) và cả site chậm theo. Cache làm `shop` nhanh, nhưng chính cách cache hết hạn lại thành nguồn sự cố. Câu hỏi của mục này: `shop` nên đọc và ghi cache thế nào để không giữ dữ liệu cũ, và làm sao để một key nóng hết hạn không kéo cả Postgres xuống?
 
 ### 1.1 Cache-aside: đọc và ghi
 
-*Đọc.* `GET product:42`. Có → trả. Không có → đọc DB, rồi `SET product:42 <json> PX <ttl>`. Đây là mô hình cache "look-aside nạp theo nhu cầu" của Facebook: web server hỏi memcache, trượt thì lấy từ DB hoặc backend khác rồi nạp cặp key-value vào cache[^fb-lookaside]. Redis không tự nạp từ DB (nhiều hệ cache thương mại có sẵn read-through/write-through/write-behind[^az-rw]; với Redis lõi, app tự làm — suy luận của người soạn từ danh sách lệnh), nên "aside" nghĩa là *code ứng dụng* giữ logic nạp.
+*Đọc.* Với mỗi request `GET /products/42`, app gọi `GET product:42` trên Redis. Có key thì trả luôn. Không có thì app đọc Postgres rồi `SET product:42 <json> PX <ttl>` (`PX` đặt TTL tính bằng mili giây), để những request sau không phải xuống DB nữa. Kiểu này gọi là *look-aside, nạp theo nhu cầu*: web server (ở đây là app của `shop`) hỏi cache trước, trượt thì tự lấy dữ liệu từ DB hoặc backend khác rồi nạp cặp key-value vào cache[^fb-lookaside].
 
-*Ghi.* Ghi DB trước (commit), *rồi* `DEL product:42`. Facebook chọn xóa thay vì cập nhật cache vì xóa là idempotent[^fb-delete] — retry `DEL` bao nhiêu lần cũng giống một lần, còn retry `SET` giá trị cũ có thể đè giá trị mới (nhận xét của người soạn). Thứ tự "DB trước, cache sau" quan trọng: tài liệu Azure nhấn mạnh cập nhật data store trước khi xóa mục cache[^az-order] — nếu xóa cache trước, reader chen vào giữa có thể nạp lại giá trị *cũ* từ DB vào cache. Dù đúng thứ tự, giữa lúc ghi và lúc đọc kế tiếp, reader vẫn có thể thấy trượt cache hoặc dữ liệu cũ trong chốc lát[^az-stale].
+Không phải hệ cache nào cũng bắt app tự nạp. Nhiều hệ cache thương mại có sẵn các chế độ read-through, write-through và write-behind[^az-rw], tức là tự đứng ra nạp từ DB và ghi xuống DB thay cho app. Redis lõi không tự làm những việc đó (suy luận của người soạn từ danh sách lệnh), nên chữ "aside" nghĩa là *code của app* giữ phần logic nạp.
 
-*Cuộc đua "stale set".* Reader đọc DB giá trị cũ; writer ghi DB và xóa cache; *rồi* reader mới nạp giá trị cũ vào cache (trình tự minh họa của người soạn). Facebook định nghĩa stale set là web server đặt vào cache một giá trị không phản ánh giá trị mới nhất, có thể xảy ra khi các cập nhật đồng thời bị đảo thứ tự[^fb-stale]; lời giải của họ là *lease token* — token gắn với key, client phải trả lại khi đặt giá trị, và memcached có thể từ chối nếu token đã bị vô hiệu vì key bị `delete` giữa chừng[^fb-lease]; mô hình TLA+ của cơ chế đó ở [P13 · Chương 09, mục 4](../13-tla-plus/09-mo-hinh-hoa-he-backend.md), tóm tắt ở [chương 16, mục 8.4](16-redis-ben-trong.md). Hai hàng rào thực tế khi chưa dùng lease: (a) TTL — giá trị cũ không sống mãi; Azure khuyên chọn chính sách hết hạn khớp với kiểu truy cập của dữ liệu[^az-ttl]; (b) với dữ liệu quan trọng, ghi cache *có phiên bản* bằng Lua — writer *ghi* phiên bản mới thay vì `DEL`; cách này chỉ chặn được ghi đảo thứ tự khi phiên bản còn nằm trong key (xem phần Đi sâu; nhận xét của người soạn).
+*Ghi.* Khi `shop` sửa một sản phẩm, chẳng hạn đổi giá của sản phẩm 42, app ghi Postgres và commit trước, *rồi mới* `DEL product:42`. Hai chi tiết ở đây đáng giải thích: vì sao xóa key thay vì `SET` giá trị mới, và vì sao DB phải đi trước.
+
+Ta xóa key thay vì cập nhật nó vì xóa là idempotent[^fb-delete]. Nói cách khác, retry `DEL` bao nhiêu lần cũng giống một lần, còn retry một lệnh `SET` mang giá trị cũ có thể đè lên giá trị mới hơn (nhận xét của người soạn).
+
+Thứ tự "DB trước, cache sau" cũng quan trọng: phải cập nhật DB xong mới xóa key cache[^az-order]. Nếu xóa cache trước, một request đọc (reader) chen vào giữa sẽ thấy trượt, đọc DB lúc dòng dữ liệu còn mang giá trị *cũ*, rồi nạp chính giá trị cũ đó vào cache.
+
+*Cuộc đua giữa reader và writer.* Làm đúng thứ tự cũng chưa hết chuyện. Từ lúc ghi tới lần đọc kế tiếp, reader vẫn có thể gặp trượt cache hoặc thấy dữ liệu cũ trong chốc lát[^az-stale]. Tệ hơn, giá trị cũ có thể nằm lại trong cache lâu hơn thế nếu một reader đang nạp cache bị một request ghi (writer) chen ngang:
+
+1. Reader trượt cache, đọc Postgres và nhận giá trị cũ.
+2. Writer ghi giá trị mới vào Postgres rồi `DEL product:42`.
+3. Reader nạp giá trị cũ vừa đọc ở bước 1 vào cache.
+
+Từ đó cache giữ giá trị cũ cho tới khi key hết hạn hoặc bị xóa lần sau (trình tự minh họa của người soạn).
+
+Tình huống này có tên là *stale set*: web server đặt vào cache một giá trị không phản ánh giá trị mới nhất, và việc đó có thể xảy ra khi các cập nhật đồng thời bị đảo thứ tự[^fb-stale].
+
+Lời giải của Facebook trong memcached là *lease token*: một token gắn với đúng key mà client đã hỏi, và client phải trả token đó lại khi đặt giá trị. Nếu giữa chừng key bị `delete` thì token bị vô hiệu, và memcached có thể từ chối lần đặt giá trị trễ ấy[^fb-lease]. Mô hình TLA+ của cơ chế này nằm ở [P13 · Chương 09, mục 4](../13-tla-plus/09-mo-hinh-hoa-he-backend.md), bản tóm tắt ở [chương 16, mục 8.4](16-redis-ben-trong.md).
+
+Khi chưa dùng lease, `shop` có hai biện pháp thực tế:
+
+- TTL: giá trị cũ không sống mãi. Nên chọn chính sách hết hạn khớp với kiểu truy cập của dữ liệu[^az-ttl].
+- Với dữ liệu quan trọng, ghi cache *có phiên bản* bằng Lua: writer *ghi* phiên bản mới vào key thay vì `DEL`. Cách này chỉ chặn được ghi đảo thứ tự chừng nào phiên bản còn nằm trong key (xem phần Đi sâu; nhận xét của người soạn).
 
 ### 1.2 Write-through và write-behind
 
-*Write-through* là cập nhật data store và cache trong cùng một thao tác ghi, để reader thấy giá trị mới ngay sau khi ghi thành công — khác cache-aside vốn xóa rồi chờ lần đọc sau nạp lại[^az-wt]. Trên Redis, hai writer đồng thời `SET` cùng một key có thể đặt giá trị theo thứ tự ngược với thứ tự commit DB (đúng kiểu "cập nhật đồng thời bị đảo thứ tự" ở trên[^fb-stale]); vì vậy write-through trên Redis nên đi kèm so phiên bản (Lua, phần Đi sâu) — nhận xét của người soạn.
+Cache-aside xóa key rồi chờ lần đọc sau nạp lại. *Write-through* đi theo hướng ngược lại: writer cập nhật DB (data store) và cache trong cùng một thao tác ghi, nên reader thấy giá trị mới ngay sau khi ghi thành công[^az-wt].
 
-*Write-behind* — app ghi vào Redis, một tiến trình khác chép xuống DB sau — đổi độ bền lấy tốc độ ghi. Mất mát có thể xảy ra ở mọi bậc: chỉ RDB thì có thể mất vài phút gần nhất[^pers-rdb-lose]; AOF `everysec` thì tài liệu nói khoảng một giây[^aof-everysec] (source có ngoại lệ trì hoãn tới ~2 giây — [chương 16, mục 4](16-redis-ben-trong.md)); thêm vào đó failover mất write (F1). Dùng khi dữ liệu *chịu được mất* (số lượt xem); không dùng cho dữ liệu mà "đã ack cho user" có nghĩa là phải còn (đơn hàng, thanh toán) — khi đó DB là nơi ghi đầu tiên và Redis (nếu cần) là bản sao dẫn xuất (nhận xét của người soạn; khái niệm dữ liệu dẫn xuất: [chương 12, mục 1](12-dung-dan-va-tich-hop-du-lieu.md)). Nếu thật sự cần bộ đệm ghi bền hơn, hình dạng gần đúng nhất là Stream + AOF với `fsync` mạnh + consumer idempotent (mục 4) — vẫn chịu F1 — chứ không phải một key cache (nhận xét của người soạn).
+Trên Redis, cách này có một cái bẫy: hai writer đồng thời `SET` cùng một key có thể đặt giá trị theo thứ tự ngược với thứ tự commit trong DB, và đó chính là kiểu "cập nhật đồng thời bị đảo thứ tự" của stale set ở mục 1.1[^fb-stale]. Vì vậy write-through trên Redis nên đi kèm so phiên bản bằng Lua (xem phần Đi sâu; nhận xét của người soạn).
+
+*Write-behind* đẩy việc ghi DB ra sau: app chỉ ghi vào Redis, rồi một tiến trình khác chép xuống DB sau. Nó đổi độ bền lấy tốc độ ghi, vì phần dữ liệu chưa kịp chép xuống DB có thể mất ở nhiều tầng:
+
+- Nếu Redis chỉ bật RDB, có thể mất vài phút dữ liệu gần nhất[^pers-rdb-lose].
+- Với AOF `everysec`, tài liệu nói có thể mất khoảng một giây[^aof-everysec] (riêng source có một ngoại lệ, xem phần Đi sâu).
+- Ngoài ra, failover cũng có thể làm mất write (F1).
+
+Vì vậy chỉ nên dùng write-behind cho dữ liệu *chịu được mất*, như số lượt xem của sản phẩm. Với dữ liệu mà "đã báo thành công cho user" nghĩa là nó phải còn, như đơn hàng hay thanh toán, thì không dùng: DB là nơi ghi đầu tiên, còn Redis (nếu cần) chỉ là bản sao dẫn xuất (nhận xét của người soạn; khái niệm dữ liệu dẫn xuất: [chương 12, mục 1](12-dung-dan-va-tich-hop-du-lieu.md)).
+
+Nếu thật sự cần một bộ đệm ghi bền hơn, hình dạng gần đúng nhất là Stream kết hợp AOF với `fsync` mạnh và consumer idempotent (mục 4), chứ không phải một key cache. Nó vẫn chịu F1 (nhận xét của người soạn).
 
 ### 1.3 Negative caching
 
-*Negative caching* — lưu tri thức rằng "cái này không tồn tại" — có định nghĩa chuẩn trong DNS: RFC 2308 gọi nó là việc lưu tri thức rằng một thứ không tồn tại, không có hoặc không trả lời được[^rfc2308-def], và nó có ích vì giảm thời gian phản hồi cho các câu trả lời âm[^rfc2308-use]. Bài toán backend tương ứng: bot dò `GET /products/9999999` — id không tồn tại — mỗi lần đều trượt cache và gõ xuống DB.
+Cache-aside còn một chỗ yếu nữa. Một con bot dò `GET /products/9999999`, id không tồn tại, thì lần nào cũng trượt cache vì DB không có dòng nào để nạp vào, nên lần nào cũng gõ xuống DB.
 
-Cách ghép trên Redis: khi DB trả "không có dòng", `SET product:9999999 "" PX 30000` (chuỗi rỗng làm dấu "đã biết là không có"; `GET` trả nil khi key không tồn tại[^get-nil], nên phân biệt được với chuỗi rỗng — suy luận của người soạn). Ba lưu ý (nhận xét của người soạn): TTL của bản ghi âm phải *ngắn* hơn nhiều TTL bản ghi dương; khi *tạo* dòng mới phải `DEL` key âm tương ứng, nếu không bản ghi "mới tạo" vẫn trả 404 tới khi TTL hết; và id do kẻ tấn công sinh ra tùy ý vẫn có thể làm đầy bộ nhớ bằng vô số key âm — nên đi cùng giới hạn tần suất (mục 2) hoặc Bloom filter ở lớp trước.
+Cách chữa là *negative caching*: lưu vào cache cả thông tin "cái này không tồn tại". Khái niệm này có định nghĩa chuẩn trong DNS (RFC 2308): việc lưu lại thông tin rằng một thứ không tồn tại, không có hoặc không trả lời được[^rfc2308-def]. Nó có ích vì giảm thời gian phản hồi cho các câu trả lời âm, tức loại "không có"[^rfc2308-use].
+
+Trên Redis, khi DB trả "không có dòng" thì app `SET product:9999999 "" PX 30000`: chuỗi rỗng đóng vai dấu "đã biết là không có". `GET` trả nil khi key không tồn tại[^get-nil], nên nil và chuỗi rỗng là hai kết quả khác nhau, và app phân biệt được "chưa biết" với "biết là không có" (suy luận của người soạn).
+
+Ba lưu ý khi dùng (nhận xét của người soạn):
+
+- TTL của bản ghi âm (key "không có") phải *ngắn* hơn nhiều TTL của bản ghi dương (key có dữ liệu thật).
+- Khi *tạo* dòng mới thì phải `DEL` key âm tương ứng; nếu không, bản ghi "mới tạo" vẫn trả 404 tới khi TTL hết.
+- Id do kẻ tấn công sinh tùy ý vẫn có thể làm đầy bộ nhớ bằng vô số key âm, nên cần đi kèm giới hạn tần suất (mục 2) hoặc Bloom filter ở lớp trước, tức bộ lọc cho biết nhanh một id chắc chắn không có trong tập.
 
 ### 1.4 Stampede và ba cách chặn
 
-Stampede (cũng gọi dog-piling, cache miss storm) xảy ra khi một mục cache phổ biến hết hạn và nhiều request cùng thấy trượt rồi cùng tính lại đúng mục đó[^xf-def]. Quy mô phụ thuộc cả tần suất request lẫn *thời gian tính lại*: paper VLDB 2015 cho ví dụ mục được đọc 10 lần/giây, tính lại mất 3 giây thì có 30 request cùng tính lại[^xf-size].
+Chuyện xảy ra với sản phẩm 42 ở đầu mục có tên là *stampede* (cũng gọi là dog-piling hoặc cache miss storm): một mục cache phổ biến hết hạn, nhiều request cùng thấy trượt rồi cùng tính lại đúng mục đó[^xf-def]. Số request cùng tính lại phụ thuộc vào cả tần suất request lẫn *thời gian tính lại*. Ví dụ: mục được đọc 10 lần/giây mà tính lại mất 3 giây thì có 30 request cùng tính lại[^xf-size].
+
+Có ba cách chặn, mỗi cách nhắm vào một chỗ khác nhau: cách 1 cho đúng một request đi nạp lại key, cách 2 rải thời điểm hết hạn của các key ra, cách 3 làm mới key từ trước hạn. Sơ đồ dưới đây là cách 1 chạy với hai request A và B cùng thấy key `product:42` hết hạn.
 
 ```mermaid
 sequenceDiagram
@@ -104,23 +171,55 @@ sequenceDiagram
   R-->>B: json (hit)
 ```
 
-*Cách 1 — single-flight bằng `SET NX PX`.* Request nào thắng `SET key:load token NX PX 5000` thì đi nạp DB; người thua *ngủ ngắn rồi đọc lại cache* thay vì chạy tới DB. Facebook giảm nhẹ biến thể này trong memcached bằng cách điều tiết token: mặc định mỗi key chỉ cấp một token mỗi 10 giây[^fb-herd-rate]; request tới trong lúc đó nhận thông báo "chờ một chút" vì client giữ lease thường nạp xong trong vài mili giây[^fb-herd-wait]. Phiên bản Redis dùng đúng primitive của khóa ở mục 3: lấy bằng `SET … NX PX`, nhả bằng script so token. Điều đẹp là đây là loại khóa "vì hiệu quả" — Kleppmann khuyên khóa kiểu này chỉ cần thuật toán một node và nên ghi rõ trong code rằng khóa chỉ gần đúng, có thể thỉnh thoảng sai[^kb-efficiency]. Nếu khóa hết hạn trước khi người nạp xong (TTL 5 giây, truy vấn mất 8 giây) thì hai request cùng nạp và cùng `SET` giá trị — chỉ tốn thêm một lần nạp nếu dữ liệu không đổi, nhưng truy vấn chạy lâu cũng là cửa sổ cho cuộc đua "stale set" ở 1.1 (một writer chen vào giữa rồi `SET` trễ đè giá trị cũ); nên TTL của khóa phải lớn hơn thời gian nạp tệ nhất, và dữ liệu quan trọng thì ghi có phiên bản (phần Đi sâu) (nhận xét của người soạn). Người thua cần *giới hạn kiên nhẫn*: sau vài lần ngủ mà cache vẫn trống thì trả giá trị cũ (nếu có) hoặc lỗi nhanh, đừng chờ vô hạn; đọc thẳng DB chỉ hợp khi tổng thời gian đã chờ dài hơn thời gian nạp thông thường (ví dụ ở phần Đi sâu chờ tối đa khoảng 460 ms) — nếu không, mọi người thua cùng đổ xuống DB và stampede quay lại (nhận xét của người soạn).
+*Cách 1 — single-flight bằng `SET NX PX`.* *Single-flight* nghĩa là mỗi lúc chỉ một request đi nạp lại key, các request khác chờ kết quả của nó. Với Redis, request nào thắng `SET product:42:load <token> NX PX 5000` thì xuống Postgres lấy dữ liệu (`NX`: chỉ đặt khi key chưa có; `PX 5000`: key tự hết hạn sau 5.000 ms, tức 5 giây). Request thua *ngủ ngắn rồi đọc lại cache* thay vì chạy tới DB, nên 3.000 truy vấn của `shop` thường chỉ còn một.
 
-*Cách 2 — TTL có jitter.* Nếu một lô key được nạp cùng lúc với cùng TTL (khởi động, deploy, warm-up) thì chúng hết hạn cùng lúc. Cộng thêm một số ngẫu nhiên (ví dụ 0–10% TTL) làm các key rải đều (nhận xét của người soạn; con số 0–10% chưa có nguồn ghim). Một lý do khác để rải: khi *rất nhiều* key cùng hết hạn, chu trình expire chủ động của Redis (cơ chế: [chương 16, mục 3](16-redis-ben-trong.md)) lặp lại khi tỷ lệ mẫu đã hết hạn vượt một ngưỡng — tài liệu EXPIRE ghi 25%[^expire-active], còn source 7.2.5 dùng `ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE` bằng 10[^expire-stale-src] — và tốn tới một phần CPU của thread chính[^expire-cpu] — hết hạn hàng loạt là một dạng lệnh chậm gián tiếp (suy luận của người soạn từ hai nguồn).
+Khóa này dùng đúng primitive ở mục 3: lấy bằng `SET … NX PX`, nhả bằng một script so token. Nó thuộc loại khóa "vì hiệu quả", chỉ để khỏi nạp thừa. Với loại này, chỉ cần thuật toán khóa trên một node, và nên ghi rõ trong code rằng khóa chỉ gần đúng, thỉnh thoảng có thể sai[^kb-efficiency].
 
-*Cách 3 — refresh sớm.* Thay vì chờ key hết hạn, để *một* request tính lại trước hạn. Paper VLDB mô tả *probabilistic early expiration*: mỗi request tự quyết định, độc lập và ngẫu nhiên, có tính lại mục trước khi hết hạn hay không, xác suất tăng dần khi gần hạn[^xf-early]; paper nhắm tới các hệ cache chỉ có thao tác `get`/`set` nguyên thủy, không có khóa hay cơ chế chống stampede[^xf-nolock]. Thuật toán `XFetch` của họ: lưu kèm mục hai số — thời gian tính lại lần trước `∆` và hạn `expiry` — rồi mỗi lần đọc kiểm tra điều kiện `Time() − ∆β log(rand()) ≥ expiry`[^xf-formula], trong đó `β` là tham số mặc định 1 — tăng `β` thì chặn stampede tốt hơn nhưng key bị làm mới sớm hơn[^xf-beta]; nếu điều kiện đúng thì tính lại. Với Redis: giữ `value`, `delta`, `expiry` trong một hash (hoặc nhúng vào JSON) với TTL vật lý dài hơn `expiry`; điều kiện tính ở client (nhận xét của người soạn). Biến thể "stale-while-revalidate" (nhận xét của người soạn): TTL vật lý = TTL logic + khoảng ân hạn; khi quá TTL logic, người thắng `SET NX` đi làm mới còn mọi người khác phục vụ giá trị cũ — tốt nhất cho p99, đổi lấy việc chấp nhận dữ liệu cũ trong khoảng ân hạn.
+Cách này có hai cái bẫy. Cái bẫy đầu tiên là khóa hết hạn trước khi request đang nạp xong. Giả sử TTL của khóa là 5 giây mà truy vấn mất 8 giây: khóa tự mất giữa chừng, một request khác thắng khóa mới, và hai request cùng nạp rồi cùng `SET` giá trị. Nếu dữ liệu không đổi thì chỉ tốn thêm một lần nạp.
+
+Nhưng truy vấn chạy lâu cũng là cửa sổ cho cuộc đua "stale set" ở mục 1.1: một writer chen vào giữa, rồi lần `SET` trễ của request đang nạp đè giá trị cũ lên cache. Vì vậy TTL của khóa phải lớn hơn thời gian nạp tệ nhất, và dữ liệu quan trọng thì nên ghi cache có phiên bản (xem phần Đi sâu; nhận xét của người soạn).
+
+Cái bẫy thứ hai nằm ở request thua: nó cần *giới hạn kiên nhẫn*. Sau vài lần ngủ mà cache vẫn trống thì trả giá trị cũ (nếu có) hoặc báo lỗi nhanh, đừng chờ vô hạn. Chỉ đọc thẳng DB khi tổng thời gian đã chờ dài hơn thời gian nạp thông thường (ví dụ ở phần Đi sâu chờ tối đa khoảng 460 ms); nếu không, mọi request thua cùng đổ xuống DB và stampede quay lại (nhận xét của người soạn).
+
+*Cách 2 — TTL có jitter.* Nếu một lô key được nạp cùng lúc với cùng TTL (lúc khởi động, sau deploy, khi warm-up) thì chúng cũng hết hạn cùng lúc. Cộng thêm một số ngẫu nhiên vào TTL của từng key, ví dụ 0–10% TTL, gọi là *jitter*: các key nhờ vậy rải đều ra (nhận xét của người soạn; con số 0–10% chưa có nguồn ghim).
+
+Rải TTL còn có một lý do nữa, nằm ở chính Redis. Khi *rất nhiều* key cùng hết hạn, chu trình expire chủ động của Redis (cơ chế: [chương 16, mục 3](16-redis-ben-trong.md)) cứ lặp lại chừng nào tỷ lệ key hết hạn trong mẫu vừa kiểm tra còn vượt một ngưỡng[^expire-active]. Chu trình này dùng tới một phần CPU của thread chính[^expire-cpu]. Vì vậy hết hạn hàng loạt hoạt động như một lệnh chậm gián tiếp (suy luận của người soạn từ hai nguồn).
+
+*Cách 3 — refresh sớm.* Cách này không chờ key hết hạn mà để *một* request tính lại nó từ trước hạn, trong lúc các request khác vẫn đọc được giá trị hiện có. Một paper VLDB 2015 về chống stampede biến ý này thành *probabilistic early expiration*: mỗi request tự quyết định, độc lập và ngẫu nhiên, xem có nên tính lại mục trước khi nó hết hạn hay không, với xác suất tăng dần khi mục gần hạn[^xf-early]. Cách đó nhắm tới các hệ cache chỉ có thao tác `get`/`set` cơ bản, không có khóa hay cơ chế chống stampede[^xf-nolock].
+
+Thuật toán `XFetch` của paper cụ thể hóa ý đó. Mỗi mục lưu kèm hai số: thời gian tính lại lần trước `∆` và thời điểm hết hạn `expiry`. Mỗi lần đọc, request kiểm tra điều kiện `Time() − ∆β log(rand()) ≥ expiry`[^xf-formula]; nếu điều kiện đúng thì nó tính lại mục. Tham số `β` mặc định bằng 1; tăng `β` thì chặn stampede tốt hơn nhưng key bị làm mới sớm hơn[^xf-beta].
+
+Với Redis, `shop` giữ `value`, `delta` và `expiry` trong một hash (hoặc nhúng vào JSON). `expiry` là thời điểm hết hạn *logic*; TTL vật lý, tức TTL thật mà Redis dùng để xóa key, phải dài hơn nó. Điều kiện `XFetch` thì tính ở phía client (nhận xét của người soạn).
+
+Một biến thể là "stale-while-revalidate": TTL vật lý bằng TTL logic cộng thêm một khoảng ân hạn. Khi đã quá TTL logic, request nào thắng `SET NX` thì đi làm mới, còn mọi request khác phục vụ giá trị cũ. Cách này tốt nhất cho độ trễ p99 (mức mà 99% request nhanh hơn), đổi lại phải chấp nhận dữ liệu cũ trong khoảng ân hạn (nhận xét của người soạn).
 
 ### 1.5 Cấu hình instance cache, hot key và khi nào KHÔNG cache
 
-Instance cache nên đặt `maxmemory` và policy LRU/LFU: tài liệu khuyên `allkeys-lru` khi phân bố truy cập theo power law[^evict-rule-lru], còn `noeviction` thì từ chối ghi khi đầy[^conf-noevict] — không hợp với cache (các policy và cơ chế: [chương 16, mục 3](16-redis-ben-trong.md)). Đừng trộn cache với dữ liệu *không được mất* (lock, job, idempotency key) trong cùng instance bật eviction (nhận xét của người soạn): tài liệu nói `volatile-lru` và `volatile-random` hợp khi một instance vừa cache vừa giữ key bền, nhưng thường tốt hơn là chạy hai instance[^evict-volatile].
+Cuối cùng là chính instance Redis dùng làm cache. Nó nên đặt `maxmemory` và một policy eviction kiểu LRU/LFU, để khi bộ nhớ đầy Redis tự đuổi bớt key (các policy và cơ chế: [chương 16, mục 3](16-redis-ben-trong.md)). `allkeys-lru` hợp khi phân bố truy cập theo power law, tức một số ít key được hỏi nhiều hơn hẳn phần còn lại[^evict-rule-lru]. Còn `noeviction` thì từ chối ghi khi đầy[^conf-noevict], nên không hợp với cache.
 
-Key cực nóng (F6): một sản phẩm viral là *một* key trên *một* master. Hai hướng giảm tải (nhận xét của người soạn): giữ bản sao trong bộ nhớ process của app với TTL vài giây hoặc có invalidation (mục 7), hoặc nhân key thành `product:42#0…#7` và đọc ngẫu nhiên một bản (ghi phải cập nhật tất cả — chỉ hợp dữ liệu ít ghi).
+Đừng để cache sống chung instance với dữ liệu *không được mất* khi instance đó bật eviction (nhận xét của người soạn). Với `shop`, loại dữ liệu này gồm khóa của job đối soát cuối ngày, idempotency key của `POST /payments` và job gửi email xác nhận đơn. Hai policy `volatile-lru` và `volatile-random` chủ yếu hợp với trường hợp một instance vừa làm cache vừa giữ một số key bền, nhưng thường chạy hai instance riêng vẫn tốt hơn[^evict-volatile].
 
-**Khi nào KHÔNG dùng cache Redis** (nhận xét của người soạn): (1) dữ liệu cần *read-your-writes* tuyệt đối (số dư, tồn kho khi đặt hàng) — đọc primary DB; (2) truy vấn DB đã rẻ — Postgres tự có page cache ([chương 15, mục 3](15-postgresql-ben-trong.md)), thêm một lớp chỉ thêm chỗ để sai; (3) hit rate thấp hoặc value lớn (F5) — cache tốn bộ nhớ mà không giảm tải; (4) hệ thống *không sống nổi khi cache lạnh*: khi đó cache không còn là tối ưu mà là phụ thuộc cứng — hãy thử khởi động với cache trống trước khi tin nó.
+Sản phẩm viral còn gây ra một vấn đề nữa là key cực nóng (F6): sản phẩm 42 vẫn chỉ là *một* key trên *một* master. Có hai hướng giảm tải (nhận xét của người soạn):
 
-<details><summary>Đi sâu: code Rust cho cache-aside + single-flight, Lua ghi có phiên bản, XFetch</summary>
+- Giữ một bản sao trong bộ nhớ của từng pod `shop`, với TTL vài giây hoặc có invalidation, tức báo cho pod bỏ bản sao khi dữ liệu đổi (mục 7).
+- Nhân key thành `product:42#0…#7` rồi đọc ngẫu nhiên một bản. Ghi thì phải cập nhật tất cả các bản, nên cách này chỉ hợp dữ liệu ít ghi.
 
-Ba đoạn dưới đây *chỉ minh họa*, không được biên dịch trong chương này. Chúng giả định `redis` 1.7.1 với các feature `aio`, `tokio-comp` (hỗ trợ async trên runtime Tokio[^rs-feat-tokio]; thiếu cả `tokio-comp` lẫn `smol-comp` thì phần `aio` của crate không biên dịch được[^rs-feat-runtime]), `connection-manager` (kiểu `ConnectionManager` chỉ có khi bật cả `aio` lẫn `connection-manager`[^rs-cm-feature]) và `script` (trang `Script` ghi rõ nó chỉ có khi bật feature `script`[^rs-script-feature]; feature này nằm trong nhóm bật mặc định[^rs-feat-script-default]). Tên feature của từng kiểu khác nhau nên kiểm tra trên docs.rs trước khi dùng. `Db`, `Product`, `new_token()` và `with_jitter()` là kiểu/hàm giả định của ví dụ, không thuộc crate nào; ví dụ còn dùng các crate `tokio`, `anyhow`, `serde_json`, `rand` (chương này không đối chiếu phiên bản của chúng).
+**Khi nào KHÔNG dùng cache Redis** (nhận xét của người soạn):
+
+- Dữ liệu cần *read-your-writes* tuyệt đối, tức vừa ghi xong là phải đọc thấy ngay, như số dư hay tồn kho lúc đặt hàng: đọc thẳng DB chính (primary).
+- Truy vấn DB vốn đã rẻ: Postgres tự có page cache ([chương 15, mục 3](15-postgresql-ben-trong.md)), thêm một lớp nữa chỉ thêm chỗ để sai.
+- Hit rate thấp (tỷ lệ request tìm thấy key trong cache) hoặc value lớn (F5): cache tốn bộ nhớ mà không giảm được tải.
+- Hệ thống *không sống nổi khi cache lạnh*: lúc đó cache không còn là một tối ưu hóa mà thành phụ thuộc cứng. Hãy thử khởi động với cache trống trước khi tin vào nó.
+
+<details><summary>Đi sâu: code Rust cho cache-aside + single-flight, Lua ghi có phiên bản, XFetch, và vài chi tiết nguồn</summary>
+
+Ba đoạn code dưới đây *chỉ minh họa*, chương này không biên dịch chúng. Chúng giả định `redis` 1.7.1 với các feature sau:
+
+- `aio` và `tokio-comp`. `tokio-comp` bật hỗ trợ async trên runtime Tokio[^rs-feat-tokio]. Thiếu cả `tokio-comp` lẫn `smol-comp` thì phần `aio` của crate không biên dịch được[^rs-feat-runtime].
+- `connection-manager`. Kiểu `ConnectionManager` chỉ có khi bật cả `aio` lẫn `connection-manager`[^rs-cm-feature].
+- `script`. Trang tài liệu của `Script` ghi rõ nó chỉ có khi bật feature `script`[^rs-script-feature]. Feature này nằm trong nhóm bật mặc định[^rs-feat-script-default].
+
+Tên feature của từng kiểu khác nhau, nên hãy kiểm tra trên docs.rs trước khi dùng. `Db`, `Product`, `new_token()` và `with_jitter()` là kiểu và hàm giả định của ví dụ, không thuộc crate nào. Ví dụ còn dùng các crate `tokio`, `anyhow`, `serde_json` và `rand` (chương này không đối chiếu phiên bản của chúng).
 
 ```rust
 use redis::{aio::ConnectionManager, AsyncCommands, Script};
@@ -160,9 +259,11 @@ async fn get_product(conn: &mut ConnectionManager, db: &Db, id: u64) -> anyhow::
 }
 ```
 
-`.key(..)` thêm một phần tử vào `KEYS`[^rs-script-key] và `.arg(..)` thêm một phần tử vào `ARGV`[^rs-script-arg]; script cache của server là *không bền* — restart Redis xóa nó[^sc-cache-volatile] — nhưng đối tượng `Script` của crate lo việc upload và thực thi tự động[^rs-script]: nếu script chưa có trên server, `invoke_async` tự nạp rồi chạy lại[^rs-script-noscript], nên code không phải tự bắt `NOSCRIPT`.
+Ở dòng `UNLOCK.key(&lock).arg(&token)`, `.key(..)` thêm một phần tử vào `KEYS`[^rs-script-key]. `.arg(..)` thêm một phần tử vào `ARGV`[^rs-script-arg].
 
-Ghi cache có phiên bản (cho write-through; `ARGV[1]` là version tăng dần của dòng DB, ví dụ cột `version` được tăng trong cùng `UPDATE`, xem [chương 07, mục 5](07-transaction.md)). Script chạy nguyên tử vì chặn server[^sc-atomic], nên "so rồi ghi" không bị chen:
+Script cache của server là *không bền*: restart Redis có thể xóa nó[^sc-cache-volatile]. Dù vậy code không phải lo chuyện đó, vì đối tượng `Script` của crate tự upload và thực thi script[^rs-script]. Nếu script chưa có trên server thì `invoke_async` tự nạp rồi chạy lại[^rs-script-noscript], nên code không phải tự bắt `NOSCRIPT`.
+
+Đoạn Lua dưới đây ghi cache có phiên bản, dùng cho write-through. `ARGV[1]` là version tăng dần của dòng DB, ví dụ một cột `version` được tăng trong cùng câu `UPDATE` (xem [chương 07, mục 5](07-transaction.md)). Script chạy nguyên tử vì trong lúc nó chạy, mọi hoạt động khác của server đều bị chặn[^sc-atomic], nên bước "so rồi ghi" không bị chen:
 
 ```lua
 -- KEYS[1] = key cache; ARGV[1] = version mới; ARGV[2] = payload; ARGV[3] = ttl ms
@@ -175,11 +276,14 @@ end
 return 0
 ```
 
-(Hash là kiểu "record" gồm các cặp field-value[^hash-def]. Lưu ý `HSET` không đụng TTL[^expire-untouched] nên script tự `PEXPIRE` mỗi lần ghi thành công.)
+Hash là kiểu "record" gồm các cặp field-value[^hash-def]. `HSET` không đụng tới TTL của key[^expire-untouched], nên script tự `PEXPIRE` mỗi lần ghi thành công.
 
-Hai lưu ý (suy luận của người soạn). (1) Script này lưu cache dạng *hash* (`v`, `d`), nên đường đọc phải là `HGET key d` hoặc `HMGET key v d`; `GET` ở ví dụ `get_product` phía trên chỉ xử lý chuỗi và trả lỗi với kiểu khác[^get-notstring] — đừng trộn hai dạng lưu trữ trên cùng một key. Trong Lua, `HGET` trả `false` khi field không có[^lua-nil-false], nên script so `cur == false`. (2) Phiên bản chỉ chặn được ghi đảo thứ tự chừng nào nó còn nằm trong key: nếu invalidation bằng `DEL` (hoặc TTL, eviction) xóa mất key thì một lần ghi trễ mang phiên bản cũ lại lọt vào. Vì vậy script này chỉ có nghĩa khi writer *ghi* phiên bản mới vào cache (write-through) thay vì `DEL`; ghép nó với `DEL` của cache-aside ở mục 1.1 thì không chặn được ghi trễ.
+Hai lưu ý về script này (suy luận của người soạn):
 
-Quyết định `XFetch` ở client, với `delta_ms` đo lần tính lại trước và `beta` mặc định 1 như paper:
+1. Script lưu cache dạng *hash* (`v`, `d`), nên đường đọc phải là `HGET key d` hoặc `HMGET key v d`. `GET` trong `get_product` ở trên chỉ xử lý chuỗi và trả lỗi với kiểu khác[^get-notstring], vì vậy đừng trộn hai dạng lưu trữ trên cùng một key. Trong Lua, `HGET` trả `false` khi field không có[^lua-nil-false], nên script so `cur == false`.
+2. Phiên bản chỉ chặn được ghi đảo thứ tự chừng nào nó còn nằm trong key. Nếu invalidation bằng `DEL` (hoặc TTL, eviction) xóa mất key thì một lần ghi trễ mang phiên bản cũ lại lọt vào. Vì vậy script này chỉ có nghĩa khi writer *ghi* phiên bản mới vào cache (write-through) thay vì `DEL`; ghép nó với `DEL` của cache-aside ở mục 1.1 thì không chặn được ghi trễ.
+
+Quyết định `XFetch` ở phía client, với `delta_ms` là thời gian đo được ở lần tính lại trước và `beta` mặc định bằng 1 như trong paper:
 
 ```rust
 fn should_refresh(now_ms: f64, delta_ms: f64, expiry_ms: f64, beta: f64) -> bool {
@@ -188,25 +292,35 @@ fn should_refresh(now_ms: f64, delta_ms: f64, expiry_ms: f64, beta: f64) -> bool
 }
 ```
 
-Nếu muốn tránh nhiều người cùng làm mới thì vẫn bọc lời gọi tính lại bằng `SET NX PX` như trên: `XFetch` giảm xác suất, lock đảm bảo thường chỉ một người đi tính (nhận xét của người soạn).
+Nếu muốn tránh chuyện nhiều request cùng làm mới thì vẫn bọc lời gọi tính lại bằng `SET NX PX` như ở trên: `XFetch` chỉ giảm xác suất đó, còn khóa giúp thường chỉ có một request đi tính (nhận xét của người soạn).
+
+**Chi tiết nguồn của phần Giải thích.**
+
+- AOF `everysec` (mục 1.2): tài liệu nói có thể mất khoảng một giây[^aof-everysec], còn source có một ngoại lệ trì hoãn tới khoảng 2 giây, cơ chế ở [chương 16, mục 4](16-redis-ben-trong.md).
+- Chu trình expire chủ động (mục 1.4, cách 2): tài liệu EXPIRE ghi ngưỡng 25%[^expire-active]. Source 7.2.5 thì dùng hằng `ACTIVE_EXPIRE_CYCLE_ACCEPTABLE_STALE` bằng 10[^expire-stale-src].
+- Facebook giảm nhẹ vấn đề này ngay trong memcached bằng cách điều tiết token của lease (mục 1.4, cách 1): mặc định mỗi key chỉ cấp một token mỗi 10 giây[^fb-herd-rate]. Request tới trong lúc đó nhận thông báo "chờ một chút", vì client giữ lease thường nạp xong trong vài mili giây[^fb-herd-wait].
 
 </details>
 
-**Quay lại Q1:** cache-aside = đọc cache → trượt thì nạp từ DB; ghi thì commit DB rồi `DEL`, TTL là lưới an toàn; stampede chặn bằng single-flight (`SET NX PX`), TTL jitter và refresh sớm xác suất; key không tồn tại thì cache giá trị âm với TTL ngắn; và đừng cache thứ cần read-your-writes tuyệt đối.
+**Quay lại Q1:** `shop` đọc cache trước và nạp từ Postgres khi trượt, ghi DB xong thì `DEL` key và để TTL làm lưới an toàn; stampede thì chặn bằng single-flight (`SET NX PX`), TTL có jitter hoặc refresh sớm xác suất; key không tồn tại thì cache giá trị âm với TTL ngắn; còn dữ liệu cần read-your-writes tuyệt đối thì không cache.
 
 ## 2. Rate limiter: fixed window, sliding window log, token bucket (Q2)
 
-> **Trả lời ngắn.** Rate limiter là một counter có hạn. *Fixed window* là `INCR` rồi đặt TTL một lần (`EXPIRE … NX`) trong `MULTI`/`EXEC` — đơn giản và rẻ nhất, nhưng cho phép dồn gấp đôi giới hạn ở biên cửa sổ. *Sliding window log* lưu từng request trong một ZSET (xóa mục cũ, đếm, thêm) và *token bucket* lưu số token + thời điểm nạp gần nhất trong một hash; cả hai cần một script Lua vì phải "đọc rồi quyết định rồi ghi" như một khối nguyên tử[^sc-atomic].
+> **Trả lời ngắn.** Rate limiter đếm số request mà mỗi API key đã gửi trong một khoảng thời gian và từ chối khi vượt giới hạn; để cả 12 pod của `shop` đếm chung, ta đặt bộ đếm trong Redis. Cách rẻ nhất là *fixed window* (cửa sổ cố định): mỗi phút một counter, tức biến đếm, tăng thêm 1 sau mỗi request, nhưng ở chỗ chuyển từ phút này sang phút sau, client vẫn có thể gửi dồn gấp đôi giới hạn trong chốc lát. Hai cách tránh được lỗ hổng ở biên đó là *sliding window log* (ghi từng request vào một ZSET, tức tập hợp có thứ tự của Redis, rồi đếm những request trong khoảng thời gian gần nhất) và *token bucket* (mỗi key có một số token, mỗi request lấy bớt token, và token nạp lại dần theo thời gian). Cả hai phải đọc, quyết định rồi ghi như một khối không ai chen vào được, nên chúng chạy trong một script Lua, tức đoạn code nhỏ do chính Redis thực thi[^sc-atomic].
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): API công khai, mỗi API key được 100 request/phút, chạy trên 12 pod. Giới hạn *cục bộ* trong từng pod cho phép tổng tới 1.200 request/phút; muốn một số chung thì phải có trạng thái chung — Redis là nơi quen thuộc để đặt nó.
+*Với `shop`.* `shop` mở một API công khai: mỗi API key được gọi tối đa 100 request/phút, còn bản thân `shop` chạy trên 12 pod. Nếu mỗi pod chỉ giới hạn *cục bộ*, tức tự đếm riêng, thì một key qua được 100 request/phút ở từng pod, tổng cộng tới 1.200 request/phút. Muốn có một con số chung thì cả 12 pod phải cùng đếm vào một chỗ, và Redis là nơi quen thuộc để đặt trạng thái chung đó (nhận xét của người soạn). Câu hỏi của mục này: đếm trong Redis thế nào để 12 pod đếm cùng lúc mà vẫn đúng, mỗi cách tốn gì, và hỏng ở đâu?
+
+Ta đi qua ba cách đếm (2.1 đến 2.3), rồi xem chúng hỏng ở đâu và khi nào không nên dùng Redis (2.4).
 
 ### 2.1 Fixed window
 
-Tài liệu Redis mô tả rate limiter là một counter đặc biệt dùng để giới hạn tần suất một thao tác[^rl-pattern] và đưa hai phiên bản ([chương 16, mục 8.5](16-redis-ben-trong.md) chỉ nhắc ngắn phần này): mỗi cặp (IP, giây) một key, `INCR` và `EXPIRE` đặt trong `MULTI`/`EXEC` để chắc chắn vừa tăng vừa đặt hạn mỗi lần gọi[^rl-multi]; hoặc một counter duy nhất mà cửa sổ bắt đầu từ request đầu tiên của cửa sổ đó[^rl-window-survive].
+Fixed window (cửa sổ cố định) là cách đếm đơn giản nhất. Mỗi API key có một counter cho cửa sổ hiện tại; mỗi request đến thì `INCR` tăng counter lên 1, và request nào làm counter vượt 100 thì bị từ chối cho tới khi sang cửa sổ mới. `INCR` là phép tăng nguyên tử[^rl-incr], nên khi nhiều pod cùng `INCR` một key thì không lần tăng nào bị mất. (Lệnh này chỉ làm việc với số nguyên 64-bit có dấu[^incr-int].) Để counter tự biến mất khi cửa sổ kết thúc, ta đặt cho nó TTL (thời gian sống của key).
 
-Cải tiến cho Redis có option `NX` của `EXPIRE` ("chỉ đặt hạn khi key chưa có hạn"[^expire-nx]; option này có từ Redis 7.0[^expire-nx-since]):
+Tài liệu Redis cũng mô tả rate limiter theo cách này: đó là một counter đặc biệt, dùng để giới hạn tần suất một thao tác[^rl-pattern]. Ở đó có hai cách làm. Cách thứ nhất dùng một key cho mỗi cặp (IP, giây), và đặt `INCR` cùng `EXPIRE` trong `MULTI`/`EXEC` (`MULTI` và `EXEC` bọc quanh các lệnh cần chạy liền nhau) để mỗi lần gọi chắc chắn vừa tăng counter vừa đặt hạn[^rl-multi]. Cách thứ hai chỉ dùng một counter duy nhất, và cửa sổ bắt đầu từ request đầu tiên của cửa sổ đó[^rl-window-survive]. [Chương 16, mục 8.5](16-redis-ben-trong.md) mới chỉ nhắc ngắn hai cách này.
+
+Ta lấy cách thứ hai và cải tiến nó bằng option `NX` của `EXPIRE`, nghĩa là chỉ đặt hạn khi key chưa có hạn[^expire-nx]. Option này có từ Redis 7.0[^expire-nx-since]. Nhờ nó, chỉ cần bọc hai lệnh trong `MULTI`/`EXEC` là đủ; phần `{apikey}` trong tên key là hash tag, mục 8 sẽ nói tới:
 
 ```
 MULTI
@@ -215,15 +329,23 @@ EXPIRE rl:{apikey} 60 NX
 EXEC
 ```
 
-Vì sao đúng. `MULTI`/`EXEC` chạy các lệnh liên tục, không request của client khác chen giữa[^tx-serial], và nếu client mất kết nối trước `EXEC` thì không lệnh nào chạy[^tx-exec-all] — nên không còn cửa sổ "đã `INCR` mà chưa `EXPIRE`" khiến key rò rỉ như bản counter duy nhất (`INCR` rồi `EXPIRE` nếu giá trị bằng 1) trong tài liệu[^rl-race] (tài liệu sửa cái đó bằng Lua[^rl-lua]; `EXPIRE … NX` + `MULTI` cho cùng hiệu quả mà không cần script — nhận xét của người soạn). `NX` quan trọng: nếu mỗi lần đều `EXPIRE key 60` không điều kiện thì mỗi request đẩy hạn đi xa hơn, cửa sổ không bao giờ kết thúc dưới tải liên tục (suy luận của người soạn). `INCR` là phép tăng nguyên tử[^rl-incr] và giới hạn trong số nguyên 64-bit có dấu[^incr-int].
+Cách này đúng nhờ hai chi tiết: `MULTI`/`EXEC` giữ cho `INCR` và `EXPIRE` đi cùng nhau, còn `NX` giữ cho cửa sổ có điểm kết thúc.
 
-Phiên bản không có window id trong tên key (`rl:{apikey}`) *không dùng đồng hồ của pod* (F3): cửa sổ bắt đầu từ request đầu tiên và kéo dài đúng TTL. Phiên bản có window id (`rl:{apikey}:{floor(now/60)}`) cần `now` từ pod — lệch đồng hồ giữa pod làm các pod cộng dồn vào *hai key khác nhau* quanh biên phút (nhận xét của người soạn).
+Trước hết, vì sao hai lệnh phải đi cùng nhau? Bản counter duy nhất trong tài liệu chạy `INCR`, rồi chỉ `EXPIRE` nếu giá trị trả về bằng 1. Nếu pod đã `INCR` mà chưa kịp `EXPIRE` thì key không có hạn và bị rò rỉ[^rl-race]. `MULTI`/`EXEC` bịt khoảng hở đó: Redis chạy liền các lệnh nằm giữa `MULTI` và `EXEC`, và không phục vụ request của client khác ở giữa chừng[^tx-serial]. Nếu pod mất kết nối trước khi gọi `EXEC` thì không lệnh nào chạy, còn đã gọi `EXEC` thì mọi lệnh đều chạy[^tx-exec-all].
 
-Chỗ hỏng: *biên cửa sổ*. Giới hạn 100/phút; một client gửi 100 request ở giây thứ 59 và 100 request ở giây thứ 1 của phút sau — 200 request trong khoảng hai giây mà cả hai cửa sổ đều "không vượt" (nhận xét của người soạn). Nếu 2× giới hạn trong chốc lát chấp nhận được thì fixed window là lựa chọn tốt nhất về giá/độ phức tạp.
+Với bản counter duy nhất, cách vá trong tài liệu là một script Lua[^rl-lua]. Ở đây `EXPIRE … NX` kèm `MULTI` cho cùng hiệu quả mà không cần script (nhận xét của người soạn).
+
+Còn `NX` thì không thể bỏ. Nếu mỗi request đều chạy `EXPIRE key 60` không điều kiện thì mỗi request lại đẩy hạn đi xa hơn, nên dưới tải liên tục cửa sổ không bao giờ kết thúc (suy luận của người soạn). Có `NX`, chỉ request đầu tiên của cửa sổ đặt hạn; các request sau giữ nguyên hạn đó.
+
+Tên key cũng liên quan tới đồng hồ. Key `rl:{apikey}` không chứa số thứ tự cửa sổ (window id), nên pod không cần đọc đồng hồ của mình (F3, đồng hồ của chính app): cửa sổ mở ra từ request đầu tiên và kéo dài đúng TTL. Nếu thêm window id vào tên key, kiểu `rl:{apikey}:{floor(now/60)}`, thì pod phải tính `now` từ đồng hồ của nó. Khi đồng hồ giữa các pod lệch nhau, quanh biên phút sẽ có pod đã đếm vào key của phút mới trong khi pod khác còn đếm vào key của phút cũ, tức các pod cộng dồn vào *hai key khác nhau* (nhận xét của người soạn).
+
+Nhược điểm của fixed window nằm ở *biên cửa sổ*. Với giới hạn 100/phút, một client của `shop` gửi 100 request ở giây thứ 59 của một phút, rồi 100 request nữa ở giây thứ 1 của phút sau. Chỉ trong khoảng hai giây đó `shop` nhận 200 request, vậy mà cả hai cửa sổ đều "không vượt" (nhận xét của người soạn). Nếu chịu được việc vượt gấp đôi giới hạn trong chốc lát thì fixed window là lựa chọn rẻ và đơn giản nhất.
 
 ### 2.2 Sliding window log (ZSET)
 
-Ý tưởng: lưu *mỗi request được nhận* thành một phần tử của ZSET với score là thời điểm; cửa sổ trượt (`now − window`, `now`] chính là các phần tử có score trong khoảng đó. Ba bước: xóa phần tử cũ bằng `ZREMRANGEBYSCORE`[^zrem-doc], đếm bằng `ZCARD`, nếu còn chỗ thì `ZADD`. Ba lệnh này phải là *một* khối, nếu không hai request đồng thời cùng thấy 99 và cùng thêm — thành 101. Lua cho khối nguyên tử:
+Sliding window log (log cửa sổ trượt) khắc phục điểm yếu ở biên cửa sổ: thay vì đếm trong một phút cố định, mỗi lần kiểm tra nó đếm những request trong 60 giây gần nhất. Muốn vậy, mỗi request mà limiter cho qua sẽ để lại một phần tử trong ZSET (sorted set: tập hợp mà mỗi phần tử kèm một `score`), với score là thời điểm request đến; request bị từ chối thì không để lại phần tử nào. Cửa sổ trượt (`now − window`, `now`] khi đó chính là các phần tử có score nằm trong khoảng ấy.
+
+Mỗi lần kiểm tra gồm ba bước: xóa các phần tử cũ bằng `ZREMRANGEBYSCORE`[^zrem-doc], đếm số phần tử còn lại bằng `ZCARD`, và nếu còn chỗ thì `ZADD` request mới. Ba lệnh này phải chạy như *một* khối. Nếu không, hai request đồng thời của cùng một key có thể cùng thấy 99 phần tử rồi cùng thêm, và ZSET thành 101. Script Lua dưới đây gói cả ba bước thành một khối nguyên tử:
 
 ```lua
 -- KEYS[1] = rl:{apikey}; ARGV[1] = window_ms; ARGV[2] = limit; ARGV[3] = id duy nhất của request
@@ -240,16 +362,21 @@ local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
 return {0, 0, tonumber(oldest[2]) + win - now}   -- retry_after_ms
 ```
 
-Vì sao đúng và vì sao viết thế:
+Script có vài điểm đáng giải thích.
 
-- *Nguyên tử*: script chạy nguyên tử vì trong lúc chạy mọi hoạt động khác của server bị chặn[^sc-atomic].
-- *Thời gian từ Redis (F3)*: `TIME` trả giờ server dưới dạng giây + micro giây[^time-cmd], nên mọi pod dùng *cùng một đồng hồ* thay vì đồng hồ của mình. Trong 7.2 script được replicate theo *effect* (các lệnh ghi đã gọi) chứ không phải nguyên văn script[^sc-effects], và tài liệu nói khi dùng effects replication thì các hạn chế về hàm không tất định bị bỏ — dùng `TIME` hay `SRANDMEMBER` trong script thoải mái ở bất kỳ chỗ nào[^sc-time-free]. Cờ `NOSCRIPT` nghĩa là lệnh không được gọi từ script hay function[^cmd-noscript] — trong source 7.2.5 `TIME` khai báo các cờ `LOADING`, `STALE`, `FAST` và không có `NOSCRIPT`[^time-noscript], còn `EVAL` thì có `NOSCRIPT`[^eval-noscript].
-- *Phần tử phải duy nhất*: ZSET chỉ có phần tử duy nhất, `ZADD` với phần tử đã có chỉ cập nhật score[^zset-update]; nếu hai request cùng mili giây dùng cùng member thì chỉ tính một. Nên member nhúng id request (`ARGV[3]`).
-- *Chi phí*: `ZREMRANGEBYSCORE` là O(log N + M) với M là số phần tử bị xóa[^zrem-cx]; bộ nhớ O(limit) mỗi key — giới hạn 10.000/phút nghĩa là mỗi API key đang hoạt động giữ tới 10.000 phần tử. Đó là giá của việc *chính xác tuyệt đối*; nếu xấp xỉ được, có biến thể "sliding window counter" (hai counter cố định liền kề, cộng có trọng số theo phần cửa sổ đã trôi — nhận xét của người soạn, không có nguồn ghim) dùng hai key và O(1) bộ nhớ.
+- *Nguyên tử.* Redis chạy nguyên khối cả script: trong lúc nó chạy, mọi hoạt động khác của server bị chặn[^sc-atomic]. Vì vậy không request nào chen được vào giữa ba bước.
+- *Giờ lấy từ Redis (F3).* Script không nhận `now` từ pod mà tự gọi `TIME`. Lệnh này trả giờ của server dưới dạng giây cộng micro giây[^time-cmd], nên cả 12 pod dùng chung *một đồng hồ*, thay vì mỗi pod một đồng hồ riêng.
+- *Vì sao script gọi được `TIME`.* `TIME` là lệnh không tất định, tức mỗi lần gọi cho một kết quả khác nhau, nhưng vẫn dùng được trong script. Lý do là Redis 7.2 replicate script theo *effect* (các lệnh ghi script đã gọi) chứ không phải nguyên văn script[^sc-effects]. Khi dùng effects replication, các hạn chế về hàm không tất định bị bỏ, nên script dùng `TIME` hay `SRANDMEMBER` thoải mái ở bất kỳ chỗ nào[^sc-time-free]. Phần đối chiếu với source 7.2.5 nằm ở Đi sâu cuối mục.
+- *Phần tử phải duy nhất.* ZSET không chứa hai phần tử trùng nhau: `ZADD` với một member đã có chỉ cập nhật score của nó[^zset-update]. Nếu member chỉ là mốc thời gian thì hai request đến cùng một mili giây sẽ trùng member và chỉ tính là một. Vì vậy member ghép thêm id duy nhất của request (`ARGV[3]`), đúng như `now .. ':' .. ARGV[3]` trong script.
+- *Chi phí.* Lệnh `ZREMRANGEBYSCORE` tốn O(log N + M), với N là số phần tử của ZSET và M là số phần tử bị xóa[^zrem-cx]. Bộ nhớ thì tốn O(limit) cho mỗi key: nếu giới hạn là 10.000 request/phút thì mỗi API key đang hoạt động giữ tới 10.000 phần tử. Đó là cái giá của việc đếm *chính xác tuyệt đối*. Nếu chấp nhận xấp xỉ, có thể dùng biến thể *sliding window counter*: hai counter cố định liền kề, cộng lại có trọng số theo phần cửa sổ đã trôi qua, chỉ cần hai key và O(1) bộ nhớ (nhận xét của người soạn, không có nguồn ghim).
 
 ### 2.3 Token bucket (hash + Lua)
 
-Bucket có sức chứa `cap` token, nạp thêm `rate` token/giây; mỗi request lấy `cost` token; thiếu thì từ chối kèm thời gian chờ. Khác hai kiểu trên ở chỗ tách *kích thước burst* (`cap`) khỏi *tốc độ bền vững* (`rate`): client được dồn tới `cap` request liền rồi bị kéo về `rate` token/giây, và vì token nạp liên tục nên trong mọi khoảng thời gian dài `T` chỉ tiêu được tối đa `cap + rate·T` token (bằng số request khi `cost` = 1) — không có biên cửa sổ để lách — hợp API muốn cho client "dồn" vài request liền (suy luận của người soạn). Trạng thái: hash hai field `tokens`, `ts` (hash là tập các cặp field-value[^hash-def]).
+Token bucket đi theo hướng khác: thay vì đếm request trong một cửa sổ, nó đếm số *token* mà mỗi API key còn lại. Mỗi key có một bucket chứa tối đa `cap` token, và bucket được nạp thêm `rate` token mỗi giây. Mỗi request lấy đi `cost` token; thiếu token thì request bị từ chối, kèm thời gian phải chờ. Với `shop`, code Rust ở phần Đi sâu đặt `cap` = 100, `rate` = 100/60 token mỗi giây và `cost` = 1.
+
+Khác hai kiểu trước, token bucket tách *kích thước burst* (`cap`, số request client được gửi dồn trong một đợt) khỏi *tốc độ bền vững* (`rate`). Client được dồn tới `cap` request liền nhau, sau đó chỉ còn `rate` token mỗi giây. Vì token nạp liên tục, trong mọi khoảng thời gian dài `T` client chỉ tiêu được tối đa `cap + rate·T` token (bằng số request khi `cost` = 1), và không có biên cửa sổ nào để lách. Vì vậy kiểu này hợp với API muốn cho client dồn vài request liền nhau (suy luận của người soạn).
+
+Trạng thái của mỗi bucket nằm trong một hash (hash là tập các cặp field-value[^hash-def]) với hai field: `tokens` là số token còn lại, `ts` là thời điểm nạp gần nhất.
 
 ```lua
 -- KEYS[1] = bucket; ARGV[1] = cap; ARGV[2] = rate (token/giây); ARGV[3] = cost
@@ -268,21 +395,34 @@ redis.call('PEXPIRE', KEYS[1], math.ceil(cap * 1000 / rate) + 1000)
 return {allowed, math.floor(tokens), retry}
 ```
 
-Điểm thiết kế (nhận xét của người soạn): (a) bucket *lười* — không có tiến trình nạp token, chỉ tính phần bù khi có request; (b) TTL đặt bằng thời gian cần để nạp đầy từ rỗng, cộng một giây: sau chừng đó bucket chắc chắn đã đầy, nên key biến mất cũng *không đổi hành vi* và bộ nhớ chỉ tỷ lệ với số client đang hoạt động; (c) `math.max(0, now − ts)` phòng trường hợp sau failover master mới có đồng hồ chậm hơn master cũ (khi đó `ts` lưu từ đồng hồ cũ); (d) mỗi lần gọi đều `HSET` + `PEXPIRE`, kể cả khi từ chối — cho đơn giản chứ không bắt buộc: khi từ chối, giữ nguyên (`tokens`, `ts`) cũ cho cùng kết quả về sau vì phần nạp tính tuyến tính, nên bỏ ghi lúc từ chối giúp giảm ghi và nhân bản tới replica/AOF khi một client cứ gửi dồn dập.
+Script có bốn điểm thiết kế đáng nói (nhận xét của người soạn).
+
+- *Nạp lazy.* Không có tiến trình nào chạy nền để nạp token. Khi có request, script mới tính xem từ lần trước tới giờ bucket được nạp thêm bao nhiêu.
+- *TTL của key.* Key hết hạn sau thời gian cần để nạp đầy bucket từ rỗng, cộng thêm một giây. Chừng đó bucket chắc chắn đã đầy, nên key biến mất cũng *không đổi hành vi* của limiter, và bộ nhớ chỉ tỷ lệ với số client đang hoạt động.
+- *`math.max(0, now − ts)`.* Biểu thức này phòng trường hợp `now` nhỏ hơn `ts`. Chuyện đó có thể xảy ra sau failover: master mới có đồng hồ chậm hơn master cũ, trong khi `ts` trong hash lại ghi theo đồng hồ cũ.
+- *Ghi cả khi từ chối.* Script luôn `HSET` và `PEXPIRE`, kể cả khi từ chối, cho đơn giản chứ không bắt buộc. Khi từ chối, giữ nguyên (`tokens`, `ts`) cũ vẫn cho cùng kết quả về sau, vì phần nạp tính tuyến tính. Bỏ ghi lúc từ chối còn giảm số lần ghi, và số lần nhân bản tới replica/AOF, khi một client cứ gửi dồn dập.
 
 ### 2.4 Hỏng ở đâu, và khi nào không dùng Redis
 
-- *F1.* Counter nằm trên master; failover mất write nên counter có thể lùi — limiter tạm "quên" một phần lượng đã dùng. Với rate limiter đó thường chấp nhận được (nó là van an toàn, không phải sổ cái), nhưng *đừng* dùng cho quota tính tiền (nhận xét của người soạn).
-- *Redis không trả lời.* Quyết định *fail-open* (cho qua) hay *fail-closed* (chặn) là quyết định sản phẩm, không phải kỹ thuật; đặt timeout ngắn cho lời gọi limiter để Redis chậm không kéo cả API chậm theo (nhận xét của người soạn). Với Rust: timeout hủy *future* chứ không hủy lệnh đã gửi — xem mục "Liên hệ với Rust".
-- *F6.* Một API key rất nóng = một key = một master; kết hợp limiter cục bộ trong pod (bucket nhỏ) với limiter toàn cục trong Redis để giảm số lời gọi (nhận xét của người soạn).
-- *F4.* Giới hạn theo nhiều chiều (theo user *và* theo IP) tạo hai key — nếu muốn kiểm cả hai trong *một* script phải đặt hash tag chung, và hash tag chung nghĩa là cùng slot (mục 8). Cách đơn giản hơn: hai lời gọi riêng, chấp nhận không nguyên tử giữa chúng.
-- *Mỗi request tốn một round trip*, và rate limiter nằm trên *đường nóng* của mọi request. Đây là chi phí cố định cần tính trước.
+Có năm chỗ cần tính tới khi đặt rate limiter của `shop` lên Redis.
 
-**Khi nào KHÔNG dùng Redis cho rate limiting** (nhận xét của người soạn): bảo vệ trước DDoS/L7 thì làm ở proxy/CDN trước khi tới app; quota *tính tiền* hoặc có hậu quả pháp lý thì ghi vào DB với giao dịch đúng nghĩa; ứng dụng một process thì limiter trong bộ nhớ là đủ và không có điểm chết mới.
+- *F1, mất write khi failover.* Counter nằm trên master. Failover có thể làm mất write, nên counter có thể lùi: limiter tạm "quên" một phần số request đã đếm. Với rate limiter, chuyện đó thường chấp nhận được vì nó chỉ để chặn lạm dụng, không phải sổ cái ghi chính xác từng request. Nhưng *đừng* dùng cách đếm này cho quota tính tiền (nhận xét của người soạn).
+- *Redis không trả lời.* Khi Redis chậm hoặc không trả lời, `shop` phải chọn giữa *fail-open* (cho request đi qua) và *fail-closed* (chặn request). Chọn bên nào là quyết định sản phẩm chứ không phải kỹ thuật; còn về kỹ thuật, nên đặt timeout ngắn cho lời gọi limiter để Redis chậm không kéo cả API chậm theo (nhận xét của người soạn). Với Rust, timeout chỉ hủy *future* chứ không hủy lệnh đã gửi; xem mục "Liên hệ với Rust".
+- *F6, hot key.* Một API key rất nóng nghĩa là mọi request của key đó đều đụng tới cùng một key trong Redis, tức cùng một master. Để giảm số lời gọi tới Redis, có thể kết hợp limiter cục bộ trong pod (một bucket nhỏ) với limiter toàn cục trong Redis (nhận xét của người soạn).
+- *F4, cross-slot.* Nếu `shop` giới hạn theo nhiều chiều, chẳng hạn theo user *và* theo IP, thì mỗi chiều là một key. Muốn kiểm cả hai trong *một* script thì hai key phải dùng chung hash tag, nghĩa là rơi vào cùng slot (cách chọn tag ở mục 8). Cách đơn giản hơn là hai lời gọi riêng, chấp nhận rằng giữa hai lời gọi đó không còn nguyên tử.
+- *Mỗi request tốn một round trip.* Mỗi request vào API của `shop` phải đi một vòng tới Redis, và rate limiter nằm trên *đường nóng* (hot path), tức đoạn mà mọi request đều đi qua. Đây là chi phí cố định, cần tính trước.
 
-<details><summary>Đi sâu: code Rust cho fixed window và token bucket</summary>
+**Khi nào KHÔNG dùng Redis cho rate limiting** (nhận xét của người soạn):
 
-Minh họa, không biên dịch trong chương này.
+- Chặn DDoS hay tấn công ở tầng ứng dụng (L7) thì làm ở proxy/CDN, trước khi request tới app.
+- Quota *tính tiền* hoặc có hậu quả pháp lý thì ghi vào DB với giao dịch đúng nghĩa.
+- Ứng dụng chỉ chạy một process thì limiter trong bộ nhớ là đủ, và không thêm một điểm chết mới.
+
+<details><summary>Đi sâu: kiểm lại lệnh TIME trong source Redis 7.2.5, và code Rust cho fixed window và token bucket</summary>
+
+**Script gọi được `TIME`: đối chiếu với source 7.2.5.** Cờ `NOSCRIPT` của một lệnh nghĩa là lệnh đó không được gọi từ script hay function[^cmd-noscript]. Trong source 7.2.5, `TIME` khai báo các cờ `LOADING`, `STALE`, `FAST` và không có `NOSCRIPT`[^time-noscript], nên cờ này không chặn script gọi `TIME`. Ngược lại, `EVAL` có cờ `NOSCRIPT`[^eval-noscript].
+
+**Code Rust cho `shop`.** Minh họa, không biên dịch trong chương này.
 
 ```rust
 use redis::{aio::ConnectionManager, Script};
@@ -317,27 +457,31 @@ pub async fn fixed_window(conn: &mut ConnectionManager, api_key: &str) -> redis:
 }
 ```
 
-`Pipeline::atomic()` bọc cả pipeline trong `MULTI`/`EXEC`[^rs-atomic] — nên cũng *không rollback* ([chương 16, mục 7](16-redis-ben-trong.md)) — và `.ignore()` bỏ kết quả của lệnh đó khỏi tuple trả về[^rs-ignore-cmd]. Timeout bằng `tokio::time::timeout` hủy *future*[^tokio-timeout] chứ không hủy lệnh đã tới server (cơ chế và nguồn: mục "Liên hệ với Rust"), nên trong `check` một lời gọi hết giờ vẫn có thể đã chạy xong script ở server và đã trừ token — limiter có thể đếm nhỉnh hơn thực tế vài đơn vị (suy luận của người soạn); đặt timeout quanh `fixed_window` thì tương tự với `INCR`. Ví dụ `check` tạo future trước rồi mới đưa vào `timeout`, nên giữ `ScriptInvocation` trong một biến qua `prepare_invoke`[^rs-prepare] — viết liền chuỗi `.key(..).arg(..).invoke_async(..)` trong một câu lệnh `let` sẽ để future mượn một giá trị tạm đã bị hủy (suy luận của người soạn từ chữ ký `&self`/`&mut self` trên docs.rs).
+`fixed_window` dùng `Pipeline::atomic()`, nghĩa là bọc cả pipeline trong `MULTI`/`EXEC`[^rs-atomic], nên cũng *không rollback* (xem [chương 16, mục 7](16-redis-ben-trong.md)). Còn `.ignore()` ở lệnh `EXPIRE` bỏ kết quả của lệnh đó khỏi tuple trả về[^rs-ignore-cmd], nên hàm chỉ nhận lại giá trị của `INCR`.
+
+Về timeout: `tokio::time::timeout` hủy *future* của lời gọi[^tokio-timeout] chứ không hủy lệnh đã tới server (cơ chế và nguồn nằm ở mục "Liên hệ với Rust"). Vì thế trong `check`, một lời gọi hết 20 ms vẫn có thể đã chạy xong script ở server và đã trừ token, trong khi pod đã thôi chờ và cho request qua. Kết quả là limiter có thể đếm nhỉnh hơn thực tế vài đơn vị (suy luận của người soạn). Đặt timeout quanh `fixed_window` thì `INCR` cũng vậy.
+
+Trong `check`, future được tạo trước rồi mới đưa vào `timeout`, nên `ScriptInvocation` phải nằm trong một biến, lấy bằng `prepare_invoke`[^rs-prepare]. Nếu viết liền chuỗi `.key(..).arg(..).invoke_async(..)` trong một câu lệnh `let`, future sẽ mượn một giá trị tạm đã bị hủy (suy luận của người soạn từ chữ ký `&self`/`&mut self` trên docs.rs).
 
 </details>
 
-**Quay lại Q2:** fixed window = `INCR` + `EXPIRE NX` trong `MULTI`/`EXEC` (rẻ, sai ở biên); sliding log = ZSET + Lua (chính xác, tốn O(limit) bộ nhớ); token bucket = hash + Lua (cho burst, TTL tự dọn); luôn chọn ranh giới nguyên tử, lấy giờ từ `TIME`, và quyết định trước fail-open hay fail-closed.
+**Quay lại Q2:** để 12 pod của `shop` dùng chung một giới hạn, fixed window (`INCR` cùng `EXPIRE … NX` trong `MULTI`/`EXEC`) rẻ nhất nhưng sai ở biên cửa sổ, sliding window log (ZSET cộng script Lua) đếm chính xác nhưng tốn bộ nhớ theo giới hạn, còn token bucket (hash cộng script Lua) cho phép dồn một đợt ngắn và tự dọn key nhờ TTL; kiểu nào cũng phải chọn đúng ranh giới nguyên tử, lấy giờ từ `TIME`, và quyết định trước khi Redis lỗi thì cho request qua hay chặn.
 
 ## 3. Lock và idempotency key (Q3)
 
-> **Trả lời ngắn.** Khóa trên một instance Redis ghép từ ba lệnh: lấy bằng `SET key token NX PX ttl`, gia hạn và nhả bằng hai script *so token trước khi động vào key*[^lk-set][^lk-unlock][^lk-extend-script]. Ghép đúng thì đủ cho khóa "vì hiệu quả" (tránh hai nơi cùng làm một việc)[^kb-efficiency], nhưng *không* đủ cho khóa "vì đúng đắn": pause, TTL hết giữa chừng, failover và nhảy đồng hồ đều có thể làm hai bên cùng tin mình đang giữ khóa, nên tài nguyên đích phải kiểm *fencing token*[^lk-disclaimer-fence][^kb-conclusion]. Idempotency key cũng ghép từ `SET NX` (ai đến trước) nhưng Redis chỉ là đường tắt: bảo đảm "chỉ một lần" phải nằm ở ràng buộc duy nhất trong DB, cùng transaction với thay đổi nghiệp vụ (nhận xét của người soạn).
+> **Trả lời ngắn.** Khóa trên một instance Redis ghép từ ba lệnh: `SET key token NX PX ttl` để lấy khóa (chỉ đặt khi chưa ai giữ, và key tự hết hạn sau `ttl` mili giây), cùng hai script để gia hạn và nhả khóa; cả hai script đều so *token* (chuỗi ngẫu nhiên riêng của mỗi lần xin khóa) với giá trị đang lưu trong key, và chỉ động vào key khi hai giá trị khớp[^lk-unlock]. Ghép đúng thì đủ cho khóa "vì hiệu quả", tức khóa chỉ để hai nơi khỏi cùng làm một việc cho đỡ tốn tài nguyên[^kb-efficiency]. Nhưng như vậy chưa đủ cho khóa "vì đúng đắn", tức khóa mà làm trùng thì kết quả sai: pod đứng im một lúc (pause), khóa hết hạn giữa chừng, Redis failover (chuyển sang máy dự phòng) hay đồng hồ nhảy đều có thể khiến hai bên cùng tin mình đang giữ khóa, nên tài nguyên đích (nơi nhận lệnh ghi, như DB) phải kiểm *fencing token*, tức một số tăng dần sau mỗi lần cấp khóa, và từ chối số cũ[^kb-conclusion]. Idempotency key (mã client gắn vào request để server nhận ra bản gửi lại) cũng dùng `SET NX` để biết ai đến trước, nhưng Redis chỉ là đường tắt: bảo đảm "chỉ một lần" phải nằm ở ràng buộc duy nhất trong DB, cùng transaction với thay đổi nghiệp vụ (nhận xét của người soạn).
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): job đối soát cuối ngày chạy trên 3 pod, chỉ một pod được chạy; và `POST /payments` nhận header `Idempotency-Key` từ client hay retry. Hai bài toán trông giống nhau ("chỉ một bên được làm") nhưng *cái giá của việc làm trùng* khác hẳn: chạy đối soát hai lần thường chỉ tốn tài nguyên; trừ thẻ hai lần là sự cố.
+*Với `shop`.* Job đối soát cuối ngày nằm trong code của mọi pod, nhưng một lúc chỉ một pod được chạy nó. Còn `POST /payments` nhận header `Idempotency-Key` từ những client hay retry, nên cùng một payment có thể đến server nhiều lần mà chỉ được xử lý một lần. Hai bài toán nghe giống nhau ("chỉ một bên được làm"), nhưng cái giá của việc làm trùng khác hẳn: đối soát chạy hai lần thường chỉ tốn tài nguyên, còn trừ thẻ hai lần là sự cố (nhận xét của người soạn). Câu hỏi của mục này: khóa ghép từ các lệnh Redis đáng tin tới đâu, và idempotency key lưu trong Redis có đủ để thẻ không bị trừ hai lần không?
 
 ### 3.1 Lắp khóa từ primitive
 
-Phần cơ chế (`SET NX PX`, vì sao `DEL` trần không an toàn, replica và Redlock, tranh luận Kleppmann–antirez) đã ở [chương 16, mục 8.1–8.3](16-redis-ben-trong.md); ở đây chỉ phần *ghép*.
+Cơ chế bên dưới (`SET NX PX`, vì sao `DEL` trần không an toàn, replica và Redlock, cuộc tranh luận Kleppmann–antirez) đã nằm ở [chương 16, mục 8.1–8.3](16-redis-ben-trong.md). Ở đây ta chỉ *ghép* chúng thành một khóa mà job đối soát của `shop` dùng được. Phần lõi là ba lệnh:
 
-- *Lấy.* `SET lock:{recon} <token> NX PX 30000`: đặt chỉ khi chưa có và có hạn trong *một* lệnh; token phải duy nhất giữa mọi client và mọi lần xin khóa[^lk-set]. Dùng ≥ 128 bit ngẫu nhiên (nhận xét của người soạn).
-- *Nhả.* Script "xóa nếu giá trị đúng là của tôi"[^lk-unlock], vì chỉ `DEL` thì một client có thể xóa khóa của client khác[^lk-del-unsafe] (ví dụ A chậm, khóa hết hạn, B lấy, rồi A `DEL` — xóa khóa của B).
-- *Gia hạn.* Cùng khuôn: một script kiểm token rồi mới kéo dài TTL[^lk-extend-script]. Tài liệu nói *nên* giới hạn số lần gia hạn lại, nếu không thì một tính chất liveness bị vi phạm[^lk-extend] — liveness ở đây là "không deadlock": cuối cùng luôn có lúc lấy được khóa, kể cả khi client giữ khóa chết hay bị tách mạng[^lk-liveness]. (Tài liệu mô tả việc gia hạn trong bối cảnh Redlock nhiều instance; áp cho một instance là suy luận của người soạn.)
+- *Lấy.* Pod muốn chạy job gửi `SET lock:{recon} <token> NX PX 30000`. Chỉ một lệnh này đã vừa đặt key khi nó chưa có (`NX`), vừa cho key hạn 30 giây (`PX 30000`). `<token>` là giá trị để sau này nhận ra khóa là của mình. Nó phải duy nhất giữa mọi client và mọi lần xin khóa[^lk-set], và ta nên dùng ít nhất 128 bit ngẫu nhiên (nhận xét của người soạn).
+- *Nhả.* Job xong thì pod nhả khóa bằng một script chỉ làm một việc: xóa key nếu giá trị trong đó đúng là token của mình[^lk-unlock]. Chỉ `DEL` thì không an toàn, vì một client có thể xóa khóa của client khác[^lk-del-unsafe]. Chẳng hạn pod A chạy chậm, khóa hết hạn, pod B lấy khóa, rồi A xong việc và `DEL`: A xóa mất khóa của B.
+- *Gia hạn.* Cùng khuôn với nhả: một script kiểm token rồi mới kéo dài TTL[^lk-extend-script].
 
 ```lua
 -- extend: KEYS[1] = khóa; ARGV[1] = token; ARGV[2] = ttl mới (ms)
@@ -348,18 +492,35 @@ else
 end
 ```
 
-- *Thử lại.* Khi không lấy được, thử lại sau một độ trễ *ngẫu nhiên* để các client khỏi đồng bộ nhịp nhau[^lk-retry].
-- *Watchdog.* Việc làm lâu hơn TTL thì một task nền gia hạn mỗi TTL/3; nếu một lần gia hạn trả `0` (khóa đã mất) thì việc đang chạy phải *dừng*, coi đó như lỗi (nhận xét của người soạn). Gia hạn không cứu được process bị pause: GC dài, VM bị đóng băng hay SIGSTOP làm *cả watchdog* đứng, khóa vẫn hết hạn[^lk-no-assume-alive] (cơ chế: [chương 08, mục 7](08-su-co-he-phan-tan.md)).
-- *Cluster (F4).* Khóa một key thì không vướng; nếu thêm key thứ hai (counter fencing, mục 3.2) thì hai key phải cùng hash tag.
+Gia hạn còn một lưu ý: số lần gia hạn lại *nên* có giới hạn, nếu không thì một tính chất liveness bị vi phạm[^lk-extend]. Liveness ở đây là "không deadlock": cuối cùng luôn có lúc lấy được khóa, kể cả khi client đang giữ khóa chết hay bị tách mạng[^lk-liveness]. Tài liệu nói điều này trong bối cảnh Redlock nhiều instance, còn áp vào một instance là suy luận của người soạn.
+
+Quanh ba lệnh đó, ta còn phải lo ba chuyện nữa:
+
+- *Thử lại.* Pod không lấy được khóa thì thử lại sau một khoảng chờ *ngẫu nhiên*, để nhiều client cùng chờ một khóa khỏi thử lại đúng cùng lúc[^lk-retry].
+- *Watchdog.* Khi job có thể chạy lâu hơn TTL, pod chạy thêm một task nền gia hạn khóa mỗi TTL/3. Nếu một lần gia hạn trả `0`, tức khóa đã mất, thì việc đang chạy phải *dừng* và coi như đã lỗi (nhận xét của người soạn). Nhưng watchdog không cứu được process bị pause, tức bị đứng im một lúc rồi mới chạy tiếp: GC dài, VM bị đóng băng hay `SIGSTOP` làm đứng *cả watchdog*, và khóa vẫn hết hạn. Nói cách khác, đừng cho rằng cứ process giữ khóa còn sống thì khóa còn đó[^lk-no-assume-alive]. Cơ chế của process pause nằm ở [chương 08, mục 7](08-su-co-he-phan-tan.md).
+- *Cluster (F4).* Với Redis Cluster, khóa một key thì không vướng gì. Nhưng nếu thêm key thứ hai, như counter fencing ở mục 3.2, thì hai key phải dùng chung hash tag để rơi vào cùng slot.
+
+Khóa lắp xong như vậy dùng được đến đâu? Đó là chuyện của mục 3.2.
 
 ### 3.2 Vì sao vẫn cần fencing
 
-TTL vừa là thời gian tự giải phóng, vừa là khoảng client có để làm xong việc mà không vi phạm loại trừ tương hỗ[^lk-window]. Làm quá TTL — do pause, GC, mạng chậm — thì hai client cùng "giữ" khóa. Hai đường khác đưa tới cùng kết quả mà *không cần* client nào chậm: failover mất key (F1) và nhảy đồng hồ trên server (F2b: Redis không dùng đồng hồ monotonic cho TTL nên bước nhảy có thể làm khóa bị nhiều process giữ[^lk-disclaimer-clock]). Kịch bản failover từng bước và các giả định về thời gian mà Kleppmann chỉ ra ở Redlock nằm ở [chương 16, mục 8.2–8.3](16-redis-ben-trong.md); chương này chỉ dùng kết luận của chúng.
+Khóa ở mục 3.1 có TTL, và TTL đóng hai vai trò cùng lúc: vừa là thời gian khóa tự nhả, vừa là khoảng client có để làm xong việc trước khi client khác lấy được khóa, mà không phá bảo đảm loại trừ tương hỗ (mutual exclusion: một lúc chỉ một bên giữ khóa)[^lk-window]. Nếu việc làm quá TTL (do pause, GC hay mạng chậm) thì khóa hết hạn giữa chừng, và hai client cùng "giữ" khóa.
 
-Fencing token là số tăng dần cấp mỗi lần cấp khóa, đi kèm *mọi* thao tác, và *tài nguyên đích* từ chối token nhỏ hơn token đã thấy[^kb-fencing-active] (cơ chế: [chương 08, mục 8](08-su-co-he-phan-tan.md); mô hình hóa bằng TLA+: [P13 · Chương 09, mục 2](../13-tla-plus/09-mo-hinh-hoa-he-backend.md)). Redlock không có cơ chế sinh token như vậy — không phát ra số nào bảo đảm tăng mỗi lần lấy khóa[^kb-fencing] — và chính tài liệu Redis khuyên cài fencing token, đặc biệt cho process có thể chạy lâu[^lk-disclaimer-fence] (tranh luận đầy đủ: [chương 16, mục 8.3](16-redis-ben-trong.md)). Ba cách có token, theo thứ tự đáng tin giảm dần (nhận xét của người soạn):
+Có hai đường khác cũng dẫn tới hai client cùng giữ khóa, mà không cần client nào chậm. Đường thứ nhất: failover làm mất key khóa (F1). Đường thứ hai: đồng hồ của máy Redis nhảy (F2b). Redis không dùng đồng hồ monotonic (loại đồng hồ không nhảy khi ai đó chỉnh giờ máy) cho việc hết hạn TTL, nên một bước nhảy đồng hồ có thể khiến nhiều process cùng giữ một khóa[^lk-disclaimer-clock]. Kịch bản failover từng bước và các giả định về thời gian mà Kleppmann chỉ ra ở Redlock nằm ở [chương 16, mục 8.2–8.3](16-redis-ben-trong.md); ở đây ta chỉ dùng kết luận của chúng.
 
-1. **Để chính DB làm fencing.** Nếu thứ khóa bảo vệ là dòng trong Postgres thì đừng cần token từ khóa: dùng compare-and-set ngay trong câu `UPDATE` ([chương 07, mục 5](07-transaction.md)), ví dụ `UPDATE accounts SET balance = balance - $1, version = version + 1 WHERE id = $2 AND version = $3` — nếu `0 rows affected` thì bạn đã mất quyền. Khi đó khóa Redis chỉ còn để *giảm tranh chấp*, không còn gánh tính đúng đắn.
-2. **Token từ Redis, cấp nguyên tử cùng lúc lấy khóa.** Một script lấy khóa *và* `INCR` counter, hai key cùng hash tag:
+Hai bên cùng giữ khóa có nguy hiểm hay không còn tùy khóa đó dùng để làm gì. Khóa *vì hiệu quả* chỉ để hai nơi khỏi cùng làm một việc, chẳng hạn chặn một cron chạy trùng (job đối soát của `shop`) hoặc chặn stampede ở mục 1. Làm trùng ở đây chỉ tốn tài nguyên, nên một node Redis với `SET NX PX` là đủ. Kleppmann cũng khuyên giữ thuật toán một node đơn giản này, kèm ghi rõ trong code rằng khóa chỉ gần đúng[^kb-efficiency].
+
+Khóa *vì đúng đắn* thì khác: hai bên cùng ghi nghĩa là dữ liệu sai, như hai pod cùng trừ thẻ cho một đơn. Khi đó ta cần *fencing token* để *tài nguyên đích*, tức nơi nhận lệnh ghi như Postgres, tự chặn thao tác của bên giữ khóa đã quá hạn. Đó là một số tăng dần: mỗi lần có bên lấy được khóa, bên đó nhận một số mới và đính nó vào *mọi* thao tác của mình, còn tài nguyên đích từ chối token nhỏ hơn token nó đã thấy[^kb-fencing-active]. Đừng nhầm nó với `<token>` ngẫu nhiên ở mục 3.1, vốn chỉ cho biết ai là chủ của khóa.
+
+Chẳng hạn pod A giữ `lock:{order:42}` rồi bị pause lâu hơn TTL, pod B lấy khóa với token lớn hơn và ghi xong. Khi A chạy tiếp và ghi với token cũ, tài nguyên đích thấy token đã lùi nên từ chối A. Cơ chế fencing nằm ở [chương 08, mục 8](08-su-co-he-phan-tan.md); mô hình hóa bằng TLA+ nằm ở [P13 · Chương 09, mục 2](../13-tla-plus/09-mo-hinh-hoa-he-backend.md).
+
+Vậy token lấy từ đâu? Redlock, thuật toán khóa trên nhiều instance Redis, không có cơ chế sinh token như vậy: nó không phát ra con số nào bảo đảm tăng mỗi lần có client lấy khóa[^kb-fencing]. Chính tài liệu Redis cũng khuyên nên cài fencing token, nhất là cho process có thể chạy lâu[^lk-disclaimer-fence]. Tranh luận đầy đủ nằm ở [chương 16, mục 8.3](16-redis-ben-trong.md).
+
+Có ba cách để có token, xếp theo thứ tự đáng tin giảm dần (nhận xét của người soạn).
+
+**Cách 1: để chính DB làm fencing.** Nếu thứ khóa bảo vệ là một dòng trong Postgres thì không cần lấy token từ khóa. Ta so-và-ghi (compare-and-set) ngay trong câu `UPDATE` ([chương 07, mục 5](07-transaction.md)), ví dụ `UPDATE accounts SET balance = balance - $1, version = version + 1 WHERE id = $2 AND version = $3`. Nếu câu lệnh báo `0 rows affected` thì pod đã mất quyền, vì `version` không còn như lúc pod đọc. Khi đó khóa Redis chỉ còn để *giảm tranh chấp*, không còn gánh tính đúng đắn.
+
+**Cách 2: token từ Redis, cấp nguyên tử cùng lúc lấy khóa.** Một script vừa lấy khóa, vừa `INCR` một counter; hai key dùng chung hash tag:
 
 ```lua
 -- KEYS[1] = lock:{order:42}; KEYS[2] = fence:{order:42}; ARGV[1] = token; ARGV[2] = ttl ms
@@ -369,16 +530,24 @@ end
 return 0                                  -- không lấy được
 ```
 
-   Script nguyên tử vì chặn server khi chạy[^sc-atomic]; mọi key script chạm phải khai qua `KEYS`[^sc-keys], và cùng slot nhờ hash tag `{order:42}`[^cl-hashtag]. Điểm yếu cốt lõi: counter *nằm trên Redis* nên F1 làm nó lùi sau failover; Kleppmann nói đúng ý này — giữ counter trên một node Redis là chưa đủ vì node đó có thể hỏng[^kb-counter]. Token từ Redis *thu hẹp* cửa sổ lỗi chứ không đóng nó.
-3. **Hệ đồng thuận** (ví dụ ZooKeeper — tên mà Kleppmann nêu; etcd cùng họ, nhận xét của người soạn) khi khóa là vì đúng đắn: Kleppmann khuyên dùng hệ đồng thuận thay vì Redlock — ít nhất là một database có bảo đảm transaction hợp lý — và buộc mọi truy cập tài nguyên dưới khóa kiểm fencing token[^kb-conclusion], tức tài nguyên đích vẫn phải kiểm token.
+Script này đúng nhờ ba điều. Thứ nhất, nó chạy nguyên tử: trong lúc nó chạy, mọi hoạt động khác của server bị chặn[^sc-atomic], nên không có lệnh nào chen vào giữa `SET` và `INCR`. Thứ hai, nó khai mọi key mình chạm tới qua `KEYS`, như Redis yêu cầu[^sc-keys]. Thứ ba, hai key rơi vào cùng slot nhờ hash tag `{order:42}`[^cl-hashtag], nên script chạy được cả trên Cluster. Điểm yếu cốt lõi là counter *nằm trên Redis*, nên F1 có thể làm nó lùi sau failover. Kleppmann cũng chỉ ra đúng điểm này: chỉ giữ counter trên một node Redis là chưa đủ, vì node đó có thể hỏng[^kb-counter]. Vì vậy token từ Redis chỉ *thu hẹp* khoảng hở có thể sai, không bịt kín được nó.
 
-Còn khóa "vì hiệu quả" (chặn stampede ở mục 1, dedupe cron khi chạy trùng chỉ tốn tài nguyên) thì một node với `SET NX PX` là đủ — Kleppmann cũng khuyên thuật toán một node đơn giản và ghi rõ trong code rằng khóa chỉ gần đúng[^kb-efficiency].
+**Cách 3: dùng hệ đồng thuận** (consensus system) khi khóa là vì đúng đắn. Kleppmann khuyên thay Redlock bằng một hệ đồng thuận như ZooKeeper (etcd cùng họ với nó, nhận xét của người soạn), hoặc ít nhất bằng một database có bảo đảm transaction hợp lý, và buộc mọi truy cập vào tài nguyên dưới khóa phải kiểm fencing token[^kb-conclusion]. Nói cách khác, dùng hệ đồng thuận cũng không miễn được việc tài nguyên đích kiểm token.
+
+Còn `POST /payments`, nơi trừ thẻ hai lần là sự cố, thì idempotency key nên nằm ở đâu? Đó là chuyện của mục 3.3.
 
 ### 3.3 Idempotency key bằng Redis
 
-Phía HTTP — client gửi `Idempotency-Key`, vì sao `POST` cần nó, các điều khoản của bản thảo IETF (key duy nhất và không dùng lại với payload khác, fingerprint của payload, chính sách hết hạn), cách Stripe gắn key với trạng thái request và trả lại kết quả đã cache, cùng bốn tình huống server phải xử (lần đầu, retry sau khi xong, retry khi bản gốc còn chạy, key dùng lại với payload khác) — đã ở [chương 12, mục 4–5](12-dung-dan-va-tich-hop-du-lieu.md); chương này không lặp. Mục này chỉ làm phần *Redis*: dựng trạng thái "đang chạy"/"đã xong" bằng `SET NX` và chỉ ra chỗ nó hỏng.
+Phía HTTP của `POST /payments` đã nằm ở [chương 12, mục 4–5](12-dung-dan-va-tich-hop-du-lieu.md), nên ta không lặp lại. Ở đó có bốn phần:
 
-Bản đồ trạng thái trên Redis, một key `idem:<tenant>:<key>` có hai dạng giá trị (`<…>` là chỗ điền, *không* phải hash tag — tag thô kiểu `{tenant}` dồn mọi key của một tenant vào một slot, xem mục 8.2):
+- client gửi `Idempotency-Key` ra sao và vì sao `POST` cần nó;
+- các điều khoản của bản thảo IETF: key duy nhất và không dùng lại với payload khác, fingerprint của payload, chính sách hết hạn;
+- cách Stripe gắn key với trạng thái request và trả lại kết quả đã cache;
+- bốn tình huống server phải xử lý: lần đầu, retry sau khi xong, retry khi bản gốc còn chạy, key dùng lại với payload khác.
+
+Mục này chỉ làm phần *Redis*: dựng trạng thái "đang chạy"/"đã xong" bằng `SET NX`, rồi chỉ ra chỗ nó hỏng.
+
+Trên Redis, mỗi `Idempotency-Key` của `shop` ứng với một key `idem:<tenant>:<key>`, và giá trị của key có hai dạng: đang chạy hoặc đã xong. Dấu `<…>` chỉ là chỗ điền, *không* phải hash tag: một tag thô kiểu `{tenant}` sẽ dồn mọi key của một tenant vào cùng một slot (xem mục 8.2). Sơ đồ dưới cho thấy key đổi trạng thái thế nào:
 
 ```mermaid
 stateDiagram-v2
@@ -388,11 +557,11 @@ stateDiagram-v2
   Done --> [*]: TTL 24 h hết
 ```
 
-Các bước (nhận xét của người soạn — không có "pattern idempotency" nào trong tài liệu Redis ghim):
+Tài liệu Redis ghim trong chương không có pattern idempotency nào, nên các bước dưới đây là cách ghép của riêng ta (nhận xét của người soạn):
 
-1. *Nhận chỗ.* `SET idem:<t>:<k> "P|<fp>|<token>" NX PX 30000` (`fp` = fingerprint payload, `token` = ngẫu nhiên của lần xử lý này). `OK` → bạn là bên đầu tiên: chạy handler.
-2. *Thua* (`nil`) → `GET`. Giá trị `P|fp2|…` (đang chạy) hoặc `D|fp2|resp` (đã xong): nếu `fp2 ≠ fp` → key bị dùng lại với payload khác (`422`); nếu bằng và là `P` → bản gốc đang chạy: trả `409`/chờ như quy ước ở chương 12; nếu bằng và là `D` → trả lại `resp`. Nếu `GET` trả `nil` (key hết hạn đúng giữa hai lệnh) thì quay lại bước 1. Từ Redis 7.0 có thể gộp bước 1–2 thành một lệnh `SET … NX PX 30000 GET`[^set-nx-get] — `nil` nghĩa là bạn đã giữ chỗ, còn trả về một chuỗi là trạng thái đang có, vì `GET` trả giá trị cũ hoặc `nil` nếu key chưa có[^set-get] (suy luận của người soạn khi ghép hai nguồn).
-3. *Xong.* Script: nếu giá trị hiện tại *đúng bằng* `P|fp|token` của mình thì `SET` thành `D|fp|response` kèm TTL dài; không thì trả `0`:
+1. *Nhận chỗ.* Pod nhận request chạy `SET idem:<t>:<k> "P|<fp>|<token>" NX PX 30000`. Ở đây `P` đánh dấu trạng thái đang chạy, `fp` là fingerprint của payload, còn `token` là chuỗi ngẫu nhiên riêng của lần xử lý này. Redis trả `OK` nghĩa là pod là bên đến đầu tiên, nên pod chạy handler.
+2. *Thua.* Nếu `SET` trả `nil` thì bên khác đã nhận chỗ trước, và pod chạy `GET` để xem trạng thái hiện có. Giá trị là `P|fp2|…` (đang chạy) hoặc `D|fp2|resp` (đã xong). Nếu `fp2 ≠ fp` thì key đã bị dùng lại với payload khác, và pod trả `422`. Nếu `fp2` bằng `fp` mà giá trị là `P` thì bản gốc còn đang chạy, và pod trả `409` hoặc chờ, như quy ước ở chương 12. Nếu `fp2` bằng `fp` và giá trị là `D` thì pod trả lại `resp`. Riêng khi `GET` trả `nil`, tức key hết hạn đúng giữa hai lệnh, pod quay lại bước 1.
+3. *Xong.* Handler chạy xong thì pod gọi một script. Script so giá trị hiện tại của key với đúng `P|fp|token` của lần xử lý này: khớp thì `SET` key thành `D|fp|response` kèm TTL dài, không khớp thì trả `0`:
 
 ```lua
 -- KEYS[1] = idem key; ARGV[1] = "P|fp|token" (kỳ vọng); ARGV[2] = "D|fp|response"; ARGV[3] = ttl ms
@@ -403,19 +572,35 @@ end
 return 0
 ```
 
-Vì sao đúng *ở mức Redis*: `SET NX` là một lệnh nên "ai đến trước" được quyết định nguyên tử trên thread chính; script so-rồi-ghi chạy nguyên tử[^sc-atomic] nên không ghi đè lên key của lần xử lý khác.
+Cách này đúng *ở mức Redis* vì hai điều. `SET NX` là một lệnh, nên Redis phân xử "ai đến trước" một cách nguyên tử, trên thread chính. Script so-rồi-ghi cũng chạy nguyên tử[^sc-atomic], nên không ghi đè lên key của một lần xử lý khác.
 
-**Hỏng ở đâu — chỗ quan trọng nhất của mục này.** Redis ở đây *không* ghi nhận việc side effect thật đã xảy ra:
+**Hỏng ở đâu — chỗ quan trọng nhất của mục này.** Redis *không* ghi nhận việc side effect thật (ở đây là cổng thanh toán đã trừ tiền) đã xảy ra. Hệ quả có ba mặt:
 
-- Handler gọi cổng thanh toán xong, rồi pod chết *trước* bước 3. Key `P|…` hết hạn sau 30 giây; client retry; lần này `SET NX` thắng và handler *chạy lại* — trừ tiền hai lần. TTL của `P` là con dao hai lưỡi: ngắn thì handler chậm bị chạy trùng, dài thì client phải chờ lâu khi pod đã chết.
-- F1: failover mất cả `P` lẫn `D` → retry chạy lại. F2(c): key bị evict nếu instance bật eviction → cũng chạy lại.
-- Dedup chỉ đáng tin khi trạng thái yêu cầu nằm ở *kho bền*: bài giảng của Kleppmann nói trong mô hình crash-recovery, khử trùng yêu cầu đòi hỏi lưu yêu cầu (hoặc metadata của nó) vào stable storage để phát hiện được bản trùng kể cả sau crash[^kleppmann-dedup]. Redis với replication bất đồng bộ không phải stable storage theo nghĩa đó (suy luận của người soạn từ F1).
+- *Pod chết giữa chừng.* Handler gọi cổng thanh toán xong, rồi pod chết *trước* bước 3. Key `P|…` hết hạn sau 30 giây, client retry, và lần này `SET NX` thắng nên handler *chạy lại*: thẻ bị trừ hai lần. Vì vậy TTL của `P` là con dao hai lưỡi: ngắn thì handler chậm bị chạy trùng, dài thì client phải chờ lâu khi pod đã chết.
+- *Redis mất key.* Failover có thể làm mất cả `P` lẫn `D` (F1), và nếu instance bật eviction thì key cũng có thể bị evict (F2(c)). Cả hai trường hợp đều khiến retry chạy lại handler.
+- *Dedup cần kho bền.* Khử trùng request chỉ đáng tin khi trạng thái của request nằm ở một *kho bền* (stable storage). Trong mô hình crash-recovery, tức process có thể chết rồi chạy lại, khử trùng đòi hỏi lưu request (hoặc metadata của nó) vào stable storage, để nhận ra bản trùng kể cả sau một lần crash[^kleppmann-dedup]. Redis với replication bất đồng bộ không phải stable storage theo nghĩa đó (suy luận của người soạn từ F1).
 
-Kết luận thiết kế (nhận xét của người soạn): ràng buộc "một lần" đặt trong DB — bảng/cột `UNIQUE (tenant_id, idempotency_key)` ghi *cùng transaction* với thay đổi nghiệp vụ (kèm outbox nếu cần gửi tin: [chương 12, mục 6](12-dung-dan-va-tich-hop-du-lieu.md)). Stripe nêu một trường hợp liên quan (và nói hành vi "phụ thuộc nhiều vào cách cài đặt"): nếu thao tác dở đã được rollback bằng một database ACID thì retry nguyên khối là an toàn, nếu không thì phải khôi phục trạng thái rồi làm tiếp[^stripe-acid]. Redis đóng vai *lớp chặn đầu*: lọc nhanh các request trùng đồng thời (không phải mở transaction DB cho mỗi bản trùng) và cache response đã hoàn tất; `INSERT … ON CONFLICT` của DB mới là trọng tài cuối. Với cổng thanh toán bên ngoài, truyền tiếp idempotency key cho họ để dedup ở đầu kia. Thứ tự trong handler (suy luận của người soạn): (1) `SET NX` ở Redis; (2) transaction DB gồm `INSERT … ON CONFLICT`, thay đổi nghiệp vụ và `COMMIT`; (3) *sau* `COMMIT` mới chạy script ghi `D` — ghi `D` trước `COMMIT` thì một transaction bị rollback vẫn để lại phản hồi "thành công" cho lần retry.
+Vì vậy, ràng buộc "một lần" nên đặt trong DB: một bảng hoặc cột `UNIQUE (tenant_id, idempotency_key)` ghi *cùng transaction* với thay đổi nghiệp vụ (nhận xét của người soạn). Nếu cần gửi tin đi thì kèm một outbox ([chương 12, mục 6](12-dung-dan-va-tich-hop-du-lieu.md)).
 
-**Khi nào KHÔNG dùng Redis cho khóa/idempotency** (nhận xét của người soạn): thao tác tiền/đơn hàng/tồn kho — ràng buộc nằm trong DB; khóa bảo vệ tính đúng đắn mà tài nguyên đích *không* kiểm được fencing — dùng DB lock (`SELECT … FOR UPDATE`: [chương 15, mục 6](15-postgresql-ben-trong.md); advisory lock: [chương 15, mục 2d](15-postgresql-ben-trong.md)) hoặc hệ đồng thuận; khóa giữ rất lâu (giờ) — TTL + gia hạn liên tục là nhiều điểm hỏng hơn một lease trong hệ đồng thuận.
+Stripe cũng nêu một trường hợp liên quan, và lưu ý hành vi chính xác phụ thuộc nhiều vào cách cài đặt. Nếu thao tác dở dang đã được rollback bằng một database ACID thì retry nguyên khối là an toàn; nếu không thì phải khôi phục trạng thái rồi làm tiếp[^stripe-acid].
 
-<details><summary>Đi sâu: code Rust cho <code>Lock</code> (không có <code>Drop</code> async), và dọn khóa sau timeout</summary>
+Redis vẫn có chỗ đứng là *lớp chặn đầu*: nó lọc nhanh các request trùng đồng thời, để `shop` khỏi phải mở transaction DB cho từng bản trùng, và cache response đã hoàn tất (nhận xét của người soạn). Còn `INSERT … ON CONFLICT` của DB mới là trọng tài cuối. Với cổng thanh toán bên ngoài, ta truyền tiếp idempotency key cho họ để họ dedup ở đầu bên kia.
+
+Trong handler, thứ tự nên như sau (suy luận của người soạn):
+
+1. `SET NX` ở Redis.
+2. Transaction DB gồm `INSERT … ON CONFLICT`, thay đổi nghiệp vụ và `COMMIT`.
+3. *Sau* `COMMIT` mới chạy script ghi `D`.
+
+Lý do là nếu ghi `D` trước `COMMIT` thì một transaction bị rollback vẫn để lại phản hồi "thành công" cho lần retry.
+
+**Khi nào KHÔNG dùng Redis cho khóa/idempotency** (nhận xét của người soạn):
+
+- Thao tác tiền, đơn hàng, tồn kho, như `POST /payments`: ràng buộc phải nằm trong DB.
+- Khóa bảo vệ tính đúng đắn mà tài nguyên đích *không* kiểm được fencing: dùng DB lock (`SELECT … FOR UPDATE`: [chương 15, mục 6](15-postgresql-ben-trong.md); advisory lock: [chương 15, mục 2d](15-postgresql-ben-trong.md)) hoặc hệ đồng thuận.
+- Khóa giữ rất lâu (cỡ giờ): TTL cùng việc gia hạn liên tục có nhiều điểm hỏng hơn một lease trong hệ đồng thuận.
+
+<details><summary>Đi sâu: code Rust cho <code>Lock</code> (không có <code>Drop</code> async), dọn khóa sau timeout, và hai chi tiết của idempotency (gộp lệnh, ràng buộc SQL)</summary>
 
 Minh họa, không biên dịch trong chương này.
 
@@ -451,12 +636,14 @@ impl Lock {
 }
 ```
 
-Hai điểm riêng của Rust (nhận xét của người soạn):
+Code trên có hai điểm riêng của Rust (nhận xét của người soạn):
 
-- `Drop::drop` là hàm *đồng bộ* (`fn drop(&mut self)`[^rs-drop-sync]), nên một `Lock` không thể tự `await` việc nhả khóa khi bị drop. Hãy gọi `release().await` tường minh trên mọi đường thoát (kể cả đường lỗi) và coi TTL là lưới an toàn cho đường bị bỏ sót (panic, task bị hủy). Làm trong `Drop` bằng `tokio::spawn` là khả thi nhưng `tokio::spawn` panic nếu gọi ngoài runtime Tokio[^tokio-spawn-panic] và task đã spawn không được bảo đảm chạy tới cùng khi runtime đang tắt[^tokio-rt-shutdown] — không nên coi đó là bảo đảm.
-- `tokio::time::timeout` hết giờ thì *future* bị hủy[^tokio-timeout] (task bị `abort` cũng bị hủy — suy luận của người soạn), còn lệnh đã gửi vẫn chạy ở server: `ConnectionManager` bọc một multiplexed connection[^rs-cm-wraps], và connection đó "cancellation-safe" nhưng việc bỏ future không hủy request đã gửi[^rs-mux]. Một `SET NX PX` bị hủy giữa chừng có thể *đã lấy được khóa* mà code không biết. Vì token do chính bạn sinh ra, cách dọn là chạy `UNLOCK` với token đó (idempotent: không phải của mình thì trả `0`) trước khi thử lại (ma trận hậu quả cho mọi pattern: "Liên hệ với Rust" ở cuối chương).
+- **`Drop` không `await` được.** `Drop::drop` là hàm *đồng bộ* (`fn drop(&mut self)`[^rs-drop-sync]), nên một `Lock` không thể tự `await` việc nhả khóa khi bị drop. Vì vậy hãy gọi `release().await` tường minh trên mọi đường thoát, kể cả đường lỗi, và coi TTL là lưới an toàn cho những đường bị bỏ sót (panic, task bị hủy). Trong `Drop` ta vẫn có thể `tokio::spawn` một task nhả khóa, nhưng không nên coi đó là bảo đảm. `tokio::spawn` panic nếu gọi ngoài runtime Tokio[^tokio-spawn-panic]. Task đã spawn cũng không chắc chạy tới cùng khi runtime đang tắt[^tokio-rt-shutdown].
+- **Timeout không hủy lệnh đã gửi.** Khi `tokio::time::timeout` hết giờ, *future* bị hủy[^tokio-timeout] (task bị `abort` cũng bị hủy: suy luận của người soạn), nhưng lệnh đã gửi vẫn chạy ở server. Lý do là `ConnectionManager` bọc một multiplexed connection[^rs-cm-wraps]. Connection đó "cancellation-safe", nghĩa là ta có thể bỏ future mà không cần poll tới cùng, nhưng việc bỏ future không hủy request đã gửi[^rs-mux]. Vậy một `SET NX PX` bị hủy giữa chừng có thể *đã lấy được khóa* mà code không hay biết. Token do chính ta sinh ra, nên cách dọn là chạy `UNLOCK` với token đó trước khi thử lại. `UNLOCK` là lệnh idempotent: nếu khóa không phải của mình thì nó trả `0`, nên chạy thừa cũng không sao. Ma trận hậu quả cho mọi pattern nằm ở phần "Liên hệ với Rust" cuối chương.
 
-Ràng buộc DB cho idempotency, phía Postgres (hành vi chờ unique index và giới hạn ở Read Committed: [chương 12, mục 4, phần Đi sâu](12-dung-dan-va-tich-hop-du-lieu.md)):
+Hai chi tiết còn lại thuộc phần idempotency. Ở phía Redis, hai bước *Nhận chỗ* và *Thua* của mục 3.3 gộp được thành một lệnh `SET … NX PX 30000 GET` từ Redis 7.0[^set-nx-get]. Khi đó kết quả `nil` nghĩa là pod đã giữ được chỗ, còn nếu trả về một chuỗi thì đó là trạng thái đang có, vì `GET` trả giá trị cũ hoặc `nil` nếu key chưa có[^set-get] (suy luận của người soạn khi ghép hai nguồn).
+
+Ở phía Postgres, ràng buộc DB cho idempotency viết như sau (hành vi chờ unique index và giới hạn ở Read Committed nằm ở [chương 12, mục 4, phần Đi sâu](12-dung-dan-va-tich-hop-du-lieu.md)):
 
 ```sql
 INSERT INTO payments (tenant_id, idempotency_key, amount, status)
@@ -467,19 +654,23 @@ RETURNING id;   -- không có hàng trả về = key đã được xử lý: đ�
 
 </details>
 
-**Quay lại Q3:** khóa Redis = `SET NX PX` + hai script so token (nhả, gia hạn) — đúng cho khóa vì hiệu quả; khi khóa là vì đúng đắn thì tài nguyên đích phải kiểm fencing token (tốt nhất là CAS ngay trong DB), còn idempotency key trong Redis chỉ là lớp chặn đầu: "chỉ một lần" phải được ràng buộc duy nhất trong DB giữ cùng transaction.
+**Quay lại Q3:** với `shop`, `SET NX PX` cộng hai script so token là đủ cho khóa vì hiệu quả như job đối soát; khi làm trùng là sai, như trừ thẻ hai lần, thì tài nguyên đích phải kiểm fencing token (tốt nhất là compare-and-set ngay trong DB), còn idempotency key trong Redis chỉ là lớp chặn đầu, vì ràng buộc "chỉ một lần" phải nằm trong DB, ghi cùng transaction với thay đổi nghiệp vụ.
 
 ## 4. Job queue: List `BLMOVE` hay Stream consumer group (Q4)
 
-> **Trả lời ngắn.** Queue tối giản bằng List (`LPUSH` + `BRPOP`) làm mất job nếu worker chết sau khi lấy[^lm-unreliable]; bản đáng tin dùng `BLMOVE` để *chuyển* job sang một list "đang xử lý" rồi `LREM` khi xong, kèm một tiến trình quét job kẹt[^lm-fetch][^lm-monitor]. Stream + consumer group làm sẵn phần khó: danh sách pending, `XACK`, claim job bị bỏ rơi (`XAUTOCLAIM`) và bộ đếm số lần giao để làm dead letter[^st-cg-pending][^st-dead-letter]. Cả hai vẫn là at-least-once trên một kho có thể mất write khi failover (F1), nên consumer phải idempotent và job không được mất thì phải ghi ở DB trước (nhận xét của người soạn).
+> **Trả lời ngắn.** Queue (hàng đợi job) làm bằng List ở dạng đơn giản nhất, `LPUSH` để thêm job và `BRPOP` để lấy job ra, sẽ làm mất job nếu worker chết ngay sau khi lấy[^lm-unreliable]. Bản đáng tin dùng `BLMOVE` để chuyển job sang một list "đang xử lý" thay vì lấy hẳn ra khỏi Redis, chỉ xóa nó bằng `LREM` khi xử lý xong, và nhờ một tiến trình riêng quét list đó để đẩy lại job nằm quá lâu[^lm-fetch]. Stream (cấu trúc dạng log của Redis) cùng consumer group làm sẵn những việc khó ấy: nhớ job nào đã giao mà chưa được xác nhận (`XACK`), giao lại job của worker đã chết (`XAUTOCLAIM`), và đếm số lần giao để đưa job hỏng mãi sang dead letter, tức một nơi riêng dành cho job thử mãi không xong[^st-cg-pending]. Cả hai cách chỉ bảo đảm job được giao ít nhất một lần (at-least-once) và vẫn có thể mất write khi replica lên thay master (failover, F1), nên consumer phải idempotent, nghĩa là chạy lại cùng một job không gây hại, còn job không được phép mất thì phải ghi vào DB trước (nhận xét của người soạn).
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): API nhận yêu cầu "xuất báo cáo" rồi đẩy job cho worker. Yêu cầu tối thiểu: không mất job khi worker chết giữa chừng, job lỗi được thử lại có giới hạn, job độc không làm worker chết mãi, và thấy được hàng đợi đang kẹt ở đâu. Cấp độ cơ bản của Redis đã đủ cho phần đầu; hai phần sau là lúc Stream thắng.
+*Với `shop`.* Khi khách đặt hàng xong, `shop` còn phải gửi email xác nhận và xuất hóa đơn. Hai việc này không nên làm ngay trong request, nên API chỉ đẩy một job vào hàng đợi cho các worker pod xử lý nền (nhận xét của người soạn). Hàng đợi ấy cần đáp ứng bốn yêu cầu tối thiểu: worker pod chết giữa chừng thì job không mất; job lỗi được thử lại nhưng không quá số lần cho phép; job độc (poison job), tức job làm worker nào nhận cũng chết, không được làm worker chết mãi; và nhìn được hàng đợi đang kẹt ở đâu. Với yêu cầu đầu, List của Redis ở cấp độ cơ bản đã đủ; các yêu cầu còn lại là chỗ Stream thắng (nhận xét của người soạn). Mục này trả lời: List và Stream mỗi bên làm được tới đâu cho `shop`, và khi nào nên chuyển hẳn sang một broker thật?
 
 ### 4.1 Reliable queue bằng List
 
-`LMOVE source destination <LEFT|RIGHT> <LEFT|RIGHT>` nguyên tử lấy một phần tử ở một đầu `source` và đẩy vào một đầu `destination`[^lm-atomic]; `BLMOVE` là biến thể chặn, khi `source` rỗng thì block connection cho tới khi có người đẩy hoặc hết timeout[^blmove-block]. Tài liệu `LMOVE` mô tả đúng pattern: queue đơn giản (producer đẩy giá trị vào list, consumer `RPOP`/`BRPOP`) *không* đáng tin vì tin có thể mất khi mạng lỗi hoặc consumer chết ngay sau khi nhận[^lm-unreliable]; `LMOVE` cho consumer lấy tin *đồng thời* đẩy nó sang list "processing", rồi dùng `LREM` xóa khỏi đó khi xử lý xong[^lm-fetch]; và một client khác giám sát list processing để đẩy lại những mục nằm đó quá lâu[^lm-monitor].
+Cách đơn giản nhất để làm queue bằng List là để API (producer, bên thêm job) `LPUSH` job vào một list, còn worker (consumer, bên lấy job ra xử lý) gọi `RPOP` hoặc `BRPOP` để lấy. Cách này không đáng tin: lệnh pop xóa job khỏi Redis ngay khi trả nó về, nên nếu mạng gặp sự cố hoặc worker chết ngay sau khi nhận, job mất luôn và đơn hàng đó không bao giờ có email xác nhận[^lm-unreliable].
+
+Muốn vá chỗ hở đó, ta phải *chuyển* job sang một chỗ khác chứ không xóa nó. `LMOVE source destination <LEFT|RIGHT> <LEFT|RIGHT>` làm đúng việc này: lấy một phần tử ở một đầu list `source` rồi đẩy vào một đầu list `destination`, tất cả trong một lệnh nguyên tử[^lm-atomic]. `BLMOVE` là biến thể chặn (blocking): khi `source` rỗng, nó chặn connection cho tới khi có client khác đẩy job vào hoặc hết timeout[^blmove-block].
+
+Với `BLMOVE`, worker lấy job và cất nó vào một list "processing" trong cùng một bước; chỉ khi xử lý xong nó mới xóa job khỏi list đó bằng `LREM`[^lm-fetch]. Nhờ vậy, nếu worker pod chết giữa chừng thì job vẫn còn nguyên trong list processing. Nhưng phải có người để mắt tới list này: một client khác giám sát nó và đẩy trở lại queue những job nằm đó quá lâu[^lm-monitor]. Ta gọi client ấy là *reaper* (tiến trình dọn job kẹt). Với job xuất hóa đơn của `shop`, ba vai làm việc như sau (queue tên `reports`, `w1` là tên một worker):
 
 ```
 producer : LPUSH  queue:{reports} <job-json>
@@ -489,19 +680,27 @@ worker   : BLMOVE queue:{reports} processing:{reports}:w1 RIGHT LEFT 5   -- ch�
 reaper   : thấy job nằm ở processing quá lâu → LMOVE ngược về queue
 ```
 
-Các chỗ phải tự làm (nhận xét của người soạn — doc chỉ nói "một client khác giám sát"):
+Tài liệu chỉ nói "một client khác giám sát", không nói giám sát bằng cách nào, nên có ba việc ta phải tự làm (nhận xét của người soạn):
 
-- *Biết job "nằm quá lâu" thế nào?* `LMOVE` không ghi thời điểm. Nhúng `enqueued_at`/`started_at` vào payload (và để worker ghi lại `started_at` khi nhận — nhưng sửa payload nghĩa là phần tử khác, `LREM` theo giá trị phải khớp bản sửa), hoặc giữ một ZSET phụ `deadline:{reports}` (score = hạn) — nhưng `LMOVE` rồi `ZADD` là *hai* lệnh không nguyên tử, phải gói trong Lua (script không block được[^lua-no-block], nên phần chờ `BLMOVE` vẫn ở ngoài).
-- *Worker chết thì list `processing:…:w1` của nó thành mồ côi.* Mỗi worker một list riêng + một key sống `heartbeat:w1` có TTL; reaper thấy heartbeat mất thì dồn toàn bộ list đó về queue.
-- *`LREM` là O(N+M)* với N là độ dài list[^lrem-cx], nên giữ list processing nhỏ (mỗi worker xử lý vài job một lúc) và đảm bảo job có id duy nhất trong payload — `LREM … 1` xóa phần tử *đầu tiên khớp giá trị* khi duyệt từ đầu list[^lrem-count], hai job payload giống hệt sẽ lẫn nhau.
-- *Công bằng giữa worker:* khi nhiều client cùng block trên một list, client chờ lâu nhất được phục vụ trước[^list-fifo-block].
-- *Block chiếm connection:* `BLMOVE` giữ connection tới khi có tin; đừng chạy nó trên connection multiplexed dùng chung (xem "Liên hệ với Rust" ở cuối chương).
-- *Cluster (F4):* `queue` và `processing` là hai key trong *một* lệnh nên phải cùng slot — hash tag `{reports}` như trên.
-- Không có đếm số lần thử, không có dead letter, không fan-out nhiều nhóm consumer, và sau khi `LREM` job biến mất khỏi mọi dấu vết — không xem lại lịch sử được.
+- *Biết job "nằm quá lâu" từ lúc nào.* `LMOVE` không ghi lại thời điểm, nên phải tự thêm. Có hai cách:
+  - Ghi `enqueued_at`/`started_at` vào payload. Nhưng nếu worker ghi lại `started_at` khi nhận thì payload đã đổi, tức đã thành một phần tử khác, và `LREM` theo giá trị phải khớp đúng bản đã sửa.
+  - Giữ một ZSET phụ `deadline:{reports}` với score là hạn xử lý. Nhưng `LMOVE` rồi `ZADD` là *hai* lệnh, không nguyên tử, nên phải gói chúng trong một script Lua. Script không chứa được lệnh block[^lua-no-block], vì vậy phần chờ của `BLMOVE` vẫn nằm ngoài script.
+- *Worker chết thì list processing của nó thành mồ côi.* Với list `processing:…:w1` riêng cho từng worker, ta thêm một key `heartbeat:w1` có TTL để báo worker còn sống (worker làm mới key này định kỳ). Reaper thấy heartbeat mất thì dồn toàn bộ list của worker đó về queue.
+- *Giữ `LREM` nhanh và không xóa nhầm.* `LREM` có độ phức tạp O(N+M), với N là độ dài list và M là số phần tử bị xóa[^lrem-cx], nên hãy giữ list processing nhỏ: mỗi worker chỉ xử lý vài job một lúc. Mỗi job còn cần một id duy nhất trong payload, vì `LREM … 1` xóa phần tử *đầu tiên khớp giá trị* khi duyệt từ đầu list[^lrem-count], và hai job có payload giống hệt nhau sẽ bị lẫn.
+
+Ngoài ra còn ba điều cần biết khi chạy queue này:
+
+- *Công bằng giữa các worker.* Khi nhiều client cùng block trên một list, client chờ lâu nhất được phục vụ trước[^list-fifo-block].
+- *Block giữ connection.* `BLMOVE` giữ connection cho tới khi có job, nên đừng chạy nó trên connection multiplexed, tức connection mà nhiều task dùng chung (xem phần "Liên hệ với Rust" ở cuối chương).
+- *Cluster (F4).* `queue` và `processing` là hai key trong *một* lệnh nên phải cùng slot; hash tag `{reports}` như trong ví dụ trên bảo đảm điều đó.
+
+Cuối cùng, List không có sẵn bộ đếm số lần thử, không có dead letter và không cho nhiều nhóm consumer cùng đọc một dữ liệu (fan-out). Sau `LREM`, job biến mất không để lại dấu vết, nên cũng không xem lại lịch sử được. Mục 4.2 cho thấy Stream xử lý các điểm này thế nào.
 
 ### 4.2 Stream + consumer group
 
-Stream là cấu trúc hoạt động như append-only log nhưng có thêm truy cập ngẫu nhiên O(1) và các kiểu tiêu thụ phức tạp như consumer group[^st-log] (cơ chế nền ở [chương 16, mục 7](16-redis-ben-trong.md); so sánh queue/log ở [chương 11, mục 2](11-stream-processing.md)). Vòng đời một job (PEL = *Pending Entries List*, danh sách các mục đã giao cho một consumer nhưng chưa `XACK`[^xack-pel]):
+Stream của Redis hoạt động như một append-only log (log chỉ ghi thêm vào cuối), nhưng có thêm truy cập ngẫu nhiên O(1) và các kiểu đọc phức tạp như consumer group[^st-log]. Consumer group là một nhóm worker cùng đọc một stream để chia tải. Cơ chế nền ở [chương 16, mục 7](16-redis-ben-trong.md); so sánh queue với log ở [chương 11, mục 2](11-stream-processing.md).
+
+Mỗi job đi qua vòng đời dưới đây. PEL (*Pending Entries List*) là danh sách các mục đã giao cho một consumer nhưng chưa được `XACK`, tức chưa được xác nhận là xử lý xong[^xack-pel]:
 
 ```mermaid
 flowchart TD
@@ -513,16 +712,25 @@ flowchart TD
   PEL -- "số lần giao > K" --> DLQ["XADD jobs:dead ... + XACK"]
 ```
 
-Các lệnh theo thứ tự dùng:
+Các lệnh tương ứng với sơ đồ, theo thứ tự dùng:
 
-1. *Tạo nhóm một lần:* `XGROUP CREATE jobs workers $ MKSTREAM` — ID `$` nghĩa là nhóm chỉ nhận tin đến từ giờ; ID `0` nghĩa là nhóm đọc cả lịch sử từ đầu[^st-xgroup-start]; `MKSTREAM` tạo stream nếu chưa có[^st-mkstream].
-2. *Gửi:* `XADD jobs MAXLEN ~ 100000 * type report user 42` (đoạn "giữ stream không phình" ở dưới).
-3. *Nhận:* `XREADGROUP GROUP workers w1 COUNT 10 BLOCK 5000 STREAMS jobs >` — ID đặc biệt `>` chỉ trả tin *chưa giao cho ai*, và cập nhật "last ID" của nhóm; với một ID thật thì trả lịch sử pending của chính consumer đó, dùng để xử lý lại sau crash[^st-pending].
-4. *Xác nhận:* `XACK jobs workers <id>` khi xử lý *thành công*; việc này bỏ mục khỏi PEL và giải phóng bộ nhớ[^xack-doc]. `XACK` chỉ gỡ mục khỏi PEL của consumer group[^xack-pel], không xóa entry khỏi stream — entry ở lại cho tới khi bị trim hoặc xóa (stream giữ tin vô thời hạn trừ khi bạn yêu cầu xóa[^st-vs]) (suy luận của người soạn từ hai câu).
-5. *Cứu job của consumer chết:* `XAUTOCLAIM jobs workers w2 60000 0-0 COUNT 10` — chuyển quyền sở hữu những mục pending đã nhàn rỗi quá 60 giây sang `w2`[^xautoclaim-idle]. Đây là bản gói sẵn của quy trình `XPENDING` → `XCLAIM`[^xautoclaim-equiv]; `XCLAIM` có tham số *min-idle-time* để hai client cùng claim thì chỉ một người thành công, vì claim đặt lại idle time[^st-claim-idle]. Con trỏ trả về dùng cho lần gọi sau; trả `0-0` nghĩa là đã quét hết PEL — nhưng vẫn phải quay lại từ đầu định kỳ vì có thể có mục mới nhàn rỗi[^st-xautoclaim-cursor].
-6. *Dead letter.* Bộ đếm số lần giao tăng khi mục được claim thành công hoặc khi `XREADGROUP` đọc lại lịch sử pending[^st-delivery-counter]; `XAUTOCLAIM` cũng tăng nó (trừ khi dùng `JUSTID`), nên job mà consumer nào xử lý cũng chết sẽ có số lần giao cao và theo dõi được[^xautoclaim-counter]. Khi bộ đếm vượt một ngưỡng bạn chọn thì đưa job sang stream khác và báo quản trị — tài liệu gọi đây là cách Redis Streams hiện thực khái niệm *dead letter*[^st-dead-letter]. `XPENDING jobs workers IDLE 60000 - + 100` (lọc theo idle time[^xpending-idle]) liệt kê id, consumer, thời gian từ lần giao gần nhất và số lần giao[^xpending-extended].
+1. *Tạo group một lần:* `XGROUP CREATE jobs workers $ MKSTREAM`. ID `$` nghĩa là group chỉ nhận tin đến từ lúc này, còn ID `0` nghĩa là group đọc cả lịch sử của stream từ đầu[^st-xgroup-start]. `MKSTREAM` tạo luôn stream nếu stream chưa có[^st-mkstream].
+2. *Gửi job:* `XADD jobs MAXLEN ~ 100000 * type report user 42` (phần `MAXLEN ~` xem ở đoạn "Giữ stream không phình" bên dưới).
+3. *Nhận job:* `XREADGROUP GROUP workers w1 COUNT 10 BLOCK 5000 STREAMS jobs >`. ID đặc biệt `>` chỉ trả những tin *chưa giao cho ai*, và cập nhật "last ID" của group. Nếu thay `>` bằng một ID thật thì lệnh trả lịch sử pending của chính consumer đó, dùng để xử lý lại những job còn dở sau crash[^st-pending].
+4. *Xác nhận:* `XACK jobs workers <id>` sau khi xử lý *thành công*, để job đó không bị xử lý lại. Lệnh này bỏ mục khỏi PEL và giải phóng bộ nhớ[^xack-doc]. Cần lưu ý là nó chỉ gỡ mục khỏi PEL của group[^xack-pel]. Còn stream giữ tin vô thời hạn trừ khi ta yêu cầu xóa[^st-vs]. Ghép hai điều này lại, `XACK` không xóa entry khỏi stream: entry của job đã xong vẫn nằm đó cho tới khi bị trim (cắt bớt entry cũ) hoặc bị xóa (suy luận của người soạn).
+5. *Cứu job của consumer chết:* `XAUTOCLAIM jobs workers w2 60000 0-0 COUNT 10` chuyển quyền sở hữu những mục pending đã nhàn rỗi quá 60 giây sang `w2`[^xautoclaim-idle]. Idle time của một mục là thời gian kể từ lần giao gần nhất[^xpending-extended].
+   - Lệnh này là bản gói sẵn của hai bước `XPENDING` rồi `XCLAIM`[^xautoclaim-equiv].
+   - Nếu hai client cùng claim một mục thì chỉ một client thành công: `XCLAIM` có tham số *min-idle-time*, và mỗi lần claim đặt lại idle time của mục[^st-claim-idle].
+   - Lệnh trả về một con trỏ để dùng cho lần gọi sau. Con trỏ `0-0` nghĩa là đã quét hết PEL, nhưng vẫn phải quay lại quét từ đầu theo định kỳ, vì có thể đã có mục mới nhàn rỗi[^st-xautoclaim-cursor].
+6. *Đếm số lần giao và dead letter.* Dead letter là nơi dành cho những job thử mãi không xong.
+   - Stream đếm số lần giao của từng mục. Bộ đếm tăng khi mục được claim thành công, hoặc khi `XREADGROUP` được dùng để đọc lại lịch sử pending[^st-delivery-counter].
+   - `XAUTOCLAIM` cũng làm bộ đếm tăng (trừ khi dùng `JUSTID`), nên một job mà consumer nào xử lý cũng chết sẽ có số lần giao cao, và ta theo dõi được điều đó[^xautoclaim-counter].
+   - Khi bộ đếm vượt một ngưỡng do ta chọn, hãy đưa job sang một stream khác và báo cho người quản trị. Đây là cách Redis Streams cài đặt khái niệm *dead letter*[^st-dead-letter].
+   - Để xem job nào đang kẹt, dùng `XPENDING jobs workers IDLE 60000 - + 100`, trong đó `IDLE 60000` lọc theo idle time[^xpending-idle]. Mỗi dòng kết quả gồm id của mục, consumer đang giữ, thời gian từ lần giao gần nhất và số lần giao[^xpending-extended].
 
-Đoạn Lua chuyển job quá hạn thử lại sang stream DLQ (gộp `XADD` + `XACK` vào một script để client khác không thấy trạng thái giữa chừng[^sc-atomic]; script nguyên tử nhưng *không rollback* — tài liệu nói ngắt script giữa chừng có thể để lại thay đổi ghi dở[^sc-halfwritten], và lỗi giữa chừng cũng vậy (suy luận của người soạn); `XDEL` tùy chọn). `XACK` chạy trước và chỉ khi nó trả `1` mới `XADD`, nên gọi lại script cho cùng một id (hai reaper cùng chạy, hoặc retry sau timeout) không tạo bản trùng trong DLQ:
+Khi một job đã quá giới hạn số lần thử, reaper chuyển nó sang stream DLQ (dead letter queue) bằng một script Lua. Script gộp `XADD` và `XACK` để client khác không thấy trạng thái nửa chừng[^sc-atomic]. Nhưng script chỉ nguyên tử chứ *không rollback*: ngắt script giữa chừng có thể để lại thay đổi ghi dở[^sc-halfwritten]. Một lỗi giữa chừng cũng có thể gây ra điều tương tự (suy luận của người soạn).
+
+Thứ tự lệnh trong script cũng quan trọng: `XACK` chạy trước và chỉ khi nó trả `1` mới `XADD`, nên gọi lại script cho cùng một id (hai reaper cùng chạy, hoặc retry sau timeout) không tạo bản trùng trong DLQ. Script không `XDEL` entry khỏi stream gốc; muốn xóa thì thêm `XDEL`, việc này tùy chọn:
 
 ```lua
 -- KEYS[1] = jobs; KEYS[2] = jobs:dead; ARGV[1] = group; ARGV[2] = id
@@ -536,9 +744,9 @@ end
 return acked
 ```
 
-(Hai stream trong một script ⇒ cùng hash tag, ví dụ `{jobs}` và `{jobs}:dead`.)
+Script đụng tới hai stream nên hai key phải có cùng hash tag, ví dụ `{jobs}` và `{jobs}:dead`.
 
-*Retry có trì hoãn* (backoff 1 phút, 5 phút…): Stream không có "giao sau". Cách thường dùng (nhận xét của người soạn) là ZSET `jobs:delayed` với score = thời điểm chạy, cộng một script chuyển các mục tới hạn sang stream. Từ 6.2 `ZRANGE` thay được `ZRANGEBYSCORE`[^zrange-replaces], nên script có thể viết như sau.
+*Retry có trì hoãn.* Muốn thử lại có backoff (chờ 1 phút, rồi 5 phút…) thì Stream không giúp được trực tiếp, vì nó không có khái niệm "giao sau". Cách thường dùng là giữ job chờ trong một ZSET `jobs:delayed` có score là thời điểm chạy, kèm một script chuyển các mục đã tới hạn sang stream (nhận xét của người soạn). Từ Redis 6.2, `ZRANGE` thay được `ZRANGEBYSCORE`[^zrange-replaces], nên script có thể viết như sau.
 
 ```lua
 -- KEYS[1] = {jobs}:delayed (score = run_at ms); KEYS[2] = {jobs}; ARGV[1] = now_ms; ARGV[2] = batch
@@ -550,36 +758,50 @@ end
 return #due
 ```
 
-*Giữ stream không phình.* Tài liệu nói rõ stream giữ tin vô thời hạn trừ khi bạn xóa[^st-vs] và có `MAXLEN` trong `XADD`[^st-capped]; dạng `MAXLEN ~ 1000` chỉ cắt khi bỏ được cả một node nên hiệu quả hơn nhiều mà chấp nhận dư tối đa vài chục mục[^st-trim-approx][^xadd-tens]. **Cạm bẫy cần biết:** `MAXLEN` cắt *theo độ dài*: loại các entry cũ nhất cho tới khi stream không vượt ngưỡng[^xtrim-maxlen], và tài liệu không nhắc tới trạng thái consumer group (suy luận của người soạn: consumer tụt hậu quá `MAXLEN` thì entry chưa đọc *bị cắt mất*). Khi `XAUTOCLAIM` gặp mục pending mà entry đã bị trim hoặc `XDEL`, nó không claim mà *xóa mục đó khỏi PEL*[^st-xautoclaim-trimmed]. Từ Redis 7.0 các ID bị xóa này được trả về ở phần tử thứ ba của reply[^xautoclaim-deleted] — crate `redis` 1.7.1 phơi chúng ở `StreamAutoClaimReply::deleted_ids`[^rs-xautoclaim-deleted] — nên reaper có dấu vết nếu chịu đọc; nhưng payload đã mất cùng entry, chỉ còn ID để dựng lại job từ DB (suy luận của người soạn: đặt `MAXLEN` đủ lớn so với độ trễ tối đa của consumer, ghi log/báo động mọi `deleted_ids`, và cảnh báo trên độ dài hàng đợi/`XINFO GROUPS`).
+*Giữ stream không phình.* Stream giữ tin vô thời hạn trừ khi ta xóa[^st-vs], nên phải tự giới hạn độ dài. `XADD` có tùy chọn `MAXLEN` để làm việc đó[^st-capped]. Dạng `MAXLEN ~ 1000` chỉ cắt khi bỏ được trọn một node, tức một khối entry bên trong stream ([chương 16, mục 2](16-redis-ben-trong.md)), nên hiệu quả hơn nhiều[^st-trim-approx]. Cái giá là stream có thể dư tối đa vài chục mục so với ngưỡng[^xadd-tens].
 
-*Dọn consumer.* Mỗi pod có tên consumer riêng; pod chết để lại consumer trong nhóm. `XGROUP DELCONSUMER` xóa nó nhưng các tin pending của consumer đó thành *không claim được*, nên phải claim/ack trước[^xgroup-delconsumer].
+**Cạm bẫy:** `MAXLEN` cắt *theo độ dài*, tức bỏ các entry cũ nhất cho tới khi stream không còn vượt ngưỡng[^xtrim-maxlen]. Tài liệu của lệnh này không nhắc gì tới trạng thái của consumer group, nên nếu một consumer tụt hậu quá `MAXLEN` thì những entry nó chưa đọc sẽ *bị cắt mất* (suy luận của người soạn). Với `shop`, đó là những đơn hàng không bao giờ có email xác nhận hay hóa đơn.
+
+`XAUTOCLAIM` cũng không cứu được những job này. Khi gặp một mục pending mà entry của nó đã bị trim hoặc `XDEL`, lệnh không claim mà *xóa mục đó khỏi PEL*[^st-xautoclaim-trimmed]. Từ Redis 7.0, những ID bị xóa kiểu này được trả về ở phần tử thứ ba của reply[^xautoclaim-deleted]. Nhờ vậy reaper vẫn có dấu vết, nếu nó chịu đọc phần tử đó (code Rust ở phần Đi sâu cuối mục). Nhưng payload đã mất cùng entry, nên chỉ còn ID để dựng lại job từ DB. Vì vậy nên đặt `MAXLEN` đủ lớn so với độ trễ tối đa của consumer, ghi log và báo động mọi ID bị xóa như thế, và đặt cảnh báo trên độ dài hàng đợi hoặc trên `XINFO GROUPS` (suy luận của người soạn).
+
+*Dọn consumer.* Mỗi worker pod dùng một tên consumer riêng, nên khi pod chết, consumer của nó vẫn nằm lại trong group. `XGROUP DELCONSUMER` xóa được consumer đó, nhưng những tin pending nó đang giữ sẽ thành *không claim được*[^xgroup-delconsumer]. Vì vậy phải claim hoặc ack số tin đó trước khi xóa.
 
 ### 4.3 So sánh, hỏng ở đâu, khi nào đổi sang broker thật
 
+Bảng dưới đặt hai cách làm bằng Redis cạnh nhau, kèm một cột cho broker chuyên dụng:
+
 | | List + `BLMOVE` | Stream + consumer group | Broker (SQS, RabbitMQ, Kafka…) |
 |---|---|---|---|
-| Không mất khi worker chết | processing list + reaper tự viết[^lm-fetch][^lm-monitor] | PEL + `XAUTOCLAIM`[^st-cg-pending][^st-claim] | có sẵn, bền hơn |
+| Không mất khi worker chết | processing list[^lm-fetch] + reaper tự viết[^lm-monitor] | PEL[^st-cg-pending] + `XAUTOCLAIM`[^st-claim] | có sẵn, bền hơn |
 | Đếm số lần giao / dead letter | tự làm | bộ đếm giao có sẵn[^st-dead-letter] | thường có sẵn |
 | Nhiều nhóm consumer đọc cùng dữ liệu | không | có (nhiều group)[^st-cg-groups] | tùy hệ |
 | Xem lại lịch sử | không (xóa khi `LREM`) | có, tới khi bị trim[^st-vs] | tùy hệ (Kafka có) |
 | Độ bền khi failover | F1 | F1: replicate bất đồng bộ, persist AOF/RDB[^st-persist] | thiết kế riêng |
 
-(Cột "Broker" là nhận xét chung của người soạn về các hệ queue/log chuyên dụng, không có nguồn ghim trong chương này; so sánh queue với log: [chương 11, mục 2–3](11-stream-processing.md).)
+Cột "Broker" là nhận xét chung của người soạn về các hệ queue/log chuyên dụng; chương này không ghim nguồn cho cột đó. So sánh queue với log nằm ở [chương 11, mục 2–3](11-stream-processing.md).
 
-Hỏng ở đâu (cả hai):
+Cả hai cách đều hỏng ở những chỗ sau:
 
-- *F1.* Stream replicate bất đồng bộ và persist như mọi cấu trúc khác[^st-persist]; tài liệu nói rõ sau failover có thể thiếu cả lệnh `XADD` lẫn thay đổi trạng thái consumer group[^st-xadd-lost]. AOF cần `fsync` mạnh, `WAIT` chỉ giảm khả năng mất và failover của Sentinel/Cluster chỉ kiểm tra *best-effort* — cơ chế và nguồn ở [chương 16, mục 7](16-redis-ben-trong.md). Job đã `XADD` thành công vẫn có thể biến mất.
-- *Cluster (F4, F6).* Một stream là một key = một slot = một master; thông lượng một queue bị chặn bởi một master, và tài liệu nói rõ một stream Redis không tự được chia ra nhiều instance[^st-no-partition]. Muốn mở rộng thì chia thành nhiều stream `{jobs:0}`…`{jobs:7}` (chọn theo hash của khóa phân vùng) và mỗi worker chỉ đọc một số stream — mô hình "N stream, N consumer" mà tài liệu mô tả[^st-nstreams]; mất thứ tự toàn cục, giữ thứ tự trong từng stream (nhận xét của người soạn; khái niệm: [chương 06](06-partitioning.md)). Ngược lại, một stream với nhiều consumer trong cùng group chỉ *chia tải*: thông điệp về cùng một đối tượng có thể bị xử lý sai thứ tự[^st-order-n].
-- *`XREADGROUP` là lệnh ghi* (nó đổi trạng thái nhóm) nên chỉ gọi được trên master[^st-write-cmd], tức không scale đọc bằng replica.
-- *Bộ nhớ.* Hàng đợi sống trong RAM. Instance đầy với `noeviction` thì từ chối ghi — `XADD` lỗi[^conf-noevict]. Với policy `allkeys-*` key queue cũng có thể bị evict (F2c), còn `volatile-*` chỉ evict key có TTL[^evict-policies]; khi không còn key nào đủ điều kiện, lệnh ghi cần thêm bộ nhớ vẫn trả lỗi như `noeviction`[^conf-evict-none]. Đặt queue ở instance riêng, `noeviction`, có cảnh báo dung lượng.
-- *At-least-once.* Một job có thể chạy nhiều lần (worker xử lý xong nhưng chết trước `XACK`; hoặc `XAUTOCLAIM` giật job còn đang chạy chậm). Tài liệu Stream tự nói không thể có exactly-once trong trường hợp tổng quát[^st-claim-idle]. Consumer phải idempotent — khuôn ở [chương 11, mục 4](11-stream-processing.md) và [chương 12, mục 5](12-dung-dan-va-tich-hop-du-lieu.md), mô hình hóa bằng TLA+ ở [P13 · Chương 09, mục 3](../13-tla-plus/09-mo-hinh-hoa-he-backend.md): thường là khóa dedup theo `job_id` trong DB cùng transaction với kết quả. Cũng đừng nhầm: consumer group của Redis không liên quan gì về cài đặt với consumer group của Kafka dù tương tự về chức năng[^st-kafka].
-- *Pub/Sub không thay được queue:* tin mất vĩnh viễn nếu subscriber không xử lý được hoặc đứt mạng[^ps-lost].
+- *F1 (mất write khi failover).* Redis replicate stream bất đồng bộ và persist nó như mọi cấu trúc khác[^st-persist]. Vì vậy sau failover, stream có thể thiếu cả lệnh `XADD` lẫn thay đổi trạng thái của consumer group[^st-xadd-lost], tức job đã `XADD` thành công vẫn có thể biến mất. Khi đánh giá rủi ro này cần nhớ ba điều: AOF cần `fsync` mạnh, `WAIT` chỉ giảm khả năng mất, và failover của Sentinel/Cluster chỉ kiểm tra *best-effort* (cơ chế và nguồn ở [chương 16, mục 7](16-redis-ben-trong.md)). Hệ quả là `BLMOVE` hay `XAUTOCLAIM` chỉ cứu được job khi *worker* chết, chứ không cứu được job khi *Redis* mất write (nhận xét của người soạn).
+- *Cluster (F4, F6).* Một stream là một key, nên nằm trọn trong một slot và do một master giữ. Thông lượng của một queue vì vậy không vượt được sức của một master, và Redis không tự chia một stream ra nhiều instance[^st-no-partition]. Muốn mở rộng, ta chia công việc thành nhiều stream `{jobs:0}`…`{jobs:7}` (chọn stream theo hash của khóa phân vùng, ví dụ mã đơn hàng) và để mỗi worker chỉ đọc một số stream. Đó là mô hình "N stream, N consumer"[^st-nstreams]. Cái giá là mất thứ tự toàn cục, còn thứ tự trong từng stream vẫn giữ (nhận xét của người soạn; khái niệm phân vùng ở [chương 06](06-partitioning.md)). Ngược lại, nếu nhiều consumer trong cùng một group đọc *một* stream thì chúng chỉ *chia tải*, và các tin về cùng một đơn hàng có thể bị xử lý sai thứ tự[^st-order-n].
+- *`XREADGROUP` là lệnh ghi.* Đọc bằng lệnh này làm đổi trạng thái của group, nên Redis coi nó là lệnh ghi và chỉ cho gọi trên master[^st-write-cmd]. Nói cách khác, ta không scale việc đọc queue bằng replica được.
+- *Bộ nhớ.* Hàng đợi sống trong RAM. Khi instance đầy mà policy là `noeviction`, Redis từ chối ghi nên `XADD` báo lỗi[^conf-noevict]. Với policy `allkeys-*`, chính key queue cũng có thể bị evict (F2c), còn policy `volatile-*` chỉ evict key có TTL[^evict-policies]. Khi không còn key nào đủ điều kiện để evict, lệnh ghi cần thêm bộ nhớ vẫn trả lỗi như với `noeviction`[^conf-evict-none]. Vì vậy nên đặt queue ở một instance riêng, dùng `noeviction` và có cảnh báo dung lượng (nhận xét của người soạn).
+- *At-least-once.* Một job có thể chạy nhiều lần, theo hai kịch bản: worker xử lý xong nhưng chết trước khi kịp `XACK`; hoặc `XAUTOCLAIM` lấy lại một job vẫn đang chạy chậm và giao cho worker khác. Chính tài liệu của Stream cũng nói không thể có exactly-once trong trường hợp tổng quát[^st-claim-idle]. Vì vậy consumer phải idempotent. Cách thường dùng là khóa dedup theo `job_id` trong DB, nằm cùng transaction với kết quả xử lý. Khuôn mẫu này ở [chương 11, mục 4](11-stream-processing.md) và [chương 12, mục 5](12-dung-dan-va-tich-hop-du-lieu.md), còn bản mô hình hóa bằng TLA+ ở [P13 · Chương 09, mục 3](../13-tla-plus/09-mo-hinh-hoa-he-backend.md).
+- *Đừng nhầm với Kafka.* Consumer group của Redis giống consumer group của Kafka về chức năng, nhưng không liên quan gì về cài đặt[^st-kafka].
+- *Pub/Sub không thay được queue.* Nếu subscriber không xử lý được tin hoặc bị đứt mạng thì tin mất vĩnh viễn[^ps-lost].
 
-**Khi nào KHÔNG dùng Redis làm queue** (nhận xét của người soạn): job *không được mất* (thanh toán, gửi hóa đơn) — ghi job vào Postgres cùng transaction với thay đổi nghiệp vụ (outbox, [chương 12, mục 6](12-dung-dan-va-tich-hop-du-lieu.md)) và để một relay đẩy sang Redis như *đường tăng tốc*, hoặc dùng broker có độ bền thiết kế riêng; hàng đợi có thể dài tới mức không vừa RAM; cần giữ log nhiều ngày để replay nhiều consumer độc lập ([chương 11, mục 3](11-stream-processing.md)); cần thứ tự toàn cục nghiêm ngặt trên thông lượng cao. Ngược lại, Redis Streams rất hợp: nhiệm vụ nền ngắn, chịu mất hiếm khi (cache warm-up, gửi thông báo không quan trọng), cần độ trễ thấp và hạ tầng đã có Redis.
+**Khi nào KHÔNG dùng Redis làm queue** (nhận xét của người soạn):
+
+- Job *không được mất*, như thanh toán hay gửi hóa đơn (job xuất hóa đơn của `shop` thuộc loại này). Với loại job đó, hãy ghi job vào Postgres cùng transaction với thay đổi nghiệp vụ, tức cùng transaction lưu đơn hàng ở `shop`, theo mẫu *outbox* ([chương 12, mục 6](12-dung-dan-va-tich-hop-du-lieu.md)). Một relay, tức tiến trình đọc outbox rồi đẩy job sang Redis, biến Redis thành *đường tăng tốc*. Cách còn lại là dùng broker được thiết kế riêng cho độ bền.
+- Hàng đợi có thể dài tới mức không vừa RAM.
+- Cần giữ log nhiều ngày để nhiều consumer độc lập replay ([chương 11, mục 3](11-stream-processing.md)).
+- Cần thứ tự toàn cục nghiêm ngặt trên thông lượng cao.
+
+Ngược lại, Redis Streams rất hợp khi nhiệm vụ nền ngắn, thỉnh thoảng mất một job thì chấp nhận được (cache warm-up, gửi thông báo không quan trọng), cần độ trễ thấp, và hạ tầng đã có sẵn Redis.
 
 <details><summary>Đi sâu: code Rust cho worker Stream, reaper và producer</summary>
 
-Minh họa, không biên dịch trong chương này; giả định feature `streams` của crate `redis` (bật mặc định ở 1.7.1[^rs-default-features]; các kiểu `StreamReadReply`, `StreamPendingCountReply` ghi "available on crate feature `streams` only"[^rs-streams-feature]).
+Code dưới đây chỉ để minh họa, chương này không biên dịch nó. Nó dùng feature `streams` của crate `redis`, bật mặc định ở bản 1.7.1[^rs-default-features]. Các kiểu `StreamReadReply` và `StreamPendingCountReply` ghi rõ "available on crate feature `streams` only"[^rs-streams-feature].
 
 ```rust
 use redis::{aio::ConnectionManager, streams::{StreamReadOptions, StreamReadReply}, AsyncCommands};
@@ -607,21 +829,31 @@ async fn enqueue(conn: &mut ConnectionManager, job_id: &str, payload: &str) -> r
 }
 ```
 
-`StreamReadOptions::group(group, consumer)` đặt nhóm và consumer cho lệnh đọc; `.block(ms)` đặt thời gian chặn, `.count(n)` giới hạn số mục (docs `StreamReadOptions`[^rs-read-group]). Reaper định kỳ: gọi `XPENDING … IDLE …` bằng `redis::cmd("XPENDING")` (người soạn không thấy hàm dựng sẵn cho tham số `IDLE` trong danh sách `AsyncCommands` ở docs.rs 1.7.1; kiểu trả `StreamPendingCountReply`, mỗi `StreamPendingId` có `times_delivered`[^rs-pending-times]), chuyển job có `times_delivered` quá ngưỡng sang DLQ bằng script ở trên, còn lại `XAUTOCLAIM` về cho consumer đang sống (`xautoclaim_options` trả `StreamAutoClaimReply`; nhớ đọc cả `deleted_ids`[^rs-xautoclaim-deleted]).
+`StreamReadOptions::group(group, consumer)` đặt group và consumer cho lệnh đọc, `.block(ms)` đặt thời gian chặn, còn `.count(n)` giới hạn số mục[^rs-read-group].
 
-Vì một lệnh block trên connection dùng chung chặn các lệnh sau nó cùng connection (phần "Liên hệ với Rust" cuối chương), `worker` ở trên cần connection *riêng*: clone một `ConnectionManager` vẫn gửi request đồng thời trên *cùng một* connection bên dưới[^rs-cm-clone], nên với vòng `BLOCK` hãy dựng `ConnectionManager` riêng từ `Client`, hoặc lấy từ pool. Nên nới cả `response_timeout`: crate `redis` 1.x ghi "Async connections now have default timeouts" và dặn chỉnh timeout khi dùng lệnh block[^rs-default-timeouts]; `ConnectionManagerConfig::set_response_timeout` nhận `Option<Duration>` (`None` = không timeout)[^rs-cm-timeout] — trần này phải lớn hơn thời gian `BLOCK` (5 s ở ví dụ); giá trị mặc định người soạn chưa kiểm.
+Reaper chạy định kỳ và làm ba việc:
+
+1. Liệt kê job kẹt bằng `XPENDING … IDLE …`, gọi qua `redis::cmd("XPENDING")`. Người soạn không thấy hàm dựng sẵn cho tham số `IDLE` trong danh sách `AsyncCommands` ở docs.rs 1.7.1. Kiểu trả về là `StreamPendingCountReply`, và mỗi `StreamPendingId` có trường `times_delivered`[^rs-pending-times].
+2. Chuyển job có `times_delivered` quá ngưỡng sang DLQ bằng script Lua ở mục 4.2.
+3. `XAUTOCLAIM` các job còn lại về cho consumer đang sống. `xautoclaim_options` trả `StreamAutoClaimReply`; ở crate `redis` 1.7.1, trường `deleted_ids` của nó chứa các ID không còn trong stream, nên reaper nhớ đọc cả trường này (xem đoạn "Giữ stream không phình" ở mục 4.2)[^rs-xautoclaim-deleted].
+
+Một lệnh block trên connection dùng chung sẽ chặn các lệnh sau nó trên cùng connection (xem phần "Liên hệ với Rust" cuối chương). Vì vậy `worker` ở trên cần một connection *riêng*. Clone một `ConnectionManager` chưa đủ: mọi bản clone vẫn gửi request đồng thời trên *cùng một* connection bên dưới[^rs-cm-clone]. Với vòng `BLOCK`, hãy dựng một `ConnectionManager` riêng từ `Client`, hoặc lấy connection từ pool.
+
+Nên nới cả `response_timeout`. Từ bản 1.x, async connection của crate `redis` có timeout mặc định, và ghi chú nâng cấp dặn chỉnh timeout khi dùng lệnh block ("Async connections now have default timeouts")[^rs-default-timeouts]. `ConnectionManagerConfig::set_response_timeout` nhận `Option<Duration>`, với `None` là không timeout[^rs-cm-timeout]. Trần này phải lớn hơn thời gian `BLOCK` (5 s ở ví dụ). Giá trị mặc định ghi ở phần "Liên hệ với Rust" cuối chương.
 
 </details>
 
-**Quay lại Q4:** List + `BLMOVE` + `LREM` + reaper là reliable queue tối thiểu (tự làm hạn xử lý, dọn worker chết, dead letter); Stream + consumer group có sẵn PEL, `XACK`, `XAUTOCLAIM` và bộ đếm số lần giao — nhưng cả hai là at-least-once trên kho có thể mất write khi failover, nên consumer phải idempotent và job không-được-mất thì ghi DB trước.
+**Quay lại Q4:** List cùng `BLMOVE`, `LREM` và một reaper là reliable queue tối thiểu (phần hạn xử lý, dọn worker chết và dead letter phải tự làm), còn Stream cùng consumer group có sẵn PEL, `XACK`, `XAUTOCLAIM` và bộ đếm số lần giao; cả hai chỉ là at-least-once trên một kho có thể mất write khi failover, nên consumer phải idempotent, còn job không được mất, như job xuất hóa đơn của `shop`, thì phải ghi vào DB trước.
 
 ## 5. Leaderboard, ranking và phân trang bằng ZSET (Q5)
 
-> **Trả lời ngắn.** Sorted set (ZSET) giữ các phần tử duy nhất sắp theo score; tài liệu Redis nêu ngay bảng xếp hạng game là một use case[^zset-lb]. Cập nhật điểm bằng `ZADD`/`ZINCRBY`, lấy top-N bằng `ZRANGE key 0 N-1 REV WITHSCORES`, hỏi hạng của một người bằng `ZREVRANK` — hầu hết thao tác là O(log N)[^zset-perf]. Hai chỗ phải tự thiết kế: *tie-break* (cùng điểm thì ai trên — mặc định là so chuỗi tên member[^zadd-lex], hiếm khi là điều nghiệp vụ muốn: nhận xét của người soạn) và *độ chính xác của score* (số thực 64-bit bảo đảm biểu diễn chính xác mọi số nguyên trong [−2^53, 2^53][^zadd-precision]).
+> **Trả lời ngắn.** Sorted set (ZSET) là kiểu dữ liệu của Redis giữ các phần tử không trùng nhau, mỗi phần tử (member) kèm một con số gọi là score và luôn được sắp theo score đó; tài liệu Redis liệt kê bảng xếp hạng (ví dụ ở đó là một game online lớn) trong các use case của nó[^zset-lb]. Bạn cập nhật điểm bằng `ZADD`/`ZINCRBY`, lấy top-N bằng `ZRANGE key 0 N-1 REV WITHSCORES`, hỏi hạng của một người bằng `ZREVRANK`; hầu hết các thao tác này có thời gian tăng rất chậm theo số phần tử (O(log N))[^zset-perf]. Có hai chỗ phải tự thiết kế. Một là *tie-break*, tức cùng điểm thì ai đứng trên: mặc định Redis so tên member[^zadd-lex], và hiếm khi đó là điều nghiệp vụ muốn (nhận xét của người soạn). Hai là độ chính xác của score: score là số thực 64-bit, biểu diễn chính xác được mọi số nguyên trong [−2^53, 2^53][^zadd-precision].
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): game có sự kiện tuần với vài triệu người chơi. Màn hình cần hiển thị top 100, hạng của chính người chơi ("bạn đứng thứ 4.932"), và vài người quanh hạng đó; điểm cập nhật liên tục. Bài toán khó với SQL thuần: lấy top-N dễ (index + `LIMIT`), nhưng *hạng của một người bất kỳ* nghĩa là đếm số dòng có điểm cao hơn — với Postgres, đó là `count(*) WHERE score > $1`, phải duyệt các mục index trong khoảng đó tức O(số người đứng trên) (suy luận của người soạn). ZSET trả lời câu đó trong O(log N) vì cấu trúc skiplist + dict của nó (cơ chế: [chương 16, mục 2](16-redis-ben-trong.md); tóm tắt: ZSET dùng hai cấu trúc cho cùng các phần tử để có O(log N) cho chèn/xóa[^zset-dual]).
+*Với `shop`.* Tuần này `shop` chạy một đợt tích điểm thưởng, có vài triệu khách tham gia và điểm thay đổi liên tục (nhận xét của người soạn). Trang xếp hạng phải hiện top 100 khách, hạng của chính khách đang xem ("bạn đứng thứ 4.932") và vài người quanh hạng đó. Với SQL thuần, lấy top-N thì dễ (index + `LIMIT`), nhưng *hạng của một người bất kỳ* nghĩa là đếm số dòng có điểm cao hơn. Trên Postgres đó là `count(*) WHERE score > $1`, và nó phải duyệt các mục index trong khoảng đó, tức O(số người đứng trên) (suy luận của người soạn). Mục này trả lời hai câu: ZSET làm ba việc trên (top-N, hạng, người quanh hạng) ra sao, và `shop` phải tự lo những gì quanh nó?
+
+ZSET trả lời câu hỏi về hạng trong O(log N) nhờ cấu trúc skiplist + dict của nó (cơ chế: [chương 16, mục 2](16-redis-ben-trong.md)). Nói tóm tắt, ZSET dùng hai cấu trúc cùng chứa các phần tử để chèn và xóa chỉ tốn O(log N)[^zset-dual].
 
 ### 5.1 Primitive
 
@@ -632,21 +864,31 @@ Tình huống (nhận xét của người soạn): game có sự kiện tuần v
 | Cộng điểm | `ZINCRBY lb 50 user:42` | chưa có thì tạo với score = giá trị tăng[^zincrby-new] |
 | Top-N | `ZRANGE lb 0 99 REV WITHSCORES` | `REV` đảo thứ tự, chỉ số 0 là điểm cao nhất[^zrange-rev-index] |
 | Hạng (0-based) | `ZREVRANK lb user:42` | hạng 0 là cao nhất khi xếp từ cao xuống thấp[^zrank-doc] |
-| Quanh hạng r | `ZRANGE lb max(0,r-5) r+5 REV` | hai lệnh (`ZREVRANK` rồi `ZRANGE`) — không nguyên tử, chấp nhận được cho hiển thị; phải chặn `r-5` ở 0 vì chỉ số âm được hiểu là đếm từ cuối[^zrange-negative] |
+| Quanh hạng r | `ZRANGE lb max(0,r-5) r+5 REV` | cần hai lệnh (`ZREVRANK` rồi `ZRANGE`), không nguyên tử |
 
-`ZRANGE` theo chỉ số có độ phức tạp O(log N + M) với M là số phần tử trả về[^zrange-cx] nên "trang sâu" theo chỉ số vẫn rẻ. Cạm bẫy ngược lại: biến thể `BYSCORE … LIMIT offset count` với offset lớn phải duyệt qua `offset` phần tử trước khi lấy, có thể thành O(N)[^zrange-limit-on]. Phân trang theo trang số (`ZRANGE lb 20*p 20*p+19 REV`) có tật chung của offset-pagination: giữa hai lần gọi điểm thay đổi làm phần tử trượt giữa các trang (trùng hoặc sót) — chấp nhận được cho bảng xếp hạng, không chấp nhận được cho feed cần chính xác (nhận xét của người soạn). Muốn tránh offset: phân trang theo con trỏ score — `ZRANGE lb (<score_cuối_trang_trước> -inf BYSCORE REV LIMIT 0 20`, trong đó `(` mở khoảng, loại chính điểm cuối[^zrange-open]; `LIMIT` luôn bắt đầu từ 0 nên không phải duyệt qua offset lớn, và với score ghép của mục 5.2 hầu như không có hai phần tử trùng score nên ít bỏ sót (suy luận của người soạn).
+Hàng cuối của bảng cần hai lưu ý. Thứ nhất, hai lệnh nối nhau nên giữa chúng điểm có thể đổi; với trang hiển thị thì chấp nhận được. Thứ hai, phải chặn `r-5` ở 0, vì chỉ số âm được hiểu là đếm từ cuối sorted set[^zrange-negative].
+
+Giờ đến phân trang. `ZRANGE` theo chỉ số tốn O(log N + M), với M là số phần tử trả về[^zrange-cx]; vì vậy lấy một trang sâu theo chỉ số vẫn rẻ. Biến thể `BYSCORE … LIMIT offset count` thì ngược lại: offset lớn buộc Redis duyệt qua `offset` phần tử trước khi lấy, nên có thể thành O(N)[^zrange-limit-on].
+
+Phân trang theo số trang (`ZRANGE lb 20*p 20*p+19 REV`) mắc tật chung của offset-pagination: giữa hai lần gọi, điểm đổi làm phần tử trượt qua lại giữa các trang, nên có khi thấy trùng, có khi bị sót. Với trang xếp hạng của `shop` thì chấp nhận được; với feed cần chính xác thì không (nhận xét của người soạn).
+
+Muốn tránh offset, hãy phân trang theo con trỏ score: `ZRANGE lb (<score_cuối_trang_trước> -inf BYSCORE REV LIMIT 0 20`. Dấu `(` mở khoảng, loại chính điểm cuối ra[^zrange-open]. `LIMIT` luôn bắt đầu từ 0 nên không phải duyệt qua offset lớn. Với score ghép của mục 5.2 hầu như không có hai phần tử trùng score, nên cách này ít bỏ sót (suy luận của người soạn).
 
 ### 5.2 Tie-break: cùng điểm thì ai đứng trên
 
-Khi nhiều phần tử cùng score, Redis xếp chúng theo thứ tự từ điển của member[^zadd-lex], so sánh theo byte[^zadd-binary]; với `REV`, các điểm bằng nhau được giải quyết theo thứ tự từ điển *ngược*[^zrange-rev-ties]. Nghĩa là `user:9` đứng trên `user:10` (so byte `'9' > '1'`) — tùy tiện so với nghiệp vụ. Nghiệp vụ thường muốn: "cùng điểm thì ai *đạt trước* xếp trên". Cách làm (nhận xét của người soạn): *nhúng thời gian vào chính score*.
+Khi nhiều phần tử cùng score, Redis xếp chúng theo thứ tự từ điển của tên member[^zadd-lex]. Phép so sánh này tính theo byte[^zadd-binary]. Với `REV`, các điểm bằng nhau được giải quyết theo thứ tự từ điển *ngược*[^zrange-rev-ties]. Hậu quả là `user:9` đứng trên `user:10` (byte `'9'` lớn hơn `'1'`), một thứ tự chẳng liên quan gì tới nghiệp vụ.
+
+Trên trang xếp hạng của `shop`, nghiệp vụ thường muốn: cùng điểm thì ai *đạt trước* xếp trên. Cách làm (nhận xét của người soạn) là *nhúng thời gian vào chính score*:
 
 ```
 score = points × 2^20 + (2^20 − 1 − t)      t = giây kể từ đầu sự kiện, 0 ≤ t < 2^20 (≈ 12,1 ngày)
 ```
 
-Cùng `points` thì `t` nhỏ (đạt sớm) cho phần thấp lớn hơn, nên đứng trên khi xếp `REV`. Ngân sách bit: score là số thực 64-bit biểu diễn *chính xác* mọi số nguyên trong [−2^53, 2^53][^zadd-precision]; 20 bit cho `t` thì còn 33 bit cho `points` (< 2^33 ≈ 8,6 tỷ). Ngoài khoảng đó, số nguyên lớn hoặc phân số được lưu dạng mũ nên *có thể* chỉ còn xấp xỉ[^zadd-precision-approx] — khi đó tie-break sai âm thầm (suy luận của người soạn); hãy kiểm tra tràn khi cộng điểm.
+Cùng `points` thì `t` nhỏ (đạt sớm) cho phần thấp lớn hơn, nên đứng trên khi xếp `REV`.
 
-`ZINCRBY` không dùng được với score ghép (cộng vào score sẽ cộng cả phần thời gian). Dùng script: đọc điểm hiện có, cộng, ghi lại với `t` mới — nguyên tử vì script chặn server[^sc-atomic]:
+Cách này tốn bit, nên phải tính ngân sách. Score là số thực 64-bit, biểu diễn *chính xác* mọi số nguyên trong [−2^53, 2^53][^zadd-precision]. Dành 20 bit cho `t` thì còn 33 bit cho `points` (< 2^33 ≈ 8,6 tỷ). Ngoài khoảng đó, số nguyên lớn hoặc phân số được lưu dạng mũ nên *có thể* chỉ còn xấp xỉ[^zadd-precision-approx]. Khi ấy tie-break sai mà không báo lỗi (suy luận của người soạn), vì vậy hãy kiểm tra tràn mỗi khi cộng điểm.
+
+`ZINCRBY` không dùng được với score ghép, vì cộng vào score là cộng luôn cả phần thời gian. Thay vào đó dùng script Lua: đọc điểm hiện có, cộng thêm, rồi ghi lại với `t` mới. Script chạy nguyên tử vì trong lúc nó chạy, server bị chặn[^sc-atomic]:
 
 ```lua
 -- KEYS[1] = lb:{game}:2026w41; ARGV[1] = member; ARGV[2] = điểm cộng; ARGV[3] = t (giây từ đầu sự kiện, 0 <= t < 2^20)
@@ -663,21 +905,37 @@ redis.call('ZADD', KEYS[1], pts * S + (S - 1 - t), ARGV[1])
 return pts
 ```
 
-Đọc ra thì giải mã `points = floor(score / 2^20)`. Script chỉ ghi khi điểm cộng > 0: nếu cập nhật mà điểm không đổi thì không được làm mới `t`, nếu không người chơi "lùi" hạng vì chính cập nhật đó. Nó cũng từ chối `t` ngoài [0, 2^20): `t` quá lớn làm phần thấp âm và hạ cả phần điểm khi giải mã.
+Khi đọc ra, giải mã `points = floor(score / 2^20)`. Script có hai điểm cần để ý:
+
+- Nó chỉ ghi khi điểm cộng > 0. Nếu cập nhật mà điểm không đổi lại làm mới `t`, khách sẽ "lùi" hạng chỉ vì chính cập nhật đó.
+- Nó từ chối `t` ngoài [0, 2^20). `t` quá lớn làm phần thấp âm, và khi giải mã thì hạ luôn cả phần điểm.
 
 ### 5.3 Vòng đời bảng, lớn dần và nhiều bảng
 
-- *Một key mỗi kỳ.* `lb:{game}:2026w41`; sau kỳ thì xuất kết quả sang DB rồi xóa key kỳ cũ bằng `UNLINK` (không chặn) thay vì `DEL` (chặn)[^unlink-doc] (F5). Đặt TTL cho key kỳ cũ cũng được, nhưng mặc định (`lazyfree-lazy-expire no`) Redis xóa key *hết hạn* theo kiểu chặn như `DEL`[^conf-lazyfree] — với bảng hàng triệu phần tử hãy tự `UNLINK` hoặc bật `lazyfree-lazy-expire yes` (cơ chế: [chương 16, mục 3](16-redis-ben-trong.md)).
-- *Gộp các bảng.* Bảng tuần từ bảy bảng ngày bằng `ZUNIONSTORE` có độ phức tạp O(N) + O(M log M) với N là tổng kích thước đầu vào[^zunion-cx] — tức lệnh *chậm* chặn thread chính[^lat-slow]; chạy nó như job nền ngoài giờ cao điểm, hoặc cộng điểm vào bảng tuần ngay từ đầu (ghi hai nơi). Mọi key liên quan, cả nguồn *lẫn đích*, phải cùng slot[^cl-subset] (F4). **Đừng gộp bảng có score ghép của mục 5.2 bằng `ZUNIONSTORE` mặc định:** nó cộng score của cùng một member qua các bảng[^zunion-sum], tức cộng cả phần thời gian và có thể làm tràn phần thấp sang phần điểm, hỏng phép giải mã `floor(score / 2^20)` (suy luận của người soạn); gộp ở client/script từ điểm đã giải mã rồi `ZADD` lại với `t` thích hợp, hoặc giữ thêm một bảng chỉ có điểm thuần để gộp.
-- *Bảng quá lớn / ghi quá nóng (F5, F6).* Một bảng toàn cầu là *một* key trên *một* master. Chia theo bucket, đặt `b = hash(user) mod 16` *vào trong* cặp `{}` để mỗi bucket có hash tag riêng: `lb:{game:2026w41:07}`. Viết `lb:{game}:w41:{b}` là sai: chỉ phần giữa `{` đầu tiên và `}` đầu tiên sau nó (`game`) được băm[^cl-hashtag-rule], cả 16 bucket rơi vào *cùng một slot* và việc chia vô nghĩa. Top-N toàn cục = gộp top-N của từng bucket ở client; hạng chính xác của một người = (số người đứng trên ở mọi bucket) + 1, mà "số người có score cao hơn x" ở một bucket là `ZCOUNT key (x +inf` với O(log N)[^zcount-cx] — cộng 16 lời gọi, mỗi lời gọi một key nên không dính F4 (nhận xét của người soạn; bỏ qua ties).
-- *Bộ nhớ.* ZSET nhỏ dùng encoding gọn (listpack) và chỉ đổi sang skiplist + dict khi vượt `zset-max-listpack-entries`/`-value` (mặc định 128 phần tử, 64 byte)[^conf-zset]; bảng triệu phần tử nằm ở dạng skiplist + dict, tốn bộ nhớ hơn dạng gọn (suy luận của người soạn; cơ chế đổi encoding, nguồn và số liệu: [chương 16, mục 2](16-redis-ben-trong.md)).
+- *Một key mỗi kỳ.* Mỗi kỳ dùng một key, ví dụ `lb:{game}:2026w41`. Hết kỳ thì xuất kết quả sang DB, rồi xóa key cũ bằng `UNLINK` (không chặn) thay vì `DEL` (chặn)[^unlink-doc] (F5).
+  - Đặt TTL cho key kỳ cũ cũng được, nhưng với cấu hình mặc định (`lazyfree-lazy-expire no`), Redis xóa key *hết hạn* theo kiểu chặn như `DEL`[^conf-lazyfree].
+  - Vì vậy với bảng hàng triệu phần tử, hãy tự `UNLINK` hoặc bật `lazyfree-lazy-expire yes` (cơ chế: [chương 16, mục 3](16-redis-ben-trong.md)).
+- *Gộp các bảng.* Giả sử `shop` muốn bảng tuần từ bảy bảng ngày.
+  - `ZUNIONSTORE` làm được việc đó, với độ phức tạp O(N) + O(M log M), N là tổng kích thước đầu vào[^zunion-cx]. Đây là lệnh *chậm*, mà lệnh chậm thì chặn thread chính[^lat-slow]. Vì vậy chạy nó như job nền ngoài giờ cao điểm, hoặc cộng điểm vào bảng tuần ngay từ đầu (ghi hai nơi).
+  - Mọi key liên quan, cả nguồn *lẫn đích*, phải cùng slot[^cl-subset] (F4).
+  - **Đừng gộp bảng có score ghép của mục 5.2 bằng `ZUNIONSTORE` mặc định:** nó cộng score của cùng một member qua các bảng[^zunion-sum]. Tức là cộng luôn phần thời gian, và có thể làm tràn phần thấp sang phần điểm, hỏng phép giải mã `floor(score / 2^20)` (suy luận của người soạn). Hãy gộp ở client hoặc script từ điểm đã giải mã rồi `ZADD` lại với `t` thích hợp, hoặc giữ thêm một bảng chỉ có điểm thuần để gộp.
+- *Bảng quá lớn hoặc ghi quá nóng (F5, F6).* Một bảng toàn cầu là *một* key trên *một* master.
+  - Cách chia: theo bucket. Đặt `b = hash(user) mod 16` *vào trong* cặp `{}` để mỗi bucket có hash tag riêng: `lb:{game:2026w41:07}`.
+  - Viết `lb:{game}:w41:{b}` là sai. Chỉ phần giữa `{` đầu tiên và `}` đầu tiên sau nó (ở đây là `game`) được băm[^cl-hashtag-rule], nên cả 16 bucket rơi vào *cùng một slot* và việc chia vô nghĩa.
+  - Top-N toàn cục là kết quả gộp top-N của từng bucket, làm ở client.
+  - Hạng chính xác của một người bằng (số người đứng trên ở mọi bucket) + 1. Số người có score cao hơn x ở một bucket là `ZCOUNT key (x +inf`, tốn O(log N)[^zcount-cx]. Vậy ta cộng 16 lời gọi; mỗi lời gọi chỉ đụng một key nên không dính F4 (nhận xét của người soạn; bỏ qua ties).
+- *Bộ nhớ.* ZSET nhỏ dùng encoding gọn (listpack), và chỉ đổi sang skiplist + dict khi vượt `zset-max-listpack-entries`/`-value` (mặc định 128 phần tử, 64 byte)[^conf-zset]. Bảng triệu phần tử nằm ở dạng skiplist + dict, tốn bộ nhớ hơn dạng gọn (suy luận của người soạn; cơ chế đổi encoding, nguồn và số liệu: [chương 16, mục 2](16-redis-ben-trong.md)).
 
 ### 5.4 Hỏng ở đâu, khi nào không dùng Redis
 
-- *Redis là bản sao dẫn xuất, không phải nguồn sự thật.* Điểm phải có nguồn gốc trong DB (log sự kiện/bảng điểm); ZSET dựng lại được từ đó. F1: failover có thể mất các cập nhật đã ack nhưng chưa kịp sang replica[^cl-ack-lost] — bảng "lùi" một chút, chấp nhận được cho hiển thị. Nhưng *dual write* (ghi DB rồi `ZADD`, hoặc ngược lại) có thể lệch khi một trong hai thất bại — khuôn sửa ở [chương 12, mục 1 và 6](12-dung-dan-va-tich-hop-du-lieu.md) (CDC/outbox) hoặc đối soát định kỳ (nhận xét của người soạn).
-- *Điểm số thực (float) tích lũy sai số* nếu dùng `ZINCRBY` với phần thập phân (phân số *có thể* chỉ được lưu xấp xỉ[^zadd-precision-approx]; suy luận của người soạn: cộng dồn làm sai số lớn dần); giữ điểm là số nguyên (đơn vị nhỏ nhất) trong ngưỡng 2^53.
-- *Giải thưởng thật.* Nếu thứ hạng chốt kỳ quyết định tiền/hiện vật thì tính hạng chính thức từ DB lúc chốt; Redis chỉ phục vụ hiển thị trực tiếp (nhận xét của người soạn).
-- *Truy vấn xếp hạng phức tạp* (lọc theo quốc gia + bạn bè + khoảng thời gian, nhiều cột sắp xếp) — để SQL với window function hoặc hệ tìm kiếm; ZSET chỉ sắp theo *một* khóa số (nhận xét của người soạn). Tài liệu sorted set của Redis cũng nêu: nếu cần lập chỉ mục và truy vấn dữ liệu thì xem kiểu JSON và tính năng Search and query[^zset-alt] — hai thứ này là module ngoài lõi (crate `redis` gọi chúng là "the JSON module" và "the Search module"[^rs-json-module]), không thuộc Redis 7.2.5 mà chương này mô tả (suy luận của người soạn).
+- *Redis chỉ là bản sao dẫn xuất, không phải nguồn sự thật.* Điểm phải có gốc trong DB (log sự kiện hoặc bảng điểm), để dựng lại ZSET từ đó khi cần.
+  - F1: khi failover, các cập nhật đã ack nhưng chưa kịp sang replica có thể mất[^cl-ack-lost]. Bảng chỉ "lùi" một chút, chấp nhận được cho hiển thị.
+  - Nguy hiểm hơn là *dual write*: ghi DB rồi `ZADD` (hoặc ngược lại) có thể lệch khi một trong hai bước thất bại. Khuôn sửa ở [chương 12, mục 1 và 6](12-dung-dan-va-tich-hop-du-lieu.md) (CDC/outbox), hoặc đối soát định kỳ (nhận xét của người soạn).
+- *Điểm số thực (float) tích lũy sai số.* Với `ZINCRBY` có phần thập phân, phân số *có thể* chỉ được lưu xấp xỉ[^zadd-precision-approx], và cộng dồn làm sai số lớn dần (suy luận của người soạn). Hãy giữ điểm là số nguyên (đơn vị nhỏ nhất) trong ngưỡng 2^53.
+- *Phần thưởng thật.* Nếu thứ hạng chốt kỳ quyết định tiền hoặc quà thật, hãy tính hạng chính thức từ DB lúc chốt; Redis chỉ phục vụ hiển thị trực tiếp (nhận xét của người soạn).
+- *Truy vấn xếp hạng phức tạp* (lọc theo quốc gia + bạn bè + khoảng thời gian, nhiều cột sắp xếp) thì để SQL với window function hoặc hệ tìm kiếm; ZSET chỉ sắp theo *một* khóa số (nhận xét của người soạn).
+  - Tài liệu sorted set của Redis cũng nêu hướng khác: nếu cần lập chỉ mục và truy vấn dữ liệu thì xem kiểu JSON và tính năng Search and query[^zset-alt].
+  - Hai thứ này là module ngoài lõi (crate `redis` gọi chúng là "the JSON module" và "the Search module"[^rs-json-module]), nên không thuộc Redis 7.2.5 mà chương này mô tả (suy luận của người soạn).
 
 <details><summary>Đi sâu: code Rust cho cập nhật điểm, top-N và hạng trong một pipeline</summary>
 
@@ -704,69 +962,107 @@ pub async fn view(conn: &mut ConnectionManager, board: &str, me: &str) -> redis:
 fn points_of(score: f64) -> u64 { (score as u64) >> 20 }   // giải mã phần điểm
 ```
 
-`redis::pipe()` gửi nhiều lệnh một lượt[^rs-pipe]; không `.atomic()` nên không bọc `MULTI`/`EXEC`[^rs-atomic] — mỗi lệnh vẫn nguyên tử riêng, và các client khác có thể xen giữa hai lệnh (như mọi pipeline thường[^sc-pipe-order]). Kiểu trả `Vec<(String, f64)>` cho trả lời phẳng của `ZRANGE … WITHSCORES`: docs `FromRedisValue` chỉ nói trait được cài cho tuple tới 12 phần tử — người soạn chưa kiểm bằng nguồn cách nó ghép cặp, nên kiểm trước khi dùng.
+`redis::pipe()` gửi nhiều lệnh một lượt[^rs-pipe]. Vì không có `.atomic()`, pipeline không bọc `MULTI`/`EXEC`[^rs-atomic]. Mỗi lệnh vẫn nguyên tử riêng, còn các client khác có thể xen vào giữa hai lệnh, như mọi pipeline thường[^sc-pipe-order].
+
+Kiểu trả `Vec<(String, f64)>` dành cho trả lời phẳng của `ZRANGE … WITHSCORES`. Docs `FromRedisValue` chỉ nói trait được cài cho tuple tới 12 phần tử; người soạn chưa kiểm bằng nguồn cách nó ghép cặp, nên hãy kiểm trước khi dùng.
 
 </details>
 
-**Quay lại Q5:** leaderboard = ZSET (`ZADD`/`ZINCRBY`, `ZRANGE … REV`, `ZREVRANK`, đều ~O(log N)); tie-break mặc định là so tên member nên muốn "đạt trước đứng trên" phải ghép thời gian vào score và giữ trong 2^53; ZSET là bản sao dẫn xuất của điểm trong DB, chia bucket khi một key quá nóng/lớn.
+**Quay lại Q5:** với `shop`, bảng xếp hạng là một ZSET dựng bằng `ZADD`/`ZINCRBY`, `ZRANGE … REV` và `ZREVRANK` (đều cỡ O(log N)), nhưng ta phải tự ghép thời gian vào score (và giữ nó trong giới hạn 2^53) nếu muốn "đạt trước đứng trên", coi ZSET là bản sao dẫn xuất của điểm trong DB, và chia bucket khi một key quá nóng hay quá lớn.
 
 ## 6. Đếm và thống kê: `INCR`, HyperLogLog, bitmap (Q6)
 
-> **Trả lời ngắn.** Đếm *số lần* thì `INCR`/`HINCRBY` — nguyên tử, mỗi counter một key hoặc một field[^rl-incr]. Đếm *số phần tử phân biệt* (unique visitor) thì HyperLogLog: dùng tối đa 12 KB với sai số chuẩn 0,81%[^hll-12k], đổi lại không liệt kê hay xóa được từng phần tử. Muốn đếm *chính xác* tập id nguyên nhỏ (ai active hôm nay) thì bitmap: một bit mỗi id, `SETBIT` để ghi và `BITCOUNT` để đếm[^bm-def]. Chọn theo câu hỏi: đếm lần → counter; đếm phân biệt xấp xỉ → HLL; đếm/giao/hợp chính xác trên id dày → bitmap.
+> **Trả lời ngắn.** Muốn đếm *số lần* (ví dụ lượt xem) thì dùng `INCR`/`HINCRBY`: mỗi lần có sự kiện, Redis tăng một con số lên 1, và thao tác đó nguyên tử; mỗi counter là một key hoặc một field[^rl-incr]. Muốn đếm *số phần tử khác nhau* (ví dụ số khách duy nhất) thì dùng HyperLogLog, một cấu trúc ước lượng chỉ tốn tối đa 12 KB với sai số chuẩn 0,81%[^hll-12k]; đổi lại, bạn không liệt kê hay xóa được từng phần tử. Muốn đếm *chính xác* một tập id là số nguyên nhỏ (ví dụ hôm nay user nào đã hoạt động) thì dùng bitmap, mỗi id một bit: `SETBIT` để ghi và `BITCOUNT` để đếm[^bm-def]. Nói gọn: đếm lần thì counter, đếm phân biệt xấp xỉ thì HLL, đếm/giao/hợp chính xác trên id dày thì bitmap.
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): dashboard cần ba con số — lượt xem bài viết (đếm lần), số người đọc khác nhau trong ngày (đếm phân biệt), và số người dùng đã hoạt động cả 7 ngày liên tiếp (giao của 7 tập). Ba câu hỏi này trông như "đếm" nhưng cần ba cấu trúc khác nhau; chọn sai thì hoặc tốn bộ nhớ gấp nghìn lần, hoặc sai số không chấp nhận được.
+*Với `shop`.* Dashboard của `shop` cần ba con số: lượt xem của từng sản phẩm (đếm lần), số khách khác nhau vào xem trong ngày (đếm phân biệt), và số user đã hoạt động cả 7 ngày liên tiếp (giao của 7 tập, mỗi tập là cờ "user hoạt động ngày X" của một ngày). Nhìn qua thì cả ba đều là "đếm", nhưng mỗi con số cần một cấu trúc khác nhau. Chọn sai thì hoặc tốn bộ nhớ gấp nghìn lần, hoặc sai số không chấp nhận được (nhận xét của người soạn). Mục này trả lời: con số nào nên dùng cấu trúc nào, và mỗi cấu trúc hỏng ở đâu?
 
 ### 6.1 Counter
 
-Tài liệu mô tả pattern: gửi `INCR` mỗi khi sự kiện xảy ra; ví dụ đếm lượt xem trang của từng user mỗi ngày, tên key ghép user id với chuỗi ngày hiện tại[^incr-counter]. Biến thể: `INCR` + `EXPIRE` để counter chỉ đếm chuỗi các lượt xem mà hai lượt liền nhau cách nhau chưa tới số giây đã định, và `GETSET` để lấy giá trị hiện tại *và* đặt lại về 0 một cách nguyên tử[^incr-getset]. `GETSET` đã bị đánh dấu deprecated từ 6.2.0 và được thay bằng `SET` kèm `GET`[^getset-deprecated] — code mới nên dùng `SET … GET`; cả hai đều xóa TTL đang có của key[^expire-cleared-by], riêng `SET` giữ được hạn nếu kèm `KEEPTTL`[^set-keepttl]. Bẫy TTL (F2): `INCR` để TTL nguyên vẹn[^expire-untouched] nên key counter mới sinh không có TTL — đặt TTL ngay lúc tạo bằng `EXPIRE … NX` như mục 2.1, nếu không counter theo ngày sống mãi.
+Counter chỉ có một nguyên tắc: mỗi khi sự kiện xảy ra, gửi `INCR` vào một key. Ví dụ trong tài liệu Redis là đếm lượt xem trang của từng user mỗi ngày, với tên key ghép user id và chuỗi ngày hiện tại[^incr-counter]. `shop` đếm theo sản phẩm thì ghép id sản phẩm với ngày theo cùng cách.
 
-*Nhiều counter cho một đối tượng.* `HINCRBY stats:42 views 1` — hash gom các counter của một đối tượng; tài liệu dùng chính ví dụ này cho các số lần chạy/ngã/đổi chủ của một xe[^hash-counters], và hash nhỏ được mã hóa gọn nên rất tiết kiệm bộ nhớ[^hash-small]. Giới hạn: `EXPIRE` mô tả là đặt hạn cho một *key*[^expire-key], không cho từng field — nên "counter theo ngày" phải là một hash mỗi ngày, không phải một field mỗi ngày trong một hash vĩnh viễn.
+Tài liệu còn nêu hai biến thể. Một là gọi `INCR` rồi `EXPIRE` ở mỗi lượt xem, để counter chỉ đếm chuỗi lượt xem gần nhất mà hai lượt kề nhau cách nhau chưa tới số giây đã định. Hai là dùng `GETSET` để lấy giá trị hiện tại *và* đặt lại về 0 trong một thao tác nguyên tử[^incr-getset].
 
-*Chỗ hỏng.* (a) F1: counter nằm trên master, mất vài giây cuối khi failover — chấp nhận cho thống kê, không cho tiền. (b) F6: một bài viết viral là một key — mọi `INCR` dồn vào một slot, một master; gom cục bộ trong mỗi pod rồi `INCRBY` một lần mỗi giây thì số lệnh tới key đó giảm từ một lệnh mỗi lượt xem xuống còn bằng số pod mỗi giây (nhận xét của người soạn). (c) *Đẩy counter xuống DB.* "Đọc rồi xóa" (`GETDEL`, hoặc `SET … GET`) rồi cộng vào DB là hai bước không nguyên tử: crash giữa chừng thì mất hoặc đếm đôi. Cách chắc hơn: counter theo *bucket thời gian* (`views:42:2026101214` — theo giờ); khi bucket đã đóng, đọc nó và `INSERT … ON CONFLICT (post, hour) DO UPDATE SET views = EXCLUDED.views` — phép *gán* nên chạy lại bao nhiêu lần cũng ra cùng kết quả (idempotent), rồi mới cho key hết hạn (nhận xét của người soạn).
+`GETSET` đã bị đánh dấu deprecated từ 6.2.0 và được thay bằng `SET` kèm `GET`[^getset-deprecated], nên code mới dùng `SET … GET`. Cả `GETSET` lẫn `SET` đều xóa TTL đang có của key[^expire-cleared-by]; muốn giữ hạn thì thêm `KEEPTTL` vào `SET`[^set-keepttl].
+
+Bẫy TTL (F2): `INCR` không đụng tới TTL của key[^expire-untouched], nên key counter mới tạo vẫn chưa có TTL. Phải đặt TTL ngay lúc tạo bằng `EXPIRE … NX`, như mục 2.1; nếu không, counter theo ngày sẽ sống mãi.
+
+*Nhiều counter cho một đối tượng.* `HINCRBY stats:42 views 1` tăng một counter nằm trong hash `stats:42`. Hash gom các counter của cùng một đối tượng vào một key; tài liệu Redis minh họa bằng số lần một chiếc xe đã chạy, đã ngã, đã đổi chủ[^hash-counters]. Hash nhỏ (vài field, giá trị nhỏ) được mã hóa gọn trong bộ nhớ nên rất tiết kiệm[^hash-small].
+
+Hash có một giới hạn: `EXPIRE` đặt hạn cho cả *key*[^expire-key], không đặt được cho từng field. Vì vậy "counter theo ngày" phải là mỗi ngày một hash, không phải mỗi ngày một field trong một hash sống vĩnh viễn.
+
+*Chỗ hỏng.*
+
+- F1: counter nằm trên master, nên khi failover có thể mất vài giây cuối. Thống kê chịu được chuyện đó, tiền thì không.
+- F6: một sản phẩm đang hot là một key, nên mọi `INCR` dồn vào một slot, tức một master. Nếu mỗi pod gom lượt xem cục bộ rồi cứ mỗi giây gửi một `INCRBY`, số lệnh tới key đó giảm từ một lệnh mỗi lượt xem xuống còn bằng số pod mỗi giây, tức 12 lệnh mỗi giây (nhận xét của người soạn).
+- *Đẩy counter xuống Postgres.* "Đọc rồi xóa" (`GETDEL`, hoặc `SET … GET`) rồi cộng vào Postgres là hai bước không nguyên tử: crash giữa chừng thì mất lượt xem hoặc đếm đôi. Cách chắc hơn là counter theo *bucket thời gian*, ví dụ `views:42:2026101214` cho bucket theo giờ. Khi bucket đã đóng, đọc nó rồi `INSERT … ON CONFLICT (product_id, hour) DO UPDATE SET views = EXCLUDED.views`. Câu lệnh này *gán* giá trị, nên chạy lại bao nhiêu lần cũng ra cùng kết quả (idempotent). Chỉ sau đó mới cho key hết hạn (nhận xét của người soạn).
 
 ### 6.2 HyperLogLog
 
-HyperLogLog là cấu trúc xác suất ước lượng *cardinality* (số phần tử phân biệt) của một tập[^hll-def]; bản Redis dùng tối đa 12 KB và có sai số chuẩn 0,81%[^hll-12k]. Điểm mấu chốt: đếm phân biệt chính xác thường cần bộ nhớ tỷ lệ với số phần tử đã thấy[^hll-memprop], còn HLL dùng lượng bộ nhớ *hằng số* — 12 KB trong trường hợp xấu nhất, ít hơn nhiều nếu mới thấy vài phần tử[^hll-const] (source 7.2.5: 16384 thanh ghi 6-bit, tổng 12 KB mỗi key[^hll-src], với biểu diễn "thưa" dùng nén run-length cho HLL còn ít phần tử[^hll-sparse]).
+HyperLogLog (viết tắt HLL) là cấu trúc xác suất ước lượng *cardinality*, tức số phần tử phân biệt của một tập[^hll-def]. Bản trong Redis dùng tối đa 12 KB và có sai số chuẩn 0,81%[^hll-12k].
 
-Ghép primitive: mỗi (bài viết, ngày) một HLL; mỗi lượt xem `PFADD uv:{post:42}:20261012 <user_id>`; đọc `PFCOUNT uv:{post:42}:20261012`. Gộp tuần: `PFMERGE uv:{post:42}:w41 uv:{post:42}:d1 … uv:{post:42}:d7` rồi `PFCOUNT` — hợp của các HLL cho xấp xỉ số phần tử phân biệt trên tất cả nguồn[^hll-merge]. HLL là một string trong Redis nên `GET`/`SET` được để sao lưu hay chuyển[^hll-string]. Use case chính thức trong tài liệu: lượt truy cập ẩn danh của trang, bài hát, video[^hll-use]. Cấu trúc chỉ giữ trạng thái chứ không giữ phần tử[^hll-no-elements], nên bản thân HLL không chứa danh sách định danh (suy luận của người soạn; việc có tuân thủ luật hay không còn tùy cách bạn xử lý định danh trước khi `PFADD`, và đây không phải tư vấn pháp lý); tài liệu lưu ý lưu địa chỉ IP hay bất kỳ định danh cá nhân nào là trái luật ở một số nước[^hll-privacy].
+Điểm đáng giá nằm ở bộ nhớ. Đếm chính xác số phần tử phân biệt thường cần bộ nhớ tỷ lệ với số phần tử, vì phải nhớ những phần tử đã thấy để khỏi đếm một phần tử hai lần[^hll-memprop]. HLL thì dùng bộ nhớ *hằng số*: 12 KB trong trường hợp xấu nhất, ít hơn nhiều nếu mới thấy vài phần tử[^hll-const].
 
-Sai số cần đọc đúng: 0,81% là *sai số chuẩn* — với 10 triệu phần tử phân biệt thì một độ lệch chuẩn ≈ 81.000 (nhận xét của người soạn: số học đơn giản; đừng đọc nó là "tối đa", đó không phải biên cứng). Hệ quả dùng: tốt cho "khoảng 10 triệu người", không tốt cho "đúng 9.999.998 người" hay quyết định tiền.
+Với `shop`, mỗi cặp (sản phẩm, ngày) có một HLL. Mỗi lượt xem gọi `PFADD uv:{product:42}:20261012 <user_id>`, và muốn đọc số khách duy nhất thì gọi `PFCOUNT uv:{product:42}:20261012`. Tài liệu Redis cũng mô tả use case này: mỗi trang (hoặc video, bài hát) trong mỗi khoảng thời gian có một HLL, và mọi IP hay định danh ghé qua đều được `PFADD` vào đó[^hll-use].
+
+Muốn gộp theo tuần thì `PFMERGE uv:{product:42}:w41 uv:{product:42}:d1 … uv:{product:42}:d7`, rồi `PFCOUNT` key kết quả. Hợp các HLL cho ra xấp xỉ số phần tử phân biệt trên tất cả nguồn[^hll-merge]. Vì HLL được lưu như một string trong Redis, bạn có thể `GET` để lấy nó ra (sao lưu, chuyển đi) và `SET` để nạp lại[^hll-string].
+
+HLL chỉ giữ một trạng thái tính toán, không giữ các phần tử đã thêm[^hll-no-elements], nên nó không chứa danh sách user hay IP (suy luận của người soạn). Điều này liên quan tới luật riêng tư: tài liệu Redis lưu ý rằng lưu địa chỉ IP hay bất kỳ định danh cá nhân nào là trái luật ở một số nước[^hll-privacy]. Có tuân thủ luật hay không còn tùy cách bạn xử lý định danh trước khi `PFADD`, và đây không phải tư vấn pháp lý (nhận xét của người soạn).
+
+Cần đọc đúng sai số: 0,81% là *sai số chuẩn*. Với 10 triệu phần tử phân biệt thì một độ lệch chuẩn là khoảng 81.000 (nhận xét của người soạn: số học đơn giản). Đừng đọc nó là "tối đa": đó không phải biên cứng. Hệ quả khi dùng: HLL tốt cho "khoảng 10 triệu khách", không tốt cho "đúng 9.999.998 khách" hay quyết định liên quan tới tiền.
 
 *Chỗ hỏng và chú ý vận hành.*
-- `PFCOUNT` một key rất nhanh nhờ cache giá trị tính trước nằm trong 8 byte cuối — nên về kỹ thuật `PFCOUNT` *là lệnh ghi*[^pfcount-write]. Nhưng `PFCOUNT` nhiều key phải gộp tức thời, chậm (cỡ mili giây), không cache được và tài liệu dặn đừng lạm dụng[^pfcount-multi].
-- Không liệt kê được phần tử, không xóa được một phần tử, không giao hai HLL trực tiếp — API chỉ cung cấp hợp (`PFMERGE`)[^hll-merge] (suy luận của người soạn: "chỉ có hợp" là từ danh sách lệnh).
-- F4: tài liệu Cluster nói các lệnh nhiều key phức tạp như hợp/giao tập chỉ được hiện thực khi mọi key cùng slot[^cl-subset]; `PFCOUNT`/`PFMERGE` nhiều key cũng là lệnh nhiều key nên chịu quy tắc đó (suy luận của người soạn) — đặt hash tag theo đối tượng (`uv:{post:42}:d1`).
-- Với tập nhỏ (vài nghìn phần tử) một `SET` (`SADD`/`SCARD`) cho kết quả chính xác với bộ nhớ nhỏ — HLL chỉ thắng khi số phần tử phân biệt đủ lớn để bộ nhớ của set đáng kể (nhận xét của người soạn).
+
+- `PFCOUNT` một key rất nhanh nhờ giá trị đã tính sẵn được cache trong 8 byte cuối của key. Vì thế về kỹ thuật, `PFCOUNT` *là lệnh ghi*[^pfcount-write]. `PFCOUNT` nhiều key thì khác: Redis phải gộp tức thời, nên chậm (cỡ mili giây) và không cache được, và tài liệu dặn đừng lạm dụng[^pfcount-multi].
+- HLL không liệt kê được phần tử, không xóa được một phần tử, và không giao hai HLL trực tiếp. API chỉ cung cấp phép hợp (`PFMERGE`)[^hll-merge] (suy luận của người soạn: "chỉ có hợp" là rút ra từ danh sách lệnh).
+- F4: Redis Cluster chỉ hiện thực các lệnh nhiều key phức tạp (như hợp, giao tập) cho trường hợp mọi key cùng slot[^cl-subset]. `PFCOUNT`/`PFMERGE` nhiều key cũng là lệnh nhiều key nên chịu quy tắc đó (suy luận của người soạn). Vì vậy hãy đặt hash tag theo đối tượng, như `uv:{product:42}:d1`.
+- Với tập nhỏ (vài nghìn phần tử), một `SET` (`SADD`/`SCARD`) cho kết quả chính xác mà bộ nhớ vẫn nhỏ. HLL chỉ thắng khi số phần tử phân biệt đủ lớn để bộ nhớ của set đáng kể (nhận xét của người soạn).
 
 ### 6.3 Bitmap
 
-Bitmap không phải kiểu dữ liệu riêng: đó là tập thao tác theo bit trên kiểu String, coi chuỗi là một vector bit[^bm-def]. String tối đa 512 MB nên bitmap có tới 2^32 bit[^bm-512]; với id người dùng tăng dần, nhớ một bit thông tin (ví dụ "có nhận bản tin không") cho 4 tỷ user chỉ tốn khoảng 512 MB[^bm-4b].
+Bitmap không phải một kiểu dữ liệu riêng. Đó là tập thao tác theo bit trên kiểu String, coi chuỗi như một vector bit[^bm-def]. String dài tối đa 512 MB nên bitmap chứa được tới 2^32 bit[^bm-512]. Nếu id user tăng dần, thì nhớ một bit thông tin cho mỗi user (ví dụ "có nhận bản tin không") với 4 tỷ user chỉ tốn khoảng 512 MB[^bm-4b].
 
-Ghép primitive cho "ai active hôm nay": `SETBIT active:20261012 <user_id> 1` mỗi khi user hoạt động; DAU = `BITCOUNT active:20261012`. `BITCOUNT` đếm số bit 1 (population count) và nhận khoảng byte `start end` để đếm từng phần[^bm-range]. Câu hỏi giao — "active cả 7 ngày": `BITOP AND dest active:d1 … active:d7` rồi `BITCOUNT dest`[^bitop-pattern]. Chuỗi ngắn hơn được coi như đệm thêm số 0 cho bằng chuỗi dài nhất[^bitop-pad], key không tồn tại coi như toàn số 0 — nên ngày chưa có ai active cho kết quả đúng. Bitmap *theo user, offset là ngày* cũng là pattern chính thức: mỗi lần user xem trang thì `SETBIT` bit của ngày hiện tại; số ngày user đã ghé là `BITCOUNT`[^bitcount-pattern]; ngay cả sau 10 năm thì chỉ 365×10 bit ≈ 456 byte mỗi user[^bitcount-456].
+Với bài "ai hoạt động hôm nay": mỗi khi user hoạt động, `shop` gọi `SETBIT active:20261012 <user_id> 1`. DAU (số user hoạt động mỗi ngày) là `BITCOUNT active:20261012`. `BITCOUNT` đếm số bit 1 (population count), và nhận khoảng byte `start end` nếu bạn chỉ muốn đếm một phần[^bm-range].
+
+Câu hỏi giao, "user nào hoạt động cả 7 ngày", dùng `BITOP AND dest active:d1 … active:d7` rồi `BITCOUNT dest`[^bitop-pattern]. Khi các chuỗi dài ngắn khác nhau, chuỗi ngắn hơn được coi như đệm thêm số 0 cho bằng chuỗi dài nhất, và key không tồn tại được coi như toàn số 0[^bitop-pad]. Nhờ vậy ngày chưa có ai hoạt động vẫn cho kết quả đúng.
+
+Cũng có thể đảo chiều: mỗi *user* một bitmap, *offset là ngày*. Mỗi lần user vào xem trang thì `SETBIT` bit của ngày hiện tại, và số ngày user đã ghé là `BITCOUNT` của bitmap đó[^bitcount-pattern]. Ngay cả sau 10 năm cũng chỉ có 365×10 bit ≈ 456 byte mỗi user[^bitcount-456].
 
 *Chỗ hỏng.*
-- *Offset phải dày và nhỏ.* Bit số `user_id`; id tuần tự (bigserial) hợp, UUID thì không — phải có ánh xạ id → số nguyên liên tục (ví dụ `INCR` cấp số + hash `HSETNX`; nhận xét của người soạn). Offset phải nhỏ hơn 2^32[^setbit-limit]. Với id thưa (100.000 user active trong dải id tới 50 triệu) một bitmap ngày vẫn chiếm 50.000.000 / 8 ≈ 6,25 MB cố định, 365 ngày ≈ 2,3 GB (nhận xét của người soạn: số học) — so với 12 KB của HLL cho câu hỏi "bao nhiêu", bitmap chỉ đáng khi cần *giao/hợp chính xác* hoặc hỏi từng user.
-- *F5: cấp phát lớn.* `SETBIT` ở offset rất cao trên key nhỏ phải cấp phát toàn bộ vùng trung gian và có thể chặn server một lúc[^setbit-alloc]; tài liệu ghi ví dụ khoảng 300 ms cho 512 MB trên MacBook Pro 2010[^setbit-warn] (con số lịch sử, chỉ để thấy bậc độ lớn). Sau lần cấp phát đầu, các lần `SETBIT` sau trên cùng key không còn chi phí cấp phát đó[^setbit-once].
-- *F5: lệnh O(N).* `BITOP` chạy O(N)[^bitop-slow] với N là độ dài chuỗi dài nhất trong phép so[^bitop-n]; `BITCOUNT` mặc định duyệt mọi byte của chuỗi[^bitcount-all] — với bitmap lớn, đếm theo từng khoảng rồi cộng ở client hoặc giữ một counter riêng cập nhật bằng script nhỏ[^bitcount-big]; ngoài ra có thể *chia bitmap ra nhiều key* (`bit-number / M`, `bit-number mod M`) — tài liệu nêu việc chia này vừa để shard dữ liệu vừa vì nói chung nên tránh làm việc với key khổng lồ[^bm-split].
-- F4: `BITOP` nhiều key ⇒ hash tag chung.
-- F1 như mọi counter.
+
+- *Offset phải dày và nhỏ.* Bit số `user_id`, nên id tuần tự (bigserial) hợp còn UUID thì không. Với UUID phải có ánh xạ id → số nguyên liên tục, ví dụ `INCR` cấp số kèm hash `HSETNX` (nhận xét của người soạn). Offset còn phải nhỏ hơn 2^32[^setbit-limit].
+- *Id thưa thì tốn.* Giả sử 100.000 user hoạt động trong dải id tới 50 triệu. Một bitmap ngày vẫn chiếm 50.000.000 / 8 ≈ 6,25 MB cố định, 365 ngày ≈ 2,3 GB (nhận xét của người soạn: số học). Nếu chỉ hỏi "bao nhiêu", HLL tốn 12 KB; bitmap chỉ đáng khi cần *giao/hợp chính xác* hoặc hỏi từng user.
+- *F5: cấp phát lớn.* `SETBIT` ở offset rất cao trên một key nhỏ phải cấp phát toàn bộ vùng trung gian, và có thể chặn server một lúc[^setbit-alloc]. Sau lần cấp phát đầu, các lần `SETBIT` sau trên cùng key không còn chi phí đó[^setbit-once].
+- *F5: lệnh O(N).* `BITOP` chạy O(N) nên có thể chậm[^bitop-slow]; N là độ dài chuỗi dài nhất trong phép so[^bitop-n]. `BITCOUNT` mặc định duyệt mọi byte của chuỗi[^bitcount-all]. Với bitmap lớn có hai cách: đếm theo từng khoảng rồi cộng ở client, hoặc giữ một counter riêng và cập nhật bằng một script nhỏ[^bitcount-big]. Cách thứ ba là *chia bitmap ra nhiều key* (`bit-number / M`, `bit-number mod M`): tài liệu Redis nêu việc chia này vừa để shard dữ liệu, vừa vì nói chung nên tránh làm việc với key khổng lồ[^bm-split].
+- F4: `BITOP` nhiều key nên cần hash tag chung.
+- F1: như mọi counter, bitmap nằm trên master nên mất vài giây cuối khi failover.
 
 ### 6.4 Bảng chọn
 
 | Câu hỏi | Cấu trúc | Chính xác? | Bộ nhớ | Liệt kê phần tử? | Giao / hợp |
 |---|---|---|---|---|---|
-| Bao nhiêu lần | `INCR`/`HINCRBY` | có | `INCR` trên string: số nguyên lưu dạng số, không thêm chi phí biểu diễn chuỗi[^incr-int-rep]; `HINCRBY`: hash nhỏ được mã hóa gọn[^hash-small] | — | — |
+| Bao nhiêu lần | `INCR`/`HINCRBY` | có | `INCR` trên string: số nguyên lưu dạng số, không thêm chi phí biểu diễn chuỗi[^incr-int-rep]; `HINCRBY`: hash nhỏ được mã hóa gọn (mục 6.1) | — | — |
 | Bao nhiêu phần tử phân biệt (xấp xỉ) | HLL | sai số chuẩn 0,81%[^hll-12k] | ≤ 12 KB[^hll-const] | không | chỉ hợp[^hll-merge] |
 | Tập id nguyên dày, cần chính xác | bitmap | có | 1 bit/id, theo *dải* id[^bm-4b] | quét bit | `BITOP AND/OR/XOR/NOT`[^bm-ops] |
 | Tập nhỏ, cần chính xác và liệt kê | `SET` | có | tỷ lệ số phần tử | có[^set-def] | giao, hợp, hiệu bằng lệnh set (`SINTER`…)[^set-ops] |
 
-**Khi nào KHÔNG dùng Redis để đếm** (nhận xét của người soạn): số liệu tính tiền, đối soát, hay có hậu quả pháp lý (F1 mất write); thống kê cần truy vấn linh hoạt theo nhiều chiều sau này (đẩy sự kiện thô vào kho phân tích — [chương 10](10-batch-processing.md), [chương 13](13-kien-truc-he-du-lieu.md)); số liệu cần xóa theo yêu cầu người dùng (HLL không xóa được từng phần tử).
+**Khi nào KHÔNG dùng Redis để đếm** (nhận xét của người soạn):
 
-<details><summary>Đi sâu: code Rust cho counter theo bucket, HLL và bitmap</summary>
+- Số liệu tính tiền, đối soát, hay có hậu quả pháp lý, vì F1 có thể làm mất write.
+- Thống kê cần truy vấn linh hoạt theo nhiều chiều về sau. Trường hợp này nên đẩy sự kiện thô vào kho phân tích ([chương 10](10-batch-processing.md), [chương 13](13-kien-truc-he-du-lieu.md)).
+- Số liệu phải xóa theo yêu cầu người dùng, vì HLL không xóa được từng phần tử.
 
-Minh họa, không biên dịch trong chương này.
+<details><summary>Đi sâu: chi tiết cài đặt HLL, con số lịch sử của SETBIT, và code Rust cho counter theo bucket, HLL và bitmap</summary>
+
+**Chi tiết cài đặt HLL** (source Redis 7.2.5):
+
+- HLL dùng 16384 thanh ghi 6-bit, tổng cộng 12 KB mỗi key[^hll-src].
+- Khi HLL còn ít phần tử, Redis dùng biểu diễn "thưa" nén run-length, nên key nhỏ hơn nhiều[^hll-sparse].
+
+**Con số lịch sử của `SETBIT`.** Tài liệu Redis ghi ví dụ về chi phí cấp phát: trên MacBook Pro 2010, đặt bit 2^32 − 1 (cấp phát 512 MB) mất khoảng 300 ms, còn đặt bit 2^30 − 1 (128 MB) mất khoảng 80 ms[^setbit-warn]. Đây là số của máy cũ, chỉ nên dùng để hình dung bậc độ lớn.
+
+**Code Rust.** Minh họa, không biên dịch trong chương này. Tham số `post` trong code là id của đối tượng được đếm, tức id sản phẩm của `shop`.
 
 ```rust
 use redis::aio::ConnectionManager;
@@ -797,61 +1093,102 @@ async fn daily_active(conn: &mut ConnectionManager, day: &str) -> redis::RedisRe
 }
 ```
 
-Hash tag `{dau}` đặt *mọi* bitmap ngày cùng slot để `BITOP` chạy được (F4) — đổi lại tất cả nằm trên một master: với bitmap lớn cân nhắc lại (mục 8.2).
+Hash tag `{dau}` đặt *mọi* bitmap ngày vào cùng một slot để `BITOP` chạy được (F4). Đổi lại, tất cả nằm trên một master; với bitmap lớn thì nên cân nhắc lại (mục 8.2).
 
 </details>
 
-**Quay lại Q6:** đếm lần = `INCR`/`HINCRBY` (nhớ TTL, F1, key nóng); đếm phân biệt xấp xỉ = HLL (≤ 12 KB, sai số chuẩn 0,81%, chỉ hợp); đếm/giao chính xác trên id dày = bitmap (cẩn thận offset dày, cấp phát lớn và lệnh O(N)).
+**Quay lại Q6:** đếm lần thì dùng `INCR`/`HINCRBY` (nhớ đặt TTL, nhớ F1 và key nóng); đếm phân biệt xấp xỉ thì dùng HLL (tối đa 12 KB, sai số chuẩn 0,81%, chỉ có phép hợp); đếm và giao chính xác trên id dày thì dùng bitmap (cẩn thận offset dày, cấp phát lớn và lệnh O(N)).
 
 ## 7. Session store, feature flag, và làm mất hiệu lực cache cục bộ (Q7)
 
-> **Trả lời ngắn.** Session là một key có TTL: `SET sess:<id> <blob> EX 1800` (hoặc một hash), mỗi request gia hạn TTL để có "idle timeout", còn "absolute timeout" phải tự lưu thời điểm tạo — Redis chỉ cho TTL, không cho hạn tuyệt đối khi gia hạn liên tục. Feature flag là một hash nhỏ + một key phiên bản để client biết khi nào tải lại; đọc flag không được gọi Redis từng request. Khi mỗi pod giữ bản sao cục bộ (của flag, của cache nóng), cách báo "bản sao đã cũ" có ba mức: chỉ TTL, Pub/Sub (mất tin khi đứt kết nối[^ps-lost]), hoặc `CLIENT TRACKING` do chính server theo dõi và đẩy thông báo invalidate[^cst-modes].
+> **Trả lời ngắn.** Session là một key có TTL (`SET sess:<id> <blob> EX 1800`, hoặc một hash); mỗi request gia hạn TTL để có "idle timeout" (user ngừng thao tác đủ lâu thì session hết hạn), còn "absolute timeout" (hạn tối đa kể từ lúc tạo) phải tự lưu thời điểm tạo, vì TTL của Redis không biết hạn tuyệt đối khi bị gia hạn liên tục. Feature flag là một hash nhỏ cộng một key phiên bản để pod biết khi nào cần tải lại, và request không được gọi Redis chỉ để đọc flag. Khi mỗi pod giữ bản sao cục bộ (của flag hay của cache nóng), có ba cách báo bản sao đã cũ: chỉ dựa vào TTL, dùng Pub/Sub, hoặc dùng `CLIENT TRACKING`, tính năng để chính server theo dõi và đẩy thông báo invalidate[^cst-modes]. Pub/Sub có thể mất tin khi đứt kết nối[^ps-lost], nên phải có TTL làm lưới an toàn.
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): web app chạy 12 pod sau load balancer. Session phải truy cập được từ mọi pod (nên không thể nằm trong bộ nhớ một pod); cờ tính năng phải đổi trong vài giây trên mọi pod mà không deploy; và pod nào cũng muốn giữ bản sao cục bộ của dữ liệu nóng để khỏi gọi Redis mỗi request.
+*Với `shop`.* `shop` chạy 12 pod sau load balancer, nên cả ba chuyện dưới đây đều xoay quanh việc nhiều pod phải thấy cùng một dữ liệu. Session đăng nhập phải truy cập được từ mọi pod, tức không thể nằm trong bộ nhớ của riêng một pod. Cờ tính năng phải đổi được trong vài giây trên cả 12 pod mà không cần deploy. Còn mỗi pod lại muốn giữ trong bộ nhớ một bản sao của dữ liệu nóng, chẳng hạn các sản phẩm được xem nhiều, để khỏi gọi Redis ở mỗi request. Mục này trả lời hai câu: Redis giữ session và cờ thế nào, và làm sao báo cho pod biết bản sao của nó đã cũ?
 
 ### 7.1 Session store
 
-*Primitive.* `SET sess:<id> <blob> EX 1800` để tạo; đọc kèm gia hạn bằng `GETEX sess:<id> EX 1800` — `GETEX` giống `GET` nhưng là lệnh ghi có thêm tùy chọn đặt hạn[^getex-doc], nên "đọc và trượt hạn" là một lệnh. Tài liệu `EXPIRE` có chính pattern này dưới tên *Navigation session*: giữ N trang gần đây của một user mà hai lần xem liền nhau không cách quá 60 giây, bằng cách mỗi lần xem chạy `RPUSH` và `EXPIRE … 60` trong `MULTI`/`EXEC`[^nav-session]; user nghỉ quá 60 giây thì key bị xóa và chỉ các lượt xem sau đó (cách nhau dưới 60 giây) được ghi[^nav-idle]. Đó là *idle timeout* — hạn tính từ hoạt động cuối.
+*Primitive.* Tạo session bằng `SET sess:<id> <blob> EX 1800`. Khi đọc, `GETEX sess:<id> EX 1800` lấy session và đặt lại hạn trong một lệnh: `GETEX` giống `GET` nhưng là lệnh ghi, có thêm tùy chọn đặt hạn[^getex-doc]. Hạn tính từ hoạt động cuối như vậy gọi là *idle timeout*.
 
-*Hai loại timeout.* Hướng dẫn quản lý session của OWASP khuyến nghị (*should*) mọi session có cả idle timeout lẫn absolute timeout (hạn tuyệt đối từ lúc tạo, bất kể hoạt động)[^owasp-idle][^owasp-abs], và đòi (*must*) việc hết hạn được thực thi ở phía server[^owasp-server]. TTL trượt của Redis chỉ cho loại đầu. Với loại thứ hai: lưu `created_at` trong session và kiểm ở app, hoặc đặt TTL mỗi lần gia hạn bằng `min(idle, abs_deadline − now)` (nhận xét của người soạn). `EXPIRE … GT` — chỉ đặt hạn khi hạn mới lớn hơn hạn hiện tại[^expire-gt] — hữu ích để gia hạn "chỉ tiến" mà không vô tình rút ngắn; nhưng key chưa có hạn được coi như có TTL vô hạn khi so với `GT`[^expire-gt-inf], nên `GT` không bao giờ đặt hạn lên key đang không có TTL — vẫn phải tạo session bằng `SET … EX`.
+Tài liệu `EXPIRE` có đúng pattern này, dưới tên *Navigation session*: giữ N trang user xem gần nhất, miễn là hai lần xem liền nhau không cách quá 60 giây. Mỗi lần xem, code chạy `RPUSH` và `EXPIRE … 60` trong `MULTI`/`EXEC`[^nav-session]. User nghỉ quá 60 giây thì key bị xóa, và chỉ những lượt xem sau đó (cách nhau dưới 60 giây) mới được ghi[^nav-idle].
 
-*Id và khóa lưu.* OWASP: tự sinh session id thì dùng CSPRNG, ≥ 128 bit, và đảm bảo duy nhất[^owasp-id]. Lưu token ngẫu nhiên nguyên văn có thể chấp nhận được trong kho session kiểm soát chặt, nhưng ai đọc được kho thì dùng lại được các token chưa hết hạn[^owasp-verbatim] — nên đặt khóa Redis theo *hash* của id (`sess:<sha256(id)>`) khi mô hình đe dọa gồm lộ nội dung Redis (nhận xét của người soạn từ lời khuyên OWASP). Đổi session id sau khi đổi quyền (đăng nhập, nâng quyền): `RENAME sess:<cũ> sess:<mới>` chuyển luôn dữ liệu *và* TTL sang tên mới[^rename-ttl], hoặc ghi key mới (kèm TTL) rồi `DEL` key cũ. Trong Cluster `RENAME` đòi hai key cùng slot[^rename-slot], nhưng với khóa `sess:<sha256(id)>` thì key cũ và key mới gần như chắc chắn khác slot (suy luận của người soạn từ công thức slot) — khi đó dùng cách ghi-rồi-xóa, hoặc đặt hash tag theo user (`sess:{u42}:<sha256(id)>`) để mọi session của một user cùng slot (mục 8.2).
+*Hai loại timeout.* Session nên có cả hai. *Idle timeout* hết hạn khi user ngừng hoạt động; OWASP khuyến nghị (*should*) mọi session có loại này[^owasp-idle]. *Absolute timeout* là hạn tuyệt đối tính từ lúc tạo, bất kể user còn hoạt động hay không, và OWASP cũng khuyến nghị có[^owasp-abs]. OWASP còn đòi (*must*) việc hết hạn phải được thực thi ở phía server[^owasp-server].
 
-*Một blob hay một hash?* Blob JSON đơn giản nhưng đọc-sửa-ghi: hai tab cùng session sửa đồng thời thì *last write wins* và mất cập nhật của bên kia (nhận xét của người soạn). Hash (`HSET sess:<id> cart_items 3`) cho phép sửa từng field nguyên tử (`HSET`, `HINCRBY`) mà không đọc-sửa-ghi; TTL vẫn là của cả key[^expire-key] và `HSET` để TTL nguyên vẹn[^expire-untouched], nên gia hạn phải làm tường minh (nhận xét của người soạn).
+TTL trượt của Redis chỉ làm được loại đầu. Với loại thứ hai có hai cách: lưu `created_at` trong session rồi kiểm ở app, hoặc mỗi lần gia hạn đặt TTL bằng `min(idle, abs_deadline − now)` (nhận xét của người soạn).
 
-*Chỉ mục "mọi session của user".* Để "đăng xuất khỏi mọi thiết bị" cần chỉ mục `user:42:sessions`. Nếu là SET thì khi key session hết hạn, phần tử trong SET *không tự mất* (TTL là của key, không của phần tử) — SET tích mục mồ côi. Dùng ZSET với score = hạn (`ZADD user:42:sessions <expire_ms> <sid>`) và dọn bằng `ZREMRANGEBYSCORE … -inf now` mỗi lần đọc (nhận xét của người soạn).
+Nếu muốn gia hạn "chỉ tiến" mà không vô tình rút ngắn hạn, dùng `EXPIRE … GT`: lệnh này chỉ đặt hạn khi hạn mới lớn hơn hạn hiện tại[^expire-gt]. Nhưng key chưa có hạn được coi như TTL vô hạn khi so với `GT`[^expire-gt-inf], nên `GT` không bao giờ đặt hạn lên key đang không có TTL. Vì vậy session vẫn phải tạo bằng `SET … EX`.
 
-*Hỏng ở đâu.* F1: failover mất session mới nhất — người dùng bị đăng xuất; thường chấp nhận được, hoặc chuyển sang token ký (stateless) nếu không chấp nhận. F2(c): session bị evict nếu instance dùng chung với cache có eviction — tài liệu khuyên hai instance[^evict-volatile]. *Revocation* của token ký: `SET revoked:<jti> 1 EX <thời gian còn lại của token>` — danh sách tự dọn vì key biến mất đúng lúc token hết hạn (nhận xét của người soạn). *Khi nào KHÔNG:* "remember me" dài hạn hay session cần kiểm toán — để DB; Redis là bản nhanh phía trước.
+*Id session.* Nếu `shop` tự sinh session id thì OWASP khuyên dùng CSPRNG (bộ sinh số ngẫu nhiên an toàn về mật mã), ít nhất 128 bit, và bảo đảm id duy nhất[^owasp-id].
+
+*Khóa lưu.* Lưu token ngẫu nhiên nguyên văn có thể chấp nhận được trong kho session kiểm soát chặt, nhưng ai đọc được kho thì dùng lại được các token chưa hết hạn[^owasp-verbatim]. Vì vậy, nếu mô hình đe dọa gồm việc lộ nội dung Redis, nên đặt khóa Redis theo *hash* của id: `sess:<sha256(id)>` (nhận xét của người soạn, rút từ lời khuyên OWASP).
+
+*Đổi id sau khi đổi quyền.* Sau khi đăng nhập hoặc nâng quyền thì phải đổi session id. Có hai cách: `RENAME sess:<cũ> sess:<mới>` chuyển cả dữ liệu *lẫn* TTL sang tên mới[^rename-ttl], hoặc ghi key mới (kèm TTL) rồi `DEL` key cũ.
+
+Trong Cluster, `RENAME` đòi hai key cùng slot[^rename-slot]. Với khóa `sess:<sha256(id)>`, key cũ và key mới gần như chắc chắn khác slot (suy luận của người soạn, từ công thức tính slot). Khi đó dùng cách ghi-rồi-xóa, hoặc đặt hash tag theo user (`sess:{u42}:<sha256(id)>`) để mọi session của một user cùng slot (mục 8.2).
+
+*Một blob hay một hash?* Blob JSON thì đơn giản, nhưng mỗi lần sửa là đọc-sửa-ghi. Nếu hai tab của cùng một user sửa session đồng thời, bên ghi sau thắng (*last write wins*) và cập nhật của bên kia mất (nhận xét của người soạn).
+
+Hash (`HSET sess:<id> cart_items 3`) cho phép sửa từng field nguyên tử bằng `HSET` hay `HINCRBY` mà không cần đọc-sửa-ghi. Nhưng TTL là của cả key, không của từng field[^expire-key]. Hơn nữa `HSET` để nguyên TTL[^expire-untouched], nên gia hạn phải làm tường minh (nhận xét của người soạn).
+
+*Chỉ mục "mọi session của user".* Muốn "đăng xuất khỏi mọi thiết bị" thì cần một chỉ mục `user:42:sessions`. Nếu chỉ mục là SET thì có vấn đề: khi key session hết hạn, phần tử trong SET *không tự mất*, vì TTL là của key chứ không của phần tử, nên SET tích dần các mục mồ côi. Cách tránh là dùng ZSET với score là thời điểm hết hạn (`ZADD user:42:sessions <expire_ms> <sid>`) và mỗi lần đọc dọn bằng `ZREMRANGEBYSCORE … -inf now` (nhận xét của người soạn).
+
+*Hỏng ở đâu.*
+
+- F1: failover làm mất session mới nhất, user bị đăng xuất. Thường chấp nhận được; nếu không thì chuyển sang token ký (stateless, server không phải lưu session).
+- F2(c): session bị evict nếu dùng chung instance với cache có eviction. Tài liệu khuyên chạy hai instance[^evict-volatile].
+- *Revocation* (thu hồi) token ký: `SET revoked:<jti> 1 EX <thời gian còn lại của token>`. Danh sách tự dọn vì key biến mất đúng lúc token hết hạn (nhận xét của người soạn).
+- *Khi nào KHÔNG:* "remember me" dài hạn hay session cần kiểm toán thì để DB; Redis chỉ là bản nhanh phía trước.
 
 ### 7.2 Feature flag
 
-Cờ là dữ liệu nhỏ, đọc cực nhiều, ghi hiếm — đúng hình dạng cần *bản sao cục bộ*. Thiết kế (nhận xét của người soạn):
+Cờ của `shop` (ví dụ `new_checkout`) là dữ liệu nhỏ, đọc cực nhiều, ghi hiếm, đúng hình dạng cần *bản sao cục bộ*. Thiết kế (nhận xét của người soạn):
 
-- *Lưu:* `HSET flags:prod new_checkout '{"on":true,"pct":20}'`, một field mỗi cờ trong một hash (hash là tập cặp field-value[^hash-def]). `HGETALL` O(N) với N là kích thước hash[^hgetall-cx] — với vài trăm cờ là rẻ.
-- *Phiên bản:* mỗi lần ghi, `MULTI` { `HSET flags:prod …`; `INCR flags:version` } `EXEC` — các lệnh trong `MULTI` chạy liền nhau, không ai chen vào giữa[^tx-serial], nên client không bao giờ thấy phiên bản mới với dữ liệu cũ. Client mỗi pod *poll `GET flags:version`* mỗi 1–5 giây (rất rẻ) và chỉ khi số đổi mới `HGETALL`. Độ trễ lan truyền ≤ chu kỳ poll.
-- *Đánh giá cờ không chạm Redis:* mọi `is_enabled("new_checkout", user)` đọc snapshot trong bộ nhớ process. Rollout phần trăm tính *ngay trong app* bằng hash ổn định (`hash(flag, user_id) mod 100 < pct`) nên cùng user luôn cùng nhánh mà không cần trạng thái ở Redis.
-- *TTL đúng chỗ:* bản thân hash cờ không có TTL; công tắc khẩn cấp thì có: `SET flag:kill:new_checkout 1 EX 3600` — tự hết hạn sau một giờ, "quên tắt" không thành sự cố (nhận xét của người soạn).
-- *Fail-static:* Redis không trả lời thì giữ snapshot cuối cùng, *đừng* chuyển về mặc định (mặc định có thể là hành vi cũ, không phải hành vi an toàn).
-- *Khi nào KHÔNG:* cờ cần kiểm duyệt, lịch sử thay đổi, quy tắc nhắm đối tượng phức tạp → dịch vụ cờ riêng hoặc DB; Redis chỉ làm tầng phân phối.
+- *Lưu:* mỗi cờ là một field trong một hash, ví dụ `HSET flags:prod new_checkout '{"on":true,"pct":20}'` (hash là tập các cặp field-value[^hash-def]). `HGETALL` mất O(N), với N là kích thước hash[^hgetall-cx], nên với vài trăm cờ là rẻ.
+- *Phiên bản:* mỗi lần ghi, chạy `MULTI` { `HSET flags:prod …`; `INCR flags:version` } `EXEC`. Các lệnh trong `MULTI` chạy liền nhau, không ai chen vào giữa[^tx-serial], nên client không bao giờ thấy phiên bản mới kèm dữ liệu cũ. Client của mỗi pod *poll `GET flags:version`* mỗi 1–5 giây (rất rẻ), và chỉ khi số đổi mới gọi `HGETALL`. Độ trễ lan truyền tối đa bằng chu kỳ poll.
+- *Đánh giá cờ không chạm Redis:* mọi lệnh `is_enabled("new_checkout", user)` đọc snapshot trong bộ nhớ process. Rollout theo phần trăm (bật cờ cho 20% user) tính ngay trong app bằng hash ổn định: `hash(flag, user_id) mod 100 < pct`. Nhờ vậy cùng một user luôn vào cùng một nhánh, và Redis không phải giữ trạng thái nào.
+- *TTL đúng chỗ:* bản thân hash cờ không có TTL, nhưng công tắc khẩn cấp thì có: `SET flag:kill:new_checkout 1 EX 3600`. Nó tự hết hạn sau một giờ, nên "quên tắt" không thành sự cố (nhận xét của người soạn).
+- *Fail-static* (lỗi thì giữ nguyên trạng): Redis không trả lời thì giữ snapshot cuối cùng, *đừng* chuyển về mặc định, vì mặc định có thể là hành vi cũ chứ không phải hành vi an toàn.
+- *Khi nào KHÔNG:* cờ cần kiểm duyệt, lịch sử thay đổi, hoặc quy tắc nhắm đối tượng phức tạp thì dùng dịch vụ cờ riêng hoặc DB; Redis chỉ làm tầng phân phối.
 
 ### 7.3 Làm mất hiệu lực bản sao cục bộ: TTL, Pub/Sub, `CLIENT TRACKING`
 
-Tài liệu client-side caching mô tả bài toán: ứng dụng giữ bản sao dữ liệu trong bộ nhớ của nó vì truy cập bộ nhớ cục bộ nhanh hơn truy cập một dịch vụ qua mạng như database cỡ nhiều bậc độ lớn[^cst-fast]; cái khó là biết khi nào bản sao cũ. Nếu ứng dụng chịu được thì chỉ cần một TTL tối đa cố định cho dữ liệu cache[^cst-ttl]; phức tạp hơn thì dùng Pub/Sub để gửi invalidation — cách này làm được nhưng khó làm đúng và tốn băng thông vì thường phải gửi tới mọi client kể cả client không có bản sao, và mỗi câu lệnh sửa dữ liệu còn phải `PUBLISH`, tốn thêm CPU của DB[^cst-pubsub].
+Ứng dụng giữ bản sao dữ liệu trong bộ nhớ của mình vì đọc bộ nhớ cục bộ nhanh hơn gọi một dịch vụ qua mạng (như database) nhiều bậc độ lớn[^cst-fast]. Cái khó là biết khi nào bản sao đã cũ. Với `shop`, đó là bản sao các sản phẩm nóng trong mỗi pod: giá sản phẩm 42 đổi ở một nơi thì cả 12 pod phải biết.
 
-*Mức 1 — chỉ TTL.* Bản sao cục bộ sống tối đa vài giây; rẻ, không có kênh nào để hỏng; chấp nhận dữ liệu cũ ≤ TTL. Đủ cho đa số cờ và cache đọc nhiều (nhận xét của người soạn).
+Cách đơn giản nhất, nếu ứng dụng chịu được dữ liệu cũ một lúc, là đặt một TTL tối đa cố định cho dữ liệu cache[^cst-ttl]. Nếu cần tươi hơn thì có thể dùng Pub/Sub để gửi invalidation. Cách này làm được nhưng khó làm đúng, và tốn băng thông vì thường phải gửi tới mọi client, kể cả client không có bản sao. Ngoài ra mỗi câu lệnh sửa dữ liệu còn phải `PUBLISH`, tốn thêm CPU của DB[^cst-pubsub]. Từ đó có ba mức.
 
-*Mức 2 — Pub/Sub.* Writer sau khi commit DB thì `PUBLISH inval:product 42`; mỗi pod `SUBSCRIBE inval:product` và xóa mục 42 khỏi bản sao. Pub/Sub là at-most-once: tin gửi tối đa một lần[^ps-at-most-once], và nếu subscriber lỗi hoặc đứt mạng thì tin mất vĩnh viễn[^ps-lost]. Hệ quả thiết kế: (a) *luôn* giữ TTL trên bản sao cục bộ làm lưới an toàn; (b) khi subscriber đứt rồi nối lại thì *xóa sạch* bản sao — đúng khuyến nghị của tài liệu client-side caching: nếu mất connection nhận invalidation thì phải flush cache cục bộ, và nên `PING` định kỳ kênh invalidation để phát hiện connection hỏng[^cst-lost]. Trong Cluster, tin Pub/Sub lan thế nào và sharded Pub/Sub (7.0+) khác ra sao: xem [chương 16, mục 6–7](16-redis-ben-trong.md).
+*Mức 1 — chỉ TTL.* Bản sao cục bộ sống tối đa vài giây. Cách này rẻ, không có kênh nào để hỏng, nhưng chấp nhận dữ liệu cũ tối đa bằng TTL. Nó đủ cho đa số cờ và cache đọc nhiều (nhận xét của người soạn).
 
-*Mức 3 — `CLIENT TRACKING` (Redis 6+[^cst-redis6]).* Server tự theo dõi và đẩy invalidate; hai chế độ[^cst-modes]:
+*Mức 2 — Pub/Sub.* Sau khi commit DB, writer `PUBLISH inval:product 42`; mỗi pod `SUBSCRIBE inval:product` và xóa mục 42 khỏi bản sao. Nhưng Pub/Sub là at-most-once, tức mỗi tin được gửi tối đa một lần[^ps-at-most-once]. Nếu subscriber lỗi hoặc đứt mạng thì tin mất vĩnh viễn[^ps-lost]. Từ đó rút ra hai điều khi thiết kế:
 
-- *Mặc định:* server nhớ mỗi client đã truy cập key nào và chỉ gửi invalidate cho các key đó — tốn bộ nhớ server.
-- *`BCAST`:* server không nhớ gì; client đăng ký theo *tiền tố* (`PREFIX user:`) và nhận thông báo mỗi khi có key khớp tiền tố bị chạm — không tốn bộ nhớ server nhưng gửi nhiều thông báo hơn[^cst-bcast][^cst-bcast-more].
+- Luôn giữ TTL trên bản sao cục bộ làm lưới an toàn.
+- Khi subscriber đứt rồi nối lại thì *xóa sạch* bản sao. Tài liệu client-side caching cũng khuyến nghị vậy: mất connection nhận invalidation thì phải flush cache cục bộ, và nên `PING` định kỳ kênh invalidation để phát hiện connection hỏng[^cst-lost].
 
-Server gửi invalidate khi key bị sửa, bị evict do hết hạn, hoặc bị evict do `maxmemory`[^cst-evict]. Để giới hạn bộ nhớ, server giữ một *invalidation table* có kích thước tối đa và khi đầy có thể "giả vờ" một key bị sửa để gửi invalidate sớm cho một mục cũ[^cst-table] — an toàn (client chỉ nạp lại thừa), không phải lỗi (suy luận của người soạn). Bộ nhớ server khi không dùng `BCAST` tỷ lệ với cả số key được theo dõi lẫn số client hỏi chúng[^cst-memory]. Hai tùy chọn: `OPTIN` — client chỉ cache một số key được chọn và báo tường minh cho server biết nó cache gì[^cst-optin]; `NOLOOP` — client không muốn nhận invalidate cho những key do chính nó sửa[^cst-noloop].
+Trong Cluster, tin Pub/Sub lan thế nào và sharded Pub/Sub (7.0+) khác ra sao: xem [chương 16, mục 6–7](16-redis-ben-trong.md).
 
-Hai cạm bẫy tài liệu nêu: (1) *race giữa invalidate và reply* — khi dùng hai connection (một cho dữ liệu, một cho invalidate), invalidate có thể tới *trước* reply của `GET` đang bay, khiến client lưu giá trị đã cũ; cách chữa là đặt trước một placeholder trong cache cục bộ lúc gửi lệnh, và chỉ ghi giá trị khi placeholder còn đó[^cst-race]; với một connection RESP3 duy nhất thì không có race này vì thứ tự thông điệp xác định[^cst-single] (RESP2/RESP3 là hai phiên bản giao thức client nói với Redis: từ Redis 6, RESP3 cho phép nhận thông điệp invalidate ngay trên connection dữ liệu[^cst-resp3-single], còn RESP2 không trộn được nhiều loại thông tin trên cùng một connection[^cst-resp2-lack]); (2) mất connection ⇒ flush cache cục bộ[^cst-lost]. Tài liệu cũng dặn: *đừng* cache các key đổi liên tục (ví dụ counter đang `INCR`), cũng đừng cache key hiếm khi được hỏi; hãy cache key được hỏi nhiều và đổi ở mức hợp lý[^cst-what], và luôn đặt TTL tối đa cho mọi mục để bảo vệ trước lỗi hay connection hỏng[^cst-maxttl].
+*Mức 3 — `CLIENT TRACKING`.* Từ Redis 6, server hỗ trợ trực tiếp client-side caching[^cst-redis6]: chính server theo dõi và đẩy invalidate. Có hai chế độ[^cst-modes]:
+
+- *Mặc định:* server nhớ mỗi client đã truy cập key nào và chỉ gửi invalidate cho các key đó. Đổi lại, chế độ này tốn bộ nhớ của server.
+- *`BCAST`:* server không nhớ gì. Client đăng ký theo *tiền tố* (`PREFIX user:`) và nhận thông báo mỗi khi có key khớp tiền tố bị chạm[^cst-bcast]. Chế độ này không tốn bộ nhớ server nhưng gửi nhiều thông báo hơn[^cst-bcast-more].
+
+Server gửi invalidate khi key bị sửa, bị evict do hết hạn, hoặc bị evict do `maxmemory`[^cst-evict].
+
+Để giới hạn bộ nhớ, server giữ một *invalidation table* có kích thước tối đa. Khi bảng đầy, server có thể "giả vờ" một key bị sửa để gửi invalidate sớm cho một mục cũ[^cst-table]. Việc này an toàn vì client chỉ phải nạp lại thừa, không phải lỗi (suy luận của người soạn). Khi không dùng `BCAST`, bộ nhớ server tỷ lệ với cả số key được theo dõi lẫn số client hỏi chúng[^cst-memory].
+
+Ngoài ra có hai tùy chọn:
+
+- `OPTIN`: client chỉ cache một số key chọn trước, và báo tường minh cho server biết nó cache gì[^cst-optin].
+- `NOLOOP`: client không nhận invalidate cho những key do chính nó sửa[^cst-noloop].
+
+Tài liệu nêu hai cạm bẫy.
+
+*Cạm bẫy 1 — race giữa invalidate và reply.* Khi dùng hai connection (một cho dữ liệu, một cho invalidate), invalidate có thể tới *trước* reply của `GET` đang bay, và client lưu một giá trị đã cũ. Cách chữa là đặt trước một placeholder trong cache cục bộ lúc gửi lệnh, rồi chỉ ghi giá trị khi placeholder còn đó[^cst-race]. Với một connection RESP3 duy nhất thì không có race này, vì thứ tự thông điệp luôn xác định[^cst-single].
+
+RESP2 và RESP3 là hai phiên bản giao thức client nói với Redis. Từ Redis 6, RESP3 cho phép nhận thông điệp invalidate ngay trên connection dữ liệu[^cst-resp3-single]. RESP2 không trộn được nhiều loại thông tin trên cùng một connection, nên với RESP2 chỉ có cách dùng hai connection[^cst-resp2-lack].
+
+*Cạm bẫy 2 — mất connection.* Mất connection thì phải flush cache cục bộ[^cst-lost].
+
+Tài liệu cũng dặn nên cache gì. Đừng cache các key đổi liên tục (ví dụ counter đang `INCR`), cũng đừng cache key hiếm khi được hỏi; hãy cache key được hỏi nhiều và đổi ở mức hợp lý[^cst-what]. Và nên đặt TTL tối đa cho mọi mục, để bảo vệ trước lỗi hay connection hỏng[^cst-maxttl].
 
 | | Chỉ TTL | Pub/Sub | `CLIENT TRACKING` |
 |---|---|---|---|
@@ -890,23 +1227,33 @@ async fn run_invalidation(client: redis::Client, cache: LocalCache) {
 }
 ```
 
-`PubSub` được docs mô tả là connection dành riêng cho message pubsub RESP2; với server hỗ trợ RESP3, docs gợi ý dùng connection thường kèm `AsyncPushSender`[^rs-pubsub]. Crate còn có module `redis::caching` hỗ trợ *thử nghiệm* client-side caching do server hỗ trợ[^rs-caching-exp], bật bằng feature `cache-aio` (cho `MultiplexedConnection`, `ConnectionManager` và `ClusterConnection` async[^rs-feature-cache]), *chỉ chạy với RESP3*[^rs-caching-resp3]; docs lưu ý dùng `ClusterConnection` với Redis 6.x có thể cho kết quả cũ (stale) khi resharding nên khuyến nghị 7.x trở lên[^rs-caching-cluster]. Với RESP3, thư viện gửi push `Disconnection` tới `AsyncPushSender` khi connection đóng[^rs-pushkind-disc] — có thể dùng làm tín hiệu flush bản sao cục bộ (nhận xét của người soạn; chưa đối chiếu hành vi cụ thể), còn push `Invalidate` báo key đã đổi[^rs-pushkind-inval]. Vì là thử nghiệm, kiểm tra kỹ trước khi dựa vào nó cho dữ liệu quan trọng (nhận xét của người soạn).
+Docs của crate mô tả `PubSub` là connection dành riêng cho message pubsub RESP2. Với server hỗ trợ RESP3, docs gợi ý dùng connection thường kèm `AsyncPushSender`[^rs-pubsub].
+
+Crate còn có module `redis::caching`, hỗ trợ *thử nghiệm* client-side caching do server hỗ trợ[^rs-caching-exp]:
+
+- Bật bằng feature `cache-aio`, dùng được cho `MultiplexedConnection`, `ConnectionManager` và `ClusterConnection` async[^rs-feature-cache].
+- *Chỉ chạy với RESP3*[^rs-caching-resp3].
+- Docs lưu ý `ClusterConnection` với Redis 6.x có thể trả kết quả cũ (stale) khi resharding, nên khuyến nghị 7.x trở lên[^rs-caching-cluster].
+
+Với RESP3, thư viện gửi push `Disconnection` tới `AsyncPushSender` khi connection đóng[^rs-pushkind-disc]. Có thể dùng nó làm tín hiệu flush bản sao cục bộ (nhận xét của người soạn; chưa đối chiếu hành vi cụ thể). Còn push `Invalidate` báo key đã đổi[^rs-pushkind-inval]. Vì module còn thử nghiệm, hãy kiểm tra kỹ trước khi dựa vào nó cho dữ liệu quan trọng (nhận xét của người soạn).
 
 Để thêm `PING` định kỳ theo khuyến nghị ở mục 7.3: `PubSub::split` tách `PubSubSink` (có `ping`) khỏi `PubSubStream`, để vừa chờ tin vừa gửi lệnh trên cùng connection[^rs-pubsub-split].
 
 </details>
 
-**Quay lại Q7:** session = key có TTL trượt (`GETEX`/`EXPIRE`) cộng absolute timeout tự quản; feature flag = hash nhỏ + key phiên bản, poll và đánh giá cục bộ; làm cũ bản sao cục bộ báo bằng TTL, Pub/Sub (có thể mất tin ⇒ phải flush khi nối lại) hoặc `CLIENT TRACKING` (server theo dõi; đổi lấy bộ nhớ hoặc băng thông).
+**Quay lại Q7:** session là key có TTL trượt (`GETEX`/`EXPIRE`) cộng một absolute timeout tự quản lý; feature flag là hash nhỏ cộng key phiên bản, pod poll phiên bản rồi đánh giá cờ ngay trong bộ nhớ. Bản sao cục bộ được báo cũ bằng TTL, Pub/Sub (có thể mất tin, nên phải flush khi nối lại) hoặc `CLIENT TRACKING` (server theo dõi, đổi lại tốn bộ nhớ hoặc băng thông).
 
 ## 8. Ghép cho đúng: công cụ nguyên tử, thiết kế key, TTL, anti-pattern (Q8)
 
-> **Trả lời ngắn.** Chọn công cụ theo *nhu cầu nguyên tử*: chỉ muốn giảm round trip thì pipeline (không nguyên tử — lệnh client khác có thể xen giữa[^sc-pipe-order]); cần cả khối chạy liền thì `MULTI`/`EXEC` (không rollback[^tx-runtime-err] và không rẽ nhánh theo kết quả giữa chừng); cần "đọc rồi quyết định rồi ghi" thì Lua/Functions (nguyên tử vì chặn server[^sc-atomic]) hoặc `WATCH` + retry. Đặt tên key có cấu trúc, dùng hash tag nhỏ nhất đủ cho thao tác nhiều key, đặt TTL ngay lúc tạo, và tránh các anti-pattern ở mục 8.4 — nặng nhất là `KEYS`, big key, hot key, trộn dữ liệu bền với cache, và dùng Redis làm nguồn sự thật mà không có persistence tương xứng.
+> **Trả lời ngắn.** Chọn công cụ theo mức nguyên tử bạn cần, tức mức bảo đảm một nhóm lệnh chạy liền mà không client nào chen vào giữa: pipeline (gửi gộp nhiều lệnh một lượt) chỉ giúp bớt số lượt đi về giữa app và Redis chứ không nguyên tử[^sc-pipe-order]. Bao các lệnh trong `MULTI`/`EXEC` thì chúng chạy liền thành một khối, nhưng không rollback, tức không hoàn tác lệnh nào đã chạy[^tx-runtime-err], và không cho rẽ nhánh theo kết quả của lệnh trước. Việc kiểu "đọc, quyết định rồi mới ghi" thì dùng script Lua chạy ngay trong Redis, nguyên tử vì lúc script chạy server không làm việc nào khác[^sc-atomic], hoặc dùng `WATCH` kèm retry. Ngoài ra, hãy đặt tên key theo một cấu trúc rõ ràng, dùng hash tag (phần `{...}` trong tên key, ép nhiều key về cùng một slot của Cluster) nhỏ nhất đủ dùng, đặt TTL (thời hạn sống) ngay lúc tạo key, và tránh các anti-pattern ở mục 8.4, nặng nhất là lệnh `KEYS` trên production, key quá lớn hoặc quá nóng (big key, hot key), trộn dữ liệu bền với cache, và dùng Redis làm nguồn sự thật khi chưa có persistence (ghi xuống đĩa) đủ bền.
 
 **Giải thích.**
 
-Tình huống (nhận xét của người soạn): bạn xem lại một service có "Redis dùng khắp nơi" — cache, khóa, queue, counter trong *một* instance — sau sự cố: Redis đầy bộ nhớ, evict mất khóa và job, một `KEYS user:*` của script vận hành làm cả site đứng 2 giây. Mục này là danh sách kiểm cho đúng loại sự cố đó.
+*Với `shop`.* Đến đây `shop` đã đặt cache sản phẩm, rate limiter, khóa, queue, bảng xếp hạng, counter và session vào *cùng một* instance Redis. Giả sử một ngày Redis đầy bộ nhớ và evict mất cả khóa lẫn job, rồi một script vận hành chạy `KEYS user:*` làm cả site đứng 2 giây (nhận xét của người soạn: sự cố giả định). Mục này là danh sách kiểm để `shop` không rơi vào loại sự cố đó. Câu hỏi của nó: mỗi thao tác nên dùng pipeline, `MULTI`/`WATCH` hay Lua, đặt tên key và TTL ra sao, và phải tránh những gì?
 
 ### 8.1 Chọn công cụ nguyên tử
+
+Với mỗi thao tác của `shop`, câu hỏi đầu tiên là nó cần nguyên tử đến đâu. Sơ đồ dưới đi qua vài câu hỏi nhỏ để chọn công cụ phù hợp; bảng tiếp theo so sánh bốn công cụ.
 
 ```mermaid
 flowchart TD
@@ -923,55 +1270,123 @@ flowchart TD
 | | Pipeline | `MULTI`/`EXEC` | `WATCH` + `MULTI`/`EXEC` | Lua / Functions |
 |---|---|---|---|---|
 | Mục đích | giảm round trip | chạy liền | CAS lạc quan | logic có điều kiện nguyên tử |
-| Nguyên tử? | **không**: lệnh client khác có thể xen giữa[^sc-pipe-order] | các lệnh tuần tự hóa, không request khác xen giữa[^tx-serial] | như `MULTI`, hủy nếu key được `WATCH` bị đổi[^tx-watch] | nguyên tử vì mọi hoạt động server bị chặn khi chạy[^sc-atomic][^fn-atomic] |
-| Rollback? | không | không: lệnh lỗi lúc chạy, các lệnh khác vẫn chạy[^tx-runtime-err] | không | không: Redis chỉ cho `SCRIPT KILL` dừng script chưa ghi, vì dừng script đã ghi sẽ phá bảo đảm nguyên tử của script[^sc-kill-doc] (suy luận của người soạn: không có cơ chế hoàn tác) |
-| Rẽ nhánh theo kết quả | ở client (nhiều round trip) | **không**: lệnh chỉ được xếp hàng tới `EXEC`[^tx-usage] | ở client rồi retry | có, ngay trong script |
-| Điểm yếu | tốn bộ nhớ trả lời nếu quá lớn[^pipe-mem] | không rẽ nhánh được | retry khi có tranh chấp; hết hạn/evict cũng làm hủy[^tx-watch-expire] | script chậm chặn cả server, `BUSY` sau ngưỡng[^sc-busy] |
+| Nguyên tử? | **không**: lệnh của client khác có thể chen vào giữa[^sc-pipe-order] | có: các lệnh chạy tuần tự, không request nào khác chen vào giữa[^tx-serial] | như `MULTI`, nhưng hủy cả transaction nếu key đang `WATCH` bị đổi[^tx-watch] | có: lúc script chạy, mọi hoạt động của server bị chặn[^sc-atomic]. Functions cũng vậy[^fn-atomic] |
+| Rollback? | không | không: lệnh nào lỗi lúc chạy thì các lệnh khác vẫn chạy[^tx-runtime-err] | không | không: `SCRIPT KILL` chỉ dừng được script chưa ghi gì vào dữ liệu, vì dừng script đã ghi sẽ phá tính nguyên tử của script[^sc-kill-doc]. Vì vậy không có cơ chế hoàn tác (suy luận của người soạn) |
+| Rẽ nhánh theo kết quả | ở client (nhiều round trip) | **không**: lệnh chỉ xếp hàng, đến `EXEC` mới chạy[^tx-usage] | ở client rồi retry | có, ngay trong script |
+| Điểm yếu | pipeline quá lớn thì server tốn RAM để xếp hàng trả lời[^pipe-mem] | không rẽ nhánh được | phải retry khi có tranh chấp; key hết hạn hoặc bị evict cũng làm hủy[^tx-watch-expire] | script chậm chặn cả server, và quá ngưỡng thời gian thì Redis bắt đầu trả `BUSY` cho hầu hết lệnh khác[^sc-busy] |
 
-*Pipeline.* Mục đích là giảm chi phí mỗi lệnh khi gửi nhiều lệnh liền nhau: docs nhấn mạnh pipeline không chỉ giảm độ trễ round trip mà còn tăng số thao tác mỗi giây mà server phục vụ được[^pipe-rtt] (cơ chế — RTT, `read`/`write` syscall — ở [chương 16, mục 1](16-redis-ben-trong.md)). Server phải xếp hàng các trả lời trong bộ nhớ, nên với lượng rất lớn hãy chia lô cỡ 10.000 lệnh rồi đọc trả lời[^pipe-mem]. Đừng dựa vào pipeline cho nguyên tử: các lệnh chạy theo thứ tự gửi nhưng lệnh của client khác có thể xen giữa[^sc-pipe-order].
+Dưới đây là điều cần biết về từng công cụ khi ghép pattern.
 
-*`MULTI`/`EXEC`.* Hai bảo đảm: tuần tự và liền nhau[^tx-serial]; nếu client mất kết nối trước `EXEC` thì không lệnh nào chạy, còn đã gọi `EXEC` thì chạy hết[^tx-exec-all]. Không rollback[^tx-no-rollback][^tx-runtime-err]. Hạn chế lớn khi *ghép pattern*: sau `MULTI` các lệnh chỉ được xếp hàng và thực thi khi `EXEC`[^tx-usage] nên không dùng kết quả của lệnh trước làm đối số cho lệnh sau (suy luận của người soạn) — đó là lý do mục 5 và mục 2 phải dùng Lua cho "đọc điểm rồi ghi" hay "đếm rồi quyết định".
+*Pipeline.* Khi `shop` có nhiều lệnh độc lập cần gửi liền nhau, chẳng hạn nạp cache cho nhiều sản phẩm cùng lúc, hãy gộp chúng vào một pipeline: client gửi hết lệnh rồi mới đọc trả lời. Lợi ích không chỉ là bớt độ trễ của mỗi lượt đi về (round trip), mà server còn phục vụ được nhiều thao tác hơn mỗi giây[^pipe-rtt] (cơ chế, gồm RTT và các syscall `read`/`write`, nằm ở [chương 16, mục 1](16-redis-ben-trong.md)). Cái giá là server phải xếp hàng các trả lời trong bộ nhớ, nên với lượng lệnh rất lớn hãy chia thành lô cỡ 10.000 lệnh: đọc hết trả lời của lô này rồi mới gửi lô tiếp[^pipe-mem]. Đừng trông vào pipeline để có tính nguyên tử. Các lệnh chạy đúng thứ tự gửi, nhưng lệnh của client khác vẫn có thể chen vào giữa[^sc-pipe-order].
 
-*`WATCH`.* Trạng thái `WATCH` gắn với *một connection*: đóng connection là mọi key bị bỏ theo dõi[^tx-close-unwatch], nên crate `redis` cảnh báo rằng chạy đồng thời nhiều transaction trên các bản clone của cùng một connection multiplexed có thể làm `WATCH`/`MULTI`/`EXEC` của chúng xen kẽ nhau[^rs-tx-async-warn] (xem phần Rust). `WATCH` hủy transaction cả khi key được theo dõi bị Redis tự sửa như hết hạn hay evict[^tx-watch-expire]; retry là vòng lặp optimistic[^tx-watch-retry]; tranh chấp cao thì vòng này tốn round trip vô ích — khi đó Lua rẻ hơn (nhận xét của người soạn).
+*`MULTI`/`EXEC`.* Khối này cho hai bảo đảm. Một là các lệnh trong khối chạy tuần tự, và Redis không bao giờ phục vụ request của client khác giữa chừng[^tx-serial]. Hai là chuyện gì xảy ra khi mất kết nối: nếu client mất kết nối trước khi gọi `EXEC` thì không lệnh nào chạy, còn đã gọi `EXEC` thì chạy hết[^tx-exec-all].
 
-*Lua và Functions.* Cơ chế (nguyên tử vì chặn server; `BUSY` sau `busy-reply-threshold` và `SCRIPT KILL`; script cache không bền; Functions lưu cùng database) đã ở [chương 16, mục 7](16-redis-ben-trong.md). Điều cần nhớ khi ghép pattern: *mỗi giây script chạy là một giây Redis không phục vụ ai khác* nên giữ script ngắn và O(nhỏ)[^sc-atomic]; mọi key script truy cập phải khai qua `KEYS`, không tự sinh tên key trong script[^sc-keys] (và vì thế phải cùng slot); script cache của `EVAL` có thể mất khi restart hay failover[^sc-cache-volatile], nên thư viện `redis::Script` tự upload và thực thi để code không phải xử `NOSCRIPT`[^rs-script] — chỉ khi gọi `invoke`/`invoke_async`; trong pipeline phải `load_script` trước[^rs-invoke-script-pipe]. Functions (7.0+) hợp khi muốn script có phiên bản gắn với deploy[^fn-persist] — nạp bằng `FUNCTION LOAD REPLACE <mã thư viện>` lúc khởi động[^fn-load-syntax], gọi bằng `FCALL`; `EVAL` hợp khi script nằm cùng binary và đơn giản (nhận xét của người soạn). Source 7.2.5 có cờ cho script như `no-cluster` và `allow-cross-slot-keys`[^script-flags-src] — công cụ nâng cao, mặc định đừng dùng (nhận xét của người soạn).
+Nhưng khối này có hai giới hạn. Thứ nhất, Redis không hỗ trợ rollback[^tx-no-rollback]. Lệnh nào lỗi lúc chạy thì các lệnh còn lại vẫn chạy[^tx-runtime-err]. Thứ hai, và là giới hạn lớn nhất khi ghép pattern: sau `MULTI`, Redis chỉ xếp lệnh vào hàng, đến `EXEC` mới chạy hết[^tx-usage]. Vì vậy ta không dùng được kết quả của lệnh trước làm đối số cho lệnh sau (suy luận của người soạn). Đó là lý do bảng xếp hạng ở mục 5 và rate limiter ở mục 2 phải dùng Lua cho những việc kiểu "đọc điểm rồi ghi" hay "đếm rồi quyết định".
+
+*`WATCH`.* `WATCH` thêm cho `MULTI`/`EXEC` hành vi check-and-set (CAS): chỉ ghi nếu key chưa bị ai đổi từ lúc ta đọc. Đây là một kiểu khóa lạc quan (optimistic locking), tức không khóa trước mà kiểm tra sau. Client theo dõi vài key, đọc giá trị, tính toán rồi mới `MULTI`/`EXEC`; nếu có key bị sửa trước `EXEC` thì Redis hủy cả transaction[^tx-watch]. Khi đó client làm lại từ đầu, hy vọng lần này không gặp tranh chấp nữa[^tx-watch-retry]. Cần nhớ rằng "bị sửa" gồm cả những lần chính Redis sửa key, như hết hạn hay evict[^tx-watch-expire].
+
+Cái bẫy còn lại là trạng thái theo dõi gắn với *một connection*: đóng connection thì mọi key bị bỏ theo dõi[^tx-close-unwatch]. Vì vậy crate `redis` cảnh báo rằng nếu nhiều transaction cùng chạy trên các bản clone của một connection multiplexed (nhiều task dùng chung một kênh bên dưới), thì `WATCH`/`MULTI`/`EXEC` của chúng có thể xen kẽ nhau[^rs-tx-async-warn]. Do đó nên dành cho `WATCH` một connection riêng, như trong sơ đồ trên (xem phần Rust). Còn khi tranh chấp cao, vòng retry tốn round trip vô ích và Lua rẻ hơn (nhận xét của người soạn).
+
+*Lua và Functions.* Cơ chế của chúng đã nằm ở [chương 16, mục 7](16-redis-ben-trong.md): script nguyên tử vì chặn server, `BUSY` sau ngưỡng `busy-reply-threshold` cùng `SCRIPT KILL`, script cache không bền, Functions lưu cùng database. Khi ghép pattern, ta chỉ cần nhớ bốn điều:
+
+- *Mỗi giây script chạy là một giây Redis không phục vụ ai khác*, nên giữ script ngắn và độ phức tạp nhỏ[^sc-atomic].
+- Script phải khai mọi key nó truy cập qua `KEYS`, và không được tự sinh tên key[^sc-keys]. Vì vậy trên Cluster các key đó phải cùng slot (F4).
+- Script cache của `EVAL` có thể mất khi Redis restart hay failover[^sc-cache-volatile]. `redis::Script` lo việc này bằng cách tự upload script rồi thực thi, nên code không phải xử lý lỗi `NOSCRIPT`[^rs-script], miễn là gọi qua `invoke` hoặc `invoke_async`. Trong pipeline thì không có chuyện đó: phải `load_script` trước[^rs-invoke-script-pipe].
+- Redis quản lý Functions (từ 7.0) như một phần của database, nên chúng luôn sẵn có nhờ persistence và replication[^fn-persist]. Vì vậy nên chọn Functions khi muốn script có phiên bản gắn với mỗi lần deploy, còn `EVAL` khi script đơn giản và nằm ngay trong binary (nhận xét của người soạn). App nạp thư viện Functions lúc khởi động bằng `FUNCTION LOAD REPLACE <mã thư viện>`[^fn-load-syntax], rồi gọi hàm bằng `FCALL`.
 
 ### 8.2 Thiết kế key và hash tag
 
-*Đặt tên.* Tài liệu khuyên bám theo một schema, ví dụ `object-type:id` như `user:1000`[^keyspace-schema]; key quá dài là không nên (memory *và* so sánh key khi tra cứu[^keyspace-long]), key quá ngắn khó đọc[^keyspace-short]. Quy ước thực dụng (nhận xét của người soạn): `<dịch-vụ>:<kiểu>:<id>[:<phần>]`; thêm tiền tố phiên bản (`v2:`) cho dữ liệu cache có thể đổi định dạng — đổi tiền tố là "xóa cache" không tốn lệnh nào; *tách môi trường bằng instance*, không bằng tiền tố (nhầm tiền tố sẽ ghi vào dữ liệu thật); với Cluster đừng dùng nhiều database vì Cluster chỉ có database 0 và không cho `SELECT`[^cl-db0].
+*Đặt tên.* Hãy bám theo một schema, ví dụ `object-type:id` như `user:1000`[^keyspace-schema]. Key quá dài là không nên: tốn bộ nhớ, và việc tra key trong dataset có thể phải so sánh key nhiều lần[^keyspace-long]. Key quá ngắn thì khó đọc[^keyspace-short]. Quy ước thực dụng (nhận xét của người soạn):
 
-*Hash tag.* Slot, quy tắc `{...}` và việc lệnh nhiều key chỉ chạy khi mọi key cùng slot đã ở [chương 06, mục 7](06-partitioning.md) và [chương 16, mục 6](16-redis-ben-trong.md); điều cần nhớ khi đặt tên: nếu key chứa `{...}` thì chỉ phần giữa `{` đầu tiên và `}` đầu tiên sau nó được băm để tìm slot[^cl-hashtag-rule]; ví dụ `{user1000}.following` và `{user1000}.followers` cùng slot[^cl-hashtag-ex]; còn `foo{}{bar}` — `{` theo sau ngay bởi `}` — thì băm nguyên cả key[^cl-hashtag-empty]. Hash tag tạo hai thứ cùng lúc: (a) cho phép lệnh/script nhiều key và `RENAME` (hai key phải cùng slot[^rename-slot]); (b) *gom* mọi key cùng tag vào một slot, một master. Quy tắc chọn (nhận xét của người soạn):
+- Đặt key theo dạng `<dịch-vụ>:<kiểu>:<id>[:<phần>]`.
+- Thêm tiền tố phiên bản cho dữ liệu cache có thể đổi định dạng, như `v1:product:42` của `GET /products/42` ở mục 1. Khi định dạng đổi, ta lên `v2:`; đổi tiền tố như vậy coi như "xóa cache" mà không tốn lệnh nào.
+- *Tách môi trường bằng instance*, không bằng tiền tố, vì nhầm tiền tố là ghi vào dữ liệu thật.
+- Với Cluster, đừng dùng nhiều database: Cluster chỉ có database 0 và không cho `SELECT`[^cl-db0].
 
-1. Tag = *thực thể nhỏ nhất cần thao tác nhiều key nguyên tử*: `lock:{order:42}` + `fence:{order:42}` (mục 3), `{reports}` cho một queue + list processing (mục 4), `{post:42}` cho các HLL/bitmap của một bài. Không dùng tag thô như `{tenant}` hay hằng `{app}`: một tenant lớn thành slot nóng (F6), và hằng số thì dồn *toàn bộ* dữ liệu vào một slot — xóa sạch lợi ích phân vùng ([chương 06, mục 2](06-partitioning.md)).
-2. Đừng nội suy chuỗi do người dùng cung cấp vào *trong* hoặc *trước* phần `{}` nếu chưa lọc ký tự `{`/`}`: slot do `{` đầu tiên và `}` đầu tiên sau nó quyết định, nên chuỗi chứa `}` làm tag đổi nghĩa, còn chuỗi chứa `{…}` đứng trước tag đoạt luôn vai trò tag — vừa sai slot, vừa là cách kẻ tấn công cố ý dồn key vào một slot; chuỗi đứng *sau* tag thì không đổi slot (suy luận của người soạn từ quy tắc băm).
-3. Gom việc xây key vào *một* hàm/kiểu (xem phần Rust), không rải `format!` khắp nơi.
-4. Đang resharding thủ công thì thao tác nhiều key có thể tạm không dùng được dù đúng slot[^cl-resharding-multikey] (cũng đã nêu ở [chương 06, mục 7](06-partitioning.md)) — server trả `TRYAGAIN`[^src-tryagain], nên retry có giới hạn.
+*Hash tag.* Slot, quy tắc `{...}` và điều kiện "lệnh nhiều key chỉ chạy khi mọi key cùng slot" đã nằm ở [chương 06, mục 7](06-partitioning.md) và [chương 16, mục 6](16-redis-ben-trong.md). F4 ở mục 0 cũng đã nêu hệ quả thiết kế: pattern nào cần nhiều key trong một thao tác nguyên tử thì phải đặt tag ngay từ đầu. Ở đây chỉ nhắc điều cần nhớ khi đặt tên, rồi đến cách chọn tag. Nếu tên key có `{...}` thì Redis chỉ băm phần nằm giữa `{` đầu tiên và `}` đầu tiên sau nó để tìm slot[^cl-hashtag-rule]. Vì vậy `{user1000}.following` và `{user1000}.followers` rơi vào cùng một slot[^cl-hashtag-ex]. Riêng `foo{}{bar}` thì `{` đầu tiên đi liền với `}`, nên Redis băm nguyên cả key[^cl-hashtag-empty].
+
+Hash tag làm hai việc cùng lúc, và phải tính cả hai khi chọn tag:
+
+- Nó cho phép dùng lệnh và script nhiều key, kể cả `RENAME` (hai key của `RENAME` phải cùng slot[^rename-slot]).
+- Nó *gom* mọi key cùng tag vào một slot, tức một master.
+
+Vế thứ hai là lý do tag không nên to hơn mức cần thiết. Ba quy tắc chọn tag (nhận xét của người soạn):
+
+1. **Tag là đối tượng nhỏ nhất cần thao tác nguyên tử trên nhiều key.** Ví dụ trong `shop`: khóa và fence token của một đơn hàng chung `{order:42}` (`lock:{order:42}` và `fence:{order:42}`, mục 3); queue và list đang xử lý chung `{reports}` (mục 4); các HLL và bitmap thống kê của một sản phẩm chung `{product:42}` (mục 6). Đừng dùng tag thô như `{tenant}`, vì một tenant lớn sẽ thành slot nóng (F6). Tệ hơn là tag hằng như `{app}`: nó dồn *toàn bộ* dữ liệu vào một slot, xóa sạch lợi ích của việc phân vùng ([chương 06, mục 2](06-partitioning.md)).
+2. **Đừng nhét chuỗi do người dùng cung cấp vào *trong* hoặc *trước* phần `{...}` khi chưa lọc ký tự `{` và `}`.** Slot do `{` đầu tiên và `}` đầu tiên sau nó quyết định. Chuỗi chứa `}` nằm trong tag làm tag bị cắt ở chỗ khác; chuỗi chứa `{…}` đứng trước tag thì chiếm luôn vai trò tag. Cả hai trường hợp đều làm key rơi sai slot, và còn là cách để kẻ tấn công cố ý dồn key vào một slot. Chuỗi đứng *sau* tag thì không đổi được slot (suy luận của người soạn từ quy tắc băm).
+3. **Dựng key ở *một* chỗ.** Gom việc xây key vào một hàm hoặc một kiểu (ví dụ ở phần Rust) để quy tắc hash tag nằm ở một nơi, thay vì rải `format!` khắp code.
 
 ### 8.3 TTL hygiene
 
-*Quy tắc:* mọi key không phải dữ liệu chính đều phải có TTL, *đặt trong cùng lệnh tạo nó*: `SET … EX`, hoặc `INCR` + `EXPIRE … NX` trong `MULTI`, hoặc script. Các lệnh "cập nhật nội dung" (`INCR`, `LPUSH`, `HSET`) để TTL nguyên vẹn[^expire-untouched]; ngược lại ghi đè bằng `SET`[^set-ttl-cleared] (trừ khi kèm `KEEPTTL`[^set-keepttl]) hoặc `DEL` xóa TTL[^expire-cleared-by] — một đoạn code "chỉ sửa giá trị" bằng `SET` biến key có TTL thành key sống mãi. `RENAME` chuyển TTL sang tên mới[^rename-ttl].
+*Quy tắc.* Mọi key không phải dữ liệu chính đều phải có TTL, và phải đặt TTL ngay trong lệnh tạo key: `SET … EX`, hoặc `INCR` kèm `EXPIRE … NX` trong `MULTI`, hoặc trong một script. Nhưng TTL còn có thể biến mất khi ta sửa key về sau, và ở đây có vài cái bẫy (F2):
 
-*Kiểm kê.* `INFO keyspace` báo số key và số key có hạn của từng database[^info-keyspace] (dạng `dbN:keys=…,expires=…`): hiệu `keys − expires` là số key *không* có hạn — nếu bạn tưởng cả instance là cache mà con số đó lớn thì có rò rỉ. Muốn biết key nào: `SCAN` kèm `TTL`, lệnh trả `-1` cho key tồn tại nhưng không có hạn[^ttl-minus1]. Chọn TTL theo *lớp dữ liệu* (nhận xét của người soạn): cache — phút đến giờ, có jitter (mục 1); khóa — dài hơn p99 thời gian của đoạn găng nhưng đủ ngắn để pod chết không kẹt lâu; idempotency key — dài hơn cửa sổ retry của client (thường nhiều giờ đến ngày); session — idle timeout; counter theo kỳ — bằng kỳ + thời gian đối soát.
+- Lệnh xóa hoặc ghi đè nội dung key, như `DEL` và `SET`, thì xóa TTL[^expire-cleared-by]. Với `SET`, mỗi lần ghi thành công đều bỏ TTL cũ của key[^set-ttl-cleared]. Muốn giữ thì phải thêm `KEEPTTL`[^set-keepttl].
+- Ngược lại, các lệnh "cập nhật nội dung" như `INCR`, `LPUSH`, `HSET` để nguyên TTL[^expire-untouched]. `RENAME` thì chuyển TTL sang tên mới[^rename-ttl].
 
-*Hết hạn hàng loạt.* Cơ chế hết hạn của Redis (thụ động khi bị truy cập, chủ động theo chu trình lấy mẫu, trần CPU của chu trình, master phát `DEL` cho replica/AOF) đã ở [chương 16, mục 3](16-redis-ben-trong.md). Hệ quả cho pattern: gán cùng một TTL cho một lô lớn key tạo cùng lúc → hết hạn cùng lúc → thread chính bận xóa (suy luận của người soạn từ cơ chế đó); rải bằng jitter.
+Vì vậy một đoạn code tưởng là "chỉ sửa giá trị" mà dùng `SET`, chẳng hạn cập nhật lại một key cache của `shop`, sẽ biến key có TTL thành key sống mãi.
+
+*Kiểm kê.* Để kiểm tra `shop` có key nào quên TTL không, chạy `INFO keyspace`: với từng database, lệnh báo số key và số key có hạn[^info-keyspace], dạng `dbN:keys=…,expires=…`. Hiệu `keys − expires` là số key *không* có hạn. Nếu bạn tưởng cả instance là cache mà số này lớn thì đang có rò rỉ. Muốn biết đó là key nào, duyệt bằng `SCAN` (không dùng `KEYS`, xem mục 8.4) rồi gọi `TTL` cho từng key: lệnh trả `-1` nếu key tồn tại nhưng không có hạn[^ttl-minus1].
+
+*TTL theo lớp dữ liệu.* Mỗi lớp dữ liệu cần một TTL riêng (nhận xét của người soạn):
+
+- Cache sản phẩm (mục 1): tính bằng phút đến giờ, có jitter.
+- Khóa (mục 3): dài hơn p99 thời gian chạy của đoạn việc mà khóa bảo vệ, nhưng đủ ngắn để khi pod chết thì khóa không kẹt lâu.
+- Idempotency key (mục 3): dài hơn cửa sổ retry của client, thường tính bằng giờ đến ngày.
+- Session (mục 7): bằng idle timeout.
+- Counter theo kỳ (mục 6): bằng độ dài kỳ cộng thời gian đối soát.
+
+*Hết hạn hàng loạt.* Cơ chế hết hạn của Redis (thụ động khi key bị truy cập, chủ động theo một chu trình lấy mẫu có trần CPU, master phát `DEL` cho replica và AOF) đã nằm ở [chương 16, mục 3](16-redis-ben-trong.md). Hệ quả cho pattern: nếu một lô lớn key được tạo cùng lúc với cùng một TTL thì chúng cũng hết hạn cùng lúc, và thread chính phải bận xóa (suy luận của người soạn từ cơ chế đó). Cách tránh là rải thời điểm hết hạn bằng jitter, như đã làm với cache ở mục 1.
 
 ### 8.4 Anti-pattern
 
-**1. `KEYS pattern` trên production.** Tài liệu cảnh báo nên dùng `KEYS` với sự cẩn trọng tối đa trong môi trường production[^keys-warn]; nó O(N) trên toàn keyspace trên thread chính nên chặn mọi client[^lat-slow]. Thay bằng `SCAN`: duyệt tăng dần, trả ít phần tử mỗi lần nên dùng được trên production mà không có nhược điểm của `KEYS`/`SMEMBERS` vốn có thể chặn server nhiều giây trên collection lớn[^scan-prod]. Cái giá là bảo đảm yếu hơn: một phần tử có thể được trả nhiều lần (app phải chịu được trùng)[^scan-dup], một lần gọi có thể trả 0 phần tử và chưa phải là hết (chỉ cursor `0` mới báo hết)[^scan-zero], và duyệt có thể không bao giờ kết thúc nếu collection cứ lớn mãi[^scan-term]. `redis-cli --scan` dùng chính `SCAN`[^cli-scan].
+Chín anti-pattern dưới đây là những cách ghép sai mà `shop` cần tránh; mỗi mục nêu vì sao tệ và nên làm gì thay.
 
-**2. Big key (F5).** Một hash/list/zset/bitmap/stream khổng lồ làm `DEL` chặn thread chính[^unlink-doc]; *tìm* chúng bằng `redis-cli --bigkeys` — công cụ dùng `SCAN` nên chạy được trên server bận (có thể giãn tốc độ bằng `-i`)[^bigkeys-doc] — và ước lượng bằng `MEMORY USAGE key` (lấy mẫu các giá trị lồng, mặc định 5 mẫu)[^memusage-doc]. Chữa: giới hạn kích thước ngay lúc ghi (list `LTRIM`: tài liệu gọi là collection có trần[^lists-capped]; stream `MAXLEN`; ZSET `ZREMRANGEBYRANK`), chia thành bucket (`bit-number / M` như bitmap[^bm-split]), TTL, và xóa bằng `UNLINK`. *Đừng* trộn mọi thứ vào một key "settings" khổng lồ.
+**1. `KEYS pattern` trên production.** `KEYS` duyệt toàn bộ keyspace, tức O(N), trên thread chính, nên mọi client khác phải đứng chờ[^lat-slow]. Vì vậy chỉ nên dùng nó với sự cẩn trọng tối đa trên production[^keys-warn]; sự cố `KEYS user:*` ở đầu mục là đúng loại này. Thay bằng `SCAN`: nó duyệt từng bước và mỗi lần chỉ trả ít phần tử, nên dùng được trên production mà không có nhược điểm của `KEYS` hay `SMEMBERS`, vốn có thể chặn server nhiều giây trên collection lớn[^scan-prod]. Đổi lại, `SCAN` có bảo đảm yếu hơn, và code gọi nó phải chịu được ba điều:
 
-**3. Hot key (F6).** Phát hiện: `OBJECT FREQ` trả bộ đếm tần suất truy cập logarit nhưng *chỉ dùng được khi* `maxmemory-policy` là một policy LFU[^objfreq]. Giảm: bản sao cục bộ/`CLIENT TRACKING` (mục 7.3), nhân key `#0…#N` và đọc ngẫu nhiên (mục 1.5), gom ghi cục bộ rồi đẩy lô (counter, mục 6.1), hoặc chuyển key nóng sang instance riêng.
+- `SCAN` có thể trả cùng một phần tử nhiều lần, nên app phải xử lý được kết quả trùng[^scan-dup].
+- Một lần gọi có thể trả 0 phần tử mà vẫn chưa hết; chỉ khi cursor về `0` mới là hết[^scan-zero].
+- Nếu collection cứ lớn mãi, vòng duyệt có thể không bao giờ kết thúc[^scan-term].
 
-**4. Dùng Redis làm nguồn sự thật mà không có persistence tương xứng.** Tài liệu persistence nêu dấu hiệu chung để dùng *cả hai* RDB và AOF là khi muốn mức an toàn dữ liệu tương đương PostgreSQL[^pers-both]; chỉ RDB có thể mất vài phút gần nhất[^pers-rdb-lose]; AOF `everysec` mất khoảng một giây[^aof-everysec] (ngoại lệ và chi tiết: [chương 16, mục 4](16-redis-ben-trong.md)); và replication bất đồng bộ (F1)[^repl-async]. Quy tắc (nhận xét của người soạn): Redis chỉ giữ (a) dữ liệu dẫn xuất dựng lại được từ DB — cache, leaderboard, counter xấp xỉ; hoặc (b) trạng thái điều phối ngắn hạn mà mất đi là chấp nhận được — rate limiter, khóa "vì hiệu quả". Phép thử: *nếu `FLUSHALL` chạy lúc này thì cái gì hỏng và mất bao lâu để dựng lại?* — nếu câu trả lời là "mất tiền" hoặc "không dựng lại được" thì dữ liệu đó thuộc về DB.
+`redis-cli --scan` dùng chính `SCAN` nên có cùng các giới hạn trên[^cli-scan]; script vận hành muốn liệt kê key thì nên dùng nó thay cho `KEYS` (nhận xét của người soạn).
 
-**5. Trộn lớp độ bền trong một instance.** Cache cần eviction; lock/job/idempotency cần *không* bị evict. Chi tiết các policy ở mục 1.5 và [chương 16, mục 3](16-redis-ben-trong.md); tài liệu khuyên chạy hai instance thay vì ép một instance làm cả hai[^evict-volatile]. Tách theo *lớp độ bền*: instance cache (eviction LRU/LFU, không cần persistence); instance trạng thái (`noeviction`, AOF) cho khóa/queue/session.
+**2. Big key (F5).** Xóa một hash, list, zset, bitmap hay stream khổng lồ bằng `DEL` sẽ chặn thread chính[^unlink-doc]. Vì vậy cần *tìm* big key trước khi chúng gây sự cố, rồi giữ cho chúng không lớn mãi. Để tìm:
 
-**6. Pub/Sub cho việc phải giao đủ.** Tin mất vĩnh viễn khi subscriber lỗi hay đứt mạng[^ps-lost] — dùng Stream (mục 4).
+- `redis-cli --bigkeys` dùng `SCAN` nên chạy được trên server đang bận; có thể thêm `-i` để giãn tốc độ quét[^bigkeys-doc].
+- `MEMORY USAGE key` ước lượng dung lượng một key; với giá trị lồng nhau, lệnh chỉ lấy mẫu, mặc định 5 mẫu[^memusage-doc].
 
-**7. Không giới hạn tăng trưởng.** List/stream/ZSET/hash không trần + không TTL sẽ chạm `maxmemory`: `noeviction` thì lỗi ghi, policy eviction thì mất key khác. Mỗi cấu trúc "chỉ thêm" phải có cách cắt (TTL, `LTRIM`, `MAXLEN ~`, `ZREMRANGEBYRANK`) (nhận xét của người soạn).
+Để chữa:
 
-**8. Retry mù lệnh không idempotent.** Khi lệnh lỗi vì rớt kết nối, `ConnectionManager` trả lỗi cho người dùng *và* kích hoạt reconnect nền[^rs-cm] — nhưng lệnh có thể đã được server thực thi. `INCR` retry là đếm đôi. Hai lối thoát (nhận xét của người soạn): dùng dạng idempotent (`SET` thay vì `INCR` khi có thể), hoặc gắn *id yêu cầu* và dedup bằng script:
+- Giới hạn kích thước ngay lúc ghi: list dùng `LTRIM` để chỉ giữ N phần tử mới nhất, tức collection có trần[^lists-capped]; stream dùng `MAXLEN`; ZSET dùng `ZREMRANGEBYRANK`.
+- Chia thành nhiều bucket, ví dụ bitmap chia theo `bit-number / M`[^bm-split].
+- Đặt TTL, và khi cần xóa thì dùng `UNLINK` thay cho `DEL`.
+- *Đừng* gom mọi thứ vào một key "settings" khổng lồ.
+
+**3. Hot key (F6).** Hot key là key bị truy cập dồn dập hơn hẳn phần còn lại. Muốn phát hiện, dùng `OBJECT FREQ`: nó trả bộ đếm logarit về tần suất truy cập, nhưng *chỉ dùng được khi* `maxmemory-policy` là một policy LFU[^objfreq]. Để giảm tải cho key nóng, có bốn hướng:
+
+- Giữ bản sao cục bộ trong từng pod, kèm cách làm mất hiệu lực như `CLIENT TRACKING` (mục 7.3).
+- Nhân key thành `#0…#N` (như `product:42#0…#7`) rồi mỗi lần đọc chọn ngẫu nhiên một bản (mục 1.5).
+- Với counter, gom ghi cục bộ trong pod rồi đẩy lên Redis theo lô (mục 6.1).
+- Hoặc chuyển key nóng sang một instance riêng.
+
+**4. Dùng Redis làm nguồn sự thật mà không có persistence tương xứng.** Redis có hai cách ghi dữ liệu xuống đĩa: RDB (chụp snapshot theo định kỳ) và AOF (ghi lại từng lệnh ghi). Cách nào cũng có thể mất dữ liệu. Chỉ dùng RDB thì nếu Redis chết đột ngột, ta có thể mất vài phút dữ liệu gần nhất[^pers-rdb-lose]. AOF với `everysec` thì mất khoảng một giây dữ liệu[^aof-everysec] (ngoại lệ và chi tiết ở [chương 16, mục 4](16-redis-ben-trong.md)). Muốn mức an toàn dữ liệu tương đương PostgreSQL thì nên dùng *cả hai*[^pers-both]. Và dù đã ghi xuống đĩa, replication bất đồng bộ vẫn có thể làm mất write khi failover (F1)[^repl-async].
+
+Quy tắc (nhận xét của người soạn): Redis chỉ nên giữ hai loại dữ liệu.
+
+- (a) Dữ liệu dẫn xuất, dựng lại được từ DB: cache, bảng xếp hạng, counter xấp xỉ.
+- (b) Trạng thái điều phối ngắn hạn mà mất đi cũng chấp nhận được: rate limiter, khóa "vì hiệu quả".
+
+Phép thử: *nếu `FLUSHALL` chạy ngay lúc này thì cái gì hỏng, và mất bao lâu để dựng lại?* Nếu câu trả lời là "mất tiền" hoặc "không dựng lại được" thì dữ liệu đó thuộc về DB. Với `shop`, đơn hàng và thanh toán thuộc loại này, nên phải nằm trong Postgres chứ không chỉ trong Redis.
+
+**5. Trộn lớp độ bền trong một instance.** Cache cần eviction: đầy bộ nhớ thì Redis phải bỏ bớt key. Ngược lại khóa, job và idempotency key không được bị evict. Việc evict mất khóa lẫn job chính là một nửa sự cố ở đầu mục. Chi tiết các policy ở mục 1.5 và [chương 16, mục 3](16-redis-ben-trong.md). Thường tốt hơn là chạy hai instance riêng, mỗi instance một lớp, thay vì ép một instance làm cả hai việc[^evict-volatile]. Với `shop`, nghĩa là tách theo *lớp độ bền* (nhận xét của người soạn):
+
+- Instance cache: eviction LRU hoặc LFU, không cần persistence.
+- Instance trạng thái: `noeviction` và AOF, chứa khóa, queue và session.
+
+**6. Pub/Sub cho việc phải giao đủ.** Nếu subscriber không xử lý được tin, vì lỗi hay vì đứt mạng, thì tin mất vĩnh viễn[^ps-lost]. Vậy việc nào phải giao đủ, như gửi email xác nhận đơn của `shop`, thì dùng Stream (mục 4).
+
+**7. Không giới hạn tăng trưởng.** Một list, stream, ZSET hay hash vừa không có trần kích thước vừa không có TTL thì sớm muộn cũng chạm `maxmemory`. Khi đó, nếu policy là `noeviction` thì các lệnh ghi bị lỗi; còn nếu là policy eviction thì Redis xóa mất key khác. Vì vậy mỗi cấu trúc "chỉ thêm" phải có cách cắt bớt: TTL, `LTRIM`, `MAXLEN ~` hoặc `ZREMRANGEBYRANK` (nhận xét của người soạn).
+
+**8. Retry mù lệnh không idempotent.** Giả sử một lệnh của `shop` lỗi vì rớt kết nối. `ConnectionManager` trả lỗi đó cho code gọi và đồng thời kích hoạt reconnect ở nền[^rs-cm]. Nhưng lệnh vẫn có thể đã được server thực thi, nên nếu code retry mù thì một lệnh `INCR` sẽ bị đếm hai lần. Có hai lối thoát (nhận xét của người soạn): dùng dạng idempotent của lệnh (`SET` thay cho `INCR` khi làm được), hoặc gắn một *id yêu cầu* vào mỗi lần đếm rồi dedup (loại các lần trùng) bằng script:
 
 ```lua
 -- KEYS[1] = dedup:{post:42}:<req_id>; KEYS[2] = views:{post:42}   (cùng hash tag {post:42})
@@ -982,44 +1397,74 @@ end
 return tonumber(redis.call('GET', KEYS[2]))      -- bản retry: không đếm lại
 ```
 
-(Hai key phải cùng hash tag — tag theo *counter*, không theo `req_id`; nếu không script bị `CROSSSLOT`[^src-crossslot].) Đây là phiên bản thu nhỏ của idempotency key ở mục 3.
+Trong script, `post:42` là id của đối tượng được đếm, như tham số `post` ở mục 6 (với `shop` đó là một sản phẩm). Hai key phải chung hash tag, và tag lấy theo *counter* (`{post:42}`) chứ không theo `req_id`; nếu không, script bị `CROSSSLOT`[^src-crossslot]. Nói gọn, đây là phiên bản thu nhỏ của cơ chế `Idempotency-Key` cho `POST /payments` ở mục 3.
 
-**9. Một kết nối mỗi request, và không pipeline.** Mỗi kết nối mới tốn thêm bắt tay TCP (và TLS/xác thực nếu có) trước lệnh đầu tiên (nhận xét của người soạn); với async, docs crate nói một connection multiplexed rẻ để clone và dùng đồng thời nên không cần pool[^rs-no-pool] — giữ kết nối dài (`ConnectionManager`) và gom lệnh độc lập vào pipeline (mục 8.1; cơ chế ở [chương 16, mục 1](16-redis-ben-trong.md)).
+**9. Một kết nối mỗi request, và không pipeline.** Mỗi kết nối mới tốn thêm một lần bắt tay TCP (cộng TLS và xác thực nếu có) trước khi gửi được lệnh đầu tiên (nhận xét của người soạn). Với async thì không cần mở kết nối mới cho mỗi request: một connection multiplexed rẻ để clone và dùng đồng thời an toàn, nên không cần cả connection pool[^rs-no-pool]. Vì vậy handler của `shop` nên giữ kết nối dài (`ConnectionManager`) và gom các lệnh độc lập vào pipeline (mục 8.1; cơ chế ở [chương 16, mục 1](16-redis-ben-trong.md)).
 
 ### 8.5 Bảng rà soát trước khi đưa một pattern lên production
 
+Trước khi `shop` đưa thêm một pattern Redis lên production, hãy trả lời từng câu dưới đây; câu nào trả lời "không" thì làm theo cột bên phải.
+
 | Câu hỏi (danh sách kiểm — nhận xét của người soạn) | Nếu trả lời "không" |
 |---|---|
-| Mất toàn bộ dữ liệu pattern này trong 1 giây cuối (F1) thì chấp nhận được? | đưa trạng thái vào DB, Redis chỉ là đường tăng tốc |
+| Mất toàn bộ dữ liệu của pattern này trong 1 giây cuối (F1) thì có chấp nhận được không? | đưa trạng thái vào DB, Redis chỉ là đường tăng tốc |
 | Mọi key có TTL ngay khi tạo, hoặc có trần kích thước? | thêm `EX`/`EXPIRE NX`/`LTRIM`/`MAXLEN` |
-| Pattern nằm trên instance có eviction khác loại độ bền? | tách instance |
-| Thao tác "đọc rồi quyết định rồi ghi" nằm trong *một* script/`MULTI` thích hợp? | gói vào Lua, đừng dựa pipeline |
+| Pattern có nằm trên instance mà chính sách eviction hợp với lớp độ bền của nó không? | tách instance |
+| Thao tác "đọc, quyết định rồi ghi" có nằm gọn trong *một* script (hoặc một `MULTI` phù hợp) không? | gói vào Lua, đừng dựa vào pipeline |
 | Mọi lệnh nhiều key có chung hash tag *nhỏ nhất đủ dùng* (F4)? | sửa tên key; tránh tag thô |
-| Lệnh/script nào có thể O(N) hoặc chạy lâu (F5)? | `SCAN`, `UNLINK`, chia bucket, giới hạn script |
-| Có key nóng đơn lẻ (F6)? | bản sao cục bộ, nhân key, gom ghi |
-| Retry sau lỗi kết nối có làm đếm đôi/giữ khóa mồ côi? | dedup theo request id, hoặc TTL + token |
-| Redis không trả lời thì hệ thống fail-open hay fail-closed, và đã quyết định có chủ đích? | ghi quyết định vào code + runbook |
+| Không lệnh hay script nào có thể O(N) hoặc chạy lâu (F5)? | `SCAN`, `UNLINK`, chia bucket, giới hạn script |
+| Không có key nào nóng đơn lẻ (F6)? | bản sao cục bộ, nhân key, gom ghi |
+| Retry sau lỗi kết nối có an toàn, không làm đếm đôi hay để lại khóa mồ côi? | dedup theo request id, hoặc TTL + token |
+| Nếu Redis không trả lời, hệ thống fail-open hay fail-closed, và đó có phải quyết định có chủ đích không? | ghi quyết định vào code + runbook |
 | Sống được khi Redis khởi động lại với dữ liệu trống? | thử khởi động lạnh trước khi tin cậy |
 
 <details><summary>Đi sâu: một vài chi tiết source 7.2.5 liên quan tới các lệnh nhiều key</summary>
 
-- `CROSSSLOT` được sinh trong `clusterRedirectClient` khi `error_code` là `CLUSTER_REDIR_CROSS_SLOT`, với thông điệp "Keys in request don't hash to the same slot"[^src-crossslot].
-- Trong `script.c` có `scriptVerifyClusterState`: khi script chạy trong cluster, các key được script *truy cập* mà không khai báo trước cũng bị kiểm slot — nếu khác slot thì script lỗi, trừ khi script không có `#!` (tài liệu nói script kiểu này đụng được key thuộc slot khác nhau[^sc-noshebang-slots]) hoặc có cờ cho phép cross-slot[^script-crossslot]; cờ `allow-cross-slot-keys` có trong bảng cờ script[^script-flags-src]. Đó là công cụ nâng cao, mặc định đừng dùng (nhận xét của người soạn).
-- `RENAME` ghi đè key đích thực hiện một `DEL` ngầm, nên nếu key đích chứa giá trị rất lớn thì có thể gây độ trễ dù `RENAME` thường là hằng số[^rename-del]; và trong Cluster cả hai key phải cùng hash slot[^rename-slot].
+- Trong source, hàm `clusterRedirectClient` trả lỗi `CROSSSLOT` khi `error_code` là `CLUSTER_REDIR_CROSS_SLOT`, với thông điệp `Keys in request don't hash to the same slot`[^src-crossslot].
+- Khi đang resharding thủ công, thao tác nhiều key có thể tạm không dùng được dù mọi key đã cùng slot[^cl-resharding-multikey] (cũng đã nêu ở [chương 06, mục 7](06-partitioning.md)). Lúc đó server trả `TRYAGAIN`[^src-tryagain], nên code cần retry, nhưng có giới hạn số lần (nhận xét của người soạn).
+- Trong `script.c`, hàm `scriptVerifyClusterState` kiểm slot cả với những key mà script *truy cập* nhưng không khai báo trước, khi script chạy trong Cluster[^script-crossslot]. Nếu các key đó khác slot thì script lỗi, trừ khi script không có `#!` (script kiểu này đụng được key thuộc các slot khác nhau[^sc-noshebang-slots]) hoặc có cờ cho phép cross-slot. Cờ đó là `allow-cross-slot-keys`, nằm trong bảng cờ script của source cùng cờ `no-cluster`[^script-flags-src]. Đây là công cụ nâng cao, mặc định đừng dùng (nhận xét của người soạn).
+- Nếu key đích của `RENAME` đã tồn tại, Redis ghi đè nó bằng một `DEL` ngầm, nên key đích chứa giá trị rất lớn có thể gây độ trễ dù `RENAME` thường chạy trong thời gian hằng số[^rename-del]. Trong Cluster, cả hai key còn phải cùng hash slot[^rename-slot].
 
 </details>
 
-**Quay lại Q8:** pipeline giảm round trip nhưng không nguyên tử; `MULTI`/`EXEC` liền khối nhưng không rollback và không rẽ nhánh; Lua/Functions cho "đọc-quyết định-ghi" nguyên tử với cái giá là chặn server; đặt tên key có cấu trúc và hash tag *nhỏ nhất đủ dùng*; TTL đặt ngay lúc tạo; và tránh `KEYS`, big/hot key, trộn lớp độ bền, hay dùng Redis làm nguồn sự thật mà không có persistence tương xứng.
+**Quay lại Q8:** để các pattern của `shop` ghép với nhau đúng, ta chọn công cụ theo mức nguyên tử cần có (pipeline chỉ giảm round trip; `MULTI`/`EXEC` chạy liền nhưng không rollback và không rẽ nhánh; Lua/Functions cho việc "đọc, quyết định rồi ghi" nguyên tử, đổi lại chặn server), đặt tên key có cấu trúc với hash tag nhỏ nhất đủ dùng, đặt TTL ngay lúc tạo, và tránh `KEYS`, big key, hot key, việc trộn dữ liệu bền với cache, cũng như việc dùng Redis làm nguồn sự thật khi chưa có persistence tương xứng.
 
 ## Liên hệ với Rust
 
-Phần này tổng hợp những gì *chung* cho mọi pattern ở trên khi viết bằng Rust; code riêng từng pattern nằm trong các mục "Đi sâu" của mục 1–7. Dùng docs.rs ghim `redis` 1.7.1 (như chương 16). Ví dụ *chỉ minh họa*, chương này không biên dịch hay chạy.
+Các pod của `shop` là những service Rust gọi Redis qua crate `redis` 1.7.1, nên mọi pattern ở mục 1–7 đều đi qua cùng một lớp client. Vì vậy phần này gom những điều chung khi dùng crate trong `shop`: bật feature nào, mở những loại connection nào, timeout và việc hủy future để lại hậu quả gì, và lỗi nào nghĩa là "kết quả không biết".
 
-*Feature của crate.* Nhiều kiểu chỉ có khi bật feature: `ConnectionManager` cần `aio` và `connection-manager`[^rs-cm-feature], và để chạy trên Tokio cần thêm `tokio-comp`[^rs-feat-tokio] (thiếu cả `tokio-comp` lẫn `smol-comp` thì phần `aio` không biên dịch được[^rs-feat-runtime]); `Script` cần `script`[^rs-script-feature]; các kiểu Stream cần `streams`[^rs-streams-feature]; module `redis::caching` cần `cache-aio`[^rs-caching-feature]; module `redis::cluster` cần `cluster`[^rs-cluster-feature]. Trong 1.7.1, `script` và `streams` là feature mặc định, còn runtime async (`tokio-comp`/`smol-comp`) là tùy chọn[^rs-feature-default] — nên khi tắt feature mặc định phải bật lại đúng tên. Kiểm tra tên feature trên docs.rs trước khi viết `Cargo.toml`.
+Code riêng của từng pattern nằm trong các mục "Đi sâu" của mục 1–7. Tên kiểu và hàm ở đây lấy từ docs.rs bản 1.7.1 (như chương 16); các ví dụ chỉ để minh họa, chương này không biên dịch hay chạy chúng.
 
-*Topology kết nối — bốn loại, không dùng chung một cái cho mọi thứ.* (1) *Traffic thường:* một `ConnectionManager` clone cho mọi task — mọi bản clone gửi request đồng thời trên cùng một connection bên dưới[^rs-cm-clone] và tự nối lại khi rớt[^rs-cm] (chi tiết ở [chương 16, phần Liên hệ với Rust](16-redis-ben-trong.md)). (2) *Lệnh block* (`BLMOVE`, `XREADGROUP … BLOCK`): `processInputBuffer` dừng xử lý khi client đang bị chặn[^net-blocked] và lệnh trong pipeline chạy theo thứ tự gửi[^sc-pipe-order], nên lệnh block trên connection dùng chung giữ các lệnh sau của *mọi task chung connection* phía sau nó (suy luận của người soạn, như chương 16) — dùng `ConnectionManager` *riêng* cho từng vòng block, và đặt `response_timeout` của nó lớn hơn thời gian block (hoặc `None`): theo source 1.7.1 mặc định là 500 ms cho mọi lệnh, kể cả lệnh block[^rs-default-response-timeout] (suy luận của người soạn từ source; chưa chạy thử). (3) *`WATCH`/`MULTI` thủ công:* connection riêng (không phải clone của manager dùng chung): trạng thái `WATCH` gắn với một connection, và docs crate cảnh báo không chạy đồng thời nhiều transaction trên các clone của cùng một connection multiplexed vì `WATCH`/`MULTI`/`EXEC` của chúng có thể xen kẽ nhau[^rs-tx-async-warn]. Crate có sẵn vòng lặp tự `WATCH` rồi thử lại tới khi thành công: `redis::transaction` cho API đồng bộ[^rs-transaction] và `redis::aio::transaction_async` cho async[^rs-tx-async]; closure có thể chạy nhiều lần nên side effect trong đó phải idempotent[^rs-tx-closure]. Khi tranh chấp cao, Lua thường vẫn là lựa chọn dễ đúng hơn (nhận xét của người soạn). (4) *Pub/Sub:* `PubSub` là connection dành riêng cho message pubsub RESP2[^rs-pubsub]; một client RESP2 đang subscribe chỉ được chạy vài lệnh[^ps-resp2].
+*Feature của crate.* Nhiều kiểu của crate chỉ có khi bật đúng feature trong `Cargo.toml`. Các kiểu hay gặp trong chương này và feature đi kèm:
 
-*Timeout và hủy — hai tầng.* `ConnectionManagerConfig` có `response_timeout` (connection mới sẽ timeout các thao tác sau khoảng này; đặt `None` để không timeout) và `connection_timeout` cho mỗi lần kết nối[^rs-cm-config]; đây là trần *toàn cục* để Redis chậm không treo task vô hạn. Theo source 1.7.1, giá trị mặc định là 500 ms cho phản hồi và 1 giây cho mỗi lần kết nối[^rs-default-response-timeout][^rs-default-connection-timeout] (chi tiết cài đặt, có thể đổi giữa các bản) — nên script chạy lâu hơn 500 ms, hay lệnh block lâu hơn, sẽ bị timeout ở phía client dù server vẫn xử lý (suy luận của người soạn từ source). Chính sách *theo lời gọi* (limiter fail-open sau 20 ms…) dùng `tokio::time::timeout`: hết giờ thì future bị hủy[^tokio-timeout] — nhưng lệnh đã gửi không bị hủy ở server: docs của `MultiplexedConnection` nói hủy future không có nghĩa là request đã gửi bị hủy[^rs-mux], và `ConnectionManager` là proxy bọc một multiplexed connection[^rs-cm-wraps] (suy luận của người soạn từ hai nguồn). Ma trận hệ quả (suy luận của người soạn):
+- `ConnectionManager` cần cả `aio` lẫn `connection-manager`[^rs-cm-feature].
+- `aio` cần thêm một runtime async: `shop` chạy trên Tokio nên bật `tokio-comp`[^rs-feat-tokio]. Nếu thiếu cả `tokio-comp` lẫn `smol-comp`, phần `aio` không biên dịch được[^rs-feat-runtime].
+- `Script` cần feature `script`[^rs-script-feature].
+- Các kiểu Stream (dùng cho queue ở mục 4) cần `streams`[^rs-streams-feature].
+- Module `redis::caching` cần `cache-aio`[^rs-caching-feature].
+- Module `redis::cluster` cần `cluster`[^rs-cluster-feature].
+
+Về mặc định, ở bản 1.7.1 `script` và `streams` đã bật sẵn, còn runtime async (`tokio-comp`, `smol-comp`) là tùy chọn[^rs-feature-default]. Vì vậy khi tắt các feature mặc định, phải bật lại đúng tên những feature mình dùng, và nên đối chiếu tên trên docs.rs trước khi viết `Cargo.toml`.
+
+*Topology kết nối: bốn loại, không dùng chung một connection cho mọi việc.* Bật xong feature, `shop` còn phải quyết định mở connection nào cho việc gì. Câu trả lời là bốn loại, mỗi loại cho một kiểu việc.
+
+*(1) Traffic thường.* Mỗi pod tạo một `ConnectionManager` và đưa cho mỗi task một bản clone. Mọi bản clone gửi request đồng thời trên cùng một connection bên dưới[^rs-cm-clone]. Khi connection rớt, manager tự nối lại[^rs-cm]. Chi tiết nằm ở [chương 16, phần Liên hệ với Rust](16-redis-ben-trong.md).
+
+*(2) Lệnh block.* Đó là các lệnh như `BLMOVE` và `XREADGROUP … BLOCK`, chẳng hạn vòng chờ job của worker ở mục 4. Có hai điều cần biết ở phía server. Thứ nhất, lệnh trong một pipeline chạy theo đúng thứ tự gửi[^sc-pipe-order]. Thứ hai, khi client đang bị chặn, Redis dừng xử lý phần lệnh còn lại của client đó; trong source Redis 7.2.5, hàm làm việc này là `processInputBuffer`[^net-blocked]. Lệnh của các task nối đuôi nhau trên cùng một connection, nên một lệnh block giữ lại mọi lệnh gửi sau nó, của *mọi* task dùng chung connection (suy luận của người soạn, như ở chương 16). Vì vậy mỗi vòng block cần một `ConnectionManager` *riêng*, và `response_timeout` của manager đó phải lớn hơn thời gian block hoặc đặt `None` (lý do ở phần timeout bên dưới).
+
+*(3) `WATCH`/`MULTI` thủ công.* Phải dùng một connection riêng, không phải clone của manager dùng chung, vì trạng thái `WATCH` gắn với một connection. Cũng đừng chạy đồng thời nhiều transaction trên các clone của cùng một connection multiplexed (nhiều task cùng gửi lệnh trên đó, như `ConnectionManager`): `WATCH`/`MULTI`/`EXEC` của chúng có thể xen kẽ nhau, và docs của crate cảnh báo đúng điều đó[^rs-tx-async-warn].
+
+Crate có sẵn vòng lặp tự `WATCH` rồi thử lại tới khi thành công, nên không cần tự viết: `redis::transaction` cho API đồng bộ[^rs-transaction]. Với async, dùng `redis::aio::transaction_async`[^rs-tx-async]. Closure truyền vào có thể chạy nhiều lần, nên side effect trong đó phải idempotent[^rs-tx-closure]. Khi tranh chấp cao, Lua thường vẫn là lựa chọn dễ đúng hơn (nhận xét của người soạn).
+
+*(4) Pub/Sub.* `PubSub` là một connection dành riêng cho message pubsub RESP2[^rs-pubsub]. Cần tách riêng vì một client RESP2 đang subscribe chỉ được chạy vài lệnh[^ps-resp2]. Nếu `shop` dùng Pub/Sub để báo cache cục bộ đã cũ (mục 7), mỗi pod sẽ subscribe trên một connection như vậy, tách khỏi connection chạy lệnh thường.
+
+*Timeout và hủy: hai tầng.* Connection nào cũng cần một trần thời gian chờ, và trần đó có hai tầng. Tầng thứ nhất là timeout *toàn cục* của connection, để Redis chậm không làm task treo vô hạn. Trong `ConnectionManagerConfig` (cấu hình dùng khi tạo `ConnectionManager`), `response_timeout` là khoảng chờ tối đa cho mỗi thao tác của connection mới; đặt `None` nếu không muốn timeout. Ngoài ra còn có `connection_timeout`, áp cho mỗi lần kết nối[^rs-cm-config].
+
+Trong source 1.7.1, `response_timeout` mặc định là 500 ms[^rs-default-response-timeout]. `connection_timeout` mặc định là 1 giây[^rs-default-connection-timeout]. Cả hai là chi tiết cài đặt, có thể đổi giữa các bản. Hệ quả: script chạy lâu hơn 500 ms, hay lệnh block chờ lâu hơn thế, sẽ bị timeout ở phía client dù server vẫn xử lý (suy luận của người soạn từ source; chưa chạy thử). Đó là lý do manager riêng cho vòng block ở trên phải nới `response_timeout`.
+
+Tầng thứ hai là chính sách *theo từng lời gọi*. Ví dụ limiter của `shop` cho request đi qua (fail-open) nếu Redis không trả lời trong 20 ms (mục 2). Chính sách này dùng `tokio::time::timeout`: hết giờ thì future bị hủy[^tokio-timeout].
+
+Nhưng hủy future không hủy lệnh đã gửi. `MultiplexedConnection` cho phép bỏ future mà không cần poll tới khi xong; request đã gửi tới server thì không vì thế mà bị hủy[^rs-mux]. `ConnectionManager` là proxy bọc một multiplexed connection[^rs-cm-wraps], nên điều đó cũng đúng với nó (suy luận của người soạn từ hai nguồn). Với từng pattern của `shop`, một lệnh bị hủy mà vẫn chạy để lại hậu quả khác nhau (suy luận của người soạn):
 
 | Pattern | Lệnh bị hủy nhưng đã chạy → hậu quả | Phòng |
 |---|---|---|
@@ -1029,11 +1474,13 @@ Phần này tổng hợp những gì *chung* cho mọi pattern ở trên khi vi�
 | Idempotency `SET NX` | key `P` mồ côi tới hết TTL | TTL ngắn của `P`; DB là trọng tài |
 | `INCR` counter | đếm đôi nếu retry | dedup theo request id (mục 8.4) |
 
-*Lỗi và "kết quả không chắc".* `RedisError` có `is_timeout()` (lỗi do I/O time out; docs ghi rõ kết quả có thể không chính xác tùy nền tảng[^rs-err]) và `is_connection_dropped()` (lỗi do connection bị rớt[^rs-err-drop]). Quy ước dùng được (nhận xét của người soạn): hai loại lỗi này nghĩa là *kết quả không biết* — với lệnh không idempotent đừng retry mù; với lệnh idempotent (`SET`, `DEL`, script so token) retry an toàn.
+*Lỗi và "kết quả không chắc".* `RedisError` có hai hàm để phân loại lỗi. `is_timeout()` trả `true` khi lỗi do I/O time out; docs ghi thêm rằng kết quả này có thể không chính xác tùy nền tảng[^rs-err]. `is_connection_dropped()` trả `true` khi lỗi do connection bị rớt[^rs-err-drop].
 
-*Script là tài nguyên dùng chung bất biến.* `Script` "có thể được chia sẻ và bất biến"[^rs-script-shared] — nên đặt trong `static` khởi tạo lười (`std::sync::LazyLock`: giá trị được khởi tạo ở lần truy cập đầu[^lazylock]) như ở các ví dụ trước, thay vì `Script::new` mỗi lời gọi (`Script::new` tính SHA1 của mã script[^rs-script-sha1]).
+Quy ước dùng được: coi cả hai lỗi này là *kết quả không biết*, tức lệnh có thể đã chạy xong mà pod không biết (nhận xét của người soạn). Vì vậy lệnh idempotent (chạy thêm lần nữa vẫn cho cùng kết quả, như `SET`, `DEL`, script so token) thì retry an toàn, còn lệnh không idempotent thì đừng retry mù.
 
-*Cluster và key.* Gom việc dựng key vào một kiểu để quy tắc hash tag nằm một chỗ:
+*Script là tài nguyên dùng chung, bất biến.* Đối tượng `Script` bất biến và có thể dùng chung[^rs-script-shared]. Vì vậy các script của `shop`, như script `UNLOCK` ở mục 3, nên nằm trong một `static` khởi tạo lười, như trong các ví dụ trước. `std::sync::LazyLock` làm việc đó: nó khởi tạo giá trị ở lần truy cập đầu tiên[^lazylock]. Nhờ vậy `Script::new`, vốn tính SHA1 của mã script[^rs-script-sha1], chỉ chạy một lần thay vì ở mỗi lời gọi.
+
+*Cluster và key.* Trên Cluster, thao tác nhiều key chỉ chạy được khi mọi key cùng slot (F4), và hash tag `{…}` là cách ép chúng cùng slot. Vì vậy nên gom việc dựng key vào một kiểu, để quy tắc hash tag nằm đúng một chỗ. Ví dụ dưới dựng khóa và fence counter của một đơn hàng `shop`:
 
 ```rust
 // Minh họa, KHÔNG được biên dịch trong chương này.
@@ -1046,135 +1493,157 @@ impl OrderKeys {
 // và lọc '{' '}' nếu nó đứng trong hoặc trước phần {…} (mục 8.2).
 ```
 
-Module `redis::cluster` (đồng bộ, cần feature `cluster`[^rs-cluster-feature]) định tuyến request theo slot và hỏi lại topology khi nhận chỉ báo cụm đã đổi[^rs-cluster], và pipeline đồng bộ trên Cluster dùng `cluster_pipe()`[^rs-cluster-pipe]; với async, docs của `redis::cluster_async` dùng `redis::pipe()` rồi `exec_async` trên `ClusterConnection`[^rs-cluster-async-pipe]. Kết hợp với F4: một pipeline hay script chứa key khác slot là lỗi *thiết kế key* chứ không phải lỗi thư viện.
+Phía client, module `redis::cluster` (bản đồng bộ, cần feature `cluster` như đã nêu ở trên) định tuyến request theo slot, và khi nhận dấu hiệu rằng topology của cụm đã đổi thì truy vấn các node để tìm topology hiện tại[^rs-cluster].
 
-*Kiểu của kết quả.* Pipeline trả tuple theo thứ tự lệnh, và `.ignore()` loại một lệnh khỏi tuple[^rs-ignore-cmd]; `.atomic()` và `ignore_errors()` đã ở [chương 16, phần Liên hệ với Rust](16-redis-ben-trong.md). Khi mọi lệnh đều `.ignore()`, `exec_async(conn)` gọn hơn `let _: () = … .query_async(conn)`[^rs-exec-async]. Với script trả mảng, đọc thẳng vào tuple (`(i64, i64, i64)` như ở mục 2).
+Với pipeline, bản đồng bộ trên Cluster dùng `cluster_pipe()`[^rs-cluster-pipe]. Còn với async, ví dụ trong docs của `redis::cluster_async` dùng `redis::pipe()` rồi gọi `exec_async` trên `ClusterConnection`[^rs-cluster-async-pipe].
+
+Cần nhớ F4: một pipeline hay script chứa key khác slot là lỗi *thiết kế key*, không phải lỗi thư viện.
+
+*Kiểu của kết quả.* Pipeline trả về một tuple theo thứ tự lệnh, và `.ignore()` bỏ một lệnh ra khỏi tuple[^rs-ignore-cmd]. `.atomic()` và `ignore_errors()` đã nói ở [chương 16, phần Liên hệ với Rust](16-redis-ben-trong.md). Khi mọi lệnh đều `.ignore()`, viết `exec_async(conn)` gọn hơn `let _: () = … .query_async(conn)`[^rs-exec-async]. Còn script trả về một mảng thì đọc thẳng vào tuple, như `(i64, i64, i64)` của script token bucket ở mục 2.
 
 ## Tóm tắt
 
-- Mỗi pattern phải trả lời năm câu: bài toán, primitive, *nguyên tử ở đâu*, hỏng ở đâu, khi nào không dùng Redis; sáu kiểu hỏng lặp lại: F1 mất write khi failover, F2 TTL trôi/bị xóa/evict, F3 lệch đồng hồ, F4 `CROSSSLOT`, F5 big key, F6 hot key.
-- Cache-aside: đọc cache → trượt thì nạp DB; ghi thì commit DB *rồi* `DEL`. Stampede chặn bằng single-flight `SET NX PX`, TTL jitter, refresh sớm xác suất (`XFetch`); key không tồn tại thì cache giá trị âm TTL ngắn; write-behind chỉ cho dữ liệu chịu mất.
-- Rate limiter: fixed window = `INCR` + `EXPIRE NX` trong `MULTI`/`EXEC` (sai ở biên); sliding log = ZSET + Lua (chính xác, O(limit) bộ nhớ); token bucket = hash + Lua; lấy giờ từ `TIME`; quyết định fail-open/closed có chủ đích.
-- Khóa Redis (`SET NX PX` + script so token) đủ cho khóa vì hiệu quả; khóa vì đúng đắn cần fencing do tài nguyên đích kiểm (tốt nhất là CAS trong DB). Idempotency key trong Redis chỉ là lớp chặn đầu; ràng buộc duy nhất trong DB cùng transaction mới là trọng tài.
-- Queue: List `BLMOVE` + `LREM` + reaper là reliable queue tối thiểu; Stream + consumer group có sẵn PEL, `XACK`, `XAUTOCLAIM`, bộ đếm số lần giao cho dead letter; cả hai at-least-once trên kho có thể mất write; `MAXLEN` có thể cắt mất job chưa xử lý.
-- ZSET cho leaderboard: `ZADD`/`ZINCRBY`/`ZRANGE REV`/`ZREVRANK` ~O(log N); tie-break mặc định là so tên member, muốn "đạt trước đứng trên" phải ghép thời gian vào score trong giới hạn 2^53; ZSET là bản dẫn xuất của điểm trong DB.
-- Đếm: `INCR`/`HINCRBY` cho số lần; HyperLogLog (≤ 12 KB, sai số chuẩn 0,81%, chỉ hợp) cho số phân biệt xấp xỉ; bitmap cho tập id nguyên dày cần chính xác, giao/hợp bằng `BITOP`.
-- Session = key TTL trượt + absolute timeout tự quản; feature flag = hash + key phiên bản, đánh giá cục bộ; invalidation cục bộ bằng TTL, Pub/Sub (mất tin ⇒ flush khi nối lại) hoặc `CLIENT TRACKING`.
-- Pipeline không nguyên tử; `MULTI`/`EXEC` liền khối nhưng không rollback/không rẽ nhánh; Lua/Functions cho đọc-quyết định-ghi nguyên tử nhưng chặn server; key có schema, hash tag nhỏ nhất đủ dùng, TTL ngay lúc tạo, và tránh `KEYS`, big/hot key, trộn lớp độ bền, Redis-làm-nguồn-sự-thật.
-- Rust: `ConnectionManager` clone cho traffic thường, kết nối riêng cho lệnh block / `WATCH` / Pub/Sub; `Script` trong `LazyLock`; hủy future không hủy lệnh đã gửi nên timeout tạo "kết quả không biết" cần thiết kế idempotent.
+- Mỗi pattern trong chương đều trả lời cùng năm câu hỏi: bài toán là gì, ghép primitive nào, *nguyên tử ở đâu*, hỏng ở đâu, và khi nào không nên dùng Redis. Câu về chỗ hỏng chỉ có sáu đáp án lặp lại: F1 mất write khi failover, F2 TTL bị xóa, bị trôi hoặc key bị evict, F3 lệch đồng hồ, F4 `CROSSSLOT`, F5 big key, F6 hot key.
+- Cache cho `GET /products/42` theo kiểu cache-aside: đọc cache trước, trượt thì nạp từ Postgres; khi ghi thì commit vào DB *rồi* mới `DEL` key cache. Stampede có ba cách chặn: single-flight bằng `SET NX PX`, TTL có jitter, và refresh sớm theo xác suất (`XFetch`). Key không tồn tại thì cache một giá trị âm với TTL ngắn. Write-behind chỉ dùng cho dữ liệu mà mất cũng chấp nhận được.
+- Rate limiter theo API key có ba kiểu. Fixed window dùng `INCR` cộng `EXPIRE NX` trong `MULTI`/`EXEC`, sai ở biên cửa sổ. Sliding log dùng ZSET cộng Lua, chính xác nhưng tốn bộ nhớ O(limit). Token bucket dùng hash cộng Lua. Thời gian nên lấy từ lệnh `TIME` của Redis, và khi Redis không trả lời thì fail-open (cho request qua) hay fail-closed (chặn) phải là quyết định có chủ đích.
+- Khóa trong Redis (`SET NX PX` kèm script so token) đủ dùng khi khóa chỉ nhằm tránh làm việc thừa, như để chỉ một pod chạy job đối soát cuối ngày. Khi khóa phải bảo vệ tính đúng đắn thì cần thêm fencing token, và chính tài nguyên đích phải kiểm token đó (tốt nhất là compare-and-set trong DB). Với `POST /payments`, idempotency key trong Redis chỉ là lớp chặn đầu; ràng buộc duy nhất trong DB, chạy cùng transaction, mới là trọng tài.
+- Queue gửi email xác nhận đơn có hai cách làm. Với List, `BLMOVE` kết hợp `LREM` và một reaper (tiến trình quét job bị kẹt) là reliable queue tối thiểu. Stream với consumer group có sẵn PEL (danh sách job đã giao mà chưa ack), `XACK`, `XAUTOCLAIM` và bộ đếm số lần giao để đưa job hỏng vào dead letter. Cả hai chỉ at-least-once, trên một kho có thể mất write; riêng Stream còn phải để ý `MAXLEN`, vì cắt theo độ dài có thể xóa mất job chưa xử lý.
+- Bảng xếp hạng (leaderboard) khách hàng nhiều điểm thưởng nhất dùng ZSET: `ZADD`, `ZINCRBY`, `ZRANGE … REV` và `ZREVRANK` đều cỡ O(log N). Hai khách bằng điểm thì mặc định Redis so tên member; muốn "ai đạt điểm trước thì đứng trên" phải ghép thời gian vào score, và giá trị ghép vẫn phải nằm trong giới hạn 2^53. ZSET chỉ là bản dẫn xuất của điểm thật trong DB.
+- Số lần xem của từng sản phẩm đếm bằng `INCR` hoặc `HINCRBY`. Số khách khác nhau trong ngày dùng HyperLogLog: tối đa 12 KB, sai số chuẩn 0,81%, nên chỉ hợp khi chấp nhận số xấp xỉ. Cần chính xác trên một tập id nguyên dày, ví dụ cờ "user hoạt động ngày X", thì dùng bitmap và lấy giao hoặc hợp bằng `BITOP`.
+- Session đăng nhập là một key có TTL trượt (mỗi request gia hạn thêm), còn hạn tuyệt đối (absolute timeout) thì app phải tự quản. Feature flag là một hash cộng một key phiên bản, và pod đánh giá flag ngay trên bản sao cục bộ. Báo cho pod biết bản sao cục bộ đã cũ có ba mức: chỉ dựa vào TTL; Pub/Sub, nhưng tin có thể mất nên phải flush bản sao khi nối lại; hoặc `CLIENT TRACKING`.
+- Pipeline không nguyên tử; `MULTI`/`EXEC` chạy liền một khối nhưng không rollback và không rẽ nhánh theo kết quả giữa chừng; muốn đọc, quyết định rồi ghi trong một bước nguyên tử thì dùng Lua hoặc Functions, với cái giá là chúng chặn server. Key cần có schema, hash tag nhỏ nhất đủ dùng và TTL đặt ngay lúc tạo; cần tránh `KEYS`, big key, hot key, trộn dữ liệu bền với cache, và dùng Redis làm nguồn sự thật mà không có persistence tương xứng.
+- Trong Rust, mỗi pod của `shop` dùng bản clone của một `ConnectionManager` cho traffic thường, và connection riêng cho lệnh block, `WATCH` và Pub/Sub. `Script` nên nằm trong `LazyLock`. Hủy future không hủy lệnh đã gửi, nên timeout có thể để lại "kết quả không biết", và vì vậy cần thiết kế lệnh idempotent.
 
 ## Câu hỏi tự kiểm tra
 
-1. Vì sao cache-aside ghi DB *rồi* `DEL` cache, thay vì `DEL` rồi ghi DB, và vì sao dùng `DEL` thay vì `SET` giá trị mới?
+1. Khi sản phẩm 42 của `shop` được sửa giá, vì sao phải ghi Postgres *rồi* mới `DEL` cache, chứ không `DEL` rồi mới ghi? Và vì sao `DEL` mà không `SET` luôn giá trị mới?
 
    <details><summary>Đáp án</summary>
 
-   Cập nhật data store trước rồi mới xóa mục cache; nếu xóa cache trước thì reader chen vào có thể nạp lại giá trị cũ từ DB vào cache[^az-order]. Facebook chọn xóa vì xóa là idempotent[^fb-delete]; hai writer đồng thời `SET` có thể đặt giá trị theo thứ tự ngược với commit — "stale set"[^fb-stale]. TTL là lưới an toàn nếu `DEL` thất bại.
+   Phải cập nhật Postgres trước rồi mới xóa mục cache. Nếu xóa cache trước, một request đọc chen vào giữa sẽ nạp lại giá trị cũ từ DB vào cache[^az-order]. Chọn `DEL` thay vì `SET` vì xóa là thao tác idempotent, chạy lại bao nhiêu lần cũng cho cùng kết quả[^fb-delete]. Ngược lại, hai writer đồng thời `SET` có thể đặt giá trị theo thứ tự khác với thứ tự commit, tức là "stale set"[^fb-stale]. TTL vẫn là lưới an toàn cho trường hợp `DEL` thất bại.
 
    </details>
 
-2. Stampede là gì và ba cách chặn nó trên Redis? Cách nào hợp với "chỉ có get/set"?
+2. Cache stampede trên `GET /products/42` là gì, và Redis có ba cách chặn nào? Cách nào hợp với hệ chỉ có `get`/`set`?
 
    <details><summary>Đáp án</summary>
 
-   Một mục phổ biến hết hạn và nhiều request cùng trượt rồi cùng tính lại[^xf-def]. (1) Single-flight: `SET key:load token NX PX` — thắng thì nạp, thua thì chờ rồi đọc lại (khóa vì hiệu quả, đủ dùng[^kb-efficiency]); (2) TTL có jitter để các key hết hạn không cùng lúc; (3) refresh sớm xác suất như `XFetch`[^xf-early], thiết kế cho hệ chỉ có `get`/`set` không có khóa[^xf-nolock].
+   Stampede xảy ra khi một mục phổ biến hết hạn: nhiều request cùng trượt cache rồi cùng chạy lại phép tính đắt[^xf-def]. Có ba cách chặn.
+
+   1. Single-flight: `SET key:load token NX PX`. Pod thắng thì đi nạp, pod thua thì chờ rồi đọc lại. Đây là khóa vì hiệu quả, nên cách này đủ dùng[^kb-efficiency].
+   2. TTL có jitter, để các key không hết hạn cùng một lúc.
+   3. Refresh sớm theo xác suất, như `XFetch`[^xf-early]. Cách này sinh ra cho hệ chỉ có `get`/`set` và không có khóa[^xf-nolock].
 
    </details>
 
-3. Vì sao fixed window cần `EXPIRE … NX` thay vì `EXPIRE` thường, và nó sai ở đâu?
+3. Với rate limiter fixed window của `shop`, vì sao phải `EXPIRE … NX` thay vì `EXPIRE` thường, và cách này sai ở đâu?
 
    <details><summary>Đáp án</summary>
 
-   `MULTI`/`EXEC` làm `INCR` + `EXPIRE` liền nhau, tránh key rò rỉ[^rl-multi][^rl-race]; `NX` chỉ đặt hạn khi key chưa có hạn[^expire-nx] — nếu không, mỗi request đẩy hạn đi xa hơn và cửa sổ không bao giờ hết dưới tải liên tục (suy luận). Sai ở biên: 100 request cuối cửa sổ + 100 request đầu cửa sổ sau cho 2× giới hạn trong chốc lát (nhận xét của người soạn).
+   `MULTI`/`EXEC` cho `INCR` và `EXPIRE` chạy liền nhau, nên không còn key bị rò rỉ do `INCR` xong mà chưa kịp đặt hạn[^rl-multi]. Cuộc đua này có thật[^rl-race]. `NX` chỉ đặt hạn khi key chưa có hạn[^expire-nx]. Thiếu `NX`, mỗi request lại đẩy hạn đi xa hơn, và dưới tải liên tục cửa sổ không bao giờ hết (suy luận của người soạn). Điểm sai nằm ở biên cửa sổ: 100 request cuối cửa sổ này cộng 100 request đầu cửa sổ sau cho 2× giới hạn trong chốc lát (nhận xét của người soạn).
 
    </details>
 
-4. Vì sao sliding window log và token bucket cần Lua, và lấy giờ từ đâu?
+4. Vì sao sliding window log và token bucket phải viết bằng Lua, và `shop` lấy giờ từ đâu?
 
    <details><summary>Đáp án</summary>
 
-   Cần khối "đọc rồi quyết định rồi ghi" nguyên tử; script chạy nguyên tử vì chặn mọi hoạt động server[^sc-atomic]. Giờ lấy từ `TIME` của server[^time-cmd] để các pod không phụ thuộc đồng hồ của mình (F3); `TIME` dùng được ngay trong script vì từ Redis 5.0 script mặc định replicate *effect* nên hạn chế về lệnh không tất định đã bỏ[^sc-time-free].
+   Cả hai cần một khối "đọc, quyết định, rồi ghi" nguyên tử. Script Lua chạy nguyên tử vì trong lúc nó chạy, server chặn mọi hoạt động khác[^sc-atomic]. Giờ lấy từ lệnh `TIME` của server[^time-cmd], để 12 pod của `shop` không phụ thuộc vào đồng hồ của chính mình (F3). Gọi `TIME` ngay trong script được vì từ Redis 5.0, script mặc định replicate *effect* (các lệnh ghi nó sinh ra) chứ không replicate cả script, nên hạn chế về lệnh không tất định đã bỏ[^sc-time-free].
 
    </details>
 
-5. Vì sao `SET NX PX` + script so token vẫn chưa đủ làm khóa "vì đúng đắn"? Fencing token lấy ở đâu là đáng tin nhất?
+5. Vì sao `SET NX PX` cùng script so token vẫn chưa đủ để khóa job đối soát cuối ngày của `shop` khi cần đúng đắn tuyệt đối? Fencing token lấy ở đâu thì đáng tin nhất?
 
    <details><summary>Đáp án</summary>
 
-   Khóa hết hạn khi client bị pause, GC hay mạng chậm quá TTL[^lk-window]; failover có thể mất key (replication bất đồng bộ)[^lk-race-steps]; nhảy đồng hồ làm hết hạn sớm[^lk-disclaimer-clock]; tài liệu Redis khuyên cài fencing token[^lk-disclaimer-fence]. Counter fence trên một node Redis chưa đủ vì node đó có thể hỏng[^kb-counter] (và với replication bất đồng bộ — F1 — counter có thể lùi sau failover; suy luận của người soạn); đáng tin nhất là để tài nguyên đích (DB) tự kiểm bằng CAS/version trong `UPDATE` (nhận xét của người soạn), hoặc dùng hệ đồng thuận[^kb-conclusion].
+   Có bốn đường làm khóa hỏng.
+
+   - Pod bị pause, bị GC hoặc mạng chậm quá TTL thì khóa hết hạn trong khi pod vẫn tưởng mình đang giữ[^lk-window].
+   - Failover có thể làm mất key, vì replication bất đồng bộ[^lk-race-steps].
+   - Đồng hồ nhảy có thể làm khóa hết hạn sớm[^lk-disclaimer-clock].
+   - Vì vậy chính tài liệu Redis khuyên cài thêm fencing token[^lk-disclaimer-fence].
+
+   Counter fence đặt trên một node Redis chưa đủ, vì node đó cũng có thể hỏng[^kb-counter]. Với replication bất đồng bộ (F1), counter còn có thể lùi sau failover (suy luận của người soạn). Đáng tin nhất là để tài nguyên đích, tức DB, tự kiểm bằng CAS hoặc cột version ngay trong câu `UPDATE` (nhận xét của người soạn). Cách còn lại là dùng một hệ đồng thuận[^kb-conclusion].
 
    </details>
 
-6. Vì sao idempotency key chỉ trong Redis không đảm bảo "chỉ một lần"? Thiết kế đúng là gì?
+6. Vì sao lưu `Idempotency-Key` của `POST /payments` chỉ trong Redis thì chưa đảm bảo "chỉ một lần"? Thiết kế đúng là gì?
 
    <details><summary>Đáp án</summary>
 
-   Handler có thể đã thực hiện side effect rồi chết trước khi ghi `D`; `P` hết hạn và retry chạy lại; failover hoặc eviction cũng làm mất key. Dedup đòi trạng thái nằm ở kho bền[^kleppmann-dedup]. Đặt `UNIQUE (tenant, idempotency_key)` trong DB cùng transaction với thay đổi nghiệp vụ, còn Redis chỉ lọc nhanh và cache response (nhận xét của người soạn; Stripe nói retry nguyên khối là an toàn khi thao tác dở được rollback bằng một database ACID[^stripe-acid]).
+   Có ba cách để key trong Redis đánh lừa `shop`: handler đã thực hiện side effect rồi chết trước khi ghi `D`; `P` hết hạn và request retry chạy lại; failover hoặc eviction làm mất key. Khử trùng lặp chỉ đáng tin khi trạng thái nằm ở kho bền[^kleppmann-dedup]. Vì vậy hãy đặt `UNIQUE (tenant, idempotency_key)` trong Postgres, cùng transaction với thay đổi nghiệp vụ. Redis chỉ lọc nhanh và cache response (nhận xét của người soạn). Stripe cũng cho rằng retry nguyên khối an toàn khi thao tác dở được rollback bằng một database ACID[^stripe-acid].
 
    </details>
 
-7. So `BLMOVE` reliable queue với Stream + consumer group: bên nào có sẵn gì, và `MAXLEN` gây hại thế nào?
+7. Hàng đợi email của `shop`: `BLMOVE` reliable queue và Stream + consumer group, bên nào có sẵn gì? Và `MAXLEN` gây hại thế nào?
 
    <details><summary>Đáp án</summary>
 
-   List cần tự làm hạn xử lý/reaper/dead letter (doc chỉ nói "một client khác giám sát"[^lm-monitor]); Stream có PEL, `XACK`, `XAUTOCLAIM` và bộ đếm số lần giao cho dead letter[^st-cg-pending][^st-dead-letter]. `MAXLEN` cắt theo độ dài; mục pending mà entry đã bị trim thì `XAUTOCLAIM` không claim mà xóa khỏi PEL[^st-xautoclaim-trimmed], chỉ báo ID đó cho caller trong phần tử thứ ba của trả lời[^st-xautoclaim-reply] — job đã mất, và nếu code bỏ qua phần tử đó thì mất không dấu vết; cả hai vẫn at-least-once và chịu F1[^st-persist].
+   Với List, bạn phải tự làm hạn xử lý, reaper và dead letter. Tài liệu chỉ nói rằng "một client khác giám sát" hàng đợi[^lm-monitor]. Stream có sẵn PEL (danh sách entry đã giao mà chưa `XACK`), `XACK` và `XAUTOCLAIM`[^st-cg-pending]. Nó còn có bộ đếm số lần giao để đưa job vào dead letter[^st-dead-letter].
+
+   `MAXLEN` cắt Stream theo độ dài. Nếu một job đang pending mà entry của nó đã bị trim, `XAUTOCLAIM` không claim được mà xóa nó khỏi PEL[^st-xautoclaim-trimmed]. Nó chỉ báo ID đó cho caller ở phần tử thứ ba của trả lời[^st-xautoclaim-reply]. Tức là job đã mất, và nếu code bỏ qua phần tử đó thì mất không để lại dấu vết. Cả hai kiểu hàng đợi vẫn chỉ at-least-once và vẫn chịu F1[^st-persist].
 
    </details>
 
-8. Tie-break mặc định của ZSET là gì, và làm sao "đạt trước đứng trên"? Giới hạn ở đâu?
+8. Bảng xếp hạng khách hàng theo điểm thưởng của `shop`: ZSET tie-break mặc định ra sao, làm thế nào để "đạt điểm trước thì đứng trên", và giới hạn của cách đó là gì?
 
    <details><summary>Đáp án</summary>
 
-   Cùng score thì theo thứ tự từ điển của member[^zadd-lex] (với `REV` thì ngược lại[^zrange-rev-ties]). Ghép `score = points·2^20 + (2^20−1−t)` để cùng điểm thì `t` nhỏ đứng trên; score là số thực 64-bit chỉ chính xác tới ±2^53[^zadd-precision], nên 20 bit cho `t` còn 33 bit cho `points`; vượt thì chỉ xấp xỉ[^zadd-precision-approx]. `ZINCRBY` không dùng được với score ghép, phải dùng script.
+   Hai member cùng score thì xếp theo thứ tự từ điển của member[^zadd-lex]. Với `REV` thì thứ tự ngược lại[^zrange-rev-ties]. Để "đạt trước đứng trên", ghép `score = points·2^20 + (2^20−1−t)`: cùng điểm thì `t` nhỏ hơn có score lớn hơn. Score là số thực 64-bit, chỉ chính xác tới ±2^53[^zadd-precision]. Vì vậy 20 bit dành cho `t`, còn 33 bit cho `points`. Vượt quá thì score chỉ còn xấp xỉ[^zadd-precision-approx]. Cuối cùng, `ZINCRBY` không dùng được với score đã ghép, nên phải cộng điểm bằng script.
 
    </details>
 
-9. HLL và bitmap khác nhau thế nào về độ chính xác, bộ nhớ và phép giao/hợp?
+9. HyperLogLog và bitmap khác nhau thế nào về độ chính xác, bộ nhớ và phép giao/hợp, khi `shop` đếm khách ghé thăm?
 
    <details><summary>Đáp án</summary>
 
-   HLL: xấp xỉ, sai số chuẩn 0,81%, ≤ 12 KB[^hll-12k], không liệt kê, chỉ có hợp qua `PFMERGE`[^hll-merge]. Bitmap: chính xác, 1 bit/id theo dải id (tới 2^32 bit = 512 MB[^bm-512]), `BITOP AND/OR/XOR/NOT` giữa các chuỗi[^bm-ops], đắt khi id thưa; `BITOP` O(N)[^bitop-slow].
+   HyperLogLog là xấp xỉ, sai số chuẩn 0,81%, nặng tối đa 12 KB[^hll-12k]. Nó không liệt kê được các phần tử, và chỉ hợp được qua `PFMERGE`[^hll-merge].
+
+   Bitmap thì chính xác, tốn 1 bit cho mỗi id trong dải id, tối đa 2^32 bit tức 512 MB[^bm-512]. Giữa các chuỗi bitmap dùng được `BITOP AND/OR/XOR/NOT`[^bm-ops]. Giá phải trả là bitmap đắt khi id thưa, và `BITOP` có độ phức tạp O(N)[^bitop-slow].
 
    </details>
 
-10. Pub/Sub, `CLIENT TRACKING` và chỉ-TTL khác nhau thế nào khi làm mất hiệu lực bản sao cục bộ? Phải làm gì khi mất kết nối?
+10. Để làm mất hiệu lực cache cục bộ trong từng pod của `shop`, Pub/Sub, `CLIENT TRACKING` và chỉ dùng TTL khác nhau thế nào? Phải làm gì khi mất kết nối?
 
     <details><summary>Đáp án</summary>
 
-    Pub/Sub at-most-once, mất tin khi đứt mạng[^ps-at-most-once][^ps-lost]; tracking do server theo dõi, hai chế độ (nhớ key, tốn bộ nhớ; hoặc `BCAST` theo tiền tố, nhiều thông báo hơn)[^cst-modes]. Mất connection nhận invalidation thì phải flush cache cục bộ[^cst-lost]; luôn đặt TTL tối đa[^cst-maxttl].
+    Pub/Sub chỉ giao at-most-once[^ps-at-most-once]. Đứt mạng là mất tin[^ps-lost]. `CLIENT TRACKING` thì do server theo dõi, có hai chế độ: nhớ từng key (tốn bộ nhớ server), hoặc `BCAST` theo tiền tố (nhiều thông báo hơn)[^cst-modes]. Khi connection nhận invalidation bị mất, pod phải flush toàn bộ cache cục bộ[^cst-lost]. Dù dùng cách nào, vẫn luôn đặt TTL tối đa làm chốt chặn cuối[^cst-maxttl].
 
     </details>
 
-11. Khi nào dùng pipeline, `MULTI`/`EXEC`, `WATCH`, Lua?
+11. Khi nào `shop` nên dùng pipeline, `MULTI`/`EXEC`, `WATCH`, Lua?
 
     <details><summary>Đáp án</summary>
 
-    Pipeline chỉ giảm round trip, không nguyên tử[^sc-pipe-order]; `MULTI`/`EXEC` liền khối nhưng không rollback[^tx-runtime-err] và không rẽ nhánh theo kết quả giữa chừng[^tx-usage]; `WATCH` là CAS lạc quan, hủy cả khi key bị hết hạn/evict[^tx-watch-expire]; Lua/Functions cho đọc-quyết định-ghi nguyên tử nhờ chặn server[^sc-atomic], đổi lại script chậm là sự cố[^sc-busy].
+    - **Pipeline** chỉ giảm round trip, không nguyên tử[^sc-pipe-order].
+    - **`MULTI`/`EXEC`** chạy các lệnh liền khối nhưng không rollback[^tx-runtime-err], và không rẽ nhánh theo kết quả giữa chừng[^tx-usage].
+    - **`WATCH`** là CAS lạc quan. Nó hủy cả transaction khi key bị hết hạn hoặc bị evict[^tx-watch-expire].
+    - **Lua/Functions** cho phép đọc, quyết định, ghi nguyên tử nhờ chặn server[^sc-atomic]. Đổi lại, một script chạy chậm là sự cố cho cả server[^sc-busy].
 
     </details>
 
-12. Hash tag nên chọn thế nào, và `foo{}{bar}` băm ra sao?
+12. Hash tag nên chọn thế nào, và `foo{}{bar}` được băm ra sao?
 
     <details><summary>Đáp án</summary>
 
-    Chỉ phần giữa `{` đầu và `}` đầu sau nó được băm[^cl-hashtag-rule]; `foo{}{bar}` băm nguyên key vì `{` theo ngay bởi `}`[^cl-hashtag-empty]. Tag là thực thể nhỏ nhất cần thao tác nhiều key nguyên tử; tag thô hoặc hằng dồn dữ liệu vào một slot (F6); không nội suy chuỗi người dùng chưa lọc `{`/`}`.
+    Chỉ phần nằm giữa `{` đầu tiên và `}` đầu tiên sau nó được băm[^cl-hashtag-rule]. Với `foo{}{bar}`, `{` được theo ngay bởi `}` nên Redis băm nguyên cả key[^cl-hashtag-empty]. Tag nên là thực thể nhỏ nhất cần thao tác nhiều key nguyên tử, ví dụ một đơn hàng. Tag quá thô, hoặc tag hằng, sẽ dồn dữ liệu vào một slot (F6). Cuối cùng, đừng nội suy chuỗi người dùng nhập mà chưa lọc `{` và `}`.
 
     </details>
 
 ## Đọc thêm
 
-- [P12 · Chương 16 — Redis bên trong](16-redis-ben-trong.md): cơ chế nền cho mọi pattern ở đây (event loop một thread, eviction, persistence, replication, Cluster, Lua/Streams).
-- [P12 · Chương 08, mục 7–8](08-su-co-he-phan-tan.md) và [P13 · Chương 09, mục 2](../13-tla-plus/09-mo-hinh-hoa-he-backend.md): process pause, lease và fencing token (mục 3).
+- [P12 · Chương 16 — Redis bên trong](16-redis-ben-trong.md): cơ chế nền của mọi pattern ở đây: event loop một thread, eviction, persistence, replication, Cluster, Lua và Streams.
+- [P12 · Chương 08, mục 7–8](08-su-co-he-phan-tan.md) và [P13 · Chương 09, mục 2](../13-tla-plus/09-mo-hinh-hoa-he-backend.md): process pause, lease và fencing token, nền cho mục 3.
 - [P13 · Chương 09, mục 4](../13-tla-plus/09-mo-hinh-hoa-he-backend.md): mô hình hóa cuộc đua stale của cache-aside (mục 1).
-- [P12 · Chương 12, mục 4–6](12-dung-dan-va-tich-hop-du-lieu.md): `Idempotency-Key` phía HTTP, "exactly-once" = at-least-once + dedup, outbox (mục 3–4).
-- [P12 · Chương 11, mục 2–4](11-stream-processing.md): queue hay log và ngữ nghĩa giao tin (mục 4).
-- [P12 · Chương 07, mục 5](07-transaction.md): compare-and-set trong DB làm fencing và làm trọng tài idempotency.
-- [P12 · Chương 06, mục 2 và 7](06-partitioning.md): skew/hot spot và thao tác nhiều khóa (hash slot, hash tag) — dùng ở mục 8.2 của chương này.
+- [P12 · Chương 12, mục 4–6](12-dung-dan-va-tich-hop-du-lieu.md): `Idempotency-Key` phía HTTP, vì sao "exactly-once" thực chất là at-least-once cộng dedup, và outbox (mục 3–4).
+- [P12 · Chương 11, mục 2–4](11-stream-processing.md): khi nào chọn queue, khi nào chọn log, và ngữ nghĩa giao tin (mục 4).
+- [P12 · Chương 07, mục 5](07-transaction.md): compare-and-set trong DB, dùng làm fencing và làm trọng tài idempotency.
+- [P12 · Chương 06, mục 2 và 7](06-partitioning.md): skew, hot spot và thao tác nhiều khóa (hash slot, hash tag), dùng ở mục 8.2 của chương này.
 - [P12 · Chương 15](15-postgresql-ben-trong.md): phía DB của cache, lock và queue (connection, page cache, lock).
-- Redis docs (pin ở redis-doc commit `1044224477fceacc5af56a636b0a7495d19e533c`): các mục *Pattern* trong trang lệnh `INCR`, `LMOVE`, `BITCOUNT`, `EXPIRE`, `SET`; "Redis Streams", "Client-side caching", "Redis Pub/Sub", "Distributed locks" — URL ở phần chú thích bên dưới.
-- Kleppmann, "How to do distributed locking" và antirez, "Is Redlock safe?" — hai phía của tranh luận Redlock: <https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html>, <http://antirez.com/news/101>.
-- Vattani, Chierichetti, Lowenstein, "Optimal Probabilistic Cache Stampede Prevention" (VLDB 2015): <https://www.vldb.org/pvldb/vol8/p886-vattani.pdf> — nguồn của `XFetch` (mục 1.4).
-- Nishtala et al., "Scaling Memcache at Facebook" (NSDI 2013): <https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf> — cache-aside, stale set, lease, thundering herd ở quy mô lớn.
+- Redis docs (pin ở redis-doc commit `1044224477fceacc5af56a636b0a7495d19e533c`): các mục *Pattern* trong trang lệnh `INCR`, `LMOVE`, `BITCOUNT`, `EXPIRE`, `SET`, cùng các trang "Redis Streams", "Client-side caching", "Redis Pub/Sub", "Distributed locks"; URL ở phần chú thích bên dưới.
+- Kleppmann, "How to do distributed locking" và antirez, "Is Redlock safe?": hai phía của cuộc tranh luận về Redlock, <https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html>, <http://antirez.com/news/101>.
+- Vattani, Chierichetti, Lowenstein, "Optimal Probabilistic Cache Stampede Prevention" (VLDB 2015): <https://www.vldb.org/pvldb/vol8/p886-vattani.pdf>, nơi `XFetch` ra đời (mục 1.4).
+- Nishtala et al., "Scaling Memcache at Facebook" (NSDI 2013): <https://www.usenix.org/system/files/conference/nsdi13/nsdi13-final170_update.pdf>, đọc để thấy cache-aside, stale set, lease và thundering herd ở quy mô lớn.
 
 [^repl-async]: Redis docs, Replication, Important facts about Redis replication — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/docs/management/replication.md> — "Redis uses asynchronous replication, with asynchronous replica-to-master acknowledges of the amount of data processed."
 [^repl-wait-cp]: Redis docs, Replication — <https://raw.githubusercontent.com/redis/redis-doc/1044224477fceacc5af56a636b0a7495d19e533c/docs/management/replication.md> — "it does not turn a set of Redis instances into a CP system with strong consistency: acknowledged writes can still be lost during a failover, depending on the exact configuration of the Redis persistence."

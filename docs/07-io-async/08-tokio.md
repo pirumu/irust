@@ -22,20 +22,28 @@ Chương này nói về **Tokio 1.53.2**, Rust 1.95.0. Mục docs gắn nhãn "b
 
 ## 1. Runtime và `#[tokio::main]` (Q1)
 
-> **Trả lời ngắn.** Rust không đi kèm runtime[^book-noruntime]; Tokio là runtime đó, gồm một I/O driver, một scheduler chạy task và một timer[^tokio-services], cộng một blocking pool[^tokio-runtime-struct]. `#[tokio::main]` chỉ là cách viết gọn: nó biến `async fn main` thành hàm đồng bộ khởi động một runtime mỗi lần được gọi[^tokio-main-sync].
+> **Trả lời ngắn.** Rust không đi kèm runtime[^book-noruntime], nên chương trình async phải tự mang theo một cái; Tokio là cái đó. Nó gồm một I/O driver, một scheduler chạy task và một timer[^tokio-services]. Ngoài ra còn một blocking pool cho việc chặn[^tokio-runtime-struct]. `#[tokio::main]` chỉ là cách viết gọn: nó biến `async fn main` thành một hàm đồng bộ, và mỗi lần hàm đó được gọi thì một runtime khởi động[^tokio-main-sync].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): runtime như một văn phòng nhỏ: scheduler là người phân việc, I/O driver là lễ tân nghe điện thoại bên ngoài, timer là chuông báo giờ, blocking pool là xưởng riêng cho việc nặng.
+*Với service của bạn.* Hãy hình dung `orders-api`, một service viết bằng Rust và Tokio, nhận request qua TCP. Mỗi request nó đọc byte từ socket, hỏi Postgres, gọi một service thanh toán, ghi một file hóa đơn rồi trả lời. Cùng lúc có hàng nghìn kết nối đang mở, trong khi máy chỉ có vài core. Ta sẽ bám theo `orders-api` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này: ai thực sự chạy hàng nghìn request đó, khi ngôn ngữ không có runtime?
 
-Rust Book nói: hầu hết ngôn ngữ hỗ trợ async đều đi kèm một runtime, còn Rust thì không[^book-noruntime]. Tokio là runtime đó. Docs module `tokio::runtime` nêu ba dịch vụ cần có: một vòng lặp sự kiện I/O gọi là *driver*, một *scheduler* chạy task, và một *timer*;[^tokio-services] trang `Runtime` thêm *blocking pool*.[^tokio-runtime-struct]
+### 1.1 Runtime gồm những gì
 
-| Thành phần | Việc làm |
-|---|---|
-| I/O driver | Chờ sự kiện hệ điều hành, đánh thức task phụ thuộc[^tokio-services]; dựa trên mio[^tokio-driver-mio], mio dùng epoll (Linux) / kqueue (macOS)[^mio-impl-linux] ([chương 07](07-executor-va-mio.md)) |
-| Scheduler | Lấy task ra khỏi hàng đợi và `poll`[^tokio-loop] |
-| Timer | Đánh thức task khi `sleep`/`timeout` đến hạn[^tokio-time-sleep][^tokio-io-check] |
-| Blocking pool | Thread riêng cho việc chặn: `spawn_blocking`, `tokio::fs` và vài việc khác như DNS qua `ToSocketAddrs` (mục 4, 7)[^tokio-mbt-uses] |
+Hầu hết ngôn ngữ hỗ trợ async đều đóng gói sẵn một runtime, còn Rust thì không[^book-noruntime]. Vì vậy `orders-api` phải kèm một runtime, và ở đây ta dùng Tokio. Runtime của Tokio cung cấp ba dịch vụ: một vòng lặp sự kiện I/O gọi là *driver*, một *scheduler* chạy các task dùng tài nguyên I/O đó, và một *timer* để hẹn việc chạy sau một khoảng thời gian[^tokio-services]. Bên cạnh ba thứ ấy còn có *blocking pool*, nơi chạy những việc buộc phải chặn thread[^tokio-runtime-struct].
+
+Với `orders-api`, mỗi thành phần đảm nhận một phần việc khác nhau:
+
+| Thành phần | Việc làm | Trong `orders-api` |
+|---|---|---|
+| I/O driver | Chờ sự kiện từ hệ điều hành rồi đánh thức task phụ thuộc[^tokio-services] | Báo rằng socket của một request đã có dữ liệu |
+| Scheduler | Lấy task ra khỏi hàng đợi và gọi `poll`[^tokio-loop] | Chạy handler của từng request |
+| Timer | Đánh thức task khi `sleep` hoặc `timeout` đến hạn[^tokio-time-sleep] | Hết giờ chờ service thanh toán |
+| Blocking pool | Thread riêng cho các việc chặn: `spawn_blocking`, thao tác `tokio::fs`, DNS qua `ToSocketAddrs` và vài việc khác (mục 4, 7)[^tokio-mbt-uses] | Đọc file hóa đơn, gọi một thư viện đồng bộ |
+
+(Cột cuối là ví dụ của người soạn.)
+
+Driver dựa trên mio[^tokio-driver-mio]. mio lại dùng epoll trên Linux và kqueue trên macOS[^mio-impl-linux]; phần này nằm ở [chương 07](07-executor-va-mio.md).
 
 ```mermaid
 flowchart LR
@@ -46,9 +54,11 @@ flowchart LR
   B -- "kết quả qua JoinHandle" --> S
 ```
 
-Runtime "periodically" (định kỳ) kiểm tra I/O và timer sẵn sàng rồi đánh thức task liên quan, xen kẽ giữa các lần lập lịch.[^tokio-io-check] Docs của module không nói thread nào làm việc này; source 1.53.2 (chi tiết cài đặt, có thể đổi) cho thấy một worker rảnh giữ được khóa driver thì chờ sự kiện bằng driver, còn worker khác ngủ trên condvar.[^tokio-park-driver]
+Driver và timer không chạy tách khỏi scheduler. Runtime kiểm tra định kỳ xem tài nguyên I/O hay timer nào đã sẵn sàng, rồi đánh thức task liên quan để scheduler xếp lịch; những lần kiểm tra này xen giữa các lần lập lịch task[^tokio-io-check]. Thread nào làm việc kiểm tra thì docs không nói; phần Đi sâu cuối mục có câu trả lời từ source.
 
-`#[tokio::main]` đánh dấu một hàm async để được chạy bởi runtime đã chọn.[^tokio-main] Tài liệu cho dạng tương đương (flavor mặc định multi-thread):[^tokio-main-multi]
+### 1.2 `#[tokio::main]` làm gì
+
+Còn hàm `main` của `orders-api` thì sao? Macro `#[tokio::main]` đánh dấu một hàm async để runtime đã chọn chạy nó[^tokio-main]. Docs cho dạng viết tay tương đương, với flavor mặc định là multi-thread[^tokio-main-multi]:
 
 ```rust
 fn main() {
@@ -60,50 +70,58 @@ fn main() {
 }
 ```
 
-Macro biến `async fn` thành hàm đồng bộ khởi động một runtime mỗi lần được gọi,[^tokio-main-sync] và hàm đó *không chạy như worker*: kỳ vọng là các task khác được spawn từ hàm này.[^tokio-main-nonworker] `Runtime::block_on` chạy future trên thread hiện tại, chặn tới khi nó hoàn thành.[^tokio-block-on] Hệ quả: logic nặng nên `spawn`, đừng `await` thẳng trong `main`.[^tokio-main-slow] Runtime multi-thread luôn chạy vì có worker riêng.[^tokio-driving]
+Nói cách khác, macro biến `async fn` thành hàm đồng bộ và mỗi lần gọi thì khởi động một runtime[^tokio-main-sync]. Phần còn lại là `block_on`: nó chạy future trên thread hiện tại và chặn tới khi future xong[^tokio-block-on].
 
-<details><summary>Đi sâu: bật driver khi dựng tay, số worker mặc định, hiểu lầm về io_uring</summary>
+Có một chỗ dễ nhầm: hàm async đó *không chạy như worker*, và docs mong các task khác được spawn từ nó[^tokio-main-nonworker]. Nếu `await` thẳng các future ngay trong `main` thì chúng chạy không nhanh bằng task đã spawn[^tokio-main-slow]. Vì vậy `orders-api` nên để `main` chỉ dựng runtime và `spawn` việc xử lý từng kết nối (nhận xét của người soạn). Còn runtime multi-thread thì luôn chạy, vì nó có worker thread riêng[^tokio-driving].
 
-Dựng runtime bằng tay thì driver không bật mặc định (docs ghi không có resource driver nào được bật mặc định[^tokio-drivers]): phải gọi `enable_io`/`enable_time`/`enable_all`.
+<details><summary>Đi sâu: thread nào gọi driver, bật driver khi dựng tay, số worker mặc định, hiểu lầm về io_uring</summary>
 
-Số worker mặc định là số core hệ thống báo; `worker_threads` ghi đè biến `TOKIO_WORKER_THREADS`;[^tokio-wt-default][^tokio-wt-env] với current-thread nó vô hiệu.[^tokio-wt-ct] Source 1.53.2 (chi tiết cài đặt) lấy số core bằng `available_parallelism()`,[^tokio-src-numcpus] mà docs std cảnh báo hàm này trên Linux có thể đếm thừa khi cgroup quota không đọc được.[^std-avail-par]
+**Thread nào chờ sự kiện I/O.** Source 1.53.2 (chi tiết cài đặt, có thể đổi) cho thấy một worker rảnh mà giữ được khóa của driver thì chờ sự kiện bằng driver, còn worker khác ngủ trên condvar[^tokio-park-driver].
 
-**Hiểu lầm: "Tokio dùng io_uring".** Không mặc định: feature `io-uring` thuộc nhóm cần cờ `tokio_unstable`,[^tokio-uring-flag] và `tokio::fs` mặc định vẫn dùng `spawn_blocking` (mục 7).[^tokio-fs-always] Kernel io_uring ở [chương 03](03-kqueue-io-uring.md).
+**Bật driver khi dựng tay.** Dựng runtime bằng `Builder` thì không có driver nào được bật mặc định[^tokio-drivers]. Bạn phải gọi `enable_io`, `enable_time` hoặc `enable_all`.
+
+**Số worker mặc định.** Mặc định là số core mà hệ thống báo[^tokio-wt-default]. `worker_threads` ghi đè giá trị đọc từ biến môi trường `TOKIO_WORKER_THREADS`[^tokio-wt-env]. Với current-thread thì nó không có tác dụng[^tokio-wt-ct]. Source 1.53.2 lấy số core bằng `available_parallelism()`[^tokio-src-numcpus]; docs std cảnh báo hàm này trên Linux có thể đếm thừa khi không đọc được cgroup quota[^std-avail-par].
+
+**Hiểu lầm: "Tokio dùng io_uring".** Mặc định thì không. Feature `io-uring` thuộc nhóm chỉ có khi bật cờ `tokio_unstable`[^tokio-uring-flag]. Còn `tokio::fs` mặc định vẫn dùng `spawn_blocking` (mục 7)[^tokio-fs-always]. Kernel io_uring nằm ở [chương 03](03-kqueue-io-uring.md).
 
 </details>
 
-**Quay lại Q1:** runtime = I/O driver + scheduler + timer + blocking pool; `#[tokio::main]` = dựng `Builder` rồi `block_on`.
+**Quay lại Q1:** runtime = I/O driver + scheduler + timer + blocking pool; `#[tokio::main]` = dựng `Builder` rồi `block_on`; với `orders-api`, `main` chỉ nên dựng runtime và giao việc cho task.
 
 ## 2. Hai scheduler: multi-thread và current-thread (Q2)
 
-> **Trả lời ngắn.** Multi-thread scheduler chạy future trên một thread pool theo chiến lược work-stealing, mặc định mỗi core một worker[^tokio-multi]. Current-thread scheduler chạy mọi task trên thread hiện tại[^tokio-current]. Docs khuyên đa số ứng dụng dùng loại multi-thread[^tokio-multi-default].
+> **Trả lời ngắn.** Multi-thread scheduler chạy future trên một thread pool theo chiến lược work-stealing, mặc định mỗi core một worker[^tokio-multi]. Current-thread scheduler thì chạy mọi task trên thread hiện tại[^tokio-current]. Docs khuyên đa số ứng dụng dùng loại multi-thread[^tokio-multi-default].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): current-thread là một quầy thu ngân duy nhất; multi-thread là nhiều quầy, quầy nào vắng thì sang lấy bớt khách của quầy đông (work-stealing).
+*Với `orders-api`.* Mỗi kết nối của `orders-api` là một task (mục 3 nói cách tạo). Vấn đề của mục này là hàng nghìn task đó chạy trên bao nhiêu thread, và ai chia việc cho thread nào. Tokio có hai câu trả lời, ứng với hai scheduler.
 
-- **Multi-thread:** là scheduler mặc định, cần feature `rt-multi-thread`; docs chỉ nêu vài trường hợp hiếm nên chọn loại khác, ví dụ khi bắt buộc chỉ chạy một thread.[^tokio-multi-default] Work-stealing nghĩa là worker hết việc thì lấy bớt task của worker khác (chi tiết ở mục Đi sâu dưới).[^tokio-steal]
-- **Current-thread:** một executor future đơn luồng; mọi task được tạo và chạy trên thread hiện tại,[^tokio-current] nên hai task của runtime này không bao giờ chạy song song (suy luận của người soạn).
+Multi-thread là scheduler mặc định, cần feature `rt-multi-thread`. Docs chỉ nêu vài trường hợp hiếm nên chọn loại khác, chẳng hạn khi bắt buộc chạy một thread[^tokio-multi-default]. Trên máy 4 core, `orders-api` có 4 worker (nhận xét của người soạn). Work-stealing nghĩa là worker nào hết việc thì lấy bớt task của worker khác[^tokio-steal]; hàng đợi và các hằng số nằm ở phần Đi sâu.
+
+Current-thread là một executor đơn luồng: mọi task được tạo và chạy trên thread hiện tại[^tokio-current]. Hệ quả là hai task của runtime này không bao giờ chạy song song (suy luận của người soạn). Nếu `orders-api` chạy kiểu này thì mọi request đều xếp hàng trên một thread.
 
 ### Vòng lặp và bảo đảm công bằng
 
-Theo "Detailed runtime behavior", runtime lặp lại việc lấy một task và `poll` nó; khi hết task, thread ngủ.[^tokio-loop] Docs nêu một bảo đảm về công bằng: nếu tổng số task không tăng vô hạn và không task nào chặn thread thì được bảo đảm các task được lập lịch công bằng.[^tokio-fair] Ngoài bảo đảm đó, docs không hứa thứ tự nào: nếu A và B cùng sẵn sàng, runtime có thể chạy A năm lần trước B, kể cả khi A gọi `yield_now`; chỉ chắc rằng cuối cùng nó sẽ lập lịch B.[^tokio-noorder] Tokio cũng có thể gọi `poll` khi chưa `wake` (spurious wakeup).[^tokio-spurious] Vế "không task nào chặn thread" là lý do của mục 4 (nhận xét của người soạn).
+Dù chọn loại nào, vòng lặp bên trong vẫn như nhau: runtime lấy một task ra và `poll` nó, hết task thì thread ngủ[^tokio-loop]. Về công bằng, docs chỉ hứa một điều: nếu tổng số task không tăng vô hạn và không task nào chặn thread, thì các task được lập lịch công bằng[^tokio-fair].
+
+Ngoài bảo đảm đó, docs không hứa thứ tự nào. Nếu hai task A và B cùng sẵn sàng, runtime có thể chạy A năm lần trước B, kể cả khi A gọi `yield_now`; chỉ chắc chắn rằng cuối cùng nó sẽ lập lịch B[^tokio-noorder]. Tokio cũng có thể `poll` một task chưa được `wake`, gọi là spurious wakeup[^tokio-spurious]. Vế "không task nào chặn thread" của bảo đảm công bằng chính là lý do có mục 4 (nhận xét của người soạn).
 
 <details><summary>Đi sâu: hàng đợi, work-stealing, LIFO slot (hành vi hiện tại)</summary>
 
 **Current-thread.**
 
-Hai hàng đợi FIFO, global và local; ưu tiên local, chỉ lấy global khi local rỗng hoặc sau 31 lần liên tiếp lấy local;[^tokio-ct-queues] kiểm tra I/O và timer khi hết task sẵn sàng hoặc sau 61 task liên tiếp;[^tokio-ct-events] runtime current-thread không dùng tối ưu hóa LIFO slot.[^tokio-ct-lifo] Runtime này không tự tạo thread, nên chỉ chạy khi bạn gọi `Runtime::block_on`; `Handle::block_on` không điều khiển runtime.[^tokio-driving-ct] Các hằng 31/61 là chi tiết hiện tại.[^tokio-ct-notice]
+- Có hai hàng đợi FIFO là global và local. Runtime ưu tiên lấy từ local, chỉ lấy từ global khi local rỗng hoặc sau 31 lần liên tiếp lấy từ local[^tokio-ct-queues].
+- Runtime kiểm tra I/O và timer khi hết task sẵn sàng, hoặc sau 61 task liên tiếp[^tokio-ct-events]. Các hằng 31 và 61 là hành vi hiện tại, không phải hợp đồng[^tokio-ct-notice].
+- Current-thread không dùng tối ưu hóa LIFO slot[^tokio-ct-lifo].
+- Runtime này không tự tạo thread, nên chỉ chạy được khi bạn gọi `Runtime::block_on`; `Handle::block_on` không điều khiển runtime[^tokio-driving-ct].
 
-**Multi-thread: work-stealing và LIFO slot.**
+**Multi-thread: work-stealing và LIFO slot.** Docs lưu ý hành vi này có thể thay đổi ở các phiên bản Tokio sau[^tokio-mt-notice].
 
-Docs: hành vi này có thể thay đổi ở các phiên bản Tokio sau.[^tokio-mt-notice]
-
-- Số worker cố định, tạo lúc khởi động; một hàng đợi global và một local mỗi worker. Local chứa tối đa 256 task; thêm nữa thì một nửa chuyển sang global.[^tokio-mt-queues]
-- Ưu tiên local; lấy global khi local rỗng hoặc sau `global_queue_interval` lần;[^tokio-mt-prefer-local] nếu không đặt, runtime tự tính theo heuristic nhắm ~10 ms.[^tokio-mt-global]
-- Local và global rỗng thì *ăn cắp*: việc ăn cắp được thực hiện bằng cách chuyển một nửa số task trong một hàng đợi local sang hàng đợi local khác.[^tokio-steal]
-- **LIFO slot:** task được một task khác đánh thức vào slot của worker thay vì hàng đợi; slot đã có task thì task cũ xuống hàng đợi local.[^tokio-lifo-1] Xong một task, worker chạy ngay task trong slot, coop budget không reset, và dùng slot ba lần liên tiếp thì slot tạm tắt.[^tokio-lifo-2] Slot tách khỏi hàng đợi nên worker khác không ăn cắp được task trong đó.[^tokio-lifo-3]
-- Task bị đánh thức từ thread không phải worker thì vào hàng đợi global.[^tokio-mt-nonworker]
+- Số worker cố định và tạo hết lúc khởi động. Có một hàng đợi global, và mỗi worker có một hàng đợi local chứa tối đa 256 task; thêm nữa thì một nửa chuyển sang global[^tokio-mt-queues].
+- Worker ưu tiên lấy từ local; nó lấy từ global khi local rỗng hoặc sau `global_queue_interval` lần liên tiếp[^tokio-mt-prefer-local]. Nếu không đặt, runtime tự tính theo heuristic nhắm tới khoảng 10 ms giữa hai lần kiểm tra global[^tokio-mt-global].
+- Local và global đều rỗng thì worker đi *ăn cắp*: chuyển một nửa số task trong hàng đợi local của worker khác sang hàng đợi của mình[^tokio-steal].
+- **LIFO slot:** khi một task đánh thức task khác, task kia vào slot của worker thay vì vào hàng đợi; slot đã có task thì task cũ xuống hàng đợi local[^tokio-lifo-1]. Chạy xong một task, worker chạy ngay task trong slot mà không reset coop budget, và nếu dùng slot ba lần liên tiếp thì slot tạm tắt[^tokio-lifo-2]. Slot tách khỏi hàng đợi local nên worker khác không ăn cắp được task trong đó[^tokio-lifo-3].
+- Task bị đánh thức từ thread không phải worker thì vào hàng đợi global[^tokio-mt-nonworker].
 
 ```mermaid
 flowchart TD
@@ -121,7 +139,7 @@ flowchart TD
   G -- "local rỗng / theo chu kỳ" --> Q1
 ```
 
-Docs còn nói: runtime của Tokio không nhận biết NUMA (Non-Uniform Memory Access).[^tokio-numa]
+Docs còn nói runtime của Tokio không nhận biết NUMA (Non-Uniform Memory Access)[^tokio-numa].
 
 </details>
 
@@ -129,20 +147,39 @@ Docs còn nói: runtime của Tokio không nhận biết NUMA (Non-Uniform Memor
 
 ## 3. `tokio::spawn`, `JoinHandle` và `Send + 'static` (Q3)
 
-> **Trả lời ngắn.** `tokio::spawn` giao một future cho runtime chạy thành task độc lập và trả về `JoinHandle`[^tokio-spawn]. Task có thể chạy trên thread khác với nơi gọi `spawn`, nên future phải `Send`[^tokio-spawn-thread]. `'static` là suy luận của người soạn: task sống độc lập với caller nên không được mượn stack của caller. Future `!Send` thì dùng `LocalSet`/`spawn_local`[^tokio-localset].
+> **Trả lời ngắn.** `tokio::spawn` giao một future cho runtime chạy thành task độc lập và trả về `JoinHandle`[^tokio-spawn]. Task có thể chạy trên thread khác với nơi gọi `spawn`, nên future phải `Send`[^tokio-spawn-thread]. Còn `'static` là suy luận của người soạn: task sống độc lập với caller nên không được mượn stack của caller. Future `!Send` thì dùng `LocalSet`/`spawn_local`[^tokio-localset].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `spawn` giống giao việc cho một nhân viên có thể làm ở bàn khác (thread khác): mọi thứ bạn đưa phải mang đi được (`Send`) và không được là đồ "mượn tạm trên bàn bạn" (`'static`).
+*Với `orders-api`.* Vòng `accept` của `orders-api` gọi `tokio::spawn` cho từng kết nối mới, rồi quay lại chờ kết nối kế tiếp mà không đợi request cũ xong. Chữ ký của `spawn` đặt ra hai điều kiện lên handler: `Send` và `'static`. Mục này giải thích vì sao, và `orders-api` làm gì khi một handler không đáp ứng được.
 
-Task giống thread của OS nhưng do runtime quản lý (docs gọi mẫu này là "green threads");[^tokio-task-green] tạo và chuyển task không cần context switch của OS.[^tokio-task-light] `spawn` tạo một task bất đồng bộ mới và trả về một `JoinHandle` cho nó[^tokio-spawn]; future chạy nền ngay, không cần `await` handle,[^tokio-spawn-start] nhưng không được poll đồng bộ trong lời gọi `spawn`.[^tokio-spawn-noblock] Task panic thì `await` handle trả `JoinError`.[^tokio-task-panic]
+### 3.1 Task và `spawn`
 
-Chữ ký: `F: Future + Send + 'static, F::Output: Send + 'static`.[^tokio-spawn-sig]
+Task giống thread của OS nhưng do runtime quản lý, không do OS scheduler; docs gọi mẫu này là "green threads"[^tokio-task-green]. Tạo task hay chuyển giữa các task không cần context switch của OS[^tokio-task-light]. Vì vậy `orders-api` có thể mở một task cho mỗi kết nối mà không tốn như mở một thread (nhận xét của người soạn).
 
-- **`Send`:** task được spawn có thể chạy trên thread hiện tại, hoặc được gửi sang một thread khác để chạy.[^tokio-spawn-thread] `Send` là các kiểu có thể được chuyển qua ranh giới thread.[^std-send] Giá trị `!Send` vẫn dùng được nếu chỉ tồn tại giữa các `.await`[^tokio-spawn-send] — khớp [chương 06, mục 3](06-async-await-pin.md): biến sống qua `.await` nằm trong future (state machine), và future là thứ bị chuyển sang thread khác (nhận xét của người soạn).
-- **`'static`:** task sống độc lập với caller (drop handle không dừng nó, mục 5) và không có bảo đảm rằng task đã spawn sẽ chạy tới khi hoàn thành.[^tokio-spawn-lifecycle] Nên task không được mượn stack của caller. **Đây là suy luận của người soạn**; docs của `spawn` không viết "vì thế `'static`". Cùng lý do với `thread::spawn`: thread có thể sống lâu hơn phạm vi đời sống nơi chúng được tạo.[^thread-static]
+`spawn` tạo một task bất đồng bộ mới và trả về `JoinHandle` cho nó[^tokio-spawn]. Future bắt đầu chạy nền ngay, kể cả khi bạn không `await` handle[^tokio-spawn-start]. Tuy vậy nó không bị poll đồng bộ ngay trong lời gọi `spawn`[^tokio-spawn-noblock]. Nếu task panic thì `await` handle trả về `JoinError`[^tokio-task-panic].
 
-**`LocalSet`/`spawn_local`** cho future `!Send`: docs nói một local task set có thể dùng để lập lịch một hoặc nhiều future `!Send` chạy cùng nhau trên cùng một thread.[^tokio-localset] `spawn_local` panic nếu gọi ngoài `LocalSet`/`LocalRuntime`, và `tokio::spawn` gọi trong `LocalSet` tạo task *ngoài* nó.[^tokio-spawn-local] `LocalSet` chỉ chạy khi được `.await` hoặc điều khiển bằng method của nó.[^tokio-localset-driven] `#[tokio::main(flavor = "local")]` cũng có, tương tự current-thread runtime nhưng hỗ trợ `task::spawn_local`.[^tokio-main-local]
+Chữ ký của hàm là `F: Future + Send + 'static, F::Output: Send + 'static`[^tokio-spawn-sig].
+
+### 3.2 Vì sao `Send`
+
+Task đã spawn có thể chạy ngay trên thread hiện tại, hoặc bị gửi sang một thread khác để chạy[^tokio-spawn-thread]. `Send` chính là đặc tính của các kiểu có thể chuyển qua ranh giới thread[^std-send]. Handler của `orders-api` có thể bắt đầu trên worker 1 rồi tiếp tục trên worker 3, nên mọi thứ nó giữ phải chuyển được sang thread khác (nhận xét của người soạn).
+
+Giá trị `!Send` vẫn dùng được nếu nó chỉ tồn tại giữa các lần `.await`[^tokio-spawn-send]. Điều này khớp với [chương 06, mục 3](06-async-await-pin.md): biến sống qua `.await` nằm trong future (state machine), và chính future mới là thứ bị chuyển sang thread khác (nhận xét của người soạn).
+
+### 3.3 Vì sao `'static`
+
+Docs của `spawn` không viết "vì thế phải `'static`", nên phần này là suy luận của người soạn. Task sống độc lập với caller: drop handle không dừng task (mục 5), và không có bảo đảm task đã spawn sẽ chạy tới khi hoàn thành[^tokio-spawn-lifecycle]. Vì vậy task không được mượn stack của caller; nếu hàm gọi `spawn` trả về trước thì tham chiếu đó treo lơ lửng. Cùng lý do với `thread::spawn`: thread có thể sống lâu hơn phạm vi nơi nó được tạo[^thread-static].
+
+### 3.4 Handler `!Send`: `LocalSet`
+
+Nếu một phần của `orders-api` buộc phải dùng giá trị `!Send` (ví dụ một thư viện C chỉ dùng được trên một thread), thì dùng `LocalSet`. Docs mô tả: một local task set dùng để lập lịch một hoặc nhiều future `!Send` chạy cùng nhau trên cùng một thread[^tokio-localset].
+
+Có vài chi tiết nên biết:
+
+- `spawn_local` panic nếu gọi ngoài `LocalSet` hoặc `LocalRuntime`. `tokio::spawn` gọi trong `LocalSet` thì tạo task *ngoài* nó[^tokio-spawn-local].
+- `LocalSet` chỉ chạy khi được `.await` hoặc điều khiển bằng một method của nó[^tokio-localset-driven].
+- `#[tokio::main(flavor = "local")]` cũng có: nó tương tự current-thread runtime nhưng hỗ trợ `task::spawn_local`[^tokio-main-local].
 
 <details><summary>Đi sâu: lỗi compiler quan sát được</summary>
 
@@ -154,13 +191,15 @@ Thử thật (rustc 1.95.0, tokio =1.53.2, container Linux): `tokio::spawn` mộ
 
 ## 4. Vì sao không được chặn trong async (Q4)
 
-> **Trả lời ngắn.** Mỗi thread của scheduler chạy nhiều task xen kẽ, nên một task chặn thread làm các task khác trên thread đó đứng[^tokio-noblock-task]. Việc chặn phải chuyển sang `spawn_blocking`, nơi closure chạy trên thread chấp nhận được việc chặn[^tokio-csb], hoặc `block_in_place`, báo executor giao các task khác sang worker mới trước khi chặn[^tokio-bip]. Coop budget là cơ chế buộc task trả `Pending` khi hết budget[^tokio-coop-budget].
+> **Trả lời ngắn.** Mỗi thread của scheduler chạy nhiều task xen kẽ, nên một task chặn thread làm các task khác trên thread đó đứng[^tokio-noblock-task]. Việc chặn phải chuyển sang `spawn_blocking`, nơi closure chạy trên một thread mà việc chặn là chấp nhận được[^tokio-csb]. Cách khác là `block_in_place`, báo cho executor giao các task khác sang worker mới trước khi chặn[^tokio-bip]. Coop budget là cơ chế buộc task trả `Pending` khi hết budget[^tokio-coop-budget].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một nhân viên thu ngân phục vụ nhiều khách xen kẽ; nếu một khách bắt anh ta đứng chờ giữa chừng thì cả hàng đứng.
+*Với `orders-api`.* Giả sử một handler của `orders-api` gọi driver Postgres đồng bộ, hoặc băm mật khẩu bằng một hàm tính toán nặng. Trong lúc đó worker chạy handler này không làm gì khác được, và mọi request đang nằm trên worker ấy bị đứng theo. Mục này cho thấy vì sao, đo mức độ, rồi nói `orders-api` có những lối thoát nào.
 
-Mỗi thread của scheduler chạy nhiều task xen kẽ. Docs: task nhìn chung không nên thực hiện system call hay thao tác khác có thể chặn thread, vì như vậy các task khác trên cùng thread cũng không chạy được.[^tokio-noblock-task] Việc đổi task chỉ xảy ra tại `.await`, nên code lâu không tới `.await` sẽ ngăn các task khác chạy;[^tokio-await-only] task là cooperative: được chạy cho tới khi nó nhường.[^tokio-coop] Hàm không-async bạn gọi từ code async cũng vậy, kể cả destructor.[^tokio-sync-in-async]
+### 4.1 Chặn một task làm đứng cả thread
+
+Docs nói task nhìn chung không nên thực hiện system call hay thao tác khác có thể chặn thread, vì như vậy các task khác trên cùng thread cũng không chạy được[^tokio-noblock-task]. Lý do nằm ở chỗ task chỉ đổi lượt tại `.await`: code chạy lâu mà không tới `.await` thì ngăn các task khác chạy[^tokio-await-only]. Nói cách khác, task là cooperative: được chạy cho tới khi tự nhường[^tokio-coop]. Điều này áp dụng cả cho hàm không-async mà bạn gọi từ code async, kể cả destructor[^tokio-sync-in-async].
 
 **Đo thử.** Task "ticker" `sleep(20 ms)` 25 lần, ghi khoảng cách tick lớn nhất; trong lúc đó một task khác "làm việc" 300 ms. Một lần chạy, container Linux `nproc` = 4 (quan sát, dao động theo lần; chạy lại: 305 ms ở dòng đầu):
 
@@ -176,28 +215,36 @@ Dòng đầu là đói: ticker 20 ms bị treo suốt thời gian task kia giữ
 
 ### `spawn_blocking` và `block_in_place`
 
-Docs có hai loại thread: core thread chạy code async, mặc định mỗi core một;[^tokio-core-threads] và blocking thread được sinh ra theo nhu cầu.[^tokio-blocking-ondemand]
+Vậy `orders-api` làm gì với việc chặn? Docs chia thread của Tokio làm hai loại: core thread chạy code async, mặc định mỗi core một[^tokio-core-threads]. Blocking thread thì được sinh ra theo nhu cầu[^tokio-blocking-ondemand]. Docs đưa ra hai lối thoát cho việc chặn: `spawn_blocking` và `block_in_place`.
 
-**`spawn_blocking`** chạy closure được đưa vào trên một thread nơi việc chặn là chấp nhận được.[^tokio-csb] Tokio sinh thêm thread đến giới hạn của `Builder`; quá giới hạn thì task xếp hàng.[^tokio-csb-queue] Giới hạn mặc định của `max_blocking_threads` là 512,[^tokio-mbt-default] hàng đợi không có backpressure nên có khả năng tăng không giới hạn;[^tokio-mbt-queue] thread rảnh giữ 10 giây.[^tokio-keepalive] Với việc CPU-bound: nên dùng semaphore hoặc một primitive đồng bộ khác để giới hạn số phép tính chạy song song;[^tokio-csb-cpu] hoặc dùng pool riêng như rayon.[^tokio-rayon] Việc chạy vô hạn nên dùng `thread::spawn`.[^tokio-csb-long] Dùng được cả trên current-thread.[^tokio-csb-ct]
+**`spawn_blocking`** chạy closure bạn đưa vào trên một thread mà việc chặn là chấp nhận được[^tokio-csb]. Tokio sinh thêm thread cho tới giới hạn của `Builder`; vượt giới hạn thì task xếp hàng[^tokio-csb-queue]. Giới hạn mặc định của `max_blocking_threads` là 512[^tokio-mbt-default]. Hàng đợi không có backpressure nên có thể tăng không giới hạn[^tokio-mbt-queue]. Thread rảnh được giữ 10 giây[^tokio-keepalive]. `spawn_blocking` dùng được cả trên current-thread[^tokio-csb-ct].
 
-**`block_in_place`** (chỉ multi-thread): lời gọi hàm này báo executor rằng task đang chạy sắp chặn thread, nhờ đó executor có thể giao mọi task khác nó đang giữ sang một worker thread mới trước khi điều đó xảy ra.[^tokio-bip]
+Với việc CPU-bound thì cần thêm một lớp giới hạn. Docs khuyên dùng semaphore hoặc một primitive đồng bộ khác để giới hạn số phép tính chạy song song[^tokio-csb-cpu]; hoặc dùng một pool riêng như rayon[^tokio-rayon]. Việc chạy vô hạn thì nên dùng `thread::spawn`[^tokio-csb-long]. Trong `orders-api`, băm mật khẩu hợp với `spawn_blocking` kèm `Semaphore` hơn là để hàng trăm lượt băm cùng chiếm thread (nhận xét của người soạn).
+
+**`block_in_place`** chỉ có ở multi-thread. Gọi hàm này là báo cho executor biết task hiện tại sắp chặn thread, nhờ đó executor kịp giao mọi task khác nó đang giữ sang một worker mới trước khi việc chặn xảy ra[^tokio-bip].
+
+Hai hàm khác nhau ở chỗ việc chặn chạy ở đâu và chuyện gì xảy ra với code còn lại trong cùng task:
 
 | | `spawn_blocking` | `block_in_place` |
 |---|---|---|
 | Chạy ở | Thread của blocking pool[^tokio-csb-ded] | Ngay worker hiện tại[^tokio-bip-summary] |
 | Runtime | Cả hai flavor[^tokio-csb-ct] | Chỉ multi-thread; panic trên current_thread[^tokio-bip-panic] |
 | Code khác trong *cùng task* (ví dụ `join!`) | Không bị treo (docs khuyên dùng `spawn_blocking` để tránh vấn đề này)[^tokio-bip-join] | Bị treo[^tokio-bip-join] |
-| Hủy | Không (trừ khi chưa bắt đầu chạy, và cũng không bảo đảm)[^tokio-csb-abort][^tokio-cancel-blocking] | Không[^tokio-bip-cancel] |
+| Hủy | Không abort được khi đã chạy[^tokio-csb-abort] | Không[^tokio-bip-cancel] |
+
+Riêng ô "Hủy" của `spawn_blocking` có một ngoại lệ: nếu task chưa bắt đầu chạy thì `abort` có thể ngăn nó bắt đầu[^tokio-cancel-blocking]. Docs chỉ dùng cách nói "có thể", nên đừng coi đó là bảo đảm.
 
 ### Cooperative budget
 
-Một `poll` có thể làm rất nhiều việc trước khi trả `Pending`; Rust không có runtime nên khó ép preempt, thay vào đó module `coop` cung cấp một cơ chế tự nguyện để future phối hợp với executor nhằm tránh starvation.[^tokio-coop-mod] Tokio đặt yield point trong hàm thư viện để buộc task định kỳ quay về executor.[^tokio-coop-yield] Mỗi task có *coop budget*; `poll_proceed` giảm budget của task và trả `Poll::Pending` nếu budget đã cạn.[^tokio-coop-budget] `consume_budget` cho code của bạn quyền tương tự,[^tokio-consume] còn `unconstrained` tắt cơ chế, khiến dịch vụ của bạn dễ bị starvation.[^tokio-unconstrained] Các trang `task::coop`, `task` và `runtime` của docs 1.53.2 không nêu giá trị budget mặc định (người soạn đã tìm), nên chương này không nêu con số.
+Còn code async thuần mà chạy lâu thì sao? Một lần `poll` có thể làm rất nhiều việc trước khi trả `Pending`. Rust không có runtime nên khó ép một task dừng giữa chừng; module `coop` thay vào đó cung cấp một cơ chế tự nguyện để future phối hợp với executor, tránh starvation[^tokio-coop-mod]. Tokio đặt sẵn các điểm nhường trong hàm thư viện, buộc task định kỳ quay về executor[^tokio-coop-yield].
+
+Cụ thể, mỗi task có một *coop budget*. `poll_proceed` trừ budget của task và trả `Poll::Pending` nếu budget đã cạn[^tokio-coop-budget]. `consume_budget` cho code của bạn cùng quyền đó[^tokio-consume]. Ngược lại, `unconstrained` tắt cơ chế này và khiến service của bạn dễ bị starvation[^tokio-unconstrained]. Docs `task::coop`, `task` và `runtime` của 1.53.2 không nêu giá trị budget mặc định (người soạn đã tìm), nên chương này không nêu con số.
 
 <details><summary>Đi sâu: <code>block_in_place</code> trên current_thread; nhường CPU khi có budget</summary>
 
-Quan sát (một lần chạy): `block_in_place` trong task spawn trên current_thread panic "can call blocking only when running on the multi-threaded runtime" và `JoinHandle` trả `Err`; khớp docs, vốn nói hàm này panic trên current_thread.[^tokio-bip-panic] (Nhận xét của người soạn: `spawn_blocking` là cầu nối cho driver DB đồng bộ, nén, băm mật khẩu; việc nặng CPU nên kèm `Semaphore` để khỏi nhồi hàng trăm thread vào máy 4 core.)
+Quan sát (một lần chạy): `block_in_place` trong task spawn trên current_thread panic "can call blocking only when running on the multi-threaded runtime" và `JoinHandle` trả `Err`; khớp docs, vốn nói hàm này panic trên current_thread[^tokio-bip-panic]. (Nhận xét của người soạn: `spawn_blocking` là cầu nối cho driver DB đồng bộ, nén, băm mật khẩu; việc nặng CPU nên kèm `Semaphore` để khỏi nhồi hàng trăm thread vào máy 4 core.)
 
-**Thử thật** (quan sát một lần chạy trên current_thread, output có sẵn từ lần soạn trước, không chạy lại): task A lặp 2.000.000 lần `tx.send(); rx.recv().await` trên `unbounded_channel` (luôn sẵn sàng); task B chỉ đặt một cờ. Khi A xong vòng cuối, B đã chạy chưa? Bình thường **có** (A bị buộc nhường giữa chừng); bọc A trong `unconstrained` thì **không**. Đúng kịch bản mà docs `coop` mô tả.[^tokio-unconstrained-ex] Ý nghĩa: `recv` của channel Tokio là một hàm thư viện có điểm nhường, nên A bị buộc nhường dù channel luôn sẵn sàng; `unconstrained` gỡ điểm nhường đó.[^tokio-coop-yield] Tôi không đo A nhường sau bao nhiêu vòng.
+**Thử thật** (quan sát một lần chạy trên current_thread, output có sẵn từ lần soạn trước, không chạy lại): task A lặp 2.000.000 lần `tx.send(); rx.recv().await` trên `unbounded_channel` (luôn sẵn sàng); task B chỉ đặt một cờ. Khi A xong vòng cuối, B đã chạy chưa? Bình thường **có** (A bị buộc nhường giữa chừng); bọc A trong `unconstrained` thì **không**. Đúng kịch bản mà docs `coop` mô tả[^tokio-unconstrained-ex]. Ý nghĩa: `recv` của channel Tokio là một hàm thư viện có điểm nhường, nên A bị buộc nhường dù channel luôn sẵn sàng; `unconstrained` gỡ điểm nhường đó[^tokio-coop-yield]. Tôi không đo A nhường sau bao nhiêu vòng.
 
 </details>
 
@@ -205,11 +252,11 @@ Quan sát (một lần chạy): `block_in_place` trong task spawn trên current_
 
 ## 5. Hủy (cancellation) (Q5)
 
-> **Trả lời ngắn.** Drop `JoinHandle` không hủy task: nó chỉ tách task ra[^tokio-jh-detach]. `abort` báo task dừng ở lần `.await` kế tiếp[^tokio-cancel]; drop future (như `select!` hay `timeout` quá hạn) bỏ nó giữa chừng tại `.await`[^tokio-timeout][^tokio-select-own]. Vì nhánh thua của `select!` bị drop, hàm dùng trong đó phải cancellation safe[^tokio-select-def].
+> **Trả lời ngắn.** Drop `JoinHandle` không hủy task: nó chỉ tách task ra[^tokio-jh-detach]. `abort` báo task dừng ở lần `.await` kế tiếp[^tokio-cancel]. Drop future (như `select!` hay `timeout` quá hạn) thì bỏ future giữa chừng tại một `.await`[^tokio-timeout]. Vì nhánh thua của `select!` bị drop, hàm dùng trong đó phải cancellation safe[^tokio-select-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hủy một việc giống rút phiếu đặt hàng: bếp đã bắt đầu nấu thì không rút lại được (`spawn_blocking`), còn nếu chỉ đang chờ nguyên liệu thì bỏ dở giữa chừng được (drop future tại `.await`).
+*Với `orders-api`.* Có ba tình huống buộc `orders-api` phải bỏ một việc đang chạy dở: client ngắt kết nối giữa request, cuộc gọi sang service thanh toán quá hạn, hoặc cả service đang tắt. Câu hỏi là bỏ như vậy thì việc đó thực sự dừng chưa, và dừng ở đâu. Câu trả lời khác nhau theo cách hủy, nên ta xem lần lượt từng cách.
 
 ```mermaid
 flowchart TD
@@ -221,25 +268,37 @@ flowchart TD
   B -- "spawn_blocking / block_in_place" --> G["đã chạy thì không hủy được"]
 ```
 
-**Drop `JoinHandle` không hủy.** Một `JoinHandle` tách task liên kết khi nó bị drop, nghĩa là task chạy tiếp và kết quả mất.[^tokio-jh-detach][^tokio-jh-drop] Quan sát (một lần chạy, output có sẵn): task `sleep` 100 ms rồi in, handle bị drop ngay; vẫn thấy dòng in và destructor chạy sau đó.
+### 5.1 Drop `JoinHandle` và `abort`
 
-**`abort`.** Task được báo hiệu để tắt ở lần nó nhường tiếp theo tại một điểm `.await`;[^tokio-cancel] task đang rảnh thì dừng sớm nhất có thể.[^tokio-cancel-idle] Khi dừng, mọi biến cục bộ bị hủy bằng cách chạy destructor của chúng.[^tokio-cancel-drop] `abort` chỉ lên lịch và trả về trước khi hủy xong; muốn đợi thì `await` handle.[^tokio-abort-async] Tắt runtime (kể cả `main` kết thúc) hủy mọi task.[^tokio-cancel-rt]
+**Drop `JoinHandle` không hủy.** Khi `JoinHandle` bị drop thì task liên kết bị tách ra: không còn handle nào, cũng không còn cách `join`[^tokio-jh-detach]. Task chạy tiếp ở nền và kết quả của nó mất[^tokio-jh-drop]. Với `orders-api`, handler của một request mà bạn vứt handle đi vẫn chạy cho tới hết (nhận xét của người soạn). Quan sát (một lần chạy, output có sẵn): task `sleep` 100 ms rồi in, handle bị drop ngay; vẫn thấy dòng in và destructor chạy sau đó.
 
-**Không bảo đảm `cancelled`.** Việc abort một task không bảo đảm nó thất bại với lỗi cancelled, vì nó có thể hoàn thành bình thường trước.[^tokio-cancel-race] Quan sát (một lần chạy): task `sleep` 10 s bị `abort` → handle cho `is_cancelled() == true`, destructor chạy; task `async { 42 }` đã xong trước khi `abort` → `Ok(42)`.
+**`abort`.** Task được báo hiệu để tắt ở lần nó nhường tiếp theo tại một điểm `.await`[^tokio-cancel]. Nếu task đang rảnh thì nó dừng sớm nhất có thể, không chạy lại trước khi dừng[^tokio-cancel-idle]. Khi dừng, task thôi chạy ở `.await` mà nó đang nhường, và mọi biến cục bộ bị hủy bằng cách chạy destructor[^tokio-cancel-drop]. Lưu ý `abort` chỉ lên lịch hủy và trả về trước khi việc hủy xong; muốn đợi thì `await` handle[^tokio-abort-async]. Tắt runtime, kể cả khi `main` kết thúc, hủy ngay mọi task trên nó[^tokio-cancel-rt].
 
-**`spawn_blocking`** không abort được vì không async, trừ khi chưa bắt đầu chạy (docs chỉ dùng cách nói "có thể", không chắc chắn).[^tokio-csb-abort][^tokio-cancel-blocking] Quan sát (một lần chạy): closure đang ngủ 200 ms bị `abort` sau 50 ms vẫn chạy hết và handle cho `Ok(7)`. Runtime shutdown sẽ chờ vô hạn cho tới khi mọi `spawn_blocking` đã bắt đầu chạy xong, trừ khi dùng `shutdown_timeout`.[^tokio-csb-shutdown]
+**Không bảo đảm `cancelled`.** `abort` không bảo đảm task thất bại với lỗi cancelled, vì task có thể hoàn thành bình thường trước đó[^tokio-cancel-race]. Quan sát (một lần chạy): task `sleep` 10 s bị `abort` → handle cho `is_cancelled() == true`, destructor chạy; task `async { 42 }` đã xong trước khi `abort` → `Ok(42)`.
 
-**Drop future.** `abort` về cơ chế là không poll nữa rồi drop future; thứ future giữ được dọn bằng `Drop` thường (suy luận của người soạn, khớp [chương 06, mục 8](06-async-await-pin.md)). `select!` hủy các nhánh còn lại,[^tokio-select] còn `timeout` quá hạn thì trả một lỗi và hủy future.[^tokio-timeout]
+**`spawn_blocking`** không abort được vì nó không async[^tokio-csb-abort]. Ngoại lệ là khi nó chưa bắt đầu chạy, và docs cũng chỉ nói "có thể ngăn", không chắc chắn[^tokio-cancel-blocking]. Quan sát (một lần chạy): closure đang ngủ 200 ms bị `abort` sau 50 ms vẫn chạy hết và handle cho `Ok(7)`. Runtime shutdown sẽ chờ vô hạn cho tới khi mọi `spawn_blocking` đã bắt đầu chạy xong, trừ khi dùng `shutdown_timeout`[^tokio-csb-shutdown].
+
+### 5.2 Drop future
+
+`abort` về cơ chế là không poll nữa rồi drop future; thứ future đang giữ được dọn bằng `Drop` thường (suy luận của người soạn, khớp [chương 06, mục 8](06-async-await-pin.md)). Hai nơi hay drop future nhất là `select!` và `timeout`. `select!` hủy các nhánh còn lại[^tokio-select]; `timeout` quá hạn thì trả về một lỗi và hủy future bên trong[^tokio-timeout]. Đây chính là cách `orders-api` bỏ cuộc gọi sang service thanh toán khi nó quá hạn (nhận xét của người soạn).
 
 ### `select!` và cancellation safety
 
-`select!` chờ trên nhiều nhánh đồng thời, trả về khi nhánh đầu tiên hoàn thành và hủy các nhánh còn lại.[^tokio-select] Các nhánh chạy trên cùng task, đồng thời nhưng không song song;[^tokio-select-conc] mặc định chọn ngẫu nhiên nhánh kiểm tra trước, `biased;` đổi thành từ trên xuống.[^tokio-select-fair]
+`select!` chờ trên nhiều nhánh đồng thời, trả về khi nhánh đầu tiên hoàn thành và hủy các nhánh còn lại[^tokio-select]. Các nhánh chạy trên cùng một task, nên đồng thời nhưng không song song[^tokio-select-conc]. Mặc định `select!` chọn ngẫu nhiên nhánh kiểm tra trước; thêm `biased;` thì đổi thành từ trên xuống[^tokio-select-fair].
 
-Định nghĩa của docs: nếu bạn có một future chưa hoàn thành, thì việc drop future đó rồi tạo lại nó phải là thao tác không có tác dụng.[^tokio-select-def] Docs liệt kê (danh sách không đầy đủ[^tokio-select-notexh]) các hàm an toàn:[^tokio-select-safe-list] `mpsc::Receiver::recv`, `broadcast::Receiver::recv`, `watch::Receiver::changed`, `TcpListener::accept`, `AsyncReadExt::read`, `AsyncWriteExt::write`. **Không** an toàn và có thể mất dữ liệu: `read_exact`, `read_to_end`, `read_to_string`, `write_all`.[^tokio-select-safe] Cũng không an toàn vì mất chỗ trong hàng đợi công bằng: `Mutex::lock`, `RwLock::read/write`, `Semaphore::acquire`, `Notify::notified`.[^tokio-select-queue] Tự kiểm hàm của mình: hủy luôn xảy ra ở `.await`; nếu hàm vẫn đúng khi bị khởi động lại ở đó thì nó cancellation safe.[^tokio-select-own] Hủy thứ không an toàn không nhất thiết sai (ví dụ khi đang tắt ứng dụng).[^tokio-select-notwrong]
+Vì nhánh thua bị drop giữa chừng, câu hỏi đặt ra là drop xong có mất gì không. Docs định nghĩa: nếu bạn có một future chưa hoàn thành, thì việc drop future đó rồi tạo lại nó phải là thao tác không có tác dụng[^tokio-select-def]. Hàm nào thỏa điều đó gọi là cancellation safe.
+
+Docs liệt kê các hàm cancellation safe, và danh sách này không đầy đủ[^tokio-select-notexh]:
+
+- An toàn: `mpsc::Receiver::recv`, `broadcast::Receiver::recv`, `watch::Receiver::changed`, `TcpListener::accept`, `AsyncReadExt::read`, `AsyncWriteExt::write`[^tokio-select-safe-list].
+- **Không** an toàn và có thể mất dữ liệu: `read_exact`, `read_to_end`, `read_to_string`, `write_all`[^tokio-select-safe].
+- Không an toàn vì mất chỗ trong hàng đợi công bằng: `Mutex::lock`, `RwLock::read/write`, `Semaphore::acquire`, `Notify::notified`[^tokio-select-queue].
+
+Với hàm của chính bạn, cách tự kiểm là nhớ rằng việc hủy luôn xảy ra ở một `.await`. Nếu hàm vẫn đúng khi bị khởi động lại ngay ở đó thì nó cancellation safe[^tokio-select-own]. Hủy thứ không an toàn cũng không nhất thiết là sai, ví dụ khi đang tắt ứng dụng[^tokio-select-notwrong].
 
 <details><summary>Đi sâu: tái hiện <code>read_exact</code> mất dữ liệu trong <code>select!</code></summary>
 
-**Thử thật** (duplex pipe trong bộ nhớ; quan sát một lần chạy, output có sẵn, không chạy lại): ghi 2 byte; `select!` giữa `read_exact(4 byte)` và `sleep(20 ms)` → timer thắng khi `read_exact` mới có 2/4 byte. Ghi thêm 2 byte rồi `timeout(100 ms, read_exact(4 byte))` → **hết giờ**: 2 byte đầu không còn để đọc (giải thích của người soạn: chúng nằm trong trạng thái nội bộ của future `read_exact` đã bị drop). Ngược lại vòng `select!` dùng `read(&mut buf[got..])` và tự cộng `got` nhận đủ `[1, 2, 3, 4]`. Ý nghĩa: đây đúng là kiểu "mất dữ liệu" mà docs cảnh báo cho `read_exact`,[^tokio-select-safe] còn `read` nằm trong danh sách an toàn.[^tokio-select-safe-list] (Nhận xét của người soạn: trong `select!` chỉ đặt future mà docs xếp cancel-safe; đọc đủ N byte thì giữ trạng thái ngoài future.)
+**Thử thật** (duplex pipe trong bộ nhớ; quan sát một lần chạy, output có sẵn, không chạy lại): ghi 2 byte; `select!` giữa `read_exact(4 byte)` và `sleep(20 ms)` → timer thắng khi `read_exact` mới có 2/4 byte. Ghi thêm 2 byte rồi `timeout(100 ms, read_exact(4 byte))` → **hết giờ**: 2 byte đầu không còn để đọc (giải thích của người soạn: chúng nằm trong trạng thái nội bộ của future `read_exact` đã bị drop). Ngược lại vòng `select!` dùng `read(&mut buf[got..])` và tự cộng `got` nhận đủ `[1, 2, 3, 4]`. Ý nghĩa: đây đúng là kiểu "mất dữ liệu" mà docs cảnh báo cho `read_exact`[^tokio-select-safe]. Còn `read` nằm trong danh sách an toàn[^tokio-select-safe-list]. (Nhận xét của người soạn: trong `select!` chỉ đặt future mà docs xếp cancel-safe; đọc đủ N byte thì giữ trạng thái ngoài future.)
 
 </details>
 
@@ -247,23 +306,37 @@ flowchart TD
 
 ## 6. `tokio::sync`: mutex, channel, semaphore, notify (Q6)
 
-> **Trả lời ngắn.** Với dữ liệu thuần, docs khuyên dùng `Mutex` của std hoặc `parking_lot`[^tokio-mutex-std][^tokio-mutex-data]; mutex của Tokio dành cho trường hợp cần giữ khóa qua `.await`, như truy cập kết nối DB[^tokio-mutex-prefer]. `oneshot` gửi một giá trị từ một producer đến một consumer[^tokio-oneshot]; `mpsc` là nhiều producer một consumer, và dung lượng của nó là chỗ xử lý backpressure[^tokio-mpsc-cap]. `Semaphore` cho nhiều bên truy cập đồng thời, khác mutex[^tokio-sem]. `Notify` chỉ báo cho một task biết có sự kiện, không mang dữ liệu[^tokio-notify-signal].
+> **Trả lời ngắn.** Với dữ liệu thuần, docs khuyên dùng `Mutex` của std hoặc `parking_lot`[^tokio-mutex-data]. Mutex của Tokio dành cho trường hợp cần giữ khóa qua `.await`, như truy cập kết nối DB[^tokio-mutex-prefer]. `oneshot` gửi một giá trị từ một producer đến một consumer[^tokio-oneshot]. `mpsc` là nhiều producer một consumer, và dung lượng của nó là chỗ xử lý backpressure[^tokio-mpsc-cap]. `Semaphore` cho nhiều bên truy cập đồng thời, khác mutex[^tokio-sem]. `Notify` chỉ báo cho một task biết có sự kiện, không mang dữ liệu[^tokio-notify-signal].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mutex là một chìa khóa phòng, channel là hộp thư, semaphore là bảng "còn N chỗ".
+*Với `orders-api`.* Các handler của `orders-api` chạy song song trên nhiều worker nhưng cần chia sẻ một số thứ: bộ đếm request đang xử lý, một kết nối tới Postgres, cái cổng giới hạn số cuộc gọi đồng thời sang service thanh toán, và tín hiệu "cấu hình vừa đổi". Mỗi thứ hợp với một primitive khác nhau của `tokio::sync`; mục này đi qua từng cái (phép gán primitive cho nhu cầu là ví dụ của người soạn).
 
-**Mutex.** Mutex của Tokio khác `std` ở hai điểm: `lock` là async, và guard được thiết kế để giữ qua các điểm `.await`.[^tokio-mutex-diff] Nhưng docs khuyên: trái với quan niệm phổ biến, dùng `Mutex` thường của thư viện chuẩn trong code bất đồng bộ là được và thường được ưu tiên.[^tokio-mutex-std] Lý do: khả năng giữ khóa qua `.await` làm mutex async đắt hơn mutex chặn;[^tokio-mutex-expensive] trường hợp chính của nó là truy cập chia sẻ có thể thay đổi tới tài nguyên I/O như kết nối cơ sở dữ liệu[^tokio-mutex-prefer]; nếu giá trị sau mutex chỉ là dữ liệu thì dùng mutex chặn của std hoặc `parking_lot`.[^tokio-mutex-data] Docs nói thêm: compiler không cấm `Mutex` của std giữ guard qua `.await` khi task không bị chuyển thread, nhưng cách đó hầu như không bao giờ cho code đồng thời đúng trong thực tế vì dễ dẫn tới deadlock;[^tokio-mutex-deadlock] còn với `tokio::spawn`, compiler từ chối vì future không `Send` (quan sát ở mục 3). Mẫu khuyến nghị: bọc `Arc<Mutex<..>>` trong struct có method không-async chỉ khóa bên trong;[^tokio-mutex-wrap] với tài nguyên I/O, giao cho một task và nói chuyện qua channel.[^tokio-mutex-pattern] Mutex Tokio hoạt động FIFO.[^tokio-mutex-fifo] Nền tảng lock ở [P4 · Chương 03](../04-concurrency/03-lock.md).
+### 6.1 Mutex: std hay Tokio
 
-**Channel.** `oneshot` gửi một giá trị từ một producer đến một consumer, thường để trả kết quả cho người chờ;[^tokio-oneshot] `mpsc` là nhiều producer một consumer,[^tokio-mpsc] và dung lượng là chìa khóa để xây chương trình vững, vì nó đóng vai trò quan trọng trong việc xử lý back pressure.[^tokio-mpsc-cap] Cặp `mpsc` + `oneshot` cho mẫu request/response tới task quản lý tài nguyên: lệnh mang theo `oneshot::Sender`.[^tokio-actor] (Nhận xét của người soạn: `unbounded_channel` bỏ backpressure, rủi ro hết bộ nhớ khi tải vào từ ngoài.)
+Mutex của Tokio khác `std` ở hai điểm: `lock` là async, và guard được thiết kế để giữ qua các điểm `.await`[^tokio-mutex-diff]. Nghe thì tưởng trong code async nên luôn dùng nó, nhưng docs nói ngược lại: trái với quan niệm phổ biến, dùng `Mutex` thường của thư viện chuẩn trong code bất đồng bộ là được và thường còn được ưu tiên[^tokio-mutex-std].
 
-**`Semaphore`.** Semaphore cho phép nhiều bên truy cập đồng thời, khác mutex;[^tokio-sem] công bằng theo thứ tự yêu cầu.[^tokio-sem-fair] Docs `spawn_blocking` đề nghị dùng nó để giới hạn số phép tính CPU-bound chạy song song.[^tokio-csb-cpu]
+Lý do là khả năng giữ khóa qua `.await` làm mutex async đắt hơn mutex chặn, nên chỉ dùng loại async khi thật cần[^tokio-mutex-expensive]. Trường hợp thật cần, theo docs, là truy cập chia sẻ có thể thay đổi tới tài nguyên I/O như kết nối cơ sở dữ liệu[^tokio-mutex-prefer]. Còn nếu giá trị sau mutex chỉ là dữ liệu thì dùng mutex chặn của std hoặc `parking_lot`[^tokio-mutex-data]. Áp vào `orders-api`: bộ đếm request dùng `std::sync::Mutex`; kết nối Postgres, thứ phải giữ khóa suốt lúc chờ server, mới là chỗ của mutex Tokio.
 
-**`Notify`.** Báo cho một task biết có sự kiện xảy ra; bản thân nó không mang dữ liệu.[^tokio-notify-signal] Cơ chế permit nằm ở mục Đi sâu bên dưới.
+Còn nếu vẫn dùng `Mutex` của std và giữ guard qua `.await` thì sao? Compiler không cấm khi task không bị chuyển thread, nhưng docs cảnh báo cách đó hầu như không bao giờ cho code đồng thời đúng vì dễ dẫn tới deadlock[^tokio-mutex-deadlock]. Với `tokio::spawn`, compiler từ chối hẳn vì future không `Send` (quan sát ở mục 3).
+
+Docs gợi ý hai mẫu. Mẫu thứ nhất: bọc `Arc<Mutex<..>>` trong một struct có các method không-async, và chỉ khóa mutex bên trong các method đó[^tokio-mutex-wrap]. Mẫu thứ hai, cho tài nguyên I/O: giao tài nguyên cho một task riêng và nói chuyện với nó qua channel[^tokio-mutex-pattern]. Mutex Tokio hoạt động theo FIFO[^tokio-mutex-fifo]. Nền tảng lock nằm ở [P4 · Chương 03](../04-concurrency/03-lock.md).
+
+### 6.2 Channel
+
+`oneshot` gửi một giá trị từ một producer đến một consumer, thường để trả kết quả cho bên đang chờ[^tokio-oneshot]. `mpsc` thì nhiều producer một consumer[^tokio-mpsc]. Với `mpsc`, dung lượng là chìa khóa để xây chương trình vững, vì nó đóng vai trò quan trọng trong việc xử lý back pressure[^tokio-mpsc-cap].
+
+Hai loại này ghép được thành mẫu request/response tới một task quản lý tài nguyên: task chờ lệnh trên một `mpsc`, và mỗi lệnh mang theo một `oneshot::Sender` để trả kết quả[^tokio-actor]. Đây cũng là dạng "giao tài nguyên cho một task" ở trên: các handler của `orders-api` gửi lệnh tới một task giữ kết nối Postgres (nhận xét của người soạn). Cũng nhận xét của người soạn: `unbounded_channel` bỏ backpressure, và khi tải đổ vào từ ngoài thì có nguy cơ hết bộ nhớ.
+
+### 6.3 `Semaphore` và `Notify`
+
+Semaphore cho phép nhiều bên truy cập đồng thời, khác mutex chỉ cho một bên[^tokio-sem]. Nó công bằng theo thứ tự yêu cầu[^tokio-sem-fair]. Docs `spawn_blocking` cũng đề nghị dùng nó để giới hạn số phép tính CPU-bound chạy song song[^tokio-csb-cpu]. Trong `orders-api`, đó là cái cổng "tối đa N cuộc gọi đồng thời sang service thanh toán" (nhận xét của người soạn).
+
+`Notify` thì đơn giản hơn: nó báo cho một task biết có sự kiện xảy ra, còn bản thân nó không mang dữ liệu[^tokio-notify-signal]. Cơ chế permit nằm ở phần Đi sâu.
 
 <details><summary>Đi sâu: <code>Notify</code> và permit</summary>
 
-`Notify` có thể xem như một Semaphore bắt đầu với 0 permit;[^tokio-notify] `notify_one()` gọi trước `notified().await` thì lần chờ sau hoàn thành ngay,[^tokio-notify-before] nhiều lần gọi trước đó chỉ lưu một permit.[^tokio-notify-one] Nền tảng ở [P4 · Chương 04](../04-concurrency/04-condition-variable-va-semaphore.md).
+`Notify` có thể xem như một Semaphore bắt đầu với 0 permit[^tokio-notify]. `notify_one()` gọi trước `notified().await` thì lần chờ sau hoàn thành ngay[^tokio-notify-before]. Nhiều lần gọi trước đó cũng chỉ lưu một permit[^tokio-notify-one]. Nền tảng ở [P4 · Chương 04](../04-concurrency/04-condition-variable-va-semaphore.md).
 
 </details>
 
@@ -271,22 +344,34 @@ Hình dung (nhận xét của người soạn): mutex là một chìa khóa phò
 
 ## 7. `tokio::time` và `tokio::fs` (Q7)
 
-> **Trả lời ngắn.** `Sleep`, `Interval`, `Timeout` chạy trên timer của runtime và phải dùng trong ngữ cảnh runtime[^tokio-time-ctx]. `tokio::fs` không async ở mức hệ điều hành: phía sau nó dùng thao tác file chặn thông thường[^tokio-fs], và theo docs module hiện luôn chạy trên `spawn_blocking`[^tokio-fs-always]; ngoại lệ duy nhất là đường io_uring thử nghiệm phải bật tường minh ([chương 03, mục 6](03-kqueue-io-uring.md)).[^tokio-fs-uring]
+> **Trả lời ngắn.** `Sleep`, `Interval`, `Timeout` chạy trên timer của runtime và phải dùng trong ngữ cảnh runtime[^tokio-time-ctx]. `tokio::fs` không async ở mức hệ điều hành: phía sau nó dùng thao tác file chặn thông thường[^tokio-fs]. Theo docs module, hiện nó luôn chạy trên `spawn_blocking`[^tokio-fs-always]. Ngoại lệ duy nhất là đường io_uring thử nghiệm phải bật tường minh ([chương 03, mục 6](03-kqueue-io-uring.md))[^tokio-fs-uring].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): timer là đồng hồ báo thức chung của runtime; còn đọc file là việc thật sự chặn nên phải đẩy sang xưởng riêng (blocking pool).
+*Với `orders-api`.* `orders-api` cần hai thứ có vẻ giống nhau: đặt hạn cho cuộc gọi sang service thanh toán, và đọc file mẫu hóa đơn từ đĩa. Cả hai đều có API async trong Tokio, nhưng chạy trên hai cơ chế khác hẳn: thứ nhất là timer của runtime, thứ hai là blocking pool.
 
-`Sleep` (hoàn thành tại một `Instant`), `Interval` (chu kỳ cố định), `Timeout` (cận trên thời gian).[^tokio-time-types] Chúng phải được dùng từ bên trong ngữ cảnh của Runtime;[^tokio-time-ctx] `timeout` panic nếu không có timer hiện hành.[^tokio-timeout-panic]
+### 7.1 Thời gian
 
-- `timeout` poll future *trước* khi kiểm tra hạn, nên future không yield có thể vượt hạn mà không lỗi.[^tokio-timeout-poll] Hủy timeout là drop future.[^tokio-timeout-cancel] Quá hạn thì future bên trong bị hủy,[^tokio-timeout] và hủy luôn xảy ra ở một `.await` (mục 5).[^tokio-select-own]
-- `interval` khác `sleep` trong vòng lặp ở chỗ đếm cả thời gian xử lý (khác với gọi `sleep` trong một vòng lặp);[^tokio-interval] tick đầu hoàn thành ngay;[^tokio-interval-first] `tick` là cancel safe.[^tokio-tick-safe]
+Có ba kiểu chính: `Sleep` hoàn thành tại một `Instant`, `Interval` phát một giá trị theo chu kỳ cố định, và `Timeout` đặt cận trên cho thời gian một future được phép chạy[^tokio-time-types]. Cả ba phải dùng từ bên trong ngữ cảnh của Runtime[^tokio-time-ctx]. Riêng `timeout` còn panic nếu không có timer hiện hành[^tokio-timeout-panic].
 
-**`tokio::fs`.** Phần phân tích đầy đủ (docs nói gì, vì sao file không có API async, cách gộp thao tác để giảm số lần `spawn_blocking`) nằm ở [P5 · Chương 08, mục 9](../05-storage/08-rust-va-luu-tru.md); ở đây chỉ giữ điều cần cho mạch Tokio. Docs module: hiện luôn dùng `spawn_blocking` trên mọi nền tảng, có thể đổi sang API như io_uring trong tương lai.[^tokio-fs-always] Source 1.53.2 cho thấy docs module đã cũ so với docs hàm: trên Linux, `tokio::fs::read` có thể dùng io_uring nếu bật đủ ba điều kiện (`--cfg tokio_unstable`, feature `io-uring`, `Builder::enable_io_uring`), và hỗ trợ này còn thử nghiệm.[^tokio-fs-uring] Không bật cả ba thì `tokio::fs` chạy trên blocking pool (chi tiết ở [chương 03, mục 6](03-kqueue-io-uring.md)).
+Với `timeout`, `orders-api` cần nhớ hai điều:
+
+- `timeout` poll future *trước* khi kiểm tra hạn. Vì vậy một future không bao giờ yield có thể xong sau hạn mà vẫn không báo lỗi[^tokio-timeout-poll].
+- Hủy một timeout là drop future[^tokio-timeout-cancel]. Quá hạn thì future bên trong bị hủy[^tokio-timeout]. Việc hủy đó luôn xảy ra ở một `.await` (mục 5)[^tokio-select-own].
+
+`interval` khác việc gọi `sleep` trong một vòng lặp ở chỗ nó tính cả thời gian xử lý giữa các lần gọi[^tokio-interval]. Tick đầu tiên hoàn thành ngay[^tokio-interval-first]. `tick` là cancel safe[^tokio-tick-safe], nên dùng được làm một nhánh của `select!`; ví dụ, `orders-api` có thể có nhánh `interval.tick()` để đẩy metric định kỳ (nhận xét của người soạn).
+
+### 7.2 File
+
+Hệ điều hành phần lớn không có API async cho file, nên Tokio dùng thao tác file chặn thông thường phía sau[^tokio-fs]. Vì vậy đọc file mẫu hóa đơn bằng `tokio::fs` thực chất là một lần `spawn_blocking`, và nó chiếm một thread của blocking pool (mục 4).
+
+Phần phân tích đầy đủ (docs nói gì, vì sao file không có API async, cách gộp thao tác để giảm số lần `spawn_blocking`) nằm ở [P5 · Chương 08, mục 9](../05-storage/08-rust-va-luu-tru.md); ở đây chỉ giữ điều cần cho mạch Tokio. Docs module nói hiện Tokio luôn dùng `spawn_blocking` trên mọi nền tảng, và có thể đổi sang API như io_uring trong tương lai[^tokio-fs-always].
+
+Source 1.53.2 cho thấy docs module đã cũ so với docs hàm. Trên Linux, `tokio::fs::read` có thể dùng io_uring nếu bật đủ ba điều kiện: `--cfg tokio_unstable`, feature `io-uring` và `Builder::enable_io_uring`; hỗ trợ này còn thử nghiệm[^tokio-fs-uring]. Không bật cả ba thì `tokio::fs` chạy trên blocking pool (chi tiết ở [chương 03, mục 6](03-kqueue-io-uring.md)).
 
 <details><summary>Đi sâu: giới hạn của <code>tokio::fs</code>, ai khác dùng blocking pool, quan sát số thread</summary>
 
-Blocking pool cũng phục vụ DNS qua `ToSocketAddrs`, stdout/stderr, stdin.[^tokio-mbt-uses] Thử thật (quan sát một lần chạy, output có sẵn; multi-thread 2 worker, đọc `/proc/self/status`): trước `tokio::fs::read_to_string` có 3 thread (main + 2 worker), sau có 4: một blocking thread vừa sinh. Ý nghĩa: khớp docs nói blocking thread được sinh theo nhu cầu và `tokio::fs` mặc định chạy trên blocking pool.[^tokio-blocking-ondemand][^tokio-fs-always] Giới hạn "chỉ dùng cho file thường" và quan sát bằng `strace` thread nào chạy `open`: [P5 · Chương 08, mục 9](../05-storage/08-rust-va-luu-tru.md).
+Blocking pool cũng phục vụ DNS qua `ToSocketAddrs`, stdout/stderr, stdin[^tokio-mbt-uses]. Thử thật (quan sát một lần chạy, output có sẵn; multi-thread 2 worker, đọc `/proc/self/status`): trước `tokio::fs::read_to_string` có 3 thread (main + 2 worker), sau có 4: một blocking thread vừa sinh. Ý nghĩa: khớp docs nói blocking thread được sinh theo nhu cầu[^tokio-blocking-ondemand]. Nó cũng khớp việc `tokio::fs` mặc định chạy trên blocking pool[^tokio-fs-always]. Giới hạn "chỉ dùng cho file thường" và quan sát bằng `strace` thread nào chạy `open`: [P5 · Chương 08, mục 9](../05-storage/08-rust-va-luu-tru.md).
 
 </details>
 
@@ -294,24 +379,29 @@ Blocking pool cũng phục vụ DNS qua `ToSocketAddrs`, stdout/stderr, stdin.[^
 
 ## 8. Graceful shutdown (Q8)
 
-> **Trả lời ngắn.** Graceful shutdown gồm ba phần: biết khi nào tắt, báo mọi thành phần tắt, chờ chúng tắt xong[^tokio-shutdown-three]. Theo hướng dẫn của Tokio, phần đầu thường là signal từ OS[^tokio-shutdown-signal], phần hai dùng `CancellationToken`[^tokio-shutdown-token], phần ba dùng `TaskTracker`[^tokio-shutdown-tracker].
+> **Trả lời ngắn.** Graceful shutdown gồm ba phần: biết khi nào tắt, báo mọi thành phần tắt, và chờ chúng tắt xong[^tokio-shutdown-three]. Theo hướng dẫn của Tokio, phần đầu thường là signal từ OS[^tokio-shutdown-signal]. Phần hai dùng `CancellationToken`[^tokio-shutdown-token]. Phần ba dùng `TaskTracker`[^tokio-shutdown-tracker].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đóng cửa hàng: treo biển "đóng cửa" (báo), để khách trong quán ăn xong (chờ), rồi mới tắt đèn.
+*Với `orders-api`.* Khi `orders-api` được triển khai lại, bản cũ phải nhận tín hiệu tắt, nhưng đang có request dở dang: một đơn đã ghi vào Postgres mà chưa trả lời, một file hóa đơn đang ghi. Tắt ngay thì những việc đó đứt giữa chừng. Graceful shutdown là cách tắt mà các việc dở dang kịp xong.
 
+Ba phần chạy theo thứ tự:
 
-1. **Biết khi nào tắt:** thường là signal từ OS; `tokio::signal::ctrl_c` sẽ ngủ cho tới khi nhận được signal như vậy.[^tokio-shutdown-signal] Nhiều điều kiện thì gộp qua một kênh và `select!`.[^tokio-shutdown-select] Docs `signal` nhắc đây là một chủ đề rất rắc rối.[^tokio-signal-care]
-2. **Báo tắt:** `CancellationToken`; task không phải dừng ngay mà có thể chạy thủ tục tắt như flush dữ liệu.[^tokio-shutdown-token]
-3. **Chờ:** `TaskTracker`; `wait` hoàn thành khi mọi future xong và tracker đã đóng.[^tokio-shutdown-tracker] Docs của `tokio_util` nói `TaskTracker` thường dùng cùng `CancellationToken`: token để báo tắt, tracker để chờ tắt xong.[^tokio-util-tracker] Cả hai kiểu nằm trong crate `tokio_util` (đường dẫn trên docs.rs),[^tokio-util-token][^tokio-util-tracker] không phải crate `tokio`; code mẫu của trang hướng dẫn import `TaskTracker` từ `tokio_util`.[^tokio-shutdown-import]
+1. **Biết khi nào tắt.** Thường đó là signal từ OS: `tokio::signal::ctrl_c` sẽ ngủ cho tới khi nhận được signal như vậy[^tokio-shutdown-signal]. Nếu có nhiều điều kiện tắt, hãy gộp chúng qua một kênh rồi `select!`[^tokio-shutdown-select]. Docs `signal` nhắc đây là một chủ đề rất rắc rối, cần dùng thận trọng[^tokio-signal-care].
+2. **Báo tắt.** Dùng `CancellationToken`. Task không phải dừng ngay khi token bị hủy mà có thể chạy thủ tục tắt trước, như flush dữ liệu[^tokio-shutdown-token]. Với `orders-api`, mỗi handler dở dang có thể trả lời nốt request hiện tại rồi mới thoát (nhận xét của người soạn).
+3. **Chờ.** Dùng `TaskTracker`: `wait` chỉ hoàn thành khi mọi future đã xong và tracker đã đóng[^tokio-shutdown-tracker]. Docs `tokio_util` nói `TaskTracker` thường dùng cùng `CancellationToken`: token để báo tắt, tracker để chờ tắt xong[^tokio-util-tracker].
+
+Một lưu ý để khỏi tìm sai chỗ: `CancellationToken` nằm trong crate `tokio_util`, không phải `tokio`[^tokio-util-token]. `TaskTracker` cũng vậy; code mẫu của trang hướng dẫn import nó từ `tokio_util`[^tokio-shutdown-import].
 
 <details><summary>Đi sâu: chạy thử graceful shutdown; SIGTERM trên Kubernetes</summary>
 
 **Thử thật** (quan sát một lần chạy trong container Linux, output có sẵn, không chạy lại; dạng chỉ dùng crate `tokio`): 3 worker trong `JoinSet`, mỗi worker xử lý theo chu kỳ 30 ms trong `select!` với `watch::Receiver::changed` (cancel-safe, nằm trong danh sách an toàn của docs[^tokio-select-safe-list]); `main` chờ `signal::ctrl_c()`; nhận `SIGINT` (`kill -INT`) thì gửi `true` qua `watch`, mỗi worker thấy tín hiệu, "flush" 50 ms rồi trả số mục đã xử lý, `main` `join_next()` đến cạn rồi thoát. Output theo thứ tự: `SIGINT received` → ba dòng `shutdown seen` → ba dòng `joined worker, items=17` → `all workers done`.
 
-Nhớ (suy ra từ mục 5): trả về từ `#[tokio::main]` hủy mọi task còn lại,[^tokio-cancel-rt] nên phải `join` việc cần hoàn tất; `spawn_blocking` đang chạy làm `Drop` của runtime chờ vô hạn nếu không có `shutdown_timeout`.[^tokio-runtime-shutdown]
+Nhớ (suy ra từ mục 5): trả về từ `#[tokio::main]` hủy mọi task còn lại[^tokio-cancel-rt], nên phải `join` việc cần hoàn tất. Ngoài ra, `spawn_blocking` đang chạy làm `Drop` của runtime chờ vô hạn nếu không có `shutdown_timeout`[^tokio-runtime-shutdown].
 
-**SIGTERM trên Kubernetes.** Docs Kubernetes: kubelet nhờ container runtime dừng container bằng cách gửi tín hiệu TERM (SIGTERM) tới tiến trình chính của mỗi container, kèm một thời hạn ân hạn;[^k8s-term] mặc định thời hạn đó là 30 giây,[^k8s-grace] và nhiều container runtime tôn trọng `STOPSIGNAL` trong image, nếu khác thì gửi tín hiệu đó thay vì TERM.[^k8s-stopsignal] Hệ quả (nhận xét của người soạn): ở trường hợp mặc định, pod nhận `SIGTERM` chứ không phải `SIGINT`, nên ngoài `ctrl_c` cần `signal::unix::signal(SignalKind::terminate())`; `SignalKind::terminate` biểu diễn SIGTERM,[^tokio-sigterm] và nó cùng dạng stream mà docs minh họa cho `SIGHUP`;[^tokio-signal-unix] thời gian tắt êm nên nhỏ hơn thời hạn ân hạn của pod.
+**SIGTERM trên Kubernetes.** Docs Kubernetes: kubelet nhờ container runtime dừng container bằng cách gửi tín hiệu TERM (SIGTERM) tới tiến trình chính của mỗi container, kèm một thời hạn ân hạn[^k8s-term]. Mặc định thời hạn đó là 30 giây[^k8s-grace]. Nhiều container runtime tôn trọng `STOPSIGNAL` trong image, và nếu khác thì gửi tín hiệu đó thay vì TERM[^k8s-stopsignal].
+
+Hệ quả (nhận xét của người soạn): ở trường hợp mặc định, pod nhận `SIGTERM` chứ không phải `SIGINT`, nên ngoài `ctrl_c` cần `signal::unix::signal(SignalKind::terminate())`. `SignalKind::terminate` biểu diễn SIGTERM[^tokio-sigterm]. Nó cùng dạng stream mà docs minh họa cho `SIGHUP`[^tokio-signal-unix]. Thời gian tắt êm nên nhỏ hơn thời hạn ân hạn của pod.
 
 </details>
 
@@ -319,7 +409,7 @@ Nhớ (suy ra từ mục 5): trả về từ `#[tokio::main]` hủy mọi task c
 
 ## 9. Đo: multi-thread và current-thread bằng `strace -f -c`
 
-**Thiết lập.** Binary `tokio_echo` của `labs/crates/lab-io-async` ([lab cũ](../labs/07-io-async-lab.md)): echo server, mỗi kết nối một task; client `echo_load` mở 4 kết nối × 200 message × 64 byte (800 message). Máy: container Linux aarch64 (Docker trên macOS), `nproc` = 4, build debug. Lệnh: `strace -f -c -o <file> ./tokio_echo <port> 4 [--current-thread]`. Hai lần mỗi chế độ (lần hai trong ngoặc):
+**Thiết lập.** Binary `tokio_echo` của `labs/crates/lab-io-async` ([lab cũ](../labs/07-io-async-lab.md)) là một echo server, mỗi kết nối một task, nên khá giống `orders-api` thu nhỏ. Client `echo_load` mở 4 kết nối × 200 message × 64 byte (800 message). Máy: container Linux aarch64 (Docker trên macOS), `nproc` = 4, build debug. Lệnh: `strace -f -c -o <file> ./tokio_echo <port> 4 [--current-thread]`. Hai lần mỗi chế độ (lần hai trong ngoặc):
 
 | Chỉ số | multi_thread | `--current-thread` |
 |---|---|---|
@@ -333,11 +423,11 @@ Nhớ (suy ra từ mục 5): trả về từ `#[tokio::main]` hủy mọi task c
 
 **Quan sát** (một máy; số đo có sẵn từ lần soạn trước, không chạy lại; lab cũ cũng ra 863 `futex`, 3208 syscall cho multi-thread):
 
-1. Cùng lượng I/O thật: 804 `recvfrom` (suy luận của người soạn: 800 message + 4 lần đọc trả 0 khi client đóng; chưa lọc từng lời gọi) và 800 `sendto`; khác nhau ở phần điều phối.
-2. 4 `clone` = bốn worker, khớp "mỗi core một worker"[^tokio-multi] trên máy 4 core; cộng thread `main` đang `block_on` thành 5 (phép cộng của người soạn khớp số đếm từ `/proc`).
-3. Multi-thread có hơn 800 `futex` (~27% số syscall), current-thread có 1. Suy luận của người soạn, có cơ sở một phần: source Tokio 1.53.2 cho thấy worker rảnh thử giữ khóa driver, không được thì ngủ trên `Condvar`,[^tokio-park-driver] và `Condvar` của std trên Linux là bộ đếm futex ([P4 · Chương 04, mục 9.1](../04-concurrency/04-condition-variable-va-semaphore.md); source std 1.95.0[^std-condvar-futex]). Đó là một đường có thể sinh `futex`; chưa đối chiếu với số đếm cụ thể (ai đánh thức ai, khi nào bị ăn cắp), nên nguyên nhân của con số này **chưa kiểm chứng**; current-thread chỉ có một thread nên không cần.
-4. `epoll_pwait` của multi-thread gấp đôi (427 so với 203). Source 1.53.2: driver là `TryLock`, chỉ một thread dùng được tại một thời điểm,[^tokio-park-shared] và worker nào giữ được khóa thì park bằng driver.[^tokio-park-driver] **Suy luận, chưa kiểm chứng:** quyền gọi epoll đổi tay giữa các worker nên số lời gọi nhiều hơn. Tôi không điều tra nguyên nhân.
-5. Với tải nhỏ (4 kết nối chạy đồng thời, mỗi kết nối gửi rồi chờ echo từng message, theo source `echo_load`), multi-thread tốn *nhiều syscall hơn*; đặc điểm của bài đo này, không phải kết luận cho tải cao nhiều core.
+1. Cùng lượng I/O thật: 804 `recvfrom` (suy luận của người soạn: 800 message + 4 lần đọc trả 0 khi client đóng; chưa lọc từng lời gọi) và 800 `sendto`. Hai chế độ chỉ khác nhau ở phần điều phối.
+2. 4 `clone` là bốn worker, khớp với "mỗi core một worker"[^tokio-multi] trên máy 4 core. Cộng thêm thread `main` đang `block_on` thành 5, khớp số đếm từ `/proc` (phép cộng của người soạn).
+3. Multi-thread có hơn 800 `futex` (khoảng 27% số syscall), current-thread có 1. Về nguyên nhân, đây là suy luận của người soạn và chỉ có cơ sở một phần. Source Tokio 1.53.2 cho thấy worker rảnh thử giữ khóa driver, không được thì ngủ trên `Condvar`[^tokio-park-driver]. `Condvar` của std trên Linux lại là một bộ đếm futex ([P4 · Chương 04, mục 9.1](../04-concurrency/04-condition-variable-va-semaphore.md); source std 1.95.0[^std-condvar-futex]). Đó là một đường có thể sinh `futex`, nhưng tôi chưa đối chiếu với số đếm cụ thể (ai đánh thức ai, khi nào bị ăn cắp), nên nguyên nhân của con số này **chưa kiểm chứng**. Current-thread chỉ có một thread nên không cần futex.
+4. `epoll_pwait` của multi-thread gấp đôi (427 so với 203). Source 1.53.2 cho biết driver là `TryLock`, chỉ một thread dùng được tại một thời điểm[^tokio-park-shared]. Worker nào giữ được khóa thì park bằng driver[^tokio-park-driver]. **Suy luận, chưa kiểm chứng:** quyền gọi epoll đổi tay giữa các worker nên số lời gọi nhiều hơn. Tôi không điều tra nguyên nhân.
+5. Tải của bài đo này nhỏ: 4 kết nối chạy đồng thời, mỗi kết nối gửi rồi chờ echo từng message (theo source `echo_load`). Ở tải đó multi-thread tốn *nhiều syscall hơn*; đây là đặc điểm của bài đo, không phải kết luận cho tải cao trên nhiều core.
 
 Trên máy đo (aarch64) strace hiện `epoll_pwait` chứ không phải `epoll_wait`: đó là quan sát một lần chạy, giải thích ở [chương 02, mục 4](02-select-poll-epoll.md).
 
@@ -345,12 +435,19 @@ Trên máy đo (aarch64) strace hiện `epoll_pwait` chứ không phải `epoll_
 
 Toàn phần này là nhận xét của người soạn.
 
-**Chọn `worker_threads`.** Mặc định là số core hệ thống thấy[^tokio-multi], hợp lý cho dịch vụ I/O-bound độc quyền một máy. Ba điểm: (1) trong container có giới hạn CPU, kiểm tra con số `available_parallelism` thật sự trả: khi đọc được cgroup, nó làm tròn xuống theo quota (đo ở [P8 · Chương 08, mục 1](../08-containers/08-rust-trong-container.md): `--cpus 1.5` → 1 worker), còn "đếm thừa" như docs std nêu chỉ xảy ra khi không đọc được cgroup fs (ví dụ do sandbox)[^std-avail-par]; đặt tường minh bằng `worker_threads` hoặc `TOKIO_WORKER_THREADS` nếu muốn con số khác; (2) docs khuyên giữ ở phía nhỏ hơn;[^tokio-wt-small] (3) máy NUMA lớn cân nhắc nhiều runtime.[^tokio-numa] Quyết định bằng đo với tải thật.
+**Chọn `worker_threads`.** Mặc định là số core mà hệ thống báo cho Tokio[^tokio-multi], hợp lý cho một service I/O-bound chiếm trọn một máy. Với `orders-api` chạy trong container, có ba điểm cần cân nhắc:
 
-**Việc nặng CPU:** `spawn_blocking` kèm `Semaphore`, rayon, hoặc runtime riêng cho việc CPU-bound.[^tokio-csb-cpu][^tokio-rayon]
+1. Kiểm tra con số `available_parallelism` thực sự trả về khi container có giới hạn CPU. Khi đọc được cgroup, nó làm tròn xuống theo quota: đo ở [P8 · Chương 08, mục 1](../08-containers/08-rust-trong-container.md) cho thấy `--cpus 1.5` ra 1 worker. Chuyện "đếm thừa" như docs std nêu chỉ xảy ra khi không đọc được cgroup fs, chẳng hạn do sandbox[^std-avail-par]. Muốn con số khác thì đặt tường minh bằng `worker_threads` hoặc `TOKIO_WORKER_THREADS`.
+2. Docs khuyên giữ số worker ở phía nhỏ[^tokio-wt-small].
+3. Máy NUMA lớn thì cân nhắc chạy nhiều runtime[^tokio-numa].
 
-**Pool DB.** Hai tầng cần định cỡ độc lập: số kết nối trong pool (giới hạn bởi DB server) và số task chờ lấy kết nối. Task chờ chỉ là một future rẻ[^tokio-task-light] nên có thể nhiều hơn pool nhiều lần; việc chờ kết nối hoạt động như semaphore (mô hình tư duy của tôi, không mô tả cài đặt của một thư viện cụ thể). Driver DB *đồng bộ* chiếm một blocking thread mỗi truy vấn (mục 4): pool cỡ 20 mà cho phép 512 blocking thread[^tokio-mbt-default] thì áp lực dồn vào DB, hãy giới hạn bằng cỡ pool. Truy vấn async không giữ thread khi chờ, nhưng xử lý dữ liệu lớn (JSON, nén) giữa hai `.await` vẫn chiếm worker (mục 4).
+Chọn con số cuối cùng bằng đo với tải thật.
 
+**Việc nặng CPU.** `spawn_blocking` kèm `Semaphore`[^tokio-csb-cpu]. Hoặc dùng rayon, hay một runtime riêng cho việc CPU-bound[^tokio-rayon].
+
+**Pool DB.** Có hai tầng cần định cỡ độc lập: số kết nối trong pool (do DB server giới hạn) và số task chờ lấy kết nối. Task chờ chỉ là một future rẻ[^tokio-task-light] nên có thể nhiều hơn pool nhiều lần. Việc chờ kết nối hoạt động như một semaphore (mô hình tư duy của tôi, không mô tả cài đặt của một thư viện cụ thể).
+
+Driver DB *đồng bộ* thì khác: mỗi truy vấn chiếm một blocking thread (mục 4). Pool cỡ 20 mà cho phép tới 512 blocking thread[^tokio-mbt-default] thì áp lực dồn hết vào DB, nên hãy giới hạn bằng đúng cỡ pool. Truy vấn async không giữ thread khi chờ, nhưng xử lý dữ liệu lớn (JSON, nén) giữa hai `.await` vẫn chiếm worker (mục 4).
 
 ## Tóm tắt
 
@@ -369,77 +466,77 @@ Toàn phần này là nhận xét của người soạn.
 1. Bốn thành phần của runtime là gì; `#[tokio::main]` khai triển thành gì?
 <details><summary>Đáp án</summary>
 
-I/O driver, scheduler, timer, blocking pool;[^tokio-runtime-struct] khai triển thành `Builder::new_multi_thread().enable_all().build().unwrap().block_on(..)`.[^tokio-main-multi]
+I/O driver, scheduler, timer, blocking pool[^tokio-runtime-struct]. Macro khai triển thành `Builder::new_multi_thread().enable_all().build().unwrap().block_on(..)`[^tokio-main-multi].
 
 </details>
 
 2. Quên `enable_all` khi dựng runtime bằng tay thì sao?
 <details><summary>Đáp án</summary>
 
-Không driver nào được bật mặc định; dùng kiểu mạng hoặc thời gian sẽ lỗi.[^tokio-drivers]
+Không driver nào được bật mặc định, nên dùng kiểu mạng hoặc thời gian sẽ lỗi[^tokio-drivers].
 
 </details>
 
 3. LIFO slot là gì; vì sao worker khác không ăn cắp được?
 <details><summary>Đáp án</summary>
 
-Chỗ chứa task vừa được đánh thức, chạy ngay sau task hiện tại, tách khỏi hàng đợi local; tạm tắt sau ba lần dùng liên tiếp; chỉ ở multi-thread và là hành vi hiện tại.[^tokio-lifo-1][^tokio-lifo-2][^tokio-lifo-3][^tokio-ct-lifo]
+Đó là chỗ chứa task vừa được đánh thức, và worker chạy nó ngay sau task hiện tại[^tokio-lifo-1]. Slot tạm tắt sau ba lần dùng liên tiếp[^tokio-lifo-2]. Nó tách khỏi hàng đợi local nên worker khác không ăn cắp được[^tokio-lifo-3]. Slot chỉ có ở multi-thread[^tokio-ct-lifo], và là hành vi hiện tại.
 
 </details>
 
 4. Vì sao `spawn` cần `Send` và `'static`; phần nào là suy luận?
 <details><summary>Đáp án</summary>
 
-`Send` vì task có thể chạy trên thread khác.[^tokio-spawn-thread] `'static` là suy luận của người soạn (task sống độc lập; drop handle không dừng, không bảo đảm chạy xong[^tokio-jh-drop][^tokio-spawn-lifecycle]), tương tự `thread::spawn`.[^thread-static]
+`Send` vì task có thể chạy trên thread khác[^tokio-spawn-thread]. `'static` là suy luận của người soạn: task sống độc lập, drop handle không dừng task[^tokio-jh-drop]. Task cũng không được bảo đảm sẽ chạy xong[^tokio-spawn-lifecycle]. Lý do tương tự `thread::spawn`[^thread-static].
 
 </details>
 
 5. Vì sao `std::thread::sleep` làm tick ~300 ms (307 ms ở lần đo) trên current_thread nhưng không trên multi-thread 2 worker?
 <details><summary>Đáp án</summary>
 
-Current-thread chỉ có một thread nên mọi task đứng;[^tokio-noblock-task][^tokio-await-only] multi-thread còn worker thứ hai (quan sát ở bảng mục 4; chặn đủ số worker thì cũng đứng: suy luận của người soạn).
+Current-thread chỉ có một thread nên mọi task đứng[^tokio-noblock-task]. Task chỉ đổi lượt tại `.await`[^tokio-await-only]. Multi-thread còn worker thứ hai (quan sát ở bảng mục 4; chặn đủ số worker thì cũng đứng: suy luận của người soạn).
 
 </details>
 
 6. `spawn_blocking` khác `block_in_place` ở đâu?
 <details><summary>Đáp án</summary>
 
-Thread khác nhau; `block_in_place` chỉ multi-thread, treo code đồng thời trong cùng task, không hủy được; `spawn_blocking` không abort được khi đã chạy (chưa chạy thì có thể, không bảo đảm).[^tokio-bip][^tokio-bip-panic][^tokio-bip-join][^tokio-bip-cancel][^tokio-csb-abort]
+Chúng chạy trên thread khác nhau; `block_in_place` báo executor giao task khác sang worker mới[^tokio-bip]. `block_in_place` chỉ có ở multi-thread[^tokio-bip-panic]. Nó treo code đồng thời trong cùng task[^tokio-bip-join]. Nó không hủy được[^tokio-bip-cancel]. `spawn_blocking` thì không abort được khi đã chạy[^tokio-csb-abort]. Chưa chạy thì có thể ngăn, nhưng không bảo đảm[^tokio-cancel-blocking].
 
 </details>
 
 7. Drop `JoinHandle` có hủy task không? `abort` có bảo đảm `cancelled`?
 <details><summary>Đáp án</summary>
 
-Không hủy;[^tokio-jh-drop] `abort` không bảo đảm vì task có thể xong trước.[^tokio-cancel-race]
+Không hủy[^tokio-jh-drop]. `abort` không bảo đảm vì task có thể xong trước[^tokio-cancel-race].
 
 </details>
 
 8. `select!` trong vòng lặp với `read_exact` sai ở đâu; sửa thế nào?
 <details><summary>Đáp án</summary>
 
-`read_exact` không cancel-safe: nhánh thua bị drop và dữ liệu đọc dở mất (quan sát một lần chạy ở mục 5).[^tokio-select-safe] Dùng `read` và tự cộng dồn, hoặc giữ trạng thái ngoài future.[^tokio-select-own]
+`read_exact` không cancel-safe: nhánh thua bị drop và dữ liệu đọc dở mất (quan sát một lần chạy ở mục 5)[^tokio-select-safe]. Cách sửa là dùng `read` và tự cộng dồn, hoặc giữ trạng thái ngoài future[^tokio-select-own].
 
 </details>
 
 9. Khi nào dùng std `Mutex` trong code async; khi nào mutex của Tokio?
 <details><summary>Đáp án</summary>
 
-Std cho dữ liệu thuần, khóa ngắn; mutex Tokio khi phải giữ khóa qua `.await` (như kết nối DB), nhưng thường tốt hơn là giao tài nguyên cho một task.[^tokio-mutex-std][^tokio-mutex-prefer][^tokio-mutex-pattern]
+Std cho dữ liệu thuần, khóa ngắn[^tokio-mutex-std]. Mutex Tokio khi phải giữ khóa qua `.await`, như kết nối DB[^tokio-mutex-prefer]. Nhưng thường tốt hơn là giao tài nguyên cho một task[^tokio-mutex-pattern].
 
 </details>
 
 10. `tokio::fs::read` có async ở mức kernel không?
 <details><summary>Đáp án</summary>
 
-Không: file op chặn chạy trên `spawn_blocking`; docs module nói hiện luôn như vậy trên mọi nền tảng, nhưng source 1.53.2 có đường io_uring thử nghiệm phải bật tường minh (mục 7, chương 03 mục 6).[^tokio-fs][^tokio-fs-always][^tokio-fs-uring] Quan sát thread tăng 3 → 4.
+Không: đó là file op chặn chạy trên `spawn_blocking`[^tokio-fs]. Docs module nói hiện luôn như vậy trên mọi nền tảng[^tokio-fs-always]. Nhưng source 1.53.2 có đường io_uring thử nghiệm phải bật tường minh (mục 7, chương 03 mục 6)[^tokio-fs-uring]. Quan sát thread tăng 3 → 4.
 
 </details>
 
 11. Ba phần của graceful shutdown?
 <details><summary>Đáp án</summary>
 
-Biết khi nào tắt (`ctrl_c`), báo tắt (`CancellationToken`), chờ xong (`TaskTracker`; thí nghiệm ở mục 8 dùng `JoinSet`, là lựa chọn của người soạn).[^tokio-shutdown-three][^tokio-shutdown-signal][^tokio-shutdown-token][^tokio-shutdown-tracker]
+Biết khi nào tắt (`ctrl_c`)[^tokio-shutdown-signal]. Báo tắt (`CancellationToken`)[^tokio-shutdown-token]. Chờ xong (`TaskTracker`)[^tokio-shutdown-tracker]. Thí nghiệm ở mục 8 dùng `JoinSet`, là lựa chọn của người soạn; ba phần nói chung được nêu ở hướng dẫn[^tokio-shutdown-three].
 
 </details>
 

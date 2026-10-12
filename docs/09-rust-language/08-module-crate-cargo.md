@@ -13,27 +13,33 @@
 
 ## Kiến thức cần trước
 
-Chương này gần như độc lập. Các chương anh em trong phase nên đọc song song khi cần: [Trait](02-trait.md) (phần `impl`/orphan rule liên quan đến visibility của trait), [Macro](07-macro.md) (macro và `$crate`, `#[macro_export]` được nhắc ở đó).
+Chương này gần như độc lập. Các chương anh em trong phase nên đọc song song khi cần: [Trait](02-trait.md) (phần `impl` và orphan rule có liên quan đến visibility của trait), [Macro](07-macro.md) (macro, `$crate` và `#[macro_export]` được nhắc ở đó).
 
-Môi trường mọi thí nghiệm trong chương: `rustc 1.95.0`, `cargo 1.95.0`, macOS aarch64 (Apple Silicon). Chỗ nào là quan sát trên máy này, không phải bảo đảm của tài liệu, sẽ được ghi rõ.
+Bạn đã viết backend nhiều năm nên chương này lấy một service làm ví dụ xuyên suốt: `svc`, một backend Rust nhận HTTP request, đọc cấu hình, nói chuyện với database, kèm một `worker` chạy nền. Mỗi mục mở đầu bằng việc mục đó nghĩa là gì với `svc`. Đây là ví dụ giả định của người soạn, không phải code có sẵn trong repo; các thí nghiệm bên dưới dùng một package đặt tên `svc` với cấu trúc tương tự.
+
+Môi trường mọi thí nghiệm trong chương: `rustc 1.95.0`, `cargo 1.95.0`, macOS aarch64 (Apple Silicon). Chỗ nào là quan sát trên máy này chứ không phải bảo đảm của tài liệu, chương sẽ ghi rõ.
 
 ## 1. Package, crate, module: ba tầng khác nhau (Q1)
 
-> **Trả lời ngắn.** Package là đơn vị Cargo quản lý (có `Cargo.toml`), crate là đơn vị rustc biên dịch, module là cách chia namespace bên trong một crate. Một package chứa nhiều binary crate nhưng tối đa một library crate.[^atmost] Rust chỉ nạp file khi có khai báo `mod` trỏ tới nó, và tìm mã inline, ở `tên.rs` hoặc ở `tên/mod.rs`.[^modfile]
+> **Trả lời ngắn.** Package là đơn vị Cargo quản lý (thư mục có `Cargo.toml`), crate là đơn vị rustc biên dịch, còn module là cách chia namespace bên trong một crate. Một package chứa được nhiều binary crate nhưng tối đa một library crate.[^atmost] Rust chỉ nạp một file khi có khai báo `mod` trỏ tới nó, và tìm mã ở ba chỗ: inline, `tên.rs`, hoặc `tên/mod.rs`.[^modfile]
 
-**Giải thích.** Hình dung monorepo: repo, service và package nội bộ đều gọi là "project" nhưng mỗi tầng một vai (nhận xét của người soạn). Rust tách ba tầng như vậy:
+**Giải thích.**
+
+*Với service `svc`.* Cả cây thư mục của `svc` thường được gọi chung là "project", nhưng Rust phân biệt ba tầng, và mỗi lần bạn quyết định chia code (đặt `pub` ở đâu, tách crate hay chỉ tách module) là bạn đang chọn một trong ba tầng đó. Mục này nói rõ từng tầng là gì, để các mục sau dùng đúng chữ.
+
+### 1.1 Ba tầng
 
 | Tầng | Là gì | Ai quản lý | Đơn vị gì |
 |---|---|---|---|
-| Package | Thư mục có `Cargo.toml` | Cargo | Đơn vị build/phiên bản/publish |
+| Package | Thư mục có `Cargo.toml` | Cargo | Đơn vị build, phiên bản, publish |
 | Crate | Một cây module do rustc biên dịch | rustc | Đơn vị biên dịch |
 | Module | Một namespace lồng nhau trong crate | ngôn ngữ | Đơn vị tổ chức và quyền truy cập |
 
-Sách Rust định nghĩa: một package là một bó gồm một hoặc nhiều crate cung cấp một tập chức năng, và có file `Cargo.toml` mô tả cách build các crate đó.[^pkg] Crate có hai dạng: binary (có `main`, biên dịch ra executable) và library (không có `main`, để chia sẻ).[^crateforms] Một package chứa được bao nhiêu binary crate cũng được, nhưng nhiều nhất **một** library crate.[^atmost]
+Package là tầng ngoài cùng: một bó gồm một hoặc nhiều crate, cộng một file `Cargo.toml` mô tả cách build chúng.[^pkg] Crate là thứ rustc thực sự biên dịch, và có hai dạng: binary (có `main`, ra executable) và library (không có `main`, để các crate khác dùng).[^crateforms] Một package chứa bao nhiêu binary crate cũng được, nhưng chỉ có tối đa **một** library crate.[^atmost]
 
-Cargo suy ra crate từ cấu trúc thư mục, không cần khai báo trong `Cargo.toml`: `src/main.rs` là crate root của binary crate trùng tên package; `src/lib.rs` là crate root của library crate trùng tên package; Cargo đưa các file crate root cho rustc để build.[^conv] Muốn thêm binary thì đặt file vào `src/bin/`, mỗi file là một binary crate riêng.[^bindir]
+Bạn không phải khai báo crate trong `Cargo.toml`, vì Cargo suy ra từ tên file. `src/main.rs` là crate root của binary crate trùng tên package; `src/lib.rs` là crate root của library crate trùng tên package; Cargo đưa các file root đó cho rustc để build.[^conv] Muốn thêm binary thì đặt file vào `src/bin/`, mỗi file thành một binary crate riêng.[^bindir]
 
-Thí nghiệm thật: package `svc` có `src/lib.rs`, `src/main.rs`, `src/bin/worker.rs`. `cargo metadata` liệt kê ba target:
+Với `svc`, ta đặt `src/lib.rs`, `src/main.rs` và `src/bin/worker.rs`. `cargo metadata` liệt kê ba target:
 
 ```
 svc ['lib']
@@ -41,11 +47,15 @@ svc ['bin']
 worker ['bin']
 ```
 
-Tức một package, ba crate (một lib + hai bin). Đây chính là mẫu "lib + bin" sẽ dùng ở mục 9.
+Một package, ba crate (một lib, hai bin). Mẫu "lib + bin" này sẽ quay lại ở mục 9.
 
-### Crate root và module tree
+### 1.2 Crate root và module tree
 
-Crate root (`main.rs`/`lib.rs`) là file rustc bắt đầu biên dịch; nội dung của nó tạo thành module gốc tên `crate`, và các module lồng bên dưới tạo thành **module tree**.[^modtree] Khác với Java/Go, **file không tự động là module**: file chỉ được biên dịch nếu có một khai báo `mod` trỏ tới nó. Viết `mod garden;` trong crate root nghĩa là "có một module `garden` ở đây, hãy nạp mã của nó"; trình biên dịch tìm mã ở ba nơi: inline ngay sau `mod garden` trong cặp ngoặc nhọn, file `src/garden.rs`, hoặc `src/garden/mod.rs`.[^modfile]
+Bên trong một crate, file root (`main.rs` hoặc `lib.rs`) là chỗ rustc bắt đầu biên dịch. Nội dung của nó tạo thành module gốc tên `crate`, và các module lồng bên dưới tạo thành **module tree**.[^modtree]
+
+Điểm dễ nhầm với người từ Java hay Go: **file không tự động là module**. Một file chỉ được biên dịch khi có khai báo `mod` trỏ tới nó. Viết `mod net;` trong crate root nghĩa là "ở đây có module `net`, hãy nạp mã của nó", và rustc tìm mã ở ba nơi: inline trong cặp ngoặc nhọn thay cho dấu `;` sau tên module, file `src/net.rs`, hoặc file `src/net/mod.rs`.[^modfile]
+
+Cây module của `svc` trong thí nghiệm trông như sau (sơ đồ của người soạn, khớp với cấu trúc file đã chạy thật):
 
 ```mermaid
 flowchart TD
@@ -57,37 +67,43 @@ flowchart TD
 
 <details><summary>Đi sâu: trộn <code>mod.rs</code> và <code>tên.rs</code>, lịch sử rustc 1.30</summary>
 
-Quy tắc file cho submodule: `mod vegetables;` khai báo trong `src/garden.rs` thì mã nằm ở `src/garden/vegetables.rs` hoặc `src/garden/vegetables/mod.rs`.[^submod] Ta đã chạy đúng cấu trúc ở trên: `net.rs` (kiểu hiện đại) cùng thư mục `net/http/mod.rs` (kiểu cũ) cùng tồn tại và biên dịch được. Sách nói rõ việc trộn hai kiểu cho các module khác nhau là được phép nhưng có thể gây rối cho người đọc.[^mix]
+Với submodule, quy tắc file giống hệt: `mod vegetables;` khai báo trong `src/garden.rs` thì mã nằm ở `src/garden/vegetables.rs` hoặc `src/garden/vegetables/mod.rs`.[^submod] Cấu trúc `svc` ở trên có `net.rs` (kiểu hiện đại) cùng thư mục `net/http/mod.rs` (kiểu cũ), và ta đã chạy: hai kiểu cùng tồn tại và biên dịch được. Sách Rust nói rõ việc trộn hai kiểu cho các module khác nhau là được phép nhưng có thể làm người đọc rối.[^mix]
 
-**`mod.rs` hay `tên.rs`?** Reference ghi rằng trước rustc 1.30 `mod.rs` là cách duy nhất để nạp module có con; hiện nay cách đặt tên mới được khuyến khích vì nhất quán hơn và tránh có nhiều file cùng tên `mod.rs` trong dự án;[^modrs] không được có cả `util.rs` lẫn `util/mod.rs`.[^notboth] Edition Guide mô tả cùng thay đổi này: `foo.rs` và thư mục `foo/` có thể cùng tồn tại, không cần `mod.rs` khi đặt submodule trong thư mục con.[^e2018] (Nhận xét của người soạn: lý do thực dụng dễ thấy nhất là tab editor — mười tab cùng tên `mod.rs` thì không phân biệt được.)
+**`mod.rs` hay `tên.rs`?** Trước rustc 1.30, `mod.rs` là cách duy nhất để nạp module có con. Giờ cách đặt tên mới được khuyến khích, vì nhất quán hơn và dự án khỏi có hàng loạt file cùng tên `mod.rs`.[^modrs] Còn có cả `util.rs` lẫn `util/mod.rs` thì không được phép.[^notboth] Edition Guide mô tả cùng thay đổi này: `foo.rs` và thư mục `foo/` có thể cùng tồn tại, và không cần `mod.rs` khi đặt submodule trong thư mục con.[^e2018] (Nhận xét của người soạn: lý do thực dụng dễ thấy nhất là tab editor, vì mười tab cùng tên `mod.rs` thì không phân biệt được.)
 
 </details>
 
-**Quay lại Q1:** package chứa crate, crate là cây module, và cây đó chỉ gồm những file được `mod` khai báo.
+**Quay lại Q1:** package chứa crate, crate là cây module, và cây đó chỉ gồm những file được `mod` khai báo; với `svc`, một package cho ra một lib cộng hai bin.
 
 ## 2. Visibility: ai được thấy cái gì (Q2)
 
-> **Trả lời ngắn.** Mặc định mọi thứ là private: chỉ module chứa nó và các module con thấy được.[^privdesc] `pub(crate)`, `pub(super)`, `pub(in path)` mở rộng phạm vi có kiểm soát.[^scopedin] Dùng item private từ ngoài báo lỗi E0603 (quan sát ở phần Đi sâu).
+> **Trả lời ngắn.** Mặc định mọi thứ là private: chỉ module chứa nó và các module con thấy được.[^privdesc] Khi cần mở rộng, `pub(crate)`, `pub(super)` và `pub(in path)` cho bạn chọn đúng phạm vi thay vì mở cho cả thế giới.[^scopedin] Dùng item private từ ngoài thì rustc báo lỗi E0603 (quan sát ở phần Đi sâu).
 
-**Giải thích.** Giống phòng ban trong một tòa nhà: người trong phòng ra được sảnh chung, nhưng người ngoài không mở được tủ riêng của phòng (nhận xét của người soạn).
+**Giải thích.**
 
-Mặc định mọi thứ là private, với hai ngoại lệ: associated item trong trait `pub` mặc định public, và variant của enum `pub` cũng public.[^visdefault] Sách mô tả quy tắc theo chiều cây: code trong một module private **với module cha** theo mặc định;[^privparent] item ở cha không dùng được item private của con, nhưng con dùng được item của tổ tiên.[^ancestor] Reference nói gọn hơn: item private truy cập được từ module hiện tại và các hậu duệ của nó.[^privdesc]
+*Với service `svc`.* Trong `svc`, module `config` đọc biến môi trường, module `net` cần đọc `Config` đó, còn `main.rs` chỉ muốn gọi vài hàm công khai. Nếu mọi thứ đều `pub`, thì bất kỳ thay đổi nội bộ nào cũng có thể làm hỏng code đang dùng nó. Visibility là cách bạn nói rõ cái nào là hợp đồng, cái nào là chuyện nội bộ.
 
-Để mở rộng có kiểm soát, `pub` có dạng hạn chế phạm vi:[^scopedin]
+### 2.1 Quy tắc đi theo cây module
 
-| Cú pháp | Nhìn thấy trong | Nguồn |
+Mặc định mọi thứ private, trừ hai ngoại lệ: associated item trong trait `pub` mặc định public, và variant của enum `pub` cũng mặc định public.[^visdefault] Quy tắc đi theo chiều của cây: code trong một module là private với module cha theo mặc định.[^privparent] Nói cách khác, module cha không dùng được item private của con, nhưng con dùng được item của tổ tiên.[^ancestor] Reference gói lại thành một câu: item private truy cập được từ module hiện tại và các hậu duệ của nó.[^privdesc]
+
+### 2.2 Mở rộng phạm vi có kiểm soát
+
+Khi private quá chặt, `pub` có dạng hạn chế phạm vi:
+
+| Cú pháp | Thấy được trong | Ghi chú |
 |---|---|---|
-| (không có) / `pub(self)` | module hiện tại (và con của nó) | tương đương nhau[^scopedself] |
+| (không viết) hoặc `pub(self)` | module hiện tại (và con của nó) | hai cách viết tương đương[^scopedself] |
 | `pub(super)` | module cha | tương đương `pub(in super)`[^scopedsuper] |
 | `pub(crate)` | toàn bộ crate hiện tại | [^scopedcrate] |
 | `pub(in path)` | phạm vi `path`, phải là tổ tiên của item | [^scopedin] |
-| `pub` | bất kỳ nơi nào truy cập được cha của nó | [^reachable] |
+| `pub` | bất kỳ nơi nào truy cập được các module tổ tiên của item | [^reachable] |
 
-Từ edition 2018, đường dẫn trong `pub(in path)` phải bắt đầu bằng `crate`, `self` hoặc `super`.[^vis2018]
+Trong `svc`, `pub(crate)` là mức dùng nhiều nhất: một helper của `net` cần cho `config` nhưng không nên lộ ra người dùng thư viện (ví dụ minh họa của người soạn). Từ edition 2018, path trong `pub(in path)` phải bắt đầu bằng `crate`, `self` hoặc `super`.[^vis2018]
 
-### Re-export và quyền truy cập
+### 2.3 Re-export: tách API công khai khỏi cấu trúc nội bộ
 
-Một tên được `use` vào scope là private với scope đó.[^usepriv] Reference: Rust cho phép re-export công khai bằng `pub use`, nhờ đó đưa quyền truy cập công khai tới item được re-export.[^reexpvis] Điều đó cho phép tách **cấu trúc nội bộ** (nhiều module sâu) khỏi **API công khai** (phẳng). Trong thí nghiệm `svc`, `src/lib.rs` có `pub use config::Config;`, nên `main.rs` viết `use svc::{net, Config};` thay vì `svc::config::Config`.
+Một tên được `use` vào scope thì private với scope đó.[^usepriv] Muốn đưa nó ra ngoài, dùng `pub use`: Rust cho phép re-export công khai item qua `pub use`.[^reexpvis] Nhờ vậy cấu trúc nội bộ có thể nhiều module sâu, còn API công khai vẫn phẳng. Trong thí nghiệm `svc`, `src/lib.rs` có `pub use config::Config;`, nên `main.rs` viết `use svc::{net, Config};` thay vì `svc::config::Config`.
 
 <details><summary>Đi sâu: thí nghiệm E0603 và E0616</summary>
 
@@ -128,70 +144,90 @@ error[E0603]: function `parent_only` is private
 error[E0616]: field `balance` of struct `Account` is private
 ```
 
-Hai điểm đáng nhớ. Thứ nhất, E0603 là lỗi "đường dẫn tới item private"; lỗi dùng field private là mã khác, E0616 — visibility áp dụng riêng cho từng field, nên struct có field private không thể tạo bằng literal từ bên ngoài, buộc người ngoài đi qua constructor (`new`) — một công cụ giữ bất biến (invariant) rất thường dùng (nhận xét của người soạn). Thứ hai, thông báo lỗi của rustc vẫn nói `private function` cho item `pub(super)` khi gọi từ `main`: đối với `main` (module gốc), nó thật sự là private. Với `fn audit()` không có `pub`, lỗi y hệt (`error[E0603]: function 'audit' is private` — cũng đã chạy thật).
+Có hai điểm đáng nhớ. Thứ nhất, E0603 là lỗi "đường dẫn tới item private", còn dùng field private là một mã khác, E0616. Visibility áp dụng riêng cho từng field, nên struct có field private không tạo được bằng literal từ bên ngoài, và người ngoài buộc phải đi qua constructor (`new`). Đó là một công cụ giữ bất biến (invariant) rất thường dùng (nhận xét của người soạn).
+
+Thứ hai, rustc vẫn nói `private function` cho item `pub(super)` khi gọi từ `main`. Điều đó đúng, vì với `main` (ở module gốc) item đó thật sự là private. Với `fn audit()` không có `pub`, lỗi y hệt (`error[E0603]: function 'audit' is private`, cũng đã chạy thật).
 
 </details>
 
-**Quay lại Q2:** private theo cây module, `pub(...)` mở có kiểm soát, và `pub use` tách API công khai khỏi cấu trúc nội bộ.
+**Quay lại Q2:** private theo cây module, `pub(...)` mở có kiểm soát, và `pub use` tách API công khai của `svc` khỏi cấu trúc nội bộ.
 
 ## 3. `use`, path, glob và prelude (Q3)
 
-> **Trả lời ngắn.** Path đi theo cây module: absolute bắt đầu từ `crate` hoặc tên crate ngoài, relative bắt đầu từ `self`, `super` hoặc một tên trong module hiện tại.[^paths] `use` chỉ tạo shortcut trong scope đó (private với scope), còn `pub use` mới re-export ra ngoài.[^usepriv][^reexpvis] Một số tên có sẵn nhờ prelude, và từ edition 2018 hầu như không cần `extern crate`.[^preludestd][^externgone]
+> **Trả lời ngắn.** Path đi theo cây module: absolute bắt đầu từ `crate` (code của chính crate) hoặc từ tên crate ngoài, relative bắt đầu từ `self`, `super` hoặc một tên trong module hiện tại.[^paths] `use` chỉ tạo shortcut cho scope chứa nó, còn muốn đưa tên ra ngoài thì dùng `pub use`.[^usepriv] Một số tên có sẵn nhờ prelude.[^preludestd] Từ edition 2018, gần như không còn cần `extern crate`.[^externgone]
 
-**Giải thích.** Path giống đường dẫn file: tuyệt đối từ gốc ổ đĩa, hoặc tương đối từ thư mục hiện tại (nhận xét của người soạn).
+**Giải thích.**
 
-### Hai dạng path
+*Với service `svc`.* Handler trong `net::http` cần gọi vào `config`, còn `main.rs` cần dùng `net`. Mỗi chỗ như vậy là một path, và cùng một path có thể đúng ở module này, sai ở module khác. Mục này nói path được tính từ đâu và `use` rút gọn nó thế nào.
 
-Path có hai dạng: **absolute** bắt đầu từ crate root — với code của chính crate, bắt đầu bằng từ khóa `crate`; với crate ngoài, bắt đầu bằng tên crate — và **relative**, bắt đầu từ module hiện tại với `self`, `super` hoặc một định danh trong module hiện tại.[^paths] `super::` đi lên module cha. Thí nghiệm: `net.rs` gọi `super::config::who()` và `crate::root_fn()`, `http/mod.rs` gọi `self::router::who()`; chương trình in:
+### 3.1 Hai dạng path
+
+Absolute path bắt đầu từ crate root: với code của chính crate thì viết từ khóa `crate`, với crate ngoài thì bắt đầu bằng tên crate. Relative path bắt đầu từ module hiện tại, qua `self`, `super` hoặc một định danh có trong module đó.[^paths] `super::` đi lên module cha.
+
+Thí nghiệm trong `svc`: `net.rs` gọi `super::config::who()` và `crate::root_fn()`, còn `http/mod.rs` gọi `self::router::who()`. Chương trình in:
 
 ```
 net -> config / root
 http, self::router=router
 ```
 
-(Nhận xét của người soạn: `super` luôn là module cha trực tiếp. `net.rs` là con trực tiếp của crate root nên từ đó `super` = `crate`; còn từ `net::http` thì `super` = `net`. Di chuyển file đổi nghĩa của `super::`, một lỗi quen.)
+(Nhận xét của người soạn: `super` luôn là module cha trực tiếp. `net.rs` là con trực tiếp của crate root nên từ đó `super` là `crate`; còn từ `net::http` thì `super` là `net`. Vì vậy di chuyển một file sang module khác sẽ đổi nghĩa của `super::`, một lỗi khá quen.)
 
-### `use` và quy ước idiom
+### 3.2 `use` và quy ước idiom
 
-`use` tạo shortcut trong scope. Sách chỉ ra quy ước: đưa **module cha** của hàm vào scope (`use crate::front_of_house::hosting;` rồi gọi `hosting::add_to_waitlist()`) là cách idiomatic, vì nó nói rõ hàm không định nghĩa cục bộ.[^idiom] Với struct/enum thì quy ước là import thẳng đường dẫn đầy đủ của tên.[^structfull] Hai item cùng tên (ví dụ `fmt::Result` và `io::Result`) thì import module cha[^sameparent] hoặc dùng `as` để đổi tên.[^asrename] Reference còn có `use Trait as _;` để nhập trait (kích hoạt method) mà không chiếm tên.[^asunder]
+`use` tạo shortcut trong scope, và có vài quy ước nên theo. Với hàm, idiom là đưa module cha của hàm vào scope (chẳng hạn `use crate::net::http;` rồi gọi `http::serve()`), vì cách gọi đó cho người đọc thấy ngay hàm không định nghĩa cục bộ.[^idiom] Với struct và enum thì ngược lại: import thẳng đường dẫn đầy đủ của tên.[^structfull]
 
-Re-export bằng `pub use` còn là công cụ thiết kế API thư viện, như đã thấy ở mục 2.[^reexp]
+Khi hai item trùng tên, ví dụ `fmt::Result` và `io::Result`, import module cha sẽ phân biệt được chúng,[^sameparent] hoặc dùng `as` để đặt tên khác.[^asrename] Còn `use Trait as _;` đưa trait vào để gọi được method của nó mà không chiếm mất tên.[^asunder] Cuối cùng, `pub use` còn là công cụ thiết kế API thư viện, như đã thấy ở mục 2.[^reexp]
 
-### Glob import
+### 3.3 Glob import
 
-`use std::collections::*;` mang vào mọi item public của `std::collections`. Sách cảnh báo: glob khiến khó biết tên nào đang trong scope và được định nghĩa ở đâu.[^globwarn] Reference thêm một quy tắc ưu tiên: item và import có tên được phép **che** (shadow) tên đến từ glob cùng namespace.[^globshadow] Glob không bị cấm mà có chỗ dùng hợp lý (test module `use super::*;`, enum variants); chỉ nên tránh ở API ranh giới. (Nhận xét của người soạn.)
+`use std::collections::*;` mang vào mọi item public của `std::collections`. Cái giá là khi đọc code, rất khó biết tên nào đang trong scope và nó được định nghĩa ở đâu.[^globwarn] Có thêm một quy tắc ưu tiên: item và import có tên được phép che (shadow) tên cùng namespace đến từ glob.[^globshadow] Glob không bị cấm và có chỗ dùng hợp lý (module test `use super::*;`, các variant của enum); chỉ nên tránh ở ranh giới API (nhận xét của người soạn).
 
 <details><summary>Đi sâu: prelude và <code>extern crate</code></summary>
 
 ### Prelude
 
-Mỗi crate có "standard library prelude" gồm các tên từ một module duy nhất của std,[^preludestd] và Reference liệt kê module theo edition: `std::prelude::rust_2015`, `rust_2018`, `rust_2021`, `rust_2024` (và bản `core::` khi có `no_std`).[^preludeedition] Ngoài ra còn *language prelude* luôn trong scope (kiểu nguyên thủy như `i32`, `str`, các attribute và derive built-in),[^preludelang] và *extern prelude* cho tên các crate ngoài. (Suy luận của người soạn: đây là lý do `Vec`, `Option`, `String` dùng được mà không `use`; và vì module prelude tách theo edition nên edition mới có thể thêm tên mà không phá crate cũ, xem mục 8.)
+Mỗi crate có một "standard library prelude" gồm các tên lấy từ đúng một module của std.[^preludestd] Module đó phụ thuộc edition của crate: Reference liệt kê `std::prelude::rust_2015`, `rust_2018`, `rust_2021`, `rust_2024` (và bản `core::` khi crate dùng `no_std`).[^preludeedition] Ngoài ra còn *language prelude* luôn nằm trong scope, gồm kiểu nguyên thủy như `i32`, `str` cùng các attribute và derive built-in,[^preludelang] và *extern prelude* cho tên các crate ngoài. (Suy luận của người soạn: đây là lý do `Vec`, `Option`, `String` dùng được mà không cần `use`. Và vì module prelude tách theo edition nên edition mới có thể thêm tên mà không phá crate cũ, xem mục 8.)
 
 ### `extern crate` và vì sao hiếm gặp
 
-Trước 2018, mỗi crate ngoài phải khai báo `extern crate foo;`. Edition Guide: "extern crate không còn cần trong 99% trường hợp",[^externgone] vì chỉ cần thêm crate vào `Cargo.toml` là đủ.[^externcargo] Cơ chế bên dưới: crate được cung cấp cho compiler (qua cờ `--extern`, thứ Cargo làm hộ) được đưa vào extern prelude;[^externprelude] một `extern crate` đặt ở crate root cũng đưa tên crate vào extern prelude, nên nó tự trong scope ở mọi module.[^externroot] Vẫn còn dùng `extern crate` cho vài ca đặc biệt (ví dụ đổi tên crate bằng `as`, hoặc `extern crate alloc;` trong `no_std`) — danh sách ca này là hiểu biết của người soạn, chưa trích nguồn trong chương, và nằm ngoài phạm vi chương.
+Trước 2018, mỗi crate ngoài phải khai báo `extern crate foo;`. Giờ thì Edition Guide nói `extern crate` không còn cần trong 99% trường hợp,[^externgone] vì chỉ cần thêm crate vào `Cargo.toml` là đủ.[^externcargo] Cơ chế bên dưới: crate được cung cấp cho compiler (qua cờ `--extern`, việc Cargo làm hộ bạn) tự được đưa vào extern prelude.[^externprelude] Một `extern crate` đặt ở crate root cũng đưa tên crate vào extern prelude, nên tên đó tự nằm trong scope ở mọi module.[^externroot] Vẫn còn vài ca đặc biệt cần `extern crate` (đổi tên crate bằng `as`, hoặc `extern crate alloc;` trong `no_std`); danh sách này là hiểu biết của người soạn, chưa có nguồn trong chương, và nằm ngoài phạm vi chương.
 
 </details>
 
-**Quay lại Q3:** path đi theo cây module, `use` chỉ là shortcut trong scope, và prelude cho sẵn một số tên.
+**Quay lại Q3:** path đi theo cây module, `use` chỉ là shortcut trong scope, và prelude cho sẵn một số tên mà `svc` không cần import.
 
 ## 4. Conditional compilation (Q4)
 
-> **Trả lời ngắn.** `#[cfg]` bật hoặc tắt mã theo điều kiện như hệ điều hành, kiến trúc CPU hay feature, và quyết định này được chốt lúc biên dịch, không phải lúc chạy.[^cfgstatic] `cfg!(...)` chỉ cho ra `true`/`false` nên cả hai nhánh vẫn phải biên dịch được (suy luận của người soạn từ định nghĩa literal[^cfgmacro]).
+> **Trả lời ngắn.** `#[cfg]` bật hoặc tắt một đoạn code theo điều kiện như hệ điều hành, kiến trúc CPU hay feature, và Rust chốt việc đó lúc biên dịch chứ không phải lúc chạy.[^cfgstatic] `cfg!(...)` chỉ cho ra `true` hoặc `false`, nên cả hai nhánh của nó vẫn phải biên dịch được (suy luận của người soạn từ định nghĩa literal[^cfgmacro]).
 
-**Giải thích.** Giống `#ifdef` hay build tag: một codebase, nhiều bản build (nhận xét của người soạn).
+**Giải thích.**
 
-**Vấn đề**: một codebase cần chạy trên macOS lẫn Linux, bật/tắt tính năng theo build, hoặc dùng code debug chỉ ở dev. Rust giải quyết **ở thời điểm biên dịch**, không phải runtime: tập cấu hình được xác định tĩnh khi biên dịch crate.[^cfgstatic]
+*Với service `svc`.* Dev chạy `svc` trên MacBook, còn production là Linux. Có đoạn code chỉ có nghĩa trên một nền tảng, có đoạn chỉ bật khi build kèm một feature, có đoạn chỉ để debug. Bạn muốn giữ một codebase duy nhất cho tất cả, và việc chọn đoạn nào được chốt ngay khi build, không phải bằng một phép kiểm tra lúc chạy.
 
-Các công cụ:[^cfgtools]
+### 4.1 Ba công cụ
+
+Rust cho bạn các attribute `cfg`, `cfg_attr` và macro `cfg!`, `cfg_select!` để biên dịch có điều kiện.[^cfgtools] Ba cái đầu hay gặp nhất:
 
 | Công cụ | Tác dụng |
 |---|---|
 | `#[cfg(pred)]` | nếu `pred` sai, phần được gắn attribute bị loại khỏi mã nguồn[^cfgremove] |
-| `cfg!(pred)` | macro cho ra literal `true`/`false`[^cfgmacro] — **cả hai nhánh vẫn phải biên dịch được** |
+| `cfg!(pred)` | macro cho ra literal `true` hoặc `false`[^cfgmacro]; **cả hai nhánh vẫn phải biên dịch được** |
 | `#[cfg_attr(pred, attr)]` | gắn attribute `attr` chỉ khi `pred` đúng |
 
-Predicate gồm option dạng tên (`unix`) hoặc cặp key-value (`target_arch = "x86_64"`), kết hợp bằng `all()`, `any()`, `not()`.[^cfgpred] `all()` rỗng là true,[^cfgall] `any()` rỗng là false.[^cfgpred2] Các key quan trọng với backend: `target_os` (ví dụ `"linux"`, `"macos"`, `"windows"`),[^targetos] `target_arch` (ví dụ `"x86_64"`, `"aarch64"`),[^targetarch] `unix`/`windows` (suy ra từ `target_family`),[^unixfam] `debug_assertions` (bật mặc định khi không tối ưu, điều khiển cả `debug_assert!`),[^dbgassert] và `feature = "..."` — theo Reference đó là một quy ước của Cargo cho tùy chọn compile-time và dependency tùy chọn.[^cfgfeature] Muốn biết một target đặt những cfg nào: `rustc --print cfg --target $TARGET`.[^printcfg]
+### 4.2 Predicate
+
+Predicate là một option dạng tên (như `unix`) hoặc cặp key-value (như `target_arch = "x86_64"`),[^cfgpred] ghép lại bằng `all()`, `any()`, `not()`. `all()` rỗng là true,[^cfgall] còn `any()` rỗng là false.[^cfgpred2]
+
+Các key hay dùng khi viết backend:
+
+- `target_os`: hệ điều hành của target, ví dụ `"linux"`, `"macos"`, `"windows"`.[^targetos]
+- `target_arch`: kiến trúc CPU, ví dụ `"x86_64"`, `"aarch64"`.[^targetarch]
+- `unix` và `windows`: suy ra từ `target_family`.[^unixfam]
+- `debug_assertions`: bật mặc định khi biên dịch không tối ưu, và điều khiển cả `debug_assert!`.[^dbgassert]
+- `feature = "..."`: Reference gọi đây là quy ước của Cargo cho tùy chọn compile-time và dependency tùy chọn.[^cfgfeature]
+
+Muốn biết một target đặt những cfg nào, chạy `rustc --print cfg --target $TARGET`.[^printcfg]
 
 <details><summary>Đi sâu: thí nghiệm <code>cfg</code> theo <code>target_os</code> và <code>cfg_attr</code> chọn file module</summary>
 
@@ -222,27 +258,29 @@ quiet                                        # chưa bật feature verbose
 
 Với `--features verbose` dòng cuối thành `P(1)` (derive `Debug` được gắn nhờ `cfg_attr`); với `--release`, `debug_assertions=false`. Để xác nhận nhánh `linux` mà không cần máy Linux, ta biên dịch kiểm tra chéo bằng `cargo check --target x86_64-unknown-linux-gnu` (cần target đã cài trong rustup) và đặt `compile_error!` ở hai nhánh: build host báo `error: macos branch`, build `--target x86_64-unknown-linux-gnu` báo `error: linux branch`. Output `rustc --print cfg --target x86_64-unknown-linux-gnu` cho `target_os="linux"`, `target_arch="x86_64"`, `target_env="gnu"`, `target_family="unix"` (quan sát).
 
-Hệ quả thiết kế: `#[cfg]` loại phần mã bị tắt khỏi mã nguồn[^cfgremove] (suy luận của người soạn: việc loại này xảy ra trước khi kiểm tra kiểu và borrow, nên code ở nhánh không chọn không cần hợp lệ trong môi trường hiện tại, ví dụ gọi API chỉ có trên Linux); ngược lại `cfg!(...)` chỉ là điều kiện hằng, mọi nhánh vẫn phải qua type-check. (Suy luận của người soạn từ định nghĩa "cfg! evaluates to literal"; sách Reference chỉ nói macro ra literal.)
+Hệ quả thiết kế: `#[cfg]` loại phần mã bị tắt khỏi mã nguồn.[^cfgremove] Suy luận của người soạn: việc loại này xảy ra trước khi kiểm tra kiểu và borrow, nên code ở nhánh không được chọn không cần hợp lệ trong môi trường hiện tại, ví dụ gọi API chỉ có trên Linux. Ngược lại `cfg!(...)` chỉ là điều kiện hằng, nên mọi nhánh vẫn phải qua type-check. (Đây cũng là suy luận từ định nghĩa "cfg! evaluates to literal"; Reference chỉ nói macro cho ra literal.)
 
-`cfg_attr` cũng có thể chọn **file module** theo nền tảng: ví dụ trong Reference, `#[cfg_attr(target_os = "linux", path = "linux.rs")] mod os;`.[^cfgattrpath]
+`cfg_attr` còn chọn được **file module** theo nền tảng. Ví dụ trong Reference: `#[cfg_attr(target_os = "linux", path = "linux.rs")] mod os;`.[^cfgattrpath]
 
 </details>
 
-**Quay lại Q4:** `cfg` chọn mã tĩnh lúc biên dịch theo `target_os`, `target_arch`, `feature`; `cfg!` chỉ là hằng nên không bỏ được kiểm tra kiểu.
+**Quay lại Q4:** `cfg` chọn mã tĩnh lúc biên dịch theo `target_os`, `target_arch`, `feature`; còn `cfg!` chỉ là hằng nên không bỏ được kiểm tra kiểu của nhánh bị "tắt".
 
 ## 5. Cargo: manifest, dependency, SemVer, `Cargo.lock` (Q5)
 
-> **Trả lời ngắn.** Viết `"1.2.3"` trong `Cargo.toml` nghĩa là chấp nhận mọi bản tương thích SemVer từ `1.2.3` tới trước `2.0.0`; với `0.2.3` thì chỉ tới trước `0.3.0`, tức tới trước minor kế tiếp.[^caret][^caretable] `Cargo.lock` ghi lại đúng phiên bản đã build, và Cargo khuyên cứ commit khi không chắc.[^lockpurpose][^lockindoubt]
+> **Trả lời ngắn.** Viết `"1.2.3"` trong `Cargo.toml` nghĩa là chấp nhận mọi bản tương thích SemVer từ `1.2.3` tới trước `2.0.0`; với `0.2.3` thì chỉ tới trước `0.3.0`, tức tới trước minor kế tiếp.[^caretable] `Cargo.lock` ghi lại đúng phiên bản đã build,[^lockpurpose] và khi không chắc thì Cargo khuyên cứ commit nó.[^lockindoubt]
 
-**Giải thích.** Caret giống thỏa thuận "nhận bản vá và tính năng mới, không nhận thay đổi phá vỡ hợp đồng" (nhận xét của người soạn).
+**Giải thích.**
+
+*Với service `svc`.* `svc` kéo vài chục dependency: HTTP framework, driver database, serde... Có hai câu hỏi thực tế. Khi chạy `cargo update`, Cargo được phép nhảy tới bản nào? Và image build hôm nay có dùng đúng những bản dependency của image tuần trước không? Câu đầu do version requirement trong `Cargo.toml` trả lời, câu sau do `Cargo.lock`.
 
 ### `Cargo.toml`
 
-Mục `[package]` đứng đầu; trường duy nhất Cargo bắt buộc là `name` (registry có thể đòi thêm khi publish).[^pkgname] Phần còn lại bạn đã quen: `[dependencies]`, `[dev-dependencies]` (cho test/bench), `[build-dependencies]` (cho `build.rs`), `[features]`, `[profile.*]`, `[workspace]`. Target được suy từ layout: thư viện ở `src/lib.rs`,[^libsrc] binary ở `src/main.rs` và/hoặc `src/bin/`.[^binsrc] Binary dùng được API công khai của library trong cùng package.[^binuselib]
+Mục `[package]` đứng đầu, và trường duy nhất Cargo bắt buộc là `name` (registry có thể đòi thêm khi publish).[^pkgname] Phần còn lại bạn đã quen: `[dependencies]`, `[dev-dependencies]` (cho test và bench), `[build-dependencies]` (cho `build.rs`), `[features]`, `[profile.*]`, `[workspace]`. Target được suy từ layout: thư viện nằm ở `src/lib.rs`,[^libsrc] còn binary ở `src/main.rs` và/hoặc `src/bin/`.[^binsrc] Binary dùng được API công khai của library trong cùng package.[^binuselib]
 
 ### Version requirement mặc định là caret
 
-`time = "0.1.12"` là một *version requirement*. Caret là chiến lược mặc định, cho phép cập nhật tương thích SemVer;[^caret] bỏ dấu `^` là cú pháp rút gọn tương đương.[^caretleave] Bảng chuyển đổi trong Cargo book:[^caretable]
+`time = "0.1.12"` là một *version requirement*. Caret là chiến lược mặc định và cho phép cập nhật tương thích SemVer;[^caret] bỏ dấu `^` chỉ là cách viết rút gọn của cùng yêu cầu đó.[^caretleave] Cargo book có bảng chuyển đổi:[^caretable]
 
 | Viết | Nghĩa |
 |---|---|
@@ -250,23 +288,25 @@ Mục `[package]` đứng đầu; trường duy nhất Cargo bắt buộc là `n
 | `1.2` | `>=1.2.0, <2.0.0` |
 | `0.2.3` | `>=0.2.3, <0.3.0` |
 
-Chú ý hàng thứ ba: với phiên bản `0.x`, "breaking" nằm ở số minor, nên caret chỉ cho nâng patch. Với backend: một cập nhật `cargo update` mà vẫn nằm trong khoảng caret là thứ Cargo coi là an toàn — nhưng "coi là" dựa trên việc tác giả crate tuân SemVer, vốn là niềm tin chứ không phải kiểm chứng (nhận xét của người soạn).
+Chú ý hàng thứ ba: với phiên bản `0.x`, "breaking" nằm ở số minor, nên caret chỉ cho nâng patch. Với `svc`, một lần `cargo update` mà vẫn nằm trong khoảng caret là thứ Cargo coi là an toàn. Nhưng "coi là an toàn" dựa trên việc tác giả crate tuân SemVer, một niềm tin chứ không phải kiểm chứng (nhận xét của người soạn).
 
 ### `Cargo.lock`: khi nào commit
 
-`Cargo.lock` mô tả "trạng thái thế giới" tại một lần build thành công, nhờ đó build cho kết quả xác định trên các máy/thời điểm khác nhau.[^lockpurpose] Guide của Cargo khuyên: khi không chắc, hãy commit `Cargo.lock` vào version control.[^lockindoubt] FAQ nói rõ hơn: `cargo new` mặc định theo dõi `Cargo.lock`, còn bạn có commit hay không là tùy nhu cầu của package.[^lockfaq] Cũng cần biết giới hạn: tính xác định có thể cho cảm giác an toàn giả, vì `Cargo.lock` không ảnh hưởng người tiêu dùng package của bạn, chỉ `Cargo.toml` làm điều đó; và `cargo install` chọn dependency mới nhất trừ khi truyền `--locked`.[^locklimit]
+`Cargo.lock` mô tả "trạng thái thế giới" tại một lần build thành công, nhờ đó build cho kết quả xác định trên các máy và thời điểm khác nhau.[^lockpurpose] Vì vậy guide của Cargo khuyên: khi không chắc, hãy commit `Cargo.lock` vào version control.[^lockindoubt] FAQ nói rõ hơn: `cargo new` mặc định theo dõi `Cargo.lock`, còn bạn có commit hay không là tùy nhu cầu của package.[^lockfaq]
 
-(Nhận xét của người soạn: với service backend triển khai ra production, hầu như luôn nên commit `Cargo.lock` cùng `cargo build --locked` trong CI để image build tái lập được. Với thư viện, chính sách tùy bạn; điều quan trọng là có job CI định kỳ build với dependency mới nhất.)
+Cũng cần biết giới hạn của sự xác định này. Nó có thể cho cảm giác an toàn giả, vì `Cargo.lock` không ảnh hưởng người tiêu dùng package của bạn (chỉ `Cargo.toml` làm điều đó), và `cargo install` chọn dependency mới nhất trừ khi truyền `--locked`.[^locklimit]
+
+Nhận xét của người soạn: với service backend như `svc` triển khai ra production, hầu như luôn nên commit `Cargo.lock` và chạy `cargo build --locked` trong CI để image build tái lập được. Với thư viện, chính sách tùy bạn; điều quan trọng là có job CI định kỳ build với dependency mới nhất.
 
 <details><summary>Đi sâu: bảng "API compatibility" của SemVer trong Cargo</summary>
 
 ### Quy tắc SemVer của Cargo
 
-Cargo book có hẳn một bảng "API compatibility". Một số dòng quan trọng khi bạn xuất bản crate nội bộ (hoặc lib trong workspace dùng chung):
+Cargo book có hẳn một bảng "API compatibility". Một số dòng quan trọng khi bạn xuất bản crate nội bộ (hoặc lib dùng chung trong workspace):
 
 | Thay đổi | Mức |
 |---|---|
-| Đổi tên/di chuyển/xóa bất kỳ public item | Major[^semvermajor] |
+| Đổi tên, di chuyển, xóa bất kỳ public item | Major[^semvermajor] |
 | **Thêm** public item mới | Minor[^semverminor] |
 | Thêm field private vào struct khi mọi field hiện tại đều public | Major[^semverprivfield] |
 | Thêm variant enum (không có `non_exhaustive`) | Major[^semverenum] |
@@ -274,29 +314,33 @@ Cargo book có hẳn một bảng "API compatibility". Một số dòng quan tr�
 | Thêm Cargo feature mới | Minor[^semverfeatadd] |
 | Xóa Cargo feature | Major[^semverfeatrm] |
 
-"Thêm pub item là minor" có một ngoại lệ hiếm mà chính tài liệu nêu: có thể thành breaking vì glob import, ví dụ thêm trait mới có associated item xung đột với kiểu mà dự án khác đã glob import.[^semverglob] (Nhận xét của người soạn: đây là lý do thực tế để hạn chế `use dep::*` ở code ứng dụng; và vì item private không thuộc API, đổi chúng là thay đổi nội bộ — nguyên do để dùng `pub(crate)` thay `pub` cho mọi thứ không cố ý công bố, liên hệ với visibility ở mục 2.)
+"Thêm pub item là minor" có một ngoại lệ hiếm mà chính tài liệu nêu: nó có thể thành breaking vì glob import, chẳng hạn khi thêm một trait mới có associated item xung đột với kiểu mà dự án khác đã glob import.[^semverglob] Nhận xét của người soạn: đây là lý do thực tế để hạn chế `use dep::*` ở code ứng dụng. Cũng vì item private không thuộc API nên đổi chúng chỉ là thay đổi nội bộ, và đó là lý do dùng `pub(crate)` thay `pub` cho mọi thứ không cố ý công bố (liên hệ với visibility ở mục 2).
 
 </details>
 
-**Quay lại Q5:** caret cho phép nâng trong cùng bản major (hoặc minor với `0.x`), SemVer quyết định thay đổi nào là major, và ứng dụng nên commit `Cargo.lock`.
+**Quay lại Q5:** caret cho phép nâng trong cùng bản major (hoặc minor với `0.x`), SemVer quyết định thay đổi nào là major, và service như `svc` nên commit `Cargo.lock`.
 
 ## 6. Features và feature unification (Q6)
 
-> **Trả lời ngắn.** Feature là công tắc bật/tắt mã và dependency tùy chọn của một package.[^featdef] Khi nhiều crate trong cùng một lần build cần cùng một dependency với feature khác nhau, Cargo build nó một lần với hợp của các feature đó,[^featunion] nên feature phải additive: bật thêm không được làm mất chức năng.[^additive]
+> **Trả lời ngắn.** Feature là công tắc bật tắt mã và dependency tùy chọn của một package.[^featdef] Khi nhiều crate trong cùng một lần build cần cùng một dependency với feature khác nhau, Cargo build dependency đó một lần với hợp (union) của các feature.[^featunion] Vì vậy feature phải additive: bật thêm một feature không được làm mất chức năng.[^additive]
 
-**Giải thích.** Giống feature flag nhưng được chốt lúc build, và cờ của mọi người dùng chung được cộng dồn lại (nhận xét của người soạn).
+**Giải thích.**
 
-Feature là cơ chế "biên dịch có điều kiện và dependency tùy chọn" của Cargo: package khai báo tập feature có tên trong `[features]`, mỗi feature bật hoặc tắt; feature của chính package bật bằng `--features`, feature của dependency bật ở khai báo dependency.[^featdef] Mặc định mọi feature tắt trừ khi được bật rõ, và feature `default` liệt kê tập bật sẵn;[^featdefault] `default-features = false` hoặc `--no-default-features` tắt chúng.[^nodefault] Mỗi feature xuất hiện trong code dưới dạng `cfg(feature = "...")` (mục 4).
+*Với service `svc`.* Khi `svc` lớn lên, bạn tách thành workspace gồm `app` (API server), `tool` (CLI quản trị) và `core-lib` (code dùng chung). `app` bật feature `fast` của `core-lib`, còn `tool` bật `extra`. Hỏi: binary `tool` có chạy với `fast` không? Câu trả lời là "tùy lệnh build", và mục này giải thích vì sao.
 
-### Feature là additive, và vì sao
+### 6.1 Feature là gì
 
-Khi cùng một crate được nhiều người cần với feature khác nhau, Cargo hợp nhất (unify) chúng: Cargo book lấy ví dụ `winapi`: nếu `foo` bật `fileapi`, `handleapi` và `bar` bật `std`, `winnt`, thì `winapi` được build với cả bốn feature.[^featunion] Hệ quả mà tài liệu rút ra: feature nên là **additive** — bật một feature không được tắt chức năng, bật tổ hợp bất kỳ nên an toàn.[^additive] Feature loại trừ nhau là hiếm, nên tránh nếu có thể vì nó buộc cả đồ thị dependency phối hợp; nếu không tránh được thì thêm compile error để phát hiện.[^mutex]
+Package khai báo một tập feature có tên trong `[features]`, mỗi feature bật hoặc tắt. Feature của chính package bật bằng `--features`; feature của dependency bật ngay ở khai báo dependency.[^featdef] Mặc định mọi feature tắt trừ khi được bật rõ,[^featdefault] và feature `default` liệt kê tập bật sẵn. `default-features = false` hoặc `--no-default-features` tắt tập đó đi.[^nodefault] Trong code, mỗi feature xuất hiện dưới dạng `cfg(feature = "...")` (mục 4).
+
+### 6.2 Feature là additive, và vì sao
+
+Khi cùng một crate được nhiều crate khác cần với feature khác nhau, Cargo hợp nhất (unify) chúng. Cargo book lấy ví dụ `winapi`: nếu `foo` bật `fileapi`, `handleapi` và `bar` bật `std`, `winnt`, thì `winapi` được build với cả bốn feature.[^featunion] Tài liệu rút ra hệ quả là feature nên **additive**: bật một feature không được tắt chức năng, và bật tổ hợp nào cũng nên an toàn.[^additive] Feature loại trừ nhau là hiếm, nên tránh nếu có thể vì nó buộc cả đồ thị dependency phối hợp để không bật chúng cùng lúc; nếu không tránh được thì thêm compile error để phát hiện.[^mutex]
 
 <details><summary>Đi sâu: thí nghiệm workspace 2 crate và resolver 2/3</summary>
 
 ### Thí nghiệm: workspace 2 crate, feature unification
 
-Cấu trúc (virtual workspace, `resolver = "3"`): `core-lib` có feature `fast` và `extra` (mặc định rỗng); hai crate binary `app` (phụ thuộc `core-lib` với `features = ["fast"]`) và `tool` (phụ thuộc `core-lib` với `features = ["extra"]`). `core_lib::mode()` trả `"fast"` nếu `cfg!(feature = "fast")` bật, ngược lại `"slow"`; `tool` in `mode()` rồi in `extra()`.
+Cấu trúc (virtual workspace, `resolver = "3"`): `core-lib` có feature `fast` và `extra` (mặc định rỗng). Hai crate binary: `app` phụ thuộc `core-lib` với `features = ["fast"]`, và `tool` phụ thuộc `core-lib` với `features = ["extra"]`. `core_lib::mode()` trả `"fast"` nếu `cfg!(feature = "fast")` bật, ngược lại `"slow"`; `tool` in `mode()` rồi in `extra()`.
 
 `cargo tree -p tool -e features` cho thấy `tool` chỉ tự bật `extra`:
 
@@ -314,25 +358,29 @@ tool v0.1.0
 | `cargo build -p app -p tool` | `fast` / `extra on` |
 | `cargo build --workspace` | `fast` / `extra on` |
 
-Cùng một binary `tool` đổi hành vi (`slow` → `fast`) chỉ vì lần build đó có thêm `app` trong **cùng** lệnh, vì `core-lib` chỉ được biên dịch một lần với hợp (`fast` + `extra`). Và `cargo tree --workspace -e features -i core-lib` hiển thị `core-lib` nhận `fast` từ `app` và `extra` từ `tool`. Kết quả là hành vi quan sát trên 1.95.0 phù hợp với quy tắc unification; đối với bạn, nó là cảnh báo: **kết quả `cargo test -p x` và `cargo test --workspace` có thể khác nhau** khi code của bạn rẽ nhánh theo feature (nhận xét của người soạn, rút từ thí nghiệm trên).
+Cùng một binary `tool` đổi hành vi (`slow` thành `fast`) chỉ vì lần build đó có thêm `app` trong **cùng** lệnh: `core-lib` chỉ được biên dịch một lần, với hợp `fast` + `extra`. `cargo tree --workspace -e features -i core-lib` cũng hiển thị `core-lib` nhận `fast` từ `app` và `extra` từ `tool`. Hành vi quan sát trên 1.95.0 khớp với quy tắc unification. Với bạn, đây là lời cảnh báo: **kết quả `cargo test -p x` và `cargo test --workspace` có thể khác nhau** khi code của bạn rẽ nhánh theo feature (nhận xét của người soạn, rút từ thí nghiệm trên).
 
 ### Resolver 2 và 3 giảm bớt unification vô lý
 
-Resolver phiên bản 1 hợp nhất feature của một package bất kể nó được khai báo ở đâu;[^res1] resolver 2 thôi unify trong vài tình huống: feature của dependency theo target (`[target.'cfg(windows)'.dependencies]`) không bật khi không build target đó;[^res2tgt] feature bật trên `build-dependencies` hoặc proc-macro không bị unify với cùng dependency khi dùng như dependency thường.[^res2build] Resolver 3 (mặc định cho edition 2024, cần Rust 1.84+) đổi mặc định của `resolver.incompatible-rust-versions` từ `allow` sang `fallback`;[^res3] với `fallback`, resolver ưu tiên package có Rust version nhỏ hơn hoặc bằng Rust của bạn.[^resfallback] Bảng phiên bản của Cargo chỉ liệt kê thay đổi đó cho resolver 3 (không có thay đổi thuật toán feature). Resolver là tùy chọn toàn cục cho cả workspace, giá trị ở dependency bị bỏ qua; với virtual workspace phải đặt trong bảng `[workspace]`.[^reswide] (Lưu ý của người soạn: virtual workspace không có `[package]` nên không có edition để suy ra mặc định, vì vậy ví dụ trên ghi tường minh `resolver = "3"`.)
+Resolver là phần của Cargo chọn feature và phiên bản cho đồ thị dependency. Resolver phiên bản 1 hợp nhất feature của một package bất kể nó được khai báo ở đâu.[^res1] Resolver 2 thôi unify trong vài tình huống. Một là feature của dependency theo target (`[target.'cfg(windows)'.dependencies]`) không bật khi không build target đó.[^res2tgt] Hai là feature bật trên `build-dependencies` hoặc proc-macro không bị unify với cùng dependency khi nó dùng như dependency thường.[^res2build]
+
+Resolver 3 (mặc định cho edition 2024, cần Rust 1.84+) đổi mặc định của `resolver.incompatible-rust-versions` từ `allow` sang `fallback`.[^res3] Với `fallback`, resolver ưu tiên package có Rust version nhỏ hơn hoặc bằng Rust của bạn.[^resfallback] Bảng phiên bản của Cargo chỉ liệt kê thay đổi đó cho resolver 3, không có thay đổi nào về thuật toán feature. Resolver là tùy chọn toàn cục cho cả workspace, giá trị ở dependency bị bỏ qua; với virtual workspace phải đặt trong bảng `[workspace]`.[^reswide] (Lưu ý của người soạn: virtual workspace không có `[package]` nên không có edition để suy ra mặc định, vì vậy ví dụ trên ghi tường minh `resolver = "3"`.)
 
 </details>
 
-**Quay lại Q6:** feature được hợp nhất trong một lệnh build, nên chúng phải additive và kết quả `-p x` có thể khác `--workspace`.
+**Quay lại Q6:** feature được hợp nhất trong một lệnh build, nên chúng phải additive, và kết quả `-p x` có thể khác `--workspace`.
 
 ## 7. Workspace và profile (Q7)
 
-> **Trả lời ngắn.** Workspace gom nhiều package dùng chung một `Cargo.lock` và một thư mục `target/`.[^wslock][^wstarget] Profile (`dev`, `release`...) chỉnh cách rustc biên dịch, nhưng Cargo chỉ đọc profile ở manifest gốc workspace; profile khai báo trong dependency bị bỏ qua.[^profroot]
+> **Trả lời ngắn.** Workspace gom nhiều package dùng chung một `Cargo.lock`[^wslock] và một thư mục `target/`.[^wstarget] Profile (`dev`, `release`...) chỉnh cách rustc biên dịch, nhưng Cargo chỉ đọc profile ở manifest gốc workspace; profile khai báo trong dependency bị bỏ qua.[^profroot]
 
-**Giải thích.** Workspace giống monorepo của các crate: một lockfile, một thư mục build, một nơi đặt cấu hình build (nhận xét của người soạn).
+**Giải thích.**
+
+*Với service `svc`.* Sau khi tách thành `app`, `tool` và `core-lib`, ba crate đó cần dùng chung một lockfile (để cùng thấy một bản dependency) và một thư mục build. Workspace lo việc này. Còn profile quyết định binary release của `app` được biên dịch ra sao, và có một cạm bẫy: chỉnh profile ở sai file thì không có tác dụng.
 
 ### Workspace
 
-Workspace là tập một hoặc nhiều package (members) được quản lý chung.[^wsdef] Điểm then chốt: mọi package **chia sẻ một `Cargo.lock`** ở gốc workspace và **một thư mục output `target/`**.[^wslock][^wstarget] Tối thiểu workspace cần một member, hoặc với root package hoặc dạng virtual manifest (chỉ có `[workspace]`, không `[package]`).[^wsvirtual] Metadata dùng chung (version, edition, license…) khai báo ở `[workspace.package]` rồi member kế thừa bằng `{key}.workspace = true`.[^wspkg] Các phần `[patch]`, `[replace]`, `[profile.*]` chỉ được nhận ở manifest gốc.[^wsroot]
+Workspace là tập một hoặc nhiều package (gọi là member) được quản lý chung.[^wsdef] Điểm then chốt là mọi package **chia sẻ một `Cargo.lock`** ở gốc workspace[^wslock] và **một thư mục output `target/`**.[^wstarget] Tối thiểu workspace cần một member, hoặc với root package, hoặc dạng virtual manifest (chỉ có `[workspace]`, không có `[package]`).[^wsvirtual] Metadata dùng chung (version, edition, license...) khai báo ở `[workspace.package]`, rồi member kế thừa bằng `{key}.workspace = true`.[^wspkg] Các phần `[patch]`, `[replace]`, `[profile.*]` chỉ được nhận ở manifest gốc.[^wsroot]
 
 ```mermaid
 flowchart LR
@@ -347,15 +395,20 @@ flowchart LR
 
 ### Profiles
 
-Cargo có bốn profile built-in: `dev`, `release`, `test`, `bench`; chọn tự động theo lệnh, và có thể định nghĩa profile tùy chỉnh.[^profbuiltin] Cấu hình ở bảng `[profile.*]`, nhưng **chỉ manifest ở gốc workspace được xét; setting profile khai báo trong dependency bị bỏ qua**.[^profroot] Mặc định theo Cargo book: `dev` có `opt-level = 0`, `debug = true`, `debug-assertions = true`, `overflow-checks = true`, `lto = false`, `panic = 'unwind'`, `codegen-units = 256`;[^profdev] `release` có `opt-level = 3`, `debug = false`, `debug-assertions = false`, `overflow-checks = false`, `lto = false`, `panic = 'unwind'`, `codegen-units = 16`.[^profrelease]
+Cargo có bốn profile built-in: `dev`, `release`, `test`, `bench`. Cargo chọn tự động theo lệnh bạn chạy, và bạn cũng có thể định nghĩa profile tùy chỉnh.[^profbuiltin] Cấu hình nằm ở bảng `[profile.*]`, nhưng **chỉ manifest ở gốc workspace được xét; setting profile khai báo trong dependency bị bỏ qua**.[^profroot] Nghĩa là nếu bạn viết `[profile.release]` trong `Cargo.toml` của `core-lib`, nó không có tác dụng gì khi build `app`.
+
+Mặc định của `dev` theo Cargo book: `opt-level = 0`, `debug = true`, `debug-assertions = true`, `overflow-checks = true`, `lto = false`, `panic = 'unwind'`, `codegen-units = 256`.[^profdev] Còn `release` có `opt-level = 3`, `debug = false`, `debug-assertions = false`, `overflow-checks = false`, `lto = false`, `panic = 'unwind'`, `codegen-units = 16`.[^profrelease]
+
+Bốn setting đáng biết nhất khi chuẩn bị image production cho `svc`:
 
 | Setting | Làm gì | Trade-off |
 |---|---|---|
 | `opt-level` | mức tối ưu (`-C opt-level`) | mức cao hơn có thể cho code chạy nhanh hơn, đổi lại thời gian biên dịch lâu hơn[^optlevel] |
-| `lto` | tối ưu liên-crate khi link | tốt hơn nhờ phân tích toàn chương trình, đổi lại link chậm hơn[^lto]; `lto = false` (mặc định) vẫn là thin local LTO trong crate hiện tại, khác `"off"` tắt hẳn[^ltofalse] — xem [P11·03 mục 3](../11-do-dac-va-go-loi/03-hieu-nang-service-rust.md) |
-| `codegen-units` | chia crate thành bao nhiêu đơn vị sinh mã | nhiều đơn vị → song song, biên dịch nhanh hơn, nhưng có thể ra code chậm hơn[^cgu] |
-| `panic` | `unwind` hoặc `abort` (hai giá trị của Cargo; rustc còn có `immediate-abort`, xem [P10·08 mục 2](../10-rust-internals/08-panic-abi-ffi.md)) | `abort` kết thúc process khi panic; test/bench/build script/proc-macro bỏ qua setting này[^panic] |
-| `strip` | gỡ symbol/debuginfo | mặc định `"none"`[^strip] |
+| `lto` | tối ưu liên-crate khi link | tốt hơn nhờ phân tích toàn chương trình, đổi lại link chậm hơn[^lto]; xem thêm [P11·03 mục 3](../11-do-dac-va-go-loi/03-hieu-nang-service-rust.md) |
+| `codegen-units` | chia crate thành bao nhiêu đơn vị sinh mã | nhiều đơn vị thì song song và biên dịch nhanh hơn, nhưng có thể ra code chậm hơn[^cgu] |
+| `panic` | `unwind` hoặc `abort` (hai giá trị của Cargo; rustc còn có `immediate-abort`, xem [P10·08 mục 2](../10-rust-internals/08-panic-abi-ffi.md)) | `abort` kết thúc process khi panic; test, bench, build script và proc-macro bỏ qua setting này[^panic] |
+
+Về `lto`, `lto = false` (mặc định) vẫn là thin local LTO trong chính crate hiện tại, khác với `"off"` là tắt hẳn.[^ltofalse] Setting cuối, `strip` (gỡ symbol và debuginfo), mặc định là `"none"`.[^strip]
 
 <details><summary>Đi sâu: số đo kích thước binary và <code>panic = "abort"</code></summary>
 
@@ -367,42 +420,48 @@ Số đo (quan sát một lần, macOS aarch64, rustc 1.95.0, binary `svc` rất
 | thêm `lto = true`, `codegen-units = 1`, `panic = "abort"` | 374.176 byte |
 | thêm `strip = true` | 302.544 byte |
 
-Bản `dev` cùng chương trình là 531.448 byte. Đây là một lần đo trên một chương trình nhỏ; không suy rộng thành tỷ lệ cho service thật. (Ghi chú: ta cũng thử `opt-level = "z"` và nhận 433.504 byte — gần như không đổi với chương trình mà phần lớn kích thước là thư viện chuẩn đã biên dịch sẵn; ta không rút kết luận gì từ đó.)
+Bản `dev` cùng chương trình là 531.448 byte. Đây là một lần đo trên một chương trình nhỏ; không suy rộng thành tỷ lệ cho service thật. (Ghi chú: ta cũng thử `opt-level = "z"` và nhận 433.504 byte, gần như không đổi với chương trình mà phần lớn kích thước là thư viện chuẩn đã biên dịch sẵn; ta không rút kết luận gì từ đó.)
 
-Về `panic = "abort"` cho service: `abort` kết thúc process khi panic.[^panicabort] Hệ quả (suy luận của người soạn): không unwind, nên `catch_unwind` và drop khi panic không chạy; đây là quyết định kiến trúc, không chỉ tối ưu kích thước. Cơ chế panic nằm ở P10 · chương 08 (panic-abi-ffi).
+Về `panic = "abort"` cho service: `abort` kết thúc process khi panic.[^panicabort] Hệ quả (suy luận của người soạn) là không có unwind, nên `catch_unwind` và drop khi panic không chạy. Vì vậy đây là một quyết định kiến trúc, không chỉ là tối ưu kích thước. Cơ chế panic nằm ở P10 · chương 08 (panic-abi-ffi).
 
 </details>
 
-**Quay lại Q7:** workspace chia sẻ lockfile và `target/`, còn profile chỉ có hiệu lực khi đặt ở manifest gốc.
+**Quay lại Q7:** workspace chia sẻ lockfile và `target/`, còn profile của `svc` chỉ có hiệu lực khi đặt ở manifest gốc.
 
 ## 8. `build.rs` và edition (Q8)
 
-> **Trả lời ngắn.** `build.rs` là chương trình Cargo biên dịch và chạy ngay trước khi build package, dùng cho việc như build thư viện C hay sinh code.[^bsplace][^bscases] Nó chạy trên máy host nên phải đọc biến `CARGO_CFG_*` để biết target.[^bshost] Edition là lựa chọn của từng crate, và crate khác edition vẫn liên thông liền mạch.[^edcrate][^edinterop]
+> **Trả lời ngắn.** `build.rs` là chương trình mà Cargo biên dịch và chạy ngay trước khi build package, dùng cho việc như build thư viện C hay sinh code.[^bsplace] Nó chạy trên máy host nên muốn biết target phải đọc biến `CARGO_CFG_*`.[^bshost] Edition là lựa chọn của từng crate,[^edcrate] và crate khác edition vẫn liên thông liền mạch.[^edinterop]
 
-**Giải thích.** `build.rs` giống bước pre-build/codegen trong CI, còn edition giống phiên bản ngôn ngữ mà từng crate tự chọn (nhận xét của người soạn).
+**Giải thích.**
 
-### `build.rs`: dùng khi nào
+*Với service `svc`.* Giả sử `svc` cần link một thư viện C đi kèm, hoặc sinh code Rust từ một file đặc tả (ví dụ minh họa của người soạn). Việc đó cần một bước chạy trước khi biên dịch, và đó là `build.rs`. Còn edition trả lời câu hỏi khác: `svc` dùng edition 2024 mà một crate nội bộ cũ vẫn ở 2015, hai bên có build chung được không?
 
-Cargo không định thay thế các công cụ chuyên dụng cho việc biên dịch C, tìm thư viện hệ thống hay sinh code; nó tích hợp với chúng bằng build script.[^bsintent] Đặt file `build.rs` ở gốc package thì Cargo biên dịch nó và chạy ngay trước khi build package.[^bsplace] Các ca dùng tiêu biểu theo tài liệu: build một thư viện C đi kèm, tìm thư viện C trên hệ thống, sinh module Rust từ đặc tả, cấu hình đặc thù nền tảng.[^bscases] Nó có phụ thuộc riêng khai trong `[build-dependencies]`[^bsbd] và không thấy `[dependencies]` của package.[^bsdeps] (Nhận xét của người soạn: nếu `#[cfg]`, feature hay một crate thuần Rust giải quyết được thì không cần `build.rs` — build script làm chậm build và khó tái lập hơn.)
+### 8.1 `build.rs`: dùng khi nào
 
-Điểm hay sai: `build.rs` chạy trên **host**, nên `cfg!`/`#[cfg]` trong chính nó kiểm tra máy host, không phải target; muốn biết target phải đọc biến môi trường `CARGO_CFG_*`.[^bshost]
+Cargo không định thay thế các công cụ chuyên dụng cho việc biên dịch C, tìm thư viện hệ thống hay sinh code; nó tích hợp với chúng bằng build script.[^bsintent] Đặt file `build.rs` ở gốc package thì Cargo biên dịch nó và chạy ngay trước khi build package.[^bsplace] Các ca dùng tiêu biểu theo tài liệu: build một thư viện C đi kèm, tìm thư viện C trên hệ thống, sinh module Rust từ đặc tả, và cấu hình đặc thù nền tảng.[^bscases] Build script có phụ thuộc riêng khai trong `[build-dependencies]`[^bsbd] và không thấy `[dependencies]` của package.[^bsdeps]
 
-Thí nghiệm: `build.rs` đọc `CARGO_CFG_TARGET_ARCH`, phát `cargo::rustc-cfg=has_big_pages` khi là `aarch64` và `cargo::rustc-env=BUILT_FOR=<arch>`. `cargo check` (host aarch64) cho `has_big_pages` được đặt; `cargo check --target x86_64-unknown-linux-gnu` cho `has_big_pages` **không** đặt (xác minh bằng `compile_error!` ở hai nhánh) dù build script vẫn chạy trên host. (Tên `has_big_pages` là tên giả lập của người soạn để minh họa cơ chế, không phải một cfg có thật của Rust.) Các chỉ thị `cargo::rustc-cfg` và `cargo::rustc-env` nằm trong danh sách chỉ thị của Cargo book.[^bsdirectives]
+Nhận xét của người soạn: nếu `#[cfg]`, feature hay một crate thuần Rust giải quyết được thì không cần `build.rs`, vì build script làm build chậm hơn và khó tái lập hơn.
 
-### Edition và tương thích giữa crate
+Điểm hay sai là `build.rs` chạy trên **host**. `cfg!` và `#[cfg]` trong chính nó kiểm tra máy host chứ không phải target, nên muốn biết target bạn phải đọc biến môi trường `CARGO_CFG_*`.[^bshost]
 
-Edition giải quyết bài toán thêm keyword mới: ví dụ trong guide, `let async = 1;` sẽ hỏng nếu `async` thành keyword đột ngột.[^edkeyword] Khi có thay đổi không tương thích ngược, chúng được đẩy sang edition kế tiếp, và vì edition là opt-in, crate hiện có không bị ảnh hưởng.[^edwhy] Mỗi crate chọn edition trong `Cargo.toml` của nó.[^edcrate] Quy tắc quan trọng nhất: crate ở edition này phải interoperate liền mạch với crate biên dịch bằng edition khác; mỗi crate tự quyết định thời điểm di cư.[^edinterop] (Edition Guide không ghim phiên bản như các nguồn còn lại; nội dung trích từ URL `doc.rust-lang.org/edition-guide/` tại thời điểm soạn.)
+Thí nghiệm: `build.rs` đọc `CARGO_CFG_TARGET_ARCH`, rồi phát `cargo::rustc-cfg=has_big_pages` khi là `aarch64` và `cargo::rustc-env=BUILT_FOR=<arch>`. `cargo check` (host aarch64) cho `has_big_pages` được đặt. `cargo check --target x86_64-unknown-linux-gnu` cho `has_big_pages` **không** được đặt (xác minh bằng `compile_error!` ở hai nhánh), dù build script vẫn chạy trên host. (Tên `has_big_pages` là tên giả lập của người soạn để minh họa cơ chế, không phải một cfg có thật của Rust.) Các chỉ thị `cargo::rustc-cfg` và `cargo::rustc-env` nằm trong danh sách chỉ thị của Cargo book.[^bsdirectives]
+
+### 8.2 Edition và tương thích giữa crate
+
+Edition sinh ra để giải bài toán thêm keyword mới. Ví dụ trong guide: nếu Rust bất ngờ thêm keyword `async`, thì `let async = 1;` sẽ không còn chạy.[^edkeyword] Vì vậy thay đổi không tương thích ngược được đẩy sang edition kế tiếp, và vì edition là opt-in nên crate hiện có không bị ảnh hưởng.[^edwhy] Mỗi crate chọn edition trong `Cargo.toml` của chính nó.[^edcrate]
+
+Quy tắc quan trọng nhất là crate ở edition này phải interoperate liền mạch với crate biên dịch bằng edition khác, và mỗi crate tự quyết định lúc nào di cư.[^edinterop] (Edition Guide không ghim phiên bản như các nguồn còn lại; nội dung trích từ URL `doc.rust-lang.org/edition-guide/` tại thời điểm soạn.)
 
 <details><summary>Đi sâu: thí nghiệm crate edition 2015 gọi từ edition 2024</summary>
 
-Thí nghiệm: crate `old` (edition 2015) khai báo `pub fn async()` và `pub fn gen()`; crate `new` (edition 2024) phụ thuộc vào nó. `old::r#async()` và `old::r#gen()` biên dịch và in `7 8`. Gọi `old::gen()` không có `r#` trong `new` lỗi:
+Thí nghiệm: crate `old` (edition 2015) khai báo `pub fn async()` và `pub fn gen()`; crate `new` (edition 2024) phụ thuộc vào nó. `old::r#async()` và `old::r#gen()` biên dịch và in `7 8`. Gọi `old::gen()` không có `r#` trong `new` thì lỗi:
 
 ```
 error: expected identifier, found reserved keyword `gen`
 help: escape `gen` to use it as an identifier
 ```
 
-Tức tên hàm hợp lệ ở edition 2015 vẫn dùng được từ edition 2024, chỉ là phía gọi phải dùng raw identifier `r#` vì edition của **crate đang biên dịch** quyết định keyword. Quy trình nâng edition do Edition Guide mô tả: `cargo update`, `cargo fix --edition`, sửa `edition` trong `Cargo.toml`, build/test, rồi `cargo fmt`.[^edmigrate]
+Tức tên hàm hợp lệ ở edition 2015 vẫn dùng được từ edition 2024, chỉ là phía gọi phải dùng raw identifier `r#`, vì edition của **crate đang biên dịch** quyết định keyword. Quy trình nâng edition do Edition Guide mô tả: `cargo update`, `cargo fix --edition`, sửa `edition` trong `Cargo.toml`, build và test, rồi `cargo fmt`.[^edmigrate]
 
 </details>
 
@@ -410,30 +469,36 @@ Tức tên hàm hợp lệ ở edition 2015 vẫn dùng được từ edition 20
 
 ## 9. Tổ chức một service backend (nhận xét có nhãn)
 
-Phần này là **nhận xét của người soạn**, dựa trên các cơ chế đã trích ở trên, không phải quy tắc của tài liệu Rust.
+Phần này là **nhận xét của người soạn**, dựa trên các cơ chế đã trích ở trên, không phải quy tắc của tài liệu Rust. Nó gom lại các mục trước thành một cách tổ chức `svc`.
 
-**Lib + bin trong cùng package.** Đặt logic (handler, domain, repository) vào `src/lib.rs` và để `src/main.rs` chỉ làm composition root: đọc cấu hình, dựng pool/connection, gọi thư viện. Lý do có cơ sở trong tài liệu: binary dùng được API công khai của library cùng package,[^binuselib] nên bạn có thể test integration (`tests/`) trên lib thật và thêm binary phụ (`src/bin/migrate.rs`, `worker.rs`) dùng chung code.[^bindir] Đó chính là cấu trúc thí nghiệm `svc`.
+**Lib + bin trong cùng package.** Đặt logic (handler, domain, repository) vào `src/lib.rs`, và để `src/main.rs` chỉ làm composition root: đọc cấu hình, dựng pool và connection, gọi thư viện. Cách này có cơ sở trong tài liệu, vì binary dùng được API công khai của library cùng package.[^binuselib] Nhờ vậy bạn test integration (`tests/`) trên lib thật, và thêm binary phụ (`src/bin/migrate.rs`, `worker.rs`) dùng chung code.[^bindir] Đó chính là cấu trúc thí nghiệm `svc`.
 
-**Visibility hẹp theo mặc định.** Dùng `pub(crate)` cho thứ chỉ cần trong crate, `pub` chỉ cho thứ muốn công bố; vì thêm `pub` item là minor còn xóa là major,[^semverminor][^semvermajor] bề mặt công khai nhỏ giúp đổi cấu trúc nội bộ miễn phí.
+**Visibility hẹp theo mặc định.** Dùng `pub(crate)` cho thứ chỉ cần trong crate, và `pub` chỉ cho thứ muốn công bố. Thêm item `pub` là minor,[^semverminor] còn xóa là major,[^semvermajor] nên bề mặt công khai càng nhỏ thì bạn càng thoải mái đổi cấu trúc nội bộ.
 
-**Khi nào tách workspace nhiều crate.** Lý do chính đáng: (1) ranh giới biên dịch — chỉ crate đổi và crate phụ thuộc nó phải biên dịch lại [INFERENCE — suy luận của người soạn từ việc crate là đơn vị biên dịch; chưa đo trong chương này]; (2) ép quy tắc phụ thuộc một chiều (crate `domain` không được depend vào `http`) bằng chính `Cargo.toml`; (3) dùng chung `Cargo.lock` và `target/` giữa các crate nên một lệnh `cargo test --workspace` cho toàn hệ thống;[^wslock][^wstarget] (4) có crate chia sẻ giữa nhiều service. Cái giá: mục 6 — feature bị unify khi build chung, nên hai service dùng chung `core-lib` với cấu hình khác nhau có thể build khác nhau trong CI so với trên máy dev. Nếu một crate chỉ có một người dùng, một module trong crate đó thường đủ.
+**Khi nào tách workspace nhiều crate.** Có bốn lý do chính đáng. (1) Ranh giới biên dịch: chỉ crate đổi và crate phụ thuộc nó phải biên dịch lại [INFERENCE: suy luận của người soạn từ việc crate là đơn vị biên dịch; chưa đo trong chương này]. (2) Ép quy tắc phụ thuộc một chiều (crate `domain` không được depend vào `http`) bằng chính `Cargo.toml`. (3) Dùng chung `Cargo.lock` và `target/` giữa các crate, nên một lệnh `cargo test --workspace` cho toàn hệ thống.[^wslock] Mọi crate cũng dùng chung thư mục output.[^wstarget] (4) Có crate chia sẻ giữa nhiều service. Cái giá là điều ở mục 6: feature bị unify khi build chung, nên hai service dùng chung `core-lib` với cấu hình khác nhau có thể build khác nhau trong CI so với trên máy dev. Nếu một crate chỉ có một người dùng, một module trong crate đó thường đủ.
 
-**Profile cho image production.** `[profile.release]` với `lto` và `codegen-units = 1` đánh đổi thời gian build lấy tối ưu; `panic = "abort"` chỉ khi bạn chấp nhận process chết khi panic (thường cùng chiến lược restart của Kubernetes). Nhớ rằng setting này chỉ có hiệu lực ở manifest gốc workspace.[^profroot]
+**Profile cho image production.** `[profile.release]` với `lto` và `codegen-units = 1` đổi thời gian build lấy tối ưu. `panic = "abort"` chỉ nên dùng khi bạn chấp nhận process chết khi panic (thường đi cùng chiến lược restart của Kubernetes). Nhớ rằng setting này chỉ có hiệu lực ở manifest gốc workspace.[^profroot]
 
 ## Liên hệ với Rust
 
-Toàn chương là Rust, nên các điểm cần nhớ là các bảo đảm đã trích: (a) file không là module nếu thiếu `mod`; (b) privacy là quan hệ cây module — con thấy tổ tiên, cha không thấy con private; (c) `cfg` loại mã bị tắt khỏi mã nguồn, và (suy luận của người soạn) việc đó xảy ra trước kiểm tra kiểu; (d) feature unification là thuộc tính của **một lệnh build**, không phải của từng package; (e) edition là thuộc tính của từng crate nhưng không chia cắt hệ sinh thái.
+Toàn chương là Rust, nên các điểm cần nhớ chính là các bảo đảm đã trích:
+
+- File không là module nếu thiếu `mod`.
+- Privacy là quan hệ cây module: con thấy tổ tiên, cha không thấy phần private của con.
+- `cfg` loại mã bị tắt khỏi mã nguồn, và (suy luận của người soạn) việc đó xảy ra trước kiểm tra kiểu.
+- Feature unification là thuộc tính của **một lệnh build**, không phải của từng package.
+- Edition là thuộc tính của từng crate nhưng không chia cắt hệ sinh thái.
 
 ## Tóm tắt
 
-- Package (Cargo, có `Cargo.toml`) chứa ≥1 crate (đơn vị rustc), tối đa một lib; crate là cây module bắt đầu từ crate root.
-- File chỉ thành module khi có `mod`; `foo.rs` + `foo/` được ưu tiên hơn `foo/mod.rs`, không được dùng cả hai cho cùng một module.
-- Mặc định private; con thấy tổ tiên, cha không thấy con private. `pub(crate)`, `pub(super)`, `pub(in path)` thu hẹp phạm vi; truy cập item private từ ngoài báo E0603.
+- Package (Cargo, có `Cargo.toml`) chứa ít nhất một crate (đơn vị rustc), tối đa một lib; crate là cây module bắt đầu từ crate root.
+- File chỉ thành module khi có `mod`; `foo.rs` cùng thư mục `foo/` được ưu tiên hơn `foo/mod.rs`, và không được dùng cả hai cho cùng một module.
+- Mặc định private; con thấy tổ tiên, cha không thấy phần private của con. `pub(crate)`, `pub(super)`, `pub(in path)` thu hẹp phạm vi; truy cập item private từ ngoài báo E0603.
 - `use` đưa tên vào scope (private với scope đó); `pub use` re-export; glob có thể bị shadow và làm khó đọc; `extern crate` hầu như không cần từ 2018.
-- `cfg`/`cfg_attr`/`cfg!` quyết định tĩnh khi biên dịch; `target_os`, `target_arch`, `feature` là các key hay dùng; `build.rs` chạy trên host nên đọc `CARGO_CFG_*` để biết target.
-- Caret là mặc định: `1.2.3` = `>=1.2.3, <2.0.0`, `0.2.3` = `>=0.2.3, <0.3.0`. Thêm public item là minor, xóa/đổi tên là major.
+- `cfg`, `cfg_attr`, `cfg!` quyết định tĩnh khi biên dịch; `target_os`, `target_arch`, `feature` là các key hay dùng; `build.rs` chạy trên host nên đọc `CARGO_CFG_*` để biết target.
+- Caret là mặc định: `1.2.3` là `>=1.2.3, <2.0.0`, `0.2.3` là `>=0.2.3, <0.3.0`. Thêm public item là minor, xóa hoặc đổi tên là major.
 - Commit `Cargo.lock` khi không chắc; ứng dụng triển khai thì nên commit và build `--locked` (nhận xét của người soạn).
-- Feature được unify trong một lệnh build: cùng binary có thể khác hành vi tùy lệnh (đã chạy thật), nên feature phải additive.
+- Feature được unify trong một lệnh build: cùng một binary có thể khác hành vi tùy lệnh (đã chạy thật), nên feature phải additive.
 - Workspace chia sẻ `Cargo.lock` và `target/`; profile chỉ đọc từ manifest gốc.
 - Crate khác edition tương tác liền mạch; edition của crate đang biên dịch quyết định keyword (cần `r#`).
 
@@ -442,32 +507,32 @@ Toàn chương là Rust, nên các điểm cần nhớ là các bảo đảm đ�
 1. Một package có thể chứa bao nhiêu library crate và binary crate? `src/bin/worker.rs` là gì?
 <details><summary>Đáp án</summary>
 
-Nhiều binary, tối đa một library; `src/bin/worker.rs` là binary crate riêng.[^atmost][^bindir]
+Nhiều binary, tối đa một library.[^atmost] `src/bin/worker.rs` là một binary crate riêng.[^bindir]
 
 </details>
 
 2. Bạn tạo `src/payments.rs` nhưng không có `mod payments;` ở đâu cả. File này có được biên dịch không?
 <details><summary>Đáp án</summary>
 
-Không: module chỉ tồn tại khi được khai báo bằng `mod`, từ đó compiler mới tìm file.[^modfile]
+Không: module chỉ tồn tại khi được khai báo bằng `mod`, và từ đó compiler mới đi tìm file.[^modfile]
 
 </details>
 
 3. `src/util.rs` và `src/util/mod.rs` cùng tồn tại thì sao? Kiểu nào được khuyến khích?
 <details><summary>Đáp án</summary>
 
-Không cho phép cả hai; khuyến khích `util.rs` + thư mục `util/` cho con.[^notboth][^modrs]
+Không cho phép cả hai.[^notboth] Khuyến khích `util.rs` cộng thư mục `util/` cho con.[^modrs]
 
 </details>
 
-4. Phân biệt `pub(super)` và `pub(in crate::bank)` và `pub(crate)`.
+4. Phân biệt `pub(super)`, `pub(in crate::bank)` và `pub(crate)`.
 <details><summary>Đáp án</summary>
 
-Cha trực tiếp / phạm vi path (phải là tổ tiên) / toàn crate.[^scopedsuper][^scopedin][^scopedcrate]
+`pub(super)` là cha trực tiếp.[^scopedsuper] `pub(in path)` là phạm vi `path`, phải là tổ tiên của item.[^scopedin] `pub(crate)` là toàn crate.[^scopedcrate]
 
 </details>
 
-5. Một hàm không có `pub` gọi từ module anh em/cha bên ngoài thì lỗi mã nào? Field private thì sao?
+5. Một hàm không có `pub` gọi từ module anh em hoặc cha bên ngoài thì lỗi mã nào? Field private thì sao?
 <details><summary>Đáp án</summary>
 
 E0603 cho đường dẫn tới item private, E0616 cho field private (quan sát ở mục 2).
@@ -484,35 +549,35 @@ E0603 cho đường dẫn tới item private, E0616 cho field private (quan sát
 7. Thêm một hàm `pub` mới vào crate thư viện là bump gì? Có trường hợp ngoại lệ nào không?
 <details><summary>Đáp án</summary>
 
-Minor; ngoại lệ hiếm do glob import gây xung đột.[^semverminor][^semverglob]
+Minor.[^semverminor] Ngoại lệ hiếm do glob import gây xung đột.[^semverglob]
 
 </details>
 
 8. Vì sao `cargo build -p tool` và `cargo build -p app -p tool` có thể cho binary `tool` hành vi khác nhau?
 <details><summary>Đáp án</summary>
 
-Feature của `core-lib` bị hợp nhất trong cùng lệnh build: `fast` từ `app` + `extra` từ `tool`.[^featunion] Thí nghiệm mục 6 in `slow` rồi `fast`.
+Feature của `core-lib` bị hợp nhất trong cùng lệnh build: `fast` từ `app` cộng `extra` từ `tool`.[^featunion] Thí nghiệm mục 6 in `slow` rồi `fast`.
 
 </details>
 
 9. Trong `build.rs`, `cfg!(target_os = "linux")` hỏi về máy nào? Dùng gì để biết target?
 <details><summary>Đáp án</summary>
 
-Máy host nơi build script chạy; dùng `CARGO_CFG_*`.[^bshost]
+Máy host nơi build script chạy; dùng `CARGO_CFG_*` để biết target.[^bshost]
 
 </details>
 
 10. Bạn đặt `[profile.release] lto = true` trong `Cargo.toml` của một member crate trong workspace. Có hiệu lực không?
 <details><summary>Đáp án</summary>
 
-Không: chỉ manifest ở gốc workspace được xét.[^profroot][^wsroot]
+Không: chỉ manifest ở gốc workspace được xét.[^profroot] Phần `[profile.*]` cũng chỉ được nhận ở manifest gốc.[^wsroot]
 
 </details>
 
 11. Crate edition 2024 gọi hàm tên `gen` định nghĩa trong crate edition 2015. Viết thế nào?
 <details><summary>Đáp án</summary>
 
-`old::r#gen()`; `gen` là từ khóa dành riêng ở edition của crate gọi (chạy thật ở mục 8); hai edition vẫn interoperate.[^edinterop]
+`old::r#gen()`, vì `gen` là từ khóa dành riêng ở edition của crate gọi (chạy thật ở mục 8). Hai edition vẫn interoperate.[^edinterop]
 
 </details>
 
@@ -522,7 +587,7 @@ Không: chỉ manifest ở gốc workspace được xét.[^profroot][^wsroot]
 - [Reference: Visibility and Privacy](https://doc.rust-lang.org/1.95.0/reference/visibility-and-privacy.html) — đặc tả đầy đủ của `pub(in path)` và re-export.
 - [Reference: Conditional compilation](https://doc.rust-lang.org/1.95.0/reference/conditional-compilation.html) — danh sách đầy đủ các option `cfg`.
 - [Cargo book: Features](https://doc.rust-lang.org/1.95.0/cargo/reference/features.html) — feature, `dep:`, unification và các cạm bẫy.
-- [Cargo book: SemVer Compatibility](https://doc.rust-lang.org/1.95.0/cargo/reference/semver.html) — bảng đầy đủ thay đổi nào là major/minor.
+- [Cargo book: SemVer Compatibility](https://doc.rust-lang.org/1.95.0/cargo/reference/semver.html) — bảng đầy đủ thay đổi nào là major, minor.
 - [Cargo book: Workspaces](https://doc.rust-lang.org/1.95.0/cargo/reference/workspaces.html), [Profiles](https://doc.rust-lang.org/1.95.0/cargo/reference/profiles.html), [Build scripts](https://doc.rust-lang.org/1.95.0/cargo/reference/build-scripts.html).
 - [Edition Guide](https://doc.rust-lang.org/edition-guide/editions/index.html) — từng edition đổi gì (không ghim phiên bản).
 

@@ -12,22 +12,23 @@
 
 ## Kiến thức cần trước
 
-- Biết lập trình ở mức senior (biến, con trỏ/tham chiếu, hàm), không cần biết assembly.
-- Mức đặc quyền chỉ nhắc ngắn ở đây (mục 7); phần user mode / kernel mode đầy đủ nằm ở [Phase 1, Chương 01 — OS và kernel, mục 3](../01-linux/01-os-va-kernel.md).
+- Bạn viết được service backend ở mức senior (biến, con trỏ/tham chiếu, hàm), nhưng chưa cần biết assembly.
+- Ví dụ xuyên suốt chương là `orders`, service Rust giả định đã gặp ở Phase 1: nó nhận request, cộng dồn doanh thu, được build thành container image và chạy trên node Kubernetes (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Mỗi mục bắt đầu bằng việc chương đó của CPU đụng vào `orders` ở chỗ nào.
+- Mức đặc quyền chỉ nhắc ngắn ở mục 7; phần user mode / kernel mode đầy đủ nằm ở [Phase 1, Chương 01 — OS và kernel, mục 3](../01-linux/01-os-va-kernel.md).
 
 ## 1. Mô hình von Neumann (Q1)
 
-> **Trả lời ngắn.** Máy gồm năm khối: xử lý, điều khiển, nhớ, nhập và xuất; hai khối xử lý và điều khiển hợp lại thành CPU.[^von-cpu] Bộ nhớ chứa cả dữ liệu lẫn lệnh của chương trình,[^von-mem] và theo sách, trong mô hình này lệnh *là* dữ liệu.[^von-instrdata] Vì thế một chương trình chỉ là nội dung nằm trong bộ nhớ, và đơn vị điều khiển nạp từng lệnh ra để chạy.[^von-pcir]
+> **Trả lời ngắn.** Máy gồm năm khối: xử lý, điều khiển, nhớ, nhập và xuất; hai khối xử lý và điều khiển hợp lại thành CPU.[^von-cpu] Bộ nhớ giữ cả dữ liệu lẫn lệnh của chương trình,[^von-mem] và trong mô hình này lệnh *là* dữ liệu.[^von-instrdata] Vì vậy một chương trình chẳng qua là nội dung nằm trong bộ nhớ, còn đơn vị điều khiển nạp từng lệnh ra để chạy.[^von-pcir]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bộ nhớ như một database lưu cả bảng dữ liệu lẫn danh sách job cần làm; CPU là một worker lần lượt lấy từng job ra xử lý. Muốn đổi việc của worker, bạn chỉ cần đổi nội dung database, không phải đổi worker.
+*Với service `orders`.* Khi bạn chạy `./orders`, file thực thi đang nằm trên ổ đĩa. Hệ điều hành nạp nó vào bộ nhớ, và lúc đó ổ đĩa đóng vai thiết bị nhập.[^von-exe] Từ đó CPU chỉ làm đi làm lại một việc: lấy một lệnh của `orders` từ bộ nhớ, thực hiện, rồi lấy lệnh kế tiếp. Mục này vẽ ra các khối đứng sau câu mô tả đó, và giải thích vì sao việc lệnh cũng là dữ liệu lại quan trọng.
 
-Đó là ý của mô hình **stored-program** (chương trình lưu trong bộ nhớ): sách nói việc lưu lệnh chương trình trong bộ nhớ là một phần then chốt của mô hình von Neumann.[^von-mem] Nhờ vậy, đổi chương trình chỉ là đổi nội dung bộ nhớ chứ không phải đổi mạch (nhận xét của người soạn).
+### 1.1 Năm khối và bus
 
-*Dive into Systems* chia máy theo kiến trúc von Neumann thành năm thành phần: đơn vị xử lý (processing unit), đơn vị điều khiển (control unit), đơn vị nhớ (memory unit), đơn vị nhập (input) và đơn vị xuất (output). Đơn vị điều khiển điều khiển việc thực thi lệnh trên đơn vị xử lý; hai khối đó hợp lại thành **CPU**.[^von-cpu] Các khối nhập nạp dữ liệu và lệnh vào máy rồi khởi động việc chạy chương trình, còn các khối xuất lưu hoặc nhận kết quả.[^von-io] Ví dụ trong sách: file thực thi nằm trên ổ đĩa được hệ điều hành nạp vào bộ nhớ để chạy — lúc đó ổ đĩa đóng vai thiết bị nhập.[^von-exe]
+Khối xử lý (processing unit) tính toán. Khối điều khiển (control unit) điều khiển việc chạy lệnh trên khối xử lý, và hai khối này hợp lại là **CPU**.[^von-cpu] Khối nhớ (memory unit) giữ dữ liệu và lệnh. Cuối cùng là khối nhập (input) và khối xuất (output): khối nhập đưa dữ liệu, lệnh vào máy rồi khởi động việc chạy chương trình, khối xuất lưu hoặc nhận kết quả.[^von-io]
 
-Các khối nói chuyện với nhau qua **bus** — kênh truyền các giá trị nhị phân giữa nơi gửi và nơi nhận.[^von-busdef] Thông thường kiến trúc có bus riêng cho dữ liệu, cho địa chỉ bộ nhớ và cho tín hiệu điều khiển.[^von-bus]
+Các khối nói chuyện với nhau qua **bus**, tức kênh truyền các giá trị nhị phân giữa bên gửi và bên nhận.[^von-busdef] Thông thường có bus riêng cho dữ liệu, cho địa chỉ bộ nhớ và cho tín hiệu điều khiển.[^von-bus]
 
 ```mermaid
 flowchart LR
@@ -46,56 +47,69 @@ flowchart LR
 
 (Sơ đồ rút gọn của người soạn: sách chỉ nói các khối nối với nhau bằng bus; chiều mũi tên nhập → bộ nhớ → xuất là cách vẽ cho gọn.)
 
-Bên trong CPU, đơn vị xử lý có hai phần, còn đơn vị điều khiển có hai thanh ghi đặc biệt:
+### 1.2 Bên trong CPU
 
-- **Đơn vị xử lý** gồm **ALU** (arithmetic/logic unit), làm các phép toán số học và logic như cộng, trừ, OR, và một tập **thanh ghi** (register): các ô lưu trữ nhỏ, nhanh, giữ dữ liệu và lệnh đang được ALU xử lý.[^von-alu]
-- **Đơn vị điều khiển** nạp lệnh từ bộ nhớ và đưa toán hạng, phép toán qua đơn vị xử lý. Nó giữ hai thanh ghi đặc biệt: **program counter (PC)** lưu địa chỉ bộ nhớ của lệnh kế tiếp cần chạy, và **instruction register (IR)** lưu lệnh đã nạp từ bộ nhớ đang được thực thi.[^von-pcir]
+Khối xử lý gồm hai phần. Phần thứ nhất là **ALU** (arithmetic/logic unit), làm các phép toán số học và logic như cộng, trừ, OR. Phần thứ hai là một tập **thanh ghi** (register), những ô lưu trữ nhỏ và nhanh giữ dữ liệu cùng lệnh mà ALU đang xử lý.[^von-alu]
 
-Vì sao câu "lệnh cũng là dữ liệu" quan trọng? Sách viết rằng trong kiến trúc von Neumann không có sự phân biệt giữa lệnh và dữ liệu — xét cho mọi mục đích, lệnh *là* dữ liệu.[^von-instrdata] Hệ quả (suy luận của người soạn): "đâu là lệnh" do cách CPU *dùng* vùng nhớ quyết định, không do vùng nhớ mang nhãn.
+Khối điều khiển nạp lệnh từ bộ nhớ rồi đưa toán hạng và phép toán qua khối xử lý. Nó giữ hai thanh ghi đặc biệt: **program counter (PC)** chứa địa chỉ bộ nhớ của lệnh kế tiếp cần chạy, còn **instruction register (IR)** chứa lệnh vừa nạp và đang được thực thi.[^von-pcir]
 
-Còn bộ nhớ được đánh địa chỉ thế nào? Đơn vị nhớ nhỏ nhất có địa chỉ trong các hệ thống hiện đại là một byte (8 bit); mỗi địa chỉ ứng với một vị trí lưu một byte.[^von-byte] ISA giới hạn dải địa chỉ mà máy có thể biểu diễn;[^von-addr] sách lấy ví dụ kiến trúc 32 bit thường hỗ trợ không gian địa chỉ tối đa $2^{32}$ byte, tức 4 GiB.[^von-addr32] Còn **word size** do ISA định nghĩa là số bit của kích thước dữ liệu chuẩn mà bộ xử lý xử lý như một đơn vị.[^von-word] (Hệ phân cấp lưu trữ: [Chương 06 — Cache và NUMA](06-cache-va-numa.md).)
+### 1.3 Lệnh cũng là dữ liệu
+
+Trong mô hình này không có ranh giới giữa lệnh và dữ liệu: xét cho mọi mục đích, lệnh *là* dữ liệu.[^von-instrdata] Việc lưu lệnh của chương trình ngay trong bộ nhớ là điểm then chốt của mô hình stored-program (chương trình lưu trong bộ nhớ).[^von-mem] Với `orders`, hệ quả là muốn đổi hành vi của service bạn chỉ cần đổi nội dung bộ nhớ, tức nạp một binary khác, chứ không phải đổi mạch (nhận xét của người soạn). Cũng vì thế, "đâu là lệnh" do cách CPU *dùng* một vùng nhớ quyết định, không do vùng nhớ mang nhãn (suy luận của người soạn).
+
+### 1.4 Địa chỉ và word size
+
+Bộ nhớ đánh địa chỉ theo byte: trong các hệ thống hiện đại, đơn vị nhớ nhỏ nhất có địa chỉ là một byte (8 bit), và mỗi địa chỉ ứng với một vị trí lưu đúng một byte.[^von-byte] ISA giới hạn dải địa chỉ mà máy biểu diễn được,[^von-addr] chẳng hạn kiến trúc 32 bit thường hỗ trợ không gian địa chỉ tối đa $2^{32}$ byte, tức 4 GiB.[^von-addr32] Còn **word size** là số bit của kích thước dữ liệu chuẩn mà bộ xử lý xử lý như một đơn vị, và do ISA định nghĩa.[^von-word] Hệ phân cấp lưu trữ nằm ở [Chương 06 — Cache và NUMA](06-cache-va-numa.md).
 
 <details><summary>Đi sâu: chu trình ở mức bus theo sách, và giới hạn của mô hình</summary>
 
-Sách mô tả năm khối phối hợp thành chu trình *fetch–decode–execute–store*, bắt đầu từ lệnh đầu tiên của chương trình và lặp lại cho đến khi chương trình thoát.[^von-cycle] Ở bước nạp lệnh, đơn vị điều khiển đặt địa chỉ trong PC lên address bus và gửi lệnh đọc qua control bus; đơn vị nhớ đọc các byte tại địa chỉ đó rồi gửi về qua data bus.[^von-fetchbus] Ở bước cuối, đơn vị điều khiển ghi kết quả vào bộ nhớ bằng cách đặt giá trị lên data bus, địa chỉ lên address bus và lệnh ghi lên control bus.[^von-store] Mục 4 dùng cách chia bốn pha *Fetch, Decode, Execute, WriteBack* của §5.6 trong cùng cuốn sách; ở đó ví dụ ADD ghi kết quả vào thanh ghi đích, còn ở đây nói chung là ghi vào bộ nhớ — nên đọc hai mô tả như hai mức chi tiết của cùng một chu trình (nhận xét của người soạn).
+Năm khối phối hợp thành chu trình *fetch–decode–execute–store*: bắt đầu từ lệnh đầu tiên của chương trình, rồi lặp lại cho đến khi chương trình thoát.[^von-cycle] Ở bước nạp lệnh, khối điều khiển đặt địa chỉ trong PC lên address bus và gửi lệnh đọc qua control bus; khối nhớ đọc các byte tại địa chỉ đó rồi gửi về qua data bus.[^von-fetchbus] Ở bước cuối, khối điều khiển ghi kết quả vào bộ nhớ: giá trị đặt lên data bus, địa chỉ lên address bus, lệnh ghi lên control bus.[^von-store] Mục 4 dùng cách chia bốn pha *Fetch, Decode, Execute, WriteBack* của §5.6 trong cùng cuốn sách. Ở đó ví dụ ADD ghi kết quả vào thanh ghi đích, còn ở đây nói chung là ghi vào bộ nhớ, nên hãy đọc hai mô tả như hai mức chi tiết của cùng một chu trình (nhận xét của người soạn).
 
-Sách khẳng định mọi bộ xử lý hiện đại, bất kể ISA, đều tuân theo mô hình này.[^von-all] Tuy vậy, pipeline (Chương 05) khiến việc thực thi thực tế khác xa vòng lặp tuần tự ở mục 4 (nhận xét của người soạn): mô hình cho bạn bức tranh đúng về *ý nghĩa* của chương trình, không phải về cách mạch làm.
+Mọi bộ xử lý hiện đại, bất kể ISA, đều theo mô hình này.[^von-all] Tuy vậy, pipeline (Chương 05) làm việc thực thi thực tế khác xa vòng lặp tuần tự ở mục 4 (nhận xét của người soạn). Mô hình cho bạn bức tranh đúng về *ý nghĩa* của chương trình, không phải về cách mạch làm.
 
 </details>
 
-**Quay lại Q1:** máy có năm khối, CPU là xử lý cộng điều khiển, và vì lệnh nằm trong bộ nhớ như dữ liệu nên "chương trình" chỉ là nội dung bộ nhớ mà CPU nạp ra chạy.
+**Quay lại Q1:** máy có năm khối, CPU là xử lý cộng điều khiển, và vì lệnh nằm trong bộ nhớ như dữ liệu nên "chương trình" chỉ là nội dung bộ nhớ mà CPU nạp ra chạy; với `orders`, binary từ đĩa được nạp vào RAM rồi CPU lấy từng lệnh ra chạy.
 
 ## 2. ISA và microarchitecture (Q2)
 
-> **Trả lời ngắn.** ISA là "hợp đồng" gồm tập lệnh, mã hóa nhị phân, tập thanh ghi và tác dụng của lệnh lên trạng thái CPU.[^isa-def] Microarchitecture là mạch điện của một bản cài đặt cụ thể, và nhiều bản cài đặt có thể khác nhau miễn là cùng đúng định nghĩa ISA.[^uarch] Vì chương trình nhị phân nhắm vào ISA chứ không nhắm vào mạch điện cụ thể, hai chip khác hãng nhưng cùng ISA chạy được cùng một binary (suy luận của người soạn; còn điều kiện về hệ điều hành và các phần mở rộng tùy chọn của ISA).
+> **Trả lời ngắn.** ISA là "hợp đồng" giữa phần mềm và CPU, gồm tập lệnh, mã hóa nhị phân của chúng, tập thanh ghi và tác dụng của từng lệnh lên trạng thái CPU.[^isa-def] Microarchitecture là mạch điện của một bản cài đặt cụ thể, và các bản cài đặt có thể khác nhau miễn là cùng đúng định nghĩa ISA.[^uarch] Chương trình nhị phân nhắm vào ISA chứ không nhắm vào mạch điện cụ thể, nên hai chip khác hãng nhưng cùng ISA chạy được cùng một binary (suy luận của người soạn; còn điều kiện về hệ điều hành và các phần mở rộng tùy chọn của ISA).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ISA giống interface của một thư viện, microarchitecture giống implementation phía sau. Code gọi interface không cần biết implementation, miễn là implementation tuân đúng interface.
+*Với service `orders`.* Giả sử CI build `orders` thành container image ngay trên laptop Apple Silicon, rồi bạn deploy lên node Kubernetes chạy x86-64. Image đó chạy được hay không, và một node Intel với một node AMD có chạy chung image được không: cả hai câu hỏi đều xoay quanh việc binary nhắm vào ISA nào. Mục này tách ISA ra khỏi mạch điện để trả lời.
 
-Cụ thể, một CPU cài đặt một **instruction set architecture (ISA)**. Theo *Dive into Systems*, ISA định nghĩa tập lệnh và mã hóa nhị phân của chúng, tập thanh ghi của CPU, và tác dụng của việc thực thi lệnh lên trạng thái bộ xử lý.[^isa-def] **Microarchitecture** thì định nghĩa mạch điện của một bản cài đặt cụ thể của ISA. Nhiều microarchitecture có thể khác nhau miễn là cùng cài đặt đúng định nghĩa ISA; ví dụ trong sách, Intel và AMD sản xuất các bộ vi xử lý khác nhau cho cùng ISA IA32.[^uarch]
+### 2.1 ISA là hợp đồng, microarchitecture là cách thực hiện
 
-Phân chia thực tế (nhận xét của người soạn): số thanh ghi *kiến trúc* — những thanh ghi mà lệnh gọi tên được, như `rax` hay `x0` — thuộc ISA; độ sâu pipeline, kích thước cache và số thanh ghi vật lý bên dưới thuộc cài đặt (Chương 05, mục 4 và Chương 06).
+Mỗi CPU cài đặt một **instruction set architecture (ISA)**. ISA cho biết CPU có những lệnh nào và mã hóa nhị phân của chúng ra sao, CPU có những thanh ghi nào, và chạy một lệnh thì trạng thái bộ xử lý đổi thế nào.[^isa-def] **Microarchitecture** là mạch điện của một bản cài đặt cụ thể của ISA đó. Nhiều microarchitecture có thể khác nhau miễn là cùng cài đặt đúng định nghĩa ISA; chẳng hạn Intel và AMD sản xuất những vi xử lý khác nhau cho cùng ISA IA32.[^uarch]
 
-Từ đó có ví dụ "chip khác nhau, cùng ISA": cùng một binary x86-64 chạy được trên cả Intel lẫn AMD vì hai hãng cài đặt cùng ISA (suy luận của người soạn từ định nghĩa trên; điều kiện thêm là cùng hệ điều hành/ABI và chip có đủ các phần mở rộng tùy chọn mà binary dùng — xem Chương 07, mục 4). Ngược lại, sách nói không thể chạy binary ARM trực tiếp trên hệ x86, dù có thể giả lập bằng QEMU;[^arm-noexec] chiều ngược lại cũng vậy (suy luận của người soạn). Vì thế image container build trên laptop Apple Silicon (AArch64) có thể không chạy trực tiếp trên node x86-64 (nhận xét của người soạn).
+Ranh giới trên thực tế nằm ở chỗ này (nhận xét của người soạn). Số thanh ghi *kiến trúc*, tức những thanh ghi mà lệnh gọi được tên như `rax` hay `x0`, thuộc ISA. Độ sâu pipeline, kích thước cache và số thanh ghi vật lý bên dưới thì thuộc cài đặt (Chương 05, mục 4 và Chương 06).
+
+### 2.2 Vì sao image build trên Mac có thể không chạy trên node
+
+Cùng ISA thì cùng binary: một binary x86-64 chạy được trên cả Intel lẫn AMD vì hai hãng cài đặt cùng ISA (suy luận của người soạn từ định nghĩa trên). Điều kiện kèm theo là cùng hệ điều hành/ABI, và chip có đủ các phần mở rộng tùy chọn mà binary dùng (xem Chương 07, mục 4).
+
+Khác ISA thì không: ta không chạy trực tiếp binary ARM trên hệ x86, chỉ giả lập được bằng QEMU.[^arm-noexec] Chiều ngược lại cũng vậy (suy luận của người soạn). Vì thế image build trên laptop Apple Silicon (AArch64) có thể không chạy thẳng trên node x86-64 (nhận xét của người soạn), nên trước khi build image hãy xem node của cluster dùng kiến trúc nào.
 
 <details><summary>Đi sâu: lịch sử x86, tương thích ngược và độ tin cậy của nguồn</summary>
 
-x86-64 là phần mở rộng của x86 32 bit, bản thân nó lại là phần mở rộng của một phiên bản 16 bit trước đó; vì vậy ISA cho truy cập phần thấp 32/16/8 bit của mỗi thanh ghi.[^x86-ext] Intel SDM ghi rằng nửa thấp của mỗi thanh ghi 32 bit của Intel386 giữ nguyên tính chất của thanh ghi 16 bit thế hệ trước, nhằm tương thích ngược.[^sdm-386] Kết quả là `eax` và `ax` là các phần của `rax`.[^dis-x86-sub] Ngược lại, ARM mô tả A64 là tập lệnh thiết kế "từ đầu";[^arm-clean] khả năng chạy mã ARMv7-A cũ được giữ ở mức trạng thái thực thi: ARMv8 có hai trạng thái AArch32 (tập lệnh A32/T32) và AArch64 (tập lệnh A64 mới).[^arm-aarch32]
+x86-64 là phần mở rộng của x86 32 bit, bản thân x86 32 bit lại mở rộng từ một phiên bản 16 bit trước đó, nên ISA cho truy cập phần thấp 32/16/8 bit của mỗi thanh ghi.[^x86-ext] Intel ghi rõ lý do: nửa thấp của mỗi thanh ghi 32 bit của Intel386 giữ nguyên tính chất của thanh ghi 16 bit thế hệ trước, để tương thích ngược.[^sdm-386] Kết quả là `eax` và `ax` là các phần của `rax`.[^dis-x86-sub] ARM đi hướng ngược lại: A64 được mô tả là tập lệnh thiết kế "từ đầu".[^arm-clean] Khả năng chạy mã ARMv7-A cũ được giữ ở mức trạng thái thực thi: ARMv8 có hai trạng thái, AArch32 (tập lệnh A32/T32) và AArch64 (tập lệnh A64 mới).[^arm-aarch32]
 
-Về nguồn: Intel SDM ở đây là bản *hiện hành* (Order Number 325462-093US, 09/2026), không ghim, nên số mục có thể đổi; tài liệu Arm là white paper của Chris Shore (07/2014), không phải đặc tả — chi tiết cần chính xác phải tra Arm Architecture Reference Manual.
+Về nguồn: Intel SDM ở đây là bản *hiện hành* (Order Number 325462-093US, 09/2026), không ghim, nên số mục có thể đổi. Tài liệu Arm là white paper của Chris Shore (07/2014), không phải đặc tả; chi tiết cần chính xác thì phải tra Arm Architecture Reference Manual.
 
 </details>
 
-**Quay lại Q2:** ISA là hợp đồng mà phần mềm nhìn thấy, microarchitecture là cách mạch thực hiện hợp đồng đó; hai chip cùng ISA chạy chung binary, hai chip khác ISA thì không.
+**Quay lại Q2:** ISA là hợp đồng mà phần mềm nhìn thấy, microarchitecture là cách mạch thực hiện hợp đồng đó; hai chip cùng ISA chạy chung binary, hai chip khác ISA thì không, nên image `orders` build trên Mac M-series không tự chạy được trên node x86-64.
 
 ## 3. Thanh ghi (Q3)
 
-> **Trả lời ngắn.** Thanh ghi là ô lưu trữ nhỏ, nhanh nằm ngay trong CPU, giữ dữ liệu đang được tính.[^von-alu] [^dis-reg-def] Có bốn họ cần phân biệt: thanh ghi đa dụng (chứa số nguyên hoặc địa chỉ), con trỏ lệnh PC/IP (địa chỉ lệnh kế tiếp), con trỏ stack SP (đỉnh stack) và cờ (ghi lại tính chất kết quả phép toán, để lệnh sau dùng chọn hành động).[^cc]
+> **Trả lời ngắn.** Thanh ghi là ô lưu trữ nhỏ, nhanh, nằm ngay trong CPU, giữ dữ liệu mà ALU đang xử lý.[^von-alu] Có bốn họ cần phân biệt: thanh ghi đa dụng (chứa số nguyên hoặc địa chỉ), con trỏ lệnh PC/IP (địa chỉ lệnh kế tiếp), con trỏ stack SP (đỉnh stack) và cờ (ghi lại tính chất của kết quả phép toán, để lệnh sau dùng mà chọn hành động).[^cc]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thanh ghi như các biến cục bộ nằm ngay trên bàn làm việc của CPU; RAM là tủ hồ sơ phía xa. Muốn tính, bạn đặt số liệu lên bàn trước (chênh lệch tốc độ so với RAM: Chương 06). Theo sách, mỗi thanh ghi chứa được một word.[^von-regword]
+*Với service `orders`.* Handler của `orders` cộng giá các dòng hàng thành tổng tiền của đơn, và trong lúc cộng thì `total` với giá của dòng hàng đang xét phải nằm ở đâu đó để CPU lấy ra tính. Chỗ đó là thanh ghi, những ô lưu trữ đặt thẳng trên CPU,[^dis-reg-def] nhanh hơn RAM nhiều (chênh lệch tốc độ: Chương 06). Mỗi thanh ghi chứa được một word, tức một đơn vị dữ liệu chuẩn của CPU.[^von-regword] Mục này kể tên các loại thanh ghi và việc của từng loại.
+
+### 3.1 Bốn họ thanh ghi
 
 | Họ | Vai trò | x86-64 | AArch64 |
 |---|---|---|---|
@@ -106,48 +120,56 @@ Hình dung (nhận xét của người soạn): thanh ghi như các biến cục
 
 (Mỗi ô của bảng được chú thích ở các đoạn ngay dưới.)
 
-**Đa dụng.** Sách mô tả CPU Intel có 16 thanh ghi chứa dữ liệu 64 bit; chương trình có thể xem nội dung chúng là số nguyên hay địa chỉ, bản thân thanh ghi không phân biệt, và chương trình đọc/ghi được cả 16 thanh ghi.[^dis-x86-regs] Với AArch64, sách mô tả CPU ARMv8 có 31 thanh ghi chứa dữ liệu 64 bit `x0`…`x30`, cũng không phân biệt số nguyên với địa chỉ và đọc/ghi được tất cả.[^dis-arm-regs] Ngoài 31 thanh ghi đó, ISA còn có các thanh ghi đặc biệt như `sp` và `pc`,[^dis-arm-special] và một thanh ghi zero luôn chứa 0.[^dis-arm-zr]
+### 3.2 Đa dụng, PC và SP
 
-**PC / IP.** Trên x86-64, `%rip` (instruction pointer, còn gọi là PC) trỏ tới lệnh kế tiếp; chương trình không ghi trực tiếp vào nó.[^dis-rip] Giá trị của nó đổi gián tiếp qua lệnh nhảy/gọi (xem mục 4). Trên AArch64 cũng vậy: `pc` trỏ tới lệnh kế tiếp và chương trình không ghi trực tiếp vào nó.[^dis-arm-pc]
+Thanh ghi đa dụng chứa số nguyên hoặc địa chỉ, và bản thân thanh ghi không phân biệt hai loại đó: chương trình muốn xem nội dung là gì cũng được, và đọc ghi được mọi thanh ghi loại này. Trên x86-64, CPU Intel có 16 thanh ghi chứa dữ liệu 64 bit, đọc ghi được cả 16.[^dis-x86-regs] Trên AArch64, CPU ARMv8 có 31 thanh ghi chứa dữ liệu 64 bit là `x0`…`x30`, cũng đọc ghi được tất cả.[^dis-arm-regs] Ngoài 31 thanh ghi đó, ISA còn có các thanh ghi đặc biệt như `sp` và `pc`,[^dis-arm-special] và một thanh ghi zero luôn chứa 0.[^dis-arm-zr]
 
-**SP.** Trình biên dịch dành `rsp` (x86-64, cùng với frame pointer `rbp`) và `sp` (AArch64) để duy trì bố cục stack của chương trình; `%rsp` luôn trỏ tới đỉnh stack.[^dis-rsp] [^dis-arm-sp] Stack làm gì và frame được bố trí ra sao là nội dung Chương 04.
+PC (hay IP) giữ địa chỉ lệnh kế tiếp. Trên x86-64 đó là `%rip` (instruction pointer, còn gọi là PC), và chương trình không ghi trực tiếp vào nó.[^dis-rip] Trên AArch64 `pc` cũng vậy.[^dis-arm-pc] Giá trị của PC chỉ đổi gián tiếp, qua lệnh nhảy hoặc gọi hàm (mục 4).
 
-**Flags.** Khi ALU thực hiện một phép toán, nó còn xuất ra các **condition code** mô tả kết quả; các mã thường gặp cho biết kết quả âm hay không, bằng 0 hay không, và có carry-out hay không.[^cc-def] Các lệnh sau có thể dùng chúng để chọn hành động.[^cc] Trên x86, các cờ trạng thái nằm trong thanh ghi EFLAGS;[^sdm-status] thanh ghi này được mở rộng thành 64 bit và gọi là RFLAGS trong chế độ 64 bit.[^sdm-rflags] Ví dụ: ZF (zero flag) được đặt nếu kết quả bằng 0;[^sdm-zf] và các lệnh `Jcc` (nhảy theo điều kiện), `SETcc`, `LOOPcc`, `CMOVcc` dùng một hoặc nhiều cờ trạng thái làm mã điều kiện.[^sdm-jcc] Đây chính là cách một `if (x + 8 != 0)` trở thành "cộng rồi nhìn cờ": sách minh họa đúng ví dụ này, với lệnh ADD tính `x + 8` rồi một lệnh nhảy có điều kiện kiểm tra các bit mã điều kiện do ADD đặt.[^cc-if]
+SP giữ đỉnh stack. Trình biên dịch dành `rsp` (x86-64, cùng với frame pointer `rbp`) để duy trì bố cục stack của chương trình, và `%rsp` luôn trỏ tới đỉnh stack.[^dis-rsp] AArch64 dành `sp` cho đúng việc đó.[^dis-arm-sp] Stack làm gì và frame được bố trí ra sao là nội dung Chương 04.
+
+### 3.3 Cờ: cách `if` đọc kết quả phép toán
+
+Mỗi khi ALU làm một phép toán, ngoài kết quả nó còn xuất ra các **condition code** mô tả kết quả đó: âm hay không, bằng 0 hay không, có carry-out hay không.[^cc-def] Lệnh đứng sau có thể dựa vào các mã này để chọn hành động.[^cc] Trên x86, các cờ trạng thái nằm trong thanh ghi EFLAGS,[^sdm-status] thanh ghi này được mở rộng thành 64 bit và gọi là RFLAGS ở chế độ 64 bit.[^sdm-rflags] Chẳng hạn ZF (zero flag) được đặt nếu kết quả bằng 0,[^sdm-zf] và các lệnh `Jcc` (nhảy theo điều kiện), `SETcc`, `LOOPcc`, `CMOVcc` dùng một hoặc nhiều cờ trạng thái làm mã điều kiện.[^sdm-jcc]
+
+Đó cũng là cách một `if (x + 8 != 0)` trở thành "cộng rồi nhìn cờ": lệnh ADD tính `x + 8` và đặt cờ theo kết quả, rồi một lệnh nhảy có điều kiện đứng sau kiểm tra các bit đó để quyết định nhảy hay không.[^cc-if]
 
 <details><summary>Đi sâu: 16 so với 31, thanh ghi con, PC/SP/zero trên AArch64, thực thi có điều kiện</summary>
 
-**Số thanh ghi đa dụng.** Intel SDM xác nhận ở chế độ 64 bit: có 16 thanh ghi đa dụng và kích thước toán hạng mặc định là 32 bit,[^sdm16] nhưng thanh ghi làm việc được với cả toán hạng 32 bit lẫn 64 bit.[^sdm-opsize] Trong 16 thanh ghi ấy, tám thanh ghi (`R8`–`R15`) là tám thanh ghi đa dụng *mới* của chế độ 64 bit.[^sdm-r8] Lưu ý: 16 thanh ghi của SDM gồm cả `RSP`,[^sdm-rsp-in16] còn 31 thanh ghi của AArch64 không tính `sp` và thanh ghi zero[^dis-arm-special] — "16 so với 31" chưa cùng đơn vị.
+**Số thanh ghi đa dụng.** Ở chế độ 64 bit, x86 có 16 thanh ghi đa dụng và kích thước toán hạng mặc định là 32 bit,[^sdm16] nhưng thanh ghi làm việc được với cả toán hạng 32 bit lẫn 64 bit.[^sdm-opsize] Tám trong 16 thanh ghi đó (`R8`–`R15`) là tám thanh ghi đa dụng *mới* của chế độ 64 bit.[^sdm-r8] Cần lưu ý 16 thanh ghi của Intel gồm cả `RSP`,[^sdm-rsp-in16] còn 31 thanh ghi của AArch64 không tính `sp` và thanh ghi zero,[^dis-arm-special] nên "16 so với 31" chưa cùng đơn vị.
 
-Tài liệu của ARM (white paper 2014) mô tả 31 thanh ghi như sách; mỗi thanh ghi dùng được như `Xn` 64 bit hoặc `Wn` 32 bit chỉ tác động nửa thấp, và có thêm một thanh ghi zero riêng.[^arm-31] Hệ quả cho trình biên dịch: nhiều thanh ghi hơn nghĩa là ít phải "tràn" (spill) biến ra stack; tài liệu ARM liệt kê đây là lợi ích rõ rệt của việc tăng số lượng và bề rộng thanh ghi[^arm-spill] (tài liệu nói điều này trong bối cảnh chuyển từ ARM 32 bit sang 64 bit, không so với x86-64 — suy luận của người soạn từ ngữ cảnh).
+Tài liệu của ARM (white paper 2014) mô tả 31 thanh ghi ấy: mỗi thanh ghi dùng được như `Xn` 64 bit hoặc `Wn` 32 bit chỉ tác động nửa thấp, và có thêm một thanh ghi zero riêng.[^arm-31] Nhiều thanh ghi hơn nghĩa là trình biên dịch ít phải "tràn" (spill) biến ra stack hơn; tài liệu ARM liệt kê đó là lợi ích rõ rệt của việc tăng số lượng và bề rộng thanh ghi.[^arm-spill] Tài liệu nói điều này khi bàn về việc chuyển từ ARM 32 bit sang 64 bit chứ không so với x86-64 (suy luận của người soạn từ ngữ cảnh).
 
-**Thanh ghi con (sub-register).** Cả hai ISA cho truy cập nửa thấp của thanh ghi 64 bit để xử lý kiểu `int` 32 bit. Trên x86-64, nửa thấp 32 bit của `rax` là `eax`, 16 bit thấp là `ax`.[^dis-x86-sub] Trên AArch64, nửa thấp của `x0` là `w0`.[^dis-arm-sub]
+**Thanh ghi con (sub-register).** Cả hai ISA cho truy cập nửa thấp của thanh ghi 64 bit, để xử lý kiểu `int` 32 bit. Trên x86-64, nửa thấp 32 bit của `rax` là `eax`, 16 bit thấp là `ax`.[^dis-x86-sub] Trên AArch64, nửa thấp của `x0` là `w0`.[^dis-arm-sub]
 
-Một chi tiết hay gây bất ngờ mà hai ISA **giống nhau**: ghi vào thanh ghi con 32 bit sẽ *xóa* nửa cao. Intel SDM: kết quả của toán hạng 32 bit được zero-extend lên 64 bit trong thanh ghi đích;[^sdm-zext] tài liệu ARM: nếu ghi như một word 32 bit thì nửa cao của thanh ghi bị xóa.[^arm-zero-upper] Trên x86-64, toán hạng 8 và 16 bit thì khác: phần cao của thanh ghi đích không bị sửa.[^sdm-8-16] (Chương 03, mục 2 trình bày kỹ hơn, kèm tên các thanh ghi con.)
+Có một chi tiết hay gây bất ngờ mà hai ISA **giống nhau**: ghi vào thanh ghi con 32 bit sẽ *xóa* nửa cao. Trên x86-64, kết quả của toán hạng 32 bit được zero-extend lên 64 bit trong thanh ghi đích;[^sdm-zext] trên AArch64, nếu ghi như một word 32 bit thì nửa cao của thanh ghi bị xóa.[^arm-zero-upper] Toán hạng 8 và 16 bit trên x86-64 thì khác: phần cao của thanh ghi đích không bị sửa.[^sdm-8-16] (Chương 03, mục 2 trình bày kỹ hơn, kèm tên các thanh ghi con.)
 
-**PC trên AArch64.** Tài liệu ARM nêu PC không còn truy cập tổng quát được như thanh ghi đa dụng — không đọc hay sửa như các thanh ghi khác, mà dùng các pseudo-instruction để dùng nó gián tiếp (ví dụ sinh địa chỉ tương đối PC).[^arm-pc]
+**PC trên AArch64.** PC không còn truy cập tổng quát được như thanh ghi đa dụng: bạn không đọc hay sửa nó như các thanh ghi khác, mà dùng các pseudo-instruction để dùng nó gián tiếp (ví dụ sinh địa chỉ tương đối theo PC).[^arm-pc]
 
-**SP và thanh ghi zero trên AArch64.** SP và thanh ghi zero cùng được mã hóa bằng "thanh ghi lõi số 31", và chỉ một số ít lệnh hiểu mã này là SP — phần còn lại coi nó là thanh ghi zero.[^arm-r31] Thanh ghi zero (sách viết là `zr`; tên đầy đủ `xzr`/`wzr` xem Chương 03, mục 2) luôn đọc ra 0; *Dive into Systems* nói nó chỉ có ích làm toán hạng nguồn,[^dis-arm-zr] còn Arm white paper nói ghi vào nó bị bỏ qua, nên lệnh CMP có thể mã hóa thành SUB với thanh ghi zero làm đích.[^arm-zr] Câu "chỉ làm toán hạng nguồn" của sách vì vậy chưa tính cách dùng làm đích để bỏ kết quả (nhận xét của người soạn).
+**SP và thanh ghi zero trên AArch64.** SP và thanh ghi zero cùng được mã hóa bằng "thanh ghi lõi số 31", và chỉ một số ít lệnh hiểu mã này là SP, phần còn lại coi nó là thanh ghi zero.[^arm-r31] Thanh ghi zero (sách viết là `zr`; tên đầy đủ `xzr`/`wzr` xem Chương 03, mục 2) luôn đọc ra 0. *Dive into Systems* nói nó chỉ có ích làm toán hạng nguồn,[^dis-arm-zr] còn Arm white paper nói ghi vào nó bị bỏ qua, nên lệnh CMP có thể mã hóa thành SUB với thanh ghi zero làm đích.[^arm-zr] Vì vậy câu "chỉ làm toán hạng nguồn" của sách chưa tính cách dùng làm đích để bỏ kết quả (nhận xét của người soạn).
 
-**Cờ trên AArch64.** AArch64 cũng có mã điều kiện: tài liệu ARM nói CPSR của A32 được thay bằng các trường có tên trong PSTATE,[^arm-pstate] và nhắc tới các cờ điều kiện lõi `NZCV`.[^arm-nzcv] Tài liệu nêu A64 không hỗ trợ thực thi có điều kiện cho từng lệnh riêng lẻ (như tập lệnh ARM cũ) mà thay bằng các lệnh có hành vi phụ thuộc cờ như `CSINC`, kết hợp với đầy đủ các lệnh nhảy có điều kiện.[^arm-nocond]
+**Cờ trên AArch64.** AArch64 cũng có mã điều kiện: CPSR của A32 được thay bằng các trường có tên trong PSTATE,[^arm-pstate] và tài liệu nhắc tới các cờ điều kiện lõi `NZCV`.[^arm-nzcv] A64 không hỗ trợ thực thi có điều kiện cho từng lệnh riêng lẻ như tập lệnh ARM cũ. Thay vào đó nó có các lệnh mà hành vi phụ thuộc cờ, như `CSINC`, kết hợp với đầy đủ các lệnh nhảy có điều kiện.[^arm-nocond]
 
 </details>
 
-**Quay lại Q3:** thanh ghi là bộ nhớ nhỏ, nhanh trong CPU; đa dụng giữ giá trị đang tính, PC giữ địa chỉ lệnh kế, SP giữ đỉnh stack, cờ giữ tính chất của kết quả vừa tính.
+**Quay lại Q3:** thanh ghi là bộ nhớ nhỏ, nhanh trong CPU; đa dụng giữ giá trị đang tính (như `total` của `orders`), PC giữ địa chỉ lệnh kế, SP giữ đỉnh stack, cờ giữ tính chất của kết quả vừa tính.
 
 ## 4. Chu trình fetch–decode–execute (Q4)
 
-> **Trả lời ngắn.** Theo sách, đa số kiến trúc chia việc thực thi một lệnh thành các pha Fetch (nạp lệnh từ bộ nhớ vào IR theo địa chỉ trong PC), Decode (tách opcode và toán hạng), Execute (ALU tính) và WriteBack (ghi kết quả vào thanh ghi đích).[^fde] Lệnh nhảy chỉ làm PC chứa một địa chỉ khác, nên lệnh kế tiếp được nạp từ chỗ mới.[^jump] [^pcwrite]
+> **Trả lời ngắn.** Đa số kiến trúc chia việc thực thi một lệnh thành các pha Fetch (nạp lệnh từ bộ nhớ vào IR theo địa chỉ trong PC), Decode (tách opcode và toán hạng), Execute (ALU tính) và WriteBack (ghi kết quả vào thanh ghi đích).[^fde] Lệnh nhảy chỉ làm PC chứa một địa chỉ khác, nên lệnh kế tiếp được nạp từ chỗ mới.[^jump]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như một worker xử lý job trong hàng đợi: lấy job ra, đọc xem job yêu cầu gì, làm, rồi ghi kết quả. Con trỏ "job tiếp theo" tự tăng, trừ khi bản thân job nói "nhảy tới job số N".
+*Với service `orders`.* Giả sử handler có vòng `for item in &order.items { total += item.price }`. Ở mức CPU, vòng đó chỉ là vài lệnh lặp lại: lấy giá, cộng vào tổng, giảm biến đếm, rồi nhảy ngược về đầu vòng nếu chưa hết (nhận xét của người soạn). Mục này xem CPU chạy từng lệnh như vậy qua những bước nào, và "nhảy ngược" nghĩa là gì ở mức phần cứng.
 
-Sách chia việc thực thi một lệnh thành nhiều pha; kiến trúc khác nhau cài đặt số pha khác nhau, nhưng đa số có các pha Fetch, Decode, Execute và WriteBack trong bốn pha rời rạc trở lên.[^fde] Dưới đây là từng pha, theo ví dụ lệnh ADD ba thanh ghi của sách:
+### 4.1 Bốn pha của một lệnh
 
-1. **Fetch.** CPU nạp lệnh kế tiếp từ bộ nhớ vào thanh ghi lệnh IR; địa chỉ cần nạp nằm trong PC.[^fetch] PC được tăng ngay trong pha fetch để chứa địa chỉ của lệnh liền sau.[^pcinc]
-2. **Decode.** CPU tách các bit của lệnh trong IR thành các phần: các bit cao mã hóa opcode (phép toán cần làm), phần còn lại chỉ nguồn toán hạng và đích kết quả.[^decode]
-3. **Execute.** ALU thực hiện phép toán trên các giá trị lấy từ thanh ghi nguồn, đồng thời cho ra các condition code.[^exec]
-4. **WriteBack.** Kết quả ALU được ghi vào thanh ghi đích.[^wb]
+Mỗi kiến trúc chia việc thực thi một lệnh một kiểu, nhưng đa số có các pha Fetch, Decode, Execute và WriteBack trong bốn pha rời rạc trở lên.[^fde] Dưới đây là từng pha, theo ví dụ lệnh ADD ba thanh ghi (cộng hai thanh ghi nguồn, ghi vào thanh ghi đích):
+
+1. **Fetch.** CPU nạp lệnh kế tiếp từ bộ nhớ vào thanh ghi lệnh IR, theo địa chỉ đang nằm trong PC.[^fetch] Ngay trong pha này PC được tăng để chứa địa chỉ của lệnh liền sau.[^pcinc]
+2. **Decode.** CPU tách các bit của lệnh trong IR thành từng phần: các bit cao mã hóa opcode (phép toán cần làm), các bit còn lại chỉ ra nguồn của toán hạng và đích của kết quả.[^decode]
+3. **Execute.** ALU làm phép toán trên các giá trị lấy từ thanh ghi nguồn, và đồng thời cho ra các condition code.[^exec]
+4. **WriteBack.** Kết quả của ALU được ghi vào thanh ghi đích.[^wb]
 
 ```mermaid
 stateDiagram-v2
@@ -161,13 +183,21 @@ stateDiagram-v2
 
 (Sơ đồ của người soạn theo mô tả ở §5.6 của sách; ghi chú ở WriteBack theo câu của sách rằng giá trị PC cũng có thể đổi trong pha WriteBack.[^jump])
 
-PC tăng bao nhiêu? Sách lấy ví dụ: nếu mọi lệnh dài 32 bit thì PC được cộng 4 sau mỗi fetch (mỗi byte có địa chỉ riêng);[^pcinc4] kích thước thực tế thay đổi theo kiến trúc và loại lệnh.[^pcsize] **Lệnh nhảy** làm PC chứa địa chỉ khác: sách nêu các lệnh nhảy liên quan đến vòng lặp, if-else và lời gọi hàm,[^jump] và mô tả để nhảy qua thân `if`, CPU ghi địa chỉ của lệnh đầu tiên sau thân `if` vào PC.[^pcwrite] Tức `for`, `if`, `while` và gọi hàm đều hạ xuống thành "ghi giá trị mới vào PC, có điều kiện hoặc không" (suy luận của người soạn).
+### 4.2 Lệnh nhảy và PC
 
-Cuối cùng là nhịp: một clock điều khiển việc thực thi, mỗi pha bắt đầu theo nhịp của nó.[^clockdrive] Sách nói tốc độ clock là ước lượng số lệnh tối đa mỗi giây CPU thực thi được;[^clock] nhưng riêng clock rate không phải thước đo hiệu năng có ý nghĩa khi so sánh các bộ xử lý khác nhau.[^clock-warn] Thước đo tốt hơn theo sách là CPI (cycles per instruction): số chu kỳ trung bình mỗi lệnh, đo trên toàn bộ lần chạy của chương trình.[^cpi] Ví dụ: vì mỗi pha tốn một chu kỳ clock, một CPU có chuỗi thực thi bốn pha như trên hoàn tất tối đa một lệnh mỗi bốn chu kỳ.[^four-cycles] (Chương 05, mục 1 cho thấy pipeline kéo con số này xuống gần một lệnh mỗi chu kỳ.) "CPU 3 GHz" không có nghĩa "3 tỷ lệnh Rust mỗi giây" (nhận xét của người soạn).
+PC tăng bao nhiêu thì tùy độ dài lệnh. Nếu mọi lệnh dài 32 bit thì sau mỗi lần fetch PC được cộng 4, vì mỗi byte có một địa chỉ riêng;[^pcinc4] còn kích thước thực tế thay đổi theo kiến trúc và loại lệnh.[^pcsize]
+
+**Lệnh nhảy** làm PC chứa một địa chỉ khác, và PC có thể đổi ngay ở pha WriteBack.[^jump] Chẳng hạn để nhảy qua thân `if`, CPU ghi địa chỉ của lệnh đầu tiên sau thân `if` vào PC.[^pcwrite] Vòng `for` của `orders` làm điều tương tự theo chiều ngược lại: lệnh cuối vòng ghi địa chỉ đầu vòng vào PC (nhận xét của người soạn). Tóm lại `for`, `if`, `while` và lời gọi hàm đều hạ xuống thành "ghi giá trị mới vào PC, có điều kiện hoặc không" (suy luận của người soạn).
+
+### 4.3 Clock và CPI
+
+Cuối cùng là nhịp. Một clock điều khiển việc thực thi lệnh, mỗi pha bắt đầu theo nhịp của nó.[^clockdrive] Tốc độ clock là ước lượng số lệnh tối đa mỗi giây CPU thực thi được,[^clock] nhưng riêng nó không phải thước đo có ý nghĩa khi so sánh các bộ xử lý khác nhau.[^clock-warn] Thước đo tốt hơn là CPI (cycles per instruction): số chu kỳ trung bình mỗi lệnh, đo trên toàn bộ lần chạy của chương trình.[^cpi]
+
+Vì mỗi pha tốn một chu kỳ clock, một CPU có chuỗi thực thi bốn pha như trên hoàn tất tối đa một lệnh mỗi bốn chu kỳ.[^four-cycles] (Chương 05, mục 1 cho thấy pipeline kéo con số này xuống gần một lệnh mỗi chu kỳ.) Vì vậy "CPU 3 GHz" không có nghĩa là "3 tỷ lệnh Rust mỗi giây", và con số GHz của node chưa đủ để nói `orders` sẽ chạy nhanh hay chậm (nhận xét của người soạn).
 
 <details><summary>Đi sâu: CPU đồ chơi bằng Rust (đã chạy thật)</summary>
 
-Máy giả lập 4 thanh ghi, lệnh 4 byte `opcode | rd | rs | imm`, chương trình cộng 5+4+3+2+1; đã biên dịch và chạy bằng rustc 1.95.0.
+Máy giả lập có 4 thanh ghi, lệnh 4 byte dạng `opcode | rd | rs | imm`, chạy chương trình cộng 5+4+3+2+1, cũng là vòng lặp cộng dồn như ở đầu mục. Chương trình đã biên dịch và chạy bằng rustc 1.95.0.
 
 ```rust
 // Máy giả lập: 4 thanh ghi, lệnh 32 bit = opcode(8) | rd(8) | rs(8) | imm(8)
@@ -210,7 +240,7 @@ Kết quả khi chạy: `r0=15 r1=0 pc=6 steps=18` (2 `LOADI` + 5 vòng × 3 l�
 
 </details>
 
-**Quay lại Q4:** mỗi lệnh được nạp (theo PC), giải mã, thực thi và ghi kết quả; lệnh nhảy chỉ là lệnh ghi địa chỉ mới vào PC.
+**Quay lại Q4:** mỗi lệnh được nạp (theo PC), giải mã, thực thi và ghi kết quả; lệnh nhảy chỉ là lệnh ghi địa chỉ mới vào PC, và vòng `for` của `orders` cũng vậy.
 
 ## 5. CISC và RISC (Q5)
 
@@ -218,9 +248,11 @@ Kết quả khi chạy: `r0=15 r1=0 pc=6 steps=18` (2 `LOADI` + 5 vòng × 3 l�
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): RISC như bộ dao nhỏ, đơn giản, ghép nhiều thao tác để làm một món; CISC như một dụng cụ đa năng làm nguyên một công đoạn trong một lần bấm.
+*Với service `orders`.* Cùng một mã nguồn Rust của `orders`, build cho x86-64 và build cho AArch64 sẽ ra hai binary với hai chuỗi lệnh khác nhau (ví dụ cụ thể ở mục 6). Hai ISA đó đại diện cho hai trường phái thiết kế, và mục này nói trường phái nào chọn gì.
 
-*Dive into Systems* định nghĩa: ISA kiểu **RISC** (reduced instruction set computer) có tập lệnh cơ bản nhỏ, mỗi lệnh chạy nhanh — khoảng một chu kỳ clock — và trình biên dịch ghép nhiều lệnh cơ bản để thực hiện chức năng cấp cao hơn.[^risc] **CISC** có lệnh mang chức năng cấp cao hơn, tập lệnh lớn hơn, chế độ địa chỉ (addressing mode, cách diễn đạt vị trí bộ nhớ của dữ liệu) phức tạp hơn, và lệnh có độ dài thay đổi.[^cisc] Một lệnh CISC có thể thực hiện cả chuỗi chức năng mức thấp và mất nhiều chu kỳ.[^cisc2]
+### 5.1 Hai trường phái
+
+**RISC** (reduced instruction set computer) có một tập lệnh cơ bản nhỏ, mỗi lệnh chạy nhanh, khoảng một chu kỳ clock, và trình biên dịch ghép nhiều lệnh cơ bản lại để làm việc cấp cao hơn.[^risc] **CISC** thì ngược lại: lệnh mang chức năng cấp cao hơn, tập lệnh lớn hơn, addressing mode (cách diễn đạt vị trí bộ nhớ của dữ liệu) phức tạp hơn, và lệnh có độ dài thay đổi.[^cisc] Một lệnh CISC có thể làm cả một chuỗi việc mức thấp và mất nhiều chu kỳ.[^cisc2]
 
 | Trục | RISC | CISC |
 |---|---|---|
@@ -230,13 +262,17 @@ Hình dung (nhận xét của người soạn): RISC như bộ dao nhỏ, đơn 
 | Chu kỳ mỗi lệnh | ~1 | có thể nhiều |
 | Số lệnh của một chương trình | nhiều hơn | ít hơn, file thực thi thường nhỏ hơn |
 
-Về hàng cuối: sách nói chương trình CISC dùng ít lệnh hơn RISC, thường cho file nhỏ hơn;[^codesize] RISC có nhiều lệnh hơn nhưng mỗi lệnh hiệu quả hơn và cho phép microarchitecture đơn giản hơn.[^tradeoff]
+Hàng cuối của bảng là một đánh đổi: chương trình CISC dùng ít lệnh hơn RISC nên file thực thi thường nhỏ hơn,[^codesize] còn RISC có nhiều lệnh hơn nhưng mỗi lệnh hiệu quả hơn, và cho phép microarchitecture đơn giản hơn.[^tradeoff]
 
-Với "load/store", muốn cộng vào một ô nhớ thì phải nạp ra thanh ghi, cộng, rồi ghi lại (ví dụ cụ thể ở mục 6).[^dis-arm-ls]
+### 5.2 Load/store
+
+Load/store là một đặc điểm của máy kiểu RISC như AArch64: dữ liệu chỉ được tính trên thanh ghi, nên phải nạp từ bộ nhớ vào thanh ghi trước và ghi ngược lại sau khi tính xong.[^dis-arm-ls] Muốn cộng vào một ô nhớ thì phải nạp ra thanh ghi, cộng, rồi ghi lại. Ví dụ cụ thể ở mục 6.
 
 <details><summary>Đi sâu: ranh giới ngày nay mờ</summary>
 
-Đừng coi "x86 là CISC, ARM là RISC" là hai phe tách biệt. Sách cho biết: một microarchitecture cài đặt ISA RISC hay CISC đều có thể trộn hai kiểu thiết kế bên trong; phần lớn CPU CISC dùng **microcode** để mã hóa một số lệnh CISC thành tập lệnh kiểu RISC hơn mà bộ xử lý bên dưới thực sự chạy, và một số ISA RISC hiện đại cũng có vài lệnh/chế độ địa chỉ phức tạp hơn các ISA RISC ban đầu.[^blur] Về thị trường, sách nói CISC (ví dụ x86 của Intel) vẫn thống trị máy bàn và nhiều máy chủ, trong khi RISC thường gặp ở máy chủ cao cấp (ví dụ SPARC) và thiết bị di động nhờ yêu cầu điện năng thấp;[^market] phần mở đầu chương ARM của cùng sách ghi nhận RISC đã bắt đầu vào thị trường máy chủ và HPC, với ví dụ siêu máy tính Fugaku (nhanh nhất thế giới tính đến 2020) dùng bộ xử lý ARM.[^arm-server] Đây là nhận định của sách ở thời điểm viết (khoảng 2020), không phải số liệu thị phần hiện nay.
+Đừng coi "x86 là CISC, ARM là RISC" là hai phe tách biệt. Một microarchitecture cài đặt ISA RISC hay CISC đều có thể trộn cả hai kiểu thiết kế bên trong.[^blur] Cụ thể là phần lớn CPU CISC dùng **microcode** để mã hóa một số lệnh CISC thành tập lệnh kiểu RISC hơn mà bộ xử lý bên dưới thực sự chạy, và một số ISA RISC hiện đại cũng có vài lệnh hay chế độ địa chỉ phức tạp hơn các ISA RISC ban đầu.[^blur]
+
+Về thị trường, CISC (ví dụ x86 của Intel) vẫn thống trị máy bàn và nhiều máy chủ, trong khi RISC thường gặp ở máy chủ cao cấp (ví dụ SPARC) và thiết bị di động nhờ yêu cầu điện năng thấp.[^market] Phần mở đầu chương ARM của cùng cuốn sách ghi nhận RISC đã bắt đầu vào thị trường máy chủ và HPC, với ví dụ siêu máy tính Fugaku (nhanh nhất thế giới tính đến 2020) dùng bộ xử lý ARM.[^arm-server] Đây là nhận định của sách ở thời điểm viết (khoảng 2020), không phải số liệu thị phần hiện nay.
 
 </details>
 
@@ -244,11 +280,13 @@ Với "load/store", muốn cộng vào một ô nhớ thì phải nạp ra thanh
 
 ## 6. Hai ISA cụ thể: x86-64 và AArch64 (Q6)
 
-> **Trả lời ngắn.** x86-64 có 16 thanh ghi đa dụng 64 bit và lệnh dài thay đổi (tối đa 15 byte); lệnh số học có thể lấy ô nhớ làm toán hạng.[^sdm16] [^sdm-format] [^sdm-len] [^sdm-add] AArch64 có 31 thanh ghi 64 bit, mọi lệnh dài cố định 32 bit và theo mô hình load/store.[^arm-31] [^arm-fixed] [^dis-arm-ls] Trên hàm `*p += x`, bạn thấy đúng sự khác biệt đó: một lệnh bên x86-64, ba lệnh bên AArch64 (xem phần Đi sâu, kết quả quan sát một lần chạy).
+> **Trả lời ngắn.** x86-64 có 16 thanh ghi đa dụng 64 bit.[^sdm16] Lệnh của nó dài thay đổi, tối đa 15 byte,[^sdm-len] và lệnh số học có thể lấy ô nhớ làm toán hạng.[^sdm-add] AArch64 có 31 thanh ghi 64 bit,[^arm-31] mọi lệnh dài cố định 32 bit,[^arm-fixed] và theo mô hình load/store.[^dis-arm-ls] Với hàm `*p += x` bạn thấy đúng khác biệt đó: một lệnh bên x86-64, ba lệnh bên AArch64 (xem phần Đi sâu, kết quả quan sát một lần chạy).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai ISA là hai ngôn ngữ cùng diễn đạt phép "cộng x vào ô nhớ p", một bên bằng một câu, bên kia bằng ba câu ngắn.
+*Với service `orders`.* Giả sử `orders` có một hàm nhỏ cộng số tiền của đơn vừa xử lý vào ô doanh thu cộng dồn: `*p += x`. Đó cũng là hàm `add_to_slot` ở phần Đi sâu. Build cho hai ISA thì trình biên dịch sinh một lệnh ở bên x86-64 và ba lệnh ở bên AArch64, và mục này cho thấy vì sao.
+
+### 6.1 So sánh hai ISA
 
 | | x86-64 | AArch64 (A64) |
 |---|---|---|
@@ -260,7 +298,7 @@ Hình dung (nhận xét của người soạn): hai ISA là hai ngôn ngữ cùn
 | Mức đặc quyền | 4 mức (ring), đánh số 0–3[^sdm-levels] | EL0–EL3[^arm-el] |
 | Endianness của dữ liệu | little-endian[^sdm-le] | little-endian ở giao diện lệnh/dữ liệu gốc; có thể build big-endian cho dữ liệu[^arm-endian] |
 
-Lưu ý khi đọc bảng: 16 thanh ghi của x86-64 đã gồm `rsp`, còn 31 của AArch64 chưa tính `sp` và thanh ghi zero.[^sdm-rsp-in16] [^dis-arm-special] Về bộ nhớ, Intel SDM cho phép đích của ADD là thanh ghi hoặc ô nhớ nhưng không cho hai toán hạng bộ nhớ trong một lệnh;[^sdm-add] A64 theo load/store nên dữ liệu phải ở thanh ghi mới tính được.[^dis-arm-ls]
+Có hai chỗ trong bảng dễ đọc nhầm. Chỗ thứ nhất là số thanh ghi: 16 thanh ghi của x86-64 đã gồm cả `rsp`,[^sdm-rsp-in16] còn 31 thanh ghi của AArch64 chưa tính `sp` và thanh ghi zero.[^dis-arm-special] Chỗ thứ hai là bộ nhớ: lệnh ADD của x86 cho đích là thanh ghi hoặc ô nhớ nhưng không cho hai toán hạng bộ nhớ trong một lệnh,[^sdm-add] còn A64 theo load/store nên dữ liệu phải nằm trong thanh ghi mới tính được.[^dis-arm-ls] Với `orders`, nghĩa là cộng doanh thu vào ô nhớ thì x86-64 làm một lệnh, còn AArch64 phải nạp, cộng rồi ghi lại.
 
 <details><summary>Đi sâu: cùng một hàm Rust trên hai ISA (quan sát thật bằng llvm-objdump)</summary>
 
@@ -308,46 +346,46 @@ sum3:
 
 Đọc kết quả:
 
-- **Độ dài lệnh.** Trên x86-64 các lệnh dài 3, 1, 4, 3, 1 byte (từ chênh offset); trên AArch64 mọi lệnh dài đúng 4 byte (offset tăng 4 mỗi lệnh). Đúng như bảng ở trên: x86-64 thay đổi, A64 cố định 32 bit.
-- **Load/store so với toán hạng bộ nhớ.** `*p += x` là *một* lệnh trên x86-64: `addq %rsi, (%rdi)` cộng `rsi` vào ô nhớ tại địa chỉ `rdi` — dạng "đích là bộ nhớ" mà Intel SDM cho phép.[^sdm-add] Trên AArch64 phải ba lệnh: `ldr` nạp từ bộ nhớ vào `x8`, `add` cộng trong thanh ghi, `str` ghi lại — vì A64 theo mô hình load/store, dữ liệu phải ở thanh ghi mới tính được.[^dis-arm-ls] Đây là minh họa nhỏ của khác biệt CISC/RISC ở mục 5 (nhận xét của người soạn).
-- **`lea`.** x86-64 có `leaq (%rdi,%rsi), %rax`. SDM mô tả `LEA` là tính địa chỉ hiệu dụng của toán hạng nguồn rồi lưu vào đích, và đích là thanh ghi đa dụng;[^sdm-lea] *Dive into Systems* nói thêm `lea` dùng cùng cấu trúc toán hạng nhưng không có bước tra cứu bộ nhớ,[^dis-lea] nên ở đây nó chỉ cộng `rdi + rsi` (chi tiết ở Chương 03, mục 3). A64 có sẵn dạng ba thanh ghi `add x8, x1, x0`.
+- **Độ dài lệnh.** Trên x86-64 các lệnh dài 3, 1, 4, 3, 1 byte (suy từ chênh offset); trên AArch64 mọi lệnh dài đúng 4 byte (offset tăng 4 mỗi lệnh). Khớp với bảng ở trên: x86-64 thay đổi, A64 cố định 32 bit.
+- **Load/store so với toán hạng bộ nhớ.** `*p += x` là *một* lệnh trên x86-64: `addq %rsi, (%rdi)` cộng `rsi` vào ô nhớ tại địa chỉ `rdi`, đúng dạng "đích là bộ nhớ" mà ISA cho phép.[^sdm-add] Trên AArch64 phải ba lệnh: `ldr` nạp từ bộ nhớ vào `x8`, `add` cộng trong thanh ghi, `str` ghi lại, vì A64 theo mô hình load/store nên dữ liệu phải ở thanh ghi mới tính được.[^dis-arm-ls] Đây là bản thu nhỏ của khác biệt CISC/RISC ở mục 5 (nhận xét của người soạn).
+- **`lea`.** x86-64 có `leaq (%rdi,%rsi), %rax`, lệnh tính địa chỉ hiệu dụng của toán hạng nguồn rồi lưu vào đích.[^sdm-lea] `lea` dùng cùng cấu trúc toán hạng như các lệnh khác nhưng không có bước tra cứu bộ nhớ,[^dis-lea] nên ở đây nó chỉ cộng `rdi + rsi` (chi tiết ở Chương 03, mục 3). A64 có sẵn dạng ba thanh ghi `add x8, x1, x0`.
 
 </details>
 
-**Quay lại Q6:** x86-64 ít thanh ghi hơn, lệnh dài thay đổi và cho toán hạng bộ nhớ; AArch64 nhiều thanh ghi hơn, lệnh 32 bit cố định và chỉ tính qua thanh ghi — nên `*p += x` là một lệnh bên này và ba lệnh bên kia.
+**Quay lại Q6:** x86-64 ít thanh ghi hơn, lệnh dài thay đổi và cho toán hạng bộ nhớ; AArch64 nhiều thanh ghi hơn, lệnh 32 bit cố định và chỉ tính qua thanh ghi — nên `*p += x` của `orders` là một lệnh bên này và ba lệnh bên kia.
 
 ## 7. Mức đặc quyền (privilege level) (Q7)
 
-> **Trả lời ngắn.** Mức đặc quyền là một *trạng thái của CPU*: ở user mode ứng dụng không có toàn quyền truy cập phần cứng, ở kernel mode OS có toàn quyền.[^ostep-mode] Chương trình muốn vào kernel (system call) phải chạy một lệnh trap đặc biệt, lệnh này vừa nhảy vào kernel vừa nâng mức đặc quyền.[^ostep-trap] Mỗi ISA hiện thực mô hình đó theo cách riêng: ring 0–3 trên x86, EL0–EL3 trên AArch64.[^sdm-levels] [^arm-el]
+> **Trả lời ngắn.** Mức đặc quyền là một *trạng thái của CPU*: ở user mode ứng dụng không có toàn quyền truy cập phần cứng, ở kernel mode OS có toàn quyền.[^ostep-mode] Chương trình muốn vào kernel (system call) phải chạy một lệnh trap đặc biệt, lệnh này vừa nhảy vào kernel vừa nâng mức đặc quyền.[^ostep-trap] Mỗi ISA hiện thực mô hình đó theo cách riêng: x86 có bốn ring đánh số 0–3,[^sdm-levels] còn AArch64 có các exception level EL0–EL3.[^arm-el]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như phân quyền trong một hệ thống nhiều tenant: ứng dụng là tenant thường, chỉ làm được trong phạm vi của mình; kernel là admin, và CPU là nơi ép các quyền đó bằng phần cứng.
+*Với service `orders`.* `orders` chạy ở user mode, nên mỗi lần `conn.read` hay `File::open` nó phải chạy lệnh trap để vào kernel; cách kernel và `orders` phối hợp đã nằm ở Phase 1. Câu hỏi còn lại ở mức CPU: "đặc quyền" ở đây là gì, nằm ở đâu trong mô hình máy mà ta vừa vẽ?
 
-CPU không để mọi chương trình làm mọi việc. OSTEP mô tả: phần cứng hỗ trợ OS bằng các chế độ thực thi; ở user mode ứng dụng không có toàn quyền truy cập tài nguyên phần cứng, ở kernel mode OS có toàn quyền.[^ostep-mode] Để gọi system call, chương trình chạy một lệnh trap đặc biệt: lệnh này đồng thời nhảy vào kernel và nâng mức đặc quyền lên kernel mode.[^ostep-trap] Vậy "kernel mode" là *chế độ thực thi của CPU* chứ không phải một tiến trình đặc biệt (vế "không phải tiến trình" là nhận xét của người soạn).[^ostep-mode]
+CPU không để mọi chương trình làm mọi việc. Phần cứng hỗ trợ OS bằng các chế độ thực thi: ở user mode ứng dụng không có toàn quyền truy cập tài nguyên phần cứng, còn ở kernel mode OS có toàn quyền.[^ostep-mode] Vì vậy "kernel mode" là *chế độ thực thi của CPU* chứ không phải một process đặc biệt (vế "không phải process" là nhận xét của người soạn). Muốn gọi system call, chương trình chạy một lệnh trap đặc biệt: lệnh này đồng thời nhảy vào kernel và nâng mức đặc quyền lên kernel mode.[^ostep-trap]
 
 Mô hình đó được hiện thực khác nhau theo ISA:
 
-- **x86:** Intel SDM mô tả bốn mức đặc quyền đánh số từ 0 đến 3, số lớn hơn nghĩa là ít đặc quyền hơn;[^sdm-levels] hình minh họa dạng vòng (ring) của SDM đặt mức 0 — ở trung tâm — cho các module quan trọng nhất, thường là kernel của hệ điều hành.[^sdm-rings]
+- **x86:** Intel mô tả bốn mức đặc quyền đánh số từ 0 đến 3, số lớn hơn nghĩa là ít đặc quyền hơn.[^sdm-levels] Hình minh họa dạng vòng (ring) của SDM đặt mức 0, ở trung tâm, cho các module quan trọng nhất, thường là kernel của hệ điều hành.[^sdm-rings]
 - **AArch64:** mô hình ngoại lệ gồm các exception level EL0–EL3. Tài liệu ARM mô tả đây là mô hình exception/privilege/security được mở rộng đáng kể, thành thứ bậc bốn cấp.[^arm-el] Chiều đánh số ngược với x86: tài liệu kernel Linux gọi EL3 là mức ưu tiên cao nhất,[^kernel-el] nên trên AArch64 số *lớn* là mức cao (suy luận của người soạn từ hai nguồn).
 
 <details><summary>Đi sâu: CPL, IOPL và EL2/EL3</summary>
 
-Trên x86, mức đặc quyền hiện hành của chương trình gọi là CPL; ví dụ trường IOPL trong thanh ghi cờ EFLAGS/RFLAGS chỉ cho phép truy cập không gian I/O khi CPL nhỏ hơn hoặc bằng IOPL.[^sdm-cpl]
+Trên x86, mức đặc quyền hiện hành của chương trình gọi là CPL. Ví dụ trường IOPL trong thanh ghi cờ EFLAGS/RFLAGS chỉ cho phép truy cập không gian I/O khi CPL nhỏ hơn hoặc bằng IOPL.[^sdm-cpl]
 
-Trên AArch64, theo tài liệu kernel Linux, EL2 là mức hypervisor và EL3 là mức ưu tiên cao nhất, tồn tại chỉ ở secure mode; cả hai đều không bắt buộc về mặt kiến trúc.[^kernel-el] Linux yêu cầu CPU vào kernel ở trạng thái non-secure, tại EL2 (được khuyến nghị) hoặc EL1;[^kernel-el-boot] cách kernel dùng các mức đặc quyền nằm ở [Phase 1, Chương 01, mục 3](../01-linux/01-os-va-kernel.md).
+Trên AArch64, theo tài liệu kernel Linux, EL2 là mức hypervisor và EL3 là mức ưu tiên cao nhất, chỉ tồn tại ở secure mode; cả hai đều không bắt buộc về mặt kiến trúc.[^kernel-el] Linux yêu cầu CPU vào kernel ở trạng thái non-secure, tại EL2 (được khuyến nghị) hoặc EL1.[^kernel-el-boot] Cách kernel dùng các mức đặc quyền nằm ở [Phase 1, Chương 01, mục 3](../01-linux/01-os-va-kernel.md).
 
 </details>
 
-**Quay lại Q7:** mức đặc quyền là một phần trạng thái của CPU, quy định chương trình đang chạy được làm gì; kernel chạy ở mức đặc quyền cao, ứng dụng ở mức thấp hơn và chỉ vào kernel qua lệnh trap.
+**Quay lại Q7:** mức đặc quyền là một phần trạng thái của CPU, quy định chương trình đang chạy được làm gì; kernel chạy ở mức đặc quyền cao, còn ứng dụng như `orders` ở mức thấp hơn và chỉ vào kernel qua lệnh trap.
 
 ## Liên hệ với Rust
 
-Rust biên dịch ra mã máy cho một **target** cụ thể và cho bạn công cụ để hỏi, điều kiện hóa hay nhúng assembly.
+Khi bạn build `orders`, Rust biên dịch ra mã máy cho một **target** cụ thể (x86-64 hay AArch64, tùy node bạn nhắm tới), và cho bạn công cụ để hỏi target đó, điều kiện hóa mã theo nó, hoặc nhúng assembly.
 
-- **`usize`** là kiểu số nguyên không dấu kích thước con trỏ; docs Rust nói kích thước của nó là số byte cần để tham chiếu bất kỳ vị trí nào trong bộ nhớ — ví dụ 4 byte trên target 32 bit và 8 byte trên target 64 bit.[^rust-usize] Nó gắn với *độ rộng địa chỉ* ở mục 1 chứ docs không định nghĩa nó là "word size"; trên hai ISA của chương này, độ rộng đó trùng độ rộng thanh ghi 64 bit (suy luận của người soạn từ mục 3 và từ quan sát dưới đây). Chạy thử trên máy soạn (Apple Silicon, aarch64): `size_of::<usize>()` in ra `8`.
-- **`cfg(target_arch = "...")`** và `cfg(target_pointer_width = "...")` chọn mã theo ISA lúc biên dịch; Rust Reference mô tả `target_arch` là tùy chọn khóa-giá trị đặt một lần theo kiến trúc CPU của target,[^rust-cfg] còn `target_pointer_width` là độ rộng con trỏ của target tính bằng bit.[^rust-ptrwidth] Khi chạy `rustc --target x86_64-unknown-linux-gnu --print cfg` trên máy soạn, kết quả có `target_arch="x86_64"`, `target_endian="little"`, `target_pointer_width="64"`.
-- **`asm!`** nhúng assembly viết tay vào assembly mà trình biên dịch sinh ra,[^rust-asm] và trang tài liệu của Reference liệt kê các kiến trúc hỗ trợ ổn định, trong đó có x86/x86-64 và AArch64.[^rust-asm-arch] Vì assembly gắn với ISA, mã dùng `asm!` thường bọc trong `#[cfg(target_arch = ...)]` (nhận xét của người soạn; Reference cũng nói compiler báo lỗi nếu dùng macro assembly trên target không được hỗ trợ).[^rust-asm-err] Chương 07, mục 5 đi sâu vào chủ đề này cùng `std::arch`.
+- **`usize`** là kiểu số nguyên không dấu cỡ con trỏ: docs nói kích thước của nó là số byte cần để tham chiếu bất kỳ vị trí nào trong bộ nhớ, tức 4 byte trên target 32 bit và 8 byte trên target 64 bit.[^rust-usize] Nó gắn với *độ rộng địa chỉ* ở mục 1 chứ docs không định nghĩa nó là "word size". Trên hai ISA của chương này, độ rộng đó trùng độ rộng thanh ghi 64 bit (suy luận của người soạn từ mục 3 và từ quan sát dưới đây). Chạy thử trên máy soạn (Apple Silicon, aarch64): `size_of::<usize>()` in ra `8`.
+- **`cfg(target_arch = "...")`** và `cfg(target_pointer_width = "...")` chọn mã theo ISA lúc biên dịch. Rust Reference mô tả `target_arch` là tùy chọn khóa-giá trị đặt một lần theo kiến trúc CPU của target,[^rust-cfg] còn `target_pointer_width` là độ rộng con trỏ của target tính bằng bit.[^rust-ptrwidth] Khi chạy `rustc --target x86_64-unknown-linux-gnu --print cfg` trên máy soạn, kết quả có `target_arch="x86_64"`, `target_endian="little"`, `target_pointer_width="64"`.
+- **`asm!`** nhúng assembly viết tay vào assembly mà trình biên dịch sinh ra,[^rust-asm] và trang tài liệu của Reference liệt kê các kiến trúc hỗ trợ ổn định, trong đó có x86/x86-64 và AArch64.[^rust-asm-arch] Vì assembly gắn với ISA, mã dùng `asm!` thường bọc trong `#[cfg(target_arch = ...)]` (nhận xét của người soạn). Reference cũng nói compiler báo lỗi nếu dùng macro assembly trên target không được hỗ trợ.[^rust-asm-err] Chương 07, mục 5 đi sâu vào chủ đề này cùng `std::arch`.
 
 ## Tóm tắt
 

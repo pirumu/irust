@@ -24,35 +24,52 @@
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một tòa nhà văn phòng cho nhiều công ty thuê. Mọi công ty dùng chung điện nước (kernel), nhưng mỗi công ty có danh bạ nội bộ riêng, số phòng riêng bắt đầu từ 101. Namespace là cái "danh bạ riêng" đó — không phải bức tường chắn, càng không phải đồng hồ giới hạn điện.
+*Với service của bạn.* Hãy hình dung `orders`, một service viết bằng Rust, đóng gói thành container và chạy trên một host Linux cạnh container `billing`. Trong container, `orders` thấy mình là PID 1, nghe cổng 8080, có hostname riêng; `billing` bên cạnh cũng thấy y hệt như vậy, kể cả cổng 8080. Thế mà bên dưới chỉ có một kernel duy nhất. Ta sẽ bám theo `orders` suốt chương (đây là ví dụ giả định của người soạn, không phải code trong repo). Câu hỏi của mục này: kernel làm thế nào để hai container trên cùng một máy mà không giẫm chân nhau?
 
-Mặc định mọi process trên một máy Linux dùng chung một bộ tài nguyên toàn cục: một không gian PID, một bảng mount, một hostname, một network stack...[^ns-def] Namespace cho mỗi nhóm process thấy một *bản riêng* của các tài nguyên đó; nhờ vậy nhiều "máy ảo nhẹ" chạy chung một kernel được ([chương 01](01-container-la-gi.md)) (nhận xét của người soạn).
+### 1.1 Một bộ tài nguyên toàn cục, nhiều bản riêng
 
-Thay đổi trên tài nguyên chỉ thấy bởi thành viên của namespace.[^ns-def] Namespace cũng không tự nó là cơ chế bảo mật hoàn chỉnh ([chương 05](05-bao-mat-container.md)); mức dùng tài nguyên do cgroup ([chương 03](03-cgroups-v2.md)) giới hạn (nhận xét của người soạn).
+Mặc định, mọi process trên một máy Linux dùng chung một bộ tài nguyên toàn cục: một không gian PID, một bảng mount, một hostname, một network stack[^ns-def]. Nếu cứ thế thì `orders` và `billing` không thể cùng bind cổng 8080, và process nào cũng thấy mọi process khác.
 
-Bảng dưới là bảng của `namespaces(7)` (cột "Cờ" là giá trị truyền cho các API ở mục 3):[^ns-table]
+Namespace giải quyết chuyện này bằng cách bọc từng tài nguyên lại. Process trong một namespace thấy một bản riêng của tài nguyên, và thay đổi trên bản đó chỉ thành viên của namespace mới thấy[^ns-def]. Nhờ vậy nhiều "máy ảo nhẹ" chạy chung một kernel được, đó chính là ý tưởng của container ([chương 01](01-container-la-gi.md); nhận xét của người soạn).
 
-| Namespace | Cờ | Cô lập |
-|---|---|---|
-| Cgroup | `CLONE_NEWCGROUP` | thư mục gốc của cgroup |
-| IPC | `CLONE_NEWIPC` | System V IPC, POSIX message queue |
-| Network | `CLONE_NEWNET` | network device, stack, port... |
-| Mount | `CLONE_NEWNS` | các mount point |
-| PID | `CLONE_NEWPID` | process ID |
-| Time | `CLONE_NEWTIME` | đồng hồ boot và monotonic |
-| User | `CLONE_NEWUSER` | user ID và group ID |
-| UTS | `CLONE_NEWUTS` | hostname và NIS domain name |
+```mermaid
+flowchart TB
+  O["Container orders<br/>PID 1, cổng 8080, hostname riêng"]
+  B["Container billing<br/>PID 1, cổng 8080, hostname riêng"]
+  K["Một kernel duy nhất<br/>mỗi loại namespace giữ một bản cho mỗi container"]
+  O --> K
+  B --> K
+```
 
-Một công dụng của namespace là hiện thực container.[^ns-containers] Runtime ghép các namespace thành một container thế nào: xem [chương 06](06-runtime-oci.md).
+(Sơ đồ minh họa của người soạn.)
+
+Có hai chuyện namespace không làm. Nó không giới hạn mức dùng: `orders` vẫn có thể ăn hết CPU của máy nếu không có cgroup ([chương 03](03-cgroups-v2.md)). Nó cũng không phải cơ chế bảo mật hoàn chỉnh ([chương 05](05-bao-mat-container.md)). Namespace chỉ đổi cái process *nhìn thấy* (nhận xét của người soạn).
+
+### 1.2 Tám loại
+
+Linux hiện có 8 loại namespace, mỗi loại bọc một tài nguyên riêng. Cột "Cờ" trong bảng là giá trị truyền cho các API ở mục 3[^ns-table]; cột cuối ghi điều `orders` hưởng được từ loại đó (nhận xét của người soạn).
+
+| Namespace | Cờ | Cô lập | Với `orders` |
+|---|---|---|---|
+| Cgroup | `CLONE_NEWCGROUP` | thư mục gốc của cgroup | thấy cây cgroup của mình như thể gốc |
+| IPC | `CLONE_NEWIPC` | System V IPC, POSIX message queue | không thấy queue của `billing` |
+| Network | `CLONE_NEWNET` | network device, stack, port... | cổng 8080 là của riêng nó |
+| Mount | `CLONE_NEWNS` | các mount point | thấy cây thư mục của image |
+| PID | `CLONE_NEWPID` | process ID | là PID 1 |
+| Time | `CLONE_NEWTIME` | đồng hồ boot và monotonic | có thể có offset đồng hồ riêng |
+| User | `CLONE_NEWUSER` | user ID và group ID | UID 0 bên trong có thể là user thường bên ngoài |
+| UTS | `CLONE_NEWUTS` | hostname và NIS domain name | hostname riêng |
+
+Container chỉ là một công dụng của namespace[^ns-containers]. Runtime ghép các namespace thành một container thế nào thì xem [chương 06](06-runtime-oci.md).
 
 <details><summary>Đi sâu: OCI liệt kê gì, giới hạn số namespace</summary>
 
-- Đặc tả OCI runtime cũng liệt kê đúng 8 loại này là kiểu namespace mà runtime "SHOULD" hỗ trợ.[^oci-types]
-- Có giới hạn số lượng: các file `/proc/sys/user/max_*_namespaces` đặt giới hạn theo từng user; vượt giới hạn thì `clone(2)`/`unshare(2)` fail với `ENOSPC`.[^ns-limits]
+- Đặc tả OCI runtime cũng liệt kê đúng 8 loại này là kiểu namespace mà runtime "SHOULD" hỗ trợ[^oci-types].
+- Số namespace có giới hạn: các file `/proc/sys/user/max_*_namespaces` đặt trần theo từng user, và khi chạm trần thì `clone(2)`/`unshare(2)` fail với `ENOSPC`[^ns-limits].
 
 </details>
 
-**Quay lại Q1:** namespace là lớp "bản riêng" của một tài nguyên toàn cục; có 8 loại, mỗi loại một tài nguyên.
+**Quay lại Q1:** namespace là lớp "bản riêng" của một tài nguyên toàn cục; có 8 loại, mỗi loại một tài nguyên, nhờ vậy `orders` và `billing` cùng kernel mà vẫn mỗi bên một cõi.
 
 ## 2. `/proc/<pid>/ns` và so sánh inode (Q2)
 
@@ -60,16 +77,23 @@ Một công dụng của namespace là hiện thực container.[^ns-containers] 
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `/proc/<pid>/ns` giống tấm thẻ nhân viên của process, ghi công ty (namespace) nó thuộc về. Hai người cùng số công ty là đồng nghiệp.
+*Với `orders`.* Giả sử bạn nghi `orders` và một sidecar đang dùng chung network namespace, hoặc đang cần biết `orders` có chạy trong user namespace hay không. Bạn không cần đoán: kernel ghi sẵn câu trả lời cho từng process trong `/proc/<pid>/ns/`.
 
-Mỗi process có thư mục `/proc/<pid>/ns/` chứa một entry cho mỗi namespace có thể thao tác bằng `setns(2)`.[^ns-dir] Nếu hai process ở cùng một namespace thì device ID và inode của các symlink `/proc/pid/ns/xxx` giống nhau (kiểm bằng `st_dev`/`st_ino` từ `stat(2)`); nội dung symlink là chuỗi gồm loại và số inode.[^ns-inode]
+### 2.1 Đọc namespace của một process
 
-Hai điểm tinh tế:
+Thư mục `/proc/<pid>/ns/` có một entry cho mỗi namespace mà `setns(2)` thao tác được[^ns-dir]. Mỗi entry là symlink, và đích của nó là một chuỗi dạng `net:[4026532458]`, gồm loại namespace và số inode.
 
-- `/proc/pid/ns/pid` vĩnh viễn trong suốt đời process (PID namespace của một process không bao giờ đổi), còn `pid_for_children` có thể khác vì đổi theo `unshare(2)`/`setns(2)`.[^ns-pidchildren] Time namespace cũng có cặp `time` / `time_for_children` tương tự.[^ns-time-children]
-- Namespace tự bị hủy khi process cuối cùng thoát hoặc rời đi, trừ khi có thứ giữ nó sống.[^ns-lifetime] Mở một file trong thư mục này cho ta một file descriptor đại diện namespace; chừng nào fd còn mở, namespace còn sống dù mọi process trong nó đã thoát.[^ns-fd] Bind mount một file ở đây cũng giữ namespace sống.[^ns-bind]
+Điều ta dùng được ở đây: hai process ở cùng một namespace thì symlink tương ứng có cùng device ID và cùng inode, kiểm được bằng `st_dev`/`st_ino` từ `stat(2)`[^ns-inode]. Vậy muốn biết `orders` và sidecar có chung network namespace không, ta so `readlink /proc/<pid>/ns/net` của hai process; giống số thì chung.
 
-<details><summary>Đi sâu: Thí nghiệm 1 — namespace của shell trong lab</summary>
+### 2.2 Namespace sống bao lâu
+
+Mặc định, namespace tự bị hủy khi process cuối cùng trong nó thoát hoặc rời đi[^ns-lifetime]. Nhưng có hai cách giữ nó sống mà không cần process nào ở trong. Cách thứ nhất là mở một file trong thư mục này để có file descriptor đại diện namespace: chừng nào fd còn mở, namespace còn sống, dù mọi process trong nó đã thoát[^ns-fd]. Cách thứ hai là bind mount một file trong thư mục này sang chỗ khác của filesystem, và namespace cũng sống tiếp[^ns-bind].
+
+Hai cách này là thứ công cụ quản lý container dựa vào khi cần giữ namespace của một container sau khi process cuối cùng của nó đã thoát (suy luận của người soạn).
+
+<details><summary>Đi sâu: pid_for_children, time_for_children, và thí nghiệm 1 — namespace của shell trong lab</summary>
+
+Hai entry có tên lạ trong thư mục: `pid_for_children` và `time_for_children`. `/proc/pid/ns/pid` giữ nguyên suốt đời process (PID namespace của một process không bao giờ đổi), còn `pid_for_children` là namespace dành cho con sinh ra sau này, nên có thể khác vì đổi theo `unshare(2)`/`setns(2)`[^ns-pidchildren]. Time namespace cũng có cặp `time` / `time_for_children` tương tự[^ns-time-children].
 
 ```console
 $ for n in /proc/self/ns/*; do echo $n $(readlink $n); done
@@ -85,7 +109,7 @@ $ for n in /proc/self/ns/*; do echo $n $(readlink $n); done
 /proc/self/ns/uts uts:[4026532454]
 ```
 
-Đọc kết quả: shell của lab nằm trong các namespace mà Docker tạo cho container, *trừ user namespace*: `/proc/self/uid_map` trong lab là `0 0 4294967295`, đúng dạng map của user namespace gốc.[^user-initial] Container lab **không dùng user namespace**; "root" ở đây là root thật của VM, bị bớt capability. Điều này quan trọng cho mục 6.
+Đọc kết quả: shell của lab nằm trong các namespace mà Docker tạo cho container, *trừ user namespace*. `/proc/self/uid_map` trong lab là `0 0 4294967295`, đúng dạng map của user namespace gốc[^user-initial]. Nói cách khác container lab **không dùng user namespace**; "root" ở đây là root thật của VM, bị bớt capability. Điều này quan trọng cho mục 6.
 
 </details>
 
@@ -93,35 +117,41 @@ $ for n in /proc/self/ns/*; do echo $n $(readlink $n); done
 
 ## 3. `clone`, `unshare`, `setns`, `nsenter` và quyền tạo namespace (Q3)
 
-> **Trả lời ngắn.** `clone(2)` tạo process *mới* nằm sẵn trong namespace mới[^ns-clone]; `unshare(2)` chuyển process *đang chạy* sang namespace mới[^ns-unshare]; `setns(2)` cho process đang chạy vào namespace *đã có*[^ns-setns]. `unshare(1)` và `nsenter(1)` là hai lệnh shell làm việc tương tự (xem bảng). Tạo namespace hầu hết cần `CAP_SYS_ADMIN`, riêng user namespace thì không[^ns-priv][^ns-userexc].
+> **Trả lời ngắn.** `clone(2)` tạo process *mới* nằm sẵn trong namespace mới[^ns-clone]; `unshare(2)` chuyển process *đang chạy* sang namespace mới[^ns-unshare]; `setns(2)` cho process đang chạy vào namespace *đã có*[^ns-setns]. `unshare(1)` và `nsenter(1)` là hai lệnh shell làm việc tương tự (xem bảng). Tạo namespace hầu hết cần `CAP_SYS_ADMIN`[^ns-priv]. Riêng user namespace thì không[^ns-userexc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `clone` là thuê nhân viên mới và xếp thẳng vào công ty mới; `unshare` là bạn tự chuyển sang công ty mới; `setns` là xin vào một công ty đã có sẵn bằng tấm thẻ (fd) của nó.
+*Với `orders`.* Để `orders` có namespace riêng, runtime phải làm một trong hai việc: tạo namespace mới lúc dựng container, hoặc đưa một process vào namespace đã có, chẳng hạn khi bạn muốn chui vào container `orders` đang chạy để debug (nhận xét của người soạn). Linux có ba system call cho việc này, cùng hai lệnh shell bọc chúng. Mục này phân biệt các lựa chọn đó và nói ai được phép gọi chúng.
+
+### 3.1 Ba system call và hai lệnh shell
+
+Điểm khác nhau nằm ở chỗ *ai* được chuyển sang namespace. `clone` tạo một process con rồi đặt thẳng nó vào namespace mới. `unshare` chuyển chính process đang gọi, không cần tạo process nào. `setns` đưa process gọi vào một namespace đã tồn tại, xác định bằng fd của `/proc/pid/ns/*`.
 
 | API / lệnh | Làm gì | Ghi chú |
 |---|---|---|
-| `clone(2)` + `CLONE_NEW*` | tạo process **mới** đã nằm trong namespace mới | tạo namespace cho *con*[^ns-clone] |
+| `clone(2)` + `CLONE_NEW*` | tạo process **mới** đã nằm trong namespace mới | namespace mới là của *con*[^ns-clone] |
 | `unshare(2)` | chuyển process **đang chạy** vào namespace mới | không cần tạo process[^ns-unshare] |
 | `setns(2)` | gia nhập namespace **đã có**, qua fd của `/proc/pid/ns/*` | fd cũng có thể là pidfd từ Linux 5.8[^setns-fd] |
-| `unshare(1)` | lệnh tạo namespace mới rồi chạy một chương trình trong đó | man page mô tả ở dưới |
-| `nsenter(1)` | lệnh chạy chương trình trong namespace chỉ định bằng option | man page mô tả ở dưới |
+| `unshare(1)` | tạo namespace mới rồi chạy một chương trình trong đó | làm việc tương tự `unshare(2)` |
+| `nsenter(1)` | chạy chương trình trong namespace chỉ định bằng option | làm việc tương tự `setns(2)` |
 
-Man page `unshare(1)` mô tả lệnh này là tạo namespace mới rồi chạy chương trình chỉ định;[^unshare1-desc] man page `nsenter(1)` mô tả là chạy một chương trình trong (các) namespace chỉ định bằng option dòng lệnh.[^nsenter] Hai lệnh này dựa trên `unshare(2)` và `setns(2)` (suy luận của người soạn: man page chỉ liệt kê các syscall đó ở mục SEE ALSO).
+`unshare(1)` tạo namespace mới rồi chạy chương trình bạn chỉ định[^unshare1-desc]. `nsenter(1)` chạy một chương trình trong các namespace bạn chọn bằng option dòng lệnh[^nsenter]. Mối liên hệ với `unshare(2)` và `setns(2)` là suy luận của người soạn: man page của hai lệnh chỉ liệt kê các syscall đó ở mục SEE ALSO.
 
-Về quyền: việc tạo namespace mới bằng `clone(2)` và `unshare(2)` trong hầu hết trường hợp đòi hỏi capability `CAP_SYS_ADMIN`, vì trong namespace mới người tạo có quyền thay đổi tài nguyên toàn cục mà process khác (sau này tạo ra trong, hoặc gia nhập, namespace đó) nhìn thấy.[^ns-priv] Ngoại lệ là user namespace: từ Linux 3.8 không cần đặc quyền để tạo.[^ns-userexc] Man page `clone(2)` ghi lỗi tương ứng: `EPERM` khi một process không có `CAP_SYS_ADMIN` yêu cầu `CLONE_NEWCGROUP`, `CLONE_NEWIPC`, `CLONE_NEWNET`, `CLONE_NEWNS`, `CLONE_NEWPID` hay `CLONE_NEWUTS`.[^clone-eperm] `unshare(2)` với `CLONE_NEWTIME` cũng đòi `CAP_SYS_ADMIN`[^unshare-time] (time namespace hiện chỉ tạo được bằng `unshare(2)`, xem mục 7).
+### 3.2 Ai được tạo namespace
 
-Nếu `CLONE_NEWUSER` đi chung các `CLONE_NEW*` khác trong một lời gọi, user namespace được bảo đảm tạo **trước**, nên người gọi không đặc quyền dùng được tổ hợp này — vì thế `unshare -Ur --uts ...` chạy được còn `unshare --uts ...` thì không.[^user-first] (Vế sau khớp thí nghiệm 2 bên dưới.)
+Tạo namespace mới bằng `clone(2)` hay `unshare(2)` trong hầu hết trường hợp đòi capability `CAP_SYS_ADMIN`, vì trong namespace mới người tạo có quyền đổi tài nguyên toàn cục mà process khác (sau này tạo ra trong, hoặc gia nhập, namespace đó) nhìn thấy[^ns-priv]. Man page `clone(2)` ghi lỗi tương ứng: `EPERM` khi một process không có `CAP_SYS_ADMIN` mà yêu cầu `CLONE_NEWCGROUP`, `CLONE_NEWIPC`, `CLONE_NEWNET`, `CLONE_NEWNS`, `CLONE_NEWPID` hay `CLONE_NEWUTS`[^clone-eperm]. Với `unshare(2)`, `CLONE_NEWTIME` cũng đòi `CAP_SYS_ADMIN`[^unshare-time] (time namespace hiện chỉ tạo được bằng `unshare(2)`, xem mục 7).
+
+Ngoại lệ là user namespace: từ Linux 3.8, tạo nó không cần đặc quyền[^ns-userexc]. Ngoại lệ này mở ra một lối đi. Nếu `CLONE_NEWUSER` đi cùng các cờ `CLONE_NEW*` khác trong một lời gọi, kernel bảo đảm tạo user namespace **trước**, nên người gọi không đặc quyền vẫn dùng được cả tổ hợp[^user-first]. Vì thế `unshare -Ur --uts ...` chạy được còn `unshare --uts ...` thì không (vế sau khớp thí nghiệm 2 bên dưới). Đây cũng là nền để runtime dựng container mà không cần chạy bằng root: nó tạo user namespace trước, rồi dựng phần còn lại bên trong (suy luận của người soạn; mục 6 nói tiếp).
 
 <details><summary>Đi sâu: ràng buộc của <code>setns</code>, OCI <code>path</code>, thí nghiệm 2 trong lab</summary>
 
 Vài ràng buộc của `setns(2)` hay gặp:
 
-- Đổi mount namespace đòi hỏi `CAP_SYS_CHROOT` và `CAP_SYS_ADMIN` trong user namespace của chính caller, và `CAP_SYS_ADMIN` trong user namespace sở hữu mount namespace đích.[^setns-mnt]
-- Process đa luồng không đổi được user namespace bằng `setns()`.[^setns-multithread] Cũng không được dùng `setns()` để vào lại user namespace hiện tại — ngăn caller đã bỏ capability lấy lại chúng.[^setns-reenter]
-- Với PID namespace, `setns` (và `unshare`) không đổi PID namespace của chính caller mà chỉ ảnh hưởng *con sinh ra sau đó* (mục 4).[^pid-unshare]
+- Đổi mount namespace đòi `CAP_SYS_CHROOT` và `CAP_SYS_ADMIN` trong user namespace của chính caller, cộng `CAP_SYS_ADMIN` trong user namespace sở hữu mount namespace đích[^setns-mnt].
+- Process đa luồng không đổi được user namespace bằng `setns()`[^setns-multithread]. Cũng không dùng `setns()` để vào lại user namespace hiện tại, nhằm ngăn caller đã bỏ capability lấy lại chúng[^setns-reenter].
+- Với PID namespace, `setns` (và `unshare`) không đổi PID namespace của chính caller mà chỉ ảnh hưởng *con sinh ra sau đó* (mục 4)[^pid-unshare].
 
-OCI runtime-spec cho phép khai báo mảng `namespaces` với `type` và `path` tùy chọn: có `path` thì runtime đặt process vào namespace đó (cơ chế tương ứng là `setns`, suy luận của người soạn), không có thì tạo mới; loại không khai báo thì container kế thừa namespace của runtime.[^oci-ns] Nên chia sẻ network namespace giữa các container (nhận xét của người soạn) chỉ là *gia nhập* namespace có sẵn thay vì tạo mới; xem [chương 06](06-runtime-oci.md).
+OCI runtime-spec cho phép khai báo mảng `namespaces`, mỗi phần tử có `type` và `path` tùy chọn. Có `path` thì runtime đặt process vào namespace đó (cơ chế tương ứng là `setns`, suy luận của người soạn); không có thì tạo mới; loại không khai báo thì container kế thừa namespace của runtime[^oci-ns]. Vì vậy chia sẻ network namespace giữa hai container chỉ là *gia nhập* namespace có sẵn thay vì tạo mới (nhận xét của người soạn); xem [chương 06](06-runtime-oci.md).
 
 **Thí nghiệm 2 — hầu hết `unshare` thường bị chặn** (lab không có `CAP_SYS_ADMIN`):
 
@@ -133,7 +163,7 @@ $ echo $?
 0
 ```
 
-Cả bảy cờ khác user đều trả `EPERM` còn `--user` thành công — khớp quy tắc trên.[^ns-userexc][^clone-eperm] Đây không phải lỗi môi trường mà là hành vi đúng docs của kernel; nhưng cần nhớ lab tắt seccomp: trong container Docker mặc định, profile seccomp còn chặn cả `unshare --user` (quan sát và JSON ghim ở [P8 · Chương 05, mục 5](05-bao-mat-container.md)), nên kết quả `--user` thành công ở đây không đúng cho container Docker thông thường. Để đi tiếp, ta dùng user namespace làm bàn đạp: `unshare -Ur` (mục 6) cho capability đầy đủ *bên trong* namespace mới, từ đó tạo được các namespace khác do nó sở hữu.
+Cả bảy cờ khác user đều trả `EPERM` còn `--user` thành công, khớp quy tắc ở trên[^ns-userexc]. Đây không phải lỗi môi trường mà là hành vi đúng như docs của kernel[^clone-eperm]. Nhưng cần nhớ lab tắt seccomp: trong container Docker mặc định, profile seccomp còn chặn cả `unshare --user` (quan sát và JSON ghim ở [P8 · Chương 05, mục 5](05-bao-mat-container.md)), nên kết quả `--user` thành công ở đây không đúng cho container Docker thông thường. Để đi tiếp, ta dùng user namespace làm bàn đạp: `unshare -Ur` (mục 6) cho capability đầy đủ *bên trong* namespace mới, và từ đó tạo được các namespace khác do nó sở hữu.
 
 </details>
 
@@ -141,31 +171,47 @@ Cả bảy cờ khác user đều trả `EPERM` còn `--user` thành công — k
 
 ## 4. PID namespace (Q4)
 
-> **Trả lời ngắn.** PID namespace cho mỗi nhóm process một không gian PID riêng bắt đầu từ 1[^pid-def][^pid-1]. Process đầu tiên trong đó là PID 1, đóng vai init: nhận nuôi process mồ côi, được bảo vệ khỏi tín hiệu từ bên trong, và nó chết thì cả namespace bị giết[^pid-init][^pid-sig][^pid-initdie]. `unshare(2)` không chuyển chính caller vào PID namespace mới nên `unshare --pid` cần `--fork`[^pid-unshare]; `/proc` thì phải mount lại để `ps` đúng[^pid-proc].
+> **Trả lời ngắn.** PID namespace cho mỗi nhóm process một không gian PID riêng bắt đầu từ 1[^pid-1]. Process đầu tiên trong đó là PID 1, đóng vai init và nhận nuôi process mồ côi[^pid-init]. Init được bảo vệ khỏi tín hiệu từ bên trong[^pid-sig]. Nó chết thì cả namespace bị giết[^pid-initdie]. `unshare(2)` không chuyển chính caller vào PID namespace mới nên `unshare --pid` cần `--fork`[^pid-unshare]; `/proc` thì phải mount lại để `ps` đúng[^pid-proc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mỗi công ty trong tòa nhà đánh số nhân viên từ 1, nên "nhân viên số 1" của công ty A và của công ty B là hai người khác nhau. Bảo vệ tòa nhà (kernel) biết cả hai số: số trong công ty và số toàn tòa.
+*Với `orders`.* Trong container, `orders` là PID 1; nhìn từ host, cùng process đó mang một PID khác. Hai chuyện thường làm người ta bất ngờ: `docker stop` gửi `SIGTERM` mà `orders` không chịu tắt, và `ps` trong một PID namespace tự dựng tay lại liệt kê cả process của host. Cả hai đều có gốc từ cách PID namespace hoạt động; mục này đi lần lượt.
 
-**Cơ chế PID 1.** PID trong namespace mới bắt đầu từ 1, gần giống một máy độc lập.[^pid-1] Process đầu tiên tạo trong namespace mới (qua `clone` với `CLONE_NEWPID`, hoặc con đầu tiên sau khi `unshare(CLONE_NEWPID)`) có PID 1 và đóng vai "init" của namespace; nó trở thành cha của mọi process mồ côi (orphan) do process trong namespace này kết thúc.[^pid-init] Ngoại lệ: nếu một tổ tiên gần hơn đã gọi `prctl(PR_SET_CHILD_SUBREAPER)` thì nó nhận nuôi trước.[^pid-subreaper] (Reaper/zombie: [../01-linux/03-process.md](../01-linux/03-process.md).)
+### 4.1 Mỗi namespace một dãy PID
 
-Nếu init của namespace kết thúc, kernel giết mọi process trong namespace bằng `SIGKILL`.[^pid-initdie] Sau đó `fork` vào namespace này trả `ENOMEM`.[^pid-forkfail]
+PID namespace cô lập không gian số PID, nên hai process ở hai namespace khác nhau có thể cùng PID[^pid-def]. PID trong namespace mới bắt đầu từ 1, gần giống một máy độc lập[^pid-1]. Đó là lý do `orders` và `billing` đều thấy mình là PID 1.
 
-Init được bảo vệ khỏi tín hiệu (luật đầy đủ kèm Kubernetes và graceful shutdown: [P1 · Chương 05, mục 8](../01-linux/05-signal.md)): các thành viên khác *trong* namespace chỉ gửi được tín hiệu mà init đã cài signal handler, kể cả process có đặc quyền, để ngăn vô tình giết init.[^pid-sig] Process ở namespace tổ tiên cũng chỉ gửi được tín hiệu mà init đã có handler;[^pid-ancestor-handler] riêng `SIGKILL` và `SIGSTOP` là ngoại lệ — được chuyển cưỡng bức khi gửi từ namespace tổ tiên.[^pid-ancestor]
+PID namespace còn xếp thành cây, và một process chỉ nhìn thấy (gửi `kill`, đổi `nice`...) process trong namespace của nó và các hậu duệ[^pid-vis]. Vì vậy `orders` không thấy gì ngoài container của mình, còn host, là namespace tổ tiên, thấy được cả container. Hệ quả là một process có **một PID ở mỗi tầng** mà nó hiện ra[^pid-perlayer], tức PID 1 bên trong container và một số khác ở host.
 
-Hệ quả: ứng dụng chạy làm PID 1 trong container không có hành vi tín hiệu mặc định như process thường — tín hiệu mà nó chưa cài handler (kể cả `SIGTERM`) không gửi tới được nó, dù gửi từ trong namespace hay từ namespace tổ tiên như host; riêng `SIGKILL`/`SIGSTOP` từ tổ tiên thì được giao (hai quy tắc ở trên). Nó cũng là cha của các con mồ côi[^pid-init] nên phải tự `wait` chúng; vì vậy hay thấy init tí hon như `tini` (suy luận của người soạn). Lệnh dừng container chỉ gửi `SIGTERM` vì thế có thể không có tác dụng cho tới khi bị `SIGKILL` (suy luận của người soạn); chi tiết và số đo ở [chương 08, mục 3](08-rust-trong-container.md).
+### 4.2 PID 1 là init của namespace
 
-**Lồng nhau.** PID namespace tạo thành cây, sâu tối đa 32 tầng từ Linux 3.7.[^pid-nest] Một process chỉ thấy (gửi `kill`, đổi `nice`...) process trong namespace của nó và các hậu duệ.[^pid-vis] Vì vậy một process có **một PID cho mỗi tầng** nó nhìn thấy được;[^pid-perlayer] đổi PID namespace là một chiều: xuống namespace con được, lên tổ tiên thì không.[^pid-oneway]
+Process đầu tiên tạo trong namespace mới (con sinh ra bằng `clone` với `CLONE_NEWPID`, hoặc con đầu tiên sau khi `unshare(CLONE_NEWPID)`) có PID 1 và đóng vai "init" của namespace: nó trở thành cha của mọi process mồ côi (orphan) do process trong namespace này kết thúc[^pid-init]. Với `orders` thì điều này có nghĩa: nếu `orders` spawn tiến trình con rồi con đó mồ côi, `orders` là người phải `wait` nó (reaper/zombie: [../01-linux/03-process.md](../01-linux/03-process.md)). Vì vậy hay thấy một init tí hon như `tini` làm PID 1 thay cho ứng dụng (suy luận của người soạn).
 
-**Vì sao `unshare --pid` cần `--fork`.** `unshare(2)` với `CLONE_NEWPID` **không** chuyển caller vào namespace mới — vì làm thế sẽ đổi PID của chính caller (`getpid()`), làm hỏng nhiều chương trình và thư viện. Chỉ con tạo sau đó nằm trong namespace mới, và con đầu tiên có PID 1.[^pid-unshare][^unshare-newpid] Bởi vậy `unshare(1)` có option `--fork` ("fork chương trình thành con của `unshare` thay vì chạy trực tiếp; hữu ích khi tạo PID namespace").[^unshare1-fork] Không có `--fork`, chương trình được `exec` thẳng trong namespace *cũ*, và con đầu tiên nó tạo mới thành init.
+Init cũng là điểm yếu của cả namespace: nếu nó kết thúc, kernel giết mọi process còn lại trong namespace bằng `SIGKILL`[^pid-initdie]. Sau đó, `fork` vào namespace này trả `ENOMEM`[^pid-forkfail].
 
-**`/proc` phải mount lại.** `/proc` chỉ hiển thị các process thấy được trong PID namespace của process *đã mount* nó, kể cả khi người xem ở namespace khác.[^pid-proc] Vì vậy sau khi tạo PID namespace, cần mount một procfs mới để `ps` đúng; nếu đồng thời tạo mount namespace thì có thể mount thẳng đè lên `/proc` mà không cần đổi root.[^pid-procmount] `unshare --mount-proc` làm đúng việc này (và ngầm kéo theo mount namespace).[^unshare1-mountproc]
+Để tránh ai đó vô tình giết init, kernel bảo vệ nó khỏi tín hiệu (luật đầy đủ kèm Kubernetes và graceful shutdown: [P1 · Chương 05, mục 8](../01-linux/05-signal.md)). Từ *bên trong* namespace, các process khác chỉ gửi được cho init những tín hiệu mà init đã cài signal handler, và luật này áp dụng cả cho process có đặc quyền[^pid-sig]. Từ namespace tổ tiên, như host, cũng chỉ gửi được tín hiệu init đã có handler[^pid-ancestor-handler]. Ngoại lệ là `SIGKILL` và `SIGSTOP`: khi gửi từ namespace tổ tiên, chúng được chuyển cưỡng bức[^pid-ancestor].
 
-<details><summary>Đi sâu: <code>getppid</code>, <code>unshare</code> một lần, <code>readlink /proc/self</code>, thí nghiệm 3 và 4</summary>
+Bây giờ ta giải được chuyện `docker stop`. Nếu `orders` chưa cài handler cho `SIGTERM` thì tín hiệu đó không tới được nó, dù gửi từ host. Lệnh dừng container chỉ gửi `SIGTERM`, nên có thể không có tác dụng cho tới khi bị `SIGKILL` (suy luận của người soạn). Cách xử lý và số đo ở [chương 08, mục 3](08-rust-trong-container.md).
 
-- Cha của init (nằm ngoài namespace) bị `getppid()` báo là 0.[^pid-ppid0]
-- Một process chỉ gọi `unshare(CLONE_NEWPID)` được **một lần**,[^pid-once] và nếu con đầu tiên kết thúc thì các `fork` về sau fail với `ENOMEM`.[^pid-enomem]
-- `readlink /proc/self` cho ra PID của caller trong PID namespace *của procfs mount*, tiện để biết PID mình ở namespace khác.[^pid-self]
+### 4.3 Vì sao `unshare --pid` cần `--fork`
+
+Khi tự dựng namespace bằng tay, bạn sẽ vấp chuyện này trước tiên. `unshare(2)` với `CLONE_NEWPID` **không** chuyển caller vào namespace mới, vì làm thế sẽ đổi PID của chính caller (`getpid()`) và làm hỏng nhiều chương trình lẫn thư viện[^pid-unshare]. Chỉ con tạo sau đó nằm trong namespace mới, và con đầu tiên có PID 1[^unshare-newpid].
+
+Vì vậy `unshare(1)` có option `--fork`, để chạy chương trình như một con của `unshare` thay vì chạy trực tiếp; man page ghi rõ nó hữu ích khi tạo PID namespace[^unshare1-fork]. Không có `--fork`, chương trình được `exec` thẳng trong namespace *cũ*, và con đầu tiên nó tạo mới thành init.
+
+### 4.4 Vì sao `/proc` phải mount lại
+
+`/proc` chỉ hiển thị các process thấy được trong PID namespace của process *đã mount* nó, kể cả khi người xem ở namespace khác[^pid-proc]. Bởi vậy, sau khi tạo PID namespace mà không mount lại, `ps` trong đó vẫn đọc `/proc` cũ và liệt kê cả process của host.
+
+Cách sửa là mount một procfs mới. Nếu bạn đồng thời tạo mount namespace thì có thể mount thẳng đè lên `/proc` mà không cần đổi root[^pid-procmount]. `unshare --mount-proc` làm đúng việc này, và ngầm kéo theo mount namespace[^unshare1-mountproc].
+
+<details><summary>Đi sâu: lồng nhau, <code>getppid</code>, <code>unshare</code> một lần, <code>readlink /proc/self</code>, thí nghiệm 3 và 4</summary>
+
+- PID namespace lồng nhau tối đa 32 tầng từ Linux 3.7[^pid-nest]. Đổi PID namespace là một chiều: xuống namespace con được, lên tổ tiên thì không[^pid-oneway].
+- Nếu một tổ tiên gần hơn đã gọi `prctl(PR_SET_CHILD_SUBREAPER)` thì nó nhận nuôi process mồ côi trước init[^pid-subreaper].
+- Cha của init (nằm ngoài namespace) bị `getppid()` báo là 0[^pid-ppid0].
+- Một process chỉ gọi `unshare(CLONE_NEWPID)` được **một lần**[^pid-once]. Nếu con đầu tiên kết thúc thì các `fork` về sau fail với `ENOMEM`[^pid-enomem].
+- `readlink /proc/self` cho ra PID của caller trong PID namespace *của procfs mount*, tiện để biết PID mình ở namespace khác[^pid-self].
 - Cùng một process hiện ra nhiều PID tùy chỗ nhìn. Trong lab, `unshare -Ur --pid --fork sleep 40` hiện ở namespace của lab với `unshare` là PID 32 và `sleep` là PID 34; bên trong namespace mới `sleep` là PID 1.
 
 **Thí nghiệm 3 — PID namespace trong lab (có trả giá bằng user namespace).** `unshare --pid` trần bị chặn (thí nghiệm 2) nên ta thêm `-Ur`, và giữ nguyên propagation (`--propagation unchanged`) vì lab chặn mount (mục 5). `pid=1`: bash là init của namespace mới.
@@ -182,7 +228,7 @@ fatal library error, lookup self
 0
 ```
 
-- `readlink /proc/self` ra `9`, dù `$$` là 1: `/proc` vẫn là procfs của namespace cũ, nên hiển thị PID theo *namespace của procfs*.[^pid-self] `ls /proc` còn liệt kê PID `1`, `10`, `11`... của container lab và `ps` vỡ (`fatal library error, lookup self`) — hậu quả cụ thể của việc quên mount lại `/proc`.
+- `readlink /proc/self` ra `9`, dù `$$` là 1: `/proc` vẫn là procfs của namespace cũ, nên hiển thị PID theo *namespace của procfs*[^pid-self]. `ls /proc` còn liệt kê PID `1`, `10`, `11`... của container lab và `ps` vỡ (`fatal library error, lookup self`). Đó là hậu quả cụ thể của việc quên mount lại `/proc`.
 - Hai biến thể `--mount-proc` và `mount -t proc` thất bại trong lab (`cannot change /proc filesystem propagation: Permission denied`; `cannot mount proc read-only`), xem mục 5. **Lab này không chạy được ví dụ `ps` sạch của man page**; hãy thử `unshare --pid --fork --mount-proc ps -ef` trên máy có `CAP_SYS_ADMIN`.
 
 **Thí nghiệm 4 — init bất tử trước `kill -9` từ bên trong.**
@@ -196,9 +242,9 @@ got TERM
 after
 ```
 
-`kill -9 1` (đích là chính bash, PID 1) trả `rc=0` nhưng bash **không chết**: tín hiệu không có handler không tới được init từ thành viên cùng namespace.[^pid-sig] `SIGKILL` chỉ được cưỡng bức khi gửi từ namespace tổ tiên.[^pid-ancestor] Sau `trap` cho `SIGTERM`, tín hiệu được giao ("got TERM"). Phần lồng nhiều tầng không có output được ghi lại ở đây nên không khẳng định kết quả; theo cơ chế, process đầu tiên của mỗi namespace mới có PID 1 trong namespace đó.[^pid-init]
+`kill -9 1` (đích là chính bash, PID 1) trả `rc=0` nhưng bash **không chết**: tín hiệu không có handler không tới được init từ thành viên cùng namespace[^pid-sig]. `SIGKILL` chỉ được cưỡng bức khi gửi từ namespace tổ tiên[^pid-ancestor]. Sau `trap` cho `SIGTERM`, tín hiệu được giao ("got TERM"). Phần lồng nhiều tầng không có output được ghi lại ở đây nên không khẳng định kết quả; theo cơ chế, process đầu tiên của mỗi namespace mới có PID 1 trong namespace đó[^pid-init].
 
-Một kết quả bài học về `unshare` không `--fork`:
+Một bài học về `unshare` không `--fork`:
 
 ```console
 $ unshare -Ur --pid --propagation unchanged bash -c '
@@ -206,23 +252,31 @@ $ unshare -Ur --pid --propagation unchanged bash -c '
 bash: fork: Cannot allocate memory
 ```
 
-Subshell `(true)` là con đầu tiên, thành init rồi kết thúc, nên `fork` kế tiếp trả `ENOMEM`.[^pid-enomem]
+Subshell `(true)` là con đầu tiên, thành init rồi kết thúc, nên `fork` kế tiếp trả `ENOMEM`[^pid-enomem].
 
 </details>
 
-**Quay lại Q4:** PID 1 là con đầu tiên của namespace (nên cần `--fork`), nó nhận orphan và chỉ nhận tín hiệu có handler từ bên trong, và `/proc` phải mount lại thì `ps` mới đúng.
+**Quay lại Q4:** PID 1 là con đầu tiên của namespace (nên cần `--fork`), nó nhận orphan và chỉ nhận tín hiệu có handler từ bên trong, và `/proc` phải mount lại thì `ps` mới đúng; với `orders` làm PID 1, đó là lý do `SIGTERM` không có handler thì `docker stop` không dừng được nó.
 
 ## 5. Mount namespace (Q5)
 
-> **Trả lời ngắn.** Mount namespace cho mỗi nhóm process một danh sách mount riêng[^mnt-def]; namespace mới bắt đầu bằng bản *sao* danh sách của caller, rồi mount/umount ở hai bên mặc định không ảnh hưởng nhau[^mnt-copy][^mnt-nopropagate]. Tính năng *propagation* (shared subtree) cho phép lan truyền có kiểm soát mount/umount giữa các mount trong cùng một nhóm peer[^mnt-shared-hist].
+> **Trả lời ngắn.** Mount namespace cho mỗi nhóm process một danh sách mount riêng[^mnt-def]. Namespace mới bắt đầu bằng bản *sao* danh sách của caller[^mnt-copy]. Từ đó mount/umount ở hai bên mặc định không ảnh hưởng nhau[^mnt-nopropagate]. Tính năng *propagation* (shared subtree) cho phép lan truyền có kiểm soát mount/umount giữa các mount trong cùng một nhóm peer[^mnt-shared-hist].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mỗi công ty có một sơ đồ tầng riêng — phòng nào gắn vào đâu. Lúc chia công ty, sơ đồ được photo; sửa bản photo không sửa bản gốc, trừ khi hai bản được đánh dấu "đồng bộ".
+*Với `orders`.* Khi `orders` mở `/etc/orders.toml` hay ghi log vào `/var/log`, nó đi qua cây thư mục của image chứ không phải cây của host. Cái làm nên cảnh đó là mount namespace: mỗi container có một danh sách mount riêng, và ta sẽ thấy danh sách đó được tạo ra thế nào, rồi khi nào mount ở một bên lan sang bên kia (cách dựng filesystem của container: [chương 04](04-filesystem-cua-container.md)).
 
-Mount namespace cô lập danh sách mount mà process thấy: mỗi instance cho một cây thư mục đơn riêng.[^mnt-def] Các file `/proc/pid/mounts`, `mountinfo`, `mountstats` phản ánh mount namespace của pid đó.[^mnt-proc] Khi tạo bằng `unshare(2)`, danh sách mount của namespace mới là bản sao của danh sách của caller trước đó;[^mnt-copy] sau đó các `mount`/`umount` ở một bên mặc định không ảnh hưởng bên kia.[^mnt-nopropagate]
+### 5.1 Bản sao danh sách mount
 
-Cô lập hoàn toàn đôi khi *quá mức* (ví dụ đĩa quang mới cắm phải được mount riêng ở từng namespace), nên từ Linux 2.6.15 có tính năng **shared subtree**, cho phép lan truyền có kiểm soát sự kiện `mount`/`umount` giữa các mount trong cùng một *peer group*.[^mnt-shared-hist] Mỗi mount có một kiểu propagation (thiết lập theo từng mount point):[^mnt-pertype]
+Mount namespace cô lập danh sách mount mà process thấy: mỗi instance cho một cây thư mục đơn riêng[^mnt-def]. Các file `/proc/pid/mounts`, `mountinfo`, `mountstats` phản ánh mount namespace của pid đó[^mnt-proc].
+
+Namespace mới không bắt đầu từ trống. Khi tạo bằng `unshare(2)`, danh sách mount của nó là bản sao danh sách của caller trước đó[^mnt-copy]. Sau đó các `mount`/`umount` ở một bên mặc định không ảnh hưởng bên kia[^mnt-nopropagate]. Nghĩa là mount thêm một thư mục bên trong container thì host mặc định không thấy (nhận xét của người soạn).
+
+### 5.2 Propagation: khi nào mount lan sang bên kia
+
+Cô lập hoàn toàn đôi khi *quá mức*: ví dụ cắm một đĩa quang mới mà phải mount riêng ở từng namespace mới dùng được. Vì thế từ Linux 2.6.15 có tính năng **shared subtree**, cho phép lan truyền có kiểm soát sự kiện `mount`/`umount` giữa các mount trong cùng một *peer group*, tức nhóm mount chia sẻ sự kiện với nhau[^mnt-shared-hist].
+
+Kiểu propagation là thiết lập của từng mount point, không phải của cả namespace[^mnt-pertype]. Có bốn kiểu:
 
 | Kiểu | Ý nghĩa |
 |---|---|
@@ -231,15 +285,15 @@ Cô lập hoàn toàn đôi khi *quá mức* (ví dụ đĩa quang mới cắm p
 | `MS_SLAVE` | nhận sự kiện từ một peer group "master" nhưng không phát đi[^mnt-slave] |
 | `MS_UNBINDABLE` | như private, và thêm: không thể bind mount[^mnt-unbindable] |
 
-Cách xem: trường tùy chọn trong `/proc/pid/mountinfo` có `shared:X`, `master:X`, `unbindable`; không có thẻ nào thì là private.[^mnt-mountinfo]
+Muốn biết một mount đang ở kiểu nào, đọc trường tùy chọn trong `/proc/pid/mountinfo`: có thẻ `shared:X`, `master:X` hoặc `unbindable`, còn không có thẻ nào thì mount là private[^mnt-mountinfo].
 
-`unshare(1)` từ util-linux 2.27 tự đặt propagation thành private trong mount namespace mới để namespace thực sự tách rời; tắt bằng `--propagation unchanged`.[^unshare1-prop]
+Có một chi tiết ở phía công cụ: `unshare(1)` từ util-linux 2.27 tự đặt propagation thành private trong mount namespace mới, để namespace thực sự tách rời; tắt bằng `--propagation unchanged`[^unshare1-prop].
 
 <details><summary>Đi sâu: ví dụ man page, mount trong user namespace, thí nghiệm 5 (mount bị chặn)</summary>
 
-Ví dụ trong man page: sau khi `unshare -m --propagation unchanged`, một mount con tạo dưới mount shared `/mntS` được tạo là shared (kế thừa từ cha) và hiện ra ở namespace gốc, còn mount con tạo dưới mount private `/mntP` là private và không lan sang.[^mnt-example]
+Ví dụ trong man page: sau khi `unshare -m --propagation unchanged`, một mount con tạo dưới mount shared `/mntS` được tạo là shared (kế thừa từ cha) và hiện ra ở namespace gốc, còn mount con tạo dưới mount private `/mntP` là private và không lan sang[^mnt-example].
 
-Giữ `CAP_SYS_ADMIN` trong user namespace *sở hữu* mount namespace cho phép tạo bind mount và mount một số loại filesystem (`/proc`, `/sys`, `devpts`, `tmpfs`, `ramfs`, `mqueue`, `bpf`, `overlayfs` từ 5.11...), nhưng filesystem dựa trên block device thì chỉ làm được với `CAP_SYS_ADMIN` ở user namespace gốc.[^mnt-userns-fs][^mnt-block] (Nền tảng để rootless container tự dựng rootfs — nhận xét của người soạn.)
+Giữ `CAP_SYS_ADMIN` trong user namespace *sở hữu* mount namespace cho phép tạo bind mount và mount một số loại filesystem (`/proc`, `/sys`, `devpts`, `tmpfs`, `ramfs`, `mqueue`, `bpf`, `overlayfs` từ 5.11...)[^mnt-userns-fs]. Còn filesystem dựa trên block device thì chỉ làm được với `CAP_SYS_ADMIN` ở user namespace gốc[^mnt-block]. Đây là nền để rootless container tự dựng rootfs (nhận xét của người soạn).
 
 **Thí nghiệm 5 — mount bị chặn trong lab:**
 
@@ -260,32 +314,44 @@ Ghi chép đúng kết quả: `unshare -Ur --mount` **tạo được** mount nam
 
 ## 6. User namespace (Q6)
 
-> **Trả lời ngắn.** User namespace cho process một bộ UID/GID và capability riêng: có thể là user thường bên ngoài nhưng UID 0 bên trong, toàn quyền cho thao tác *bên trong* namespace và không đặc quyền bên ngoài[^user-def][^user-root]. `uid_map`/`gid_map` là bảng dịch UID giữa hai namespace, ghi được một lần[^user-mapfmt][^user-once]. Đó là nền tảng của rootless container (nhận xét của người soạn).
+> **Trả lời ngắn.** User namespace cho process một bộ UID/GID và capability riêng: có thể là user thường bên ngoài nhưng UID 0 bên trong, toàn quyền cho thao tác *bên trong* namespace và không đặc quyền bên ngoài[^user-root]. `uid_map`/`gid_map` là bảng dịch UID giữa hai namespace[^user-mapfmt]. Mỗi file chỉ ghi được một lần[^user-once]. Đó là nền tảng của rootless container (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đeo thẻ "giám đốc" trong công ty mới, nhưng ra khỏi cửa công ty thì chỉ là khách thường; và thẻ này chỉ mở được những phòng do chính công ty đó sở hữu.
+*Với `orders`.* Giả sử trong container `orders` chạy bằng UID 0. Nếu đó cũng là root thật của host thì một lỗ hổng cho phép thoát khỏi container sẽ cho kẻ tấn công quyền root trên host (nhận xét của người soạn). User namespace cho cách khác: bên trong, `orders` vẫn thấy mình là UID 0 và làm được việc cần quyền, nhưng nhìn từ host nó chỉ là một user thường. Mục này giải thích bảng dịch UID làm được điều đó thế nào, và quyền "root" ấy rộng đến đâu.
 
-**Ý tưởng.** User namespace cô lập các định danh và thuộc tính liên quan bảo mật: user ID, group ID, thư mục gốc, keyring và capabilities. Một process có thể là user thường bên ngoài nhưng có UID 0 bên trong — toàn quyền cho thao tác *bên trong* namespace, không đặc quyền bên ngoài.[^user-def][^user-root] User namespace lồng nhau tối đa 32 tầng (từ Linux 3.11, vượt thì lỗi `EUSERS`); mỗi process thuộc đúng một user namespace.[^user-nest]
+### 6.1 Cô lập những gì
 
-**`uid_map` và `gid_map`.** Namespace mới sinh ra **chưa có ánh xạ** UID/GID nào.[^user-map-empty] File `/proc/pid/uid_map` và `gid_map` (từ Linux 3.5) cho phép đọc và **ghi một lần** để định nghĩa ánh xạ;[^user-mapfile] ghi lần hai bị `EPERM`.[^user-once] Mỗi dòng là ánh xạ 1-1 một dải ID liên tiếp giữa hai namespace,[^user-mapfmt] gồm ba số: ID bắt đầu bên trong namespace của process `pid`, ID bắt đầu bên kia, độ dài dải. Namespace gốc có map giả `0 0 4294967295`.[^user-initial]
+User namespace cô lập các định danh và thuộc tính liên quan đến bảo mật, cụ thể là user ID, group ID, thư mục gốc, keyring và capabilities[^user-def]. Nhờ vậy một process có thể là user thường bên ngoài mà có UID 0 bên trong: toàn quyền cho thao tác *bên trong* namespace, không đặc quyền bên ngoài[^user-root]. User namespace lồng nhau được tối đa 32 tầng (từ Linux 3.11, vượt thì lỗi `EUSERS`), và mỗi process thuộc đúng một user namespace[^user-nest].
 
-Ví dụ: map `0 1000 1` nghĩa là UID 1000 bên ngoài là UID 0 bên trong. Khi process truy cập file, kernel ánh xạ UID/GID về namespace gốc để kiểm tra quyền;[^user-file] ID chưa ánh xạ thường hiện ra là *overflow ID*, mặc định 65534.[^user-overflow]
+### 6.2 `uid_map` và `gid_map`
 
-Quy tắc ghi map (tóm tắt): người ghi cần `CAP_SETUID`/`CAP_SETGID` trong namespace của pid, và các ID được ánh xạ phải có ánh xạ ở namespace cha. Nếu người ghi không có `CAP_SETUID`/`CAP_SETGID` trong namespace cha thì chỉ được ghi **một dòng** ánh xạ chính EUID (GID) của nó ở namespace cha, phải cùng EUID với người tạo namespace, và với `gid_map` phải ghi `deny` vào `/proc/pid/setgroups` trước.[^user-unpriv][^user-setgroups] `unshare --map-root-user` ánh xạ EUID/EGID hiện tại thành superuser trong namespace mới và ngầm đặt `--setgroups=deny`.[^unshare1-maproot][^unshare1-maproot2]
+Namespace mới sinh ra **chưa có ánh xạ** UID/GID nào[^user-map-empty]. Muốn có, ta ghi vào hai file `/proc/pid/uid_map` và `gid_map` (từ Linux 3.5), đọc được và **ghi một lần**[^user-mapfile]. Ghi lần hai bị `EPERM`[^user-once].
 
-Để ánh xạ **nhiều UID** (ví dụ một image có nhiều user) thì người ghi cần `CAP_SETUID` trong namespace cha (trường hợp (a) trong cùng mục man page).[^user-unpriv] `newuidmap(1)` là công cụ ghi `/proc/[pid]/uid_map` dựa trên dải trong `/etc/subuid` (hoặc NSS subid) mà admin cấp cho user.[^newuidmap] Rootless Docker/Podman dựa vào cơ chế kiểu này (suy luận của người soạn; chi tiết rootless ở [chương 05](05-bao-mat-container.md)).
+Mỗi dòng của file là ánh xạ 1-1 một dải ID liên tiếp giữa hai namespace[^user-mapfmt]. Dòng gồm ba số: ID bắt đầu bên trong namespace của process `pid`, ID bắt đầu ở namespace bên kia, và độ dài dải. Namespace gốc có map giả `0 0 4294967295`[^user-initial].
 
-**Root trong namespace có quyền gì, và không có gì.**
+Ví dụ: dòng `0 1000 1` nghĩa là UID 1000 bên ngoài là UID 0 bên trong, tức là `orders` thấy mình là root còn host thấy user 1000. Khi process truy cập file, kernel ánh xạ UID/GID của nó về namespace gốc để kiểm tra quyền[^user-file]. Còn ID chưa được ánh xạ thường hiện ra là *overflow ID*, mặc định 65534[^user-overflow].
 
-- Process nhận capability **đầy đủ trong namespace mới** nhưng **không có capability nào** trong namespace cha/trước đó, kể cả khi người tạo là root ngoài.[^user-caps][^user-nocapparent]
-- Quyền chỉ áp dụng cho tài nguyên **thuộc** các namespace do user namespace đó sở hữu: mỗi namespace không-phải-user ghi lại user namespace tạo ra nó làm owner, và kiểm tra quyền lúc thao tác tài nguyên toàn cục của namespace đó đối chiếu theo owner.[^user-scope][^user-owns]
-- Nhiều thao tác đặc quyền chạm tài nguyên *không thuộc namespace nào* (đổi giờ hệ thống – `CAP_SYS_TIME`, nạp kernel module – `CAP_SYS_MODULE`, tạo device – `CAP_MKNOD`) chỉ làm được ở user namespace gốc.[^user-global]
+### 6.3 Ai được ghi map
+
+Quy tắc ghi map (tóm tắt): người ghi cần `CAP_SETUID`/`CAP_SETGID` trong namespace của pid, và các ID được ánh xạ phải có ánh xạ ở namespace cha. Với người ghi không có `CAP_SETUID`/`CAP_SETGID` trong namespace cha, quy tắc chặt hơn: chỉ được ghi **một dòng** ánh xạ chính EUID (GID) của nó ở namespace cha[^user-unpriv]. Người ghi này phải cùng EUID với người tạo namespace, và với `gid_map` phải ghi `deny` vào `/proc/pid/setgroups` trước[^user-setgroups].
+
+Công cụ dòng lệnh làm sẵn việc này: `unshare --map-root-user` ánh xạ EUID/EGID hiện tại thành superuser trong namespace mới[^unshare1-maproot]. Nó cũng ngầm đặt `--setgroups=deny`[^unshare1-maproot2].
+
+Một image thật hay có nhiều user, nên cần ánh xạ **nhiều UID**. Việc đó đòi người ghi có `CAP_SETUID` trong namespace cha (trường hợp (a) trong cùng mục man page)[^user-unpriv]. Với user thường, `newuidmap(1)` ghi `/proc/[pid]/uid_map` giúp dựa trên dải trong `/etc/subuid` (hoặc NSS subid) mà admin cấp cho user đó[^newuidmap]. Rootless Docker/Podman dựa vào cơ chế kiểu này (suy luận của người soạn; chi tiết rootless ở [chương 05](05-bao-mat-container.md)).
+
+### 6.4 Root trong namespace có quyền gì, và không có gì
+
+Process nhận capability **đầy đủ trong namespace mới**[^user-caps]. Đổi lại, nó **không có capability nào** ở namespace cha hoặc namespace trước đó, kể cả khi người tạo là root ngoài[^user-nocapparent].
+
+Phạm vi quyền cũng hẹp: capability trong một user namespace chỉ cho phép thao tác trên tài nguyên **thuộc** các namespace mà user namespace đó quản lý[^user-scope]. Cơ chế là mỗi namespace không-phải-user ghi lại user namespace của người tạo ra nó làm owner[^user-owns], và khi bạn thao tác tài nguyên toàn cục của namespace đó, kernel kiểm quyền theo owner. Chẳng hạn khi `orders` muốn thêm một network device: được nếu network namespace thuộc user namespace của nó, không được nếu network namespace đó là của host (suy ra từ quy tắc trên; thí nghiệm 8 xác nhận).
+
+Cuối cùng, nhiều thao tác đặc quyền chạm tài nguyên *không thuộc namespace nào*: đổi giờ hệ thống (`CAP_SYS_TIME`), nạp kernel module (`CAP_SYS_MODULE`), tạo device (`CAP_MKNOD`). Những thao tác này chỉ làm được ở user namespace gốc[^user-global]. Nghĩa là "root" của `orders` không sửa được giờ của host.
 
 <details><summary>Đi sâu: capability kế thừa, <code>execve</code>, thí nghiệm 7 và 8</summary>
 
-- Capability trong một user namespace có hiệu lực với mọi namespace con.[^user-inherit] Người sở hữu namespace (euid khớp) ở namespace cha có đầy đủ capability trong nó.[^user-owner]
-- Khi `execve`, capability tính lại như thường: trừ khi process có UID 0 trong namespace hoặc file có inheritable capability khác rỗng, process mất hết capability.[^user-execve] Suy ra (suy luận của người soạn): phải ghi map *trước* khi `exec`, để UID bên trong là 0 chứ không phải overflow ID.
+- Capability trong một user namespace có hiệu lực với mọi namespace con[^user-inherit]. Người sở hữu namespace (euid khớp) ở namespace cha có đầy đủ capability trong nó[^user-owner].
+- Khi `execve`, capability tính lại như thường: trừ khi process có UID 0 trong namespace hoặc file có inheritable capability khác rỗng, process mất hết capability[^user-execve]. Suy ra (suy luận của người soạn): phải ghi map *trước* khi `exec`, để UID bên trong là 0 chứ không phải overflow ID.
 
 **Thí nghiệm 7 — `unshare --user --map-root-user` rồi `id`:**
 
@@ -304,8 +370,8 @@ CapBnd:	000001ffffffffff
 CapAmb:	0000000000000000
 ```
 
-- `uid_map = 0 0 1`: map "0 trong ns ↔ 0 bên ngoài, dài 1". Vì ta *đã là* root thật trước đó nên trông không khác `id` ban đầu; điểm khác là `CapEff` nay là `1ffffffffff` (đủ capability trong namespace) so với `a80c35fb` bên ngoài. Trên máy với user 1000 thì `--map-root-user` ánh xạ EUID hiện tại thành 0 nên map sẽ là `0 1000 1`.[^unshare1-maproot]
-- Ta *lấy được* `cap_sys_admin` trong namespace dù ngoài lab không có — đúng docs.[^user-caps]
+- `uid_map = 0 0 1`: map "0 trong ns ↔ 0 bên ngoài, dài 1". Vì ta *đã là* root thật trước đó nên trông không khác `id` ban đầu; điểm khác là `CapEff` nay là `1ffffffffff` (đủ capability trong namespace) so với `a80c35fb` bên ngoài. Trên máy với user 1000 thì `--map-root-user` ánh xạ EUID hiện tại thành 0 nên map sẽ là `0 1000 1`[^unshare1-maproot].
+- Ta *lấy được* `cap_sys_admin` trong namespace dù ngoài lab không có, đúng như docs[^user-caps].
 - Không `--map-root-user`:
 
 ```console
@@ -313,7 +379,7 @@ $ unshare --user bash -c 'id'
 uid=65534(nobody) gid=65534(nogroup) groups=65534(nogroup)
 ```
 
-Chưa có ánh xạ nên UID hiện là overflow 65534.[^user-overflow]
+Chưa có ánh xạ nên UID hiện là overflow 65534[^user-overflow].
 
 **Thí nghiệm 8 — "root trong ns" làm được gì:**
 
@@ -327,31 +393,45 @@ RTNETLINK answers: Operation not permitted
 rc=0
 ```
 
-- `date -s`: `Operation not permitted` dù `CapEff` đầy đủ — `CAP_SYS_TIME` chỉ có tác dụng ở user namespace gốc.[^user-global]
+- `date -s`: `Operation not permitted` dù `CapEff` đầy đủ, vì `CAP_SYS_TIME` chỉ có tác dụng ở user namespace gốc[^user-global].
 - `chown 1:1 /tmp`: `Invalid argument` (suy luận của người soạn: do UID/GID 1 không có ánh xạ, vì map chỉ có `0 0 1`).
-- `ip link add dummy0` trong network namespace **của lab** (không thuộc user namespace mới): bị từ chối. Nhưng trong network namespace mới tạo bằng `unshare --net` (thuộc user namespace mới), `ip link add d0 type dummy` **thành công** — quyền chỉ trên tài nguyên do namespace của mình sở hữu.[^user-scope][^user-owns]
+- `ip link add dummy0` trong network namespace **của lab** (không thuộc user namespace mới): bị từ chối. Nhưng trong network namespace mới tạo bằng `unshare --net` (thuộc user namespace mới), `ip link add d0 type dummy` **thành công**: quyền chỉ áp dụng trên tài nguyên do namespace của mình sở hữu[^user-scope].
 
 </details>
 
-**Quay lại Q6:** `uid_map`/`gid_map` là bảng dịch ID ghi một lần; root trong user namespace đủ capability chỉ trên tài nguyên do namespace đó sở hữu, và đó là nền của rootless container.
+**Quay lại Q6:** `uid_map`/`gid_map` là bảng dịch ID ghi một lần; root trong user namespace đủ capability chỉ trên tài nguyên do namespace đó sở hữu, nên `orders` làm root trong container mà vẫn không đụng được vào host, và đó là nền của rootless container.
 
 ## 7. UTS, IPC, network, cgroup, time (Q7)
 
-> **Trả lời ngắn.** UTS cô lập hostname và NIS domain name[^uts-def]; IPC cô lập System V IPC và POSIX message queue[^ipc-def]; network cô lập device, stack, routing, firewall, port[^net-def]; cgroup ảo hóa *cách nhìn* cây cgroup[^cgns-def]; time ảo hóa đồng hồ monotonic và boottime[^time-def].
+> **Trả lời ngắn.** UTS cô lập hostname và NIS domain name[^uts-def]. IPC cô lập System V IPC và POSIX message queue[^ipc-def]. Network cô lập device, stack, routing, firewall, port[^net-def]. Cgroup namespace ảo hóa *cách nhìn* cây cgroup[^cgns-def]. Time namespace ảo hóa đồng hồ monotonic và boottime[^time-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mỗi loại là một "danh bạ riêng" cho một thứ: tên máy, hòm thư nội bộ, đường dây mạng, sơ đồ cgroup, đồng hồ treo tường.
+*Với `orders`.* Năm loại còn lại đơn giản hơn PID, mount và user, mỗi loại bọc đúng một nhóm tài nguyên. Với `orders` thì mỗi loại ứng với một điều cụ thể: tên máy `orders` tự thấy, cổng 8080 của riêng nó, và việc nó không thấy IPC của `billing`. Ta đi lần lượt qua từng loại.
 
-**UTS.** Hai định danh: hostname và NIS domain name (đặt bằng `sethostname(2)`/`setdomainname(2)`, đọc bằng `uname(2)`...). Thay đổi chỉ thấy trong cùng namespace.[^uts-def] Khi tạo mới, hostname/domain của namespace mới được copy từ namespace của caller.[^uts-copy] `sethostname` trong user namespace được phép vì kernel kiểm `CAP_SYS_ADMIN` trong user namespace sở hữu UTS namespace.[^user-hostname]
+### 7.1 UTS: hostname
 
-**IPC.** Cô lập System V IPC object và (từ Linux 2.6.30) POSIX message queue.[^ipc-def] Khi namespace bị hủy, mọi IPC object trong nó bị hủy theo.[^ipc-destroy]
+UTS namespace cô lập hai định danh: hostname và NIS domain name (đặt bằng `sethostname(2)`/`setdomainname(2)`, đọc bằng `uname(2)`...). Thay đổi chỉ thấy trong cùng namespace[^uts-def]. Namespace mới không bắt đầu trống: hostname và domain name được copy từ namespace của caller[^uts-copy]. Một điểm hay bị hỏi: `sethostname` chạy được trong user namespace vì kernel kiểm `CAP_SYS_ADMIN` trong user namespace sở hữu UTS namespace đó[^user-hostname].
 
-**Network.** Cô lập network device, stack IPv4/IPv6, bảng routing, firewall rule, `/proc/net`, `/sys/class/net`, port, và cả abstract UNIX socket namespace.[^net-def] Một device vật lý chỉ ở đúng một network namespace; cặp `veth` là "ống" nối hai namespace.[^net-veth] Nền tảng mạng (Ethernet, bridge, routing) ở [../06-networking/02-link-layer.md](../06-networking/02-link-layer.md); cách container dùng veth + bridge ở [chương 07](07-mang-container.md).
+### 7.2 IPC
 
-**Cgroup.** Cgroup namespace ảo hóa *cách nhìn* cgroup của process qua `/proc/pid/cgroup` và `mountinfo`; cgroup hiện tại của process trở thành thư mục gốc của namespace mới.[^cgns-def][^cgns-root] Nó không đặt giới hạn tài nguyên ([chương 03](03-cgroups-v2.md)).
+IPC namespace cô lập System V IPC object và (từ Linux 2.6.30) POSIX message queue[^ipc-def]. Khi namespace bị hủy, mọi IPC object trong nó bị hủy theo[^ipc-destroy]. Vì vậy `orders` và `billing` không thấy message queue của nhau.
 
-**Time.** Ảo hóa hai đồng hồ: `CLOCK_MONOTONIC` (cùng `_COARSE`, `_RAW`) và `CLOCK_BOOTTIME`, ảnh hưởng `clock_gettime`, `nanosleep`, `timerfd_settime`... và `/proc/uptime`.[^time-def] Theo man page hiện tại, cách tạo duy nhất là `unshare(2)` với `CLONE_NEWTIME`, và caller *không* được chuyển vào namespace mới — chỉ các con sau đó, để kịp đặt offset trước.[^time-create] Offset (so với namespace gốc) xem tại `/proc/PID/timens_offsets`.[^time-offsets]
+### 7.3 Network
+
+Network namespace cô lập network device, stack IPv4/IPv6, bảng routing, firewall rule, `/proc/net`, `/sys/class/net`, port, và cả abstract UNIX socket namespace[^net-def]. Chính nó cho `orders` và `billing` cùng nghe cổng 8080 mà không xung đột. Một device vật lý chỉ ở đúng một network namespace, và cặp `veth` là "ống" nối hai namespace[^net-veth].
+
+Nền tảng mạng (Ethernet, bridge, routing) ở [../06-networking/02-link-layer.md](../06-networking/02-link-layer.md); cách container dùng veth + bridge ở [chương 07](07-mang-container.md).
+
+### 7.4 Cgroup
+
+Cgroup namespace ảo hóa *cách nhìn* cgroup của process qua `/proc/pid/cgroup` và `mountinfo`[^cgns-def]. Cgroup hiện tại của process trở thành thư mục gốc của namespace mới[^cgns-root], nên `orders` thấy cây cgroup của mình như thể từ gốc. Nó không đặt giới hạn tài nguyên ([chương 03](03-cgroups-v2.md)).
+
+### 7.5 Time
+
+Time namespace ảo hóa hai đồng hồ: `CLOCK_MONOTONIC` (cùng `_COARSE`, `_RAW`) và `CLOCK_BOOTTIME`. Nó ảnh hưởng `clock_gettime`, `nanosleep`, `timerfd_settime`... và `/proc/uptime`[^time-def].
+
+Cách tạo có một chỗ lạ: hiện chỉ có `unshare(2)` với `CLONE_NEWTIME`, và caller *không* được chuyển vào namespace mới, chỉ các con sau đó mới vào, để kịp đặt offset trước (theo man page bản hiện tại)[^time-create]. Offset (so với namespace gốc) xem tại `/proc/PID/timens_offsets`[^time-offsets].
 
 <details><summary>Đi sâu: thí nghiệm 6 (hostname), IPC, network, cgroup, time trong lab</summary>
 
@@ -396,15 +476,17 @@ Chạy được trong lab: uptime trong time namespace lớn hơn host đúng 10
 
 </details>
 
-**Quay lại Q7:** mỗi namespace còn lại ảo hóa đúng một nhóm tài nguyên: tên máy (UTS), IPC, mạng, cây cgroup, đồng hồ.
+**Quay lại Q7:** mỗi namespace còn lại ảo hóa đúng một nhóm tài nguyên: tên máy (UTS), IPC, mạng, cây cgroup, đồng hồ; với `orders`, đó là hostname, cổng 8080 và queue của riêng nó.
 
 ## Liên hệ với Rust
 
-Crate `nix` bọc các system call trên. Ghim phiên bản docs.rs `nix 0.29.0`: `nix::sched::unshare(flags: CloneFlags) -> Result<()>` ("disassociate parts of the process execution context") và `nix::sched::setns<Fd: AsFd>(fd: Fd, nstype: CloneFlags) -> Result<()>` ("reassociate thread with a namespace"); cả hai chỉ có khi bật feature `sched`.[^nix-unshare][^nix-setns] Docs của `nix` chỉ trỏ tới `unshare(2)`/`setns(2)` cho chi tiết; suy luận của người soạn: ngữ nghĩa là của kernel đúng như hai man page đó — ví dụ `unshare(CloneFlags::CLONE_NEWPID)` vẫn không đưa process hiện tại vào namespace mới (mục 4), và `setns` tác động lên *thread* gọi nên chương trình Rust đa luồng muốn đổi mount/user namespace phải xử lý cẩn thận (mục 3). Người soạn không chạy code Rust nào cho chương này nên không khẳng định kết quả chạy; ví dụ runtime container viết bằng Rust ở [chương 08](08-rust-trong-container.md).
+Nếu bạn tự viết launcher hay runtime cho `orders` bằng Rust, các system call trên đã có sẵn trong crate `nix`. Ghim phiên bản docs.rs `nix 0.29.0`, hai hàm cần dùng là `nix::sched::unshare(flags: CloneFlags) -> Result<()>` ("disassociate parts of the process execution context"), chỉ có khi bật feature `sched`[^nix-unshare], và `nix::sched::setns<Fd: AsFd>(fd: Fd, nstype: CloneFlags) -> Result<()>` ("reassociate thread with a namespace"), cũng cần feature `sched`[^nix-setns]. Chữ "thread" trong mô tả của `setns` đáng chú ý: nó cho thấy hàm tác động lên thread gọi, chứ không phải cả process.
+
+Docs của `nix` chỉ trỏ tới `unshare(2)`/`setns(2)` cho chi tiết, nên theo suy luận của người soạn, ngữ nghĩa là của kernel đúng như hai man page đó. Chẳng hạn `unshare(CloneFlags::CLONE_NEWPID)` vẫn không đưa process hiện tại vào namespace mới (mục 4). Và vì `setns` tác động lên *thread* gọi, chương trình Rust đa luồng muốn đổi mount hoặc user namespace phải xử lý cẩn thận (mục 3). Người soạn không chạy code Rust nào cho chương này nên không khẳng định kết quả chạy; ví dụ runtime container viết bằng Rust ở [chương 08](08-rust-trong-container.md).
 
 ## Tóm tắt
 
-- Namespace cô lập *tầm nhìn* vào tài nguyên toàn cục; 8 loại (cgroup, IPC, network, mount, PID, time, user, UTS), tạo bằng cờ `CLONE_NEW*`.
+- Namespace cô lập *tầm nhìn* vào tài nguyên toàn cục; 8 loại (cgroup, IPC, network, mount, PID, time, user, UTS), tạo bằng cờ `CLONE_NEW*`. `orders` và `billing` chung kernel nhưng mỗi bên một bản.
 - Trạng thái ở `/proc/<pid>/ns/*`: cùng inode thì cùng namespace; giữ fd/bind mount để namespace sống không cần process.
 - `clone` tạo con trong namespace mới, `unshare` chuyển chính caller, `setns` gia nhập namespace có sẵn; `unshare(1)`/`nsenter(1)` là hai lệnh shell làm việc tương tự.
 - Tạo namespace cần `CAP_SYS_ADMIN` trong hầu hết trường hợp (man page nêu thế; `clone(2)` liệt kê 6 loại, `unshare(2)` thêm time), riêng user namespace thì không; đi kèm `CLONE_NEWUSER` thì user namespace được tạo trước.
@@ -418,56 +500,56 @@ Crate `nix` bọc các system call trên. Ghim phiên bản docs.rs `nix 0.29.0`
 1. Kiểm hai process có cùng network namespace bằng cách nào?
 <details><summary>Đáp án</summary>
 
-So sánh `readlink /proc/<pid>/ns/net` (hoặc `st_dev`/`st_ino`): man page nêu rằng process cùng namespace có device ID và inode giống nhau và ứng dụng có thể kiểm bằng `stat`.[^ns-inode]
+So sánh `readlink /proc/<pid>/ns/net` (hoặc `st_dev`/`st_ino`): man page nêu rằng process cùng namespace có device ID và inode giống nhau và ứng dụng có thể kiểm bằng `stat`[^ns-inode].
 
 </details>
 
 2. Vì sao `unshare --pid bash` không làm `bash` thành PID 1, còn `unshare --pid --fork bash` thì có?
 <details><summary>Đáp án</summary>
 
-`unshare(CLONE_NEWPID)` không chuyển caller vào namespace mới; chỉ con đầu tiên tạo sau đó mới là PID 1; `--fork` làm chương trình là con đó.[^pid-unshare][^unshare-newpid][^unshare1-fork]
+`unshare(CLONE_NEWPID)` không chuyển caller vào namespace mới[^pid-unshare]. Chỉ con đầu tiên tạo sau đó mới là PID 1[^unshare-newpid]. `--fork` làm chương trình là con đó[^unshare1-fork].
 
 </details>
 
 3. Chuyện gì xảy ra nếu init của một PID namespace thoát?
 <details><summary>Đáp án</summary>
 
-Kernel `SIGKILL` mọi process còn lại trong namespace; `fork` vào namespace đó sau này fail `ENOMEM`.[^pid-initdie][^pid-forkfail]
+Kernel `SIGKILL` mọi process còn lại trong namespace[^pid-initdie]; `fork` vào namespace đó sau này fail `ENOMEM`[^pid-forkfail].
 
 </details>
 
 4. `kill -9 1` từ trong container (khi PID 1 là ứng dụng không cài handler) có giết được PID 1 không? Còn từ host?
 <details><summary>Đáp án</summary>
 
-Từ bên trong thì không (tín hiệu không có handler bị chặn, kể cả privileged); từ namespace tổ tiên thì `SIGKILL`/`SIGSTOP` được giao cưỡng bức.[^pid-sig][^pid-ancestor] Thí nghiệm 4 xác nhận trường hợp bên trong.
+Từ bên trong thì không: tín hiệu không có handler bị chặn, kể cả privileged[^pid-sig]. Từ namespace tổ tiên thì `SIGKILL`/`SIGSTOP` được giao cưỡng bức[^pid-ancestor]. Thí nghiệm 4 xác nhận trường hợp bên trong.
 
 </details>
 
 5. `ps` trong PID namespace mới vẫn liệt kê process của host. Vì sao, và sửa thế nào?
 <details><summary>Đáp án</summary>
 
-`/proc` hiển thị theo PID namespace của process đã mount nó; cần mount procfs mới (kèm mount namespace) — `unshare --mount-proc`.[^pid-proc][^pid-procmount][^unshare1-mountproc]
+`/proc` hiển thị theo PID namespace của process đã mount nó[^pid-proc]. Cần mount procfs mới (kèm mount namespace)[^pid-procmount]. `unshare --mount-proc` làm việc đó[^unshare1-mountproc].
 
 </details>
 
 6. Mount ở trong một mount namespace mới có hiện ra ở host không?
 <details><summary>Đáp án</summary>
 
-Mặc định không; trừ khi mount cha là shared và nằm cùng peer group, khi đó mount/umount lan truyền. `unshare(1)` mặc định đặt propagation thành private trong mount namespace mới để tránh điều đó.[^mnt-nopropagate][^mnt-shared][^unshare1-prop]
+Mặc định không[^mnt-nopropagate]. Trừ khi mount cha là shared và nằm cùng peer group, khi đó mount/umount lan truyền[^mnt-shared]. `unshare(1)` mặc định đặt propagation thành private trong mount namespace mới để tránh điều đó[^unshare1-prop].
 
 </details>
 
 7. `uid_map` có dòng `0 1000 1` nghĩa là gì? Ghi lần hai thì sao?
 <details><summary>Đáp án</summary>
 
-UID 0 trong namespace ↔ UID 1000 ở namespace kia, dải dài 1. Ghi lần hai: `EPERM`.[^user-mapfmt][^user-once]
+UID 0 trong namespace ↔ UID 1000 ở namespace kia, dải dài 1[^user-mapfmt]. Ghi lần hai: `EPERM`[^user-once].
 
 </details>
 
 8. "Root trong user namespace" có đổi được giờ hệ thống của host không? Vì sao?
 <details><summary>Đáp án</summary>
 
-Không; `CAP_SYS_TIME` (và nạp module, tạo device) chỉ có tác dụng ở user namespace gốc vì tài nguyên đó không thuộc namespace nào.[^user-global]
+Không; `CAP_SYS_TIME` (và nạp module, tạo device) chỉ có tác dụng ở user namespace gốc vì tài nguyên đó không thuộc namespace nào[^user-global].
 
 </details>
 
