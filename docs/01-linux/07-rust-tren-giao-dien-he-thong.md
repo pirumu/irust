@@ -2,21 +2,25 @@
 
 ## Bạn sẽ hiểu được gì
 
-1. **Q1.** Vì sao `std` có `RawFd`, `OwnedFd`, `BorrowedFd` cho cùng một con số, và `Drop` của chúng làm gì với `close(2)`? → mục 1
-2. **Q2.** `io::Error` mang gì từ `errno`; `raw_os_error`, `kind`, `last_os_error` khác nhau ra sao? → mục 2
-3. **Q3.** `Command::spawn` gọi `posix_spawn` hay `fork`+`exec`; điều kiện nào đẩy nó sang đường thứ hai; vì sao `pre_exec` là `unsafe`? → mục 3
-4. **Q4.** Bỏ `Child` mà không `wait` thì chuyện gì xảy ra; `Stdio` ánh xạ lên `dup2` thế nào? → mục 4
-5. **Q5.** Vì sao process Rust khởi động với `SIGPIPE` bị ignore còn process con thì không? → mục 5
+1. **Q1.** Số fd mà `thumbd` truyền qua lại giữa các hàm có thể bị đóng hai lần hoặc trỏ nhầm file. Vì sao `std` có `RawFd`, `OwnedFd`, `BorrowedFd` cho cùng một con số, và `Drop` của chúng làm gì với `close(2)`? → mục 1
+2. **Q2.** Khi `File::open` của `thumbd` lỗi, `io::Error` mang gì từ `errno`; `raw_os_error`, `kind`, `last_os_error` khác nhau ra sao? → mục 2
+3. **Q3.** `Command::spawn` chạy `convert` bằng `posix_spawn` hay `fork`+`exec`; điều kiện nào đẩy nó sang đường thứ hai; vì sao `pre_exec` là `unsafe`? → mục 3
+4. **Q4.** Handler bỏ `Child` mà không `wait` thì chuyện gì xảy ra; `Stdio` ánh xạ lên `dup2` thế nào? → mục 4
+5. **Q5.** Vì sao process Rust khởi động với `SIGPIPE` bị ignore, còn `convert` do nó spawn thì không? → mục 5
 6. **Q6.** Vì sao `env::args()` có thể panic, `OsString` khác `String` ở đâu, `set_var` vì sao `unsafe`? → mục 6
 7. **Q7.** Khi nào gọi `libc` trực tiếp, khi nào dùng `nix`/`rustix`? → mục 7
 
 ## Kiến thức cần trước
 
-[Chương 02](02-system-call.md) (`errno`, wrapper libc), [Chương 03](03-process.md) (`fork`/`exec`/`wait`, zombie), [Chương 04](04-file-descriptor-va-vfs.md) (fd, open file description, `O_CLOEXEC`, pipe), [Chương 05](05-signal.md) (`SIGPIPE`, async-signal-safe).
+Chương này đứng trên bốn chương trước: [Chương 02](02-system-call.md) (`errno`, wrapper libc), [Chương 03](03-process.md) (`fork`/`exec`/`wait`, zombie), [Chương 04](04-file-descriptor-va-vfs.md) (fd, open file description, `O_CLOEXEC`, pipe) và [Chương 05](05-signal.md) (`SIGPIPE`, async-signal-safe).
 
-Chương này **thuần Rust**: không dạy lại cơ chế kernel mà chỉ ra kiểu/hàm nào của `std` đứng trên cơ chế nào và bảo đảm gì; chỗ cần nhắc cơ chế OS thì chỉ vài câu rồi trỏ sang chương chính. Ví dụ chạy trong container Linux aarch64 của repo (rustc 1.95.0, chạy bằng root); kết quả *quan sát* được ghi rõ là quan sát, khác với bảo đảm của docs.
+Chương này **thuần Rust** nên không dạy lại cơ chế kernel. Nó chỉ chỉ ra kiểu và hàm nào của `std` đứng trên cơ chế nào, và `std` hứa gì với bạn; chỗ cần nhắc OS thì vài câu rồi trỏ về chương chính. Ví dụ chạy trong container Linux aarch64 của repo (rustc 1.95.0, chạy bằng root). Kết quả *quan sát* được ghi rõ là quan sát, khác với điều docs bảo đảm.
+
+**Ví dụ xuyên chương: `thumbd`.** Hãy hình dung `thumbd`, một service Rust tạo thumbnail (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Client upload một ảnh; service ghi ảnh vào file tạm, gọi chương trình ngoài `convert` để thu nhỏ, đọc kết quả từ stdout của `convert` rồi trả về. Cấu hình lấy từ biến môi trường, log in ra stdout và stdout được nối vào một log shipper. Vài worker thread xử lý request song song. Mỗi mục dưới đây bắt đầu bằng một chỗ mà `thumbd` đụng vào hệ điều hành qua `std`, rồi mới xuống cơ chế.
 
 ## Bản đồ: khái niệm hệ điều hành → kiểu Rust
+
+Bảng dưới nối những thứ `thumbd` chạm vào với kiểu Rust đứng trên chúng; mỗi dòng có mục giải thích riêng.
 
 | Khái niệm | Kiểu / hàm Rust | Điều cần nhớ |
 |---|---|---|
@@ -27,22 +31,24 @@ Chương này **thuần Rust**: không dạy lại cơ chế kernel mà chỉ ra
 | `errno` | `io::Error` | `last_os_error()` đọc `errno`[^rs-last-os-error] |
 | tạo process con (`posix_spawn` hoặc `fork`+`exec`), `wait` | `Command`, `Child`, `ExitStatus` | Builder; không tự `wait`[^rs-child-zombie] |
 | `SIGPIPE` | runtime của `std` | Đặt `SIG_IGN` lúc khởi động[^rs-rt-sigpipe] |
-| `argv`, `environ` | `env::args_os`, `env::vars_os` | Không kiểm Unicode[^env-args-os]; `args()`/`vars()` thì panic nếu không phải Unicode[^env-args][^env-vars-panic] |
+| `argv`, `environ` | `env::args_os`, `env::vars_os` | `args_os` không kiểm Unicode[^env-args-os]; `args()` thì panic nếu gặp đối số không phải Unicode[^env-args] |
 | gọi thẳng libc | `unsafe extern "C"`, crate `libc` | Compiler không kiểm được hàm C có tuân quy tắc của Rust hay không[^rs-unsafe-extern] |
 
 ## 1. Fd trong Rust: `OwnedFd`, `BorrowedFd`, `RawFd` và `Drop` (Q1)
 
-> **Trả lời ngắn.** Fd chỉ là một con số, và sau `close` số đó có thể được cấp lại cho file khác[^close-desc]. Vì vậy `std` tách ba vai: `OwnedFd` là chủ sở hữu, tự đóng fd khi bị hủy (drop) và bảo đảm không ai khác đóng nó[^rs-ownedfd]; `BorrowedFd<'fd>` là người mượn, bị buộc không sống lâu hơn chủ (lifetime)[^rs-borrowedfd]; `RawFd` chỉ là số nguyên `c_int`[^rs-rawfd]. Nếu `close` lỗi lúc drop thì lỗi bị bỏ qua[^rs-drop-close].
+> **Trả lời ngắn.** Fd chỉ là một con số, và sau `close` số đó có thể được cấp lại cho file khác[^close-desc]. Vì vậy `std` chia fd làm ba vai. `OwnedFd` là chủ: nó tự đóng fd khi bị hủy (drop) và bảo đảm không ai khác đóng fd đó[^rs-ownedfd]. `BorrowedFd<'fd>` là người mượn: lifetime buộc nó không sống lâu hơn chủ[^rs-borrowedfd]. `RawFd` chỉ là số nguyên `c_int`[^rs-rawfd]. Lỗi `close` lúc drop bị bỏ qua[^rs-drop-close].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): số ghế trong rạp: vé ghi "ghế 7" vẫn còn khi người ngồi đã đi và ghế đã xếp cho người khác. `OwnedFd` là người đang ngồi (được dùng ghế và được rời ghế), `BorrowedFd` là người được ngồi nhờ trong lúc chủ ghế còn đó, `RawFd` chỉ là tờ vé ghi số.
+*Với `thumbd`.* Mỗi upload làm `thumbd` mở vài file: ảnh gốc, file tạm chứa thumbnail, socket của client. Các worker thread chạy song song nên fd của request này xen lẫn fd của request kia trong cùng một bảng fd. Nếu code cầm fd như một số `i32` trần thì "ai đóng, đóng mấy lần, số này còn là file của mình không" trở thành chuyện tự nhớ. Mục này cho thấy `std` đẩy câu hỏi đó cho kiểu dữ liệu và borrow checker lo.
 
-**Vấn đề: fd chỉ là số, và số bị cấp lại**
+### 1.1 Vấn đề: fd chỉ là số, và số bị cấp lại
 
-Fd là chỉ số vào bảng fd của process[^open-fd]; `open` trả số nhỏ nhất chưa dùng[^open-lowest]; sau `close` số đó có thể được dùng lại[^close-desc] (chi tiết: [Chương 04, mục 5](04-file-descriptor-va-vfs.md)). Docs `std::io` nói thẳng hậu quả: fd đã đóng có thể được cấp lại, nên chủ cũ của số đó giờ đang thao tác nhầm file[^rs-iosafety-realloc]. Ví dụ (suy luận của người soạn): hai đoạn code cùng tin mình sở hữu fd 7, đoạn thứ nhất đóng nó, một `open` khác nhận lại số 7, thì đoạn thứ hai sẽ đọc/ghi nhầm file — giống use-after-free nhưng cho tài nguyên kernel.
+Fd là chỉ số vào bảng fd của process[^open-fd]. `open` trả số nhỏ nhất chưa dùng[^open-lowest]. Sau `close`, số đó có thể được dùng lại[^close-desc] (chi tiết ở [Chương 04, mục 5](04-file-descriptor-va-vfs.md)).
 
-Quan sát một lần chạy (khớp quy tắc "số nhỏ nhất chưa dùng" ở trên):
+Giả sử hai đoạn code của `thumbd` cùng tin rằng mình sở hữu fd 7. Đoạn thứ nhất đóng nó. Một request khác vừa `open` file và nhận đúng số 7. Đoạn thứ hai vẫn ghi vào "fd 7" của mình, tức ghi nhầm vào file của request kia. Hậu quả là chủ cũ của số fd giờ đang làm việc trên nhầm file[^rs-iosafety-realloc]. Nó giống use-after-free, chỉ khác là xảy ra với tài nguyên kernel (ví dụ và so sánh là suy luận của người soạn).
+
+Một lần chạy cho thấy số fd bị dùng lại đúng như quy tắc "số nhỏ nhất chưa dùng" ở trên (quan sát):
 
 ```rust
 let f = File::open("/etc/hostname").unwrap();
@@ -52,9 +58,15 @@ let g = File::open("/etc/passwd").unwrap();
 println!("{} {}", n, g.as_raw_fd());   // 3 3  (số fd được dùng lại)
 ```
 
-Giải pháp là kỷ luật *I/O safety* mà docs `std::io` đặt ra, tương đương với kỷ luật an toàn bộ nhớ của Rust: fd có thể được **sở hữu độc quyền**[^rs-iosafety-disc] — không code nào khác được truy cập, chủ được dùng và đóng bất kỳ lúc nào, và kiểu sở hữu thường đóng fd trong `drop`[^rs-iosafety-own]. Fd cũng có thể được **mượn**: quyền thao tác tạm thời, fd không bị đóng trong suốt thời gian mượn, nhưng không có quyền đóng[^rs-iosafety-borrow]. Hệ quả: một hàm *safe* nhận số nguyên rồi coi nó là fd là **unsound**[^rs-iosafety-unsound] — nghĩa là người gọi hàm safe đó có thể phá bảo đảm an toàn mà không cần viết `unsafe` (cách giải nghĩa "unsound" là của người soạn).
+### 1.2 Lời giải: kỷ luật I/O safety
 
-**`OwnedFd`, `BorrowedFd`, `RawFd`, `AsFd`**
+Rust xử lý chuyện này bằng một kỷ luật mà docs `std::io` gọi là *I/O safety*, tương đương kỷ luật an toàn bộ nhớ: fd có thể được **sở hữu độc quyền**[^rs-iosafety-disc]. Sở hữu độc quyền nghĩa là không code nào khác được đụng vào fd, chủ thì được dùng và đóng nó bất kỳ lúc nào, và kiểu sở hữu thường đóng fd trong `drop`[^rs-iosafety-own].
+
+Fd cũng có thể được **mượn**: người mượn có quyền thao tác tạm thời, fd không bị đóng trong suốt thời gian mượn, nhưng người mượn không có quyền đóng[^rs-iosafety-borrow].
+
+Từ đó có một hệ quả cho hàm safe. Hàm nhận một số nguyên thường, coi nó là fd rồi thao tác trên đó là **unsound**[^rs-iosafety-unsound]. Nói theo cách của người soạn: người gọi một hàm như vậy phá được bảo đảm an toàn mà không cần viết `unsafe`.
+
+### 1.3 `OwnedFd`, `BorrowedFd`, `RawFd` và các trait chuyển đổi
 
 ```mermaid
 flowchart LR
@@ -64,19 +76,27 @@ flowchart LR
   R2 -- "unsafe from_raw_fd()" --> F
 ```
 
-- **`OwnedFd`** đóng fd khi drop và bảo đảm không ai khác đóng nó[^rs-ownedfd]. Nó `repr(transparent)` như fd của host, dùng được trong FFI (giao tiếp với code viết bằng ngôn ngữ khác, thường là C) khi fd được trao đi hoặc trả về như giá trị sở hữu, và không bao giờ bằng `-1`[^rs-ownedfd-repr].
-- **`BorrowedFd<'fd>`**: lifetime buộc nó vào thứ sở hữu fd; trong lifetime đó không ai đóng được fd[^rs-borrowedfd]. Chỗ canh là borrow checker, thành phần của compiler so sánh phạm vi sống của các borrow lúc biên dịch[^book-borrowck]; chữ ký `as_fd(&self) -> BorrowedFd<'_>` gắn lifetime của kết quả vào `&self`[^rs-asfd-sig] (suy luận của người soạn: nên không thể drop chủ khi còn người mượn).
-- **`AsFd::as_fd`** mượn fd từ một đối tượng[^rs-asfd]; **`AsRawFd::as_raw_fd`** lấy số mà không chuyển quyền sở hữu, và docs chỉ bảo đảm fd còn hợp lệ chừng nào đối tượng gốc chưa bị hủy[^rs-asrawfd] — số lấy ra không mang lifetime nên compiler không canh giúp, bạn tự chịu trách nhiệm (suy luận của người soạn).
-- **`FromRawFd::from_raw_fd`** thường dùng để *nhận quyền sở hữu*: đối tượng mới đóng fd khi ra khỏi scope[^rs-fromrawfd]. Điều kiện: fd phải là fd được sở hữu, trong đó phải đang mở[^rs-fromraw-safety]. Compiler không kiểm được điều đó nên hàm là `unsafe`; gọi nó ngoài khối `unsafe` bị rustc từ chối với lỗi `E0133`[^rs-e0133] (lý do thiết kế là nhận xét của người soạn).
-- **`IntoRawFd::into_raw_fd`** tiêu thụ đối tượng và trao quyền sở hữu cho bạn; bạn phải tự đóng[^rs-intoraw].
+`OwnedFd` đóng fd khi drop và bảo đảm không ai khác đóng nó[^rs-ownedfd]. Hàm nào của `thumbd` muốn giữ fd lâu dài, chẳng hạn worker giữ file tạm suốt một request, nên nhận hoặc giữ kiểu sở hữu (nhận xét của người soạn).
 
-**`Drop` đóng fd và bỏ qua lỗi**
+`BorrowedFd<'fd>` dành cho hàm chỉ cần dùng fd một lúc. Lifetime buộc nó vào thứ sở hữu fd, và trong lifetime đó không ai đóng được fd[^rs-borrowedfd]. Người canh là borrow checker, thành phần của compiler so sánh phạm vi sống của các borrow lúc biên dịch[^book-borrowck]. Chữ ký `as_fd(&self) -> BorrowedFd<'_>` gắn lifetime của kết quả vào `&self`[^rs-asfd-sig], nên không thể drop chủ khi còn người mượn (suy luận của người soạn).
 
-`File` được đóng khi ra khỏi scope; lỗi lúc đóng bị `Drop` bỏ qua, và docs chỉ `sync_all` nếu cần tự xử lý các lỗi đó[^rs-file]. `sync_all` thường đắt hơn việc đóng bằng drop, vì drop không bắt buộc chờ đến khi dữ liệu xuống filesystem[^rs-sync-all]. Trong source, `Drop` của `OwnedFd` gọi `libc::close` và bỏ kết quả[^rs-drop-close-call], kèm comment ghi rõ lỗi bị bỏ qua[^rs-drop-close]. Với WAL hay file cần độ bền, phải gọi `sync_all()` và kiểm lỗi (nhận xét của người soạn).
+`AsFd::as_fd` là cách mượn fd từ một đối tượng[^rs-asfd]. `AsRawFd::as_raw_fd` thì lấy số trần mà không chuyển quyền sở hữu, và docs chỉ bảo đảm fd còn hợp lệ chừng nào đối tượng gốc chưa bị hủy[^rs-asrawfd]. Số lấy ra không mang lifetime nên compiler không canh giúp; bạn tự chịu trách nhiệm (suy luận của người soạn).
+
+Chiều ngược lại, `FromRawFd::from_raw_fd` thường dùng để *nhận quyền sở hữu* một fd: đối tượng mới sẽ đóng fd khi ra khỏi scope[^rs-fromrawfd]. Điều kiện là fd phải là fd được sở hữu, và đặc biệt phải đang mở[^rs-fromraw-safety]. Compiler không kiểm được điều đó nên hàm là `unsafe`; gọi nó ngoài khối `unsafe` thì rustc từ chối với lỗi `E0133`[^rs-e0133] (lý do thiết kế là nhận xét của người soạn).
+
+`IntoRawFd::into_raw_fd` tiêu thụ đối tượng và trao quyền sở hữu cho bạn; từ đó bạn phải tự đóng fd[^rs-intoraw].
+
+### 1.4 `Drop` đóng fd và bỏ qua lỗi
+
+`File` được đóng khi ra khỏi scope. Lỗi lúc đóng bị `Drop` bỏ qua, và nếu cần tự xử lý các lỗi đó thì phải dùng `sync_all`[^rs-file]. `sync_all` thường đắt hơn việc đóng bằng drop, vì drop không bắt buộc chờ đến khi dữ liệu xuống filesystem[^rs-sync-all]. Trong source, `Drop` của `OwnedFd` gọi `libc::close` rồi bỏ kết quả[^rs-drop-close-call]. Comment ngay đó ghi rõ lỗi bị bỏ qua[^rs-drop-close].
+
+Với `thumbd`: ghi xong thumbnail rồi `drop(file)` không cho bạn biết dữ liệu đã xuống đĩa chưa. Nếu file cần độ bền (WAL, kết quả không được mất) thì phải gọi `sync_all()` và kiểm lỗi (nhận xét của người soạn).
 
 <details><summary>Đi sâu: <code>From</code> giữa <code>File</code>/<code>OwnedFd</code>/<code>Stdio</code>, đóng hai lần, <code>Read</code>/<code>Write</code>, close-on-exec</summary>
 
-Trang docs của `File` liệt kê `impl From<OwnedFd> for File`[^file-from-owned] và `impl From<File> for OwnedFd`[^file-into-owned]; `Stdio` có `impl From<OwnedFd> for Stdio`[^stdio-from-owned]. Đóng hai lần để thấy hậu quả:
+**Chuyển đổi giữa các kiểu.** Trang docs của `File` liệt kê `impl From<OwnedFd> for File`[^file-from-owned]. Chiều ngược lại cũng có: `impl From<File> for OwnedFd`[^file-into-owned]. `Stdio` nhận `OwnedFd` qua `impl From<OwnedFd> for Stdio`[^stdio-from-owned]. Riêng `OwnedFd` còn `repr(transparent)` như fd của host, nên dùng được trong FFI (giao tiếp với code viết bằng ngôn ngữ khác, thường là C) khi fd được trao đi hoặc trả về như giá trị sở hữu, và nó không bao giờ bằng `-1`[^rs-ownedfd-repr].
+
+**Đóng hai lần.** Đoạn dưới cho thấy hậu quả:
 
 ```rust
 let raw = File::open("/etc/hostname").unwrap().into_raw_fd();
@@ -85,43 +105,47 @@ let r = unsafe { close(raw) };                    // đóng lần hai qua FFI
 // close again -> -1, Os { code: 9, kind: Uncategorized, message: "Bad file descriptor" }
 ```
 
-Ở đây lần đóng thứ hai chỉ gặp `EBADF` vì chưa ai nhận lại số fd; nếu thread khác đã `open` xen giữa, nó sẽ đóng file của người khác (suy luận của người soạn, từ phần Vấn đề ở mục 1).
+Ở đây lần đóng thứ hai chỉ gặp `EBADF` vì chưa ai nhận lại số fd. Nếu một thread khác đã `open` xen vào giữa thì nó sẽ đóng file của người khác (suy luận của người soạn, từ §1.1).
 
-Comment trong source giải thích vì sao `Drop` bỏ qua lỗi chứ không thử lại khi `close` bị ngắt (`EINTR`, xem [Chương 05, mục 5](05-signal.md)): bỏ qua lỗi là chấp nhận được vì một số Unix lớn, trong đó có Linux, luôn đóng fd kể cả khi `close()` bị ngắt, và tình huống này hiếm; còn thử lại trên implementation không tuân thủ POSIX có thể có hậu quả rất tệ vì có thể đóng nhầm fd khác[^rs-drop-close-why].
+**Vì sao `Drop` không thử lại khi `close` bị ngắt.** Comment trong source giải thích: `close()` có thể bị ngắt (`EINTR`, xem [Chương 05, mục 5](05-signal.md)), nhưng bỏ qua lỗi vẫn chấp nhận được vì một số Unix lớn, trong đó có Linux, luôn đóng fd kể cả khi `close()` bị ngắt, và tình huống này vốn hiếm. Nếu thử lại trên một implementation không tuân thủ POSIX thì hậu quả có thể rất tệ, vì có thể đóng nhầm một fd khác[^rs-drop-close-why].
 
-Sở hữu độc quyền một fd không có nghĩa sở hữu độc quyền open file description bên dưới ([Chương 04, mục 1](04-file-descriptor-va-vfs.md)): docs ví fd như `Arc`, nên khi nhận một fd sở hữu bạn không biết còn fd nào khác trỏ cùng kernel object hay không[^rs-iosafety-arc]; theo cách ví đó, `OwnedFd` giống `Arc` còn `BorrowedFd<'a>` giống `&'a Arc`[^rs-iosafety-arc2].
+**Sở hữu fd không có nghĩa sở hữu độc quyền open file description.** Docs ví fd như `Arc`: khi nhận một fd sở hữu, bạn không biết còn fd nào khác trỏ cùng kernel object hay không[^rs-iosafety-arc]. Theo cách ví đó, `OwnedFd` giống `Arc` còn `BorrowedFd<'a>` giống `&'a Arc`[^rs-iosafety-arc2]. Quan hệ giữa fd và open file description nằm ở [Chương 04, mục 1](04-file-descriptor-va-vfs.md).
 
-**`Read`/`Write`, buffer và close-on-exec**
+**`Read`/`Write` và buffer.** `Write::write` chỉ *cố* ghi và trả số byte đã ghi[^rs-write]. `Read::read` cố kéo byte vào buffer cho sẵn[^rs-read]. Vì thế mới có `write_all` và `read_exact` (nhận xét của người soạn). `File` không buffer đọc/ghi, và docs khuyên bọc `BufReader`/`BufWriter` khi gọi nhiều lần nhỏ[^rs-file-nobuf]. Lý do là giao diện theo byte có thể kém hiệu quả khi phải gọi OS gần như liên tục[^rs-bufwriter]. Mỗi lời gọi `read`/`write` trên `File` trần thường là một syscall (suy luận của người soạn).
 
-`Write::write` chỉ *cố* ghi và trả số byte đã ghi[^rs-write]; `Read::read` cố kéo byte vào buffer cho sẵn[^rs-read]; vì thế có `write_all`/`read_exact` (nhận xét của người soạn). `File` không buffer đọc/ghi, và docs khuyên bọc `BufReader`/`BufWriter` khi gọi nhiều lần nhỏ[^rs-file-nobuf], vì giao diện theo byte có thể kém hiệu quả khi gọi OS gần như liên tục[^rs-bufwriter]; mỗi lời gọi `read`/`write` trên `File` trần thường là một syscall (suy luận của người soạn).
+**Close-on-exec.** `File::open` đặt `O_CLOEXEC` ngay trong lời gọi `open`: `flags` trong source bắt đầu bằng `libc::O_CLOEXEC`[^src-open-cloexec]. Cờ này cho phép tránh thêm một `fcntl(F_SETFD)` riêng[^open-cloexec]. Đặt cờ cùng lúc với `open` là thiết yếu trong chương trình đa thread, vì một `fcntl` riêng không loại được race với thread khác đang `fork`+`execve`[^open-cloexec-mt] (cơ chế đầy đủ: [Chương 04, mục 4](04-file-descriptor-va-vfs.md)). Fd đánh dấu close-on-exec bị đóng khi `exec` thành công[^exec-fds]. Nhờ vậy khi `thumbd` spawn `convert`, các file do `std` mở (kể cả ảnh của request khác) không còn mở trong `convert` (nhận xét của người soạn).
 
-`File::open` đặt `O_CLOEXEC` ngay trong lời gọi `open`: `flags` trong source bắt đầu bằng `libc::O_CLOEXEC`[^src-open-cloexec]. Cờ này cho phép tránh thêm một `fcntl(F_SETFD)` riêng[^open-cloexec], và đặt cờ cùng lúc với `open` là thiết yếu trong chương trình đa thread vì `fcntl` riêng không loại được race với thread khác đang `fork`+`execve`[^open-cloexec-mt] (cơ chế đầy đủ: [Chương 04, mục 4](04-file-descriptor-va-vfs.md)). Fd đánh dấu close-on-exec bị đóng khi `exec` thành công[^exec-fds], nên fd do `std` mở không còn mở trong chương trình mới. Nhân đôi fd (`OwnedFd::try_clone`, cài bằng `try_clone_to_owned` trong source) dùng `F_DUPFD_CLOEXEC` để vừa nhân đôi vừa đặt cờ nguyên tử[^src-dupfd]; fd mới chia sẻ cùng open file description, tức cùng offset[^rs-ownedfd-clone][^dup-share], nhưng không chia sẻ cờ close-on-exec[^dup-flags].
+Nhân đôi fd (`OwnedFd::try_clone`, cài bằng `try_clone_to_owned` trong source) dùng `F_DUPFD_CLOEXEC` để vừa nhân đôi vừa đặt cờ một cách nguyên tử[^src-dupfd]. Fd mới trỏ cùng open file description với fd cũ[^rs-ownedfd-clone]. Vì cùng description nên hai fd chia sẻ offset và file status flag[^dup-share]. Riêng cờ close-on-exec thì mỗi fd một cờ[^dup-flags].
 
-`std` còn mở lại stdin/stdout/stderr nếu chúng bị đóng lúc khởi động, để `stdout()` không vô tình dùng fd của tài nguyên khác[^rs-std-fds] — cùng bài toán fd bị cấp lại; source ghi việc này không bảo đảm chạy khi Rust được gọi từ bên ngoài[^rs-init-notrun].
+**Stdio bị đóng lúc khởi động.** `std` mở lại stdin/stdout/stderr nếu chúng bị đóng lúc khởi động, để `stdout()` không vô tình dùng fd của một tài nguyên khác[^rs-std-fds]. Đây cũng là bài toán fd bị cấp lại. Source ghi việc này không bảo đảm chạy khi Rust được gọi từ bên ngoài[^rs-init-notrun].
 
 </details>
 
-**Quay lại Q1:** `OwnedFd` đóng khi drop, `BorrowedFd` mượn có lifetime, `RawFd` chỉ là số không kèm bảo đảm nào; lỗi `close` bị bỏ qua.
+**Quay lại Q1:** `OwnedFd` đóng khi drop, `BorrowedFd` mượn có lifetime, `RawFd` chỉ là số không kèm bảo đảm nào; lỗi `close` bị bỏ qua, nên `thumbd` cần độ bền thì phải `sync_all`.
 
 ## 2. `io::Error`, `errno` và `ErrorKind` (Q2)
 
-> **Trả lời ngắn.** `io::Error` là kiểu lỗi I/O của `std`: phần lớn đến từ hệ điều hành, nhưng cũng có thể tự dựng với một `ErrorKind`[^rs-error-origin]. `raw_os_error()` trả `Some(errno)` — mã lỗi mà OS để lại — khi lỗi được dựng từ mã đó (`last_os_error`, `from_raw_os_error`), còn lại trả `None`[^rs-raw-os-error]; `kind()` cho một danh mục lỗi chung (`ErrorKind`)[^errorkind-desc]; `last_os_error()` đọc `errno` hiện tại nên phải gọi ngay sau lời gọi hệ thống[^rs-last-os-error].
+> **Trả lời ngắn.** `io::Error` là kiểu lỗi I/O của `std`. Phần lớn lỗi đến từ hệ điều hành, nhưng bạn cũng tự dựng được một lỗi với `ErrorKind` tùy chọn[^rs-error-origin]. `raw_os_error()` trả `Some(errno)` (mã lỗi mà OS để lại) khi lỗi được dựng từ mã đó, bằng `last_os_error` hoặc `from_raw_os_error`; trường hợp khác nó trả `None`[^rs-raw-os-error]. `kind()` cho một danh mục lỗi chung (`ErrorKind`)[^errorkind-desc]. Còn `last_os_error()` đọc `errno` hiện tại nên phải gọi ngay sau lời gọi hệ thống[^rs-last-os-error].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `errno` là tờ giấy nháp thread-local, lời gọi sau ghi đè được; `io::Error` là bản chụp phải chụp ngay.
+*Với `thumbd`.* Khi handler mở ảnh gốc, `File::open` có thể lỗi vì những lý do rất khác nhau: file không tồn tại, không có quyền đọc, đĩa hỏng. Mỗi lý do cần một phản ứng riêng: trả 404 cho client, hay trả 500 và ghi log (nhận xét của người soạn). `io::Error` đưa cho bạn hai thứ để làm việc đó: `kind()` để rẽ nhánh, và `raw_os_error()` để log đúng `errno` gốc.
 
-**Mô hình**
+### 2.1 `errno` và `io::Error`
 
-`errno` là mã lỗi thread-local, chỉ có nghĩa ngay sau lời gọi báo lỗi, và hàm thành công vẫn được đổi nó[^errno-signif][^errno-thread] (nguồn gốc của `errno`: [Chương 02, mục 3](02-system-call.md)). `io::Error` là kiểu lỗi I/O của `std`: phần lớn đến từ OS, nhưng có thể tự chế với một `ErrorKind`[^rs-error-origin]. Ba cách nhìn:
+`errno` là mã lỗi mà OS để lại sau một lời gọi hệ thống. Nó chỉ có nghĩa ngay sau lời gọi báo lỗi, còn hàm thành công vẫn được phép đổi nó[^errno-signif]. Mỗi thread có một bản `errno` riêng[^errno-thread] (nguồn gốc của `errno`: [Chương 02, mục 3](02-system-call.md)).
 
-- `raw_os_error()` → `Option<RawOsError>`: `Some` nếu tạo bằng `last_os_error` hoặc `from_raw_os_error`, ngược lại `None`[^rs-raw-os-error].
-- `kind()` → `ErrorKind`, một danh sách danh mục lỗi chung[^errorkind-desc]; với lỗi từ OS, giá trị này được suy ra từ mã lỗi của hệ thống[^rs-error-kind]. Enum `#[non_exhaustive]`, `match` phải có nhánh `_`[^errorkind-nonex].
-- `Display`/`Debug`: ví dụ `No such file or directory (os error 2)`; chuỗi lấy từ `strerror_r`[^src-strerror].
+`io::Error` gói thông tin đó lại theo ba góc nhìn:
 
-**`last_os_error` phải gọi ngay**
+- `raw_os_error()` trả `Option<RawOsError>`. Nó là `Some` nếu lỗi được tạo bằng `last_os_error` hoặc `from_raw_os_error`, ngược lại là `None`[^rs-raw-os-error].
+- `kind()` trả `ErrorKind`, một danh sách các danh mục lỗi chung[^errorkind-desc]. Với lỗi từ OS, giá trị này được suy ra từ mã lỗi của hệ thống[^rs-error-kind]. Enum này là `#[non_exhaustive]`, nên `match` luôn phải có nhánh `_`[^errorkind-nonex].
+- `Display`/`Debug` in ra chuỗi như `No such file or directory (os error 2)`; chuỗi này lấy từ `strerror_r`[^src-strerror].
 
-`Error::last_os_error()` đọc `errno` và dựng `io::Error`; docs yêu cầu gọi *ngay sau* lời gọi platform, nếu không trạng thái lỗi là không xác định (*indeterminate*)[^rs-last-os-error]. Trong `std`, mẫu này nằm trong `cvt`: nếu kết quả là `-1` thì `Err(io::Error::last_os_error())`[^rs-cvt]; `cvt_r` thêm vòng lặp thử lại khi `EINTR`[^rs-cvt-r] — xử lý điều [Chương 05, mục 5](05-signal.md) nói về syscall bị signal ngắt[^signal-eintr]; `ErrorKind::Interrupted` được docs mô tả là có thể retry[^errorkind-intr]. Vì sao thiết kế thế (nhận xét của người soạn): quy ước C "trả `-1` rồi đọc biến thread-local" dễ bị chen ngang bởi một lời gọi khác; `cvt` đọc `errno` ngay tại chỗ nên không có code nào chen vào.
+### 2.2 `last_os_error` phải gọi ngay
+
+`Error::last_os_error()` đọc `errno` rồi dựng `io::Error`. Nếu không gọi nó *ngay sau* lời gọi platform thì trạng thái lỗi là không xác định (*indeterminate*)[^rs-last-os-error]. Lý do (nhận xét của người soạn): quy ước của C là hàm trả `-1` rồi bạn đọc biến thread-local, và nếu giữa hai bước đó có lời gọi khác chen vào thì `errno` đã bị ghi đè.
+
+`std` tránh chuyện này bằng hàm `cvt`: nếu kết quả là `-1` thì trả ngay `Err(io::Error::last_os_error())`[^rs-cvt]. Vì `cvt` đọc `errno` tại chỗ nên không có code nào chen vào được. `cvt_r` thêm một vòng lặp thử lại khi gặp `EINTR`[^rs-cvt-r]. Đó là cách `std` xử lý chuyện syscall bị signal ngắt mà [Chương 05, mục 5](05-signal.md) nói đến[^signal-eintr]. Phía `ErrorKind`, docs mô tả `Interrupted` là loại thao tác thường retry được[^errorkind-intr].
 
 <details><summary>Đi sâu: quan sát lỗi trên Linux và <code>decode_error_kind</code></summary>
 
@@ -134,25 +158,23 @@ read_dir("/etc/passwd")     -> Not a directory (os error 20)           kind=NotA
 ghi vào pipe mất đầu đọc    -> Broken pipe (os error 32)               kind=BrokenPipe raw=Some(32)
 ```
 
-`kind` suy ra từ `errno` bằng `decode_error_kind`, một `match` trên hằng `libc::E*` (ví dụ `EACCES | EPERM => PermissionDenied`)[^src-decode-kind]; số lỗi ngoài bảng rơi vào nhánh cuối `_ => Uncategorized`[^src-decode-fallback]. Đó là lý do `EBADF` ở thí nghiệm đóng hai lần (mục 1) in `kind: Uncategorized` (quan sát trên 1.95.0, cộng với việc người soạn không thấy `EBADF` trong bảng `decode_error_kind`; chi tiết cài đặt có thể đổi). Khi cần phân biệt một `errno` mà `ErrorKind` không có, so `raw_os_error() == Some(libc::EBADF)` (nhận xét của người soạn).
+`kind` được suy ra từ `errno` bằng `decode_error_kind`, một `match` trên các hằng `libc::E*` (ví dụ `EACCES | EPERM => PermissionDenied`)[^src-decode-kind]. Số lỗi nào ngoài bảng thì rơi vào nhánh cuối `_ => Uncategorized`[^src-decode-fallback]. Đó là lý do `EBADF` ở thí nghiệm đóng hai lần (§1) in `kind: Uncategorized` (quan sát trên 1.95.0, cộng với việc người soạn không thấy `EBADF` trong bảng `decode_error_kind`; đây là chi tiết cài đặt, có thể đổi). Khi cần phân biệt một `errno` mà `ErrorKind` không có, hãy so `raw_os_error() == Some(libc::EBADF)` (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q2:** `raw_os_error` giữ `errno`, `kind` phân loại, `last_os_error` phải đọc ngay.
+**Quay lại Q2:** `raw_os_error` giữ `errno` để log, `kind` phân loại để `thumbd` chọn 404 hay 500, và `last_os_error` phải đọc ngay.
 
 ## 3. `Command::spawn`: `posix_spawn`, `fork`+`exec` và `pre_exec` (Q3)
 
-> **Trả lời ngắn.** Khi nền tảng hỗ trợ, `Command::spawn` thử `posix_spawn` trước — hàm libc gộp `fork` và `exec` thành một lời gọi, kèm vài việc dọn dẹp trong con[^posix-spawn-desc]. Nó rơi xuống `fork`+`exec` thủ công khi đặt uid/gid, groups, chroot, có closure `pre_exec` (đoạn code do bạn gắn vào để chạy trong con), hoặc `env` đổi `PATH` với program không phải đường dẫn[^rs-spawn-first][^rs-spawn-conds] (còn vài điều kiện khác ở phần Giải thích). `pre_exec` là `unsafe` vì closure chạy ở process con giữa `fork` và `exec`, trong môi trường hạn chế mà compiler không kiểm được[^rs-preexec-safety][^cmdext-sig].
+> **Trả lời ngắn.** Khi nền tảng hỗ trợ, `Command::spawn` thử `posix_spawn` trước. Đó là hàm libc gộp `fork` và `exec` thành một lời gọi, kèm vài việc dọn dẹp trong process con[^posix-spawn-desc]. Nó chuyển sang `fork`+`exec` thủ công khi bạn đặt uid hoặc gid, groups, chroot, gắn closure `pre_exec` (đoạn code của bạn chạy trong con), hoặc đổi `PATH` trong `env` cho program không phải đường dẫn[^rs-spawn-conds]. `pre_exec` là `unsafe` vì closure chạy ở process con giữa `fork` và `exec`, trong một môi trường hạn chế mà compiler không kiểm được[^rs-preexec-safety]. Vài điều kiện nữa nằm ở phần Đi sâu.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): dịch vụ giao hàng có sẵn tùy chọn (`posix_spawn`) so với tự lái và chèn việc tùy ý giữa đường (`pre_exec`).
+*Với `thumbd`.* `convert` xử lý ảnh do người dùng gửi, nên ta muốn nó chạy với uid ít quyền và có giới hạn tài nguyên, chẳng hạn bằng một closure `pre_exec` (nhận xét của người soạn). Mỗi lựa chọn như vậy đổi cách `std` tạo process con: có cách `std` dùng `posix_spawn`, có cách buộc nó tự `fork` rồi `exec`. Mục này chỉ ra lựa chọn nào dẫn tới đường nào, và vì sao `pre_exec` đòi `unsafe`.
 
-**`posix_spawn` hay `fork`+`exec`: đọc source 1.95.0**
+### 3.1 `posix_spawn` hay `fork`+`exec`: đọc source 1.95.0
 
-`Command::spawn` (file `library/std/src/sys/process/unix/unix.rs`) **thử `posix_spawn` trước**: nếu `self.posix_spawn(...)` trả `Some` thì dùng ngay[^rs-spawn-first]. Hàm này chỉ có thân thật trên một danh sách nền tảng (Linux với libc gnu và musl, FreeBSD, illumos, Apple, cygwin, nto…[^src-spawn-platforms]); nơi khác nó là bản rỗng luôn trả `None`[^src-spawn-stub]. Source ghi lý do của danh sách này: chỉ hỗ trợ các nền tảng mà `posix_spawn()` trả được `ENOENT` trực tiếp (dịch comment)[^src-spawn-enoent]; riêng glibc phải từ 2.24 trở lên[^src-spawn-glibc], bản cũ hơn (hoặc không đọc được phiên bản) thì trả `None`[^src-spawn-glibc-ver]. Ngay cả trên nền tảng hỗ trợ, nó bỏ cuộc khi: đặt uid hoặc gid; `env` đổi `PATH` mà program không phải đường dẫn; có closure `pre_exec`; có groups hoặc chroot[^rs-spawn-conds].
-
-Source `unix.rs` này **không có comment nào giải thích vì sao ưa `posix_spawn` hơn `fork`+`exec`**: người soạn đã tìm trong file các từ `efficien`, `vfork`, `faster`, `overhead`, `speed` và không thấy; từ `fast` chỉ xuất hiện trong comment về đường nhanh của pidfd, không liên quan. Lý do hiệu năng ở dưới là suy luận từ man page, không phải lời của `std`.
+`Command::spawn` (file `library/std/src/sys/process/unix/unix.rs`) **thử `posix_spawn` trước**. Nếu `self.posix_spawn(...)` trả `Some` thì `spawn` dùng ngay kết quả đó[^rs-spawn-first]. Hàm `posix_spawn` của `std` tự bỏ cuộc, tức trả `None` để `spawn` rơi xuống `fork`+`exec`, khi gặp một trong các điều kiện sau: đặt uid hoặc gid; `env` đổi `PATH` mà program không phải đường dẫn; có closure `pre_exec`; có groups hoặc chroot[^rs-spawn-conds].
 
 ```mermaid
 flowchart TD
@@ -161,28 +183,40 @@ flowchart TD
   C -- "không" --> PS["posix_spawn"]
 ```
 
-(Sơ đồ chỉ vẽ các điều kiện ở dòng trích dẫn; source còn các nhánh `return Ok(None)` khác: glibc cũ ở trên; `current_dir` khi libc thiếu hàm `posix_spawn_file_actions_addchdir`[^src-spawn-chdir]; `setsid` trên mọi nền tảng ngoài Linux-glibc[^src-spawn-setsid]; và nhánh dành cho tính năng pidfd, một API nightly-only không bàn ở đây[^src-spawn-pidfd][^src-pidfd-nightly].) `pre_exec` buộc rời `posix_spawn` vì docs định nghĩa closure chạy ngay trước khi hàm exec được gọi[^cmdext-preexec], trong con sau `fork`[^rs-preexec], còn `posix_spawn` chỉ hỗ trợ một tập nhỏ các việc xác định sẵn trong con[^posix-spawn-housekeeping] — không có chỗ chạy code tùy ý (suy luận của người soạn).
+(Sơ đồ chỉ vẽ các điều kiện ở dòng trích dẫn; source còn vài nhánh bỏ cuộc khác, xem phần Đi sâu.)
 
-**Vì sao `pre_exec` là `unsafe`**
+Với `thumbd`: cho `convert` chạy dưới một uid khác, hay gắn `pre_exec` để đặt giới hạn tài nguyên, đều đẩy `spawn` sang đường `fork`+`exec` thủ công. Spawn một `convert` trần thì đi đường `posix_spawn` (trên nền tảng được hỗ trợ).
 
-Docs của `pre_exec` nói closure chạy trong con ngay sau `fork`, một môi trường rất hạn chế: `malloc`, đọc biến môi trường qua `std::env` hay lấy mutex không được bảo đảm hoạt động, vì thread khác có thể còn chạy lúc `fork`[^rs-preexec-safety]. Docs dặn đọc thêm yêu cầu về async-signal-safety của POSIX `fork()`[^cmdext-asyncsafe]; bản `before_exec` cũ từng là hàm safe rồi bị deprecated, vì closure chỉ được làm các thao tác async-signal-safe[^cmdext-before-exec]. Cơ chế nền ở chương khác: con chỉ giữ một thread nhưng sao nguyên trạng thái mutex[^fork-thread], nên sau `fork` trong chương trình đa luồng con chỉ nên gọi hàm async-signal-safe cho đến khi `execve`[^fork-signalsafe] ([Chương 03, mục 3.1](03-process.md); async-signal-safe là gì: [Chương 05, mục 6](05-signal.md)).
+Có một điều cần nói thẳng: source `unix.rs` **không có comment nào giải thích vì sao ưa `posix_spawn` hơn `fork`+`exec`**. Người soạn đã tìm trong file các từ `efficien`, `vfork`, `faster`, `overhead`, `speed` và không thấy; từ `fast` chỉ xuất hiện trong comment về đường nhanh của pidfd, không liên quan. Lý do hiệu năng ở phần Đi sâu là suy luận từ man page, không phải lời của `std`.
 
-Phần riêng của Rust:
+Vì sao `pre_exec` buộc `spawn` rời `posix_spawn`? Docs định nghĩa closure này chạy ngay trước khi hàm exec được gọi[^cmdext-preexec]. Source ghi thêm rằng closure chạy trong con sau `fork`[^rs-preexec]. Còn `posix_spawn` chỉ hỗ trợ một tập nhỏ các việc xác định sẵn trong con[^posix-spawn-housekeeping]. Vậy `posix_spawn` không có chỗ nào để chạy code tùy ý (suy luận của người soạn).
 
-- `Error::new` và `Error::other` cũng cấp phát, nên docs khuyên dùng `panic!` để báo lỗi không tầm thường[^cmdext-alloc]; riêng `panic!` chỉ an toàn khi đối số định dạng của thông báo format được an toàn, vì `Command` gọi `always_abort` trước hook nhưng thông báo vẫn được định dạng[^cmdext-panic].
-- Mọi fd và vùng `mmap` đều bị nhân đôi; bạn phải tự bảo đảm không dùng bản nhân đôi phá bất biến thư viện[^cmdext-dupres].
-- `std` không kiểm được các điều này bằng kiểu, nên `pre_exec` là `unsafe fn`[^cmdext-sig]. Dùng nó trong service đa thread nguy hiểm hơn vẻ ngoài (nhận xét của người soạn).
+### 3.2 Vì sao `pre_exec` là `unsafe`
 
-`CommandExt::exec()` thực hiện toàn bộ setup rồi `execvp`; thành công thì không return, lỗi thì trả `io::Error`[^cmdext-exec]. Quan sát: `Command::new("echo").arg("exec'd").exec()` in `exec'd` và không quay lại.
+Closure chạy trong con ngay sau `fork`, một môi trường rất hạn chế: `malloc`, đọc biến môi trường qua `std::env` hay lấy mutex đều không được bảo đảm hoạt động, vì thread khác có thể còn đang chạy lúc `fork`[^rs-preexec-safety]. `thumbd` là chương trình đa thread nên đây là tình huống thật chứ không phải lý thuyết (nhận xét của người soạn).
 
-<details><summary>Đi sâu: quan sát <code>strace</code>, thứ tự việc và kênh báo lỗi ở đường <code>fork</code>+<code>exec</code></summary>
+Cơ chế nền nằm ở chương khác. Process con chỉ có một thread, nhưng nó sao nguyên trạng thái mutex của cha[^fork-thread]. Vì vậy sau `fork` trong chương trình đa thread, con chỉ nên gọi hàm async-signal-safe cho đến khi `execve`[^fork-signalsafe] ([Chương 03, mục 3.1](03-process.md); async-signal-safe là gì: [Chương 05, mục 6](05-signal.md)). Docs của `pre_exec` dặn đọc thêm các yêu cầu về async-signal-safety trong đặc tả POSIX `fork()`[^cmdext-asyncsafe]. Lịch sử API cũng khớp: bản `before_exec` cũ từng là hàm safe, nhưng nó cần phải là `unsafe` vì closure chỉ được làm các thao tác async-signal-safe[^cmdext-before-exec].
 
-Quan sát bằng `strace -f` (aarch64, glibc):
+Còn ba điểm riêng của Rust:
+
+- `Error::new` và `Error::other` cũng cấp phát, nên docs khuyên dùng `panic!` để báo lỗi không tầm thường[^cmdext-alloc]. Riêng `panic!` chỉ an toàn khi mọi đối số định dạng của thông báo đều format được an toàn, vì `Command` gọi `always_abort` trước hook nhưng thông báo vẫn được định dạng[^cmdext-panic].
+- Mọi fd và vùng `mmap` đều bị nhân đôi vào con; bạn phải tự bảo đảm không dùng bản nhân đôi để phá bất biến của thư viện[^cmdext-dupres].
+- `std` không kiểm được các điều này bằng kiểu, nên `pre_exec` là `unsafe fn`[^cmdext-sig]. Dùng nó trong service đa thread như `thumbd` nguy hiểm hơn vẻ ngoài (nhận xét của người soạn).
+
+`CommandExt::exec()` thực hiện toàn bộ phần setup rồi gọi `execvp`. Thành công thì không return, lỗi thì trả `io::Error`[^cmdext-exec]. Quan sát: `Command::new("echo").arg("exec'd").exec()` in `exec'd` và không quay lại.
+
+<details><summary>Đi sâu: điều kiện bỏ <code>posix_spawn</code> khác, quan sát <code>strace</code>, thứ tự việc và kênh báo lỗi ở đường <code>fork</code>+<code>exec</code></summary>
+
+**Danh sách nền tảng và các nhánh bỏ cuộc còn lại.** Hàm `posix_spawn` của `std` chỉ có thân thật trên một danh sách nền tảng: Linux với libc gnu và musl, FreeBSD, illumos, Apple, cygwin, nto và vài nền tảng nữa[^src-spawn-platforms]. Nơi khác nó là bản rỗng luôn trả `None`[^src-spawn-stub]. Lý do của danh sách này nằm trong source: chỉ hỗ trợ các nền tảng mà `posix_spawn()` trả được `ENOENT` trực tiếp (dịch comment)[^src-spawn-enoent]. Riêng glibc phải từ 2.24 trở lên[^src-spawn-glibc]. Bản cũ hơn, hoặc không đọc được phiên bản, thì trả `None`[^src-spawn-glibc-ver].
+
+Ngoài các điều kiện ở §3.1, source còn vài nhánh `return Ok(None)`. Một là `current_dir` khi libc thiếu hàm `posix_spawn_file_actions_addchdir`[^src-spawn-chdir]. Hai là `setsid` trên mọi nền tảng ngoài Linux-glibc[^src-spawn-setsid]. Ba là nhánh dành cho tính năng pidfd[^src-spawn-pidfd]. Tính năng này là API nightly-only nên không bàn ở đây[^src-pidfd-nightly].
+
+**Quan sát bằng `strace -f`** (aarch64, glibc):
 
 - `Command` thường: `clone(... CLONE_VM|CLONE_VFORK|SIGCHLD)`, rồi trong con `dup3(4, 1, 0)`, `dup3(5, 2, 0)`, rồi `execve` thử từng thư mục `PATH` cho đến khi trúng `/usr/bin/sh`.
 - Có `pre_exec` (kể cả rỗng): `clone(CLONE_CHILD_CLEARTID|CLONE_CHILD_SETTID|SIGCHLD)` — **không** có `CLONE_VM`/`CLONE_VFORK`, tức một `fork` đầy đủ.
 
-Khớp man page glibc: từ glibc 2.24, `posix_spawn()` bắt đầu bằng `clone(2)` với `CLONE_VM` và `CLONE_VFORK`[^posix-spawn-clone], nên bên gọi bị treo đến khi con `execve` hoặc `_exit`[^clone-vfork] ([Chương 03, mục 3.3](03-process.md)). Suy luận của người soạn: con dùng chung không gian địa chỉ đến lúc `exec` nên tránh được chi phí sao page table của `fork`[^fork-cow] — đáng kể khi service giữ nhiều GB bộ nhớ mà phải spawn con.
+Khớp man page glibc: từ glibc 2.24, `posix_spawn()` bắt đầu bằng `clone(2)` với `CLONE_VM` và `CLONE_VFORK`[^posix-spawn-clone]. Vì vậy bên gọi bị treo đến khi con `execve` hoặc `_exit`[^clone-vfork] ([Chương 03, mục 3.3](03-process.md)). Suy luận của người soạn: con dùng chung không gian địa chỉ đến lúc `exec` nên tránh được chi phí sao page table của `fork`[^fork-cow]; điều này đáng kể khi một service như `thumbd` giữ nhiều GB bộ nhớ mà vẫn phải spawn con.
 
 **Đường `fork`+`exec`: thứ tự việc và kênh báo lỗi**
 
@@ -204,35 +238,43 @@ sequenceDiagram
   end
 ```
 
-Cha tạo cặp socket Unix `SOCK_SEQPACKET` làm kênh lỗi trên Linux[^src-socketpair]; nền tảng khác dùng `pipe()` của `std`, hàm này đặt close-on-exec ngay lúc tạo bằng `pipe2` với `O_CLOEXEC` trên các nền tảng có hàm đó[^src-pipe-cloexec]. Cha giữ khóa đọc môi trường quanh `fork`[^src-envlock]. Trong con: `panic::always_abort()` và `mem::forget(env_lock)`, với comment nói để tránh việc mở khóa không async-signal-safe[^src-child-abort].
+Cha tạo một cặp socket Unix `SOCK_SEQPACKET` làm kênh lỗi trên Linux[^src-socketpair]. Nền tảng khác dùng `pipe()` của `std`, và hàm này đặt close-on-exec ngay lúc tạo bằng `pipe2` với `O_CLOEXEC` trên các nền tảng có hàm đó[^src-pipe-cloexec]. Cha giữ khóa đọc môi trường quanh `fork`[^src-envlock]. Trong con có hai việc: `panic::always_abort()` và `mem::forget(env_lock)`, với comment nói để tránh việc mở khóa không async-signal-safe[^src-child-abort].
 
-`do_exec` làm `dup2` stdio[^rs-do-exec-dup2], rồi đặt groups/gid/uid[^src-order-uidgid], `chroot`, `chdir`, `setpgid`, `setsid`[^src-order-chdir-setsid], reset `SIGPIPE` (mục 5) và chạy từng closure `pre_exec`[^src-closures], cuối cùng `execvp`[^src-execvp]. Thứ tự này là thứ tự câu lệnh trong source 1.95.0 (người soạn đọc trực tiếp; chi tiết cài đặt, có thể đổi). Docs xác nhận hệ quả: khi closure chạy, stdio và thư mục làm việc *đã* được đổi nên output từ closure có thể không ra nơi bạn mong[^cmdext-stdio-done].
+`do_exec` làm `dup2` stdio trước[^rs-do-exec-dup2]. Tiếp theo nó đặt groups, gid, uid[^src-order-uidgid]. Sau đó là `chroot`, `chdir`, `setpgid`, `setsid`[^src-order-chdir-setsid]. Rồi nó reset `SIGPIPE` (mục 5) và chạy từng closure `pre_exec`[^src-closures]. Cuối cùng là `execvp`[^src-execvp]. Đây là thứ tự câu lệnh trong source 1.95.0 (người soạn đọc trực tiếp; chi tiết cài đặt, có thể đổi). Docs xác nhận một hệ quả: khi closure chạy, stdio và thư mục làm việc *đã* được đổi, nên output từ closure có thể không ra nơi bạn mong[^cmdext-stdio-done].
 
-Báo lỗi exec: nếu `exec` thất bại, con ghi `errno` kèm chuỗi `NOEX`[^src-noex-const] vào kênh rồi `_exit(1)`[^src-noex-exit]; nếu thành công, cha đọc được `Ok(0)` — source có nhánh `Ok(0) => return Ok((p, ours))`[^src-spawn-ok0] — tức EOF không kèm dữ liệu. Điều này chỉ đúng vì cặp socket được tạo với `SOCK_CLOEXEC`, nên đầu ghi của con tự đóng khi `exec` thành công[^src-socketpair-cloexec]. Khi nhận được thông báo lỗi, cha giải mã `errno`, `wait` con rồi trả `Err(Error::from_raw_os_error(errno))`[^src-parent-err]. Source gọi kênh này là `CLOEXEC pipe` trong thông báo lỗi của nó[^src-cloexec-name].
+Báo lỗi exec hoạt động như sau. Nếu `exec` thất bại, con ghi `errno` kèm chuỗi `NOEX`[^src-noex-const] vào kênh. Rồi nó `_exit(1)`[^src-noex-exit]. Nếu thành công, cha đọc được `Ok(0)`, tức EOF không kèm dữ liệu; source có nhánh `Ok(0) => return Ok((p, ours))`[^src-spawn-ok0]. Điều này chỉ đúng vì cặp socket được tạo với `SOCK_CLOEXEC`, nên đầu ghi của con tự đóng khi `exec` thành công[^src-socketpair-cloexec]. Khi nhận được thông báo lỗi, cha giải mã `errno`, `wait` con rồi trả `Err(Error::from_raw_os_error(errno))`[^src-parent-err]. Source tự gọi kênh này là `CLOEXEC pipe` trong thông báo lỗi của nó[^src-cloexec-name].
 
-Lỗi từ closure cũng đi ngược về cha theo docs: closure trả `Err(io::Error::from_raw_os_error(13))` khiến `spawn()` trả `Permission denied (os error 13) kind=PermissionDenied`[^rs-preexec-err].
+Lỗi từ closure cũng đi ngược về cha theo docs. Closure trả `Err(io::Error::from_raw_os_error(13))` thì `spawn()` trả `Permission denied (os error 13) kind=PermissionDenied`[^rs-preexec-err].
 
 </details>
 
-**Quay lại Q3:** khi nền tảng hỗ trợ, `posix_spawn` được thử trước; `pre_exec` (cùng uid/gid, groups, chroot…) buộc rơi xuống `fork`+`exec`, và nó `unsafe` vì chạy trong con giữa `fork` và `exec`.
+**Quay lại Q3:** `posix_spawn` được thử trước; uid/gid, groups, chroot, `pre_exec` buộc `thumbd` rơi xuống `fork`+`exec`, và `pre_exec` `unsafe` vì chạy trong con giữa `fork` và `exec`.
 
 ## 4. `Child` không `wait` và `Stdio` ánh xạ lên `dup2` (Q4)
 
-> **Trả lời ngắn.** Nếu bỏ `Child` mà không `wait`, process con không bị dừng và `std` cũng không thu dọn nó[^rs-child-nodrop][^rs-child-zombie]; khi con thoát, nó thành *zombie* — process đã chết nhưng kernel còn giữ một bản ghi nhỏ để cha đọc kết quả sau[^wait-zombie]. `Stdio::piped()` nối cha và con bằng một pipe[^rs-stdio-piped]; trước khi chạy chương trình mới, con dùng `dup2` (hoặc file action tương đương của `posix_spawn`) để đặt đầu pipe lên fd 0/1/2[^rs-do-exec-dup2][^rs-spawn-adddup2].
+> **Trả lời ngắn.** Nếu bỏ `Child` mà không `wait`, process con không bị dừng và `std` cũng không thu dọn nó[^rs-child-nodrop]. Khi con thoát, nó thành *zombie*: process đã chết nhưng kernel còn giữ một bản ghi nhỏ để cha đọc kết quả sau[^wait-zombie]. `Stdio::piped()` nối cha và con bằng một pipe[^rs-stdio-piped]. Trước khi chạy chương trình mới, con dùng `dup2` để đặt đầu pipe lên fd 0/1/2[^rs-do-exec-dup2]. Đường `posix_spawn` làm cùng việc bằng một file action tương đương[^rs-spawn-adddup2].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thợ xong việc nhưng hồ sơ nằm lại cho đến khi bạn ký nhận (`wait`).
+*Với `thumbd`.* Mỗi upload, handler spawn một `convert`, đọc thumbnail từ stdout của nó rồi trả cho client. Có hai chỗ dễ hỏng. Thứ nhất, handler thoát sớm vì lỗi và quên `wait`, để lại `convert` đã chết nhưng vẫn nằm trong bảng process. Thứ hai, `convert` ghi ra stdout nhiều hơn pipe chứa nổi trong khi handler chưa kịp đọc (nhận xét của người soạn: cả hai là tình huống giả định). Mục này giải thích cả hai.
 
-`Command` là process builder cho phép điều khiển chi tiết cách spawn[^rs-command]. Mặc định `spawn`/`status` kế thừa stdin/stdout/stderr, còn `output` tạo pipe[^rs-command-default]; môi trường cũng được kế thừa, và biến đặt bằng `env` được ưu tiên hơn biến kế thừa[^cmd-env-inherit]. `Stdio::piped()` sắp xếp một pipe nối cha và con[^rs-stdio-piped].
+### 4.1 `Command` và `Stdio`
 
-Ánh xạ về [Chương 04, mục 7](04-file-descriptor-va-vfs.md): để con có stdout là pipe, trong con phải `dup2` đầu ghi lên fd 1 *trước* `exec`. Source ở đường `fork`+`exec` làm đúng thế: `do_exec` gọi `dup2(fd, STDOUT_FILENO)` (tương tự stdin, stderr) trong `cvt_r`[^rs-do-exec-dup2]. Đường `posix_spawn` khai báo việc đó dưới dạng file action `posix_spawn_file_actions_adddup2`[^rs-spawn-adddup2], và libc thực hiện các file action trong con theo thứ tự đã khai báo[^posix-spawn-fileactions].
+`Command` là process builder, cho phép điều khiển chi tiết cách spawn một process mới[^rs-command]. Mặc định `spawn` và `status` kế thừa stdin/stdout/stderr, còn `output` thì tạo pipe[^rs-command-default]. Môi trường cũng được kế thừa, và biến đặt bằng `env` ưu tiên hơn biến kế thừa[^cmd-env-inherit]. `Stdio::piped()` sắp xếp một pipe nối cha và con[^rs-stdio-piped].
 
-**`Child`, zombie và `wait`**
+Để `convert` có stdout là pipe, đầu ghi của pipe phải thành fd 1 trong con *trước* `exec` (nền: [Chương 04, mục 7](04-file-descriptor-va-vfs.md)). Source ở đường `fork`+`exec` làm đúng việc đó: `do_exec` gọi `dup2(fd, STDOUT_FILENO)` trong `cvt_r` (stdin và stderr tương tự)[^rs-do-exec-dup2]. Đường `posix_spawn` khai báo việc ấy dưới dạng file action `posix_spawn_file_actions_adddup2`[^rs-spawn-adddup2]. Libc thực hiện các file action trong con theo đúng thứ tự đã khai báo[^posix-spawn-fileactions].
 
-`Child` không cài `Drop`: nếu bạn không bảo đảm con đã thoát thì nó cứ chạy tiếp, kể cả sau khi handle `Child` ra khỏi scope[^rs-child-nodrop]; `std` không tự `wait` kể cả khi drop[^rs-child-zombie]. Docs cảnh báo: trên một số hệ thống, gọi `wait` hoặc tương tự là cần thiết để OS giải phóng tài nguyên[^child-wait-resource]; process đã kết thúc mà chưa được `wait` vẫn còn đó dưới dạng zombie, và quá nhiều zombie có thể cạn tài nguyên toàn cục như PID[^child-zombie-ids]; vì vậy docs không khuyến khích drop `Child` mà không `wait` trong ứng dụng chạy lâu[^rs-child-longrunning]. Zombie ở đây chính là zombie của [Chương 03, mục 7](03-process.md)[^wait-zombie]. Quan sát (đọc `/proc/<pid>/stat`): `spawn` rồi ngủ 300 ms chưa `wait` → trạng thái `Z`, sau `wait()` thư mục `/proc/<pid>` biến mất; `drop(child)` ngay sau `spawn` → vẫn `Z`.
+### 4.2 `Child`, zombie và `wait`
 
-Với service chạy lâu, mỗi lần spawn phải có đường tới `wait`/`try_wait`/`wait_with_output` kể cả trên nhánh lỗi (nhận xét của người soạn, cùng hướng với lời dặn của docs ở trên). `Child::wait` đóng stdin của con trước khi chờ để tránh deadlock khi con chờ input còn cha chờ con[^child-wait-stdin]. Pipe có dung lượng hữu hạn: ghi vào pipe đầy chặn hoặc lỗi tùy `O_NONBLOCK`[^pipe-cap] ([Chương 04, mục 8](04-file-descriptor-va-vfs.md)); nên nếu con ghi nhiều hơn dung lượng pipe `piped` mà cha `wait` trước khi đọc, cả hai có thể chờ nhau mãi (suy luận của người soạn từ `pipe(7)`). `wait_with_output` vừa chờ con thoát vừa gom output từ stdout/stderr[^child-wait-with-output], nên tránh được tình huống này (suy luận của người soạn).
+`Child` không cài `Drop`. Nếu bạn không bảo đảm con đã thoát thì nó cứ chạy tiếp, kể cả sau khi handle `Child` ra khỏi scope[^rs-child-nodrop]. `std` cũng không tự `wait`, kể cả khi `Child` bị drop[^rs-child-zombie]. Docs cảnh báo thêm rằng trên một số hệ thống, gọi `wait` hoặc tương tự là cần thiết để OS giải phóng tài nguyên[^child-wait-resource]. Một process đã kết thúc mà chưa được `wait` vẫn còn đó dưới dạng zombie, và quá nhiều zombie có thể cạn tài nguyên toàn cục như PID[^child-zombie-ids]. Vì vậy docs không khuyến khích drop `Child` mà không `wait` trong ứng dụng chạy lâu[^rs-child-longrunning]. Zombie ở đây chính là zombie của [Chương 03, mục 7](03-process.md)[^wait-zombie].
+
+Quan sát (đọc `/proc/<pid>/stat`): `spawn` rồi ngủ 300 ms chưa `wait` → trạng thái `Z`; sau `wait()` thư mục `/proc/<pid>` biến mất; `drop(child)` ngay sau `spawn` → vẫn `Z`.
+
+Với `thumbd`, đó là lý do mỗi lần spawn phải có đường tới `wait`/`try_wait`/`wait_with_output`, kể cả trên nhánh lỗi (nhận xét của người soạn, cùng hướng với lời dặn của docs ở trên).
+
+### 4.3 Pipe đầy và deadlock
+
+`Child::wait` đóng stdin của con trước khi chờ, để tránh deadlock khi con chờ input còn cha chờ con[^child-wait-stdin]. Pipe thì có dung lượng hữu hạn: ghi vào pipe đầy sẽ chặn hoặc lỗi tùy `O_NONBLOCK`[^pipe-cap] ([Chương 04, mục 8](04-file-descriptor-va-vfs.md)). Suy ra (suy luận của người soạn từ `pipe(7)`): nếu `convert` ghi nhiều hơn dung lượng pipe `piped` mà handler gọi `wait` trước khi đọc, hai bên có thể chờ nhau mãi. `wait_with_output` vừa chờ con thoát vừa gom output từ stdout/stderr[^child-wait-with-output], nên tránh được tình huống này (suy luận của người soạn).
 
 <details><summary>Đi sâu: ví dụ <code>Stdio::piped()</code> và <code>ExitStatus</code></summary>
 
@@ -246,101 +288,113 @@ c.stdout.take().unwrap().read_to_string(&mut s).unwrap();
 
 Docs gợi ý `take()` handle để tránh *partial move* (di chuyển một phần) khỏi `child`, vốn chặn bạn gọi tiếp hàm trên `child` khi đang dùng stdin[^child-stdin-take].
 
-**`ExitStatus`**
-
-`code()` trả `None` trên Unix nếu process bị signal giết[^rs-exitstatus-code] — `WIFSIGNALED` ở [Chương 03, mục 6](03-process.md)[^wait-wifsignaled]; exit status Unix bị cắt còn 8 bit[^rs-exitstatus-8bit], khớp `status & 0xFF` của `_exit(2)`[^exit-status-mask].
+**`ExitStatus`.** Trên Unix, `code()` trả `None` nếu process bị signal giết[^rs-exitstatus-code]. Đây chính là `WIFSIGNALED` ở [Chương 03, mục 6](03-process.md)[^wait-wifsignaled]. Exit status trên Unix bị cắt còn 8 bit[^rs-exitstatus-8bit]. Con số này khớp với `status & 0xFF` của `_exit(2)`[^exit-status-mask].
 
 </details>
 
-**Quay lại Q4:** không `wait` thì có zombie; `Stdio::piped()` là `dup2` đầu pipe lên fd 0/1/2.
+**Quay lại Q4:** handler không `wait` thì `convert` thành zombie; `Stdio::piped()` là `dup2` đầu pipe lên fd 0/1/2 của con.
 
 ## 5. `SIGPIPE`: runtime ignore, process con reset (Q5)
 
-> **Trả lời ngắn.** `SIGPIPE` là signal (thông báo kernel gửi cho process, xem [Chương 05](05-signal.md)) sinh ra khi ghi vào pipe mà mọi đầu đọc đã đóng; nếu process chọn bỏ qua (ignore) signal đó thì `write` chỉ trả lỗi `EPIPE`[^pipe-eof][^pipe-epipe]. Runtime Rust ignore `SIGPIPE` lúc khởi động[^rs-rt-sigpipe]. `std` đặt `SIGPIPE` về mặc định (`SIG_DFL`) trong process con trước khi chạy chương trình mới; source ghi lý do là "tương thích ngược"[^rs-child-sigpipe-reset]. Nếu không reset, trạng thái ignore sẽ sống sót qua `execve`[^signal-exec] (nối hai điều này là suy luận của người soạn, xem phần "Process con").
+> **Trả lời ngắn.** `SIGPIPE` là signal (thông báo kernel gửi cho process, xem [Chương 05](05-signal.md)) sinh ra khi ghi vào pipe mà mọi đầu đọc đã đóng[^pipe-eof]. Nếu process chọn bỏ qua (ignore) signal đó thì `write` chỉ trả lỗi `EPIPE`[^pipe-epipe]. Runtime Rust ignore `SIGPIPE` ngay lúc khởi động[^rs-rt-sigpipe]. Còn với process con, `std` đặt `SIGPIPE` về mặc định (`SIG_DFL`) trước khi chạy chương trình mới; source ghi lý do là "tương thích ngược"[^rs-child-sigpipe-reset]. Nếu không reset, trạng thái ignore sẽ sống sót qua `execve`[^signal-exec] (nối hai điều này lại là suy luận của người soạn, xem §5.2).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chuông báo cháy mặc định giết cả tòa nhà; Rust tắt chuông nhưng công tắc di truyền qua `exec`, nên bật lại cho process con.
+*Với `thumbd`.* Log của `thumbd` đi ra stdout, và stdout nối vào một log shipper. Nếu shipper chết, `thumbd` sẽ ghi vào một pipe không còn ai đọc. Chuyện gì xảy ra lúc đó, process bị kernel giết hay chỉ nhận một lỗi, phụ thuộc vào `SIGPIPE`, và Rust đã chọn sẵn một cách. Với `convert` do `thumbd` spawn thì Rust chọn cách ngược lại. Mục này giải thích cả hai lựa chọn (nhận xét của người soạn: bối cảnh log shipper là giả định).
 
-**Process Rust**
+### 5.1 Process Rust
 
-Cơ chế gốc ở [Chương 04, mục 8](04-file-descriptor-va-vfs.md) và [Chương 05, mục 7](05-signal.md): ghi vào pipe mà mọi đầu đọc đã đóng thì sinh `SIGPIPE`[^pipe-eof], và nếu process ignore signal này thì `write` lỗi `EPIPE`[^pipe-epipe]. Phần riêng của Rust: từ 2014 runtime Rust trên Unix đặt `SIGPIPE` thành `SIG_IGN`[^rs-rt-sigpipe], và có cờ compiler `-Zon-broken-pipe` để chọn cách khác[^rs-onbrokenpipe-flag]. Lý do trong source: một số nền tảng gửi signal khi lẽ ra chỉ trả `EPIPE`, runtime không cài handler nên chương trình bị giết — không mong muốn, nên `std` ignore khi khởi động[^rs-sigpipe-comment]; nhánh mặc định (`sigpipe::DEFAULT`) chọn handler `SIG_IGN` để áp lên `SIGPIPE`[^rs-sigpipe-ign].
+Cơ chế gốc nằm ở [Chương 04, mục 8](04-file-descriptor-va-vfs.md) và [Chương 05, mục 7](05-signal.md): ghi vào pipe mà mọi đầu đọc đã đóng thì sinh `SIGPIPE`[^pipe-eof]. Nếu process ignore signal này thì `write` lỗi `EPIPE`[^pipe-epipe].
 
-Hệ quả: với chương trình in 100000 dòng bằng `println!` chạy `./prog | head -1`, quan sát được `line 0`, rồi panic `failed printing to stdout: Broken pipe (os error 32)` và `PIPESTATUS` (mã thoát của từng lệnh trong pipeline) là `101 0` (docs của `println!` ghi: panic nếu ghi ra `io::stdout` thất bại[^println-panics]); còn `yes | head -1` (chương trình C) chạy xong mà không in thông báo lỗi nào (quan sát; cơ chế là `SIGPIPE` được sinh ra và hành động mặc định của nó là kết thúc process[^sig-pipe-term]). Với CLI Rust hay đặt sau `| head` (nhận xét của người soạn): dùng `writeln!` và coi `ErrorKind::BrokenPipe` là tín hiệu thoát bình thường thay vì `println!`.
+Phần riêng của Rust: từ 2014, runtime Rust trên Unix đặt `SIGPIPE` thành `SIG_IGN`[^rs-rt-sigpipe]. Compiler còn có cờ `-Zon-broken-pipe` để chọn cách khác[^rs-onbrokenpipe-flag]. Lý do nằm trong source: một số nền tảng gửi signal khi lẽ ra chỉ cần trả `EPIPE`, mà runtime không cài handler nên chương trình bị giết, và đó là điều `std` không muốn, nên nó ignore `SIGPIPE` khi khởi động[^rs-sigpipe-comment]. Nhánh mặc định (`sigpipe::DEFAULT`) chọn handler `SIG_IGN` để áp lên `SIGPIPE`[^rs-sigpipe-ign].
 
-**Process con**
+Hệ quả cho `thumbd`: ghi log vào pipe đã mất đầu đọc cho ra lỗi `EPIPE`, không phải cái chết im lặng. `println!` thì panic khi ghi ra `io::stdout` thất bại[^println-panics]. Quan sát với chương trình in 100000 dòng bằng `println!` chạy `./prog | head -1`: in được `line 0`, rồi panic `failed printing to stdout: Broken pipe (os error 32)`, và `PIPESTATUS` (mã thoát của từng lệnh trong pipeline) là `101 0`. Ngược lại `yes | head -1` (chương trình C) chạy xong mà không in thông báo lỗi nào. Đó là quan sát; cơ chế là `SIGPIPE` được sinh ra và hành động mặc định của nó là kết thúc process[^sig-pipe-term].
 
-Disposition (cách process xử lý một signal: mặc định, ignore hoặc chạy handler; xem [Chương 05, mục 2](05-signal.md)) kiểu *ignored* sống sót qua `execve`, chỉ disposition kiểu handler bị đặt lại về mặc định[^signal-exec]. Nếu `std` không làm gì, mọi chương trình do Rust spawn sẽ thừa hưởng `SIGPIPE` bị ignore[^signal-exec]. Source: nếu không dùng `-Zon-broken-pipe`, `std` **reset `SIGPIPE` về `SIG_DFL`** trong con vì tương thích ngược[^rs-child-sigpipe-reset], ở cả hai đường: `fork`+`exec` gọi `signal(SIGPIPE, SIG_DFL)` trong con[^rs-child-sigpipe-fork]; `posix_spawn` thêm `SIGPIPE` vào tập `sigdefault`[^rs-child-sigpipe-spawn]. Nối lý do "tương thích ngược" với việc "ignore sống sót qua exec" là suy luận của người soạn.
+Lời khuyên (nhận xét của người soạn): với CLI Rust hay đặt sau `| head`, và với service ghi log ra stdout như `thumbd`, hãy dùng `writeln!` và coi `ErrorKind::BrokenPipe` là tín hiệu để thoát hoặc mở lại log một cách có chủ đích, thay vì để `println!` panic.
+
+### 5.2 Process con
+
+Disposition là cách process xử lý một signal: mặc định, ignore, hoặc chạy handler (xem [Chương 05, mục 2](05-signal.md)). Khi `exec`, disposition kiểu handler bị đặt lại về mặc định, còn disposition kiểu *ignored* thì sống sót qua `execve`[^signal-exec]. Vậy nếu `std` không làm gì thêm, mọi chương trình do Rust spawn, trong đó có `convert`, sẽ thừa hưởng `SIGPIPE` bị ignore.
+
+`std` chặn chuyện đó. Nếu không dùng `-Zon-broken-pipe`, nó **reset `SIGPIPE` về `SIG_DFL`** trong con vì tương thích ngược[^rs-child-sigpipe-reset]. Việc này diễn ra ở cả hai đường spawn. Đường `fork`+`exec` gọi `signal(SIGPIPE, SIG_DFL)` trong con[^rs-child-sigpipe-fork]. Đường `posix_spawn` thêm `SIGPIPE` vào tập `sigdefault`[^rs-child-sigpipe-spawn]. Nối lý do "tương thích ngược" với việc "ignore sống sót qua exec" là suy luận của người soạn.
 
 <details><summary>Đi sâu: quan sát <code>/proc/self/status</code> ở cha và con</summary>
 
-Quan sát: process Rust có `SigIgn: 0000000000001000` trong `/proc/self/status`; `proc(5)` mô tả `SigIgn` là mask các signal bị ignore[^proc-sigign], và bit `0x1000` là bit 12, ứng với signal 13; `signal(7)` ghi `SIGPIPE` là 13 trên mọi kiến trúc trong bảng của nó (x86/ARM, Alpha/SPARC, MIPS, PARISC)[^sig-pipe-num]. Phép gán "signal *n* ↔ bit *n−1*" là suy luận của người soạn (proc(5) không nêu), nhưng khớp quan sát: bit 12 = `0x1000` = `SIGPIPE`.
+Quan sát: process Rust có `SigIgn: 0000000000001000` trong `/proc/self/status`. `proc(5)` mô tả `SigIgn` là mask các signal bị ignore[^proc-sigign]. Bit `0x1000` là bit 12, ứng với signal 13, và `signal(7)` ghi `SIGPIPE` là 13 trên mọi kiến trúc trong bảng của nó (x86/ARM, Alpha/SPARC, MIPS, PARISC)[^sig-pipe-num]. Phép gán "signal *n* ↔ bit *n−1*" là suy luận của người soạn (proc(5) không nêu), nhưng khớp quan sát: bit 12 = `0x1000` = `SIGPIPE`.
 
-Quan sát: con `grep /proc/self/status` do `Command` spawn in `SigIgn: 0000000180000000` (đường `posix_spawn`) và `SigIgn: 0000000000000000` (đường có `pre_exec`) — cả hai **không có** bit `0x1000`. Hai bit cao ở trường hợp đầu ứng với signal 32 và 33 theo phép gán trên; `signal(7)` ghi glibc dùng nội bộ hai signal real-time cho NPTL và đẩy `SIGRTMIN` lên 34[^sig-rt-nptl], còn mã `posix_spawn` của glibc 2.36 đặt các signal nội bộ đang bị chặn thành ignore trong con[^glibc-spawni-internal] (người soạn chọn 2.36 vì image lab là `rust:1.95-bookworm`; chưa kiểm phiên bản glibc thực tế trong container). Khớp quan sát, nhưng việc gán đúng số 32 và 33 cho hai signal nội bộ đó là suy luận của người soạn. Muốn con giữ ignore, `pre_exec` chạy sau bước reset (thứ tự ở phần Đi sâu của mục 3) nên có thể đặt lại, kèm rủi ro ở mục 3 (suy luận của người soạn).
+Quan sát: con `grep /proc/self/status` do `Command` spawn in `SigIgn: 0000000180000000` (đường `posix_spawn`) và `SigIgn: 0000000000000000` (đường có `pre_exec`). Cả hai **không có** bit `0x1000`. Hai bit cao ở trường hợp đầu ứng với signal 32 và 33 theo phép gán trên. `signal(7)` ghi glibc dùng nội bộ hai signal real-time cho NPTL và đẩy `SIGRTMIN` lên 34[^sig-rt-nptl]. Còn mã `posix_spawn` của glibc 2.36 đặt các signal nội bộ đang bị chặn thành ignore trong con[^glibc-spawni-internal] (người soạn chọn 2.36 vì image lab là `rust:1.95-bookworm`; chưa kiểm phiên bản glibc thực tế trong container). Khớp quan sát, nhưng việc gán đúng số 32 và 33 cho hai signal nội bộ đó là suy luận của người soạn.
+
+Muốn con giữ ignore, `pre_exec` chạy sau bước reset (thứ tự ở phần Đi sâu của mục 3) nên có thể đặt lại, kèm rủi ro ở mục 3 (suy luận của người soạn).
 
 </details>
 
-**Quay lại Q5:** cha ignore → `EPIPE`; con reset về `SIG_DFL`.
+**Quay lại Q5:** cha ignore nên `thumbd` nhận `EPIPE` khi mất đầu đọc; con (`convert`) được reset về `SIG_DFL`.
 
 ## 6. `std::env`: `OsString`, `args()` panic và `set_var` (Q6)
 
-> **Trả lời ngắn.** Trên Unix, string do OS trao cho process (đối số, biến môi trường…) thường là dãy byte khác 0 tùy ý, đôi khi được hiểu là UTF-8 nhưng không bảo đảm[^os-unix-bytes]; còn string Rust luôn là UTF-8 hợp lệ[^rust-str-utf8]. Vì vậy `args()` panic khi gặp đối số không phải Unicode[^env-args], và `OsString` là kiểu bắc cầu giữa hai thế giới[^os-bridge]. `set_var` là `unsafe` vì với chương trình đa thread (trên hệ không phải Windows), lựa chọn an toàn duy nhất là không dùng nó[^set-var-mt].
+> **Trả lời ngắn.** Trên Unix, string mà OS trao cho process (đối số, biến môi trường…) thường là dãy byte khác 0 tùy ý, đôi khi được hiểu là UTF-8 nhưng không bảo đảm[^os-unix-bytes]. String Rust thì luôn là UTF-8 hợp lệ[^rust-str-utf8]. Vì vậy `args()` panic khi gặp đối số không phải Unicode[^env-args]. `OsString` là kiểu bắc cầu giữa hai thế giới[^os-bridge]. `set_var` là `unsafe` vì với chương trình đa thread (trên hệ không phải Windows), lựa chọn an toàn duy nhất là không dùng nó[^set-var-mt].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `String` là mẫu giấy chỉ nhận chữ hợp lệ, `OsString` là phong bì nhận mọi thứ OS đưa; môi trường là bảng tin chung, sửa khi người khác đang đọc gây rối.
+*Với `thumbd`.* `thumbd` nhận cấu hình từ biến môi trường (thư mục tạm, địa chỉ nghe) và nhận tên file từ client. Cả hai đều là dữ liệu từ bên ngoài đi vào, và trên Unix không có gì bảo đảm chúng là UTF-8 hợp lệ. Thêm một bẫy nữa: nếu một thread nào đó gọi `set_var` để đổi cấu hình lúc service đang chạy, trong khi thread khác đọc môi trường, thì có thể xảy ra data race (nhận xét của người soạn: bối cảnh giả định). Mục này đi qua cả hai chuyện.
 
-**Dữ liệu từ OS không bảo đảm là UTF-8**
+### 6.1 Dữ liệu từ OS không bảo đảm là UTF-8
 
-Docs `OsString`: trên Unix, string thường là dãy byte khác 0 tùy ý, trong nhiều trường hợp được diễn giải là UTF-8[^os-unix-bytes], còn string Rust luôn là UTF-8 hợp lệ và có thể chứa byte 0[^rust-str-utf8]. `OsString`/`OsStr` bắc cầu bằng cách biểu diễn đồng thời string Rust và string native của nền tảng[^os-bridge]; nhiều API của `std` trao chuỗi với OS dùng chúng thay cho string thường, ví dụ `env::var_os` trả `Option<OsString>`[^os-var-os]. Trên Unix, `OsStrExt` có `from_bytes`/`as_bytes` đổi qua lại với byte slice rẻ tiền[^os-bytes-ext].
+Trên Unix, string từ OS thường là dãy byte khác 0 tùy ý, trong nhiều trường hợp được diễn giải là UTF-8[^os-unix-bytes]. String Rust thì luôn là UTF-8 hợp lệ và có thể chứa byte 0[^rust-str-utf8]. Hai thế giới này lệch nhau, nên `std` có `OsString`/`OsStr` để biểu diễn đồng thời string Rust và string native của nền tảng[^os-bridge].
 
-Lời khuyên (nhận xét của người soạn): tool nhận path hoặc đối số từ người dùng nên dùng `args_os`/`Path`/`OsStr` suốt đường đi, chỉ đổi sang `String` ở biên cần hiển thị hay serialize; service đọc config từ biến môi trường thì biến `NotUnicode` thành lỗi cấu hình rõ ràng.
+Nhiều API của `std` trao chuỗi với OS dùng chúng thay cho string thường. Ví dụ `env::var_os` trả `Option<OsString>`[^os-var-os]. Trên Unix, `OsStrExt` có `from_bytes`/`as_bytes` để đổi qua lại với byte slice với chi phí rẻ[^os-bytes-ext].
 
-**Snapshot và `set_var` là `unsafe`**
+Hệ quả với đối số: `args()` panic khi duyệt nếu có đối số không phải Unicode[^env-args]. Còn `args_os()` không kiểm Unicode[^env-args-os].
 
-`vars()` trả snapshot lúc gọi; thay đổi sau đó không phản ánh[^env-vars-snap].
+Lời khuyên (nhận xét của người soạn): tool nhận path hoặc đối số từ người dùng nên dùng `args_os`/`Path`/`OsStr` suốt đường đi, chỉ đổi sang `String` ở biên cần hiển thị hay serialize. Service đọc config từ biến môi trường như `thumbd` thì nên biến `NotUnicode` thành lỗi cấu hình rõ ràng.
 
-`set_var` có chữ ký `pub unsafe fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V)`[^set-var-sig]. Docs: trong chương trình đa thread trên hệ không phải Windows, lựa chọn an toàn duy nhất là không dùng `set_var` hay `remove_var` chút nào[^set-var-mt]. Điều kiện chính xác: không thread nào khác đang ghi *hoặc đọc* môi trường qua hàm hay biến toàn cục ngoài module này[^set-var-req]. Lý do docs nêu: các hệ điều hành này không có cách thread-safe để đọc môi trường, và hầu hết thư viện C, kể cả libc, không cho biết hàm nào đọc môi trường[^set-var-why]; kể cả thư viện chuẩn có thể đọc môi trường ngoài module `env`, ví dụ DNS lookup của `ToSocketAddrs`[^set-var-std]. Muốn truyền biến cho process con thì docs gợi ý dùng `Command::env`[^set-var-cmd].
+### 6.2 Snapshot và `set_var` là `unsafe`
 
-Từ edition 2024 (mốc phiên bản của ngôn ngữ Rust, chọn bằng cờ `--edition`), gọi `set_var`/`remove_var` ngoài khối `unsafe` là lỗi biên dịch; hàm được đánh dấu `unsafe` bắt đầu từ edition 2024, còn các edition cũ không đòi `unsafe`[^ed-unsafe-fn] (đã chạy rustc 1.95.0: cùng một dòng `std::env::set_var("A", "b");` biên dịch được với `--edition 2021`, còn `--edition 2024` báo `E0133`).
+`vars()` trả một snapshot lúc gọi; thay đổi môi trường sau đó không phản ánh vào iterator đã lấy[^env-vars-snap].
 
-Cùng gốc với mục 3: `Command` giữ khóa đọc môi trường quanh `fork`[^src-envlock], và docs `pre_exec` không bảo đảm việc đọc `std::env` hoạt động ở con[^rs-preexec-safety]; điểm chung là môi trường (`environ`) là trạng thái toàn cục dùng chung (suy luận của người soạn).
+`set_var` có chữ ký `pub unsafe fn set_var<K: AsRef<OsStr>, V: AsRef<OsStr>>(key: K, value: V)`[^set-var-sig]. Trong chương trình đa thread trên hệ không phải Windows, lựa chọn an toàn duy nhất là không dùng `set_var` hay `remove_var` chút nào[^set-var-mt]. Điều kiện chính xác là không thread nào khác đang ghi *hoặc đọc* môi trường qua hàm hay biến toàn cục ngoài module này[^set-var-req].
+
+Lý do là các hệ điều hành này không có cách thread-safe để đọc môi trường, và hầu hết thư viện C, kể cả libc, không cho biết hàm nào đọc môi trường[^set-var-why]. Ngay cả thư viện chuẩn cũng có thể đọc môi trường mà không qua module `env`, ví dụ DNS lookup của `ToSocketAddrs`[^set-var-std]. Nghĩa là `thumbd` không thể tự bảo đảm "không thread nào đang đọc" chỉ bằng cách nhìn code của mình (nhận xét của người soạn). Muốn truyền biến cho process con như `convert` thì docs gợi ý dùng `Command::env`[^set-var-cmd].
+
+Từ edition 2024 (mốc phiên bản của ngôn ngữ Rust, chọn bằng cờ `--edition`), gọi `set_var`/`remove_var` ngoài khối `unsafe` là lỗi biên dịch. Hàm được đánh dấu `unsafe` bắt đầu từ edition 2024, còn các edition cũ không đòi `unsafe`[^ed-unsafe-fn] (đã chạy rustc 1.95.0: cùng một dòng `std::env::set_var("A", "b");` biên dịch được với `--edition 2021`, còn `--edition 2024` báo `E0133`).
+
+Cùng gốc với mục 3: `Command` giữ khóa đọc môi trường quanh `fork`[^src-envlock]. Docs `pre_exec` thì không bảo đảm việc đọc `std::env` hoạt động ở con[^rs-preexec-safety]. Điểm chung là môi trường (`environ`) là trạng thái toàn cục dùng chung (suy luận của người soạn).
 
 <details><summary>Đi sâu: quan sát với đối số <code>abc\xff</code> và biến <code>BAD</code></summary>
 
-Quan sát khi truyền đối số `abc\xff`: `args_os()` thành công, `last = "abc\xFF"`, `bytes = [97, 98, 99, 255]`; còn `args().collect()` panic ở `library/std/src/env.rs`. Khớp docs: `args()` panic khi duyệt nếu đối số không phải Unicode[^env-args]; `args_os` không kiểm Unicode[^env-args-os]. Tương tự `vars()` panic khi gặp key/value không hợp lệ[^env-vars-panic]; `var` trả `VarError::NotUnicode`[^env-var-notunicode] — với `BAD=$'a\xffb'`: `var("BAD")` → `NotUnicode("a\xFFb")`, `var_os("BAD")` → `Some([97, 255, 98])`.
+Quan sát khi truyền đối số `abc\xff`: `args_os()` thành công, `last = "abc\xFF"`, `bytes = [97, 98, 99, 255]`; còn `args().collect()` panic ở `library/std/src/env.rs`. Khớp docs: `args()` panic khi duyệt nếu đối số không phải Unicode[^env-args]. Còn `args_os` không kiểm Unicode[^env-args-os]. `vars()` cũng panic khi gặp key hoặc value không hợp lệ[^env-vars-panic]. `var` thì trả `VarError::NotUnicode`[^env-var-notunicode]; với `BAD=$'a\xffb'`: `var("BAD")` → `NotUnicode("a\xFFb")`, `var_os("BAD")` → `Some([97, 255, 98])`.
 
 </details>
 
-**Quay lại Q6:** dùng `args_os`/`var_os`/`OsString`; `set_var` `unsafe` vì thread khác.
+**Quay lại Q6:** `thumbd` nên đọc config bằng `args_os`/`var_os`/`OsString`; `set_var` `unsafe` vì thread khác có thể đang đọc môi trường.
 
 ## 7. FFI: gọi `libc` trực tiếp, `nix` và `rustix` (Q7)
 
-> **Trả lời ngắn.** Ưu tiên `std`; thiếu syscall thì dùng crate đã bọc sẵn: `rustix` nhận và trả fd bằng `AsFd`/`OwnedFd`, docs hứa memory-safe và I/O-safe[^rustix-desc][^rustix-fd]; `nix` là binding thân thiện với Rust, module chia theo header C[^nix-desc][^nix-mod]. Chỉ khi thiếu cả hai mới gọi hàm C trực tiếp qua `libc` với `unsafe extern`, vì compiler không kiểm được hàm C và lời gọi phải nằm trong `unsafe`[^rs-unsafe-extern][^nomicon-unsafe]. Thứ tự ưu tiên này là gợi ý của người soạn, không phải điều docs nói.
+> **Trả lời ngắn.** Hãy ưu tiên `std`. Thiếu syscall thì dùng crate đã bọc sẵn. `rustix` nhận và trả fd bằng `AsFd`/`OwnedFd`[^rustix-fd]. Docs của nó hứa memory-safe và I/O-safe[^rustix-desc]. `nix` là binding thân thiện với Rust, module chia theo header C[^nix-desc]. Chỉ khi thiếu cả hai mới gọi hàm C trực tiếp qua `libc` với `unsafe extern`, vì compiler không kiểm được hàm C và lời gọi phải nằm trong `unsafe`[^rs-unsafe-extern]. Thứ tự ưu tiên này là gợi ý của người soạn, không phải điều docs nói.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `libc` là cầm dao thẳng vào bếp hệ điều hành; `rustix` là bộ dụng cụ đã bọc sẵn phần nguy hiểm (theo lời docs của nó); `nix` là bộ dụng cụ làm tên hàm C quen tay với Rust, còn an toàn đến đâu thì phải xem từng hàm.
+*Với `thumbd`.* Giả sử `thumbd` cần một lời gọi hệ thống mà `std` không có hàm tương ứng, chẳng hạn đặt giới hạn tài nguyên cho `convert` (nhận xét của người soạn: ví dụ giả định). Lúc đó có ba đường: gọi thẳng hàm C qua `libc`, dùng `nix`, hoặc dùng `rustix`. Chúng khác nhau ở chỗ ai chịu trách nhiệm về an toàn.
 
-**`unsafe extern`**
+### 7.1 `unsafe extern`
 
-Crate `libc` là các binding FFI thô (khai báo để Rust gọi hàm C) tới thư viện hệ thống của nền tảng[^libc-crate]. Rust Book: hàm trong khối `extern` nói chung unsafe để gọi nên khối `extern` cũng phải đánh dấu `unsafe`, vì ngôn ngữ khác không thực thi quy tắc của Rust và compiler không kiểm được[^rs-unsafe-extern]; Nomicon: lời gọi phải nằm trong `unsafe {}` như lời hứa với compiler[^nomicon-unsafe].
+Crate `libc` là các binding FFI thô (khai báo để Rust gọi hàm C) tới thư viện hệ thống của nền tảng[^libc-crate]. Hàm khai báo trong khối `extern` nói chung unsafe để gọi, nên khối `extern` cũng phải đánh dấu `unsafe`: ngôn ngữ khác không thực thi quy tắc của Rust và compiler không kiểm được[^rs-unsafe-extern]. Vì thế mọi lời gọi phải nằm trong `unsafe {}`, như một lời hứa với compiler[^nomicon-unsafe].
 
-Với `write(fd, ptr, len)`, compiler không biết `ptr` có hợp lệ cho `len` byte hay `fd` có thuộc về bạn không — cả memory safety lẫn I/O safety (mục 1) nằm ngoài tầm kiểm soát. Chiến lược (nhận xét của người soạn): bọc lời gọi `unsafe` trong một hàm safe nhỏ nhận `BorrowedFd` và `&[u8]`, đổi kết quả `-1` thành `io::Error::last_os_error()` ngay (như `cvt`, mục 2), để các bất biến tự chứng minh chỉ nằm một chỗ.
+Với `write(fd, ptr, len)`, compiler không biết `ptr` có hợp lệ cho `len` byte hay `fd` có thuộc về bạn không. Cả memory safety lẫn I/O safety (mục 1) nằm ngoài tầm kiểm soát của nó. Chiến lược (nhận xét của người soạn): bọc lời gọi `unsafe` trong một hàm safe nhỏ nhận `BorrowedFd` và `&[u8]`, đổi kết quả `-1` thành `io::Error::last_os_error()` ngay (như `cvt`, mục 2), để các bất biến cần tự chứng minh chỉ nằm một chỗ.
 
-**`nix` và `rustix`**
+### 7.2 `nix` và `rustix`
 
-Chỉ ghi điều docs nói (ghim `nix` 0.31.3, `rustix` 1.1.5):
+Phần này chỉ ghi điều docs nói (ghim `nix` 0.31.3, `rustix` 1.1.5):
 
-- **nix**: binding thân thiện với Rust cho các hàm hệ thống *nix[^nix-desc]; module tổ chức theo header C chứa hàm đó[^nix-mod].
-- **rustix**: wrapper an toàn bộ nhớ và an toàn I/O cho API syscall kiểu POSIX/Unix/Linux/Winsock, có backend cấu hình được[^rustix-desc]; fd được truyền và trả về bằng `AsFd` và `OwnedFd` thay vì số nguyên trần, bảo đảm I/O safety[^rustix-fd].
-- Trang chủ docs của `nix` không nhắc `OwnedFd`/`AsFd`, nên đừng suy ra nó dùng kiểu I/O-safe; kiểm từng hàm ở phiên bản bạn dùng.
+- **nix** là binding thân thiện với Rust cho các hàm hệ thống *nix[^nix-desc]. Module của nó được tổ chức theo header C chứa hàm đó[^nix-mod].
+- **rustix** là wrapper an toàn bộ nhớ và an toàn I/O cho API syscall kiểu POSIX/Unix/Linux/Winsock, có backend cấu hình được[^rustix-desc]. Fd được truyền và trả về bằng `AsFd` và `OwnedFd` thay vì số nguyên trần, để bảo đảm I/O safety[^rustix-fd].
+- Trang chủ docs của `nix` không nhắc `OwnedFd`/`AsFd`, nên đừng suy ra nó dùng kiểu I/O-safe; hãy kiểm từng hàm ở phiên bản bạn dùng.
 
-Gợi ý chọn (nhận xét của người soạn, không phải điều docs nói): thử `std` trước; thiếu syscall thì chọn crate đã bọc sẵn (`rustix` nếu muốn API nhận `AsFd` và trả `OwnedFd`, `nix` nếu muốn API bám theo tên hàm C, kèm việc kiểm kiểu fd của từng hàm); chỉ khi thiếu cả hai mới viết `unsafe extern`/`libc` tự bọc, với ranh giới `unsafe` nằm trong một module nhỏ có test.
+Gợi ý chọn (nhận xét của người soạn, không phải điều docs nói): thử `std` trước. Thiếu syscall thì chọn crate đã bọc sẵn: `rustix` nếu muốn API nhận `AsFd` và trả `OwnedFd`, `nix` nếu muốn API bám theo tên hàm C (kèm việc kiểm kiểu fd của từng hàm). Chỉ khi thiếu cả hai mới viết `unsafe extern`/`libc` tự bọc, với ranh giới `unsafe` nằm trong một module nhỏ có test.
 
 <details><summary>Đi sâu: quy tắc <code>extern</code> theo edition và ví dụ gọi <code>getpid</code>/<code>write</code></summary>
 
-Reference: gọi hàm unsafe hay truy cập `static` unsafe khai báo trong external block chỉ được trong ngữ cảnh unsafe[^ref-extern-ctx]; hàm trong khối mặc định unsafe trừ khi có qualifier `safe`[^ref-extern-implicit]; trước edition 2024, `unsafe` trước `extern` là tùy chọn[^ref-extern-2024]. Edition Guide: khối `extern` giờ phải được đánh dấu bằng từ khoá `unsafe` từ edition 2024[^ed-unsafe-extern]. Kiểm chứng bằng rustc 1.95.0: `extern "C" { fn getpid() -> i32; }` biên dịch được với `--edition 2021`, còn `--edition 2024` báo `error: extern blocks must be unsafe`.
+Reference quy định: gọi hàm unsafe hay truy cập `static` unsafe khai báo trong external block chỉ được trong ngữ cảnh unsafe[^ref-extern-ctx]. Hàm trong khối mặc định là unsafe trừ khi có qualifier `safe`[^ref-extern-implicit]. Trước edition 2024, `unsafe` trước `extern` là tùy chọn[^ref-extern-2024]. Từ edition 2024, khối `extern` phải được đánh dấu bằng từ khóa `unsafe`[^ed-unsafe-extern]. Kiểm chứng bằng rustc 1.95.0: `extern "C" { fn getpid() -> i32; }` biên dịch được với `--edition 2021`, còn `--edition 2024` báo `error: extern blocks must be unsafe`.
 
 Ví dụ chạy được, không cần crate `libc` (quan sát: `std` đã liên kết libc; docs của crate `libc` chỉ nói theo mặc định nó giả định thư viện chuẩn chứa link directive cần thiết[^libc-std-link]):
 
@@ -354,23 +408,23 @@ let msg = b"hello via raw write\n";
 let n = unsafe { write(1, msg.as_ptr(), msg.len()) };   // in dòng chữ; n = 20
 ```
 
-Khai báo `unsafe extern "C" { safe fn getpid() -> i32; }` cho phép gọi không cần `unsafe` ở nơi gọi (rustc 1.95.0 biên dịch và chạy): bạn tự chịu trách nhiệm rằng hàm thật sự an toàn với mọi đối số.
+Khai báo `unsafe extern "C" { safe fn getpid() -> i32; }` cho phép gọi không cần `unsafe` ở nơi gọi (rustc 1.95.0 biên dịch và chạy). Khi đó bạn tự chịu trách nhiệm rằng hàm thật sự an toàn với mọi đối số.
 
 </details>
 
-**Quay lại Q7:** ưu tiên `std`, rồi crate đã bọc sẵn (`rustix`, `nix`), cuối cùng mới tự bọc `unsafe`.
+**Quay lại Q7:** ưu tiên `std`, rồi crate đã bọc sẵn (`rustix`, `nix`), cuối cùng mới tự bọc `unsafe` quanh `libc`.
 
 ## Bổ sung: extension trait của `std::os::unix`
 
-`std` giữ API chính đa nền tảng và đặt phần riêng của Unix thành *extension trait*[^permsext][^metaext]; bạn `use` trait để method xuất hiện trên kiểu quen thuộc (nhận xét của người soạn).
+`thumbd` còn hai việc nữa mà `std` chỉ cho làm qua phần riêng của Unix: đặt mode `0o640` cho thumbnail, và chạy `convert` dưới một uid khác. `std` giữ API chính đa nền tảng, còn phần riêng của Unix nằm trong các *extension trait*[^permsext]. Bạn `use` trait thì method mới hiện ra trên kiểu quen thuộc (nhận xét của người soạn). Chẳng hạn `MetadataExt` là extension của `fs::Metadata`[^metaext].
 
 | Trait | Mở rộng | Method (từ docs) |
 |---|---|---|
-| `PermissionsExt` | `fs::Permissions`[^permsext] | `mode()`, `set_mode(u32)`, `from_mode(u32)`[^permsext-sig] |
-| `MetadataExt` | `fs::Metadata`[^metaext] | `dev()` (ID của thiết bị chứa file[^metaext-dev]), `ino()`[^metaext-sig] |
-| `CommandExt` | `process::Command` | `uid`, `gid`, `exec`, `arg0`, `process_group`, và `unsafe fn pre_exec`[^cmdext-methods1][^cmdext-methods2][^cmdext-sig] |
+| `PermissionsExt` | `fs::Permissions` | `mode()`, `set_mode(u32)`, `from_mode(u32)`[^permsext-sig] |
+| `MetadataExt` | `fs::Metadata` | `dev()` (ID của thiết bị chứa file[^metaext-dev]), `ino()`[^metaext-sig] |
+| `CommandExt` | `process::Command` | `uid`, `gid`[^cmdext-methods1], `exec`, `arg0`, `process_group`[^cmdext-methods2], và `unsafe fn pre_exec`[^cmdext-sig] |
 
-Trong docs 1.95.0, `groups`, `chroot` và `setsid` của `CommandExt` được đánh dấu là API thử nghiệm chỉ có ở nightly (nightly-only experimental)[^cmdext-nightly-groups][^cmdext-nightly-chroot][^cmdext-nightly-setsid], nên chưa dùng được trên toolchain stable (suy luận của người soạn).
+Trong docs 1.95.0, `groups` là API thử nghiệm chỉ có ở nightly (nightly-only experimental)[^cmdext-nightly-groups]. `chroot` cũng vậy[^cmdext-nightly-chroot]. `setsid` cũng vậy[^cmdext-nightly-setsid]. Vì thế cả ba chưa dùng được trên toolchain stable (suy luận của người soạn).
 
 ```rust
 let f = File::create("/tmp/x").unwrap();
@@ -384,104 +438,104 @@ let m = std::fs::metadata("/tmp/x").unwrap();
 
 `mode()` trả cả bit loại file (`100000` hệ bát phân là file thường[^inode-modetype]) lẫn bit quyền; ý nghĩa các bit xem [Chương 06](06-user-quyen-proc-sys.md) mục 2. `ino()` cho số inode (quan sát: `> 0`), vốn chỉ bảo đảm duy nhất trong một filesystem[^inode-unique] ([Chương 04](04-file-descriptor-va-vfs.md) mục 1).
 
-`CommandExt::uid` dịch thành `setuid` trong con, lỗi làm `spawn` thất bại[^cmdext-uid-setuid]; docs thêm rằng nó gọi `setgroups(0, NULL)` nếu chưa chỉ định groups, để bỏ nhóm phụ có thể cho con quyền ngoài ý muốn[^cmdext-uid]. Code `do_exec` khớp: gọi `setgroups(0, …)` rồi bỏ qua riêng lỗi `EPERM` (trường hợp thiếu `CAP_SETGID`) trước khi `setuid`[^src-eperm]. Đặt `uid`/`gid` cũng là điều kiện làm `std` bỏ `posix_spawn` (mục 3). Về ID và capability: [Chương 06](06-user-quyen-proc-sys.md) mục 1 và 3. Code dùng các trait này tự khai báo chỉ chạy trên Unix, nên đặt sau `#[cfg(unix)]` (nhận xét của người soạn).
+`CommandExt::uid` dịch thành `setuid` trong con, và lỗi làm `spawn` thất bại[^cmdext-uid-setuid]. Docs thêm rằng nó gọi `setgroups(0, NULL)` nếu chưa chỉ định groups, để bỏ các nhóm phụ có thể cho con quyền ngoài ý muốn[^cmdext-uid]. Code `do_exec` khớp với điều đó: nó gọi `setgroups(0, …)` rồi bỏ qua riêng lỗi `EPERM` (trường hợp thiếu `CAP_SETGID`) trước khi `setuid`[^src-eperm]. Đặt `uid`/`gid` cũng là điều kiện làm `std` bỏ `posix_spawn` (mục 3). Về ID và capability: [Chương 06](06-user-quyen-proc-sys.md) mục 1 và 3. Code dùng các trait này tự khai báo chỉ chạy trên Unix, nên đặt sau `#[cfg(unix)]` (nhận xét của người soạn).
 
 ## Tóm tắt
 
-- Fd chỉ là số và bị cấp lại sau `close`; I/O safety tách nó thành `OwnedFd` (đóng khi drop), `BorrowedFd<'a>` (mượn có lifetime), `RawFd` (số trần).
-- `from_raw_fd` là `unsafe` vì compiler không kiểm được fd đang mở và thuộc về bạn; `Drop` của `File`/`OwnedFd` bỏ qua lỗi `close`, cần xử lý lỗi hay độ bền thì `sync_all`.
-- `File::open`/`try_clone` đặt close-on-exec ngay từ đầu nên fd do `std` mở không còn mở trong chương trình mới sau `exec` (cơ chế: [Chương 04](04-file-descriptor-va-vfs.md) mục 4).
-- `io::Error` chứa `errno` (`raw_os_error`) và `ErrorKind` (`#[non_exhaustive]`, errno lạ → `Uncategorized`); `last_os_error` phải gọi ngay, `std` gói trong `cvt`/`cvt_r`.
-- `Command::spawn` thử `posix_spawn` trước, rơi xuống `fork`+`exec` khi có uid/gid/groups/chroot, `pre_exec`, đổi `PATH` với program không phải path (và vài điều kiện khác trong source); `groups`, `chroot`, `setsid` của `CommandExt` hiện là API nightly-only.
-- `pre_exec` chạy ở con giữa `fork` và `exec`, môi trường hạn chế mà docs dặn tuân thủ yêu cầu async-signal-safety, vì thế `unsafe`; lỗi từ `exec` và closure quay về cha qua một kênh riêng.
-- `Child` không có `Drop`, `std` không tự `wait`: bỏ `Child` để lại zombie (quan sát `Z`); `Stdio::piped()` là `dup2` đầu pipe lên fd 0/1/2 của con.
-- Runtime Rust ignore `SIGPIPE` (`write` cho `EPIPE`, `println!` panic); `Command` reset `SIGPIPE` trong con vì tương thích ngược, và việc reset cần thiết vì ignore sống sót qua `exec` (nối hai nguồn là suy luận của người soạn).
-- `args`/`vars` panic với dữ liệu không phải Unicode; dùng `args_os`/`var_os`/`OsString`. `set_var` `unsafe` vì các OS này không có cách thread-safe để đọc môi trường.
-- FFI trực tiếp cần `unsafe extern` (bắt buộc từ edition 2024); `rustix` hứa memory-safe và I/O-safe theo docs, còn trang chủ docs của `nix` không nhắc `OwnedFd`/`AsFd`.
+- Fd chỉ là số và bị cấp lại sau `close`. I/O safety tách nó thành `OwnedFd` (đóng khi drop), `BorrowedFd<'a>` (mượn có lifetime) và `RawFd` (số trần).
+- `from_raw_fd` là `unsafe` vì compiler không kiểm được fd đang mở và thuộc về bạn. `Drop` của `File`/`OwnedFd` bỏ qua lỗi `close`; cần xử lý lỗi hay độ bền thì dùng `sync_all`.
+- `File::open`/`try_clone` đặt close-on-exec ngay từ đầu, nên fd do `std` mở không còn mở trong chương trình mới sau `exec` (cơ chế: [Chương 04](04-file-descriptor-va-vfs.md) mục 4).
+- `io::Error` chứa `errno` (`raw_os_error`) và `ErrorKind` (`#[non_exhaustive]`, errno lạ → `Uncategorized`). `last_os_error` phải gọi ngay, nên `std` gói nó trong `cvt`/`cvt_r`.
+- `Command::spawn` thử `posix_spawn` trước, rơi xuống `fork`+`exec` khi có uid/gid/groups/chroot, `pre_exec`, hoặc đổi `PATH` với program không phải path (cùng vài điều kiện khác trong source). `groups`, `chroot`, `setsid` của `CommandExt` hiện là API nightly-only.
+- `pre_exec` chạy ở con giữa `fork` và `exec`, trong môi trường hạn chế mà docs dặn phải tuân thủ async-signal-safety, nên nó `unsafe`. Lỗi từ `exec` và từ closure quay về cha qua một kênh riêng.
+- `Child` không có `Drop` và `std` không tự `wait`: bỏ `Child` để lại zombie (quan sát `Z`). `Stdio::piped()` là `dup2` đầu pipe lên fd 0/1/2 của con.
+- Runtime Rust ignore `SIGPIPE` (`write` cho `EPIPE`, `println!` panic). `Command` reset `SIGPIPE` trong con vì tương thích ngược, và việc reset cần thiết vì ignore sống sót qua `exec` (nối hai nguồn là suy luận của người soạn).
+- `args`/`vars` panic với dữ liệu không phải Unicode, nên dùng `args_os`/`var_os`/`OsString`. `set_var` `unsafe` vì các OS này không có cách thread-safe để đọc môi trường.
+- FFI trực tiếp cần `unsafe extern` (bắt buộc từ edition 2024). `rustix` hứa memory-safe và I/O-safe theo docs, còn trang chủ docs của `nix` không nhắc `OwnedFd`/`AsFd`.
 
 ## Câu hỏi tự kiểm tra
 
 1. Vì sao hàm safe nhận `i32` rồi `close` nó bị coi là unsound?
    <details><summary>Đáp án</summary>
 
-   Docs `std::io`: hàm safe coi số nguyên là fd rồi thao tác là unsound[^rs-iosafety-unsound]; fd còn bị cấp lại sau `close`[^close-desc], nên chủ cũ của số đó có thể đang làm việc trên file khác[^rs-iosafety-realloc].
+   Hàm safe lấy một số nguyên làm fd rồi thao tác trên đó là unsound[^rs-iosafety-unsound]. Lý do là fd bị cấp lại sau `close`[^close-desc]. Vì vậy chủ cũ của số đó có thể đang làm việc trên file khác[^rs-iosafety-realloc].
 
    </details>
 
 2. `BorrowedFd<'fd>` bảo đảm gì, kiểm bằng cơ chế nào; và vì sao `from_raw_fd` là `unsafe`?
    <details><summary>Đáp án</summary>
 
-   Trong lifetime, không ai đóng fd[^rs-borrowedfd]; cơ chế là tham số lifetime cộng borrow checker, bộ so sánh phạm vi sống của các borrow lúc biên dịch[^book-borrowck]. `from_raw_fd` nhận quyền sở hữu và đối tượng mới sẽ đóng fd[^rs-fromrawfd]; fd phải được sở hữu và đang mở[^rs-fromraw-safety]; compiler không kiểm được điều đó nên hàm là `unsafe`, gọi ngoài khối `unsafe` bị từ chối (E0133)[^rs-e0133].
+   Trong lifetime, không ai đóng fd[^rs-borrowedfd]. Cơ chế là tham số lifetime cộng borrow checker, bộ so sánh phạm vi sống của các borrow lúc biên dịch[^book-borrowck]. `from_raw_fd` nhận quyền sở hữu, và đối tượng mới sẽ đóng fd[^rs-fromrawfd]. Fd phải là fd được sở hữu và đang mở[^rs-fromraw-safety]. Compiler không kiểm được điều đó nên hàm là `unsafe`, và gọi nó ngoài khối `unsafe` bị từ chối (E0133)[^rs-e0133].
 
    </details>
 
 3. `drop(File)` có báo lỗi đóng hay bảo đảm dữ liệu xuống đĩa không?
    <details><summary>Đáp án</summary>
 
-   Không; lỗi đóng bị bỏ qua, muốn tự xử lý thì dùng `sync_all`[^rs-file][^rs-drop-close]; drop cũng không bắt buộc chờ đến khi dữ liệu xuống filesystem[^rs-sync-all].
+   Không. Lỗi đóng bị bỏ qua, và muốn tự xử lý thì dùng `sync_all`[^rs-file]. Source của `OwnedFd` cũng ghi rõ lỗi bị bỏ qua[^rs-drop-close]. Drop cũng không bắt buộc chờ đến khi dữ liệu xuống filesystem[^rs-sync-all].
 
    </details>
 
 4. `raw_os_error()` trả `None` khi nào?
    <details><summary>Đáp án</summary>
 
-   Khi lỗi không tạo bằng `last_os_error`/`from_raw_os_error`[^rs-raw-os-error], ví dụ `io::Error::other("custom")`.
+   Khi lỗi không được tạo bằng `last_os_error`/`from_raw_os_error`[^rs-raw-os-error], ví dụ `io::Error::other("custom")`.
 
    </details>
 
 5. Kể các điều kiện khiến `spawn` bỏ `posix_spawn`.
    <details><summary>Đáp án</summary>
 
-   uid/gid, `pre_exec`, groups, chroot, hoặc `env` đổi `PATH` mà program không phải path[^rs-spawn-conds]; ngoài ra còn `current_dir` khi libc thiếu `addchdir`[^src-spawn-chdir], `setsid` ngoài Linux-glibc[^src-spawn-setsid], và nhánh pidfd[^src-spawn-pidfd].
+   uid/gid, `pre_exec`, groups, chroot, hoặc `env` đổi `PATH` mà program không phải path[^rs-spawn-conds]. Ngoài ra còn `current_dir` khi libc thiếu `addchdir`[^src-spawn-chdir]. Tương tự với `setsid` ngoài Linux-glibc[^src-spawn-setsid]. Cuối cùng là nhánh pidfd[^src-spawn-pidfd].
 
    </details>
 
 6. Vì sao closure `pre_exec` không nên cấp phát hay lấy mutex?
    <details><summary>Đáp án</summary>
 
-   Nó chạy ở con sau `fork`; `malloc`, `std::env`, mutex không được bảo đảm do thread khác có thể còn chạy lúc fork[^rs-preexec-safety]; `fork` giữ một thread nhưng sao trạng thái mutex[^fork-thread], nên con chỉ nên gọi hàm async-signal-safe cho đến `execve`[^fork-signalsafe].
+   Nó chạy ở con sau `fork`. `malloc`, `std::env` và mutex không được bảo đảm hoạt động, vì thread khác có thể còn chạy lúc `fork`[^rs-preexec-safety]. `fork` giữ một thread nhưng sao trạng thái mutex[^fork-thread]. Vì vậy con chỉ nên gọi hàm async-signal-safe cho đến `execve`[^fork-signalsafe].
 
    </details>
 
 7. Chuyện gì xảy ra với `Child` bị drop mà không `wait`; và `Stdio::piped()` được nối vào fd 0/1/2 của con bằng gì?
    <details><summary>Đáp án</summary>
 
-   Con không bị dừng, không được thu hoạch[^rs-child-nodrop][^rs-child-zombie]; khi kết thúc thành zombie[^wait-zombie]; nhiều zombie có thể cạn PID[^child-zombie-ids]. `Stdio::piped()` là một pipe nối cha–con[^rs-stdio-piped]; con `dup2` đầu pipe lên fd 0/1/2 trước `exec` ở đường `fork`+`exec`[^rs-do-exec-dup2], còn đường `posix_spawn` khai báo file action `adddup2`[^rs-spawn-adddup2].
+   Con không bị dừng và cũng không được thu hoạch[^rs-child-nodrop]. Khi kết thúc nó thành zombie[^wait-zombie]. Nhiều zombie có thể cạn PID[^child-zombie-ids]. `Stdio::piped()` là một pipe nối cha–con[^rs-stdio-piped]. Con `dup2` đầu pipe lên fd 0/1/2 trước `exec` ở đường `fork`+`exec`[^rs-do-exec-dup2]. Đường `posix_spawn` thì khai báo file action `adddup2`[^rs-spawn-adddup2].
 
    </details>
 
 8. Vì sao con do `Command` spawn không thừa hưởng `SIGPIPE` ignore của cha?
    <details><summary>Đáp án</summary>
 
-   Ignore sống sót qua `exec`[^signal-exec], nên `std` reset về `SIG_DFL` trong con ở cả hai đường spawn[^rs-child-sigpipe-reset][^rs-child-sigpipe-fork][^rs-child-sigpipe-spawn].
+   Ignore sống sót qua `exec`[^signal-exec]. Vì vậy `std` reset về `SIG_DFL` trong con[^rs-child-sigpipe-reset]. Việc này có ở cả hai đường spawn. Đường `fork`+`exec` gọi `signal(SIGPIPE, SIG_DFL)`[^rs-child-sigpipe-fork]. Đường `posix_spawn` thêm `SIGPIPE` vào tập `sigdefault`[^rs-child-sigpipe-spawn].
 
    </details>
 
 9. Vì sao `env::args()` có thể panic và tránh thế nào?
    <details><summary>Đáp án</summary>
 
-   Đối số là byte tùy ý trên Unix[^os-unix-bytes], `args()` panic nếu không phải Unicode[^env-args]; dùng `args_os`[^env-args-os].
+   Đối số là byte tùy ý trên Unix[^os-unix-bytes]. Vì vậy `args()` panic nếu chúng không phải Unicode[^env-args]. Hãy dùng `args_os`[^env-args-os].
 
    </details>
 
 10. Vì sao `env::set_var` là `unsafe`?
     <details><summary>Đáp án</summary>
 
-    Phải bảo đảm không thread nào khác đọc/ghi môi trường, kể cả qua thư viện chuẩn[^set-var-req][^set-var-std]; lý do là các OS này không có cách thread-safe để đọc môi trường[^set-var-why]; với chương trình đa thread, lựa chọn an toàn duy nhất là không dùng[^set-var-mt].
+    Bạn phải bảo đảm không thread nào khác đọc hay ghi môi trường, kể cả qua thư viện chuẩn[^set-var-req]. Thư viện chuẩn cũng có thể đọc môi trường ngoài module `env`[^set-var-std]. Lý do là các OS này không có cách thread-safe để đọc môi trường[^set-var-why]. Với chương trình đa thread, lựa chọn an toàn duy nhất là không dùng[^set-var-mt].
 
     </details>
 
 11. Edition 2024 yêu cầu gì với khối `extern`, và `safe fn` nghĩa là gì?
     <details><summary>Đáp án</summary>
 
-    Khối phải là `unsafe extern`[^ed-unsafe-extern]; hàm trong khối mặc định unsafe trừ khi có qualifier `safe`[^ref-extern-implicit], khi đó người khai báo chịu trách nhiệm.
+    Khối phải là `unsafe extern`[^ed-unsafe-extern]. Hàm trong khối mặc định là unsafe trừ khi có qualifier `safe`[^ref-extern-implicit]; khi đó người khai báo chịu trách nhiệm.
 
     </details>
 
 12. Theo docs, `rustix` và `nix` khác nhau thế nào về cách truyền fd?
     <details><summary>Đáp án</summary>
 
-    `rustix` nhận và trả fd bằng `AsFd`/`OwnedFd` và docs hứa memory-safe, I/O-safe[^rustix-desc][^rustix-fd]; `nix` là binding thân thiện với Rust, module theo header C[^nix-desc][^nix-mod], và trang chủ docs của nó không nhắc `OwnedFd`/`AsFd` (người soạn đã đọc trang), nên phải kiểm từng hàm ở phiên bản bạn dùng.
+    `rustix` nhận và trả fd bằng `AsFd`/`OwnedFd`[^rustix-fd]. Docs của nó hứa memory-safe và I/O-safe[^rustix-desc]. `nix` là binding thân thiện với Rust[^nix-desc]. Module của nó theo header C[^nix-mod]. Trang chủ docs của `nix` không nhắc `OwnedFd`/`AsFd` (người soạn đã đọc trang), nên phải kiểm từng hàm ở phiên bản bạn dùng.
 
     </details>
 

@@ -1,6 +1,6 @@
 # P11 · Chương 03 — Đo và cải thiện hiệu năng service Rust
 
-> Chương này nói về **phương pháp** và **cấu hình**, không đưa ra con số hiệu năng của riêng người soạn: người soạn không chạy benchmark (theo hợp đồng của dự án). Mọi con số như "10–20%" là lời của tài liệu được trích, đúng như tài liệu đó nói và không hứa gì cho dự án của bạn. Một số nguồn là **trang sống** (không ghim phiên bản; nội dung có thể đổi): *The Rust Performance Book* (`nnethercote.github.io/perf-book`), sách Criterion.rs, *Site Reliability Engineering* của Google. Phần còn lại ghim phiên bản: Rust 1.95.0, `tracing` 0.1.44, `tokio` 1.53.2, `hdrhistogram` 7.5.4, `console-subscriber` 0.5.0, README `tokio-console-v0.1.13`.
+> Chương này nói về **phương pháp** và **cấu hình**, không đưa ra con số hiệu năng nào của người soạn: người soạn không chạy benchmark (theo hợp đồng của dự án). Những con số như "10–20%" là lời của tài liệu được trích, đúng như tài liệu đó nói, và không hứa gì cho dự án của bạn. Một số nguồn là **trang sống**, không ghim phiên bản nên nội dung có thể đổi: *The Rust Performance Book* (`nnethercote.github.io/perf-book`), sách Criterion.rs và *Site Reliability Engineering* của Google. Các nguồn còn lại ghim phiên bản: Rust 1.95.0, `tracing` 0.1.44, `tokio` 1.53.2, `hdrhistogram` 7.5.4, `console-subscriber` 0.5.0, README `tokio-console-v0.1.13`.
 
 ## Bạn sẽ hiểu được gì
 
@@ -19,17 +19,27 @@
 - [P3 · Chương 06 — Heap allocator](../03-memory/06-heap-allocator.md): free list, arena, `brk`/`mmap`, jemalloc/mimalloc và `#[global_allocator]` ở mức khái niệm.
 - [P7 · Chương 08 — Tokio](../07-io-async/08-tokio.md): runtime, scheduler, vì sao không được chặn trong async, `spawn_blocking`.
 
+Cả chương bám theo một service giả định tên `catalog`, giới thiệu ở đầu mục 1.
+
 ## 1. Benchmark đúng cách: warm-up, nhiễu, `black_box` (Q1)
 
-> **Trả lời ngắn.** Hai nguồn sai chính của benchmark viết vội là *trình biên dịch tối ưu mất đoạn code bạn định đo*[^bb-elim] và *đo trên máy chưa "nóng", đang ồn*[^crit-warm][^crit-quiet]. `black_box` là cách nói với trình biên dịch "đừng giả định gì về giá trị này"[^bb-def], còn warm-up và máy yên tĩnh xử lý phần còn lại. Wall-time dễ dao động, nên có thể cần thêm số đo ít nhiễu hơn như số lệnh[^pb-var][^pb-instr].
+> **Trả lời ngắn.** Benchmark viết vội thường sai vì hai lý do. Lý do thứ nhất: trình biên dịch tối ưu mất đoạn code bạn định đo[^bb-elim]. Lý do thứ hai: máy chưa "nóng", nên cache còn lạnh[^crit-warm]. Máy cũng phải yên tĩnh thì số đo mới đáng tin[^crit-quiet]. `black_box` là cách bảo trình biên dịch đừng giả định gì về một giá trị[^bb-def]; warm-up và máy yên tĩnh lo phần còn lại. Wall-time vốn dễ dao động mạnh[^pb-var]. Vì vậy đôi khi cần đo thêm một đại lượng ít nhiễu hơn như số lệnh[^pb-instr].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn cân thử một chiếc xe bằng cách bấm giờ ngay lúc xe vừa nổ máy nguội, trên con đường đang kẹt, rồi trình biên dịch "thông minh" nhận ra bạn chẳng bao giờ dùng kết quả nên... không chạy chiếc xe nữa. Kết quả 0 ns trông rất đẹp và hoàn toàn vô nghĩa.
+*Với service `catalog`.* `catalog` là một service Rust chạy trên Tokio, có endpoint `GET /items/{id}`. Mỗi request nó parse đường dẫn, hỏi Postgres rồi serialize dòng dữ liệu thành JSON. Ta sẽ bám theo `catalog` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Giả sử p99 của endpoint này đang cao và bạn nghi hàm `to_json` serialize chậm. Việc đầu tiên là viết benchmark cho hàm đó, và đây cũng là chỗ dễ đo sai nhất: bạn bấm giờ một vòng lặp gọi `to_json` rồi nhận về 0 ns. Con số ấy trông rất đẹp và hoàn toàn vô nghĩa. Mục này giải thích vì sao, và cần làm gì để số đo đáng tin.
 
-*Lỗi 1 — đoạn code bị tối ưu mất.* Tài liệu `black_box` đưa ví dụ một hàm thuần `contains` gọi trong vòng lặp mà kết quả không ai dùng, rồi liệt kê những gì trình biên dịch về lý thuyết được phép làm: kéo lời gọi ra khỏi vòng lặp, inline, thay bằng hằng `true` vì đầu vào biết lúc biên dịch, và xóa luôn lời gọi vì kết quả không được dùng[^bb-nothing]. Tài liệu nói không chắc mọi thứ xảy ra cùng lúc, nhưng trình biên dịch hoàn toàn có thể làm một số trong đó và khiến benchmark "rất thiếu chính xác"[^bb-elim].
+### 1.1 Lỗi 1: đoạn code bị tối ưu mất
 
-*Cách chữa — `std::hint::black_box`.* Đây là hàm đồng nhất (trả đúng giá trị nhận vào) được dặn trình biên dịch "bi quan tối đa" về việc nó có thể làm gì với giá trị đó[^bb-def]. Trong thực hành nó phục vụ hai việc: ngăn trình biên dịch tối ưu dựa trên giá trị `black_box` trả về, và buộc giá trị truyền vào phải được tính ra dù kết quả không dùng[^bb-purposes]. Quy tắc dùng: bọc *đầu vào* của hàm cần đo bằng `black_box` để trình biên dịch không thể tối ưu theo cách phi thực tế[^bb-inputs]; bọc *kết quả* để phép tính không bị xóa (ví dụ trong docs bọc cả lời gọi lẫn hai đối số, nhờ đó thân `benchmark` không thể bỏ lời gọi[^bb-example]).
+Bản release của Rust được tối ưu rất mạnh, và với benchmark thì điều đó gây hại. Docs của `black_box` minh họa bằng một hàm thuần `contains` được gọi trong vòng lặp mà không ai dùng kết quả. Về lý thuyết, trình biên dịch được phép làm bốn việc: kéo lời gọi ra khỏi vòng lặp, inline nó, thay bằng hằng `true` vì đầu vào đã biết lúc biên dịch, và xóa hẳn lời gọi vì kết quả không được dùng[^bb-nothing]. Docs không chắc cả bốn việc xảy ra cùng lúc. Nhưng chỉ cần trình biên dịch làm một vài trong số đó là benchmark đã "rất thiếu chính xác"[^bb-elim].
+
+`to_json` của `catalog` rơi đúng vào tình huống này: nó là hàm thuần, và vòng lặp benchmark bỏ kết quả đi (nhận xét của người soạn). Trình biên dịch có đủ lý do để bỏ luôn việc serialize, và 0 ns là thời gian của một phép đo không còn đo gì.
+
+### 1.2 Cách chữa: `std::hint::black_box`
+
+`black_box` là hàm đồng nhất, tức trả đúng giá trị nó nhận. Điểm đặc biệt là trình biên dịch được dặn phải "bi quan tối đa" về việc hàm này có thể làm gì với giá trị đó[^bb-def]. Trong thực hành nó phục vụ hai việc: ngăn trình biên dịch tối ưu dựa trên giá trị `black_box` trả về, và buộc giá trị truyền vào phải được tính ra dù kết quả không dùng[^bb-purposes].
+
+Từ đó có hai quy tắc dùng. Thứ nhất, bọc *đầu vào* của hàm cần đo để trình biên dịch không thể tối ưu theo cách phi thực tế, một cách mà production không bao giờ được hưởng[^bb-inputs]. Thứ hai, bọc cả *kết quả* để phép tính không bị xóa. Ví dụ trong docs bọc cả lời gọi lẫn hai đối số, nhờ vậy thân `benchmark` không thể bỏ lời gọi[^bb-example]. Với `catalog`, nghĩa là viết `black_box(to_json(black_box(&item)))`. Đoạn code dưới đây dùng hàm `contains` của docs để minh họa cùng khuôn đó:
 
 ```rust
 use std::hint::black_box;
@@ -48,11 +58,17 @@ pub fn benchmark() {
 }
 ```
 
-*Giới hạn.* `black_box` chỉ được cung cấp theo kiểu "best-effort": mức độ nó chặn được tối ưu hóa tùy nền tảng và backend sinh code[^bb-bestef], và chương trình không được dựa vào nó cho tính đúng đắn ngoài việc nó là hàm đồng nhất[^bb-correct]. Với benchmark thì đủ dùng; đừng coi nó là bảo đảm tuyệt đối. (Nhận xét của người soạn: nếu số đo tốt đến mức khó tin, hãy nghi trước là code đã bị tối ưu mất, thay vì mừng.)
+`black_box` chỉ được cung cấp theo kiểu "best-effort": mức nó chặn được tối ưu hóa tùy nền tảng và backend sinh code[^bb-bestef]. Chương trình cũng không được dựa vào nó cho tính đúng đắn, ngoài việc nó là hàm đồng nhất[^bb-correct]. Với benchmark thế là đủ dùng, nhưng đừng coi nó là bảo đảm tuyệt đối. Một quy tắc thực hành: số đo tốt đến mức khó tin thì nên nghi code đã bị tối ưu mất trước khi mừng (nhận xét của người soạn).
 
-*Lỗi 2 — chưa warm-up.* Criterion chạy hàm cần đo lặp lại trong một khoảng warm-up cấu hình được (mặc định ba giây); với hàm Rust, mục đích là làm nóng cache của bộ xử lý và cache của file system nếu có[^crit-warm]. Thuật toán warm-up của Criterion: chạy một lần, rồi hai, bốn… cho đến khi tổng thời gian vượt ngưỡng warm-up[^crit-warm-alg]. (Nhận xét của người soạn: Rust biên dịch sẵn nên không có pha JIT như Java, nhưng cache CPU, page chưa được map, trạng thái allocator vẫn "lạnh" ở lần chạy đầu.)
+### 1.3 Lỗi 2: máy chưa nóng
 
-*Lỗi 3 — nhiễu.* Criterion khuyên chạy benchmark trên máy yên tĩnh và thiết kế để mỗi vòng lặp làm khối lượng việc xấp xỉ nhau[^crit-quiet]. *Rust Performance Book* thêm một điểm tinh tế: wall-time (thời gian thực trôi qua trên đồng hồ, thứ người dùng cảm nhận) dễ có phương sai cao[^pb-var], và thay đổi nhỏ về bố cục bộ nhớ cũng gây dao động đáng kể nhưng thoáng qua[^pb-layout]; vì vậy các số đo ít nhiễu hơn như số chu kỳ hoặc số lệnh có thể là phương án thay thế hợp lý[^pb-instr]. Khi so sánh hai lần chạy, Criterion có ngưỡng nhiễu cấu hình được vì các dao động không lường trước hiếm khi là thứ người đo quan tâm[^crit-noise].
+Rust biên dịch trước nên không có pha JIT như Java. Dù vậy lần chạy đầu vẫn chậm hơn: cache CPU còn lạnh, một số page chưa được map, trạng thái allocator chưa ổn định (nhận xét của người soạn). Criterion xử lý bằng cách chạy hàm cần đo lặp lại trong một khoảng warm-up cấu hình được, mặc định ba giây. Với hàm Rust, mục đích là làm nóng cache của bộ xử lý và cache của file system nếu có[^crit-warm]. Cách làm khá đơn giản: chạy hàm một lần, rồi hai lần, bốn lần... cho đến khi tổng thời gian chạy vượt ngưỡng warm-up[^crit-warm-alg].
+
+### 1.4 Lỗi 3: nhiễu
+
+Criterion khuyên hai điều: chạy benchmark trên máy yên tĩnh, và thiết kế sao cho mỗi vòng lặp làm khối lượng việc xấp xỉ nhau[^crit-quiet]. Laptop đang mở IDE và trình duyệt chưa phải là máy yên tĩnh (nhận xét của người soạn). Nhưng máy yên tĩnh vẫn chưa hết nhiễu. Wall-time là thời gian thực trôi qua trên đồng hồ, thứ người dùng cảm nhận được, và nó dễ có phương sai cao[^pb-var]. Chỉ một thay đổi rất nhỏ về bố cục bộ nhớ cũng đủ gây dao động đáng kể, dù thoáng qua[^pb-layout]. Vì vậy các số đo ít nhiễu hơn, như số chu kỳ hoặc số lệnh, có thể là phương án thay thế hợp lý[^pb-instr]. Khi so hai lần chạy với nhau, Criterion còn có một ngưỡng nhiễu cấu hình được, vì những dao động không lường trước hiếm khi là thứ người đo quan tâm[^crit-noise].
+
+Ghép các bước lại, một benchmark `to_json` đáng tin có dạng:
 
 ```mermaid
 flowchart LR
@@ -64,37 +80,45 @@ flowchart LR
   D -- "không" --> N["Coi như chưa có bằng chứng"]
 ```
 
-*Sơ đồ trên là tóm tắt của người soạn từ các đoạn vừa nêu (warm-up[^crit-warm-alg], `black_box`[^bb-inputs], ngưỡng nhiễu[^crit-noise]); không phải sơ đồ của tài liệu nào.*
+*Sơ đồ trên là tóm tắt của người soạn từ các đoạn vừa nêu (warm-up, `black_box`, ngưỡng nhiễu); không phải sơ đồ của tài liệu nào.*
 
 <details><summary>Đi sâu: Criterion xử lý outlier thế nào, công cụ nào có sẵn, microbenchmark thôi chưa đủ</summary>
 
-- Criterion không đo từng lần lặp mà chỉ đo cả mẫu (sample)[^crit-sample]; ước lượng thời gian mỗi lần lặp lấy từ độ dốc của đường thẳng hồi quy vẽ số lần lặp theo thời gian của các mẫu[^crit-regress]. Vì thế nó không cho bạn phân phối latency *của từng request* — đó là việc của mục 2 (suy luận của người soạn từ việc Criterion chỉ đo cả mẫu).
-- Criterion phân loại outlier (mẫu lệch xa phần còn lại) bằng một biến thể của phương pháp Tukey, dựa trên khoảng tứ phân vị IQR[^crit-tukey], và in cảnh báo, nhưng *không loại* outlier khỏi dữ liệu: chúng vẫn đi vào phân tích[^crit-outlier].
-- Sách Rust Performance Book liệt kê công cụ: bộ benchmark có sẵn của Rust chỉ chạy trên nightly vì dùng tính năng chưa ổn định; Criterion và Divan tinh vi hơn[^pb-tools]. Nó cũng khuyên có nhiều workload đại diện cho cách dùng thật, input thật là tốt nhất, microbenchmark và stress test dùng có chừng mực[^pb-workload].
-- Build cho `cargo bench` dùng profile `bench`, kế thừa profile `release`[^cargo-bench-inherits]. Nghĩa là benchmark chạy với tối ưu hóa; chạy bản dev (không tối ưu) thì không có ý nghĩa: sách Performance Book nói tăng tốc 10–100 lần so với bản dev là phổ biến[^pb-release].
-- Thái độ thực dụng của sách: đừng quá lo phải có hệ thống benchmark hoàn hảo; benchmark tầm thường vẫn tốt hơn không có[^pb-mediocre].
+- Criterion không đo từng lần lặp mà chỉ đo cả mẫu (sample)[^crit-sample]. Thời gian mỗi lần lặp được ước lượng từ độ dốc của đường thẳng hồi quy vẽ số lần lặp theo thời gian của các mẫu[^crit-regress]. Vì thế nó không cho bạn phân phối latency *của từng request*; việc đó thuộc mục 2 (suy luận của người soạn từ việc Criterion chỉ đo cả mẫu).
+- Criterion phân loại outlier (mẫu lệch xa phần còn lại) bằng một biến thể của phương pháp Tukey, dựa trên khoảng tứ phân vị IQR[^crit-tukey]. Nó in cảnh báo nhưng *không loại* outlier khỏi dữ liệu: chúng vẫn đi vào phân tích[^crit-outlier].
+- Bộ benchmark có sẵn của Rust chỉ chạy trên nightly vì dùng tính năng chưa ổn định; Criterion và Divan tinh vi hơn[^pb-tools]. Performance Book cũng khuyên có nhiều workload đại diện cho cách dùng thật: input thật là tốt nhất, còn microbenchmark và stress test chỉ nên dùng có chừng mực[^pb-workload].
+- `cargo bench` dùng profile `bench`, kế thừa profile `release`[^cargo-bench-inherits]. Nghĩa là benchmark chạy có tối ưu hóa; chạy bản dev (không tối ưu) thì chẳng có ý nghĩa gì, vì sách nói tăng tốc 10–100 lần so với bản dev là chuyện phổ biến[^pb-release].
+- Thái độ thực dụng của sách: đừng quá lo phải có hệ thống benchmark hoàn hảo, vì benchmark tầm thường vẫn tốt hơn không có[^pb-mediocre].
 
 </details>
 
-**Quay lại Q1:** benchmark sai vì code bị tối ưu mất, vì máy lạnh và ồn; `black_box` bọc đầu vào/kết quả, warm-up và máy yên tĩnh là điều kiện tối thiểu, và `black_box` chỉ là "best-effort".
+**Quay lại Q1:** với `catalog`, benchmark `to_json` sai vì code bị tối ưu mất và vì máy lạnh, ồn; `black_box` bọc đầu vào và kết quả, warm-up cùng máy yên tĩnh là điều kiện tối thiểu, và `black_box` chỉ là "best-effort".
 
 ## 2. Phân phối và percentile thay vì trung bình (Q2)
 
-> **Trả lời ngắn.** Trung bình che mất đuôi: một service có latency trung bình 100 ms ở 1.000 request/giây vẫn có thể có 1% request mất tới 5 giây[^sre-100ms]. Cách rẻ nhất để thấy đuôi là đếm số request rơi vào từng khoảng latency (histogram) thay vì lưu từng giá trị[^sre-bucket]. Trong Rust, crate `hdrhistogram` làm đúng việc này với chi phí bộ nhớ cố định và truy vấn được theo quantile[^hdr-fixed][^hdr-quantile].
+> **Trả lời ngắn.** Trung bình che mất đuôi: một service có latency trung bình 100 ms ở 1.000 request/giây vẫn có thể có 1% request mất tới 5 giây[^sre-100ms]. Cách rẻ nhất để thấy đuôi là đếm số request rơi vào từng khoảng latency (histogram) thay vì lưu từng giá trị[^sre-bucket]. Trong Rust, crate `hdrhistogram` làm đúng việc này, với chi phí bộ nhớ cố định[^hdr-fixed]. Bạn truy vấn nó được theo quantile[^hdr-quantile].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thời gian chờ ở sân bay. Trung bình 20 phút nghe ổn, nhưng nếu 1 trong 100 hành khách bị kẹt 3 tiếng thì đó là người viết đánh giá một sao. Trung bình không cho bạn biết ai là người đó.
+*Với service `catalog`.* Sau mục 1 bạn có benchmark đáng tin cho `to_json`, nhưng nó chỉ đo một hàm trong vòng lặp, chưa đo request thật. Muốn biết người dùng gặp gì, bạn phải đo latency của `GET /items/{id}` ngay lúc service đang chạy. Giả sử dashboard báo trung bình 40 ms (số giả định). Con số đó có ổn không? Chưa biết được, vì trung bình không cho biết bao nhiêu request chậm bất thường, và chính những request ấy là thứ người dùng phàn nàn. Mục này nói vì sao trung bình đánh lừa, và `catalog` nên ghi latency bằng gì.
 
-Giải nghĩa (của người soạn): *percentile thứ 99* (p99) là mức latency mà 99% số request nhanh hơn hoặc bằng nó; p50 là trung vị (một nửa số request nhanh hơn); p99,9 là mốc 99,9%.
+Trước hết là mấy từ sẽ gặp (giải nghĩa của người soạn): *percentile thứ 99* (p99) là mức latency mà 99% số request nhanh hơn hoặc bằng nó; p50 là trung vị, một nửa số request nhanh hơn; p99,9 là mốc 99,9%.
 
-*Vì sao trung bình đánh lừa.* SRE book cảnh báo: khi thiết kế monitoring từ đầu, rất dễ chọn trung bình của một đại lượng (latency trung bình, CPU trung bình, độ đầy trung bình của DB)[^sre-mean]. Với latency cũng vậy: ví dụ trong sách là service trung bình 100 ms ở 1.000 request/giây mà 1% request có thể mất 5 giây[^sre-100ms]. Chú thích của sách: nếu 1% request chậm gấp 50 lần trung bình thì 99% còn lại nhanh gấp khoảng hai lần trung bình[^sre-fn23]; nghĩa là *không đo phân phối thì "đa số request gần mức trung bình" chỉ là hy vọng* (ý của chú thích cuối trang đó, người soạn diễn đạt lại).
+### 2.1 Vì sao trung bình đánh lừa
 
-*Đuôi bị khuếch đại khi gọi nhiều backend.* Nếu người dùng phụ thuộc vào nhiều service như vậy để dựng một trang, percentile thứ 99 của một backend có thể dễ dàng trở thành phản hồi trung vị của frontend[^sre-fan]. (Nhận xét của người soạn: đây chính là lý do p99 của service nội bộ quan trọng hơn con số trung bình khi service bạn nằm giữa một chuỗi gọi.)
+Khi dựng monitoring từ đầu, rất dễ chọn trung bình của một đại lượng nào đó: latency trung bình, CPU trung bình của các node, hay độ đầy trung bình của database[^sre-mean]. Với latency, hậu quả cụ thể là thế này: một web service trung bình 100 ms ở 1.000 request/giây vẫn có thể có 1% request mất tới 5 giây[^sre-100ms]. Cùng chỗ đó có một phép tính đáng nhớ: nếu 1% request chậm gấp 50 lần trung bình thì 99% còn lại nhanh hơn trung bình chỉ khoảng hai lần[^sre-fn23]. Nói cách khác, khi không đo phân phối thì câu "đa số request gần mức trung bình" chỉ là hy vọng (ý của chú thích đó, người soạn diễn đạt lại).
 
-*Ghi lại phân phối thế nào.* Sách SRE gợi ý cách đơn giản nhất: đếm số request theo từng khoảng latency (0–10 ms, 10–30 ms, 30–100 ms, …) thay vì lưu từng latency[^sre-bucket], và chia ranh giới theo cấp số nhân (hệ số khoảng 3) là cách dễ để trực quan hóa phân phối[^sre-expo]. Percentile thứ 99 theo cửa sổ ngắn (ví dụ một phút) còn là tín hiệu sớm của bão hòa[^sre-p99-sat].
+### 2.2 Đuôi bị khuếch đại khi gọi nhiều backend
 
-*Trong Rust.* `hdrhistogram` mô tả "HDR histogram" là cấu trúc cho phép phân tích nhanh và chính xác các vùng cực trị của dữ liệu có phân phối không chuẩn, như latency[^hdr-desc]. Nó giữ chi phí cố định cả về không gian và thời gian[^hdr-fixed], và hỏi được giá trị tại một quantile bất kỳ[^hdr-quantile].
+Chuyện này nặng hơn khi `catalog` chỉ là một mắt xích. Giả sử trang sản phẩm phải gọi `catalog` cùng vài service khác rồi mới dựng xong. Khi người dùng phụ thuộc vào nhiều service như vậy, percentile thứ 99 của một backend có thể dễ dàng trở thành phản hồi trung vị của frontend[^sre-fan]. Vì thế p99 của service nội bộ quan trọng hơn con số trung bình, nhất là khi service của bạn nằm giữa một chuỗi gọi (nhận xét của người soạn).
+
+### 2.3 Ghi lại phân phối thế nào
+
+Cách đơn giản nhất mà sách SRE gợi ý: đếm số request theo từng khoảng latency (0–10 ms, 10–30 ms, 30–100 ms, …) thay vì lưu từng latency[^sre-bucket]. Chia ranh giới các khoảng theo cấp số nhân, với hệ số khoảng 3, là một cách dễ để nhìn ra phân phối[^sre-expo]. Ngoài ra, percentile thứ 99 tính trên cửa sổ ngắn, ví dụ một phút, còn là tín hiệu sớm của việc bão hòa[^sre-p99-sat].
+
+### 2.4 Trong Rust: `hdrhistogram`
+
+Crate `hdrhistogram` mô tả "HDR histogram" là cấu trúc cho phép phân tích nhanh và chính xác các vùng cực trị của dữ liệu không có phân phối chuẩn, như latency[^hdr-desc]. Nó giữ chi phí cố định cả về không gian lẫn thời gian[^hdr-fixed]. Bạn hỏi được giá trị tại một quantile bất kỳ[^hdr-quantile]. Với `catalog`, bạn ghi latency của mỗi request vào một histogram theo endpoint, rồi đọc p50, p99 và p99,9 từ đó:
 
 ```rust
 use hdrhistogram::Histogram;
@@ -112,36 +136,61 @@ fn main() {
 }
 ```
 
-Đối số cuối của `new_with_bounds` là độ chính xác tính bằng số chữ số có nghĩa (significant digits)[^hdr-precision]; docs mô tả đúng ví dụ này là đếm giá trị trong khoảng [1..3600000] với độ chính xác 1%, dùng để theo dõi latency từ 1 ms đến 1 giờ[^hdr-bounds].
+Đối số cuối của `new_with_bounds` là độ chính xác tính bằng số chữ số có nghĩa (significant digits)[^hdr-precision]. Docs mô tả đúng ví dụ này là đếm giá trị trong khoảng [1..3600000] với độ chính xác 1%, dùng để theo dõi latency từ 1 ms đến 1 giờ[^hdr-bounds].
 
 <details><summary>Đi sâu: quantile hay percentile, monitoring ≠ profiling, và các cách ghi ở lớp tracing</summary>
 
 - `hdrhistogram` ưu tiên làm việc với *quantile* (số trong [0, 1]) hơn *percentile* (số trong [0, 100]) để giảm mất chính xác do số dấu phẩy động[^hdr-quant-pct]. Vì vậy p99,9 là `value_at_quantile(0.999)`.
 - Kiểu đếm của histogram (ví dụ `u64`) có thể đổi để tiết kiệm bộ nhớ, đổi lại nguy cơ bão hòa nếu quá nhiều mẫu rơi vào cùng một ô[^hdr-u64].
-- Crate `tracing-timing` (crate bên thứ ba mà docs của `tracing` liệt kê) cung cấp subscriber đo thời gian giữa các cặp event và tạo histogram[^tr-timing] — nghĩa là có thể gắn đo phân phối vào instrumentation sẵn có (mục 7).
-- Sách SRE nhấn mạnh: quan sát CPU trung bình theo phút sẽ không lộ các đỉnh ngắn nhưng gây latency đuôi cao[^sre-cpu]. (Nhận xét của người soạn: cửa sổ lấy mẫu của metric phải ngắn hơn đuôi bạn muốn bắt.)
+- `tracing-timing` là crate bên thứ ba mà docs của `tracing` liệt kê. Nó cung cấp một subscriber đo thời gian giữa các cặp event và tạo histogram[^tr-timing]; nghĩa là có thể gắn đo phân phối vào instrumentation sẵn có (mục 7).
+- Sách SRE nhấn mạnh: quan sát CPU trung bình theo phút sẽ không lộ các đỉnh ngắn nhưng gây latency đuôi cao[^sre-cpu]. Cửa sổ lấy mẫu của metric phải ngắn hơn đuôi bạn muốn bắt (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q2:** báo cáo phân phối (p50/p99/p99,9) bằng histogram, vì trung bình có thể đẹp trong khi 1% request chậm gấp hàng chục lần và gây hại nhất khi gọi nhiều service nối tiếp.
+**Quay lại Q2:** với `catalog`, hãy báo cáo p50/p99/p99,9 từ histogram, vì trung bình có thể đẹp trong khi 1% request chậm gấp hàng chục lần, và đuôi đó gây hại nhất khi nhiều service gọi nối tiếp nhau.
 
 ## 3. Cấu hình build: opt-level, codegen-units, LTO, panic (Q3)
 
-> **Trả lời ngắn.** Profile `release` mặc định đã tối ưu (`opt-level = 3`) và đặt `lto = false`, `codegen-units = 16`, `panic = 'unwind'`[^cargo-release-defaults]. Đặt `codegen-units = 1` có thể cho code nhanh hơn nhưng build chậm hơn[^rustc-cgu]; LTO (tối ưu lúc link) tối ưu xuyên crate với giá là thời gian link dài hơn[^rustc-lto]; `panic = "abort"` có thể giảm kích thước và tăng tốc nhẹ nhưng bạn mất unwind (tháo ngược stack khi panic)[^pb-panic][^book-unwind]. Mọi thay đổi đều phải đo bằng workload của bạn.
+> **Trả lời ngắn.** Profile `release` mặc định đã tối ưu (`opt-level = 3`) và đặt `lto = false`, `codegen-units = 16`, `panic = 'unwind'`[^cargo-release-defaults]. Đặt `codegen-units = 1` có thể cho code nhanh hơn nhưng build chậm hơn[^rustc-cgu]. LTO (tối ưu lúc link) tối ưu xuyên crate, đổi lại thời gian link dài hơn[^rustc-lto]. `panic = "abort"` có thể giảm kích thước và tăng tốc nhẹ[^pb-panic]. Đổi lại bạn mất unwind, tức việc tháo ngược stack khi panic[^book-unwind]. Mọi thay đổi đều phải đo bằng workload của bạn.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): biên dịch giống làm bánh theo lô. Chia việc cho nhiều thợ (codegen unit) thì nhanh xong nhưng mỗi thợ chỉ thấy phần bột của mình, không tối ưu được công thức xuyên các phần. Một thợ duy nhất (codegen-units = 1) thấy hết nên làm được tốt hơn, nhưng lâu. LTO là cho thợ nhìn cả các crate khác nhau khi gần xong.
+*Với service `catalog`.* `catalog` được build bằng `cargo build --release` trong CI rồi đóng vào container image. Profile release mặc định đã tối ưu khá mạnh, nhưng vẫn còn vài núm vặn cho phép đổi thời gian build lấy tốc độ chạy. Mục này nói mỗi núm đổi gì, và núm nào đổi cả hành vi của `catalog` lúc panic. Nhớ rằng mọi thay đổi ở đây chỉ có giá trị nếu bạn đo lại bằng cách của mục 1 và 2.
 
-*`opt-level`.* Cargo: mức tối ưu cao hơn có thể cho code chạy nhanh hơn với giá thời gian biên dịch dài hơn, và có thể sắp xếp lại code làm khó debug hơn[^cargo-opt]. Các mức 0–3, `"s"`, `"z"`; có thể có kết quả bất ngờ như mức 3 chậm hơn mức 2, nên cần thử và đánh giá lại khi rustc đổi[^cargo-opt-surprise]. rustc: `-O` là bí danh của `-C opt-level=3`[^rustc-O].
+### 3.1 `opt-level`
 
-*`codegen-units`.* Khi crate bị chia thành nhiều codegen unit, LLVM xử lý song song; tăng song song có thể rút thời gian biên dịch nhưng có thể sinh code chậm hơn, còn đặt bằng 1 có thể cải thiện hiệu năng code sinh ra với giá biên dịch chậm hơn[^rustc-cgu]. Mặc định là 16 cho build không incremental và 256 cho incremental[^rustc-cgu-default]; profile `release` dùng 16 (build không incremental)[^cargo-release-defaults].
+Mức tối ưu cao hơn có thể cho code chạy nhanh hơn, với giá thời gian biên dịch dài hơn; nó cũng có thể sắp xếp lại code khiến debug khó hơn[^cargo-opt]. Các mức là 0–3, `"s"` và `"z"`. Kết quả có thể bất ngờ, chẳng hạn mức 3 chậm hơn mức 2, nên cần thử và đánh giá lại mỗi khi rustc đổi[^cargo-opt-surprise]. Còn cờ `-O` của rustc chỉ là bí danh của `-C opt-level=3`[^rustc-O].
 
-*LTO (link-time optimization).* Cờ này cho LLVM dùng tối ưu hóa lúc link, dựa trên phân tích toàn chương trình, để code tốt hơn với giá thời gian link lâu hơn[^rustc-lto]. Cargo có các giá trị: `"fat"`/`true` tối ưu xuyên mọi crate trong đồ thị phụ thuộc[^cargo-lto-fat]; `"thin"` tương tự nhưng ít thời gian hơn mà vẫn đạt lợi ích gần bằng[^cargo-lto-thin]; `false` là "thin local LTO" chỉ trong crate hiện tại (xuyên các codegen unit của nó) và `"off"` tắt hẳn[^cargo-lto-false]. Một cái bẫy: nếu không chỉ định `lto`, rustc vẫn có thể làm thin local LTO, nhưng tắt khi `codegen-units` bằng 1 hoặc `opt-level = 0`[^rustc-lto-cgu1]; vì thế `lto = false` *khác* `lto = "off"`[^pb-lto-off].
+### 3.2 `codegen-units`
 
-*`panic`.* `unwind` tháo ngược stack khi panic: Rust đi ngược lên stack và dọn dữ liệu của từng hàm đi qua; `abort` kết thúc chương trình ngay mà không dọn dẹp[^book-unwind][^rustc-panic]. Performance Book: nếu không cần unwind (ví dụ không dùng `catch_unwind`) thì `panic = "abort"` có thể giảm kích thước binary, tăng tốc nhẹ và có thể rút ngắn compile[^pb-panic]. Nhưng với server Tokio, **đánh đổi này thực chất là đổi hành vi**: khi unwind, panic trong một task được `JoinHandle` báo qua `JoinError`[^tokio-jh-panic]; với `abort`, tiến trình chết thay vì chỉ một task (suy luận của người soạn từ hai nguồn trên — nguồn chỉ nói `abort` "kết thúc tiến trình khi panic", không nói gì riêng về Tokio). Chọn `abort` cho service nghĩa là chấp nhận crash cả process, nên cần supervisor khởi động lại (Kubernetes…) — nhận xét của người soạn.
+Khi crate bị chia thành nhiều codegen unit, LLVM xử lý chúng song song. Song song nhiều hơn có thể rút thời gian biên dịch nhưng có thể sinh code chậm hơn; đặt bằng 1 thì code sinh ra có thể nhanh hơn, đổi lại biên dịch chậm hơn[^rustc-cgu]. Mặc định là 16 cho build không incremental và 256 cho incremental[^rustc-cgu-default]. Profile `release` dùng 16 (build không incremental)[^cargo-release-defaults].
 
-*Tổ hợp tham khảo.* Sách Performance Book nêu: để tối đa tốc độ chạy, cân nhắc `codegen-units = 1`, `lto = "fat"`, allocator thay thế và `panic = "abort"`[^pb-max]. Một cờ khác, `-C target-cpu=native`, bảo rustc dùng bộ xử lý của máy host[^rustc-cpu-native] để sinh lệnh riêng cho CPU đó; chỉ hợp lý nếu không cần tương thích với CPU cũ/khác[^pb-cpu]. (Suy luận của người soạn: container build trên CI rồi chạy trên node khác loại CPU thì `native` có thể sinh lệnh mà CPU đích không có; khi đó tiến trình có thể nhận tín hiệu SIGILL, tức "Illegal Instruction"[^sig-ill]. Hãy chỉ định `target-cpu` cụ thể và kiểm tra trước khi triển khai.)
+### 3.3 LTO (link-time optimization)
+
+Cờ này cho LLVM tối ưu lúc link, dựa trên phân tích toàn chương trình, để code tốt hơn với giá thời gian link lâu hơn[^rustc-lto]. Trong Cargo, khóa `lto` có bốn giá trị đáng phân biệt:
+
+- `"fat"` (hoặc `true`): tối ưu xuyên mọi crate trong đồ thị phụ thuộc[^cargo-lto-fat].
+- `"thin"`: tương tự `fat` nhưng tốn ít thời gian hơn đáng kể mà vẫn đạt lợi ích gần bằng[^cargo-lto-thin].
+- `false`: "thin local LTO", chỉ tối ưu trong crate hiện tại, xuyên các codegen unit của nó[^cargo-lto-false].
+- `"off"`: tắt hẳn LTO[^cargo-lto-false].
+
+Có một cái bẫy: nếu bạn không chỉ định `lto`, rustc vẫn có thể làm thin local LTO, nhưng sẽ tắt khi `codegen-units` bằng 1 hoặc `opt-level = 0`[^rustc-lto-cgu1]. Vì thế `lto = false` *khác* `lto = "off"`[^pb-lto-off].
+
+### 3.4 `panic`: đổi tốc độ lấy hành vi
+
+Khi panic, `unwind` đi ngược lên stack và dọn dữ liệu của từng hàm đi qua[^book-unwind]. `abort` thì kết thúc chương trình ngay, không dọn dẹp[^rustc-panic]. Nếu không cần unwind (ví dụ không dùng `catch_unwind`), `panic = "abort"` có thể giảm kích thước binary, tăng tốc nhẹ và rút ngắn thời gian biên dịch một chút[^pb-panic].
+
+Nhưng với một server Tokio, **đánh đổi này thực chất là đổi hành vi**. Khi unwind, panic trong một task được `JoinHandle` báo ra qua `JoinError`[^tokio-jh-panic]. Với `abort`, cả tiến trình chết thay vì chỉ một task (suy luận của người soạn từ hai nguồn trên: nguồn chỉ nói `abort` kết thúc tiến trình khi panic, không nói gì riêng về Tokio). Cụ thể, nếu một handler của `catalog` panic vì `unwrap()` trên giá trị không ngờ tới, thì dưới `unwind` chỉ request đó hỏng; dưới `abort`, `catalog` chết cùng mọi request đang xử lý (suy luận của người soạn). Chọn `abort` cho service nghĩa là chấp nhận crash cả process, nên cần một supervisor khởi động lại, chẳng hạn Kubernetes (nhận xét của người soạn).
+
+### 3.5 Tổ hợp tham khảo và `target-cpu`
+
+Performance Book nêu: để tối đa tốc độ chạy, hãy cân nhắc `codegen-units = 1`, `lto = "fat"`, allocator thay thế và `panic = "abort"`[^pb-max]. Một cờ khác, `-C target-cpu=native`, bảo rustc dùng bộ xử lý của máy host[^rustc-cpu-native] để sinh lệnh riêng cho CPU đó. Cách này chỉ hợp lý nếu bạn không cần tương thích với CPU cũ hoặc khác[^pb-cpu].
+
+Với `catalog` có một bẫy cụ thể (suy luận của người soạn): nếu image được build trên CI rồi chạy trên node khác loại CPU, `native` có thể sinh lệnh mà CPU đích không có. Khi đó tiến trình có thể nhận SIGILL, tức "Illegal Instruction"[^sig-ill]. Hãy chỉ định `target-cpu` cụ thể và kiểm tra trước khi triển khai.
+
+### 3.6 Một profile riêng để so sánh
+
+Thay vì sửa thẳng `release`, bạn có thể tạo một profile riêng để đo song song với bản mặc định:
 
 ```toml
 # Cargo.toml — minh họa một profile riêng để so sánh với release thường (chưa chạy)
@@ -152,31 +201,35 @@ lto = "fat"
 # panic = "abort"   # chỉ khi chấp nhận crash cả process (xem mục này)
 ```
 
-Cargo bắt buộc profile tùy biến phải có khóa `inherits`[^cargo-custom], và chỉ đọc cấu hình profile ở `Cargo.toml` gốc của workspace; profile khai báo trong dependency bị bỏ qua[^cargo-ws-profiles].
+Cargo bắt buộc profile tùy biến phải có khóa `inherits`[^cargo-custom]. Cargo cũng chỉ đọc cấu hình profile ở `Cargo.toml` gốc của workspace; profile khai báo trong dependency bị bỏ qua[^cargo-ws-profiles].
 
 <details><summary>Đi sâu: bảng mặc định, các ngoại lệ, và build-override</summary>
 
 - Mặc định `release`: `opt-level = 3`, `debug = false`, `strip = "none"`, `debug-assertions = false`, `overflow-checks = false`, `lto = false`, `panic = 'unwind'`, `incremental = false`, `codegen-units = 16`[^cargo-release-defaults]. Mặc định `dev`: `opt-level = 0`, `debug-assertions = true`, `overflow-checks = true`, `incremental = true`, `codegen-units = 256`[^cargo-dev-defaults].
 - Tổ hợp `lto` và `codegen-units` của rustc khi chỉ định `-C lto`: một mình `lto` là 16 codegen unit rồi fat LTO xuyên crate; `codegen-units=1` cộng `lto` là 1 unit với fat LTO[^rustc-lto-matrix].
-- Sách Performance Book viết LTO "có thể cải thiện tốc độ chạy 10–20% hoặc hơn" và giảm kích thước nhị phân, với giá thời gian biên dịch tệ hơn[^pb-lto]; còn đặt `codegen-units = 1` có thể cải thiện tốc độ và kích thước với giá thời gian biên dịch[^pb-cgu]. Đó là lời của sách, không phải bảo đảm: Cargo nhấn mạnh nên tự thử, có thể có kết quả bất ngờ[^cargo-opt-surprise].
-- Build dependency (build script, proc macro) mặc định không tối ưu (`opt-level = 0`, `codegen-units = 256`) để build nhanh[^cargo-build-override]; muốn đổi thì khai báo `[profile.release.build-override]`, vì Cargo cho phép ghi đè cấu hình profile cho từng package và cho crate chạy lúc build[^cargo-overrides].
+- Performance Book viết LTO "có thể cải thiện tốc độ chạy 10–20% hoặc hơn" và giảm kích thước nhị phân, với giá thời gian biên dịch tệ hơn[^pb-lto]. Còn đặt `codegen-units = 1` có thể cải thiện tốc độ và kích thước với giá thời gian biên dịch[^pb-cgu]. Đó là lời của sách, không phải bảo đảm: Cargo nhấn mạnh nên tự thử, vì có thể có kết quả bất ngờ[^cargo-opt-surprise].
+- Build dependency (build script, proc macro) mặc định không được tối ưu (`opt-level = 0`, `codegen-units = 256`) để build nhanh[^cargo-build-override]. Muốn đổi thì khai báo `[profile.release.build-override]`, vì Cargo cho phép ghi đè cấu hình profile cho từng package và cho crate chạy lúc build[^cargo-overrides].
 - Với `cargo test`, `cargo bench`, build script và proc macro, Cargo bỏ qua `panic`; test harness hiện đòi hành vi unwind[^cargo-panic-ignored].
 
 </details>
 
-**Quay lại Q3:** `release` mặc định cân bằng giữa thời gian build và tốc độ chạy; `codegen-units = 1`, LTO, `panic = "abort"`, `target-cpu` đẩy về phía tốc độ chạy với giá thời gian build hoặc hành vi khi panic, và chỉ chọn sau khi đo.
+**Quay lại Q3:** `release` mặc định cân bằng giữa thời gian build và tốc độ chạy; `codegen-units = 1`, LTO, `panic = "abort"` và `target-cpu` đẩy `catalog` về phía tốc độ chạy, với giá là thời gian build hoặc hành vi khi panic, và chỉ nên chọn sau khi đo.
 
 ## 4. PGO: tối ưu theo hồ sơ chạy thật (Q4)
 
-> **Trả lời ngắn.** PGO thu dữ liệu về cách chương trình chạy điển hình (nhánh nào hay đi…) rồi dùng nó để quyết định inlining, bố trí code máy, cấp phát thanh ghi…[^pgo-concept]. Quy trình bốn bước: build bản có instrument, chạy nó để sinh file `.profraw`, gộp thành `.profdata` bằng `llvm-profdata`, rồi build lại với `-Cprofile-use`[^pgo-steps]. Chất lượng kết quả phụ thuộc workload bạn chạy ở bước hai.
+> **Trả lời ngắn.** PGO thu dữ liệu về cách chương trình chạy điển hình (nhánh nào hay đi…), rồi dùng nó để quyết định inlining, bố trí code máy, cấp phát thanh ghi…[^pgo-concept]. Quy trình có bốn bước: build bản có instrument, chạy nó để sinh file `.profraw`, gộp thành `.profdata` bằng `llvm-profdata`, rồi build lại với `-Cprofile-use`[^pgo-steps]. Chất lượng kết quả phụ thuộc vào workload bạn chạy ở bước hai.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hãng taxi lập sơ đồ phân luồng giờ cao điểm sau khi quan sát xe thật chạy một tuần, thay vì chỉ nhìn bản đồ. PGO là "tuần quan sát" đó: compiler biết hàm nào nóng, nhánh nào hầu như luôn đi, nên đặt chúng gần nhau và inline đúng chỗ.
+*Với service `catalog`.* Giả sử `GET /items/{id}` chiếm gần hết lưu lượng của `catalog`. Nếu compiler biết điều đó, nó có thể đặt code của đường đi này gần nhau và inline đúng chỗ, thay vì đoán mò như khi chỉ nhìn source. PGO là cách cho compiler biết điều ấy: bạn chạy `catalog` với lưu lượng thật, ghi lại hàm nào nóng, nhánh nào hầu như luôn đi, rồi build lại dựa trên bản ghi đó. Mục này nói quy trình, và câu hỏi khó nhất của nó: lưu lượng nào là "đại diện" cho `catalog`.
 
-Giải nghĩa (của người soạn): *inlining* là chép thân hàm được gọi vào ngay chỗ gọi; *machine-code layout* là thứ tự đặt các khối lệnh máy trong binary; *register allocation* là chọn giá trị nào được giữ trong thanh ghi CPU. Cả ba đều nằm trong danh sách rustc book nêu là thứ PGO giúp quyết định[^pgo-concept].
+Ba thứ PGO giúp quyết định, giải nghĩa của người soạn: *inlining* là chép thân hàm được gọi vào ngay chỗ gọi; *machine-code layout* là thứ tự đặt các khối lệnh máy trong binary; *register allocation* là chọn giá trị nào được giữ trong thanh ghi CPU. Cả ba đều nằm trong danh sách mà rustc book nêu[^pgo-concept].
 
-*Hai cách thu dữ liệu.* Có thể chạy chương trình dưới một profiler (như `perf`) hoặc tạo bản instrumented (có sẵn mã thu dữ liệu). Cách sau thường cho dữ liệu chính xác hơn và là cách rustc hỗ trợ[^pgo-instr].
+### 4.1 Hai cách thu dữ liệu
+
+Có thể chạy chương trình dưới một profiler như `perf`, hoặc tạo bản instrumented, tức bản có sẵn mã thu dữ liệu. Cách sau thường cho dữ liệu chính xác hơn và là cách rustc hỗ trợ[^pgo-instr].
+
+### 4.2 Bốn bước
 
 ```mermaid
 flowchart LR
@@ -185,68 +238,102 @@ flowchart LR
   C --> D["4. Build lại<br/>-Cprofile-use=merged.profdata"]
 ```
 
-*Bốn bước.* (1) biên dịch với instrumentation, ví dụ `rustc -Cprofile-generate=/tmp/pgo-data main.rs`; (2) chạy chương trình đã instrument để sinh `.profraw`; (3) chuyển `.profraw` thành `.profdata` bằng công cụ `llvm-profdata` của LLVM; (4) biên dịch lại, dùng dữ liệu đó, ví dụ `rustc -Cprofile-use=merged.profdata main.rs`[^pgo-steps]. Chạy bản instrument nhiều lần sẽ dùng lại và cập nhật tại chỗ các file `.profraw` tương ứng[^pgo-multi]. `llvm-profdata` lấy dễ nhất qua `rustup component add llvm-tools-preview`, nhưng thành phần này không đưa nó vào `PATH`[^pgo-llvmtools].
+Cụ thể: (1) biên dịch với instrumentation, ví dụ `rustc -Cprofile-generate=/tmp/pgo-data main.rs`; (2) chạy chương trình đã instrument để sinh `.profraw`; (3) chuyển `.profraw` thành `.profdata` bằng công cụ `llvm-profdata` của LLVM; (4) biên dịch lại và dùng dữ liệu đó, ví dụ `rustc -Cprofile-use=merged.profdata main.rs`[^pgo-steps]. Chạy bản instrument nhiều lần sẽ dùng lại và cập nhật tại chỗ các file `.profraw` tương ứng[^pgo-multi]. Công cụ `llvm-profdata` lấy dễ nhất qua `rustup component add llvm-tools-preview`, nhưng thành phần này không đưa nó vào `PATH`[^pgo-llvmtools].
 
-*Với Cargo.* Tài liệu rustc dùng biến `RUSTFLAGS` để truyền cờ PGO cho mọi crate, kèm vài chú ý: truyền `--target` để cờ không áp lên build script (vì không muốn build script sinh hàng đống `.profraw`)[^pgo-cargo-target]; dùng `--release` vì đó là nơi PGO có ý nghĩa nhất[^pgo-release]; dùng đường dẫn tuyệt đối cho `-Cprofile-generate`/`-Cprofile-use` vì Cargo có thể gọi rustc từ các thư mục làm việc khác nhau[^pgo-abs]; xóa dữ liệu cũ trước khi build instrument[^pgo-leftover]. Bước cuối: ví dụ của sách ghi chú "mọi cờ rustc phải giống nhau" — trong ví dụ đó bước 1 và bước 4 đều có `-O`, chỉ khác cờ PGO[^pgo-same-flags].
+### 4.3 Với Cargo
 
-*Với một service.* Bước 2 là chỗ khó nhất: "workload điển hình" của service là gì? (Nhận xét của người soạn: nên chạy bản instrument với lưu lượng đại diện — ví dụ replay lưu lượng thật hoặc load test có mix endpoint giống production — vì tài liệu chỉ nói PGO dựa trên "quá trình chạy điển hình"[^pgo-concept]; profile lệch với thực tế có thể tối ưu sai chỗ. Đây là suy luận của người soạn.)
+Tài liệu rustc dùng biến `RUSTFLAGS` để truyền cờ PGO cho mọi crate, kèm vài chú ý:
+
+- Truyền `--target` để cờ không áp lên build script, vì ta không muốn build script sinh hàng đống `.profraw`[^pgo-cargo-target].
+- Dùng `--release`, vì đó là nơi PGO có ý nghĩa nhất[^pgo-release].
+- Dùng đường dẫn tuyệt đối cho `-Cprofile-generate` và `-Cprofile-use`, vì Cargo có thể gọi rustc từ các thư mục làm việc khác nhau[^pgo-abs].
+- Xóa dữ liệu cũ trước khi build bản instrument[^pgo-leftover].
+- Bước cuối: ví dụ của sách ghi chú "mọi cờ rustc phải giống nhau"; trong ví dụ đó bước 1 và bước 4 đều có `-O`, chỉ khác cờ PGO[^pgo-same-flags].
+
+### 4.4 Với một service: workload nào là "điển hình"?
+
+Bước 2 là chỗ khó nhất. Tài liệu chỉ nói PGO dựa trên "quá trình chạy điển hình"[^pgo-concept], nên với `catalog`, lưu lượng bạn chạy ở bước này quyết định compiler tối ưu cho cái gì. Nên chạy bản instrument với lưu lượng đại diện, chẳng hạn replay lưu lượng thật hoặc load test có tỉ lệ endpoint giống production. Profile lệch với thực tế có thể khiến compiler tối ưu sai chỗ. Đây là suy luận của người soạn, không phải lời của nguồn.
 
 <details><summary>Đi sâu: cảnh báo thiếu profile, cargo-pgo, giới hạn phân phối</summary>
 
-- Khuyến nghị thêm `-Cllvm-args=-pgo-warn-missing-function` ở pha `-Cprofile-use`: mặc định LLVM không cảnh báo khi thiếu dữ liệu profile cho một hàm, bật cờ này giúp phát hiện cấu hình sai[^pgo-warn].
+- Nên thêm `-Cllvm-args=-pgo-warn-missing-function` ở pha `-Cprofile-use`: mặc định LLVM không cảnh báo khi thiếu dữ liệu profile cho một hàm, bật cờ này giúp phát hiện cấu hình sai[^pgo-warn].
 - Hỗ trợ PGO của rustc dựa hoàn toàn trên LLVM, tương đương `-fprofile-generate`/`-fprofile-use` của Clang[^pgo-llvm].
 - Công cụ cộng đồng `cargo-pgo` có API dòng lệnh dễ dùng, làm thay phần việc thủ công[^pgo-cargo-pgo].
-- Performance Book: PGO có thể tăng tốc 10% hoặc hơn[^pb-pgo] (lời của sách, không phải bảo đảm); là kỹ thuật nâng cao, tốn công cài đặt, đáng làm trong một số trường hợp[^pb-pgo-effort]; và không hỗ trợ cho binary phát hành trên crates.io qua `cargo install`[^pb-pgo-cargo-install].
-- Chương này không dạy `cargo-pgo`/BOLT chi tiết vì không có trong phạm vi nguồn đã ghim ngoài các đoạn trên.
+- Performance Book: PGO có thể tăng tốc 10% hoặc hơn[^pb-pgo] (lời của sách, không phải bảo đảm). Đây là kỹ thuật nâng cao, tốn công cài đặt, đáng làm trong một số trường hợp[^pb-pgo-effort]. Nó cũng không hỗ trợ binary phát hành trên crates.io qua `cargo install`[^pb-pgo-cargo-install].
+- Chương này không dạy `cargo-pgo` hay BOLT chi tiết, vì ngoài các đoạn trên chúng không nằm trong phạm vi nguồn đã ghim.
 
 </details>
 
-**Quay lại Q4:** PGO là build hai lần quanh một lần chạy thu dữ liệu; cú pháp rõ ràng trong rustc book, còn chất lượng phụ thuộc vào việc workload lúc thu có đại diện cho production hay không.
+**Quay lại Q4:** PGO là build hai lần quanh một lần chạy thu dữ liệu; cú pháp rõ ràng trong rustc book, còn chất lượng phụ thuộc vào việc lưu lượng bạn replay cho `catalog` có đại diện cho production hay không.
 
 ## 5. Tìm chỗ nóng: profiler và cờ build để đọc được kết quả (Q5)
 
-> **Trả lời ngắn.** Đo trước, tối ưu sau: chương trình có "chỗ nóng" (thực thi đủ thường xuyên để ảnh hưởng thời gian chạy) và bạn nên tìm chúng bằng profiler[^pp-hot]. Với Rust, build release có thể thiếu thông tin để profiler đọc: có thể cần `debug = "line-tables-only"` để có số dòng, có thể cần `-C force-frame-pointers=yes` để stack trace tốt, và symbol Rust bị mangle nên có thể cần demangle[^pp-debug][^pp-fp][^pp-mangle].
+> **Trả lời ngắn.** Đo trước, tối ưu sau: chương trình có "chỗ nóng" (thực thi đủ thường xuyên để ảnh hưởng thời gian chạy) và bạn nên tìm chúng bằng profiler[^pp-hot]. Với Rust, bản build release có thể thiếu thông tin để profiler đọc. Bạn có thể cần `debug = "line-tables-only"` để có số dòng[^pp-debug]. Có thể cần thêm `-C force-frame-pointers=yes` để stack trace tốt hơn[^pp-fp]. Symbol Rust cũng bị mangle nên có thể phải demangle[^pp-mangle].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): sửa ống nước mà không biết chỗ rò. Bạn có thể thay hết ống nhà (viết lại mọi thứ bằng `unsafe` cho "nhanh") mà vẫn ngập vì mối nối trong bếp. Profiler là camera nhiệt.
+*Với service `catalog`.* Bạn đã có p99 xấu (mục 2) nhưng chưa biết thời gian nằm ở đâu: parse, serialize, hay chờ DB. Nếu đoán rồi viết lại một đoạn bằng `unsafe` cho "nhanh", rất có thể bạn sửa nhầm chỗ. Profiler cho biết chỗ nóng thật. Nhưng bạn chạy `perf record` trên `catalog` bản release và nhận về flame graph toàn địa chỉ hex hoặc tên bắt đầu bằng `_ZN`, không đọc được. Mục này nói chọn công cụ nào, và build `catalog` ra sao để kết quả đọc được.
 
-*Chọn công cụ.* Performance Book liệt kê các profiler đã được dùng thành công với Rust: `perf` (dùng bộ đếm phần cứng, chạy trên Linux)[^pp-perf]; Instruments đi kèm Xcode trên macOS[^pp-instruments]; `samply`, profiler lấy mẫu có thể xem trong Firefox Profiler, chạy trên Mac/Linux/Windows[^pp-samply]; `flamegraph` là lệnh Cargo dùng perf/DTrace để vẽ flame graph[^pp-flame]; Cachegrind và Callgrind cho số lệnh và dữ liệu mô phỏng cache/dự đoán nhánh theo hàm và dòng[^pp-cachegrind]. Cách dùng `perf` và đọc flame graph xem [P11 · Chương 01](01-perf-va-sampling-profiler.md).
+### 5.1 Chọn công cụ
 
-*Build để profile.* Để profile một bản release hiệu quả có thể cần bật debug info mức dòng: thêm `debug = "line-tables-only"` vào `[profile.release]`[^pp-debug]. Cargo mô tả mức đó là tạo thông tin tối thiểu cho backtrace với tên file/số dòng, không có thông tin biến hay tham số[^cargo-line-tables]. Lưu ý: ngay cả vậy bạn vẫn không có thông tin chi tiết cho code thư viện chuẩn, vì bản std phát hành không build kèm debug info[^pp-std].
+Performance Book liệt kê các profiler đã được dùng thành công với Rust:
 
-*Frame pointer.* Frame pointer là thanh ghi trỏ vào khung stack của hàm đang chạy; chuỗi các khung này là thứ profiler đi ngược để dựng call stack (đã giải thích ở [P11 · Chương 01 mục 5](01-perf-va-sampling-profiler.md)). Trình biên dịch có thể bỏ frame pointer, làm giảm chất lượng stack trace trong profile; có thể ép bằng `RUSTFLAGS="-C force-frame-pointers=yes"`[^pp-fp].
+- `perf` dùng bộ đếm phần cứng và chạy trên Linux[^pp-perf].
+- Instruments đi kèm Xcode trên macOS[^pp-instruments].
+- `samply` là profiler lấy mẫu, xem kết quả trong Firefox Profiler, chạy trên Mac, Linux và Windows[^pp-samply].
+- `flamegraph` là lệnh Cargo dùng perf hoặc DTrace để vẽ flame graph[^pp-flame].
+- Cachegrind và Callgrind cho số lệnh và dữ liệu mô phỏng cache, dự đoán nhánh theo hàm và theo dòng[^pp-cachegrind].
 
-*Symbol bị mangle.* Rust mã hóa tên hàm (name mangling); profiler không biết sẽ hiện tên bắt đầu bằng `_ZN` hoặc `_R`; có thể dùng `rustfilt`, hoặc đổi định dạng sang `v0` bằng `-C symbol-mangling-version=v0`[^pp-mangle].
+Cách dùng `perf` và đọc flame graph xem [P11 · Chương 01](01-perf-va-sampling-profiler.md).
 
-*Strip symbol hại profile.* `strip = "symbols"` có thể làm chương trình khó debug và profile hơn[^pb-strip]; nên giữ symbol ở bản dùng để profile (nhận xét của người soạn, suy ra từ câu trên).
+### 5.2 Build để profile
+
+Để profile một bản release cho hiệu quả, bạn có thể cần bật debug info mức dòng: thêm `debug = "line-tables-only"` vào `[profile.release]`[^pp-debug]. Cargo mô tả mức này là tạo lượng thông tin tối thiểu cho backtrace, gồm tên file và số dòng, không có thông tin biến hay tham số[^cargo-line-tables]. Lưu ý rằng dù vậy bạn vẫn không có thông tin chi tiết cho code thư viện chuẩn, vì bản std phát hành không được build kèm debug info[^pp-std].
+
+### 5.3 Frame pointer
+
+Frame pointer là thanh ghi trỏ vào khung stack của hàm đang chạy. Chuỗi các khung này là thứ profiler đi ngược để dựng call stack (đã giải thích ở [P11 · Chương 01 mục 5](01-perf-va-sampling-profiler.md)). Trình biên dịch có thể bỏ frame pointer, làm giảm chất lượng stack trace trong profile[^pp-fp]. Bạn ép nó giữ lại bằng `RUSTFLAGS="-C force-frame-pointers=yes"`.
+
+### 5.4 Symbol bị mangle và đừng strip
+
+Rust mã hóa tên hàm (name mangling), nên profiler không biết cách đọc sẽ hiện tên bắt đầu bằng `_ZN` hoặc `_R`. Có thể dùng `rustfilt`, hoặc đổi định dạng sang `v0` bằng `-C symbol-mangling-version=v0`[^pp-mangle].
+
+Còn `strip = "symbols"` có thể làm chương trình khó debug và khó profile hơn[^pb-strip]. Vì vậy ở bản dùng để profile, nên giữ symbol (nhận xét của người soạn, suy ra từ câu trên).
 
 <details><summary>Đi sâu: các profiler khác, và hai mức debuginfo</summary>
 
-- DHAT dùng để tìm phần code gây nhiều allocation và hiểu đỉnh bộ nhớ; `dhat-rs` là bản thay thế thử nghiệm kém mạnh hơn một chút, cần sửa chương trình nhẹ nhưng chạy trên mọi nền tảng[^pp-dhat]; `heaptrack` và `bytehound` là profiler heap trên Linux[^pp-heaptrack]. Phần allocation xem mục 6.
+- DHAT dùng để tìm phần code gây nhiều allocation và hiểu đỉnh bộ nhớ. `dhat-rs` là bản thay thế thử nghiệm, kém mạnh hơn một chút, cần sửa chương trình nhẹ nhưng chạy trên mọi nền tảng[^pp-dhat]. `heaptrack` và `bytehound` là profiler heap trên Linux[^pp-heaptrack]. Phần allocation xem mục 6.
 - Coz làm *causal profiling* để ước lượng tiềm năng tối ưu, có hỗ trợ Rust qua `coz-rs`, chạy trên Linux[^pp-coz].
-- Cargo liệt kê các mức `debug`: `"line-tables-only"`, `1`/`"limited"` (thông tin mức module chi tiết hơn line-tables-only) và `2`/`"full"`, mặc định của dev là full[^cargo-debug-levels]; mặc định của release là `debug = false`, tức không có debug info[^cargo-release-defaults].
-- Cargo cũng nói tối ưu cao có thể sắp xếp lại code làm khó dùng với debugger[^cargo-opt] — với profiler mẫu thì stack có thể "không giống source"; đó là lý do inline làm flame graph khó đọc (nhận xét của người soạn).
+- Cargo liệt kê các mức `debug`: `"line-tables-only"`, `1`/`"limited"` (thông tin mức module chi tiết hơn line-tables-only) và `2`/`"full"`, mặc định của dev là full[^cargo-debug-levels]. Mặc định của release là `debug = false`, tức không có debug info[^cargo-release-defaults].
+- Cargo cũng nói tối ưu cao có thể sắp xếp lại code làm khó dùng với debugger[^cargo-opt]. Với profiler lấy mẫu, stack có thể "không giống source"; đó là lý do inline làm flame graph khó đọc (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q5:** profile trước khi tối ưu; build release cần `line-tables-only`, tốt nhất là frame pointer, giữ symbol, demangle — nếu không, flame graph sẽ toàn địa chỉ và tên `_ZN…`.
+**Quay lại Q5:** profile trước khi tối ưu; build release của `catalog` cần `line-tables-only`, tốt nhất thêm frame pointer, giữ symbol và demangle, nếu không flame graph sẽ toàn địa chỉ và tên `_ZN…`.
 
 ## 6. Heap allocation: đếm, giảm, đổi allocator (Q6)
 
-> **Trả lời ngắn.** Mỗi lần cấp phát (và giải phóng) heap thường khá tốn: tùy allocator, nó có thể phải lấy khóa toàn cục, thao tác cấu trúc dữ liệu không đơn giản và có khi gọi system call[^pb-heap-cost]. Nếu profiler thấy `malloc`/`free` nóng thì nên giảm tốc độ cấp phát hoặc thử allocator khác[^pb-heap-prof]; công cụ chuyên dụng là DHAT[^pb-dhat]. Trong Rust bạn cũng có thể tự đếm bằng cách đặt một `GlobalAlloc` bọc ngoài `System` — nhưng không được kỳ vọng mọi allocation trong source thật sự xảy ra[^ga-notrely].
+> **Trả lời ngắn.** Mỗi lần cấp phát (và giải phóng) heap thường khá tốn: tùy allocator, nó có thể phải lấy khóa toàn cục, thao tác cấu trúc dữ liệu không đơn giản, và có khi gọi system call[^pb-heap-cost]. Nếu profiler thấy `malloc`/`free` nóng thì nên giảm tốc độ cấp phát hoặc thử allocator khác[^pb-heap-prof]. Công cụ chuyên dụng cho việc này là DHAT[^pb-dhat]. Trong Rust bạn cũng có thể tự đếm bằng cách đặt một `GlobalAlloc` bọc ngoài `System`, nhưng không được kỳ vọng mọi allocation trong source thật sự xảy ra[^ga-notrely].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Vec::new()` trong vòng lặp nóng giống mỗi lần cần cái bút lại đi ra kho trung tâm, ký sổ, nhận bút, rồi mang trả. Nếu kho có một cửa duy nhất thì mọi nhân viên xếp hàng. Giữ sẵn bút trong túi (tái dùng buffer) rẻ hơn nhiều.
+*Với service `catalog`.* Giả sử flame graph của `catalog` (mục 5) cho thấy `malloc` và `free` chiếm một phần đáng kể. Thường thủ phạm là một đoạn như `Vec::new()` hoặc `String::new()` trong vòng lặp mà `to_json` chạy cho mỗi dòng dữ liệu của mỗi request, nên mỗi request cấp phát lại hàng chục lần cùng một thứ. Mục này nói allocation tốn gì, đếm chúng ra sao, giảm bằng cách nào, và khi nào mới đáng đổi allocator.
 
-*Chi phí.* Performance Book nói cấp phát heap "vừa phải đắt", chi tiết tùy allocator, và cấp phát nhỏ không nhất thiết rẻ hơn cấp phát lớn[^pb-heap-small]. Cơ chế allocator (header, free list, arena, thread cache, `brk`/`mmap`) đã giải thích ở [P3 · Chương 06](../03-memory/06-heap-allocator.md); chương này chỉ bàn cách đo và đổi.
+### 6.1 Chi phí
 
-*Tìm ra allocation nóng.* Nếu profiler tổng quát thấy `malloc`, `free` và các hàm liên quan nóng thì đáng giảm allocation rate hoặc dùng allocator khác[^pb-heap-prof]. DHAT xác định chính xác điểm cấp phát nóng và tốc độ cấp phát; theo kinh nghiệm với rustc, giảm 10 allocation trên mỗi triệu lệnh có thể cho cải thiện đo được (khoảng 1%)[^pb-dhat-rustc] — đó là kinh nghiệm của dự án rustc, không phải quy luật.
+Performance Book nói cấp phát heap "vừa phải đắt", chi tiết tùy allocator, và cấp phát nhỏ không nhất thiết rẻ hơn cấp phát lớn[^pb-heap-small]. Cơ chế allocator (header, free list, arena, thread cache, `brk`/`mmap`) đã giải thích ở [P3 · Chương 06](../03-memory/06-heap-allocator.md); chương này chỉ bàn cách đo và đổi.
 
-*Giảm allocation.* Khi biết kích thước tối thiểu hoặc chính xác của vector, đặt trước bằng `Vec::with_capacity`, `Vec::reserve` hoặc `Vec::reserve_exact`[^pb-withcap]. `SmallVec` giảm số allocation khi dùng đúng chỗ nhưng không bảo đảm nhanh hơn; cần đo để xác nhận[^pb-smallvec]. Có thể viết test kiểm tra snippet cấp phát đúng lượng heap mong đợi bằng tính năng heap usage testing của `dhat-rs`[^pb-dhat-test].
+### 6.2 Tìm ra allocation nóng
 
-*Tự đếm bằng `GlobalAlloc`.* `GlobalAlloc` là trait cho allocator có thể đăng ký làm mặc định của thư viện chuẩn qua thuộc tính `#[global_allocator]`[^ga-desc]. Ý tưởng: bọc `System`, tăng bộ đếm nguyên tử trong `alloc`:
+Nếu profiler tổng quát thấy `malloc`, `free` và các hàm liên quan nóng, thì đáng giảm allocation rate hoặc dùng allocator khác[^pb-heap-prof]. DHAT xác định chính xác điểm cấp phát nóng và tốc độ cấp phát ở từng điểm[^pb-dhat]. Về mức đáng kể: kinh nghiệm với rustc cho thấy giảm 10 allocation trên mỗi triệu lệnh có thể cho cải thiện đo được, khoảng 1%[^pb-dhat-rustc]. Đó là kinh nghiệm của dự án rustc, không phải quy luật cho `catalog`.
+
+### 6.3 Giảm allocation
+
+Khi biết kích thước tối thiểu hoặc chính xác của vector, hãy đặt trước bằng `Vec::with_capacity`, `Vec::reserve` hoặc `Vec::reserve_exact`[^pb-withcap]. Trong `catalog`, nếu `to_json` biết trước số cột của một dòng, một lần `with_capacity` thay được hàng chục lần mở rộng vector (nhận xét của người soạn). `SmallVec` giảm số allocation khi dùng đúng chỗ nhưng không bảo đảm nhanh hơn, nên cần đo để xác nhận[^pb-smallvec]. Bạn cũng có thể viết test kiểm tra một snippet cấp phát đúng lượng heap mong đợi bằng tính năng heap usage testing của `dhat-rs`[^pb-dhat-test].
+
+### 6.4 Tự đếm bằng `GlobalAlloc`
+
+`GlobalAlloc` là trait cho allocator có thể đăng ký làm mặc định của thư viện chuẩn qua thuộc tính `#[global_allocator]`[^ga-desc]. Ý tưởng: bọc `System`, và tăng một bộ đếm nguyên tử trong `alloc`:
 
 ```rust
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -273,33 +360,46 @@ unsafe impl GlobalAlloc for Counting {
 static GLOBAL: Counting = Counting;
 ```
 
-Đọc `ALLOCS` trước và sau một đoạn code cho số allocation giữa hai thời điểm (nhận xét của người soạn: nếu tiến trình có thread khác đang chạy, số đếm là *toàn tiến trình*, không riêng đoạn code của bạn — dùng test đơn luồng hoặc `dhat-rs` để cô lập).
+Đọc `ALLOCS` trước và sau một đoạn code, bạn có số allocation giữa hai thời điểm. Lưu ý (nhận xét của người soạn): nếu tiến trình có thread khác đang chạy, số đếm là *toàn tiến trình*, không riêng đoạn code của bạn; hãy dùng test đơn luồng hoặc `dhat-rs` để cô lập.
 
-*Ba cạm bẫy từ docs của `GlobalAlloc`.* (a) Allocator không được unwind (panic) — đó là hành vi không xác định[^ga-unwind]. (b) Docs cấm dựa vào việc allocation thật sự xảy ra, vì optimizer có thể bỏ hoặc chuyển xuống stack; "có allocation hay không" không thuộc hành vi chương trình, kể cả khi một allocator có thể phát hiện qua việc in ra hay có side effect khác[^ga-notrely][^ga-notbehavior]. Vì thế số đếm của bạn là *quan sát trên một bản build cụ thể* chứ không phải thuộc tính ngôn ngữ (suy luận của người soạn: so sánh trước/sau trên cùng cấu hình build, và đừng assert cứng số đếm trong test cross-version). (c) Tái nhập: nhiều cấu trúc của thư viện chuẩn có thể tự cấp phát, nên rất dễ tạo allocator đệ quy vô hạn[^ga-reent]; ví dụ `std::sync::Mutex` trên vài nền tảng có thể cấp phát nên rất rắc rối trong allocator[^ga-mutex]; nên giữ trong các tính năng của `core`[^ga-core].
+Docs của `GlobalAlloc` nêu ba cạm bẫy:
 
-*Đổi allocator.* Có thể thay allocator hệ thống của chương trình Rust bằng allocator khác; hiệu quả tùy chương trình và allocator, có thể cải thiện lớn về tốc độ và bộ nhớ, nhưng cũng có thể tăng kích thước binary và thời gian biên dịch[^pb-altalloc][^pb-altalloc-cost]. Hai lựa chọn được sách nêu: jemalloc (Linux/Mac, crate `tikv-jemallocator`)[^pb-jemalloc] và mimalloc (nhiều nền tảng, crate `mimalloc`)[^pb-mimalloc]. Việc gắn allocator là một dòng `#[global_allocator] static GLOBAL: ... = ...;` như đã nêu ở [P3 · Chương 06 mục 10](../03-memory/06-heap-allocator.md).
+- **Allocator không được unwind (panic).** Đó là hành vi không xác định[^ga-unwind].
+- **Không được dựa vào việc allocation thật sự xảy ra.** Optimizer có thể bỏ nó hoặc chuyển xuống stack, kể cả khi trong source có heap allocation tường minh[^ga-notrely]. "Có allocation hay không" không thuộc hành vi chương trình, dù một allocator có thể phát hiện qua việc in ra hay có side effect khác[^ga-notbehavior]. Vì thế số đếm của bạn là *quan sát trên một bản build cụ thể*, không phải thuộc tính của ngôn ngữ. Cách dùng (suy luận của người soạn): so sánh trước/sau trên cùng cấu hình build, và đừng assert cứng số đếm trong test chạy qua nhiều phiên bản.
+- **Tái nhập.** Nhiều cấu trúc của thư viện chuẩn có thể tự cấp phát, nên rất dễ vô tình tạo ra allocator đệ quy vô hạn[^ga-reent]. Ví dụ `std::sync::Mutex` trên một số nền tảng có thể cấp phát, nên dùng nó trong global allocator rất rắc rối[^ga-mutex]. Vì vậy nên bám vào các tính năng của `core`[^ga-core].
+
+### 6.5 Đổi allocator
+
+Có thể thay allocator hệ thống của chương trình Rust bằng allocator khác. Hiệu quả tùy chương trình và allocator được chọn; thực tế đã thấy cải thiện lớn về tốc độ và bộ nhớ[^pb-altalloc]. Đổi lại, binary có thể lớn hơn và thời gian biên dịch lâu hơn[^pb-altalloc-cost]. Sách nêu hai lựa chọn. Một là jemalloc, cho Linux và Mac, qua crate `tikv-jemallocator`[^pb-jemalloc]. Hai là mimalloc, chạy trên nhiều nền tảng, qua crate `mimalloc`[^pb-mimalloc]. Việc gắn allocator chỉ là một dòng `#[global_allocator] static GLOBAL: ... = ...;` như đã nêu ở [P3 · Chương 06 mục 10](../03-memory/06-heap-allocator.md). Với `catalog`, hãy chỉ đổi sau khi DHAT hoặc bộ đếm cho thấy allocation thật sự là vấn đề, rồi đo lại bằng mục 1 và 2 (nhận xét của người soạn).
 
 <details><summary>Đi sâu: yêu cầu hợp đồng của <code>realloc</code> và hạn chế của số đếm</summary>
 
-- `realloc` thu nhỏ hoặc mở rộng khối đến `new_size`; nếu trả con trỏ khác null thì quyền sở hữu khối chuyển sang allocator, con trỏ cũ không được truy cập nữa dù khối giữ nguyên chỗ, và vùng `0..min(layout.size(), new_size)` của khối mới được bảo đảm giống khối cũ[^ga-realloc]. Nếu bạn viết allocator đếm và override `realloc`, nhớ giữ hợp đồng này. Ví dụ `Counting` ở trên không override `realloc`, nên một `Vec` mở rộng đi qua bản mặc định của trait; trong source 1.95.0, bản mặc định gọi `self.alloc` cho khối mới rồi sao chép và gọi `self.dealloc` cho khối cũ[^ga-realloc-default], nghĩa là lần mở rộng đó được đếm như một lần `alloc` (chi tiết cài đặt, có thể đổi; docs không hứa điều này). (Suy luận của người soạn: vì không dùng `System.realloc`, allocator đếm có thể làm mất khả năng mở rộng tại chỗ của allocator thật, nên thời gian đo qua nó có thể khác bản không bọc.)
-- Performance Book cũng nhắc: allocator hệ thống mỗi nền tảng có điểm mạnh riêng, nên hiệu quả khác nhau theo nền tảng[^pb-altalloc].
-- Trên Linux jemalloc còn có thể cấu hình dùng transparent huge pages để tăng tốc, có thể đổi lấy nhiều bộ nhớ hơn[^pb-jemalloc-thp].
+- `realloc` thu nhỏ hoặc mở rộng khối đến `new_size`. Nếu nó trả con trỏ khác null, quyền sở hữu khối chuyển sang allocator và con trỏ cũ không được truy cập nữa dù khối giữ nguyên chỗ. Vùng `0..min(layout.size(), new_size)` của khối mới được bảo đảm giống khối cũ[^ga-realloc]. Nếu bạn viết allocator đếm và override `realloc`, nhớ giữ hợp đồng này.
+- Ví dụ `Counting` ở trên không override `realloc`, nên một `Vec` mở rộng đi qua bản mặc định của trait. Trong source 1.95.0, bản mặc định gọi `self.alloc` cho khối mới, rồi sao chép và gọi `self.dealloc` cho khối cũ[^ga-realloc-default]. Nghĩa là lần mở rộng đó được đếm như một lần `alloc` (chi tiết cài đặt, có thể đổi; docs không hứa điều này). Vì không dùng `System.realloc`, allocator đếm có thể làm mất khả năng mở rộng tại chỗ của allocator thật, nên thời gian đo qua nó có thể khác bản không bọc (suy luận của người soạn).
+- Performance Book cũng nhắc: allocator hệ thống của mỗi nền tảng có điểm mạnh riêng, nên hiệu quả khác nhau theo nền tảng[^pb-altalloc].
+- Trên Linux, jemalloc còn có thể cấu hình dùng transparent huge pages để tăng tốc, có thể đổi lấy nhiều bộ nhớ hơn[^pb-jemalloc-thp].
 
 </details>
 
-**Quay lại Q6:** allocation là chi phí đo được; thấy `malloc`/`free` nóng thì dùng DHAT hoặc bộ đếm `GlobalAlloc` để biết ở đâu, giảm bằng `with_capacity`/tái dùng, và chỉ đổi allocator sau khi đo — docs không hứa mọi allocation trong source thực sự xảy ra.
+**Quay lại Q6:** allocation là chi phí đo được; thấy `malloc`/`free` nóng trong `catalog` thì dùng DHAT hoặc bộ đếm `GlobalAlloc` để biết ở đâu, giảm bằng `with_capacity`/tái dùng buffer, và chỉ đổi allocator sau khi đo; docs không hứa mọi allocation trong source thực sự xảy ra.
 
 ## 7. Quan sát runtime: `tracing` và `tokio-console` (Q7)
 
-> **Trả lời ngắn.** `tracing` là framework để gắn instrumentation có cấu trúc vào chương trình Rust[^tr-what]. Ba khái niệm lõi: *span* (một khoảng thời gian có đầu có cuối), *event* (một thời điểm) và *subscriber* (thứ ghi/tổng hợp chúng)[^tr-span][^tr-event][^tr-sub]. Trong async đừng giữ guard của `Span::enter` qua `.await`: docs nói làm vậy cho trace sai[^tr-enter-warn]; dùng `#[instrument]`, `Instrument` hoặc `in_scope`. `tokio-console` là công cụ chẩn đoán task Tokio, cần `tokio_unstable`[^con-unstable].
+> **Trả lời ngắn.** `tracing` là framework để gắn instrumentation có cấu trúc vào chương trình Rust[^tr-what]. Ba khái niệm lõi: *span* là một khoảng thời gian có đầu có cuối[^tr-span]. *Event* là một thời điểm[^tr-event]. *Subscriber* là thứ ghi hoặc tổng hợp chúng[^tr-sub]. Trong async, đừng giữ guard của `Span::enter` qua `.await`, vì docs nói làm vậy cho trace sai[^tr-enter-warn]; hãy dùng `#[instrument]`, `Instrument` hoặc `in_scope`. `tokio-console` là công cụ chẩn đoán task Tokio, cần `tokio_unstable`[^con-unstable].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): log là ảnh chụp, span là đoạn phim. Log "xử lý xong request" cho bạn một khoảnh khắc; span `handle_request` cho bạn thấy request vào lúc nào, ra lúc nào, bên trong gọi DB hết bao lâu.
+*Với service `catalog`.* Giả sử một request `GET /items/42` chậm bất thường. Log của `catalog` có dòng "xử lý xong request", nhưng nó chỉ cho bạn một khoảnh khắc: không biết thời gian nằm ở parse, ở DB hay ở serialize. Tệ hơn, Tokio chạy xen kẽ nhiều request trên cùng một thread, nên các dòng log của những request khác chen vào giữa. Mục này nói `tracing` giải quyết chuyện đó thế nào, cái bẫy lớn nhất của nó trong async, và `tokio-console` cho thấy thêm gì.
 
-*Vì sao log thường không đủ trong async.* Tài liệu `tracing` nói: ở hệ thống async như Tokio, đọc log truyền thống khó vì nhiều task bị ghép trên cùng một thread nên log của các tác vụ xen lẫn nhau, khó lần theo luồng logic[^tr-async]. `tracing` mở rộng log bằng cách ghi sự kiện có cấu trúc kèm thông tin về thời gian và quan hệ nhân quả; khác với một dòng log, span có thời điểm bắt đầu và kết thúc, có thể được vào và ra theo luồng thực thi, và lồng nhau thành cây[^tr-span-nest].
+### 7.1 Vì sao log thường không đủ trong async
 
-*Span, event, subscriber.* Span biểu diễn một khoảng thời gian; chương trình "vào" span khi bắt đầu làm việc trong ngữ cảnh đó và "ra" khi dừng[^tr-span]. Event là một điểm thời gian, thường đặt trong span, ví dụ "request trả về với status code nào"[^tr-event]. Subscriber là thứ nhận thông báo khi event xảy ra và khi span được vào/ra, để ghi hoặc tổng hợp[^tr-sub]. Thư viện `tracing` không có sẵn subscriber; đó là việc của các crate khác[^tr-nosub], ví dụ `tracing-subscriber` có `FmtSubscriber` in ra stdout[^tr-ts]; tài liệu Tokio hướng dẫn đăng ký subscriber sớm nhất có thể trong `main`[^tokio-tracing-early]. Event ngoài ngữ cảnh của subscriber nào sẽ không được thu[^tr-global].
+Trong hệ thống async như Tokio, đọc log truyền thống khá khó: nhiều task bị ghép trên cùng một thread nên log của các tác vụ xen lẫn nhau, và khó lần theo luồng logic[^tr-async]. `tracing` mở rộng log bằng cách ghi sự kiện có cấu trúc, kèm thông tin về thời gian và quan hệ nhân quả. Khác với một dòng log, một span có thời điểm bắt đầu và kết thúc, có thể được vào và ra theo luồng thực thi, và lồng nhau thành cây[^tr-span-nest]. Với `catalog`, một span `handle_request` cho bạn thấy request vào lúc nào, ra lúc nào, và các span con bên trong (parse, DB, serialize) chiếm bao lâu (nhận xét của người soạn).
+
+### 7.2 Span, event, subscriber
+
+Span biểu diễn một khoảng thời gian: chương trình "vào" span khi bắt đầu làm việc trong ngữ cảnh đó và "ra" khi dừng[^tr-span]. Event là một điểm thời gian, thường đặt trong một span, ví dụ "request trả về với status code nào"[^tr-event]. Subscriber là thứ nhận thông báo khi event xảy ra và khi span được vào hoặc ra, để ghi hay tổng hợp lại[^tr-sub].
+
+Thư viện `tracing` không có sẵn subscriber; đó là việc của các crate khác[^tr-nosub]. Ví dụ `tracing-subscriber` có `FmtSubscriber` in ra stdout[^tr-ts]. Tài liệu Tokio hướng dẫn đăng ký subscriber sớm nhất có thể trong `main`[^tokio-tracing-early]. Event nằm ngoài ngữ cảnh của mọi subscriber thì sẽ không được thu[^tr-global].
 
 ```mermaid
 flowchart LR
@@ -314,11 +414,21 @@ flowchart LR
   SUB --> O3["OpenTelemetry..."]
 ```
 
-*Sơ đồ là của người soạn; docs của `tracing` liệt kê `tracing-timing` (histogram) và `tracing-opentelemetry` (xuất trace sang hệ OpenTelemetry) là các crate bên thứ ba[^tr-timing][^tr-otel].*
+*Sơ đồ là của người soạn. Docs của `tracing` liệt kê `tracing-timing` (tạo histogram) là một crate bên thứ ba[^tr-timing]. Crate `tracing-opentelemetry` xuất trace sang các hệ OpenTelemetry[^tr-otel].*
 
-*Chi phí.* Subscriber có thể lọc theo metadata (`enabled`); theo docs, nếu không subscriber nào đang hoạt động quan tâm đến metadata của một span/event thì span/event đó không bao giờ được dựng[^tr-enabled]. (Suy luận của người soạn: do đó instrumentation ở mức TRACE trên đường nóng có thể rẻ khi bị lọc, nhưng bạn nên đo chi phí khi bật.) Attribute `#[instrument]` ghi tham số của hàm thành field bằng `fmt::Debug`[^tr-instrument]; muốn tránh ghi những thứ lớn hoặc không cần, dùng `skip(...)`[^tr-skip] (nhận xét của người soạn: tham số lớn bị format trên đường nóng là một nguồn chậm kín đáo).
+### 7.3 Chi phí của instrumentation
 
-*Bẫy async: `Span::enter`.* Docs của `Span::enter` cảnh báo: trong code async, nên dùng rất cẩn thận hoặc tránh hẳn; giữ guard trả về qua điểm `.await` sẽ cho trace sai[^tr-enter-warn]. Lý do: khi async fn dừng ở `.await`, scope hiện tại bị thoát nhưng các giá trị trong scope *không bị drop*, nên task khác bắt đầu chạy trong khi vẫn "ở trong" span đó[^tr-enter-why]. Thay thế: `Span::in_scope` cho đoạn đồng bộ, vì closure thoát span trước điểm await kế tiếp[^tr-in-scope]; `Future::instrument` gắn span vào future, vào span mỗi lần future được poll và ra khi future yield[^tr-instrument-combinator]; và `#[instrument]` sinh code đúng khi dùng trên `async fn`[^tr-instrument-async].
+Subscriber có thể lọc theo metadata. Theo docs, nếu không subscriber nào đang hoạt động quan tâm đến metadata của một span hay event thì span, event đó không bao giờ được dựng[^tr-enabled]. Do đó instrumentation ở mức TRACE trên đường nóng có thể rẻ khi bị lọc, nhưng bạn vẫn nên đo chi phí khi bật (suy luận của người soạn). Attribute `#[instrument]` ghi tham số của hàm thành field bằng `fmt::Debug`[^tr-instrument]. Muốn tránh ghi những thứ lớn hoặc không cần, hãy dùng `skip(...)`[^tr-skip]. Với `catalog`, nếu `to_json` nhận cả một dòng dữ liệu lớn làm tham số thì đó là thứ nên `skip`: tham số lớn bị format trên đường nóng là một nguồn chậm kín đáo (nhận xét của người soạn).
+
+### 7.4 Bẫy async: `Span::enter`
+
+Docs của `Span::enter` cảnh báo: trong code async, nên dùng rất cẩn thận hoặc tránh hẳn; giữ guard trả về qua điểm `.await` sẽ cho trace sai[^tr-enter-warn]. Lý do: khi async fn dừng ở `.await`, scope hiện tại bị thoát nhưng các giá trị trong scope *không bị drop*. Kết quả là một task khác bắt đầu chạy trong khi vẫn "ở trong" span đó[^tr-enter-why]. Với `catalog`, nghĩa là thời gian và field của request khác có thể bị gán nhầm cho request này.
+
+Có ba cách thay thế:
+
+- `Span::in_scope` cho đoạn đồng bộ: closure thoát span trước điểm await kế tiếp[^tr-in-scope].
+- `Future::instrument`: gắn span vào future, vào span mỗi lần future được poll và ra khi future yield[^tr-instrument-combinator].
+- `#[instrument]`: sinh code đúng khi dùng trên `async fn`[^tr-instrument-async].
 
 ```rust
 use tracing::{info_span, Instrument};
@@ -335,155 +445,185 @@ async fn handle(req_id: u64) {
 }
 ```
 
-*`tokio-console`.* Đây là công cụ debug/profile cho ứng dụng async, thu và hiển thị dữ liệu chẩn đoán về task, resource, operation[^con-what]; gồm phần instrumentation nhúng trong ứng dụng và phần consumer như ứng dụng dòng lệnh `tokio-console`[^con-what]. Crate `console-subscriber` cài phần instrumentation dưới dạng một `Layer` của `tracing-subscriber` và một server gRPC xuất telemetry[^con-impl]. Yêu cầu: tính năng `tracing` của Tokio và cờ cfg `tokio_unstable` — vì support `tracing` trong runtime Tokio được coi là thử nghiệm[^con-experimental][^con-unstable]. Bản README ghim cũng dặn target `tokio` và `runtime` phải bật ở mức TRACE; dùng `console_subscriber::init()` thì tự bật[^con-targets].
+### 7.5 `tokio-console`
 
-Tool này có một số cảnh báo (lint) về các mẫu task đáng ngờ: task bị drop mà chưa từng được đánh thức (`lost-waker`)[^con-lost], task chưa từng yield (`never-yielded`)[^con-never], và task tự đánh thức mình quá nhiều so với tổng số lần đánh thức (`self-wakes`)[^con-self]. (Nhận xét của người soạn: README không nói các cảnh báo này liên quan latency; riêng `never-yielded` liên hệ trực tiếp với mục 8, vì task không yield giữ chặt worker.)
+`tokio-console` là công cụ debug và profile cho ứng dụng async, thu và hiển thị dữ liệu chẩn đoán chi tiết về task, resource và operation[^con-what]. Nó gồm phần instrumentation nhúng trong ứng dụng và phần consumer, như ứng dụng dòng lệnh `tokio-console`. Crate `console-subscriber` cài phần instrumentation dưới dạng một `Layer` của `tracing-subscriber`, kèm một server gRPC xuất telemetry[^con-impl].
+
+Yêu cầu là bật tính năng `tracing` của Tokio và cờ cfg `tokio_unstable`[^con-unstable]. Lý do là support `tracing` trong runtime Tokio hiện được coi là thử nghiệm[^con-experimental]. Bản README ghim cũng dặn target `tokio` và `runtime` phải bật ở mức TRACE; dùng `console_subscriber::init()` thì chúng tự được bật[^con-targets].
+
+Tool còn có một số cảnh báo (lint) về các mẫu task đáng ngờ:
+
+- `lost-waker`: task bị drop mà chưa từng được đánh thức[^con-lost].
+- `never-yielded`: task chưa từng yield[^con-never].
+- `self-wakes`: task tự đánh thức mình quá nhiều so với tổng số lần đánh thức[^con-self].
+
+README không nói các cảnh báo này liên quan latency; riêng `never-yielded` liên hệ trực tiếp với mục 8, vì task không yield giữ chặt worker (nhận xét của người soạn).
 
 <details><summary>Đi sâu: Layer, tracing-log, và cấu hình của console-subscriber</summary>
 
 - `tracing-subscriber` cung cấp trait `Layer` để ghép nhiều thành phần thành một subscriber có nhiều hành vi[^tokio-tracing-layer]; `console-subscriber` là một `Layer` như vậy[^con-impl].
-- Cầu nối với crate `log`: feature `log` làm span/event phát log record khi không có subscriber `tracing` nào hoạt động; `log-always` phát log cả khi đã có subscriber, dành cho ứng dụng thu log và trace riêng[^tr-log].
-- `tracing-timing` dựng histogram từ khoảng thời gian giữa các cặp event[^tr-timing] — kết nối trực tiếp với mục 2.
+- Cầu nối với crate `log`: feature `log` làm span/event phát log record khi không có subscriber `tracing` nào hoạt động. `log-always` phát log cả khi đã có subscriber, dành cho ứng dụng thu log và trace riêng[^tr-log].
+- `tracing-timing` dựng histogram từ khoảng thời gian giữa các cặp event[^tr-timing], kết nối trực tiếp với mục 2.
 - `console-subscriber` có `retention(Duration)` để chỉnh thời gian giữ dữ liệu task đã hoàn thành; theo ví dụ trong docs đặt là 60 giây[^con-retention].
 - Console chỉ dùng với Tokio 1.7.0 trở lên, vì hiện chỉ runtime đó cài instrumentation cần thiết[^con-tokio-only].
-- Overhead của `tokio-console`/`tracing` trong service production: nguồn đã ghim không nêu số; cần tự đo (nhận xét của người soạn).
+- Overhead của `tokio-console`/`tracing` trong service production: nguồn đã ghim không nêu số, cần tự đo (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q7:** span là đoạn thời gian, event là điểm thời gian, subscriber ghi lại chúng; trong async dùng `#[instrument]`/`Instrument`/`in_scope`, không giữ `enter` qua `.await`, và `tokio-console` cho thấy trạng thái task Tokio khi bật `tokio_unstable`.
+**Quay lại Q7:** span là đoạn thời gian, event là điểm thời gian, subscriber ghi lại chúng; trong `catalog` hãy dùng `#[instrument]`/`Instrument`/`in_scope`, đừng giữ `enter` qua `.await`, và `tokio-console` cho thấy trạng thái task Tokio khi bật `tokio_unstable`.
 
 ## 8. Latency đuôi trong service Rust/Tokio (Q8)
 
-> **Trả lời ngắn.** Docs Tokio nêu những thứ làm *một* worker không chạy được các task khác kịp lúc: code chặn thread trong task[^tokio-noblock] và task chạy lâu không yield[^tokio-coop]. Đó là các nguồn có khả năng kéo đuôi latency của service Tokio (suy luận của người soạn: docs không dùng từ "tail latency"); cấp phát heap, vốn có thể phải lấy khóa toàn cục hoặc gọi system call[^pb-heap-cost], là ứng viên thứ ba. Runtime chỉ bảo đảm công bằng nếu không task nào chặn thread[^tokio-fair], và không bảo đảm công bằng giữa các task[^tokio-fair-neg]. Cách làm việc: đo phân phối (mục 2), chia thời gian request thành span (mục 7), rồi profile (mục 5).
+> **Trả lời ngắn.** Docs Tokio chỉ ra hai thứ làm *một* worker không chạy được các task khác kịp lúc. Thứ nhất là code chặn thread trong task[^tokio-noblock]. Thứ hai là task chạy lâu mà không yield[^tokio-coop]. Cả hai đều có khả năng kéo đuôi latency của service Tokio (suy luận của người soạn: docs không dùng từ "tail latency"). Cấp phát heap, vốn có thể phải lấy khóa toàn cục hoặc gọi system call[^pb-heap-cost], là ứng viên thứ ba. Runtime chỉ bảo đảm công bằng khi không task nào chặn thread[^tokio-fair]. Nó cũng không bảo đảm công bằng giữa các task với nhau[^tokio-fair-neg]. Cách làm việc: đo phân phối (mục 2), chia thời gian request thành span (mục 7), rồi profile (mục 5).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một quầy thu ngân phục vụ nhiều hàng. Nếu một khách ở quầy 1 đứng làm thủ tục dài (task chặn), mọi người trong hàng của quầy đó chờ, dù các quầy khác rảnh. Trung bình thời gian chờ vẫn đẹp vì phần lớn khách ở quầy khác; p99 thì xấu vì nhóm khách xui xẻo.
+*Với service `catalog`.* Giả sử `catalog` có thêm endpoint `GET /reports/{id}`, và handler của nó gọi thẳng một hàm đồng bộ `build_report()` chạy vài trăm mili-giây (ví dụ giả định). Hàm này không có `.await` nào, nên worker thread chạy nó không poll được task nào khác trong suốt thời gian đó, kể cả những request `GET /items/{id}` đang chờ trên chính worker ấy. Dashboard khi đó có dạng quen thuộc: p50 đẹp vì phần lớn request rơi vào các worker khác, còn p99 xấu vì nhóm request xui xẻo bị kẹt sau `build_report()` (nhận xét của người soạn). Mục này đi qua bốn nguồn có thể gây ra đuôi như vậy, rồi một quy trình khoanh vùng.
 
-*Vì sao đuôi đáng lo hơn trung bình.* Xem lại mục 2: 1% request chậm là bình thường với service trung bình nhanh[^sre-100ms], và khi gọi nhiều backend, p99 của một backend dễ trở thành trung vị phía frontend[^sre-fan].
+Trước hết, vì sao đuôi đáng lo hơn trung bình: như ở mục 2, 1% request chậm là chuyện bình thường với service trung bình nhanh[^sre-100ms]. Khi nhiều backend nối tiếp, p99 của một backend lại dễ trở thành trung vị phía frontend[^sre-fan].
 
-*Nguồn 1 — chặn thread.* Tokio chạy nhiều task xen kẽ trên cùng một thread; task nên không gọi system call hoặc thao tác có thể chặn thread vì sẽ ngăn các task khác cùng thread chạy[^tokio-noblock]. Docs liệt kê hai cách: `task::spawn_blocking` và `task::block_in_place`[^tokio-blocking-apis]. Docs còn nhắc rằng gọi hàm không-async từ code async vẫn nằm trong ngữ cảnh async nên cũng phải tránh chặn ở đó, gồm cả destructor của object bị hủy trong code async[^tokio-destructors]. Chi tiết từng cơ chế: [P7 · Chương 08 mục 4](../07-io-async/08-tokio.md).
+### 8.1 Nguồn 1: chặn thread
 
-*Nguồn 2 — task chạy lâu mà không yield.* Đa nhiệm hợp tác: task được chạy cho đến khi nó yield[^tokio-coop], nên một vòng lặp CPU dài giữa hai điểm `.await` chiếm worker; `tokio-console` có cảnh báo `never-yielded` cho kiểu task này[^con-never].
+Tokio chạy nhiều task xen kẽ trên cùng một thread. Vì vậy task không nên gọi system call hay thao tác nào có thể chặn thread, vì làm thế sẽ ngăn các task khác cùng thread chạy[^tokio-noblock]. `build_report()` ở trên là một ví dụ: nó chặn thread bằng CPU thay vì bằng system call, nhưng hậu quả với các task cùng thread thì như nhau (nhận xét của người soạn).
 
-*Nguồn 3 — công bằng chỉ có điều kiện.* Docs Tokio chỉ bảo đảm công bằng nếu số task không tăng không giới hạn và không task nào chặn thread[^tokio-fair]; nói chính xác, nếu mọi lần `poll` đều quay về trong một thời gian hữu hạn thì task được đánh thức sẽ được lập lịch trong một độ trễ tối đa hữu hạn[^tokio-fair-formal] (suy luận của người soạn: một lần `poll` chạy lâu làm tăng giả định về thời gian `poll`, nên cận trễ này tăng theo, vì docs nói cận đó phụ thuộc vào các giả định). Ngoài ra không có bảo đảm về thứ tự hay mức công bằng giữa các task: runtime có thể lập lịch A năm lần trước B dù cả hai sẵn sàng, chỉ bảo đảm B rồi sẽ được lập lịch[^tokio-fair-neg]. Tokio cũng đưa ra bảo đảm kiểu "tối đa bao nhiêu đơn vị thời gian" cho việc đánh thức task có sự kiện IO hoặc timer, với cùng giả định[^tokio-io-timer].
+Docs liệt kê hai cách thoát: `task::spawn_blocking` và `task::block_in_place`[^tokio-blocking-apis]. Docs còn nhắc rằng gọi hàm không-async từ code async vẫn nằm trong ngữ cảnh async, nên cũng phải tránh chặn ở đó, kể cả trong destructor của object bị hủy trong code async[^tokio-destructors]. Chi tiết từng cơ chế xem [P7 · Chương 08 mục 4](../07-io-async/08-tokio.md).
 
-*Nguồn 4 — cấp phát.* Cấp phát heap có thể phải lấy khóa toàn cục hoặc gọi system call tùy allocator[^pb-heap-cost]; hiệu ứng thực tế phụ thuộc allocator và workload (mục 6, và [P3·06](../03-memory/06-heap-allocator.md)).
+### 8.2 Nguồn 2: task chạy lâu mà không yield
 
-*Quy trình khoanh vùng (nhận xét của người soạn, kết hợp các mục trên):*
+Đa nhiệm của Tokio là hợp tác: một task được chạy cho đến khi nó yield[^tokio-coop]. Vì thế một vòng lặp CPU dài giữa hai điểm `.await` chiếm trọn worker. `tokio-console` có cảnh báo `never-yielded` cho đúng kiểu task này[^con-never].
 
-1. Ghi latency vào histogram theo endpoint; so sánh p50 với p99/p99,9 (mục 2).
+### 8.3 Nguồn 3: công bằng chỉ có điều kiện
+
+Docs Tokio chỉ bảo đảm công bằng nếu số task không tăng không giới hạn và không task nào chặn thread[^tokio-fair]. Nói chính xác hơn: nếu mọi lần `poll` đều quay về trong một thời gian hữu hạn thì task được đánh thức sẽ được lập lịch trong một độ trễ tối đa hữu hạn[^tokio-fair-formal]. Một lần `poll` chạy lâu làm tăng giả định về thời gian `poll`, nên cận trễ này cũng tăng theo, vì docs nói cận đó phụ thuộc vào các giả định (suy luận của người soạn).
+
+Ngoài ra không có bảo đảm về thứ tự hay mức công bằng giữa các task: runtime có thể lập lịch A năm lần trước B dù cả hai đều sẵn sàng, chỉ bảo đảm B rồi sẽ được lập lịch[^tokio-fair-neg]. Tokio cũng đưa ra bảo đảm kiểu "tối đa bao nhiêu đơn vị thời gian" cho việc đánh thức task có sự kiện IO hoặc timer, với cùng các giả định đó[^tokio-io-timer].
+
+### 8.4 Nguồn 4: cấp phát
+
+Cấp phát heap có thể phải lấy khóa toàn cục hoặc gọi system call, tùy allocator[^pb-heap-cost]. Hiệu ứng thực tế phụ thuộc allocator và workload (mục 6, và [P3·06](../03-memory/06-heap-allocator.md)).
+
+### 8.5 Quy trình khoanh vùng
+
+Đây là quy trình của người soạn, ghép từ các mục trên:
+
+1. Ghi latency vào histogram theo endpoint; so p50 với p99 và p99,9 (mục 2).
 2. Bọc từng pha của request trong span (parse, DB, serialize…) và xem pha nào kéo đuôi (mục 7).
-3. Kiểm tra `tokio-console`: task nào có poll time dài hoặc `never-yielded` (mục 7).
-4. Profile CPU bằng flame graph để tìm đoạn nóng/chặn (mục 5, [P11·01](01-perf-va-sampling-profiler.md)); heap profile nếu `malloc` nóng (mục 6).
-5. Sửa một thứ, benchmark lại theo mục 1, so sánh *phân phối* chứ không chỉ trung bình.
+3. Mở `tokio-console` xem task nào có poll time dài hoặc dính `never-yielded` (mục 7).
+4. Profile CPU bằng flame graph để tìm đoạn nóng hoặc đoạn chặn (mục 5, [P11·01](01-perf-va-sampling-profiler.md)); heap profile nếu `malloc` nóng (mục 6).
+5. Sửa một thứ, benchmark lại theo mục 1, rồi so sánh *phân phối* chứ không chỉ trung bình.
 
 <details><summary>Đi sâu: lập lịch của Tokio ảnh hưởng đuôi thế nào</summary>
 
-- Trong runtime đa luồng (docs ghi rõ hành vi chi tiết này "có thể đổi" ở phiên bản sau[^tokio-detail-warn]): hàng đợi toàn cục được kiểm tra khi hàng đợi local rỗng hoặc khi worker đã lấy `global_queue_interval` task liên tiếp từ hàng đợi local; nếu không đặt, runtime tự tính theo heuristic nhắm đến khoảng 10 ms giữa các lần kiểm tra, dựa trên metric `worker_mean_poll_time`[^tokio-gqi]. (Nhận xét của người soạn: nghĩa là poll time trung bình của task ảnh hưởng trực tiếp tần suất task ở hàng đợi chung được xét tới.)
+- Trong runtime đa luồng (docs ghi rõ hành vi chi tiết này "có thể đổi" ở phiên bản sau[^tokio-detail-warn]): hàng đợi toàn cục được kiểm tra khi hàng đợi local rỗng, hoặc khi worker đã lấy `global_queue_interval` task liên tiếp từ hàng đợi local. Nếu không đặt, runtime tự tính theo heuristic nhắm đến khoảng 10 ms giữa các lần kiểm tra, dựa trên metric `worker_mean_poll_time`[^tokio-gqi]. Nghĩa là poll time trung bình của task ảnh hưởng trực tiếp tần suất task ở hàng đợi chung được xét tới (nhận xét của người soạn).
 - Runtime kiểm tra sự kiện IO/timer khi không còn task sẵn sàng hoặc đã lập lịch 61 task liên tiếp; hằng 61 đổi được bằng `event_interval`[^tokio-event-interval].
-- Docs của `spawn_blocking` nói nó chạy hàm chặn trên một thread pool riêng cho các tác vụ chặn[^tokio-sb-pool], và task `spawn_blocking` đã chạy thì không `abort` được[^tokio-sb-abort]. Pool này có giới hạn thread (mặc định 512 theo docs của `max_blocking_threads`)[^tokio-blocking-limit]; khi hết thread rảnh và đã đạt giới hạn, task chờ trong hàng đợi[^tokio-blocking-queue]. (Nhận xét của người soạn: đẩy việc CPU nặng sang pool này giữ worker async rảnh, nhưng tải nặng vẫn có thể xếp hàng ở đó.)
+- Docs của `spawn_blocking` nói nó chạy hàm chặn trên một thread pool riêng cho các tác vụ chặn[^tokio-sb-pool]. Task `spawn_blocking` đã chạy thì không `abort` được[^tokio-sb-abort]. Pool này có giới hạn thread, mặc định 512 theo docs của `max_blocking_threads`[^tokio-blocking-limit]. Khi hết thread rảnh và đã đạt giới hạn, task chờ trong hàng đợi[^tokio-blocking-queue]. Đẩy việc CPU nặng sang pool này giữ worker async rảnh, nhưng tải nặng vẫn có thể xếp hàng ở đó (nhận xét của người soạn).
 - `tokio::task::yield_now` cho task nhường runtime một lần để task khác chạy[^tokio-yield].
 
 </details>
 
-**Quay lại Q8:** latency đuôi trong service Tokio thường do một worker bị chiếm (chặn, vòng lặp dài không yield) hoặc do công bằng/cấp phát không đều; hãy khoanh vùng bằng histogram + span + `tokio-console` + profile thay vì đoán.
+**Quay lại Q8:** latency đuôi trong service Tokio thường do một worker bị chiếm (chặn, hoặc vòng lặp dài không yield), hoặc do công bằng và cấp phát không đều; với `catalog`, hãy khoanh vùng bằng histogram, span, `tokio-console` và profile thay vì đoán.
 
 ## Tóm tắt
 
-- Benchmark: dùng `black_box` cho đầu vào/kết quả[^bb-inputs], warm-up[^crit-warm], máy yên tĩnh[^crit-quiet]; `black_box` chỉ best-effort[^bb-bestef].
-- Wall-time dễ nhiễu vì cả bố cục bộ nhớ[^pb-layout]; số lệnh/chu kỳ là phương án ít nhiễu hơn[^pb-instr].
-- Trung bình che đuôi: 100 ms trung bình vẫn có thể có 1% request 5 giây[^sre-100ms]; ghi histogram[^sre-bucket], ví dụ `hdrhistogram`[^hdr-quantile].
-- `release` mặc định: `opt-level = 3`, `lto = false`, `codegen-units = 16`, `panic = 'unwind'`[^cargo-release-defaults]; `codegen-units = 1` và LTO đổi build chậm lấy code có thể nhanh hơn[^rustc-cgu][^rustc-lto]; `panic = "abort"` kết thúc tiến trình thay vì tháo stack[^rustc-panic] và có thể tăng tốc nhẹ[^pb-panic].
-- PGO: instrument → chạy → `llvm-profdata merge` → build lại với `-Cprofile-use`; ví dụ của rustc book ghi chú "mọi cờ rustc phải giống nhau" ở bước cuối[^pgo-steps][^pgo-same-flags].
-- Profile: `debug = "line-tables-only"`, frame pointer, demangle; std phát hành không có debug info[^pp-debug][^pp-fp][^pp-std].
-- Cấp phát heap tốn (khóa toàn cục, system call)[^pb-heap-cost]; DHAT hoặc `GlobalAlloc` đếm; docs không hứa mọi allocation trong source xảy ra[^ga-notrely].
-- `tracing`: span/event/subscriber[^tr-sub]; không giữ `Span::enter` qua `.await`[^tr-enter-warn]; `tokio-console` cần `tokio_unstable`[^con-unstable].
-- Đuôi latency: chặn thread, task không yield, công bằng có điều kiện[^tokio-noblock][^tokio-fair].
+- Benchmark `to_json` phải bọc đầu vào bằng `black_box`[^bb-inputs]. Hãy nhớ `black_box` chỉ là best-effort[^bb-bestef].
+- Warm-up làm nóng cache trước khi đo[^crit-warm]. Máy cũng phải yên tĩnh[^crit-quiet].
+- Wall-time dễ nhiễu, kể cả chỉ vì bố cục bộ nhớ đổi nhẹ[^pb-layout]. Số lệnh hay chu kỳ là phương án ít nhiễu hơn[^pb-instr].
+- Trung bình che đuôi: 100 ms trung bình vẫn có thể có 1% request mất 5 giây[^sre-100ms]. Hãy ghi histogram[^sre-bucket]. Trong Rust, `hdrhistogram` truy vấn được theo quantile[^hdr-quantile].
+- `release` mặc định có `opt-level = 3`, `lto = false`, `codegen-units = 16`, `panic = 'unwind'`[^cargo-release-defaults].
+- `codegen-units = 1` và LTO đổi thời gian build lấy code có thể nhanh hơn[^rustc-cgu].
+- `panic = "abort"` kết thúc tiến trình thay vì tháo stack[^rustc-panic]. Nó có thể tăng tốc nhẹ[^pb-panic].
+- PGO là instrument, chạy, `llvm-profdata merge`, rồi build lại với `-Cprofile-use`[^pgo-steps]. Bước cuối cần giữ mọi cờ rustc giống nhau[^pgo-same-flags].
+- Để profile build release, cần `debug = "line-tables-only"`[^pp-debug]. Nên thêm frame pointer[^pp-fp]. Symbol cũng cần được demangle[^pp-mangle]. Std phát hành không có debug info[^pp-std].
+- Cấp phát heap tốn vì khóa toàn cục và system call[^pb-heap-cost]. Hãy đếm bằng DHAT hoặc `GlobalAlloc`, và nhớ docs không hứa mọi allocation trong source đều xảy ra[^ga-notrely].
+- `tracing` có span, event và subscriber[^tr-sub]. Đừng giữ `Span::enter` qua `.await`[^tr-enter-warn].
+- `tokio-console` cần `tokio_unstable`[^con-unstable].
+- Đuôi latency của service Tokio đến từ chặn thread[^tokio-noblock].
+- Task không yield cũng chiếm worker[^tokio-coop].
+- Công bằng của Tokio chỉ có điều kiện[^tokio-fair].
 
 ## Câu hỏi tự kiểm tra
 
 1. Vì sao một benchmark trả về 0 ns cho một hàm thuần có thể là lỗi của phép đo, và `black_box` sửa thế nào?
 <details><summary>Đáp án</summary>
 
-Trình biên dịch có thể xóa lời gọi hàm thuần mà kết quả không được dùng, hoặc thay bằng hằng vì đầu vào biết lúc biên dịch[^bb-nothing][^bb-elim]. `black_box` bọc đầu vào/kết quả để trình biên dịch phải xem giá trị là không dự đoán được và phải tính ra[^bb-purposes][^bb-inputs].
+Trình biên dịch có thể xóa lời gọi hàm thuần mà kết quả không được dùng[^bb-nothing]. Nó cũng có thể thay lời gọi bằng hằng vì đầu vào biết lúc biên dịch, và những việc này làm benchmark rất thiếu chính xác[^bb-elim]. `black_box` bọc đầu vào và kết quả để trình biên dịch phải coi giá trị là không dự đoán được và phải tính ra[^bb-purposes]. Với đầu vào, mục đích cụ thể là tránh các tối ưu phi thực tế[^bb-inputs].
 
 </details>
 
 2. `black_box` có bảo đảm tuyệt đối chặn mọi tối ưu hóa không?
 <details><summary>Đáp án</summary>
 
-Không. Docs nói nó chỉ ở mức best-effort, tùy nền tảng và backend sinh code[^bb-bestef], và chương trình không dựa vào nó cho tính đúng đắn ngoài việc nó là hàm đồng nhất[^bb-correct].
+Không. Docs nói nó chỉ ở mức best-effort, tùy nền tảng và backend sinh code[^bb-bestef]. Chương trình cũng không được dựa vào nó cho tính đúng đắn, ngoài việc nó là hàm đồng nhất[^bb-correct].
 
 </details>
 
 3. Warm-up làm gì cho benchmark hàm Rust (không có JIT)?
 <details><summary>Đáp án</summary>
 
-Criterion nói với hàm Rust, warm-up nhằm làm nóng cache bộ xử lý và cache file system nếu có[^crit-warm]; thuật toán là chạy 1, 2, 4… lần đến khi vượt ngưỡng thời gian[^crit-warm-alg].
+Criterion nói với hàm Rust, warm-up nhằm làm nóng cache bộ xử lý và cache file system nếu có[^crit-warm]. Thuật toán là chạy 1, 2, 4… lần cho đến khi vượt ngưỡng thời gian[^crit-warm-alg].
 
 </details>
 
 4. Vì sao SRE book khuyên đếm request theo khoảng latency thay vì lưu trung bình?
 <details><summary>Đáp án</summary>
 
-Vì trung bình che đuôi: 100 ms trung bình vẫn có 1% request 5 giây[^sre-100ms]; histogram phân biệt được trung bình chậm với đuôi rất chậm[^sre-bucket].
+Vì trung bình che đuôi: 100 ms trung bình vẫn có 1% request mất 5 giây[^sre-100ms]. Histogram thì phân biệt được trung bình chậm với đuôi rất chậm[^sre-bucket].
 
 </details>
 
 5. `hdrhistogram` tính p99,9 bằng lời gọi nào, và vì sao dùng đối số 0.999?
 <details><summary>Đáp án</summary>
 
-`value_at_quantile(0.999)`[^hdr-quantile]; thư viện làm việc với quantile trong [0, 1] thay vì percentile trong [0, 100] để giảm mất chính xác do số dấu phẩy động[^hdr-quant-pct].
+Bằng `value_at_quantile(0.999)`[^hdr-quantile]. Thư viện làm việc với quantile trong [0, 1] thay vì percentile trong [0, 100] để giảm mất chính xác do số dấu phẩy động[^hdr-quant-pct].
 
 </details>
 
 6. `lto = false` và `lto = "off"` khác nhau thế nào trong Cargo?
 <details><summary>Đáp án</summary>
 
-`false` là thin local LTO chỉ trong crate hiện tại (và không LTO nếu codegen units là 1 hoặc opt-level là 0); `"off"` tắt hẳn[^cargo-lto-false][^pb-lto-off].
+`false` là thin local LTO chỉ trong crate hiện tại, và không có LTO nếu codegen units là 1 hoặc opt-level là 0; `"off"` tắt hẳn[^cargo-lto-false]. Performance Book nhấn mạnh sự khác nhau này[^pb-lto-off].
 
 </details>
 
 7. Đặt `codegen-units = 1` đánh đổi gì?
 <details><summary>Đáp án</summary>
 
-Có thể cải thiện hiệu năng code sinh ra nhưng biên dịch chậm hơn; mặc định 16 (không incremental) hoặc 256 (incremental)[^rustc-cgu][^rustc-cgu-default].
+Code sinh ra có thể nhanh hơn nhưng biên dịch chậm hơn[^rustc-cgu]. Mặc định là 16 cho build không incremental và 256 cho incremental[^rustc-cgu-default].
 
 </details>
 
 8. Bốn bước của PGO với rustc là gì, và vì sao "mọi cờ phải giống nhau"?
 <details><summary>Đáp án</summary>
 
-Build instrument, chạy sinh `.profraw`, `llvm-profdata` tạo `.profdata`, build lại với `-Cprofile-use`[^pgo-steps]; rustc book dặn mọi cờ rustc phải giống nhau ở bước cuối[^pgo-same-flags] (lý do kỹ thuật không được nêu trong nguồn).
+Build bản instrument, chạy để sinh `.profraw`, dùng `llvm-profdata` tạo `.profdata`, rồi build lại với `-Cprofile-use`[^pgo-steps]. Rustc book dặn mọi cờ rustc phải giống nhau ở bước cuối[^pgo-same-flags]; lý do kỹ thuật không được nêu trong nguồn.
 
 </details>
 
 9. Cần cấu hình gì để flame graph của build release có số dòng và stack tốt?
 <details><summary>Đáp án</summary>
 
-`debug = "line-tables-only"`[^pp-debug], tùy chọn `-C force-frame-pointers=yes`[^pp-fp], giữ symbol (không `strip`)[^pb-strip], và demangle hoặc dùng mangling `v0`[^pp-mangle]. Std không có debug info[^pp-std].
+Cần `debug = "line-tables-only"`[^pp-debug]. Nên thêm `-C force-frame-pointers=yes`[^pp-fp]. Giữ symbol, tức không `strip`[^pb-strip]. Cuối cùng là demangle, hoặc dùng mangling `v0`[^pp-mangle]. Lưu ý std không có debug info[^pp-std].
 
 </details>
 
 10. Vì sao không nên assert cứng số allocation đếm được bằng `GlobalAlloc` làm bất biến của chương trình?
 <details><summary>Đáp án</summary>
 
-Docs: không được dựa vào việc allocation thật sự xảy ra vì optimizer có thể loại bỏ hoặc chuyển xuống stack, và việc có allocation hay không không thuộc hành vi chương trình[^ga-notrely][^ga-notbehavior].
+Docs cấm dựa vào việc allocation thật sự xảy ra, vì optimizer có thể loại bỏ chúng hoặc chuyển xuống stack[^ga-notrely]. Việc có allocation hay không cũng không thuộc hành vi chương trình[^ga-notbehavior].
 
 </details>
 
 11. Vì sao giữ guard của `Span::enter` qua `.await` làm sai trace, và ba cách thay thế?
 <details><summary>Đáp án</summary>
 
-Khi yield, scope bị thoát nhưng guard không drop, nên task khác chạy trong lúc vẫn ở trong span[^tr-enter-why]. Thay bằng `Span::in_scope`[^tr-in-scope], `Future::instrument`[^tr-instrument-combinator], hoặc `#[instrument]` trên `async fn`[^tr-instrument-async].
+Khi yield, scope bị thoát nhưng guard không bị drop, nên task khác chạy trong lúc vẫn ở trong span[^tr-enter-why]. Cách thứ nhất là `Span::in_scope`[^tr-in-scope]. Cách thứ hai là `Future::instrument`[^tr-instrument-combinator]. Cách thứ ba là `#[instrument]` trên `async fn`[^tr-instrument-async].
 
 </details>
 
 12. Vì sao một task chặn thread làm tăng p99 của các request không liên quan?
 <details><summary>Đáp án</summary>
 
-Các task chạy xen kẽ trên cùng thread; task chặn ngăn các task khác trên thread đó chạy[^tokio-noblock], và bảo đảm công bằng của Tokio chỉ có điều kiện không task nào chặn thread[^tokio-fair]. Phần "p99 tăng" là suy luận từ mục 2 và 8.
+Các task chạy xen kẽ trên cùng thread, nên task chặn ngăn các task khác trên thread đó chạy[^tokio-noblock]. Bảo đảm công bằng của Tokio cũng chỉ có điều kiện là không task nào chặn thread[^tokio-fair]. Phần "p99 tăng" là suy luận từ mục 2 và 8.
 
 </details>
 
@@ -497,6 +637,7 @@ Các task chạy xen kẽ trên cùng thread; task chặn ngăn các task khác 
 - [`tracing` 0.1.44](https://docs.rs/tracing/0.1.44/tracing/) và [`Span::enter`](https://docs.rs/tracing/0.1.44/tracing/struct.Span.html): span/event/subscriber, cảnh báo async.
 - [SRE book — Monitoring Distributed Systems](https://sre.google/sre-book/monitoring-distributed-systems/) (trang sống), mục "Worrying About Your Tail": vì sao dùng histogram thay trung bình.
 - [P11 · Chương 01 — perf](01-perf-va-sampling-profiler.md), [P3 · Chương 06 — Heap allocator](../03-memory/06-heap-allocator.md), [P7 · Chương 08 — Tokio](../07-io-async/08-tokio.md).
+
 
 [^bb-def]: std::hint::black_box, Description — <https://doc.rust-lang.org/1.95.0/std/hint/fn.black_box.html> — "An identity function that hints to the compiler to be maximally pessimistic about what black_box could do."
 [^bb-bestef]: std::hint::black_box, Description — <https://doc.rust-lang.org/1.95.0/std/hint/fn.black_box.html> — "The extent to which it can block optimisations may vary depending upon the platform and code-gen backend used."

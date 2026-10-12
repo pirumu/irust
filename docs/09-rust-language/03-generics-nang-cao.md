@@ -2,7 +2,7 @@
 
 ## Bạn sẽ hiểu được gì
 
-1. **Q1.** Trait bound là "hợp đồng" gì, nó ảnh hưởng thế nào tới type inference, và khi nào bắt buộc dùng turbofish `::<>`? → mục 1
+1. **Q1.** Trait bound cho phép gì và cấm gì trong thân hàm generic, nó ảnh hưởng thế nào tới type inference, và khi nào bắt buộc dùng turbofish `::<>`? → mục 1
 2. **Q2.** Const generics cho phép những kiểu nào, và vì sao `[u8; N + 1]` bị từ chối? → mục 2
 3. **Q3.** GAT (generic associated type) giải quyết bài toán gì mà `Iterator` thường không làm được? Viết được `LendingIterator` thế nào? → mục 3
 4. **Q4.** `for<'a>` (higher-ranked trait bound, HRTB) là gì và vì sao closure nhận reference hay chạm tới nó? → mục 4
@@ -19,15 +19,17 @@
 
 Mọi ví dụ trong chương được biên dịch và chạy bằng `rustc 1.95.0`, edition 2024, trên macOS aarch64. Thông điệp lỗi trích nguyên văn từ trình biên dịch; chúng có thể đổi chữ ở phiên bản khác (đó là quan sát, không phải bảo đảm).
 
+Xuyên suốt chương ta bám theo `orders`, một HTTP service viết bằng Rust (ví dụ giả định của người soạn, không phải code trong repo). Mỗi request nó đọc tham số từ query string, tra user và order theo ID, chạy một chuỗi handler rồi trả kết quả. Mỗi mục dưới đây mở đầu bằng một chỗ trong `orders` mà tính năng của mục đó giải quyết được.
+
 ## 1. Trait bound, hợp đồng và type inference (Q1)
 
-> **Trả lời ngắn.** Bound là lời hứa mà hàm generic được phép dựa vào: trong thân hàm chỉ dùng được những gì bound cho phép, nên thiếu bound thì lỗi nằm ngay ở định nghĩa (quan sát qua lỗi E0369 bên dưới). Bound không *chọn* kiểu hộ bạn; khi tham số kiểu chỉ xuất hiện ở kiểu trả về (như `parse`, `collect`) thì trình biên dịch đòi bạn nói rõ. Có ba cách nói rõ (cách chia ba là tổng hợp của người soạn): annotation trên biến, turbofish `::<>`[^turbofish], hoặc để ngữ cảnh khác ép kiểu.
+> **Trả lời ngắn.** Trong thân hàm generic, bạn chỉ được dùng những gì bound hứa, nên thiếu bound thì lỗi hiện ngay ở chỗ định nghĩa hàm (quan sát qua lỗi E0369 bên dưới). Bound cũng không *chọn* kiểu hộ bạn: khi tham số kiểu chỉ xuất hiện ở kiểu trả về (như `parse`, `collect`) thì trình biên dịch đòi bạn nói rõ. Có ba cách nói rõ (cách chia ba là tổng hợp của người soạn): annotation trên biến, turbofish `::<>`[^turbofish], hoặc để ngữ cảnh khác ép kiểu.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hàm generic giống một hợp đồng thầu — bên nhận thầu chỉ được dùng những vật liệu có ghi trong hợp đồng. Còn bound không phải là "tôi chọn vật liệu giúp bạn"; nó chỉ là danh sách điều kiện, và nếu nhiều vật liệu cùng thỏa thì phải có người chỉ định.
+*Với service `orders`.* Handler của `orders` đọc `?qty=5` từ query string và cần một số nguyên; ngoài ra service có vài hàm tiện ích generic, kiểu như tìm giá lớn nhất trong một lát giá. Hai việc này cho ta hai nửa của Q1: bound cho phép gì trong thân hàm, và vì sao một mình `"5".parse()` chưa đủ để compiler biết bạn muốn số nguyên loại nào.
 
-*Bước 1 — generic ở đâu và bound đặt ở đâu.* Generics cho phép một định nghĩa dùng cho nhiều kiểu. Bound đặt ở đâu thì hiệu ứng khác nhau:
+*Bước 1: generic ở đâu, bound đặt ở đâu.* Generics cho một định nghĩa dùng được với nhiều kiểu. Chỗ đặt bound quyết định phạm vi của nó: trên hàm, bound áp cho mọi lời gọi; trên `impl`, chỉ những kiểu thỏa bound mới có method; và có thể viết thêm `impl` riêng cho một kiểu cụ thể.
 
 ```rust
 fn largest<T: PartialOrd + Copy>(xs: &[T]) -> T {
@@ -45,18 +47,18 @@ impl Pair<f64> {                                   // impl chuyên cho một ki�
 }
 ```
 
-Chạy `largest(&[3, 9, 2])` ra `9`, `largest(&[1.5, 0.2])` ra `1.5`, `Pair{a:1,b:5}.max()` ra `5`, `Pair{a:3.0,b:4.0}.norm()` ra `5`. Thứ tự tham số generic bị quy định: lifetime trước, sau đó type và const xen kẽ tùy ý.[^order]
+Chạy `largest(&[3, 9, 2])` ra `9`, `largest(&[1.5, 0.2])` ra `1.5`, `Pair{a:1,b:5}.max()` ra `5`, `Pair{a:3.0,b:4.0}.norm()` ra `5`. Khi khai báo tham số generic, lifetime phải đứng trước, còn type và const xen kẽ thế nào cũng được[^order].
 
-*Bước 2 — bound là hợp đồng ở thân hàm.* Hàm generic chỉ được dùng những gì bound hứa. Bỏ bound thì lỗi nằm ngay trong định nghĩa chứ không phải ở chỗ gọi:
+*Bước 2: trong thân hàm, bound là hợp đồng.* Hàm chỉ được dùng những gì bound hứa. Bỏ `PartialOrd` khỏi `largest`, lỗi nằm ngay trong định nghĩa chứ không đợi tới chỗ gọi:
 
 ```text
 error[E0369]: binary operation `>` cannot be applied to type `T`
 help: consider restricting type parameter `T` with trait `PartialOrd`
 ```
 
-Đây là điểm khác biệt lớn với template C++ (nhận xét của người soạn): Rust kiểm tra thân generic một lần theo bound, không đợi tới lúc thay kiểu cụ thể.
+Chỗ này khác template C++ (nhận xét của người soạn): Rust kiểm tra thân generic đúng một lần theo bound, không chờ tới lúc thay kiểu cụ thể vào.
 
-*Bước 3 — bound không "chọn" kiểu.* Phần này là mô hình của người soạn rút ra từ các lỗi dưới đây, không phải câu trích: inference dựa vào ràng buộc thu thập được từ ngữ cảnh; bound như `FromStr` hay `FromIterator<_>` là một **ràng buộc**, không phải một **lựa chọn**, nên khi không đủ thông tin trình biên dịch dừng lại và báo lỗi thay vì đoán. Book dùng chính tình huống `parse` không có annotation để minh họa lỗi này.[^book-e0284]
+*Bước 3: bound không chọn kiểu.* Phần này là mô hình của người soạn rút ra từ các lỗi dưới đây, không phải câu trích. Inference chỉ dựa vào các ràng buộc gom được từ ngữ cảnh. Bound như `FromStr` hay `FromIterator<_>` là một **ràng buộc**, không phải một **lựa chọn**; thiếu thông tin thì compiler dừng lại và báo lỗi thay vì đoán. Chính Book dùng tình huống `parse` không có annotation để minh họa lỗi này[^book-e0284].
 
 ```rust
 let x = "5".parse().unwrap();
@@ -71,7 +73,7 @@ error[E0284]: type annotations needed
 help: consider giving `x` an explicit type
 ```
 
-Tương tự với `collect()` mà không biết đích:
+`collect()` mà không biết đích cũng vướng y như vậy:
 
 ```text
 error[E0283]: type annotations needed
@@ -80,9 +82,9 @@ note: required by a bound in `collect`
 help: consider giving `v` an explicit type
 ```
 
-Nguyên nhân chung (suy luận của người soạn từ hai thông báo trên): tham số trả về (`F` của `parse`, `B` của `collect`) chỉ xuất hiện ở *return type*, không có đối số nào kéo nó ra.
+Hai trường hợp có chung nguyên nhân (suy luận của người soạn từ hai thông báo trên): tham số trả về (`F` của `parse`, `B` của `collect`) chỉ xuất hiện ở return type, không có đối số nào kéo nó ra.
 
-*Bước 4 — ba cách cung cấp thông tin.* (Bảng là gợi ý của người soạn.)
+*Bước 4: ba cách bổ sung thông tin.* Với `qty` của `orders`, bạn chọn cách nào tùy chỗ dùng (bảng là gợi ý của người soạn):
 
 | Cách | Ví dụ | Khi nào hợp |
 |---|---|---|
@@ -90,13 +92,13 @@ Nguyên nhân chung (suy luận của người soạn từ hai thông báo trên
 | Turbofish | `"5".parse::<i32>()` | Ngay trong chuỗi gọi, không có biến trung gian |
 | Ngữ cảnh khác | truyền `x` vào hàm nhận `i32` | Kiểu suy ra ngược từ nơi dùng |
 
-Turbofish là cú pháp `::<>` trong expression: `::` bắt buộc trước `<` để không nhầm với toán tử so sánh nhỏ hơn.[^turbofish] Có thể để trống phần suy ra được bằng `_`: `collect::<Vec<_>>()`, `Vec::<u8>::new()`. Chạy `[(1,"a")].into_iter().collect::<HashMap<_,_>>()` ra `{1: "a"}` (đã chạy).
+Turbofish là cú pháp `::<>` trong expression. Dấu `::` bắt buộc đứng trước `<` để compiler không nhầm với toán tử so sánh nhỏ hơn[^turbofish]. Phần nào suy ra được thì để `_`: `collect::<Vec<_>>()`, `Vec::<u8>::new()`. Ví dụ đã chạy: `[(1,"a")].into_iter().collect::<HashMap<_,_>>()` ra `{1: "a"}`.
 
 <details><summary>Đi sâu: E0283 hay E0284, và bound là một phần API</summary>
 
-- Hai mã lỗi khác nhau vì thông báo `cannot satisfy` khác dạng: ở `parse` là ràng buộc projection `<_ as FromStr>::Err == _`, ở `collect` là ràng buộc trait `_: FromIterator<i32>` (suy luận của người soạn từ nội dung hai thông báo trên).
-- Error index mô tả E0283 chung chung là trình biên dịch không suy ra được kiểu và yêu cầu annotation[^e0283]. E0284 là trường hợp không suy ra rõ ràng được kiểu trả về của hàm/method generic theo kiểu trả về, và phần mô tả này lấy `collect` làm ví dụ[^e0284] — nhưng ở 1.95.0 mình chạy `collect` thì nhận E0283 (quan sát). Vì vậy đừng dựa vào mã lỗi để suy ra nguyên nhân.
-- Lưu ý (nhận xét của người soạn, dựa trên lỗi E0283 ở trên): suy luận kiểu chạy xuyên thân hàm nhưng chữ ký hàm phải đầy đủ, nên thêm một bound mới vào hàm công khai có thể làm hỏng inference ở các chỗ gọi — hãy coi chữ ký generic là một phần API.
+- Hai mã lỗi khác nhau vì thông báo `cannot satisfy` có dạng khác nhau: ở `parse` là ràng buộc projection `<_ as FromStr>::Err == _`, ở `collect` là ràng buộc trait `_: FromIterator<i32>` (suy luận của người soạn từ nội dung hai thông báo trên).
+- Error index mô tả E0283 chung chung: compiler không suy ra được kiểu và đòi annotation[^e0283]. E0284 là trường hợp compiler không suy ra rõ ràng được kiểu trả về của hàm hay method generic theo kiểu trả về, và mô tả đó lấy `collect` làm ví dụ[^e0284]. Nhưng khi chạy `collect` ở 1.95.0 ta nhận E0283 (quan sát), nên đừng dựa vào mã lỗi để suy ra nguyên nhân.
+- Một lưu ý cho thư viện (nhận xét của người soạn, dựa trên lỗi E0283 ở trên): suy luận kiểu chạy xuyên thân hàm nhưng chữ ký hàm phải đầy đủ, nên thêm một bound mới vào hàm công khai có thể làm hỏng inference ở những chỗ gọi. Hãy coi chữ ký generic là một phần API.
 
 </details>
 
@@ -104,13 +106,13 @@ Turbofish là cú pháp `::<>` trong expression: `::` bắt buộc trước `<` 
 
 ## 2. Const generics và giới hạn của chúng (Q2)
 
-> **Trả lời ngắn.** Const generics cho phép tham số là một *giá trị* hằng (điển hình độ dài mảng), nhưng chỉ với số nguyên, `char` và `bool`[^constty]. Trong kiểu hoặc biểu thức lặp mảng, tham số const chỉ được đứng một mình (`N` hoặc `{N}`), không được kết hợp với biểu thức khác, nên `[u8; N + 1]` bị từ chối[^conststand].
+> **Trả lời ngắn.** Const generics cho phép tham số là một *giá trị* hằng (điển hình là độ dài mảng), nhưng chỉ với số nguyên, `char` và `bool`[^constty]. Trong kiểu hoặc biểu thức lặp mảng, tham số const chỉ được đứng một mình (`N` hoặc `{N}`) chứ không được kết hợp với biểu thức khác, nên `[u8; N + 1]` bị từ chối[^conststand].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Vec<T>` như một cái hộp đựng được nhiều loại đồ; `[T; N]` giống khay trứng có đúng `N` ô — số ô là một phần của kiểu khay, nên khay 6 ô và khay 12 ô không lẫn được.
+*Với service `orders`.* Giả sử `orders` đọc request vào một buffer có độ dài cố định, `[u8; N]`, và muốn hàm xử lý buffer biết `N` ngay lúc biên dịch để khỏi cấp phát heap. Có tham số const thì độ dài trở thành một phần của kiểu: `[u8; 512]` và `[u8; 4096]` là hai kiểu khác nhau, và một hàm viết một lần chạy được cho cả hai. Mục này nói tham số const nhận được kiểu gì và vì sao không viết được `N + 1`.
 
-*Cơ bản.* Const generics cho tham số giá trị hằng, điển hình là độ dài mảng:
+*Cơ bản.* Ví dụ dưới dùng mảng số nguyên và ma trận cho gọn:
 
 ```rust
 fn sum<const N: usize>(a: [i32; N]) -> i32 { a.iter().sum() }
@@ -125,33 +127,33 @@ impl<const R: usize, const C: usize> Matrix<R, C> {
 }
 ```
 
-`sum([1,2,3,4])` ra `10`; `Matrix([[1,2,3],[4,5,6]]).transpose().0` ra `[[1, 4], [2, 5], [3, 6]]`. Kiểu `Matrix<2,3>` và `Matrix<3,2>` là hai kiểu khác nhau, nên nhân ma trận sai kích thước thành lỗi biên dịch (nhận xét của người soạn: đây là lợi ích chính so với `Vec<Vec<_>>`).
+`sum([1,2,3,4])` ra `10`; `Matrix([[1,2,3],[4,5,6]]).transpose().0` ra `[[1, 4], [2, 5], [3, 6]]`. `Matrix<2,3>` và `Matrix<3,2>` là hai kiểu khác nhau, nên nhân ma trận sai kích thước thành lỗi biên dịch (nhận xét của người soạn: đây là lợi ích chính so với `Vec<Vec<_>>`).
 
-Đối số const trong path phải là const inferred (`_`) hoặc biểu thức const đúng kiểu; biểu thức phải đặt trong `{}` trừ khi là một đường dẫn một đoạn hoặc literal.[^constarg]
+Khi truyền đối số const vào một path, đối số đó phải là `_` (để compiler suy ra) hoặc một biểu thức const đúng kiểu. Biểu thức phải đặt trong `{}`, trừ khi nó chỉ là một đường dẫn một đoạn hoặc một literal[^constarg].
 
-*Kiểu được phép.* Reference liệt kê: `u8…u128`, `usize`, `i8…i128`, `isize`, `char`, `bool` — chỉ có vậy.[^constty] Thử `f64`:
+*Kiểu được phép.* Reference liệt kê đủ: `u8…u128`, `usize`, `i8…i128`, `isize`, `char`, `bool`, ngoài ra không có gì[^constty]. Thử `f64`:
 
 ```text
 error: `f64` is forbidden as the type of a const generic parameter
   = note: the only supported types are integers, `bool`, and `char`
 ```
 
-*Chỉ được đứng một mình trong kiểu/array repeat.* Tham số const trong kiểu hoặc biểu thức lặp mảng chỉ được xuất hiện *độc lập* (`N` hoặc `{N}`), không kết hợp với biểu thức khác.[^conststand] Hệ quả: không viết được kiểu trả về `[u8; N + 1]`:
+*Chỉ được đứng một mình.* Trong một kiểu hoặc biểu thức lặp mảng, tham số const chỉ xuất hiện *độc lập* (`N` hoặc `{N}`), không kết hợp với biểu thức khác[^conststand]. Vì vậy không viết được kiểu trả về `[u8; N + 1]`:
 
 ```text
 error: generic parameters may not be used in const operations
   = help: const parameters may only be used as standalone arguments here, i.e. `N`
 ```
 
-Đây là chỗ mà người từ C++ hay vấp (nhận xét của người soạn): `N + 1` trong kiểu bị chặn ở 1.95.0 (lỗi trên). Cách thường dùng (nhận xét của người soạn, không phải câu trích) là truyền thêm một tham số const riêng (`<const N: usize, const M: usize>`) và để người gọi khớp quan hệ.
+Người đã quen C++ hay vấp ở đây (nhận xét của người soạn): `N + 1` trong kiểu bị chặn ở 1.95.0, như lỗi trên cho thấy. Cách hay dùng (nhận xét của người soạn, không phải câu trích) là thêm một tham số const riêng, `<const N: usize, const M: usize>`, rồi để người gọi khớp quan hệ giữa hai số.
 
 <details><summary>Đi sâu: giá trị phải là hằng, tham số const "không dùng", exhaustiveness, ví dụ trong std</summary>
 
-- **Giá trị phải là hằng lúc biên dịch.** Error index E0435 mô tả đây là lỗi dùng một giá trị không hằng trong biểu thức hằng[^e0435]; ví dụ `let n: usize = 5; let v: [u8; n] = [0; n];` rơi vào loại lỗi này (suy luận của người soạn từ ví dụ của error index).
-- **Tham số const được phép "không dùng"**, khác tham số kiểu và lifetime.[^constunused] Ngược lại, `struct Baz<T>;` bị từ chối ở ví dụ của cùng đoạn Reference đó; xem mục 5.
-- **Không có suy luận từ độ phủ.** Khi giải trait bound, tính *đầy đủ* của các impl theo giá trị const không được xét: dù đã impl cho cả `true` lẫn `false`, bound với `const B: bool` chung vẫn lỗi.[^constexh]
-- Std dùng const generics rộng rãi: `[T; N]` có `map`[^arr-map] và `TryFrom<&[T]>` (với `T: Copy`).[^arr-tryfrom] Ví dụ đã chạy: `<[i32;3]>::try_from(&b[..3]).unwrap()` ra `[1, 2, 3]`.
-- `Default` cho mảng thì không generic theo `N`: std docs liệt kê từng `impl<T> Default for [T; 32]`, `[T; 31]`… (xem trang `array` trong std 1.95.0), nên đừng giả định `[T; N]: Default` cho mọi `N`.[^arr-default]
+- **Giá trị phải là hằng lúc biên dịch.** Error index E0435 mô tả lỗi dùng một giá trị không hằng trong biểu thức hằng[^e0435]; ví dụ `let n: usize = 5; let v: [u8; n] = [0; n];` rơi vào loại lỗi này (suy luận của người soạn từ ví dụ của error index).
+- **Tham số const được phép "không dùng"**, khác tham số kiểu và lifetime[^constunused]. Ngược lại, `struct Baz<T>;` bị từ chối ở ví dụ của cùng đoạn Reference đó; xem mục 5.
+- **Không có suy luận từ độ phủ.** Khi giải trait bound, compiler không xét tính *đầy đủ* của các impl theo giá trị const: dù đã impl cho cả `true` lẫn `false`, bound với `const B: bool` chung vẫn lỗi[^constexh].
+- Std dùng const generics rộng rãi: `[T; N]` có `map`[^arr-map] và `TryFrom<&[T]>` (với `T: Copy`)[^arr-tryfrom]. Ví dụ đã chạy: `<[i32;3]>::try_from(&b[..3]).unwrap()` ra `[1, 2, 3]`.
+- `Default` cho mảng thì không generic theo `N`: std docs liệt kê từng `impl<T> Default for [T; 32]`, `[T; 31]`… (xem trang `array` trong std 1.95.0), nên đừng giả định `[T; N]: Default` cho mọi `N`[^arr-default].
 
 </details>
 
@@ -159,13 +161,13 @@ error: generic parameters may not be used in const operations
 
 ## 3. GAT và LendingIterator (Q3)
 
-> **Trả lời ngắn.** `Iterator` không thể trả về phần tử *mượn từ chính iterator* vì kiểu `Item` cố định cho cả impl, không gắn được với lần mượn `&mut self` của từng lần gọi `next` (suy luận của người soạn từ chữ ký trait, có lỗi biên dịch minh họa bên dưới). GAT cho phép kiểu liên kết có tham số generic (ở đây là lifetime)[^gat-ref], nhờ đó `next` trả được item mượn từ `self`[^gat-lend]. Tính năng này stable từ Rust 1.65[^rel165].
+> **Trả lời ngắn.** `Iterator` không thể trả về phần tử *mượn từ chính iterator*, vì kiểu `Item` cố định cho cả impl nên không gắn được với lần mượn `&mut self` của từng lần gọi `next` (suy luận của người soạn từ chữ ký trait, có lỗi biên dịch minh họa bên dưới). GAT cho phép kiểu liên kết có tham số generic, ở đây là lifetime[^gat-ref], nhờ đó `next` trả được item mượn từ `self`[^gat-lend]. Tính năng này stable từ Rust 1.65[^rel165].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Iterator` như băng chuyền phát từng món *cho bạn giữ luôn*; `LendingIterator` như thủ thư *cho mượn* một cuốn — bạn phải trả lại trước khi mượn cuốn kế tiếp.
+*Với service `orders`.* Giả sử `orders` đọc một luồng bản ghi đơn hàng vào một buffer dùng lại, và muốn đưa cho caller từng bản ghi dưới dạng `&mut` trỏ thẳng vào buffer, không copy ra `Vec` mới. Mỗi bản ghi mượn từ buffer, mà buffer lại nằm trong iterator. `Iterator` chuẩn không diễn đạt được điều đó. Ví dụ dưới thu gọn bài toán thành cửa sổ trượt `&mut [T]` trên một lát, vì lỗi cũng như lời giải y hệt.
 
-*Vấn đề.* `Iterator::Item` là kiểu một lần cho cả impl, không thể phụ thuộc vào lifetime của `&mut self` trong `next` (suy luận của người soạn từ chữ ký trait; chứng cứ là lỗi dưới đây). Hệ quả: iterator không thể trả về tham chiếu mượn từ chính nó, ví dụ cửa sổ `&mut` chồng lấn. Thử viết `Iterator` cho cửa sổ trượt `&mut [T]`:
+*Vấn đề.* `Iterator::Item` là một kiểu duy nhất cho cả impl, nên không thể phụ thuộc vào lifetime của `&mut self` trong `next` (suy luận của người soạn từ chữ ký trait; chứng cứ là lỗi dưới đây). Hệ quả là iterator không trả được tham chiếu mượn từ chính nó, chẳng hạn các cửa sổ `&mut` chồng lấn. Thử viết `Iterator` cho cửa sổ trượt:
 
 ```rust
 pub struct W<'s, T> { s: &'s mut [T], pos: usize }
@@ -182,9 +184,9 @@ error: lifetime may not live long enough
   = method was supposed to return data with lifetime `'s` but it is returning data with lifetime `'1`
 ```
 
-Hợp lý (suy luận của người soạn): nếu được phép, người gọi có thể giữ hai cửa sổ chồng lấn cùng lúc, tức hai `&mut` alias nhau. Ngược lại `slice::chunks_mut` hợp lệ vì các chunk **không** chồng lấn — mình đã chạy: giữ hai chunk cùng lúc biên dịch được.
+Compiler từ chối là hợp lý (suy luận của người soạn): nếu cho qua, caller giữ được hai cửa sổ chồng lấn cùng lúc, tức hai `&mut` alias nhau. Ngược lại, `slice::chunks_mut` hợp lệ vì các chunk **không** chồng lấn; ta đã chạy thử và giữ hai chunk cùng lúc vẫn biên dịch được.
 
-*GAT là lời giải.* Reference: kiểu liên kết có thể có tham số generic và where clause — gọi là generic associated types, GAT.[^gat-ref] Blog stabilization mô tả cái GAT bổ sung: `next` được phép trả về một item mượn từ `self`.[^gat-lend] Blog chính thức của dự án cũng thông báo GAT sẽ stable ở 1.65 trước khi phát hành.[^gat-blog]
+*GAT là lời giải.* Kiểu liên kết được phép có tham số generic và where clause; cái tên chung là generic associated types, GAT[^gat-ref]. Khi tham số đó là lifetime, `next` được phép trả về một item mượn từ `self`[^gat-lend]. Blog chính thức của dự án đã thông báo GAT sẽ stable ở 1.65 trước khi bản này phát hành[^gat-blog].
 
 ```rust
 trait LendingIterator {
@@ -204,7 +206,7 @@ impl<'s, T> LendingIterator for Windows<'s, T> {
 }
 ```
 
-Dùng: với `v = [1,2,3,4]`, vòng `while let Some(x) = w.next() { x[1] += x[0]; }` biến `v` thành `[1, 3, 6, 10]` — mỗi cửa sổ thấy kết quả ghi của cửa sổ trước, chính là thứ `Iterator` không cho phép. Lifetime `'a` của `Item<'a>` bị buộc vào lần mượn `&'a mut self`, nên không giữ được phần tử cũ khi gọi `next` lần nữa; borrow checker kiểm tra điều này (xem [chương 01](./01-ownership-borrowing-lifetime.md)).
+Dùng thử: với `v = [1,2,3,4]`, vòng `while let Some(x) = w.next() { x[1] += x[0]; }` biến `v` thành `[1, 3, 6, 10]`. Mỗi cửa sổ thấy kết quả ghi của cửa sổ trước, đúng thứ `Iterator` không cho phép. Lifetime `'a` của `Item<'a>` bị buộc vào lần mượn `&'a mut self`, nên bạn không giữ được phần tử cũ khi gọi `next` lần nữa; borrow checker kiểm tra điều này (xem [chương 01](./01-ownership-borrowing-lifetime.md)).
 
 <details><summary>Đi sâu: vì sao <code>where Self: 'a</code> bắt buộc, và giới hạn còn lại ở 1.95.0</summary>
 
@@ -216,15 +218,15 @@ Dùng: với `v = [1,2,3,4]`, vòng `while let Some(x) = w.next() { x[1] += x[0]
     = note: this bound is currently required to ensure that impls have maximum flexibility
   ```
 
-  Reference giải thích: mệnh đề này cần để tối đa hóa các định nghĩa impl cho phép; quy tắc có thể được nới trong tương lai.[^gat-where]
-- **Giới hạn HRTB trên GAT.** Blog stabilization nêu trước rằng `for<'a> I::Item<'a>: Debug` hiện *ngầm buộc* `I::Item<'a>` outlive `'static`.[^gat-limit] Mình kiểm lại ở 1.95.0 với hàm `print_items<I>(it: I) where I: LendingIterator, for<'a> I::Item<'a>: Debug` gọi trên `WindowsMut` mượn biến cục bộ:
+  Reference giải thích: mệnh đề này cần để tối đa hóa các định nghĩa impl cho phép; quy tắc có thể được nới trong tương lai[^gat-where].
+- **Giới hạn HRTB trên GAT.** Blog stabilization đã nêu trước rằng `for<'a> I::Item<'a>: Debug` hiện *ngầm buộc* `I::Item<'a>` outlive `'static`[^gat-limit]. Ta kiểm lại ở 1.95.0 với hàm `print_items<I>(it: I) where I: LendingIterator, for<'a> I::Item<'a>: Debug` gọi trên `WindowsMut` mượn biến cục bộ:
 
   ```text
   error[E0597]: `v` does not live long enough
     = note: due to a current limitation of the type system, this implies a `'static` lifetime
   ```
 
-  Vậy giới hạn này **vẫn tồn tại ở 1.95.0** (quan sát một lần biên dịch). Hệ quả thực tế (nhận xét của người soạn): viết thuật toán generic trên `LendingIterator` với bound HRTB lên `Item` còn khó; trait `LendingIterator` do bạn tự định nghĩa như ở trên.
+  Vậy giới hạn này **vẫn còn ở 1.95.0** (quan sát một lần biên dịch). Hệ quả thực tế (nhận xét của người soạn): viết thuật toán generic trên `LendingIterator` với bound HRTB lên `Item` còn khó, và trait `LendingIterator` bạn phải tự định nghĩa như ở trên.
 
 </details>
 
@@ -232,15 +234,15 @@ Dùng: với `v = [1,2,3,4]`, vòng `while let Some(x) = w.next() { x[1] += x[0]
 
 ## 4. Higher-ranked trait bound: `for<'a>` (Q4)
 
-> **Trả lời ngắn.** `for<'a>` đọc là "với mọi lifetime `'a`": bound phải đúng cho *mọi* lifetime chứ không chỉ một lifetime cố định[^hrtb-ref]. Nó cần khi hàm nhận một closure rồi tự truyền vào đó reference có lifetime ngắn hơn mọi lifetime mà chữ ký hàm nêu tên được[^hrtb-need]. Bạn đã dùng nó ngầm mỗi lần viết `Fn(&str) -> &str`, vì elision áp dụng cho chữ ký closure trait[^elide-fn] và mở rộng nó thành `for<'a> Fn(&'a str) -> &'a str`[^elide-expand].
+> **Trả lời ngắn.** `for<'a>` đọc là "với mọi lifetime `'a`": bound phải đúng cho *mọi* lifetime chứ không chỉ một lifetime cố định[^hrtb-ref]. Bạn cần nó khi hàm nhận một closure rồi tự truyền vào đó reference có lifetime ngắn hơn mọi lifetime mà chữ ký hàm nêu tên được[^hrtb-need]. Bạn đã dùng nó ngầm mỗi lần viết `Fn(&str) -> &str`, vì elision mở rộng chữ ký đó thành `for<'a> Fn(&'a str) -> &'a str`[^elide-expand].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hàm là một quán cà phê nhận "công thức" từ khách. Quán không biết trước ly của khách là ly nào; công thức phải dùng được với *bất kỳ* ly nào quán đưa ra, chứ không phải chỉ một ly đã định sẵn.
+*Với service `orders`.* Giả sử `orders` có một hàm nhận closure của bạn, tự lấy path của request làm một `String` cục bộ rồi gọi closure trên `&path`. Path sống ngắn hơn hàm, và hàm chỉ nhận closure `F`, không biết trước lifetime nào sẽ được truyền vào. Chỗ này là nơi `for<'a>` xuất hiện, và cũng là nơi closure khai báo rời hay dính lỗi lạ.
 
-*Vấn đề.* Bound `F: Fn(&str) -> &str` nghe đơn giản nhưng "reference có lifetime nào?" Hàm chỉ nhận `F` không biết trước lifetime của dữ liệu mà nó sẽ truyền vào bên trong thân. Reference: HRTB là bound đúng với *mọi* lifetime.[^hrtb-ref] Reference minh họa: chỉ bound bậc cao mới dùng được khi tham chiếu sống ngắn hơn mọi tham số lifetime của hàm.[^hrtb-need]
+*Vấn đề.* Bound `F: Fn(&str) -> &str` nghe đơn giản, nhưng "reference có lifetime nào?" Hàm không biết trước lifetime của dữ liệu mà nó sẽ truyền vào closure trong thân. Lời giải là một HRTB: bound đúng với *mọi* lifetime[^hrtb-ref]. Reference minh họa rằng chỉ bound bậc cao mới dùng được khi tham chiếu sống ngắn hơn mọi tham số lifetime của hàm[^hrtb-need].
 
-*Bạn đã dùng nó mà không thấy.* Lifetime elision áp dụng trong chữ ký `Fn`, function pointer và closure trait.[^elide-fn] Reference minh họa `dyn Fn(&str) -> &str` được mở rộng thành `dyn for<'a> Fn(&'a str) -> &'a str`.[^elide-expand] Nên:
+*Bạn đã dùng nó mà không thấy.* Lifetime elision áp dụng cả trong chữ ký `Fn`, function pointer và closure trait[^elide-fn]. Reference có ví dụ `dyn Fn(&str) -> &str` được mở rộng thành `dyn for<'a> Fn(&'a str) -> &'a str`[^elide-expand]. Vì vậy hai cách viết dưới đây tương đương:
 
 ```rust
 fn call_with_ref<F>(f: F) -> usize where F: for<'a> Fn(&'a str) -> &'a str {
@@ -251,7 +253,7 @@ fn call_with_ref<F>(f: F) -> usize where F: for<'a> Fn(&'a str) -> &'a str {
 
 `call_with_ref(|s| s.split(' ').next().unwrap())` ra `5`. Viết `F: Fn(&str) -> &str` là tương đương nhờ elision: `call(|s| s)` với `fn call<F: Fn(&str) -> &str>` ở dưới ra `2`, và `call_with_ref(|s| &s[1..])` ra `10` (đã chạy).
 
-*Khi nào gặp: closure nhận reference.* Bẫy kinh điển là *suy luận chữ ký closure*. Closure khai báo riêng rồi mới truyền, không có chữ ký kỳ vọng ở chỗ định nghĩa:
+*Khi nào gặp: closure nhận reference.* Bẫy kinh điển là *suy luận chữ ký closure*. Nếu bạn khai báo closure riêng rồi mới truyền, lúc định nghĩa nó chưa có chữ ký kỳ vọng nào để bám:
 
 ```rust
 fn call<F: Fn(&str) -> &str>(f: F) -> usize { f("ab").len() }
@@ -267,33 +269,33 @@ error: implementation of `Fn` is not general enough
   = note: ...but it actually implements `Fn<(&'2 str,)>`, for some specific lifetime `'2`
 ```
 
-Chính văn bản lỗi nói rõ: bound đòi "mọi lifetime", closure chỉ được suy ra cho "một lifetime cụ thể". Truyền closure **inline** `call(|s| s)` thì chạy được (ra `2`; đã chạy), vì closure được định nghĩa ngay tại chỗ có kỳ vọng `for<'a>` (suy luận của người soạn). Chỉ annotate tham số không đủ cứu closure tách rời: `let f = |s: &str| s; call(f)` vẫn bị `error: lifetime may not live long enough` (đã chạy). Cách sửa thực tế: truyền closure inline. Tách closure ra biến để dùng lại ở nhiều nơi là lúc bạn thường chạm lỗi này (nhận xét của người soạn).
+Thông báo lỗi nói thẳng: bound đòi "mọi lifetime", còn closure chỉ được suy ra cho "một lifetime cụ thể". Truyền closure **inline** thì chạy được, `call(|s| s)` ra `2` (đã chạy), vì closure được định nghĩa ngay tại chỗ có kỳ vọng `for<'a>` (suy luận của người soạn). Chỉ annotate tham số không cứu được closure tách rời: `let f = |s: &str| s; call(f)` vẫn bị `error: lifetime may not live long enough` (đã chạy). Cách sửa thực tế là truyền closure inline; và đúng lúc bạn tách closure ra biến để dùng lại ở nhiều nơi là lúc hay chạm lỗi này (nhận xét của người soạn).
 
-Ngược lại, nếu gán lifetime cụ thể `F: Fn(&'a str) -> &'a str` với `'a` là tham số hàm, thân hàm không thể truyền `&s` của biến cục bộ:
+Điều ngược lại cũng cho thấy vì sao `for<'a>` phải tồn tại. Nếu gán một lifetime cụ thể, `F: Fn(&'a str) -> &'a str` với `'a` là tham số của hàm, thì thân hàm không thể truyền `&s` của biến cục bộ:
 
 ```text
 error[E0597]: `s` does not live long enough
 ```
 
-Đây là lý do `for<'a>` tồn tại. Nomicon dẫn đúng loại tình huống này (struct `Closure` với `Fn(&(u8,u16)) -> &u8`) và nói công việc này cần "The Magic of Higher-Rank Trait Bounds".[^nomicon-hrtb]
+Nomicon dùng đúng loại tình huống này (struct `Closure` với `Fn(&(u8,u16)) -> &u8`) để nói rằng việc đó cần đến HRTB[^nomicon-hrtb].
 
 <details><summary>Đi sâu: hai vị trí đặt <code>for&lt;'a&gt;</code></summary>
 
-`where for<'a> F: Fn(&'a T)` và `F: for<'a> Fn(&'a T)` khác nhau chỉ ở phạm vi lifetime: dạng sau chỉ phủ tới hết trait đó.[^hrtb-trait] Reference có ví dụ hai dạng này là tương đương cho `call_on_ref_zero`.
+`where for<'a> F: Fn(&'a T)` và `F: for<'a> Fn(&'a T)` khác nhau chỉ ở phạm vi lifetime: dạng sau chỉ phủ tới hết trait đó[^hrtb-trait]. Reference có ví dụ hai dạng này tương đương cho `call_on_ref_zero`.
 
 </details>
 
-**Quay lại Q4:** `for<'a>` nghĩa là "với mọi lifetime"; elision tự sinh nó trong `Fn(&T) -> &U`, và closure khai báo rời có thể bị suy ra cho một lifetime cụ thể nên "not general enough".
+**Quay lại Q4:** `for<'a>` nghĩa là "với mọi lifetime"; elision tự sinh nó trong `Fn(&T) -> &U`, và closure khai báo rời có thể bị suy ra cho một lifetime cụ thể nên báo "not general enough".
 
 ## 5. `PhantomData` ở mức người dùng (Q5)
 
-> **Trả lời ngắn.** Rust từ chối tham số kiểu không được dùng trong field. `PhantomData<T>` là kiểu kích thước 0 để báo cho trình biên dịch rằng kiểu của bạn hành xử như có chứa `T`[^phantom-doc], nên bạn có thể "gắn nhãn" kiểu (ID, đơn vị, trạng thái) mà không tốn byte nào[^phantom-size].
+> **Trả lời ngắn.** Rust từ chối tham số kiểu không dùng trong field nào. `PhantomData<T>` là kiểu kích thước 0, dùng để báo cho trình biên dịch rằng kiểu của bạn hành xử như có chứa `T`[^phantom-doc]. Nhờ vậy bạn "gắn nhãn" được cho kiểu (ID, đơn vị, trạng thái) mà không tốn byte nào[^phantom-size].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tem màu dán trên chìa khóa. Chìa vẫn y nguyên, nhưng bạn không thể cắm chìa nhãn "kho A" vào ổ nhãn "kho B" — và con tem không làm chìa nặng thêm.
+*Với service `orders`.* Trong `orders`, ID của user và ID của order đều là `u64`, nên truyền nhầm ID order vào hàm tra user vẫn biên dịch được và chỉ sai lúc chạy. Bạn muốn compiler bắt lỗi này mà không phải trả thêm byte nào. `PhantomData` làm được việc đó; cùng cách ấy mã hóa được đơn vị đo, và cả trạng thái của một connection tới database.
 
-Tham số kiểu không dùng trong field bị từ chối:
+Trước hết là lý do `PhantomData` cần tới. Tham số kiểu không xuất hiện trong field nào bị từ chối:
 
 ```rust
 struct Id<T>(u64);
@@ -304,9 +306,9 @@ error[E0392]: type parameter `T` is never used
   = help: consider removing `T`, referring to it in a field, or using a marker such as `PhantomData`
 ```
 
-`PhantomData<T>` là kiểu kích thước 0 dùng để "đánh dấu" rằng kiểu hành xử như có `T`.[^phantom-doc] Kích thước bằng 0 và alignment 1.[^phantom-size]
+`PhantomData<T>` là field "đánh dấu" rằng kiểu hành xử như có `T`[^phantom-doc], còn kích thước của nó bằng 0[^phantom-size].
 
-*Typed ID.*
+*Typed ID.* Mỗi loại ID được một tham số kiểu riêng, dù bên trong vẫn là một `u64`:
 
 ```rust
 use std::marker::PhantomData;
@@ -325,9 +327,9 @@ error[E0308]: mismatched types
              found struct `Id<Order>`
 ```
 
-`size_of::<Id<User>>()` và `size_of::<Id<Order>>()` đều bằng `8` — an toàn kiểu **không tốn byte** (đã chạy).
+`size_of::<Id<User>>()` và `size_of::<Id<Order>>()` đều bằng `8`: an toàn kiểu **không tốn byte** (đã chạy).
 
-*Đơn vị đo (unit of measure).*
+*Đơn vị đo.* Cùng kỹ thuật, bây giờ dùng cho số đo, chẳng hạn khối lượng hàng trong đơn:
 
 ```rust
 struct Meters; struct Feet;
@@ -338,9 +340,9 @@ impl<U> std::ops::Add for Len<U> {
 }
 ```
 
-`(Len::<Meters>(1.0, PhantomData) + Len(2.0, PhantomData)).0` ra `3`; cộng `Len<Meters>` với `Len<Feet>` bị `error[E0308]: mismatched types` (`expected Len<Meters>, found Len<Feet>`, đã chạy) vì `Add` chỉ định nghĩa cho cùng `U`.
+`(Len::<Meters>(1.0, PhantomData) + Len(2.0, PhantomData)).0` ra `3`. Cộng `Len<Meters>` với `Len<Feet>` thì bị `error[E0308]: mismatched types` (`expected Len<Meters>, found Len<Feet>`, đã chạy), vì `Add` chỉ định nghĩa cho cùng một `U`.
 
-*Type state pattern.* Mã hóa *trạng thái* vào tham số kiểu; phương thức chỉ tồn tại ở trạng thái hợp lệ:
+*Type state pattern.* Cách thứ ba mã hóa *trạng thái* vào tham số kiểu, để method chỉ tồn tại ở trạng thái hợp lệ. Với connection của `orders` tới DB, `send` chỉ gọi được khi connection đang mở:
 
 ```rust
 struct Open; struct Closed;
@@ -363,7 +365,7 @@ error[E0599]: no method named `send` found for struct `C<Closed>` in the current
           - `C<Open>`
 ```
 
-Cơ chế dựa vào việc `self` được **move** khi chuyển trạng thái: `open(self)` tiêu thụ `Conn<Closed>` nên không thể dùng lại bản cũ (nhận xét của người soạn, hệ quả từ ownership — [chương 01](./01-ownership-borrowing-lifetime.md)). Với backend: tương tự "connection phải được authenticated trước khi query" mà không cần kiểm tra runtime. Trade-off (suy luận của người soạn): số impl tăng, kiểu trạng thái lộ ra trong API, và không thể lưu nhiều connection ở trạng thái khác nhau trong cùng `Vec` mà không dùng enum hoặc `dyn`.
+Cơ chế dựa vào việc `self` bị **move** khi chuyển trạng thái: `open(self)` tiêu thụ `Conn<Closed>` nên bản cũ không dùng lại được (nhận xét của người soạn, hệ quả từ ownership, xem [chương 01](./01-ownership-borrowing-lifetime.md)). Ở backend, đây là cách bảo đảm "connection phải được authenticated trước khi query" mà không cần kiểm tra lúc chạy. Cái giá (suy luận của người soạn): số impl tăng, kiểu trạng thái lộ ra trong API, và bạn không lưu được nhiều connection ở các trạng thái khác nhau trong cùng một `Vec` nếu không dùng enum hoặc `dyn`.
 
 <details><summary>Đi sâu: vì sao <code>PhantomData&lt;fn() -&gt; T&gt;</code> và <code>Clone</code>/<code>Copy</code> viết tay</summary>
 
@@ -374,14 +376,12 @@ Cơ chế dựa vào việc `self` được **move** khi chuyển trạng thái:
   note: required for `Id<NoClone>` to implement `Copy`
   ```
 
-- Quan sát: derive đòi `T: Copy`, trong khi marker `User`/`Order` thường không cần implement gì; impl tay bỏ bound đó. Đây là hành vi được ghi trong docs: `#[derive]` trên struct generic thêm bound `Clone` lên tham số generic[^derive-bound], và docs `Clone` dùng ví dụ `Generate<T>(fn() -> T)` để cho thấy bản derive có bound `T: Copy`/`T: Clone` không cần thiết[^derive-unnec].
-- `PhantomData<T>` được tính như sở hữu `T` cho variance, drop check và auto trait.[^phantom-ref] Bảng trong Nomicon ghi `PhantomData<fn() -> T>` là covariant theo `T`, `Send + Sync`, và không còn ràng buộc drop check kiểu "owns T".[^nomicon-phantom] Đó là lý do ví dụ dùng dạng này. Lưu ý: docs của `PhantomData` nói hiện tại việc thêm trường `PhantomData<T>` cho biết kiểu của bạn sở hữu dữ liệu `T` chỉ "trong những trường hợp rất hiếm" và tương tác chính xác với drop check có thể đổi trong tương lai.[^phantom-std] Chi tiết ở [P10·05](../10-rust-internals/05-variance-va-dropck.md).
-- `PhantomData<T>` bản thân khai báo `T: ?Sized`.[^phantom-qsized]
-- Chi tiết variance/dropck: [P10·05](../10-rust-internals/05-variance-va-dropck.md).
+- Quan sát: derive đòi `T: Copy`, trong khi marker `User`/`Order` thường không cần implement gì; impl tay bỏ bound đó. Hành vi này có trong docs: `#[derive]` trên struct generic thêm bound `Clone` lên tham số generic[^derive-bound]. Docs `Clone` còn dùng ví dụ `Generate<T>(fn() -> T)` để cho thấy bản derive có bound `T: Copy`/`T: Clone` không cần thiết[^derive-unnec].
+- `PhantomData<T>` được tính như sở hữu `T` cho variance, drop check và auto trait[^phantom-ref]. Bảng trong Nomicon ghi `PhantomData<fn() -> T>` là covariant theo `T`, `Send + Sync`, và không còn ràng buộc drop check kiểu "owns T"[^nomicon-phantom]; đó là lý do ví dụ dùng dạng này. Docs của `PhantomData` lưu ý thêm: hiện tại việc thêm trường `PhantomData<T>` để báo kiểu của bạn sở hữu dữ liệu `T` chỉ áp dụng "trong những trường hợp rất hiếm", và tương tác chính xác với drop check có thể đổi trong tương lai[^phantom-std]. Chi tiết ở [P10·05](../10-rust-internals/05-variance-va-dropck.md).
 
 </details>
 
-**Quay lại Q5:** `PhantomData` là con tem kích thước 0 cho phép mã hóa ID, đơn vị và trạng thái vào kiểu — lỗi được bắt lúc biên dịch mà không tốn byte.
+**Quay lại Q5:** `PhantomData` là field kích thước 0 cho phép mã hóa ID, đơn vị và trạng thái vào kiểu; lỗi bị bắt lúc biên dịch mà không tốn byte.
 
 ## 6. `Sized` mặc định và `?Sized` (Q6)
 
@@ -389,7 +389,7 @@ Cơ chế dựa vào việc `self` được **move** khi chuyển trạng thái:
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Sized` mặc định giống quy định "chỉ nhận hàng đã đóng thùng có kích thước ghi sẵn". `str` và `[T]` là hàng không biết dài bao nhiêu; chỉ nhận được qua một "phiếu" (`&str`) ghi địa chỉ và độ dài.
+*Với service `orders`.* `orders` có một hàm ghi log generic, nhận `&T` với `T: Debug`. Bạn gọi nó với một `&str` lấy từ query string và compiler từ chối, dù `str` rõ ràng in được. Lý do nằm ở một bound mà bạn không viết ra: mọi tham số kiểu đều ngầm có `T: Sized`, tức kích thước phải biết lúc biên dịch. `str` và `[T]` thì không: chúng chỉ đi qua con trỏ như `&str` (chi tiết ở [P10·03](../10-rust-internals/03-dst-fat-pointer-vtable.md)).
 
 Quên điều này và truyền `&str`:
 
@@ -404,13 +404,13 @@ error[E0277]: the size for values of type `str` cannot be known at compilation t
 note: required by an implicit `Sized` bound in `show`
 ```
 
-Sửa bằng `fn show<T: ?Sized + Debug>(t: &T) -> String { format!("{:?}", t) }`: `show("str")` ra `"str"` và `show(&[1,2][..])` ra `[1, 2]`. Quy tắc áp dụng: nếu hàm chỉ dùng `T` sau con trỏ (`&T`, `Box<T>`), hãy cân nhắc `?Sized` để nhận được `str`, `[T]`, `dyn Trait` (nhận xét của người soạn).
+Sửa bằng `fn show<T: ?Sized + Debug>(t: &T) -> String { format!("{:?}", t) }`: `show("str")` ra `"str"` và `show(&[1,2][..])` ra `[1, 2]`. Quy tắc áp dụng (nhận xét của người soạn): nếu hàm chỉ chạm `T` sau một con trỏ (`&T`, `Box<T>`), hãy cân nhắc `?Sized` để nhận được `str`, `[T]`, `dyn Trait`.
 
 <details><summary>Đi sâu: phạm vi của <code>?Sized</code>, <code>PhantomData</code>, và DST</summary>
 
-- `?Sized` chỉ dùng được để nới bound cho tham số kiểu hoặc associated type, không dùng cho kiểu khác.[^qsized]
-- `Sized` mặc định áp dụng cho tham số kiểu *trừ `Self` trong trait*, và cho associated type.[^sized-default]
-- `PhantomData<T>` bản thân cũng khai báo `T: ?Sized`.[^phantom-qsized]
+- `?Sized` chỉ dùng được để nới bound cho tham số kiểu hoặc associated type, không dùng cho kiểu khác[^qsized].
+- `Sized` mặc định áp dụng cho tham số kiểu *trừ `Self` trong trait*, và cho associated type[^sized-default].
+- `PhantomData<T>` bản thân cũng khai báo `T: ?Sized`[^phantom-qsized], nên đặt nó trong struct không ép `T` phải `Sized`.
 - Chi tiết DST và fat pointer: [P10·03](../10-rust-internals/03-dst-fat-pointer-vtable.md).
 
 </details>
@@ -419,21 +419,21 @@ Sửa bằng `fn show<T: ?Sized + Debug>(t: &T) -> String { format!("{:?}", t) }
 
 ## 7. `impl Trait` ở return position (Q7)
 
-> **Trả lời ngắn.** Ở vị trí tham số, `impl Trait` chỉ là cách viết gọn của tham số kiểu; ở vị trí trả về, nó là một kiểu trừu tượng[^impl-both] mà *hàm* chọn chứ không phải người gọi[^impl-diff]. Giới hạn lớn nhất: mọi nhánh trả về phải cùng một kiểu cụ thể[^impl-single].
+> **Trả lời ngắn.** `impl Trait` xuất hiện ở hai nơi: ở tham số, nó chỉ là cách viết gọn của một tham số kiểu ẩn danh; ở kiểu trả về, nó là một kiểu trừu tượng[^impl-both]. Ở vị trí trả về, chính *hàm* chọn kiểu cụ thể chứ không phải người gọi[^impl-diff]. Giới hạn lớn nhất là mọi nhánh trả về phải cùng một kiểu cụ thể[^impl-single].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn đặt pizza và nhận hộp có dán nhãn "pizza"; bạn không cần biết là pizza hải sản hay phô mai, nhưng quán mỗi lần chỉ giao đúng một loại cho một lần đặt.
+*Với service `orders`.* Một hàm của `orders` trả về luồng ID các đơn cần xử lý, thực chất là một chuỗi adapter `filter`, `map`… Bạn không muốn viết tên kiểu dài ngoằng của chuỗi đó vào chữ ký, cũng không muốn `Box` nó chỉ để giấu tên. `impl Iterator<Item = ...>` ở kiểu trả về giải quyết cả hai, với điều kiện hàm chỉ trả về đúng một kiểu cụ thể.
 
-Argument position: `impl Trait` là tham số kiểu ẩn danh. Return position: kiểu trả về trừu tượng.[^impl-both] Khác biệt cốt lõi: với generic, *người gọi* chọn kiểu; với `impl Trait` ở return, *hàm* chọn.[^impl-diff]
+Khác biệt cốt lõi với generic thường là ai chọn kiểu: với tham số generic, *người gọi* chọn; với `impl Trait` ở kiểu trả về, *hàm* chọn[^impl-diff]. Ví dụ rút gọn:
 
 ```rust
 fn evens() -> impl Iterator<Item = u32> { (0..10).filter(|x| x % 2 == 0) }
 ```
 
-`evens().collect::<Vec<_>>()` ra `[0, 2, 4, 6, 8]`. Lợi ích: chỉ lộ `Iterator` như bound trên kiểu trả về thay vì viết tên cả chuỗi adapter[^impl-closures], và tránh các nhược điểm của boxed trait object.[^impl-nobox]
+`evens().collect::<Vec<_>>()` ra `[0, 2, 4, 6, 8]`. Chữ ký chỉ lộ `Iterator` như một bound trên kiểu trả về, thay vì tên cả chuỗi adapter và closure[^impl-closures]. Cách này còn tránh được các nhược điểm của boxed trait object[^impl-nobox].
 
-**Giới hạn lớn nhất: mọi nhánh phải cùng một kiểu cụ thể.**[^impl-single]
+**Mọi nhánh phải cùng một kiểu cụ thể**[^impl-single]. Hàm dưới trả `1` ở nhánh này, `"a"` ở nhánh kia, nên bị từ chối:
 
 ```rust
 pub fn f(b: bool) -> impl std::fmt::Display { if b { 1 } else { "a" } }
@@ -444,13 +444,13 @@ error[E0308]: `if` and `else` have incompatible types
 help: you could change the return type to be a boxed trait object
 ```
 
-Lối thoát là `Box<dyn Display>` (trả kiểu khác nhau; chi phí heap + dispatch động — nhận xét của người soạn). Book cũng nêu: chỉ dùng `impl Trait` khi trả về một kiểu duy nhất.[^book-impl-single]
+Lối thoát là `Box<dyn Display>`, trả được kiểu khác nhau nhưng tốn một lần cấp phát heap và dispatch động (nhận xét của người soạn). Book cũng nói như vậy: chỉ dùng `impl Trait` khi trả về một kiểu duy nhất[^book-impl-single].
 
 <details><summary>Đi sâu: capture lifetime và edition 2024</summary>
 
-- Return-position `impl Trait` tự động capture mọi tham số generic trong phạm vi, kể cả lifetime.[^impl-capture]
-- Trước edition 2024, lifetime generic không xuất hiện trong bound của kiểu trả về *không* được capture tự động với hàm tự do và method của inherent impl.[^impl-2024]
-- Ví dụ của chương dùng edition 2024 nên không dính. Reference còn có cách điều khiển tường minh tập tham số được capture bằng bound `use<..>`.[^impl-use]
+- Return-position `impl Trait` tự động capture mọi tham số generic trong phạm vi, kể cả lifetime[^impl-capture].
+- Trước edition 2024, lifetime generic không xuất hiện trong bound của kiểu trả về *không* được capture tự động với hàm tự do và method của inherent impl[^impl-2024].
+- Ví dụ của chương dùng edition 2024 nên không dính chuyện này. Reference còn có cách điều khiển tường minh tập tham số được capture, bằng bound `use<..>`[^impl-use].
 
 </details>
 
@@ -458,13 +458,13 @@ Lối thoát là `Box<dyn Display>` (trả kiểu khác nhau; chi phí heap + di
 
 ## 8. Generic hay `dyn`? (Q8)
 
-> **Trả lời ngắn.** Generic được biên dịch thành mã riêng cho từng kiểu (monomorphization), nên gọi hàm là gọi thẳng và không tốn chi phí runtime riêng cho generics[^mono-cost]. `dyn Trait` bắt buộc dùng dynamic dispatch (tra bảng lúc chạy)[^dyn-must] và chặn inline[^dyn-inline], đổi lại cho phép nhiều kiểu cụ thể trong cùng một collection.
+> **Trả lời ngắn.** Generic được biên dịch thành mã riêng cho từng kiểu (monomorphization), nên gọi hàm là gọi thẳng và không tốn chi phí runtime riêng cho generics[^mono-cost]. `dyn Trait` thì bắt buộc dùng dynamic dispatch, tức tra bảng lúc chạy[^dyn-must]. Việc tra bảng này chặn luôn inline[^dyn-inline]; đổi lại, `dyn` cho phép nhiều kiểu cụ thể nằm chung một collection.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): generic giống in sẵn một tờ hướng dẫn riêng cho từng loại máy; `dyn` giống một cuốn hướng dẫn chung và một danh bạ tra "máy này dùng trang nào" mỗi lần cần.
+*Với service `orders`.* `orders` chạy mỗi request qua một chuỗi handler: xác thực, validate, ghi đơn, ghi log. Câu hỏi thiết kế là viết chuỗi đó bằng generic (mỗi handler là một kiểu, compiler biết hết lúc biên dịch) hay lưu trong `Vec<Box<dyn Handler>>` (đăng ký lúc chạy, kiểu lẫn lộn). Mục này đặt hai chi phí cạnh nhau để bạn chọn.
 
-*Static dispatch và monomorphization.* Book: trình biên dịch *monomorphize* — biến code generic thành code cụ thể bằng cách điền kiểu thực tế dùng lúc biên dịch.[^mono] Hệ quả: "không trả chi phí runtime cho generics".[^mono-cost] Code sau monomorphization là static dispatch: biên dịch viên biết gọi phương thức nào.[^static]
+*Static dispatch và monomorphization.* Compiler *monomorphize*: biến code generic thành code cụ thể bằng cách điền các kiểu thực tế được dùng lúc biên dịch[^mono]. Vì vậy Book nói ta "không trả chi phí runtime cho generics"[^mono-cost]. Code sau monomorphization là static dispatch: compiler biết chính xác method nào được gọi[^static].
 
 ```mermaid
 flowchart LR
@@ -473,30 +473,30 @@ flowchart LR
     G -->|T = char| C["largest::&lt;char&gt;"]
 ```
 
-Quan sát trực tiếp: biên dịch `largest` (đánh dấu `#[inline(never)]`) và gọi với `i32`, `f64`, `char` ở chế độ debug. `nm m | grep largest` ra **ba** symbol khác nhau (`...largest17h06f6...`, `...17h5ac3...`, `...17hf2bd...`) — mỗi kiểu một bản (quan sát một lần chạy; ở `-O` thì compiler có thể inline hết nên symbol biến mất, mình đã thấy `nm` không còn symbol nào). Mỗi kiểu dùng thêm một bản mã máy là lý do generic làm tăng thời gian biên dịch và kích thước binary (suy luận của người soạn từ quan sát này). Cơ chế monomorphization: [P10·04](../10-rust-internals/04-monomorphization.md).
+Quan sát trực tiếp: biên dịch `largest` (đánh dấu `#[inline(never)]`) và gọi với `i32`, `f64`, `char` ở chế độ debug. `nm m | grep largest` ra **ba** symbol khác nhau (`...largest17h06f6...`, `...17h5ac3...`, `...17hf2bd...`), mỗi kiểu một bản (quan sát một lần chạy; ở `-O` compiler có thể inline hết nên symbol biến mất, và ta đã thấy `nm` không còn symbol nào). Mỗi kiểu thêm một bản mã máy, nên generic làm tăng thời gian biên dịch và kích thước binary (suy luận của người soạn từ quan sát này). Cơ chế monomorphization nằm ở [P10·04](../10-rust-internals/04-monomorphization.md).
 
-*Dynamic dispatch.* Trait object bắt buộc dùng dynamic dispatch; Book nói rõ điều đó.[^dyn-must] Chi phí: tra bảng lúc chạy, và chặn inline.[^dyn-inline] Đổi lại, một hàm duy nhất phục vụ nhiều kiểu cụ thể trong cùng một collection:
+*Dynamic dispatch.* Trait object bắt buộc dùng dynamic dispatch, Book nói rõ điều này[^dyn-must]. Chi phí là phải tra bảng lúc chạy và mất khả năng inline[^dyn-inline]. Bù lại, một hàm duy nhất phục vụ được nhiều kiểu cụ thể trong cùng một collection:
 
 ```rust
 let v: Vec<Box<dyn Display>> = vec![Box::new(1), Box::new("a"), Box::new(2.5)];
 ```
 
-In ra `1`, `a`, `2.5`. Con trỏ `&dyn Display` có kích thước `16` byte so với `8` cho `&i32` (đã chạy trên aarch64). Reference: mỗi con trỏ tới trait object gồm một con trỏ tới instance của `T` và một vtable.[^to-ptr] Chi tiết ở [P10·03 mục 2 và 4](../10-rust-internals/03-dst-fat-pointer-vtable.md).
+In ra `1`, `a`, `2.5`. Con trỏ `&dyn Display` có kích thước `16` byte, so với `8` cho `&i32` (đã chạy trên aarch64), vì mỗi con trỏ tới trait object gồm một con trỏ tới instance của `T` và một vtable[^to-ptr]. Chi tiết ở [P10·03 mục 2 và 4](../10-rust-internals/03-dst-fat-pointer-vtable.md).
 
 *So sánh.* Bảng so sánh generic với `dyn` (dispatch, số bản mã, thời gian biên dịch, kích thước binary, inline, collection hỗn hợp), có nguồn cho từng ô, nằm ở [P10·04 mục 3](../10-rust-internals/04-monomorphization.md); mục này chỉ giữ quy tắc chọn. Thêm một tiêu chí thuộc góc API (nhận xét của người soạn): generic làm lộ tham số kiểu ra API công khai, còn `dyn` thì không.
 
 **Quy tắc ngón tay cái (nhận xét của người soạn):**
 
 - Hot path, kiểu biết lúc biên dịch → generic.
-- Plugin/handler đăng ký lúc chạy, collection kiểu hỗn hợp → `dyn`.
-- Thư viện công khai muốn giảm lan truyền tham số kiểu → `dyn` ở ranh giới, generic bên trong.
-- Trong service backend, handler lưu trong `Vec<Box<dyn Handler>>` có chi phí một lần gọi gián tiếp — thường nhỏ so với I/O; đo trước khi tối ưu.
+- Plugin hoặc handler đăng ký lúc chạy, collection kiểu hỗn hợp → `dyn`.
+- Thư viện công khai muốn giảm việc tham số kiểu lan ra ngoài → `dyn` ở ranh giới, generic bên trong.
+- Trong `orders`, handler lưu trong `Vec<Box<dyn Handler>>` tốn một lần gọi gián tiếp mỗi handler, thường nhỏ so với thời gian I/O của request; hãy đo trước khi tối ưu.
 
-Thảo luận đầy đủ trong Book ch18.[^dyn-must]
+Book ch18 thảo luận đầy đủ chủ đề này[^dyn-must].
 
 <details><summary>Đi sâu: dyn compatibility</summary>
 
-Trait chỉ dùng làm `dyn` được khi mọi hàm liên kết hoặc dispatchable, hoặc được đánh dấu non-dispatchable tường minh: hàm dispatchable không được có type parameter (lifetime thì được) và không được dùng `Self` ngoài receiver,[^dyn-compat] còn hàm non-dispatchable cần bound `where Self: Sized`.[^dyn-nondisp] Danh sách điều kiện đầy đủ và các lần chạy `E0038` (trả `Self`, method generic, associated const) nằm ở [P9·02 mục 6](02-trait.md); lý do theo góc vtable nằm ở [P10·03 mục 5](../10-rust-internals/03-dst-fat-pointer-vtable.md).
+Trait chỉ dùng làm `dyn` được khi mọi hàm liên kết hoặc dispatchable, hoặc được đánh dấu non-dispatchable tường minh. Hàm dispatchable không được có type parameter (lifetime thì được) và không được dùng `Self` ngoài receiver[^dyn-compat]; còn hàm non-dispatchable cần bound `where Self: Sized`[^dyn-nondisp]. Danh sách điều kiện đầy đủ và các lần chạy `E0038` (trả `Self`, method generic, associated const) nằm ở [P9·02 mục 6](02-trait.md); lý do theo góc vtable nằm ở [P10·03 mục 5](../10-rust-internals/03-dst-fat-pointer-vtable.md).
 
 </details>
 

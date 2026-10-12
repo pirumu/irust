@@ -22,24 +22,26 @@
 
 ## 1. Ba tầng: fd → open file description → inode (Q1)
 
-> **Trả lời ngắn.** fd chỉ là một con số, dùng làm chỉ số vào bảng riêng của mỗi process[^open-fd]. Con số đó dẫn tới một *open file description* (OFD): bản ghi nằm trong bảng toàn hệ thống, giữ vị trí đọc/ghi hiện tại (offset) và các cờ trạng thái của lần mở đó[^open-ofd]. OFD lại ứng với một *inode* — đối tượng đại diện cho chính file trong filesystem[^vfs-inode], chứa metadata của file[^inode-def]; nhiều OFD có thể cùng ứng với một inode[^open-each].
+> **Trả lời ngắn.** Khi `open` một file, bạn nhận về một fd: chỉ là số nguyên, dùng làm chỉ số vào bảng các file đang mở của riêng process[^open-fd]. Mục ở chỉ số đó trỏ tới một *open file description* (OFD) nằm trong bảng của cả hệ thống; kernel ghi vào OFD vị trí đọc/ghi hiện tại (offset) và các cờ trạng thái của lần mở[^open-ofd]. OFD lại trỏ tới *inode*, đối tượng đại diện cho chính file và giữ metadata của nó[^inode-def]; nhiều OFD có thể cùng trỏ tới một inode[^open-each].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn vào thư viện. fd là số ngăn tủ bạn được phát — mỗi người có dãy số riêng, nên "ngăn 3" của bạn khác "ngăn 3" của người bên cạnh. Trong ngăn tủ là một *phiếu mượn* (OFD) ghi bạn đang đọc đến trang nào. Phiếu mượn trỏ tới *cuốn sách* (inode). Hai phiếu mượn có thể cùng trỏ tới một cuốn sách, mỗi phiếu một trang đang đọc.
+*Với service `orders`.* Ta quay lại `orders` ở [Chương 01](01-os-va-kernel.md): service Rust chạy trên Linux, nhận kết nối, đọc file, ghi log. Chương này cho nó thêm một việc: mỗi khi cần xuất hóa đơn, `orders` sinh một process con tên `pdfgen` (chương trình ngoài, ví dụ giả định của người soạn, không phải code trong repo), đưa dữ liệu đơn hàng cho nó rồi nhận file PDF về. Tất cả những gì `orders` đang cầm lúc đó, từ socket của client tới file log, đều là fd. Câu hỏi của mục này: con số `7` mà `orders` giữ thực ra là gì, và từ nó tới file thật đi qua mấy tầng?
 
-*Tầng 1 — fd.* `open(2)` trả về một *file descriptor*: một số nguyên nhỏ, không âm, làm chỉ số vào bảng các file đang mở của process[^open-fd]. Vì là chỉ số vào bảng của *một* process, số `3` ở process A và số `3` ở process B là hai chỉ số vào hai bảng khác nhau. `close(2)` làm fd không còn trỏ tới file nào và có thể được cấp lại[^close-desc]. Theo quy ước, 0/1/2 là stdin/stdout/stderr[^proc-fd]; shell chỉ cần đặt đúng file vào ba chỉ số đó trước khi `exec` (mục 7).
+Ba tầng đi từ gần code nhất ra xa nhất: fd là con số trong code, OFD là trạng thái của một lần mở, inode là chính file. Phải tách rõ như vậy vì mỗi chuyện ở mục 2–5 chỉ hiểu được khi biết nó nằm ở tầng nào.
 
-*Tầng 2 — OFD.* Mỗi lần gọi `open()`, kernel tạo một *open file description*: một mục trong bảng các file đang mở của toàn hệ thống, ghi lại offset và cờ trạng thái; fd chỉ là một tham chiếu tới nó[^open-ofd]. Tham chiếu này không bị ảnh hưởng nếu đường dẫn sau đó bị xóa hoặc bị đổi sang trỏ file khác, tức là fd gắn với *đối tượng đã mở*, không gắn với *đường dẫn*[^open-ref]. Hai thông tin nằm ở OFD (chứ không ở fd): **file offset** (vị trí `read`/`write` kế tiếp) và **file status flags** (như `O_APPEND`, `O_NONBLOCK`[^fcntl-setfl]). Vì mỗi `open()` tạo một OFD *mới*, một inode có thể có nhiều OFD; hai lần `open` cùng đường dẫn cho hai offset độc lập[^open-each].
+*Tầng 1: fd.* Đây là tầng bạn thấy trong code. `open(2)` trả về một file descriptor, số nguyên nhỏ không âm, làm chỉ số vào bảng các file đang mở của process[^open-fd]. Bảng này là của riêng từng process, nên số `3` trong `orders` và số `3` trong `pdfgen` là hai chỉ số vào hai bảng khác nhau (suy luận của người soạn). Khi bạn `close(2)`, fd thôi trỏ tới file nào và số đó có thể được cấp lại cho lần `open` sau[^close-desc]. Ba số đầu có nghĩa theo quy ước: 0 là stdin, 1 là stdout, 2 là stderr[^proc-fd]. Vì vậy shell chỉ cần đặt đúng file vào ba chỉ số đó trước khi `exec` là đã redirect xong (mục 7).
 
-*Tầng 3 — inode.* Mỗi file có một inode chứa metadata của file — thứ ứng dụng lấy được bằng `stat(2)`[^inode-def]; tài liệu VFS mô tả inode là đối tượng của filesystem như file thường, thư mục, FIFO…[^vfs-inode]. Một inode có thể được nhiều *dentry* (directory entry, mục nhập thư mục; xem mục 6) trỏ tới — hard link là ví dụ[^vfs-inode-multi] — nên tên file không phải thuộc tính của inode: tên nằm ở mục nhập thư mục trỏ tới inode (suy luận của người soạn; chi tiết on-disk ở Phase 5).
+*Tầng 2: OFD.* Mỗi lần gọi `open()`, kernel tạo một open file description, tức một mục trong bảng các file đang mở của cả hệ thống, ghi lại offset và cờ trạng thái; fd chỉ là tham chiếu tới mục đó[^open-ofd]. Nhờ vậy fd gắn với *đối tượng đã mở* chứ không gắn với *đường dẫn*: dù đường dẫn sau đó bị xóa hay bị trỏ sang file khác, tham chiếu vẫn giữ nguyên[^open-ref]. Cờ trạng thái ở đây là những cờ như `O_APPEND` hay `O_NONBLOCK`[^fcntl-setfl]. Offset và cờ trạng thái nằm ở OFD chứ không nằm ở fd, và đây là điểm mấu chốt của cả chương. Vì mỗi `open()` tạo một OFD *mới*, một file có thể có nhiều OFD: nếu `orders` mở `app.log` hai lần thì có hai offset độc lập[^open-each].
+
+*Tầng 3: inode.* Cuối chuỗi là inode, bản thân file. Inode chứa metadata của file, thứ ứng dụng lấy được bằng `stat(2)`[^inode-def]. Tài liệu VFS của kernel mô tả inode là đối tượng của filesystem, như file thường, thư mục hay FIFO[^vfs-inode]. Một inode có thể được nhiều *dentry* (directory entry, mục nhập thư mục, xem mục 6) trỏ tới, hard link là một ví dụ[^vfs-inode-multi]. Suy ra tên file không phải thuộc tính của inode mà nằm ở mục nhập thư mục trỏ tới inode (suy luận của người soạn; chi tiết trên đĩa ở Phase 5).
 
 ```mermaid
 flowchart LR
-  subgraph PA["Process A: bảng fd"]
+  subgraph PA["orders: bảng fd"]
     a3["fd 3"]; a4["fd 4"]; a5["fd 5"]
   end
-  subgraph PB["Process B (con của A, sau fork)"]
+  subgraph PB["Process con (sau fork)"]
     b3["fd 3"]
   end
   subgraph SYS["Hệ thống: open file descriptions"]
@@ -55,30 +57,30 @@ flowchart LR
   o2 --> I
 ```
 
-(Sơ đồ rút gọn: sau `fork`, B có bản sao cả fd 3, 4, 5; chỉ vẽ fd 3 cho gọn. fd 4 là `dup` của fd 3; fd 5 là lần `open` thứ hai nên có OFD riêng.)
+(Sơ đồ rút gọn của người soạn: sau `fork`, con có bản sao cả fd 3, 4, 5; chỉ vẽ fd 3 cho gọn. fd 4 là bản `dup` của fd 3; fd 5 là lần `open` thứ hai nên có OFD riêng.)
 
 <details><summary>Đi sâu: tên gọi của OFD, hai nhóm cờ, số inode, giới hạn số fd</summary>
 
-- "Open file description" là thuật ngữ của POSIX; người viết kernel gọi nó là `struct file`[^open-ofd-term][^vfs-fileobj].
+- "Open file description" là thuật ngữ của POSIX; người viết kernel gọi nó là `struct file`[^open-ofd-term]. Tài liệu VFS của kernel cũng nói file object chính là "open file description" theo cách gọi của POSIX[^vfs-fileobj].
 - `open(2)` chia cờ làm hai nhóm: cờ tạo file ảnh hưởng chính thao tác open, còn cờ trạng thái ảnh hưởng ngữ nghĩa các thao tác I/O về sau[^open-flaggroups].
 - Số inode chỉ bảo đảm duy nhất trong phạm vi một filesystem[^inode-unique].
-- Số fd mỗi process mở được là hữu hạn: chạm trần thì `open` lỗi `EMFILE`[^emfile]; trần toàn hệ thống ứng với `ENFILE`[^enfile]. Cách đọc và chỉnh giới hạn (`ulimit`, `RLIMIT_NOFILE`) ở [Chương 06, mục 6](06-user-quyen-proc-sys.md). (Nhận xét của người soạn: với server nhiều kết nối, `EMFILE` là lỗi vận hành kinh điển — mỗi socket là một fd.)
+- Số fd mỗi process mở được là hữu hạn: chạm trần thì `open` lỗi `EMFILE`[^emfile]. Trần toàn hệ thống ứng với `ENFILE`[^enfile]. Cách đọc và chỉnh giới hạn (`ulimit`, `RLIMIT_NOFILE`) ở [Chương 06, mục 6](06-user-quyen-proc-sys.md). (Nhận xét của người soạn: với server nhiều kết nối như `orders`, `EMFILE` là lỗi vận hành kinh điển vì mỗi socket là một fd.)
 
 </details>
 
-**Quay lại Q1:** fd là số trong bảng của process, OFD giữ offset và cờ trạng thái, inode là bản thân file — ba thứ khác nhau, nối với nhau bằng con trỏ.
+**Quay lại Q1:** fd là số trong bảng của process, OFD giữ offset và cờ trạng thái, inode là bản thân file; ba thứ nối với nhau bằng con trỏ, nên số `7` trong `orders` mới chỉ là đầu của chuỗi chứ chưa phải file.
 
 ## 2. Chia sẻ offset: `dup` và `fork` (Q2)
 
-> **Trả lời ngắn.** `dup` (nhân bản một fd) và `fork` (nhân bản cả process) không tạo file đang mở mới: chúng chỉ tạo thêm fd trỏ vào *cùng* OFD, nên các fd đó chung offset[^dup-share][^open-fork-share]. Mỗi lần `open` thì kernel tạo OFD mới, nên mỗi lần có offset riêng[^open-each].
+> **Trả lời ngắn.** `dup` (nhân bản một fd) không tạo file mở mới mà chỉ thêm một fd trỏ vào *cùng* OFD, nên hai fd chung offset[^dup-share]. `fork` (nhân bản cả process) làm điều đó với toàn bộ bảng fd: fd của con trỏ vào cùng OFD với fd tương ứng của cha[^open-fork-share]. Còn mỗi lần `open` thì kernel tạo OFD mới, nên mỗi lần có offset riêng[^open-each].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn, nối tiếp hình dung ở mục 1): hai người cầm *chung một phiếu mượn* (một cái kẹp sách) — ai lật trang thì người kia cũng thấy trang đã đổi (`dup`, `fork`); còn nếu mỗi người tự đi mượn thì được hai phiếu, mỗi phiếu một kẹp riêng dù vẫn là cùng một cuốn sách (`open` hai lần).
+*Với service `orders`.* Giả sử `orders` mở file `report.csv`, `fork` một process con để nó ghi tiếp vào đó, trong khi hai handler thread khác cũng tự `open` chính file này để ghi. Hai câu hỏi nảy ra: con sẽ ghi *sau* chỗ cha đã ghi hay ghi đè từ đầu? Và hai handler thread có thấy nhau đã ghi tới đâu không? Cả hai đều quy về một chuyện: các fd đó có chung OFD hay không, vì offset nằm ở OFD.
 
-Với `dup(2)`: hai fd cùng trỏ một OFD nên chia sẻ offset và cờ trạng thái; nếu `lseek` trên fd này thì offset của fd kia cũng đổi[^dup-share]. Nhưng hai fd không chia sẻ *cờ của fd* — cờ close-on-exec, tức cờ bảo kernel tự đóng fd khi `exec` (mục 4)[^dup-flags]. Cờ này nằm ở tầng 1, không ở OFD: man page xếp nó vào nhóm cờ gắn với *file descriptor*[^fcntl-fdflags] (suy luận của người soạn từ hai chú thích).
+Với `dup(2)`, hai fd cùng trỏ một OFD nên cùng offset và cùng cờ trạng thái. Nếu `lseek` trên fd này thì offset của fd kia cũng đổi theo[^dup-share]. Cái hai fd *không* chung là cờ của fd, tức cờ close-on-exec bảo kernel tự đóng fd khi `exec` (mục 4)[^dup-flags]. Từ đó suy ra cờ này nằm ở tầng 1 chứ không ở OFD (suy luận của người soạn): man page xếp nó vào nhóm cờ gắn với *file descriptor*[^fcntl-fdflags].
 
-Qua process cũng vậy: con tạo bởi `fork(2)` thừa hưởng bản sao các fd của cha, và các bản sao đó trỏ tới cùng OFD[^open-fork-share].
+`fork(2)` cũng vậy nhưng qua ranh giới process. Con thừa hưởng bản sao các fd của cha, và các bản sao đó trỏ tới cùng OFD[^open-fork-share]. Nghĩa là con ghi tiếp *sau* chỗ cha đã ghi, và ngược lại. Hai handler thread tự `open` thì khác: mỗi thread có OFD riêng, offset riêng, nên cả hai cùng bắt đầu từ đầu file và ghi đè lên nhau (suy luận của người soạn từ chỗ mỗi `open` có offset riêng).
 
 **Thí nghiệm** (chạy thật; file `x.txt` chứa `0123456789abcdef`, mỗi lần đọc 4 byte, FFI trực tiếp `dup`/`fork`):
 
@@ -98,16 +100,16 @@ F_GETFD: f1=1 dup=0                # f1 có FD_CLOEXEC, bản dup không
 
 <details><summary>Đi sâu: <code>fork(2)</code>, <code>O_APPEND</code>, và <code>fcntl</code> — cờ của fd khác cờ của OFD</summary>
 
-Chính `fork(2)` cũng ghi như vậy: con thừa hưởng bản sao tập fd đang mở của cha, và mỗi fd của con trỏ cùng OFD với fd tương ứng của cha[^fork-fds].
+Man page `fork(2)` ghi cùng điều đó: con thừa hưởng bản sao tập fd đang mở của cha, và mỗi fd của con trỏ cùng OFD với fd tương ứng của cha[^fork-fds].
 
-`O_APPEND` là một cờ trạng thái nằm ở OFD: trước mỗi `write`, offset được đặt về cuối file như bằng `lseek`, và việc đổi offset cùng thao tác ghi diễn ra như một bước nguyên tử duy nhất[^open-append]. Vì offset nằm ở OFD dùng chung, bước nguyên tử này là thứ giúp nhiều bên cùng ghi nối đuôi một file mà không giẫm lên nhau (suy luận của người soạn).
+`O_APPEND` là một cờ trạng thái nằm ở OFD. Trước mỗi `write`, offset được đặt về cuối file như bằng `lseek`, và việc đổi offset cùng thao tác ghi diễn ra như một bước nguyên tử duy nhất[^open-append]. Vì offset nằm ở OFD dùng chung, bước nguyên tử này là thứ giúp nhiều bên cùng ghi nối đuôi một file mà không giẫm lên nhau (suy luận của người soạn).
 
 `fcntl(2)` gom nhiều thao tác lên fd vào một lời gọi. Hai nhóm lệnh quan trọng ở đây ứng với hai tầng:
 
-- **Cờ của fd (tầng 1):** `F_GETFD`/`F_SETFD`. Hiện chỉ có một cờ như vậy là `FD_CLOEXEC`, cờ close-on-exec[^fcntl-fdflags]. Cờ này riêng cho từng fd — vì thế `dup` không copy[^dup-flags].
-- **Cờ trạng thái của OFD (tầng 2):** `F_GETFL`/`F_SETFL`. Man page: trên Linux `F_SETFL` chỉ đổi được `O_APPEND`, `O_ASYNC`, `O_DIRECT`, `O_NOATIME`, `O_NONBLOCK`; access mode và cờ tạo file bị bỏ qua[^fcntl-setfl]. Vì cờ này nằm ở OFD nên *mọi fd dùng chung OFD* (qua `dup`, `fork`…) *đều thấy*[^fcntl-status-share].
+- **Cờ của fd (tầng 1):** `F_GETFD`/`F_SETFD`. Hiện chỉ có một cờ như vậy là `FD_CLOEXEC`, cờ close-on-exec[^fcntl-fdflags]. Cờ này riêng cho từng fd, vì thế `dup` không copy nó[^dup-flags].
+- **Cờ trạng thái của OFD (tầng 2):** `F_GETFL`/`F_SETFL`. Trên Linux, `F_SETFL` chỉ đổi được `O_APPEND`, `O_ASYNC`, `O_DIRECT`, `O_NOATIME`, `O_NONBLOCK`; access mode và cờ tạo file bị bỏ qua[^fcntl-setfl]. Cờ này nằm ở OFD nên mọi fd dùng chung OFD (qua `dup`, `fork`…) đều thấy nó[^fcntl-status-share].
 
-Thí nghiệm: tạo pipe, `dup` đầu đọc, bật `O_NONBLOCK` bằng `F_SETFL` trên fd gốc, rồi `F_GETFL` trên bản `dup` — `O_NONBLOCK` đã bật (quan sát; khớp việc cờ nằm ở OFD). Bẫy thật: bật non-blocking cho "fd của tôi" có thể đổi hành vi code khác giữ bản `dup`/bản kế thừa của cùng OFD (suy luận của người soạn).
+Thí nghiệm: tạo pipe, `dup` đầu đọc, bật `O_NONBLOCK` bằng `F_SETFL` trên fd gốc, rồi `F_GETFL` trên bản `dup` thì thấy `O_NONBLOCK` đã bật (quan sát; khớp việc cờ nằm ở OFD). Bẫy thật: bật non-blocking cho "fd của tôi" có thể đổi hành vi của code khác đang giữ bản `dup` hoặc bản kế thừa của cùng OFD (suy luận của người soạn).
 
 </details>
 
@@ -115,11 +117,13 @@ Thí nghiệm: tạo pipe, `dup` đầu đọc, bật `O_NONBLOCK` bằng `F_SET
 
 ## 3. Nhân bản fd: `dup`, `dup2`, `dup3`, `fcntl` (Q3)
 
-> **Trả lời ngắn.** Cả bốn đều tạo thêm một fd trỏ tới cùng OFD; khác nhau ở cách *chọn số cho fd mới*: `dup` lấy số nhỏ nhất chưa dùng, `dup2`/`dup3` lấy đúng số bạn chỉ định, `fcntl(F_DUPFD)` lấy số nhỏ nhất không bé hơn mức bạn đưa ra[^dup-lowest][^dup2-desc][^fcntl-dupfd]. `dup2` phải *nguyên tử* — làm trọn việc "đóng số đích rồi dùng lại nó" trong một bước — vì nếu tự ghép `close` rồi `dup` thì giữa hai bước, thread khác (hoặc code xử lý signal) có thể chen vào lấy mất số đó[^dup2-atomic].
+> **Trả lời ngắn.** Cả bốn lời gọi đều tạo thêm một fd trỏ tới cùng OFD; chúng chỉ khác ở cách chọn số cho fd mới: `dup` lấy số nhỏ nhất chưa dùng, `dup2` và `dup3` lấy đúng số bạn chỉ định, `fcntl(F_DUPFD)` lấy số nhỏ nhất không bé hơn mức bạn đưa ra[^dup2-desc]. Riêng `dup2` phải *nguyên tử*, tức làm trọn "đóng số đích rồi dùng lại nó" trong một bước. Nếu tự ghép `close` rồi `dup` thì giữa hai bước, thread khác hoặc code xử lý signal có thể chen vào lấy mất số đó[^dup2-atomic].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn muốn chuyển xe sang ô đỗ số 1 vốn đang có xe khác. `dup2` là "đuổi xe cũ và đỗ xe bạn vào" trong một động tác liền mạch. Nếu tách thành "đuổi xe" rồi "đi tìm chỗ", trong khoảnh khắc ô 1 trống, người khác có thể chiếm.
+*Với service `orders`.* `orders` muốn log của mọi thứ nó in ra (kể cả `println!`) đi vào một file thay vì terminal, tức là muốn fd 1 trỏ vào file log. Việc cần làm là "cho fd 1 trỏ tới cùng OFD với fd của file log", và đó đúng là việc của `dup2(logfd, 1)`. Khó ở chỗ `orders` đang chạy nhiều thread, và các thread khác vẫn `open`, `accept` liên tục trong lúc đó (nhận xét của người soạn). Vì vậy câu hỏi không chỉ là gọi hàm nào mà còn là có thể chen vào giữa hay không.
+
+Bốn lời gọi khác nhau ở cách chọn số cho fd mới:
 
 | Lời gọi | Số fd mới | Ghi chú |
 |---|---|---|
@@ -129,28 +133,39 @@ Hình dung (nhận xét của người soạn): bạn muốn chuyển xe sang ô
 | `fcntl(fd, F_DUPFD, min)` | thấp nhất `>= min` | |
 | `fcntl(fd, F_DUPFD_CLOEXEC, min)` | như trên | đặt luôn `FD_CLOEXEC` |
 
-Nguồn của bảng: số trả về của `dup` được bảo đảm là số nhỏ nhất chưa dùng trong process gọi[^dup-lowest]. `dup2` thì không lấy số nhỏ nhất mà dùng đúng số `newfd` bạn chỉ định[^dup2-desc]; nếu `newfd` đang mở, nó bị đóng trước khi được dùng lại, và việc đóng này diễn ra âm thầm (lỗi lúc đóng không được báo)[^dup2-silent]. `F_DUPFD` dùng số nhỏ nhất còn trống mà không bé hơn `arg`[^fcntl-dupfd]; `F_DUPFD_CLOEXEC` làm như vậy và đặt thêm cờ close-on-exec ngay[^fcntl-dupfd-cloexec]. `dup3` giống `dup2` nhưng cho ép `O_CLOEXEC`[^dup3-flag].
+Bảng này lấy từ man page:
 
-**Vì sao `dup2` phải nguyên tử.** Ai cũng có thể nghĩ "`close(new)` rồi `dup(old)`" là tương đương. Man page giải thích vì sao không: hai bước đóng và dùng lại `newfd` của `dup2` được thực hiện nguyên tử. Nếu tự ghép bằng `close(2)` và `dup()` thì có thể dính race condition, trong đó `newfd` bị dùng lại giữa hai bước — chẳng hạn vì chương trình chính bị ngắt bởi một signal handler có cấp phát fd, hoặc vì một thread song song cấp phát fd[^dup2-atomic]. Quy tắc "số nhỏ nhất chưa dùng" (mục 5) làm race này có thật: vừa `close(new)` xong thì `new` là một số trống, và một `open`/`dup` xen vào có thể nhận chính số đó (suy luận của người soạn). Cũng theo quy tắc ấy, `dup(old)` chỉ trả đúng `new` khi `new` là số trống nhỏ nhất[^dup-lowest], nên ghép tay còn có thể ra sai số ngay cả khi không có race (suy luận của người soạn).
+- Số trả về của `dup` được bảo đảm là số nhỏ nhất chưa dùng trong process gọi[^dup-lowest].
+- `dup2` không lấy số nhỏ nhất mà dùng đúng số `newfd` bạn chỉ định[^dup2-desc].
+- Nếu `newfd` đang mở thì nó bị đóng trước khi dùng lại, và việc đóng này diễn ra âm thầm: lỗi lúc đóng không được báo[^dup2-silent].
+- `F_DUPFD` dùng số nhỏ nhất còn trống mà không bé hơn `arg`[^fcntl-dupfd].
+- `F_DUPFD_CLOEXEC` làm y như vậy và đặt thêm cờ close-on-exec ngay[^fcntl-dupfd-cloexec].
+- `dup3` giống `dup2`, chỉ thêm việc cho ép `O_CLOEXEC`[^dup3-flag].
+
+**Vì sao `dup2` phải nguyên tử.** Nhìn qua, "`close(new)` rồi `dup(old)`" có vẻ tương đương `dup2(old, new)`. Man page nói không: hai bước đóng và dùng lại `newfd` của `dup2` được làm nguyên tử, còn tự ghép bằng `close(2)` và `dup()` thì dính race condition, trong đó `newfd` bị dùng lại giữa hai bước[^dup2-atomic]. Man page nêu hai cách điều đó xảy ra: chương trình chính bị ngắt bởi một signal handler có cấp phát fd, hoặc một thread song song cấp phát fd; trong `orders`, đó là các handler thread.
+
+Quy tắc "số nhỏ nhất chưa dùng" (mục 5) làm race này có thật. Vừa `close(new)` xong thì `new` là một số trống, và một `open` hay `dup` xen vào có thể nhận đúng số đó (suy luận của người soạn). Cũng theo quy tắc ấy, `dup(old)` chỉ trả về đúng `new` khi `new` là số trống nhỏ nhất[^dup-lowest]. Nên ghép tay còn có thể ra sai số ngay cả khi không có race nào (suy luận của người soạn).
 
 <details><summary>Đi sâu: <code>dup2</code>/<code>dup3</code> khi <code>old == new</code>, và phiên bản của <code>dup3</code></summary>
 
-- Nếu `oldfd` không hợp lệ thì `dup2` lỗi và `newfd` không bị đóng; nếu `oldfd` hợp lệ và bằng `newfd` thì `dup2` không làm gì và trả `newfd`[^dup2-points]. Còn `dup3()` với `oldfd` bằng `newfd` thì lỗi `EINVAL`[^dup3-einval].
+- Nếu `oldfd` không hợp lệ thì `dup2` lỗi và `newfd` không bị đóng. Nếu `oldfd` hợp lệ và bằng `newfd` thì `dup2` không làm gì và trả `newfd`[^dup2-points]. Còn `dup3()` với `oldfd` bằng `newfd` thì lỗi `EINVAL`[^dup3-einval].
 - `dup3` được thêm vào Linux 2.6.27[^dup3-linux].
 
 </details>
 
-**Quay lại Q3:** các lời gọi chỉ khác cách chọn số fd mới; `dup2` gộp "đóng số đích và dùng lại nó" thành một bước nguyên tử để không ai chen vào giữa.
+**Quay lại Q3:** các lời gọi chỉ khác cách chọn số fd mới; `dup2` gộp "đóng số đích và dùng lại nó" thành một bước nguyên tử để không thread nào chen vào giữa.
 
 ## 4. `O_CLOEXEC` và vì sao quan trọng (Q4)
 
-> **Trả lời ngắn.** Mặc định, fd vẫn mở sau `exec` (lúc process nạp một chương trình mới)[^open-default-exec], nên chương trình con chạy sau `fork`+`exec` thừa hưởng cả những fd nó không nên biết (socket, file nhạy cảm). `O_CLOEXEC` bảo kernel tự đóng fd khi `exec` thành công[^open-cloexec][^fcntl-cloexec]. Nếu `open` xong mới gọi `fcntl` để đặt cờ thì không đủ khi có nhiều thread: giữa hai lời gọi, thread khác có thể `fork`+`exec` và fd rò ra[^open-cloexec-mt].
+> **Trả lời ngắn.** Mặc định, fd vẫn mở sau `exec` (lúc process nạp một chương trình mới)[^open-default-exec], nên process con chạy sau `fork`+`exec` thừa hưởng cả những fd nó không nên có, như socket của client. `O_CLOEXEC` bảo kernel tự đóng fd khi `exec` thành công[^open-cloexec]. Nhưng nếu `open` xong mới gọi `fcntl` để đặt cờ thì không đủ khi có nhiều thread: giữa hai lời gọi, một thread khác có thể `fork`+`exec` và fd rò ra[^open-cloexec-mt].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn thuê thầu phụ sửa điện và vô tình để nguyên chùm chìa khóa nhà kho trong túi áo bạn giao cho họ. Cờ `O_CLOEXEC` là "chìa này tự thu hồi khi đổi người". Và nếu bạn để chìa vào túi áo trước rồi mới nhớ gắn nhãn thu hồi, trong khoảng chờ thợ đã nhận áo.
+*Với service `orders`.* Mỗi lần xuất hóa đơn, `orders` sinh `pdfgen` bằng `fork`+`exec`. Lúc đó các handler thread khác đang giữ hàng chục socket của client, cộng thêm listening socket của cổng 8080. Nếu `pdfgen` thừa hưởng hết những fd này thì sao? Mục này trả lời câu đó, và chỉ ra vì sao "mở xong rồi đặt cờ" vẫn để lọt.
 
-*Vấn đề.* Mặc định fd mới được đặt để vẫn mở qua `execve(2)`[^open-default-exec]. Theo `fcntl(2)`, nếu bit `FD_CLOEXEC` được đặt thì fd tự đóng khi `execve` thành công (nếu `execve` thất bại, fd vẫn mở); nếu bit không được đặt, fd vẫn mở qua `execve`[^fcntl-cloexec]. Mặc định đó hữu ích — shell dựa vào việc fd giữ mở qua `exec` để dựng redirect[^ostep-redirect] — nhưng với mọi fd *khác* (socket kết nối, listening socket) nó là rò rỉ: chương trình con thừa hưởng chúng mà không hề biết. Hậu quả có thể gặp (suy luận của người soạn, từ chỗ OFD chỉ được giải phóng khi fd cuối cùng trỏ tới nó đóng[^close-last]): server đóng socket kết nối nhưng con còn giữ một bản sao thì bên kia có thể không thấy kết thúc kết nối; listening socket lọt vào con có thể giữ cổng mở ngay cả khi server đã chết.
+*Vấn đề.* Mặc định fd mới được đặt để vẫn mở qua `execve(2)`[^open-default-exec]. Cụ thể, nếu bit `FD_CLOEXEC` được đặt thì fd tự đóng khi `execve` thành công (nếu `execve` thất bại, fd vẫn mở); nếu bit không được đặt, fd vẫn mở qua `execve`[^fcntl-cloexec]. Mặc định đó có lý do: shell dựa vào việc fd giữ mở qua `exec` để dựng redirect[^ostep-redirect]. Nhưng với mọi fd *khác*, như socket kết nối hay listening socket, đó là rò rỉ: chương trình con thừa hưởng chúng mà không hề biết.
+
+Hậu quả có thể gặp (suy luận của người soạn, từ chỗ OFD chỉ được giải phóng khi fd cuối cùng trỏ tới nó đóng[^close-last]): `orders` đóng socket của một client mà `pdfgen` còn giữ một bản sao, thì client có thể không thấy kết nối kết thúc. Listening socket lọt vào `pdfgen` có thể giữ cổng mở ngay cả khi `orders` đã chết.
 
 **Thí nghiệm.** Chương trình Rust mở `/etc/hostname` bằng `File::open` (std tự đặt close-on-exec, xem mục 9), rồi tạo bản `dup` thô (fd 4), rồi `Command::new("sh")` chạy `ls -l /proc/self/fd`:
 
@@ -166,22 +181,22 @@ child sees:
 
 Dòng `3 -> /proc/25/fd` là fd của chính `ls` (nó đang đọc thư mục), không phải `File` của cha. Vậy fd 3 của cha (từ `File::open`, có `FD_CLOEXEC`) không lọt vào con, còn fd 4 (từ `dup`, không có cờ) thì lọt vào.
 
-*Vì sao `open` rồi `fcntl(F_SETFD)` không đủ.* Cách "cũ" là `fd = open(...)` rồi `fcntl(fd, F_SETFD, FD_CLOEXEC)`. Giữa hai lời gọi có một khe hở. Man page nói thẳng rằng cờ `O_CLOEXEC` là thiết yếu trong một số chương trình đa luồng, vì dùng một thao tác `fcntl(2)` `F_SETFD` riêng để đặt `FD_CLOEXEC` không đủ tránh race: một thread vừa mở fd và định đặt cờ thì thread khác đồng thời `fork(2)` rồi `execve(2)`[^open-cloexec-mt]. Dòng thời gian:
+*Vì sao `open` rồi `fcntl(F_SETFD)` không đủ.* Cách "cũ" là `fd = open(...)` rồi `fcntl(fd, F_SETFD, FD_CLOEXEC)`. Giữa hai lời gọi có một khe hở. Man page nói thẳng rằng cờ `O_CLOEXEC` là thiết yếu trong một số chương trình đa luồng: dùng một thao tác `fcntl(2)` `F_SETFD` riêng để đặt `FD_CLOEXEC` không đủ tránh race, khi một thread vừa mở fd và định đặt cờ thì thread khác đồng thời `fork(2)` rồi `execve(2)`[^open-cloexec-mt]. Với `orders`, đó là một handler thread vừa mở file hóa đơn thì thread khác gọi sinh `pdfgen`. Dòng thời gian:
 
 ```mermaid
 sequenceDiagram
-  participant T1 as Thread 1 (cha)
-  participant T2 as Thread 2 (cha)
-  participant C as Process con
-  T1->>T1: fd = open("secret") — chưa có CLOEXEC
+  participant T1 as Handler thread 1 (orders)
+  participant T2 as Handler thread 2 (orders)
+  participant C as pdfgen (process con)
+  T1->>T1: fd = open("invoice-42.json") — chưa có CLOEXEC
   T2->>C: fork() — con nhận bản sao bảng fd, có cả fd này
-  C->>C: execve("prog") — fd vẫn mở trong prog
+  C->>C: execve("pdfgen") — fd vẫn mở trong pdfgen
   T1->>T1: fcntl(fd, F_SETFD, FD_CLOEXEC) — quá muộn
 ```
 
-*Lời giải* là đặt cờ **nguyên tử lúc tạo fd**: `O_CLOEXEC` trong `open` cho phép tránh thêm thao tác `fcntl` `F_SETFD`[^open-cloexec]. Mẫu chung (nhận xét của người soạn): syscall tạo fd có biến thể "tạo kèm cờ".
+*Lời giải* là đặt cờ **nguyên tử lúc tạo fd**: `O_CLOEXEC` trong `open` giúp chương trình khỏi cần thêm thao tác `fcntl` `F_SETFD` để đặt `FD_CLOEXEC`[^open-cloexec]. Mẫu chung (nhận xét của người soạn): syscall nào tạo fd cũng có một biến thể "tạo kèm cờ".
 
-*Đánh đổi.* Khi *cố ý* truyền fd cho con (như shell truyền stdin/stdout, hoặc một process giám sát mở sẵn socket rồi giao cho con), phải tắt cờ trên đúng fd đó (`F_SETFD`) hoặc `dup2` nó lên số đích (nhận xét của người soạn). Cờ close-on-exec của descriptor nhân bản bằng `dup` là tắt[^dup-cloexec-off], còn `dup3` cho ép bật `O_CLOEXEC`[^dup3-flag]; vì `dup2` làm cùng việc như `dup` nhưng chọn số đích[^dup2-desc] và không có tham số cờ, fd do `dup2` tạo ra không có `FD_CLOEXEC` (suy luận của người soạn từ các chú thích này).
+*Đánh đổi.* Khi bạn *cố ý* truyền fd cho con, như shell truyền stdin/stdout, hoặc một process giám sát mở sẵn socket rồi giao cho con, thì phải tắt cờ trên đúng fd đó (`F_SETFD`) hoặc `dup2` nó lên số đích (nhận xét của người soạn). Cờ close-on-exec của descriptor nhân bản bằng `dup` là tắt[^dup-cloexec-off]. `dup3` thì cho ép bật `O_CLOEXEC`[^dup3-flag]. `dup2` làm cùng việc như `dup` nhưng chọn được số đích[^dup2-desc], và nó không có tham số cờ; vì vậy fd do `dup2` tạo ra không có `FD_CLOEXEC` (suy luận của người soạn từ các chú thích này).
 
 <details><summary>Đi sâu: danh sách biến thể "tạo kèm cờ" và cảnh báo trong <code>fcntl(2)</code></summary>
 
@@ -195,19 +210,19 @@ sequenceDiagram
 
 ## 5. Quy tắc "số nhỏ nhất chưa dùng" và hệ quả (Q5)
 
-> **Trả lời ngắn.** Kernel luôn cấp cho `open`/`dup` số fd nhỏ nhất chưa dùng trong process, và đây là *bảo đảm* của man page chứ không phải chi tiết cài đặt[^open-lowest][^dup-lowest]. Hệ quả: số fd vừa đóng sẽ sớm được cấp lại (ngay lần cấp kế tiếp nếu không còn số nào thấp hơn đang trống), nên shell có thể dựng redirect dựa vào đó; nhưng hai nơi cùng tin mình sở hữu một số fd sẽ đọc/ghi nhầm file, và đóng stdin/stdout/stderr (0/1/2) rồi chạy tiếp rất nguy hiểm.
+> **Trả lời ngắn.** `open` và `dup` luôn trả số fd nhỏ nhất mà process chưa dùng, và đây là điều man page bảo đảm chứ không phải chi tiết cài đặt[^dup-lowest]. Hệ quả: số fd vừa đóng sẽ sớm được cấp lại (ngay lần cấp kế tiếp nếu không còn số nào thấp hơn đang trống). Shell tận dụng điều đó để dựng redirect; nhưng nếu hai nơi cùng tin mình sở hữu một số fd thì sẽ đọc/ghi nhầm file, và đóng stdin/stdout/stderr (0/1/2) rồi chạy tiếp là rất nguy hiểm.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): khách sạn luôn xếp phòng trống số nhỏ nhất. Giả sử các phòng số nhỏ hơn đều đang có khách: bạn trả phòng 7 thì người kế tiếp nhận ngay phòng 7. Nếu bạn quên rằng mình đã trả phòng và vẫn cầm chìa cũ, bạn mở nhầm phòng của người khác.
+*Với service `orders`.* Hãy xem quy tắc này làm hỏng `orders` thế nào. Handler thread A đóng socket số 7 của một client. Một client mới nối vào, `accept` trả về một fd, và vì 7 là số nhỏ nhất đang trống nên đó chính là 7 (giả sử mọi số thấp hơn đều đang dùng). Nếu handler thread B vẫn nhớ rằng "7 là socket của client cũ" và ghi response vào đó, response sẽ đến nhầm khách hàng (nhận xét của người soạn, suy ra từ quy tắc). Quy tắc này không có lỗi; lỗi nằm ở chỗ hai nơi cùng cầm một con số.
 
-Từ quy tắc đó có ít nhất ba hệ quả:
+`open` hứa trả số nhỏ nhất đang chưa mở trong process[^open-lowest]. Từ lời hứa đó có ít nhất ba hệ quả:
 
-1. **Redirect bằng cách đóng rồi mở** (kiểu OSTEP): nếu đóng stdout (fd 1) rồi `open` file, file sẽ nhận fd 1. OSTEP mô tả shell redirect đúng như vậy: trong con, trước `exec`, shell đóng stdout rồi mở file đích[^ostep-close-open]; việc fd giữ mở qua `exec` làm điều này khả thi[^ostep-redirect]. Trong các quan sát ở mục 7, dash và bash dùng `dup3` thay vì dựa vào quy tắc này.
-2. **Fd bị tái sử dụng khi hai nơi cùng tin mình sở hữu nó** (suy luận của người soạn từ quy tắc trên): A `close(7)`, một `open` khác nhận lại 7, B vẫn cầm 7 và đọc/ghi nhầm file. Docs `std::io` của Rust mô tả đúng tình huống này — fd đã đóng có thể được cấp lại nên chủ cũ đang thao tác nhầm file — và coi việc không giữ kỷ luật sở hữu là vi phạm *I/O safety*[^rs-iosafety-realloc] (mục 9).
-3. **Đóng stdin/stdout/stderr rồi chạy chương trình:** các lần `open` sau sẽ lấy 0/1/2 và ghi log vào file dữ liệu (hệ quả trực tiếp của quy tắc).
+1. **Redirect bằng cách đóng rồi mở.** Nếu đóng stdout (fd 1) rồi `open` một file, file sẽ nhận fd 1. OSTEP mô tả shell redirect đúng như vậy: trong con, trước `exec`, shell đóng stdout rồi mở file đích[^ostep-close-open]. Cách này khả thi vì fd giữ mở qua `exec`[^ostep-redirect]. Trong các quan sát ở mục 7, dash và bash lại dùng `dup3` thay vì dựa vào quy tắc này.
+2. **Fd bị tái sử dụng khi hai nơi cùng tin mình sở hữu nó** (suy luận của người soạn từ quy tắc trên). Đây chính là tình huống của handler thread A và B ở trên: A `close(7)`, một `open` khác nhận lại 7, B vẫn cầm 7 và đọc/ghi nhầm file. Docs `std::io` của Rust mô tả đúng tình huống này: fd đã đóng có thể được cấp lại, nên chủ cũ đang thao tác nhầm file[^rs-iosafety-realloc]. Docs coi việc không giữ kỷ luật sở hữu là vi phạm *I/O safety* (mục 9).
+3. **Đóng stdin/stdout/stderr rồi chạy tiếp.** Các lần `open` sau sẽ lấy 0/1/2. `println!("served order 42")` của `orders` khi đó có thể ghi thẳng vào file dữ liệu vừa mở (hệ quả trực tiếp của quy tắc).
 
-Thí nghiệm mục 2 cũng cho thấy: đóng fd 3 thì `open` kế tiếp lấy lại fd 3.
+Thí nghiệm ở mục 2 cũng cho thấy điều này: đóng fd 3 thì `open` kế tiếp lấy lại fd 3.
 
 <details><summary>Đi sâu: std của Rust đề phòng việc 0/1/2 bị đóng</summary>
 
@@ -215,35 +230,42 @@ Std của Rust đề phòng đúng chuyện ở hệ quả 3. Mã nguồn giải
 
 </details>
 
-**Quay lại Q5:** số nhỏ nhất chưa dùng được bảo đảm, nên số fd vừa đóng sớm bị cấp lại — hữu ích cho redirect, nguy hiểm khi hai nơi cùng giữ một số.
+**Quay lại Q5:** số nhỏ nhất chưa dùng được bảo đảm, nên số fd vừa đóng sớm bị cấp lại: hữu ích cho redirect, nguy hiểm khi hai nơi cùng giữ một số.
 
 ## 6. VFS và "everything is a file" (Q6)
 
-> **Trả lời ngắn.** VFS (Virtual File System) là lớp phần mềm trong kernel cung cấp giao diện filesystem cho chương trình và cho phép nhiều loại filesystem cùng tồn tại[^vfs-def]. "Everything is a file" đúng ở chỗ nhiều loại đối tượng (file thường, pipe, terminal, kết nối mạng…) được truy cập qua fd[^beej-fd][^beej-kinds]; nhưng không có nghĩa mọi thao tác hợp lệ với mọi fd (ví dụ `lseek` không dùng được với pipe)[^lseek-espipe].
+> **Trả lời ngắn.** VFS (Virtual File System) là lớp phần mềm trong kernel cung cấp giao diện filesystem cho chương trình, đồng thời cho phép nhiều loại filesystem cùng tồn tại[^vfs-def]. "Everything is a file" đúng ở chỗ nhiều loại đối tượng (file thường, pipe, terminal, kết nối mạng…) đều được truy cập qua fd[^beej-kinds]. Nhưng điều đó không có nghĩa mọi thao tác đều hợp lệ với mọi fd; ví dụ `lseek` không dùng được với pipe[^lseek-espipe].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): VFS giống ổ cắm đa năng — chương trình luôn cắm vào bằng cùng một kiểu phích `read(fd, …)`; còn đằng sau, ext4, tmpfs hay `/proc` mỗi loại tự lo phần việc của mình.
+*Với service `orders`.* Handler của `orders` gọi `read(fd, …)` trên đủ thứ: file JSON nằm trên ext4, socket của client, một file trong `/proc`. Cùng một lời gọi, nhưng bên dưới là những thứ rất khác nhau. Mục này giải thích kernel làm cho điều đó chạy bằng cách nào, và nó đúng đến đâu.
 
-VFS thực hiện các syscall `open`, `stat`, `chmod`…[^vfs-syscalls]; phần việc riêng của từng filesystem được gọi qua các phương thức do filesystem đó cài (bước 2–3 dưới đây), nên cùng một `read(fd, …)` chạy được trên ext4, tmpfs hay `/proc` (suy luận của người soạn).
+VFS thực hiện các syscall `open`, `stat`, `chmod`…[^vfs-syscalls] Phần việc riêng của từng filesystem được gọi qua các phương thức do chính filesystem đó cài (bước 2–3 dưới đây). Nhờ vậy cùng một `read(fd, …)` chạy được trên ext4, tmpfs hay `/proc` (suy luận của người soạn).
 
-*Đường đi của `open(path)` theo tài liệu VFS*, từng bước:
+Đường đi của `open(path)` theo tài liệu VFS, từng bước:
 
-1. VFS dùng *pathname* để tìm trong **dentry cache** (dcache) — một cơ chế tra cứu rất nhanh biến pathname thành một *dentry* (viết tắt của *directory entry*); dentry nằm trong RAM, không bao giờ lưu xuống đĩa, chỉ tồn tại vì hiệu năng[^vfs-dcache]. Một dentry thường có con trỏ tới một inode[^vfs-dentry-inode].
-2. Cache không chứa hết mọi dentry; khi thiếu, VFS có thể phải tạo dentry dọc đường rồi nạp inode[^vfs-dcache-miss]. Để tra inode, VFS gọi phương thức `lookup()` của inode thư mục cha — phương thức do từng filesystem cài[^vfs-lookup].
-3. Mở file cần cấp phát một `file` structure — tài liệu VFS gọi nó là phần hiện thực phía kernel của file descriptor. Nó được khởi tạo với con trỏ tới dentry và tập hàm thao tác lấy từ dữ liệu inode, rồi phương thức `open()` của file được gọi để filesystem cụ thể làm phần việc của nó[^vfs-file]. (Nhận xét của người soạn: tài liệu dùng chữ "file descriptor" khá lỏng ở đây; theo mục 1, `file` structure chính là OFD[^vfs-fileobj], còn fd là con số trỏ tới nó.)
-4. `file` structure được đặt vào bảng fd của process[^vfs-file-table]: mục đó trong bảng là fd mà `open` trả về cho bạn (mục 1).
-5. `read`/`write`/`close` sau đó dùng fd để lấy lại `file` structure và gọi phương thức tương ứng; chừng nào file còn mở, nó giữ dentry — và do đó inode — còn dùng[^vfs-fd-use].
+1. VFS dùng *pathname* để tìm trong **dentry cache** (dcache), một cơ chế tra cứu rất nhanh, biến pathname thành một *dentry* (viết tắt của *directory entry*). Dentry nằm trong RAM, không bao giờ lưu xuống đĩa, chỉ tồn tại vì hiệu năng[^vfs-dcache]. Một dentry thường có con trỏ tới một inode[^vfs-dentry-inode].
+2. Cache không chứa hết mọi dentry; khi thiếu, VFS có thể phải tạo dentry dọc đường rồi nạp inode[^vfs-dcache-miss]. Để tra inode, VFS gọi phương thức `lookup()` của inode thư mục cha, và phương thức này do từng filesystem cài[^vfs-lookup].
+3. Mở file cần cấp phát một `file` structure, phần mà tài liệu VFS gọi là hiện thực phía kernel của file descriptor. Nó được khởi tạo với con trỏ tới dentry và một tập hàm thao tác lấy từ dữ liệu inode, rồi phương thức `open()` của file được gọi để filesystem cụ thể làm phần việc của nó[^vfs-file]. (Nhận xét của người soạn: tài liệu dùng chữ "file descriptor" khá lỏng ở đây; theo mục 1, `file` structure chính là OFD[^vfs-fileobj], còn fd là con số trỏ tới nó.)
+4. `file` structure được đặt vào bảng fd của process[^vfs-file-table]. Mục đó trong bảng chính là fd mà `open` trả về cho bạn (mục 1).
+5. `read`/`write`/`close` sau đó dùng fd để lấy lại `file` structure và gọi phương thức tương ứng. Chừng nào file còn mở, nó giữ dentry, và do đó giữ inode, còn dùng[^vfs-fd-use].
 
-`struct file_operations` mô tả cách VFS thao tác trên một file đang mở[^vfs-fops] — (nhận xét của người soạn) một cái "công tắc" cho phép một `read` rẽ nhánh theo loại đối tượng.
+`struct file_operations` mô tả cách VFS thao tác trên một file đang mở[^vfs-fops]. Nó cho phép cùng một lời gọi `read` rẽ sang code khác nhau tùy loại đối tượng (nhận xét của người soạn).
 
-*"Everything is a file": đúng đến đâu.* Beej viết rằng khi chương trình Unix làm bất kỳ I/O nào, chúng đọc hoặc ghi vào một file descriptor[^beej-fd], và fd đó có thể là kết nối mạng, FIFO, pipe, terminal, file thật trên đĩa, hay gần như bất cứ thứ gì khác[^beej-kinds].
+*"Everything is a file": đúng đến đâu.* Khi chương trình Unix làm I/O, nó đọc hoặc ghi vào một file descriptor[^beej-fd]. Fd đó có thể là kết nối mạng, FIFO, pipe, terminal, file thật trên đĩa, hay gần như bất cứ thứ gì khác[^beej-kinds].
 
-**Giới hạn (nhận xét của người soạn, dựa trên các nguồn trên).** "Mọi thứ là file" nghĩa là *truy cập qua fd và nhóm syscall chung* (`read`, `write`, `close`, `dup`, `fcntl`…), không phải mọi thao tác có nghĩa với mọi fd: pipe/socket/FIFO không `lseek` được[^lseek-espipe]; socket được tạo bằng `socket(2)` chứ không phải `open`[^socket-create]; thao tác riêng của thiết bị (như đặc tính vận hành của terminal) đi qua `ioctl`[^ioctl-desc]. Cũng không phải mọi thứ có tên trong filesystem: socket `AF_UNIX` trừu tượng không có tên trong filesystem[^unix-desc], pipe ẩn danh không có tên nào.
+**Giới hạn (nhận xét của người soạn, dựa trên các nguồn trên).** "Mọi thứ là file" nghĩa là *truy cập qua fd và nhóm syscall chung* (`read`, `write`, `close`, `dup`, `fcntl`…). Nó không có nghĩa mọi thao tác đều có nghĩa với mọi fd:
+
+- Pipe, socket, FIFO không `lseek` được[^lseek-espipe].
+- Socket được tạo bằng `socket(2)` chứ không phải `open`[^socket-create].
+- Thao tác riêng của thiết bị, như đặc tính vận hành của terminal, đi qua `ioctl`[^ioctl-desc].
+- Không phải mọi thứ có tên trong filesystem: socket `AF_UNIX` trừu tượng không có tên trong filesystem[^unix-desc], và pipe ẩn danh không có tên nào.
 
 <details><summary>Đi sâu: device node, <code>/dev</code>, <code>/proc/&lt;pid&gt;/fd</code></summary>
 
-- Dấu vết kiểm chứng được khác: `open()` mở được cả device special file[^open-device]; danh sách thiết bị của tài liệu kernel liệt kê `/dev/stdin`, `/dev/stdout`, `/dev/stderr` trong các link *nên có* trên mọi hệ thống, dạng symlink tới `fd/0`, `fd/1`, `fd/2`[^kdoc-devfd]; còn `/proc/<pid>/fd` liệt kê mọi fd đang mở như symlink, pipe/socket hiện dạng `loại:[inode]`[^proc-fd] — chính các dòng `pipe:[155608]` ở mục 4. Cách dùng nó để chẩn đoán xem [Chương 06, mục 4](06-user-quyen-proc-sys.md).
+- `open()` mở được cả device special file[^open-device].
+- Danh sách thiết bị của tài liệu kernel liệt kê `/dev/stdin`, `/dev/stdout`, `/dev/stderr` trong các link *nên có* trên mọi hệ thống, dạng symlink tới `fd/0`, `fd/1`, `fd/2`[^kdoc-devfd].
+- `/proc/<pid>/fd` liệt kê mọi fd đang mở như symlink; pipe và socket hiện dạng `loại:[inode]`[^proc-fd]. Đó chính là các dòng `pipe:[155608]` ở mục 4. Cách dùng nó để chẩn đoán xem [Chương 06, mục 4](06-user-quyen-proc-sys.md).
 - Khi mở một device node, phần lớn filesystem gọi các hàm hỗ trợ đặc biệt của VFS để tìm thông tin driver cần dùng; các hàm này thay tập thao tác file của filesystem bằng tập thao tác của device driver rồi gọi phương thức `open()` mới. Nhờ vậy, mở một device file rốt cuộc gọi tới phương thức `open()` của driver[^vfs-devopen].
 - `/dev/null` và `/dev/zero`: dữ liệu ghi vào cả hai bị bỏ; đọc `/dev/null` luôn trả EOF (`read` trả 0), đọc `/dev/zero` luôn trả byte 0[^null-def]. Hai device này thường được tạo bằng `mknod` (lệnh mẫu trong man page: `c 1 3`, `c 1 5`)[^null-mknod].
 - Quan sát trong lab: `ls -l /dev/null` hiện `crw-rw-rw- 1 root root 1, 3` (chữ `c` đầu dòng, cặp major/minor thay cho kích thước); `/dev/stdin -> /proc/self/fd/0`, `/dev/fd -> /proc/self/fd`.
@@ -254,21 +276,21 @@ VFS thực hiện các syscall `open`, `stat`, `chmod`…[^vfs-syscalls]; phần
 
 ## 7. Redirect của shell ở mức syscall (Q7)
 
-> **Trả lời ngắn.** Về khái niệm, `cmd > out.txt` là: `fork`, trong con `open` file, `dup2` nó lên fd 1, `close` số thừa rồi `exec` — chương trình mới ghi vào fd 1 mà không hề biết nó là file; cách làm này dựa vào việc shell chạy được code giữa `fork` và `exec`[^ostep-fork-exec]. `a | b` cũng vậy, chỉ khác là fd 1 của `a` và fd 0 của `b` được nối vào hai đầu của một pipe[^ostep-pipe]. Các redirect được xử lý từ trái sang phải[^bash-order], nên thứ tự viết là thứ tự các `dup2` (một số shell, như dash trong quan sát ở dưới, áp redirect ngay trong shell rồi khôi phục — cùng bộ syscall).
+> **Trả lời ngắn.** Về khái niệm, `cmd > out.txt` là: `fork`, trong con `open` file, `dup2` nó lên fd 1, `close` số thừa rồi `exec`. Chương trình mới ghi vào fd 1 mà không hề biết đó là file; cách làm này dựa vào việc shell chạy được code giữa `fork` và `exec`[^ostep-fork-exec]. `a | b` cũng vậy, chỉ khác là fd 1 của `a` và fd 0 của `b` được nối vào hai đầu của một pipe[^ostep-pipe]. Các redirect được xử lý từ trái sang phải[^bash-order], nên thứ tự viết chính là thứ tự các `dup2` (một số shell, như dash trong quan sát ở dưới, áp redirect ngay trong shell rồi khôi phục, nhưng vẫn cùng bộ syscall).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): shell như nhân viên lễ tân cắm lại dây điện thoại trước khi chuyển máy cho người nghe: người nghe vẫn "nói vào ống nghe số 1" như mọi khi, chỉ là dây đã được nối sang chỗ khác.
+*Với service `orders`.* `pdfgen` chỉ biết ghi PDF ra stdout, còn `orders` muốn kết quả nằm trong file `invoice-42.pdf`. Trên command line bạn viết `pdfgen > invoice-42.pdf` và xong. Câu hỏi: shell đã làm gì để `pdfgen` ghi vào file mà không hề biết có file nào? Câu trả lời cũng là cách `orders` làm khi dùng `Command` với `Stdio` (xem Đi sâu cuối mục).
 
-*Vấn đề.* `ls > out.txt` phải làm `ls` ghi vào `out.txt` mà `ls` không biết gì về file đó. Cơ chế dựa trên đúng ba mảnh đã học: con thừa hưởng bảng fd (mục 2), fd giữ mở qua `exec` (mục 4), và `dup2` đặt OFD vào đúng số fd (mục 3). OSTEP: tách `fork` khỏi `exec` cho shell chạy mã *sau* `fork` nhưng *trước* `exec`; mã này có thể thay đổi môi trường của chương trình sắp chạy[^ostep-fork-exec].
+Cơ chế chỉ cần ba mảnh đã học: con thừa hưởng bảng fd (mục 2), fd giữ mở qua `exec` (mục 4), và `dup2` đặt OFD vào đúng số fd (mục 3). Mảnh còn thiếu là một khoảng để chen code vào. Việc Unix tách `fork` khỏi `exec` cho shell chạy code *sau* `fork` nhưng *trước* `exec`, và code đó có thể đổi môi trường của chương trình sắp chạy[^ostep-fork-exec].
 
 Trình tự khái niệm cho `cmd > out.txt`:
 
 1. `fork()` → con có bản sao bảng fd.
 2. Trong con: `fd = open("out.txt", O_WRONLY|O_CREAT|O_TRUNC, 0666)` (nhận số thấp nhất, giả sử 3).
-3. `dup2(fd, 1)` → fd 1 giờ cùng OFD với fd 3 và không còn trỏ tới stdout cũ (OFD cũ chỉ được giải phóng khi fd cuối cùng trỏ tới nó đóng[^close-last]; ở đây shell cha vẫn giữ nó).
+3. `dup2(fd, 1)` → fd 1 giờ cùng OFD với fd 3 và không còn trỏ tới stdout cũ. (OFD cũ chỉ được giải phóng khi fd cuối cùng trỏ tới nó đóng[^close-last]; ở đây shell cha vẫn giữ nó.)
 4. `close(fd)` → bỏ số 3 thừa.
-5. `execve("cmd")` → chương trình mới ghi vào fd 1 và ghi vào file.
+5. `execve("cmd")` → chương trình mới ghi vào fd 1, và vì fd 1 trỏ vào file nên nó ghi vào file.
 
 **Quan sát thật.** `strace -f` (công cụ liệt kê các syscall của một process, xem [Chương 02, mục 6](02-system-call.md)) trên `sh -c '/bin/echo hi > o.txt'` (dash trong container):
 
@@ -285,62 +307,69 @@ dup3(10, 1, 0)                          = 1      # (cha) khôi phục stdout
 close(10)                               = 0
 ```
 
-Bài học: (a) thứ tự `open → dup2/dup3 → close` đúng mô hình; (b) ở đây dash/libc dùng syscall `dup3(…, 0)` để làm việc của `dup2` — man page nói `dup3` giống `dup2` trừ việc cho ép `O_CLOEXEC`[^dup3-flag] và lỗi khi `old == new`[^dup3-einval] (quan sát, không phải bảo đảm cho mọi shell hay kiến trúc); (c) dash áp redirect *trong shell* rồi khôi phục sau khi sinh con — khác sơ đồ "làm trong con" nhưng cùng bộ syscall. Fd 10 được cất kèm `FD_CLOEXEC` — đúng kỹ thuật mục 4.
+Từ đây rút ra ba điều:
 
-*Còn `a | b`?* OSTEP mô tả shell nối đầu ra của một process vào một pipe trong kernel (một hàng đợi), và đầu vào của process kia vào cùng pipe đó[^ostep-pipe]. Với `echo hi | cat >/dev/null`, bash sinh một con cho mỗi vế và mỗi con có `dup3(pipe_end, 0|1, 0)` rồi `close(pipe_end)` trước `execve` (quan sát từ strace). Pipe xem mục 8.
+- Thứ tự `open → dup2/dup3 → close` đúng mô hình ở trên.
+- dash/libc ở đây dùng syscall `dup3(…, 0)` để làm việc của `dup2`. Man page nói `dup3` giống `dup2` trừ việc cho ép `O_CLOEXEC`[^dup3-flag], và lỗi khi `old == new`[^dup3-einval]. Đó là quan sát, không phải bảo đảm cho mọi shell hay kiến trúc.
+- dash áp redirect *trong shell* rồi khôi phục sau khi sinh con, khác sơ đồ "làm trong con" nhưng cùng bộ syscall. Fd 10 được cất kèm `FD_CLOEXEC`, đúng kỹ thuật ở mục 4.
 
-*Thứ tự redirect là thứ tự dup.* Bash manual: các redirect được xử lý theo thứ tự xuất hiện, từ trái sang phải[^bash-order]. Ví dụ trong manual: `ls > dirlist 2>&1` đưa cả stdout lẫn stderr vào file `dirlist`, còn `ls 2>&1 > dirlist` chỉ đưa stdout vào file, vì stderr đã được làm bản sao của stdout *trước* khi stdout bị chuyển sang `dirlist`[^bash-order-ex].
+*Còn `a | b`?* Shell nối đầu ra của một process vào một pipe nằm trong kernel (một hàng đợi), và nối đầu vào của process kia vào cùng pipe đó[^ostep-pipe]. Với `echo hi | cat >/dev/null`, bash sinh một con cho mỗi vế, và mỗi con có `dup3(pipe_end, 0|1, 0)` rồi `close(pipe_end)` trước `execve` (quan sát từ strace). Pipe xem mục 8.
 
-Bash manual mô tả `[n]>&word` là cách nhân bản fd *đầu ra*, dùng tương tự `[n]<&word` cho fd đầu vào: nếu `word` là số thì fd `n` trở thành bản sao của fd đó[^bash-dup-out][^bash-dup-in]. Ở mức syscall, `2>&1` là kiểu `dup2(1, 2)` (suy luận từ các `dup3` đã quan sát ở trên): "fd 2 trỏ cùng OFD với fd 1 *tại thời điểm này*". Nó sao chép *tham chiếu hiện tại*, không phải "liên kết tương lai".
+*Thứ tự redirect là thứ tự dup.* Bash xử lý các redirect theo thứ tự xuất hiện, từ trái sang phải[^bash-order]. Ví dụ trong manual: `ls > dirlist 2>&1` đưa cả stdout lẫn stderr vào file `dirlist`. Còn `ls 2>&1 > dirlist` chỉ đưa stdout vào file, vì stderr đã được làm bản sao của stdout *trước* khi stdout bị chuyển sang `dirlist`[^bash-order-ex].
+
+Bash manual mô tả `[n]>&word` là cách nhân bản fd *đầu ra*[^bash-dup-out]. `[n]<&word` dùng tương tự cho fd đầu vào: nếu `word` là số thì fd `n` trở thành bản sao của fd đó[^bash-dup-in]. Ở mức syscall, `2>&1` là kiểu `dup2(1, 2)` (suy luận từ các `dup3` đã quan sát ở trên), nghĩa là "fd 2 trỏ cùng OFD với fd 1 *tại thời điểm này*". Nó sao chép *tham chiếu hiện tại*, không phải "liên kết tương lai".
 
 <details><summary>Đi sâu: kiểm chứng đếm byte và <code>dup2</code> trong Rust</summary>
 
 - Kiểm chứng (đếm byte của thông báo lỗi `ls /nonexist`): `ls /nonexist 2>&1 >o1.txt | wc -c` in 57 và `o1.txt` có 0 byte (stderr đi vào pipe, vì lúc `dup2(1,2)` fd 1 còn là pipe); `ls /nonexist >o2.txt 2>&1` cho `o2.txt` 57 byte.
-- Rust spawn cũng vậy: ở đường `fork`+`exec`, trong con std chạy `cvt_r(|| libc::dup2(fd, libc::STDOUT_FILENO))` trước `exec`[^rs-do-exec-dup2]; việc `Command` chọn `posix_spawn` hay `fork`+`exec` và cách `Stdio` ánh xạ lên `dup2` nằm ở [Chương 07, mục 3–4](07-rust-tren-giao-dien-he-thong.md).
+- Rust spawn cũng vậy: ở đường `fork`+`exec`, trong con std chạy `cvt_r(|| libc::dup2(fd, libc::STDOUT_FILENO))` trước `exec`[^rs-do-exec-dup2]. Việc `Command` chọn `posix_spawn` hay `fork`+`exec` và cách `Stdio` ánh xạ lên `dup2` nằm ở [Chương 07, mục 3–4](07-rust-tren-giao-dien-he-thong.md).
 
 </details>
 
-**Quay lại Q7:** về khái niệm, redirect và pipe đều là `open`/`pipe` + `dup2` lên 0/1/2 + `close` + `exec`, các redirect xử lý từ trái sang phải; chương trình đích chỉ thấy fd 0/1/2 như thường.
+**Quay lại Q7:** về khái niệm, redirect và pipe đều là `open`/`pipe` + `dup2` lên 0/1/2 + `close` + `exec`, các redirect xử lý từ trái sang phải; chương trình đích chỉ thấy fd 0/1/2 như thường, nên `pdfgen` không hề biết nó đang ghi vào file.
 
 ## 8. Pipe, FIFO, Unix domain socket (Q8)
 
-> **Trả lời ngắn.** Cả ba là kênh giao tiếp liên process, khác ở cách các process có được fd của kênh: pipe ẩn danh (không có tên) nối các process có quan hệ với nhau, thường qua `fork` thừa hưởng fd[^pipe-related]; FIFO là pipe có tên trong filesystem nên process không quan hệ cũng mở được[^fifo-def0]; Unix socket là socket cho các process cùng máy và còn truyền được cả fd sang process khác[^unix-passfd]. Với pipe: khi mọi đầu ghi đã đóng thì `read` trả 0, tức hết dữ liệu (EOF); khi mọi đầu đọc đã đóng thì `write` làm kernel gửi signal `SIGPIPE` (hành động mặc định của nó là kết thúc process[^sig-tbl-pipe][^sig-term-def]), hoặc trả lỗi `EPIPE` nếu process đã chọn bỏ qua signal đó[^pipe-eof][^pipe-epipe].
+> **Trả lời ngắn.** Cả ba là kênh giao tiếp giữa các process, khác nhau ở cách các process có được fd của kênh. Pipe ẩn danh (không có tên) nối các process có quan hệ với nhau, thường qua việc con thừa hưởng fd khi `fork`[^pipe-related]. FIFO là pipe có tên trong filesystem, nên process không quan hệ cũng mở được[^fifo-def0]. Unix socket dành cho các process cùng máy và còn truyền được cả fd sang process khác[^unix-passfd]. Với pipe, khi mọi đầu ghi đã đóng thì `read` trả 0 (EOF); khi mọi đầu đọc đã đóng thì `write` làm kernel gửi `SIGPIPE`, hoặc trả lỗi `EPIPE` nếu process đã chọn bỏ qua signal đó[^pipe-eof].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): pipe ẩn danh là ống nước nối giữa hai phòng do chủ nhà lắp, ai ở trong nhà dùng được; FIFO là ống có biển tên ở sảnh, người lạ biết tên (và được phép) cũng nối vào được; Unix socket là đường dây điện thoại nội bộ hai chiều.
+*Với service `orders`.* `orders` đã có một pipe tới `pdfgen`: nó đọc PDF `pdfgen` in ra ở đầu kia. Giờ giả sử có thêm một agent thu log chạy riêng trên máy, không phải con của `orders`, và muốn nhận log của `orders`. Hai process không quan hệ thì pipe ẩn danh không đủ, vì agent không có cách nào thừa hưởng fd. Khi đó cần một kênh có tên (FIFO) hoặc một Unix socket (nhận xét của người soạn). Mục này lần lượt đi qua ba loại, bắt đầu bằng pipe vì hai loại sau là biến thể của nó.
 
 ### 8.1 Pipe ẩn danh
 
-`pipe(2)` tạo một pipe, kênh dữ liệu một chiều dùng cho giao tiếp liên process[^pipe-chan]; nó trả hai fd: `pipefd[0]` là đầu đọc, `pipefd[1]` là đầu ghi[^pipe-pipefd]. Man page nói pipe dùng để tạo kênh giữa các process có quan hệ[^pipe-related]; vì pipe ẩn danh không có tên, cách nó đến được process khác là *qua thừa kế fd* (`fork`) (suy luận của người soạn).
+`pipe(2)` tạo một pipe, một kênh dữ liệu một chiều dùng cho giao tiếp giữa các process[^pipe-chan]. Nó trả về hai fd: `pipefd[0]` là đầu đọc, `pipefd[1]` là đầu ghi[^pipe-pipefd]. Man page nói pipe dùng để dựng kênh giữa các process có quan hệ[^pipe-related]. Vì pipe ẩn danh không có tên, cách duy nhất nó đến được process khác là qua thừa kế fd khi `fork` (suy luận của người soạn).
 
-Tính chất (theo pipe(7); man page nói khác biệt duy nhất giữa pipe và FIFO là cách tạo và mở, còn I/O trên chúng có đúng cùng ngữ nghĩa[^pipe-fifo-same]):
+Man page pipe(7) nói khác biệt duy nhất giữa pipe và FIFO là cách tạo và mở; xong rồi thì I/O trên chúng có đúng cùng ngữ nghĩa[^pipe-fifo-same]. Vài tính chất cần nhớ:
 
-- **Byte stream:** kênh pipe là một dòng byte, không có khái niệm ranh giới message[^pipe-bytestream].
-- **EOF và SIGPIPE.** Mọi fd đầu ghi đã đóng → `read` trả 0 (EOF); mọi fd đầu đọc đã đóng → `write` sinh `SIGPIPE`[^pipe-eof], hoặc lỗi `EPIPE` nếu process ignore signal đó[^pipe-epipe]. (Signal nói đầy đủ ở [Chương 05, mục 7](05-signal.md).)
-- **Quên `close` thì treo.** Hệ quả của mục 2: sau `fork`, cả hai bên giữ cả hai đầu; man page dặn phải `close` các bản sao thừa để EOF và `SIGPIPE`/`EPIPE` được báo đúng lúc[^pipe-close]. Quên đóng đầu ghi ở bên đọc là nguồn của lỗi "chương trình đọc pipe treo mãi" (nhận xét của người soạn: vì chính nó còn giữ một đầu ghi nên không bao giờ thấy EOF).
-- **Chặn:** mặc định, đọc pipe rỗng thì chặn và ghi pipe đầy thì chặn; bật `O_NONBLOCK` bằng `F_SETFL` (mục 2) thì I/O không chặn[^pipe-block].
+- **Byte stream.** Kênh pipe là một dòng byte, không có khái niệm ranh giới message[^pipe-bytestream].
+- **EOF.** Khi mọi fd đầu ghi đã đóng, `read` trả 0, tức EOF; khi mọi fd đầu đọc đã đóng, `write` sinh `SIGPIPE`[^pipe-eof].
+- **SIGPIPE.** Trong bảng signal của Linux, `SIGPIPE` là signal gửi khi ghi vào pipe không có người đọc[^sig-tbl-pipe]. Hành động mặc định kiểu `Term` nghĩa là kết thúc process[^sig-term-def]. Nếu process bỏ qua signal này thì `write` thất bại với lỗi `EPIPE`[^pipe-epipe]. Signal nói đầy đủ ở [Chương 05, mục 7](05-signal.md).
+- **Quên `close` thì treo.** Đây là hệ quả của mục 2: sau `fork`, cả hai bên giữ cả hai đầu. Man page dặn phải `close` các bản sao thừa để EOF và `SIGPIPE`/`EPIPE` được báo đúng lúc[^pipe-close]. Giả sử `orders` đọc stdout của `pdfgen` qua pipe mà quên đóng bản sao đầu ghi của chính nó. `pdfgen` xong và thoát, nhưng `orders` đọc mãi không thấy EOF vì chính nó còn giữ một đầu ghi (nhận xét của người soạn).
+- **Chặn.** Mặc định, đọc pipe rỗng thì chặn và ghi pipe đầy thì chặn; bật `O_NONBLOCK` bằng `F_SETFL` (mục 2) thì I/O không chặn[^pipe-block].
 
 ### 8.2 FIFO (named pipe)
 
-FIFO giống pipe, trừ việc được truy cập như một phần của filesystem[^fifo-def0]. Dữ liệu đi trong kernel: file FIFO không có nội dung trên filesystem; mục trong filesystem chỉ là điểm tham chiếu để process truy cập pipe bằng tên[^fifo-def]. Nghĩa là: *tên* nằm trong filesystem (một inode loại FIFO[^vfs-inode]), *dữ liệu* nằm trong kernel.
+FIFO giống pipe, chỉ khác ở chỗ nó được truy cập như một phần của filesystem[^fifo-def0]. Dữ liệu vẫn đi trong kernel: file FIFO không có nội dung trên filesystem, và mục trong filesystem chỉ là điểm tham chiếu để process truy cập pipe bằng tên[^fifo-def]. Nói gọn: *tên* nằm trong filesystem (một inode loại FIFO[^vfs-inode]), còn *dữ liệu* nằm trong kernel.
 
-Khác pipe ẩn danh: FIFO phải được mở ở cả hai đầu (đọc và ghi) trước khi dữ liệu đi qua, và bình thường thì `open` chặn cho tới khi đầu kia cũng được mở[^fifo-open]. Ghi vào FIFO không có đầu đọc → `SIGPIPE`[^fifo-sigpipe]. Hai process *không quan hệ* giao tiếp được vì chỉ cần biết tên (suy luận của người soạn từ định nghĩa trên).
+FIFO khác pipe ẩn danh ở cách mở: nó phải được mở ở cả hai đầu (đọc và ghi) trước khi dữ liệu đi qua, và bình thường `open` chặn cho tới khi đầu kia cũng được mở[^fifo-open]. Ghi vào FIFO không có ai mở đầu đọc thì process nhận `SIGPIPE`[^fifo-sigpipe]. Còn hai process *không quan hệ* giao tiếp được vì chỉ cần biết tên (suy luận của người soạn từ định nghĩa trên). Agent thu log ở trên có thể mở đúng FIFO mà `orders` ghi vào.
 
 ### 8.3 Unix domain socket
 
-`AF_UNIX` (còn gọi `AF_LOCAL`) là họ socket dùng để giao tiếp hiệu quả giữa các process trên cùng máy. Truyền thống, socket loại này có thể không tên hoặc gắn với một pathname trong filesystem (đánh dấu là loại socket); Linux còn hỗ trợ abstract namespace độc lập với filesystem[^unix-desc]. So với pipe một chiều (mục 8.1): socket kiểu stream là hai chiều[^sock-twoway], và Unix socket còn có kiểu giữ ranh giới message[^unix-types]. Điểm riêng so với pipe/FIFO trong các man page đã dẫn: Unix socket truyền được fd hoặc thông tin xác thực (credentials) của process sang process khác qua *ancillary data* — dữ liệu phụ gửi/nhận bằng `sendmsg`/`recvmsg`[^unix-ancillary][^unix-passfd]. Cái được truyền thật ra là tham chiếu tới một OFD (bên nhận thường nhận số fd khác), về ngữ nghĩa tương đương `dup` vào bảng fd của process kia[^unix-scm-ofd]; nhờ vậy có thể trao một fd cho process *không phải con cháu* (suy luận của người soạn). (Nhận xét của người soạn: ví dụ quen thuộc là `/var/run/docker.sock`, nơi daemon Docker mặc định lắng nghe[^docker-sock].)
+`AF_UNIX` (còn gọi `AF_LOCAL`) là họ socket dùng để giao tiếp hiệu quả giữa các process trên cùng máy. Theo truyền thống, socket loại này có thể không tên hoặc gắn với một pathname trong filesystem (đánh dấu là loại socket); Linux còn hỗ trợ abstract namespace độc lập với filesystem[^unix-desc]. So với pipe một chiều (mục 8.1), socket kiểu stream là hai chiều[^sock-twoway], và Unix socket còn có kiểu giữ ranh giới message[^unix-types].
+
+Điểm riêng so với pipe và FIFO trong các man page đã dẫn là Unix socket truyền được fd hoặc thông tin xác thực (credentials) của process sang process khác, qua *ancillary data*[^unix-passfd]. Ancillary data là dữ liệu phụ gửi và nhận bằng `sendmsg`/`recvmsg`[^unix-ancillary]. Cái được truyền thật ra là tham chiếu tới một OFD, và bên nhận thường nhận về một số fd khác. Về ngữ nghĩa, việc này tương đương `dup` một fd vào bảng fd của process kia[^unix-scm-ofd]. Nhờ vậy ta có thể trao một fd cho process *không phải con cháu* (suy luận của người soạn): `orders` mở sẵn một file hay socket rồi giao cho process khác dùng mà không cần `fork`. Ví dụ quen thuộc là `/var/run/docker.sock`, nơi daemon Docker mặc định lắng nghe[^docker-sock] (nhận xét của người soạn).
 
 <details><summary>Đi sâu: dung lượng, nguyên tử, <code>lseek</code>, exit status 141, tạo FIFO, kiểu và quyền của Unix socket</summary>
 
-- **Dung lượng hữu hạn:** ứng dụng không nên dựa vào một dung lượng cụ thể; nên thiết kế sao cho bên đọc tiêu thụ dữ liệu ngay khi có, để bên ghi không bị chặn mãi[^pipe-cap]. Linux: mặc định 16 page, đổi/đọc bằng `F_SETPIPE_SZ`/`F_GETPIPE_SZ`[^pipe-cap-linux]. Man page ghi rõ 16 page là 65.536 byte khi page size 4096[^pipe-cap-bytes]; quan sát trong lab: `F_GETPIPE_SZ` = 65536 (mặc định, không phải bảo đảm).
-- **Atomicity:** POSIX nói ghi *dưới* `PIPE_BUF` byte phải nguyên tử, ghi lớn hơn có thể bị xen với process khác[^pipe-atomic]; bảng ngữ nghĩa trong pipe(7) của Linux xếp cả trường hợp n ≤ `PIPE_BUF` vào nhóm nguyên tử[^pipe-atomic-table]. Trên Linux `PIPE_BUF` = 4096[^pipe-bufsize].
-- **Không `lseek`:** không thể áp dụng `lseek(2)` cho pipe[^pipe-seek] — `lseek` lỗi `ESPIPE` với pipe, socket, FIFO[^lseek-espipe].
-- **Cờ trạng thái:** chỉ `O_NONBLOCK` và `O_ASYNC` có nghĩa với pipe/FIFO[^pipe-statusflags].
-- **Exit status 141.** Quan sát: `yes | head -1` — `head` thoát, `yes` ghi vào pipe không còn người đọc, bị `SIGPIPE`; `PIPESTATUS` là `141 0` (`141` cho `yes`). Con số 141 giải thích được từ hai nguồn: bash dùng `128+N` làm exit status khi lệnh chết vì signal `N`[^bash-128n], và `SIGPIPE` là signal 13 (signal(7))[^sigpipe-num] — 128+13 = 141. Ở mức `wait(2)` (xem [Chương 03, mục 6](03-process.md)), trạng thái này là "bị signal giết" (`WIFSIGNALED`, `WTERMSIG`)[^wait-wifsignaled]; con số 141 là cách shell biểu diễn nó.
-- **Tạo FIFO:** bằng `mkfifo(3)`, hiện loại `p` trong `ls -l`[^fifo-mkfifo] (hoặc `mknod` với `S_IFIFO`[^mknod-types]). Quan sát: `mkfifo ff` → `ls -l` đầu dòng là `p`; `echo hello > ff &` rồi `cat ff` in `hello`.
-- **Kiểu socket:** `SOCK_STREAM` (hướng stream), `SOCK_DGRAM` (giữ ranh giới message) và `SOCK_SEQPACKET` (có kết nối, giữ ranh giới message)[^unix-types].
-- **Quyền:** socket gắn đường dẫn chịu quyền của thư mục chứa nó[^unix-perm]; trên Linux, connect tới stream socket còn cần quyền ghi trên chính socket đó[^unix-sockperm].
+- **Dung lượng hữu hạn.** Ứng dụng không nên dựa vào một dung lượng cụ thể; nên thiết kế sao cho bên đọc tiêu thụ dữ liệu ngay khi có, để bên ghi không bị chặn mãi[^pipe-cap]. Trên Linux, mặc định là 16 page, đổi hoặc đọc bằng `F_SETPIPE_SZ`/`F_GETPIPE_SZ`[^pipe-cap-linux]. Man page ghi rõ 16 page là 65.536 byte khi page size 4096[^pipe-cap-bytes]. Quan sát trong lab: `F_GETPIPE_SZ` = 65536 (mặc định, không phải bảo đảm).
+- **Atomicity.** POSIX nói ghi *dưới* `PIPE_BUF` byte phải nguyên tử, ghi lớn hơn có thể bị xen với process khác[^pipe-atomic]. Bảng ngữ nghĩa trong pipe(7) của Linux xếp cả trường hợp n ≤ `PIPE_BUF` vào nhóm nguyên tử[^pipe-atomic-table]. Trên Linux `PIPE_BUF` = 4096[^pipe-bufsize].
+- **Không `lseek`.** Không thể áp dụng `lseek(2)` cho pipe[^pipe-seek]; `lseek` lỗi `ESPIPE` với pipe, socket, FIFO[^lseek-espipe].
+- **Cờ trạng thái.** Chỉ `O_NONBLOCK` và `O_ASYNC` có nghĩa với pipe/FIFO[^pipe-statusflags].
+- **Exit status 141.** Quan sát: `yes | head -1` cho `PIPESTATUS` là `141 0` (`141` là của `yes`). Lý do: `head` thoát, `yes` ghi vào pipe không còn người đọc và bị `SIGPIPE`. Con số 141 giải thích được từ hai nguồn: bash dùng `128+N` làm exit status khi lệnh chết vì signal `N`[^bash-128n], và `SIGPIPE` là signal 13 (signal(7))[^sigpipe-num], nên 128+13 = 141. Ở mức `wait(2)` (xem [Chương 03, mục 6](03-process.md)), trạng thái này là "bị signal giết" (`WIFSIGNALED`, `WTERMSIG`)[^wait-wifsignaled]; con số 141 chỉ là cách shell biểu diễn nó.
+- **Tạo FIFO.** Dùng `mkfifo(3)`; FIFO hiện loại `p` trong `ls -l`[^fifo-mkfifo]. Cũng tạo được bằng `mknod` với `S_IFIFO`[^mknod-types]. Quan sát: `mkfifo ff` → `ls -l` đầu dòng là `p`; `echo hello > ff &` rồi `cat ff` in `hello`.
+- **Kiểu socket.** `SOCK_STREAM` (hướng stream), `SOCK_DGRAM` (giữ ranh giới message) và `SOCK_SEQPACKET` (có kết nối, giữ ranh giới message)[^unix-types].
+- **Quyền.** Socket gắn đường dẫn chịu quyền của thư mục chứa nó[^unix-perm]. Trên Linux, connect tới stream socket còn cần quyền ghi trên chính socket đó[^unix-sockperm].
 
 </details>
 
@@ -348,7 +377,7 @@ Khác pipe ẩn danh: FIFO phải được mở ở cả hai đầu (đọc và 
 
 ## 9. Liên hệ với Rust
 
-Rust (std 1.95.0) đặt kiểu lên đúng các tầng ở trên. [Chương 07](07-rust-tren-giao-dien-he-thong.md) giải thích kỹ từng kiểu (mục 1: `OwnedFd`/`BorrowedFd`/`RawFd` và `Drop`; mục 4: `Stdio` ↔ `dup2`; mục 5: `SIGPIPE`); ở đây chỉ nối từng khái niệm của chương này với kiểu tương ứng.
+Rust (std 1.95.0) đặt kiểu lên đúng các tầng ở trên, và đó là cách `orders` viết bằng Rust tránh được các lỗi ở mục 4–5. [Chương 07](07-rust-tren-giao-dien-he-thong.md) giải thích kỹ từng kiểu (mục 1: `OwnedFd`/`BorrowedFd`/`RawFd` và `Drop`; mục 4: `Stdio` ↔ `dup2`; mục 5: `SIGPIPE`); ở đây chỉ nối từng khái niệm của chương này với kiểu tương ứng.
 
 | Khái niệm | Kiểu Rust | Bảo đảm |
 |---|---|---|
@@ -359,10 +388,10 @@ Rust (std 1.95.0) đặt kiểu lên đúng các tầng ở trên. [Chương 07]
 | `dup` | `OwnedFd::try_clone` | tạo `OwnedFd` mới dùng chung file description bên dưới[^rs-ownedfd-clone] — chung offset như `f1`/`f2` ở mục 2 |
 | `pipe` | `std::io::pipe()` | kênh dữ liệu một chiều do OS cung cấp[^rs-pipe] |
 
-- **Vì sao fd cần ownership.** Vì số fd bị cấp lại sau `close` (mục 5), docs `std::io` định nghĩa fd được sở hữu độc quyền là fd mà không code nào khác được truy cập, còn chủ thì được dùng và đóng nó bất cứ lúc nào[^rs-iosafety-own]. Một hàm safe nhận số nguyên trần, coi nó là fd và thao tác trên đó là unsound[^rs-iosafety-unsound]; nên `FromRawFd::from_raw_fd` là `unsafe`: fd truyền vào phải là fd được sở hữu và đang mở[^rs-fromraw-safety]. Docs còn ví fd như `Arc` trỏ tới OFD: có một fd sở hữu rồi vẫn không biết còn fd nào khác cùng trỏ tới OFD đó[^rs-iosafety-arc] — đúng bức tranh ở mục 1–2.
+- **Vì sao fd cần ownership.** Số fd bị cấp lại sau `close` (mục 5), nên Rust cần cách ngăn hai nơi cùng tưởng mình sở hữu một fd, đúng như lỗi của handler thread A và B. Docs `std::io` định nghĩa fd được sở hữu độc quyền là fd mà không code nào khác được truy cập, còn chủ thì được dùng và đóng nó bất cứ lúc nào[^rs-iosafety-own]. Một hàm safe nhận số nguyên trần, coi nó là fd rồi thao tác trên đó là unsound[^rs-iosafety-unsound]. Vì vậy `FromRawFd::from_raw_fd` là `unsafe`: fd truyền vào phải là fd được sở hữu và đang mở[^rs-fromraw-safety]. Docs còn ví fd như `Arc`: nhận một fd sở hữu rồi, bạn vẫn không biết còn fd nào khác cùng trỏ tới một đối tượng kernel[^rs-iosafety-arc]. Đó đúng là bức tranh ở mục 1–2.
 - **`O_CLOEXEC` là mặc định của std.** `File::open` ghép sẵn `libc::O_CLOEXEC` vào cờ: `let flags = libc::O_CLOEXEC | opts.get_access_mode()?`[^rs-fs-cloexec]. `try_clone` dùng `F_DUPFD_CLOEXEC`; chú thích trong mã nguồn nói muốn nhân bản fd và đặt `CLOEXEC` một cách nguyên tử[^rs-tryclone]. Đó là lý do trong thí nghiệm mục 4, fd 3 từ `File::open` không rò sang con còn `dup` thô thì rò. Gọi FFI `dup`/`pipe` trực tiếp thì phải tự lo cờ này (suy luận của người soạn).
-- **Drop không báo lỗi close.** Lỗi lúc đóng fd khi thả `File`/`OwnedFd` bị bỏ qua[^rs-file][^rs-drop-close]. Man page `close(2)` nhắc rằng lỗi của lần `write` trước đó có thể chỉ hiện ở lần `close` cuối cùng, và bỏ qua nó có thể làm mất dữ liệu âm thầm[^close-errors]; docs `File` chỉ dùng `sync_all` khi cần tự xử lý các lỗi này[^rs-file] (durability thuộc Phase 5).
-- **`SIGPIPE`.** Runtime `std` đặt `SIGPIPE` về ignore lúc khởi động[^rs-rt-sigpipe] để chương trình không bị giết khi ghi vào pipe đã đóng[^rs-sigpipe-ignore]. Theo mục 8.1, `write` vào pipe không còn người đọc khi đó trả `EPIPE`[^pipe-epipe], và std ánh xạ nó thành `ErrorKind::BrokenPipe`[^rs-epipe-kind] — nên chương trình Rust ghi vào `| head` nhận lỗi ở chỗ gọi `write` thay vì chết như `yes` (exit status 141). Đây là chi tiết cài đặt của std và không được bảo đảm chạy khi code Rust được gọi từ bên ngoài[^rs-sigpipe-notguaranteed]; process con do `Command` sinh ra được std đặt lại `SIGPIPE` về mặc định (khi không dùng `-Zon-broken-pipe`)[^rs-child-sigpipe-dfl]. Lý do và quan sát `/proc/self/status`: [Chương 07, mục 5](07-rust-tren-giao-dien-he-thong.md); cơ chế signal: [Chương 05, mục 7](05-signal.md).
+- **Drop không báo lỗi close.** Lỗi lúc đóng fd khi thả `File` hay `OwnedFd` bị bỏ qua[^rs-drop-close]. Man page `close(2)` nhắc rằng lỗi của lần `write` trước đó có thể chỉ hiện ở lần `close` cuối cùng, và bỏ qua nó có thể làm mất dữ liệu âm thầm[^close-errors]. Docs `File` chỉ dùng `sync_all` khi cần tự xử lý các lỗi này[^rs-file] (durability thuộc Phase 5).
+- **`SIGPIPE`.** Runtime `std` đặt `SIGPIPE` về ignore lúc khởi động[^rs-rt-sigpipe], để chương trình không bị giết khi ghi vào pipe đã đóng[^rs-sigpipe-ignore]. Theo mục 8.1, `write` vào pipe không còn người đọc khi đó trả `EPIPE`[^pipe-epipe], và std ánh xạ nó thành `ErrorKind::BrokenPipe`[^rs-epipe-kind]. Nên chương trình Rust ghi vào `| head` nhận lỗi ở chỗ gọi `write` thay vì chết như `yes` (exit status 141). Đây là chi tiết cài đặt của std và không được bảo đảm chạy khi code Rust được gọi từ bên ngoài[^rs-sigpipe-notguaranteed]. Process con do `Command` sinh ra được std đặt lại `SIGPIPE` về mặc định (khi không dùng `-Zon-broken-pipe`)[^rs-child-sigpipe-dfl]. Lý do và quan sát `/proc/self/status`: [Chương 07, mục 5](07-rust-tren-giao-dien-he-thong.md); cơ chế signal: [Chương 05, mục 7](05-signal.md).
 
 **Chạy thật** (chạy lại bởi người review, 2026-10-11; máy: container lab `./labs/linux.sh`, Linux 6.8.0-117-generic aarch64, `rustc 1.95.0 (59807616e 2026-04-14)`; chương trình lặp `stdout().lock().write_all(b"y\n")` và tự `exit(3)` khi nhận lỗi; chạy `./m | head -n 1`):
 
@@ -372,7 +401,7 @@ y
 PIPESTATUS 3 0
 ```
 
-`raw=Some(32)` là `EPIPE` (kernel 6.8 định nghĩa `EPIPE` là 32[^errno-epipe]) và `PIPESTATUS` là `3 0` — status 3 là do chính chương trình gọi `exit(3)`, không phải 141 như `yes`. Cùng chương trình trên macOS (rustc 1.95.0) cho cùng kết quả `kind=BrokenPipe raw=Some(32)`, `PIPESTATUS 3 0` (do người điều phối báo lại, người soạn không tự chạy trên macOS).
+`raw=Some(32)` là `EPIPE` (kernel 6.8 định nghĩa `EPIPE` là 32[^errno-epipe]) và `PIPESTATUS` là `3 0`: status 3 là do chính chương trình gọi `exit(3)`, không phải 141 như `yes`. Cùng chương trình trên macOS (rustc 1.95.0) cho cùng kết quả `kind=BrokenPipe raw=Some(32)`, `PIPESTATUS 3 0` (do người điều phối báo lại, người soạn không tự chạy trên macOS).
 
 ## Tóm tắt
 
@@ -388,66 +417,66 @@ PIPESTATUS 3 0
 
 ## Câu hỏi tự kiểm tra
 
-1. Hai lần `open` cùng file và một `open` + `dup` khác nhau thế nào về offset? Nếu cha `fork` rồi cả hai `read` cùng một fd thì sao?
+1. `orders` mở `report.csv` hai lần, rồi lại `dup` một fd. Hai lần `open` và một `open` + `dup` khác nhau thế nào về offset? Nếu cha `fork` rồi cả hai `read` cùng một fd thì sao?
 <details><summary>Đáp án</summary>
 
-Mỗi `open` tạo OFD mới nên offset riêng[^open-each]; `dup` và `fork` cho fd cùng OFD nên chung offset[^dup-share][^open-fork-share]. Thí nghiệm mục 2: dup đọc `4567`, open riêng đọc `0123`, con đọc `89ab` rồi cha `cdef`.
+Mỗi `open` tạo OFD mới nên offset riêng[^open-each]. `dup` cho fd cùng OFD nên chung offset[^dup-share], và `fork` cũng vậy[^open-fork-share]. Thí nghiệm mục 2: dup đọc `4567`, open riêng đọc `0123`, con đọc `89ab` rồi cha `cdef`.
 
 </details>
 
 2. `FD_CLOEXEC` và `O_NONBLOCK` nằm ở tầng nào? Hệ quả với `dup`?
 <details><summary>Đáp án</summary>
 
-`FD_CLOEXEC` là cờ fd, không chia sẻ qua `dup`[^dup-flags][^fcntl-fdflags]; `O_NONBLOCK` là cờ trạng thái của OFD, mọi fd cùng OFD thấy[^fcntl-setfl].
+`FD_CLOEXEC` là cờ fd, không chia sẻ qua `dup`[^dup-flags]. `O_NONBLOCK` là cờ trạng thái của OFD, mọi fd cùng OFD đều thấy[^fcntl-setfl].
 
 </details>
 
 3. Vì sao `dup2(old, new)` không thay được bằng `close(new); dup(old)`?
 <details><summary>Đáp án</summary>
 
-Giữa hai bước, signal handler hoặc thread khác có thể chen vào dùng lại số `new`[^dup2-atomic]; quy tắc số nhỏ nhất chưa dùng[^open-lowest] làm chuyện đó dễ xảy ra (suy luận của người soạn).
+Giữa hai bước, signal handler hoặc thread khác có thể chen vào dùng lại số `new`[^dup2-atomic]. Quy tắc số nhỏ nhất chưa dùng[^open-lowest] làm chuyện đó dễ xảy ra (suy luận của người soạn).
 
 </details>
 
-4. Vì sao `open` rồi `fcntl(F_SETFD, FD_CLOEXEC)` vẫn có thể rò fd?
+4. Vì sao `open` rồi `fcntl(F_SETFD, FD_CLOEXEC)` vẫn có thể rò fd sang `pdfgen`?
 <details><summary>Đáp án</summary>
 
-Thread khác `fork`+`exec` giữa hai lời gọi[^open-cloexec-mt][^fcntl-race]; `O_CLOEXEC` đặt cờ nguyên tử[^open-cloexec].
+Một thread khác có thể `fork`+`exec` giữa hai lời gọi[^open-cloexec-mt]. `fcntl(2)` cũng cảnh báo race này[^fcntl-race]. `O_CLOEXEC` đặt cờ nguyên tử lúc tạo fd[^open-cloexec].
 
 </details>
 
 5. `ls 2>&1 > f` khác `ls > f 2>&1` ở mức syscall thế nào?
 <details><summary>Đáp án</summary>
 
-Xử lý trái → phải[^bash-order]; `2>&1` là `dup2(1,2)` tại thời điểm đó. Dạng đầu chép stdout *cũ* sang stderr rồi mới đổi stdout[^bash-order-ex].
+Bash xử lý redirect từ trái sang phải[^bash-order], và `2>&1` là `dup2(1,2)` tại thời điểm đó. Dạng đầu chép stdout *cũ* sang stderr rồi mới đổi stdout[^bash-order-ex].
 
 </details>
 
 6. Khi nào `read` pipe trả 0, khi nào `write` nhận `SIGPIPE`/`EPIPE`, và vì sao quên `close` gây treo?
 <details><summary>Đáp án</summary>
 
-Hết đầu ghi → `read` trả 0; hết đầu đọc → `SIGPIPE`/`EPIPE`[^pipe-eof][^pipe-epipe]. Còn bản sao thừa của đầu ghi sau `fork` thì EOF không tới[^pipe-close].
+Hết đầu ghi thì `read` trả 0, hết đầu đọc thì `write` bị `SIGPIPE`[^pipe-eof], hoặc nhận `EPIPE` nếu process bỏ qua signal đó[^pipe-epipe]. Bản sao thừa của đầu ghi sau `fork` làm EOF không bao giờ tới[^pipe-close].
 
 </details>
 
 7. FIFO khác pipe ẩn danh và Unix socket ở đâu?
 <details><summary>Đáp án</summary>
 
-FIFO có tên trong filesystem, dữ liệu trong kernel[^fifo-def], mở phải đủ hai đầu[^fifo-open]; Unix socket truyền được fd[^unix-passfd]; pipe ẩn danh nối các process có quan hệ[^pipe-related], tức đến được process khác qua thừa kế fd (suy luận của người soạn).
+FIFO có tên trong filesystem, dữ liệu nằm trong kernel[^fifo-def]; mở phải đủ hai đầu[^fifo-open]. Unix socket truyền được fd[^unix-passfd]. Pipe ẩn danh nối các process có quan hệ[^pipe-related], tức đến được process khác qua thừa kế fd (suy luận của người soạn).
 
 </details>
 
 8. Đường đi của `open(path)` trong VFS, và "everything is a file" sai ở đâu?
 <details><summary>Đáp án</summary>
 
-dcache → dentry → inode → `struct file` → bảng fd[^vfs-dcache][^vfs-file][^vfs-file-table]. Không phải mọi thao tác hợp lệ với mọi fd: `lseek` lỗi `ESPIPE` với pipe/socket/FIFO[^lseek-espipe].
+Đi qua dcache[^vfs-dcache], rồi dentry → inode → `struct file`[^vfs-file], cuối cùng vào bảng fd[^vfs-file-table]. Không phải mọi thao tác hợp lệ với mọi fd: `lseek` lỗi `ESPIPE` với pipe/socket/FIFO[^lseek-espipe].
 
 </details>
 
 9. Vì sao `File::open` không rò fd sang `Command` còn `dup` FFI thô thì có; vì sao `from_raw_fd` là `unsafe`?
 <details><summary>Đáp án</summary>
 
-std đặt `O_CLOEXEC`[^rs-fs-cloexec], `dup` không copy `FD_CLOEXEC`[^dup-flags]. `from_raw_fd` đòi fd sở hữu và đang mở[^rs-fromraw-safety]; hàm an toàn nhận số trần là unsound[^rs-iosafety-unsound].
+std đặt `O_CLOEXEC`[^rs-fs-cloexec], còn `dup` không copy `FD_CLOEXEC`[^dup-flags]. `from_raw_fd` đòi fd sở hữu và đang mở[^rs-fromraw-safety]; hàm an toàn nhận số trần là unsound[^rs-iosafety-unsound].
 
 </details>
 

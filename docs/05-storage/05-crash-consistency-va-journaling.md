@@ -19,25 +19,23 @@
 
 ## 1. Bài toán: cập nhật nhiều cấu trúc trên đĩa mà máy có thể chết bất kỳ lúc nào (Q1)
 
-> **Trả lời ngắn.** Để append một block, file system phải sửa ba cấu trúc: inode, bitmap dữ liệu và chính data block[^three]. Máy sập khi mới ghi một phần thì để lại sáu kịch bản trung gian: một kịch bản chỉ như chưa ghi gì, năm kịch bản còn lại là bất nhất, rò rỉ không gian hoặc inode trỏ tới rác[^scen1][^scen2]. `fsck` là cách chữa kiểu cũ: sửa sau khi khởi động lại, nhưng chỉ làm metadata nhất quán nội bộ và phải quét cả đĩa[^fsck-intro][^fsck-slow].
+> **Trả lời ngắn.** Để append một block, file system phải sửa ba cấu trúc: inode, bitmap dữ liệu và chính data block[^three]. Nếu máy sập khi mới ghi được một phần thì đĩa rơi vào một trong sáu trạng thái dở dang: một trạng thái vô hại vì như chưa ghi gì, năm trạng thái còn lại gây bất nhất, rò rỉ không gian hoặc để inode trỏ tới rác[^scen2]. `fsck` là cách chữa kiểu cũ: sửa sau khi khởi động lại, nhưng chỉ làm metadata nhất quán nội bộ[^fsck-intro]. Muốn vậy nó phải quét cả đĩa nên rất chậm[^fsck-slow].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chuyển nhà bằng ba chuyến xe (hộp đồ, sổ địa chỉ, biển tên cửa) mà xe có thể chết bất kỳ lúc nào. Chết giữa chừng thì sổ địa chỉ ghi một đằng, nhà thực tế một nẻo.
+*Với service của bạn.* Hãy hình dung `orders`, một service Rust chạy trên Linux với ext4, nhận đơn hàng và nối mỗi đơn vào cuối file `orders.log`. Ta sẽ bám theo `orders` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Mỗi lần nối, `orders` chỉ thấy một lời gọi `write` trả về. Nhưng bên dưới, file system phải sửa nhiều chỗ trên đĩa để lần nối đó thành thật, và máy có thể mất điện đúng giữa chừng. Câu hỏi của mục này: lúc ấy `orders.log` còn lại gì, và file system có tự sửa được không?
 
-Cấu trúc dữ liệu trong RAM mất khi tắt máy là chuyện bình thường; cấu trúc của file system thì phải "sống sót" qua mất điện. OSTEP gọi vấn đề là *crash-consistency problem*: cần cập nhật hai cấu trúc A và B trên đĩa để hoàn thành một thao tác, nhưng đĩa chỉ nhận từng yêu cầu một, nên nếu máy sập sau khi một yêu cầu hoàn tất thì trạng thái trên đĩa sẽ không nhất quán.[^crux]
+Cấu trúc dữ liệu trong RAM mất khi tắt máy thì chẳng ai ngạc nhiên; cấu trúc của file system thì phải sống sót qua mất điện. Khó ở chỗ một thao tác của file system thường phải cập nhật hai cấu trúc trên đĩa, gọi là A và B, mà đĩa chỉ nhận từng yêu cầu một. Nếu máy sập ngay sau khi một yêu cầu xong, đĩa nằm ở trạng thái không nhất quán. Đó là *crash-consistency problem*[^crux].
 
-### 1.1 Ví dụ: append một block
+### 1.1 `orders` nối một block vào `orders.log`
 
-OSTEP dùng một file system đồ chơi: bitmap inode 8 bit, bitmap data 8 bit, 8 inode, 8 data block. Ban đầu inode số 2 đang dùng, trỏ tới data block 4 (`I[v1]`, size = 1). Workload: mở file, `lseek` tới cuối, `write` 4 KB, đóng.[^example]
+Để thấy cụ thể, ta dùng một file system đồ chơi: 8 inode, 8 data block, mỗi loại có một bitmap 8 bit. Giả sử `orders.log` là inode số 2, đang trỏ tới data block 4 (`I[v1]`, size = 1), và `orders` nối thêm 4 KB: mở file, `lseek` tới cuối, `write` 4 KB, đóng[^example].
 
-Để append, file system phải thay đổi **ba** cấu trúc: inode mới `I[v2]` (trỏ thêm block 5, size = 2), bitmap data mới `B[v2]` (`00001100`) và chính data block `Db`.[^three]
-
-Ba block này lúc đầu chỉ nằm trong bộ nhớ (page cache/buffer cache) một lúc rồi mới được ghi xuống đĩa — nên giữa chúng luôn có một khoảng thời gian mà crash có thể xen vào.[^delay]
+Lần nối này làm đổi **ba** thứ: inode mới `I[v2]` (trỏ thêm block 5, size = 2), bitmap data mới `B[v2]` (`00001100`) và chính data block `Db`[^three]. Cả ba lúc đầu chỉ nằm trong bộ nhớ (page cache hoặc buffer cache) một lúc rồi mới xuống đĩa, nên giữa chúng luôn có một khoảng thời gian để crash chen vào[^delay].
 
 ### 1.2 Sáu kịch bản crash
 
-OSTEP đếm: nếu chỉ một lần ghi tới được đĩa thì có ba kết quả, nếu hai lần ghi thành công còn lần cuối hỏng thì có thêm ba kết quả nữa; tổng 6 (không tính "chưa ghi gì" và "ghi đủ"; con số 6 cũng bằng 2³ − 2, phép tính của người soạn).[^scen1][^scen2]
+Thử đếm xem crash để lại những gì. Nếu chỉ một lần ghi kịp xuống đĩa thì có ba khả năng; chẳng hạn chỉ `B[v2]` xuống, bitmap báo block 5 đã cấp phát mà không inode nào trỏ tới nó[^scen1]. Nếu hai lần ghi xong còn lần cuối hỏng thì có thêm ba khả năng; chẳng hạn `I[v2]` và `B[v2]` xuống mà `Db` chưa, khi đó metadata hoàn toàn nhất quán[^scen2]. Tổng cộng 6 kịch bản, chưa tính "chưa ghi gì" và "ghi đủ" (con số 6 cũng bằng 2³ − 2, phép tính của người soạn).
 
 | # | Đã xuống đĩa | Hậu quả |
 |---|---|---|
@@ -48,22 +46,23 @@ OSTEP đếm: nếu chỉ một lần ghi tới được đĩa thì có ba kết
 | 5 | `I[v2]` + `Db` | Bất nhất inode–bitmap |
 | 6 | `B[v2]` + `Db` | Bất nhất; không biết block thuộc file nào |
 
-Hai điều nên rút ra:
+Bảng cho thấy hai loại hỏng khác hẳn nhau. Loại thứ nhất là *bất nhất cấu trúc*: inode nói một đằng, bitmap nói một nẻo. Loại thứ hai là *dữ liệu rác*, và kịch bản 4 là ví dụ thuần túy: metadata hoàn toàn nhất quán nên đối chiếu metadata không thấy gì, trong khi inode trỏ tới rác[^scen2]. Với `orders`, đó là trường hợp đáng sợ nhất: file dài thêm 4 KB, mọi công cụ kiểm tra cấu trúc đều hài lòng, nhưng 4 KB cuối là rác (nhận xét của người soạn).
 
-- Có hai loại hỏng khác nhau: *bất nhất cấu trúc* (inode nói một đằng, bitmap nói một nẻo) và *dữ liệu rác*. Kịch bản 4 là loại rác thuần túy: metadata hoàn toàn nhất quán nên đối chiếu metadata không thấy gì; kịch bản 2 vừa bất nhất vừa trỏ tới rác.[^scen2]
-- Mục tiêu lý tưởng là chuyển file system *nguyên tử* từ trạng thái nhất quán này sang trạng thái nhất quán khác, nhưng đĩa chỉ commit từng lần ghi một.[^goal]
+Lý tưởng nhất là file system chuyển nguyên tử từ trạng thái nhất quán này sang trạng thái nhất quán khác. Điều đó không làm được trực tiếp vì đĩa chỉ commit từng lần ghi một[^goal].
 
 ### 1.3 Giải pháp cũ: `fsck`
 
-Các file system đời đầu chọn cách "để bất nhất xảy ra rồi sửa sau khi khởi động lại": công cụ `fsck` (file system checker). Nó chạy **trước khi mount** và giả định không còn hoạt động file system nào khác. Điều quan trọng: `fsck` không sửa được mọi thứ — ví dụ trường hợp metadata nhất quán nhưng inode trỏ tới rác thì nó không làm gì được; mục tiêu thật sự chỉ là làm metadata nhất quán nội bộ.[^fsck-intro]
+Các file system đời đầu chọn cách để bất nhất xảy ra rồi sửa sau, lúc khởi động lại, bằng công cụ `fsck` (file system checker). Nó chạy **trước khi mount** và giả định không còn hoạt động nào khác trên file system[^fsck-phases1]. Nhưng `fsck` không sửa được mọi thứ. Mục tiêu thật sự của nó chỉ là làm metadata nhất quán nội bộ[^fsck-intro], nên với kịch bản 4, khi metadata đã nhất quán mà inode vẫn trỏ tới rác, nó không còn gì để sửa (suy luận của người soạn).
+
+Cái giá thứ hai là thời gian: `fsck` phải quét cả đĩa, nên `orders` chỉ lên lại được sau khi quét xong (nhận xét của người soạn). Phần Đi sâu nói chi tiết các pha của `fsck` và vì sao nó chậm.
 
 <details><summary>Đi sâu: các pha của <code>fsck</code> và vì sao nó chậm</summary>
 
-Các pha chính theo OSTEP: kiểm tra superblock (nghi hỏng thì dùng bản sao); quét inode và indirect block để dựng lại bitmap, **tin vào inode** khi bất đồng với bitmap; kiểm tra trạng thái inode; tự đếm link count bằng cách duyệt cây thư mục từ root (inode mồ côi chuyển vào `lost+found`); tìm block bị hai inode cùng trỏ; xóa con trỏ ngoài phạm vi phân vùng; kiểm tra cấu trúc thư mục.[^fsck-phases1][^fsck-phases2]
+`fsck` làm lần lượt các việc sau: kiểm tra superblock (nghi hỏng thì dùng bản sao); quét inode và indirect block để dựng lại bitmap, và **tin vào inode** khi bất đồng với bitmap; kiểm tra trạng thái inode; tự đếm link count bằng cách duyệt cây thư mục từ root; tìm block bị hai inode cùng trỏ; xóa con trỏ ngoài phạm vi phân vùng; kiểm tra cấu trúc thư mục. Inode đang cấp phát mà không thư mục nào nhắc tới thì bị chuyển vào `lost+found`[^fsck-phases2].
 
 ### Vì sao `fsck` chậm
 
-Vấn đề lớn nhất là hiệu năng: với ổ lớn, quét toàn bộ đĩa để tìm block đã cấp phát và đọc cả cây thư mục có thể mất nhiều phút đến hàng giờ.[^fsck-slow] OSTEP ví von: chỉ ghi dở ba block mà phải quét cả đĩa giống như làm rơi chìa khóa trong phòng ngủ rồi lục soát cả nhà từ tầng hầm.[^keys] Chi phí recovery của `fsck` tỷ lệ với kích thước volume, còn journaling thì tỷ lệ với kích thước log — OSTEP viết là O(size-of-the-disk-volume) so với O(size-of-the-log).[^summary]
+Vấn đề lớn nhất là hiệu năng. Với ổ lớn, quét toàn bộ đĩa để tìm block đã cấp phát rồi đọc cả cây thư mục có thể mất nhiều phút đến hàng giờ[^fsck-slow], dù việc dở chỉ là ba block. Nói cách khác, chi phí recovery của `fsck` tăng theo kích thước volume, còn journaling thì tăng theo kích thước log[^summary].
 
 </details>
 
@@ -71,34 +70,36 @@ Vấn đề lớn nhất là hiệu năng: với ổ lớn, quét toàn bộ đ�
 
 ## 2. Journaling (write-ahead logging): giao thức và recovery (Q2)
 
-> **Trả lời ngắn.** Journaling ghi trước một "ghi chú" vào log ở chỗ cố định rồi mới sửa tại chỗ[^wal-idea]. Một transaction gồm TxB, nội dung cập nhật và TxE[^txb], và TxE chỉ được phát sau khi các lần ghi còn lại đã xong[^timeline]. Sau crash, recovery replay các transaction đã commit và bỏ qua phần chưa commit[^recovery].
+> **Trả lời ngắn.** Journaling ghi trước một "ghi chú" mô tả việc sắp làm vào log ở một chỗ cố định, rồi mới sửa tại chỗ[^wal-idea]. Một transaction gồm TxB, nội dung cập nhật và TxE[^txb]. TxE chỉ được phát sau khi các lần ghi còn lại đã xong[^timeline]. Sau crash, recovery replay các transaction đã commit và bỏ qua phần chưa commit[^recovery].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): kế toán viết phiếu thay đổi vào sổ nhật ký trước khi sửa sổ cái. Mất điện giữa chừng thì đọc nhật ký để biết phải làm nốt việc gì, thay vì rà cả sổ cái.
+*Với service `orders`.* Nếu ext4 cứ sửa thẳng inode, bitmap và data block mỗi khi `orders` nối log, mất điện sẽ để lại một trong sáu trạng thái ở mục 1 mà chỉ `fsck` mới dọn được. Journaling đổi cách làm: ext4 ghi lại việc sắp làm vào một chỗ riêng, chờ cho bản ghi đó nằm chắc trên đĩa, rồi mới sửa thật. Mục này đi qua bản ghi ấy gồm những gì, ghi theo thứ tự nào, và đọc lại sau crash ra sao.
 
-Ý tưởng mượn từ database: *write-ahead logging*, trong file system quen gọi là *journaling*.[^wal-db] Trước khi ghi đè cấu trúc tại chỗ, hãy ghi một "ghi chú" mô tả việc sắp làm vào một chỗ cố định (log). Nếu crash giữa lúc cập nhật, sau khi khởi động xem lại ghi chú để biết chính xác cần làm lại gì, thay vì quét cả đĩa. Journaling thêm một ít việc lúc cập nhật để giảm mạnh việc lúc recovery.[^wal-idea] Cedar là file system đầu tiên áp dụng;[^cedar] ext3, ext4, reiserfs, JFS, XFS và NTFS đều dùng ý tưởng này.[^wal-list]
+Ý tưởng này mượn từ database: *write-ahead logging*, mà trong file system quen gọi là *journaling*[^wal-db]. Trước khi ghi đè cấu trúc tại chỗ, file system ghi một "ghi chú" mô tả việc sắp làm vào một chỗ cố định gọi là log. Nếu crash giữa lúc cập nhật, sau khi khởi động chỉ cần đọc log là biết cần làm lại gì, khỏi quét cả đĩa. Nói gọn, journaling thêm một ít việc lúc cập nhật để giảm mạnh việc lúc recovery[^wal-idea]. Cedar là file system đầu tiên áp dụng[^cedar]; ext3, ext4, reiserfs, JFS, XFS và NTFS đều dùng ý tưởng này[^wal-list].
 
-Với ext3 (và ext4 sau này), cấu trúc trên đĩa gần như ext2, khác là có thêm journal — nằm trong cùng phân vùng, hoặc trên thiết bị riêng, hoặc là một file.[^journal-place] Trong ext4 hiện tại, journal "là một file bình thường nhưng bị ẩn", thường là inode số 8; hoặc có thể dùng journal device ngoài.[^jbd2-inode]
+Với ext3 (và ext4 sau này), cấu trúc trên đĩa gần như ext2, chỉ khác là có thêm journal. Journal có thể nằm ngay trong phân vùng, trên một thiết bị riêng, hoặc là một file[^journal-place]. Trong ext4 hiện tại, journal là một file bình thường nhưng bị ẩn, thường là inode số 8; cũng có thể dùng journal device ngoài[^jbd2-inode].
 
 ### 2.1 Data journaling: TxB, nội dung, TxE
 
-Với ví dụ append, ta ghi vào journal 5 block: `TxB`, `I[v2]`, `B[v2]`, `Db`, `TxE`. `TxB` (transaction begin) chứa thông tin về cập nhật sắp tới — gồm địa chỉ đích cuối cùng của các block — và transaction ID (TID); ba block giữa là *bản sao nguyên văn* nội dung block (*physical logging*; ngược lại *logical logging* ghi biểu diễn gọn như "append block Db vào file X"); `TxE` đánh dấu hết transaction và cũng mang TID.[^txb]
+Với lần nối của `orders`, ta ghi vào journal 5 block: `TxB`, `I[v2]`, `B[v2]`, `Db`, `TxE`. `TxB` (transaction begin) chứa thông tin về cập nhật sắp tới, gồm địa chỉ đích cuối cùng của các block, cùng một transaction ID (TID). Ba block ở giữa là *bản sao nguyên văn* nội dung các block (*physical logging*; ngược lại, *logical logging* ghi biểu diễn gọn như "append block Db vào file X"). `TxE` đánh dấu hết transaction và cũng mang TID[^txb].
 
-Khi transaction đã nằm an toàn trong journal, file system ghi đè các cấu trúc ở chỗ chính thức: đó là **checkpointing**.[^checkpoint]
+Khi transaction đã nằm an toàn trong journal, file system mới ghi đè các cấu trúc ở chỗ chính thức. Bước này gọi là **checkpointing**[^checkpoint].
 
-Giao thức hoàn chỉnh cuối cùng của data journaling có 4 bước:[^proto4]
+Giao thức hoàn chỉnh của data journaling có 4 bước[^proto4]:
 
-1. **Journal write** — ghi TxB và nội dung update vào log, chờ xong.
-2. **Journal commit** — ghi block commit (chứa TxE), chờ xong; transaction được coi là *committed*.
-3. **Checkpoint** — ghi nội dung update ra vị trí cuối cùng.
-4. **Free** — sau này đánh dấu transaction là rảnh trong journal superblock.
+1. **Journal write**: ghi TxB và nội dung update vào log, chờ xong.
+2. **Journal commit**: ghi block commit (chứa TxE), chờ xong; transaction được coi là *committed*.
+3. **Checkpoint**: ghi nội dung update ra vị trí cuối cùng.
+4. **Free**: sau này đánh dấu transaction là rảnh trong journal superblock.
 
 #### Vì sao tách commit ra bước riêng
 
-Muốn nhanh thì phát cả 5 lần ghi cùng lúc. Nhưng đĩa có thể sắp xếp lại nội bộ và hoàn tất từng phần theo thứ tự bất kỳ. Nếu mất điện sau khi `TxB`, `I[v2]`, `B[v2]`, `TxE` xuống đĩa mà `Db` chưa: journal trông như một transaction hợp lệ (đầu–cuối có TID khớp) và file system **không thể** nhận ra block thứ tư là sai vì đó là dữ liệu người dùng tùy ý. Recovery sẽ replay và chép rác vào chỗ của `Db` — tệ hơn nhiều nếu đó là một cấu trúc trọng yếu như superblock.[^torn-commit] Vì thế file system ghi mọi thứ trừ `TxE` trước, chờ xong rồi mới ghi `TxE`. OSTEP lưu ý để việc ghi `TxE` nguyên tử thì nên gói nó trong một block 512 byte, dựa vào bảo đảm "ghi 512 byte hoặc xảy ra trọn vẹn hoặc không".[^atomic512]
+Muốn nhanh thì cứ phát cả 5 lần ghi cùng lúc. Nhưng đĩa có thể sắp xếp lại nội bộ và hoàn tất từng phần theo thứ tự bất kỳ. Giả sử mất điện sau khi `TxB`, `I[v2]`, `B[v2]`, `TxE` đã xuống đĩa mà `Db` chưa. Journal khi đó trông như một transaction hợp lệ, vì đầu và cuối có TID khớp nhau, và file system **không thể** nhận ra block thứ tư là sai: đó chỉ là dữ liệu người dùng tùy ý. Recovery sẽ replay và chép rác vào chỗ của `Db`, và còn tệ hơn nhiều nếu block bị chép đè là một cấu trúc trọng yếu như superblock[^torn-commit].
 
-Mermaid dưới đây mô tả thứ tự bắt buộc (đường nét đứt trong hình OSTEP là các ràng buộc thứ tự):
+Vì vậy file system ghi mọi thứ trừ `TxE` trước, chờ xong rồi mới ghi `TxE`. Để việc ghi `TxE` nguyên tử, nên gói nó trong một block 512 byte, dựa vào bảo đảm rằng ghi 512 byte hoặc xảy ra trọn vẹn hoặc không xảy ra[^atomic512].
+
+Sơ đồ dưới đây vẽ thứ tự bắt buộc:
 
 ```mermaid
 sequenceDiagram
@@ -114,35 +115,37 @@ sequenceDiagram
     FS->>J: cập nhật journal superblock (free)
 ```
 
-Hình trên dựa trên mô tả giao thức và timeline của OSTEP.[^proto4][^timeline]
+Sơ đồ là của người soạn, dựng từ giao thức 4 bước ở trên[^proto4]. Ràng buộc "TxE chỉ được phát sau các lần ghi còn lại" lấy từ timeline của OSTEP[^timeline].
 
 ### 2.2 Recovery
 
-Crash có thể ở bất kỳ điểm nào:[^recovery]
+Bây giờ quay lại câu hỏi ban đầu: máy mất điện thì `orders.log` ra sao? Điều đó phụ thuộc crash rơi vào điểm nào[^recovery]:
 
-- Trước khi transaction commit xong vào log: bỏ qua cập nhật đang chờ.
-- Sau commit nhưng trước khi checkpoint xong: lúc boot, file system quét log, tìm các transaction đã commit và **replay theo thứ tự** để ghi lại các block ra vị trí chính thức. Kiểu này gọi là **redo logging**.
-- Crash giữa chừng checkpoint cũng ổn: tệ nhất là một số lần ghi bị làm lại; vì recovery hiếm xảy ra nên vài lần ghi dư không đáng lo.
+- Crash trước khi transaction commit xong vào log: file system bỏ qua cập nhật đang chờ.
+- Crash sau commit nhưng trước khi checkpoint xong: lúc boot, file system quét log, tìm các transaction đã commit và **replay theo thứ tự** để ghi lại các block ra vị trí chính thức. Kiểu này gọi là **redo logging**.
+- Crash giữa chừng checkpoint cũng ổn: tệ nhất là một số lần ghi bị làm lại, mà recovery hiếm xảy ra nên vài lần ghi dư không đáng lo.
 
-Tài liệu kernel mô tả cùng ý ở mức jbd2: journal được replay "cho tới commit record mới nhất", đảm bảo tính nguyên tử của những gì ghi qua journal.[^jbd2-intro]
+Ở mức jbd2 (lớp journal của ext4), tài liệu kernel mô tả cùng ý: journal được replay tới commit record mới nhất, nhờ đó những gì ghi qua journal có tính nguyên tử[^jbd2-intro].
 
-Vậy ví dụ 6 kịch bản ở mục 1 giờ ra sao? Mọi thứ nằm trong journal trước khi ghi vào chỗ chính thức nên: hoặc transaction chưa commit (như chưa xảy ra gì, file như cũ) hoặc đã commit (replay đầy đủ cả ba block). Không còn trạng thái "một nửa" ở vị trí chính thức nào mà journal không thể sửa. (suy luận của người soạn, từ giao thức ở mục 2.1)
+Vậy sáu kịch bản ở mục 1 giờ ra sao? Mọi thứ đã nằm trong journal trước khi được ghi vào chỗ chính thức, nên chỉ còn hai khả năng: transaction chưa commit (như chưa có gì xảy ra, file như cũ) hoặc đã commit (replay đủ cả ba block). Ở vị trí chính thức không còn trạng thái "một nửa" nào mà journal không sửa được (suy luận của người soạn, từ giao thức ở mục 2.1).
 
 ### 2.3 Batching: gộp cập nhật
 
-Giao thức cơ bản có thể sinh nhiều lưu lượng thừa: tạo `file1` rồi `file2` trong cùng thư mục đều chạm bitmap inode, inode, data block của thư mục và inode thư mục — ghi đi ghi lại cùng các block. Cách khắc phục (ví dụ ext3): đệm mọi cập nhật vào **một transaction toàn cục**, đến lúc hết timeout (ví dụ 5 giây) mới commit một lần.[^batch]
+Giao thức cơ bản có thể sinh nhiều lưu lượng thừa. `orders` tạo `file1` rồi `file2` trong cùng một thư mục thì cả hai lần đều chạm bitmap inode, inode, data block của thư mục và inode thư mục, tức ghi đi ghi lại cùng các block. Để tránh, ext3 đệm mọi cập nhật vào **một transaction toàn cục** và đến lúc hết timeout (ví dụ 5 giây) mới commit một lần[^batch].
 
 ### 2.4 Journal tròn
 
-Log có kích thước hữu hạn. Hai vấn đề khi đầy: log càng lớn recovery càng lâu (phải replay hết), và quan trọng hơn là log đầy thì không commit được transaction mới. Giải pháp: coi log là cấu trúc **vòng** (circular log). Sau khi một transaction đã checkpoint, không gian của nó được giải phóng để dùng lại — ví dụ ghi vào *journal superblock* (khác với superblock của file system) vị trí transaction cũ nhất và mới nhất chưa checkpoint.[^circular] Đó là lý do có bước 4 "Free" ở giao thức.
+Log có kích thước hữu hạn, và đầy là rắc rối. Log càng lớn thì recovery càng lâu vì phải replay hết, còn nghiêm trọng hơn là log đầy thì không commit được transaction mới. Cách giải quyết là coi log như một cấu trúc **vòng** (circular log). Sau khi một transaction đã checkpoint, chỗ của nó được giải phóng để dùng lại; chẳng hạn ghi vào *journal superblock* (khác superblock của file system) vị trí của transaction cũ nhất và mới nhất chưa checkpoint[^circular]. Đó là lý do giao thức có bước 4 "Free".
 
 <details><summary>Đi sâu: <code>commit=</code> của ext4 và checksum thay cho lần chờ</summary>
 
-Với ext4 mount option `commit=nrsec` đặt tuổi tối đa của transaction đang chạy, mặc định 5 giây; nghĩa là mất điện có thể mất tới 5 giây thay đổi metadata mới nhất (nhưng file system không hỏng). Do delayed allocation, dữ liệu cũ hơn còn có thể mất vì writeback chỉ bắt đầu sau `dirty_expire_centisecs`.[^commit]
+Mount option `commit=nrsec` của ext4 đặt tuổi tối đa của transaction đang chạy, mặc định 5 giây. Nghĩa là mất điện có thể mất tới 5 giây thay đổi metadata mới nhất (file system vẫn không hỏng). Do delayed allocation, dữ liệu cũ hơn còn có thể mất vì writeback chỉ bắt đầu sau `dirty_expire_centisecs`[^commit].
 
 #### Tối ưu của ext4: checksum thay cho lần chờ
 
-Chờ nhóm ghi đầu xong rồi mới ghi `TxE` tốn thêm một vòng quay đĩa. Ý tưởng của Prabhakaran và cộng sự: đặt **checksum** của nội dung journal vào block begin/end, cho phép ghi cả transaction một lần; khi recovery thấy checksum không khớp thì kết luận crash xảy ra giữa lúc ghi và bỏ transaction. Ý tưởng này được đưa vào ext4.[^txcsum] Tài liệu kernel cho ext4: mount option `journal_checksum` bật checksum cho transaction của journal để code recovery của `e2fsck` và kernel phát hiện hỏng;[^jchk] `journal_async_commit` cho phép commit block được ghi mà không chờ descriptor block, và bật `journal_checksum` ngầm.[^jcsum] Trong định dạng jbd2, một transaction hoàn thành luôn kết thúc bằng commit; nếu không có commit record (hoặc checksum không khớp) thì transaction bị bỏ khi replay.[^jbd2-layout]
+Chờ nhóm ghi đầu xong rồi mới ghi `TxE` tốn thêm một vòng quay đĩa. Prabhakaran và cộng sự đề xuất đặt **checksum** của nội dung journal vào block begin và end, để ghi cả transaction một lần. Khi recovery thấy checksum không khớp thì kết luận crash xảy ra giữa lúc ghi và bỏ transaction đó. Ý tưởng này đã được đưa vào ext4[^txcsum].
+
+Trong tài liệu kernel cho ext4, mount option `journal_checksum` bật checksum cho transaction của journal để code recovery của `e2fsck` và kernel phát hiện hỏng[^jchk]. Option `journal_async_commit` cho phép ghi commit block mà không chờ descriptor block, và bật `journal_checksum` ngầm[^jcsum]. Còn trong định dạng jbd2, một transaction hoàn thành luôn kết thúc bằng commit; thiếu commit record (hoặc checksum không khớp) thì transaction bị bỏ khi replay[^jbd2-layout].
 
 </details>
 
@@ -150,43 +153,43 @@ Chờ nhóm ghi đầu xong rồi mới ghi `TxE` tốn thêm một vòng quay �
 
 ## 3. Ordered journaling và ba mode `data=` của ext4 (Q3)
 
-> **Trả lời ngắn.** Ordered (metadata) journaling không ghi dữ liệu người dùng vào journal, chỉ metadata, nhưng bắt buộc dữ liệu được ghi ra chỗ chính trước khi commit[^md-journal][^md-proto]. ext4 có ba mode: `data=journal` (cả dữ liệu vào journal), `data=ordered` (mặc định) và `data=writeback` (không bảo đảm thứ tự, có thể lộ dữ liệu cũ sau shutdown không sạch)[^ext4-journal][^ext4-ordered][^ext4-wb][^wb-sec].
+> **Trả lời ngắn.** Ordered (metadata) journaling chỉ đưa metadata vào journal, còn dữ liệu người dùng thì không[^md-journal]. Đổi lại, dữ liệu phải được ghi ra chỗ chính trước khi commit[^md-proto]. ext4 cho chọn ba mode `data=`: `journal` (cả dữ liệu vào journal), `ordered` (mặc định) và `writeback` (không bảo đảm thứ tự)[^ext4-wb]. Riêng `writeback` có thể để lộ dữ liệu cũ sau một lần shutdown không sạch[^wb-sec].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): data journaling như photocopy mọi tài liệu vào hồ sơ tạm trước khi cất vào tủ chính; ordered chỉ photocopy phiếu mục lục nhưng bắt buộc tài liệu thật phải vào tủ trước khi phiếu mục lục có hiệu lực.
+*Với service `orders`.* `orders` ghi log tuần tự, mỗi đơn một lần nối. Nếu ext4 đưa cả dữ liệu vào journal, mỗi block của `orders.log` sẽ bị ghi hai lần: một lần vào journal, một lần ra chỗ chính. Mục này trả lời câu hỏi `orders` nên trả giá thế nào cho sự an toàn đó, và ba mode của ext4 cho `orders` những bảo đảm nào.
 
-Data journaling ghi mỗi data block **hai lần** — phí đắt cho một thứ hiếm như crash. Trong workload ghi tuần tự, băng thông ghi bị giảm còn một nửa đỉnh của ổ và còn thêm seek giữa journal và vùng chính.[^dj-cost] Dạng phổ biến hơn là *ordered journaling* hay *metadata journaling*: gần như giống hệt nhưng dữ liệu người dùng không vào journal, chỉ `TxB`, `I[v2]`, `B[v2]`, `TxE`.[^md-journal]
+Data journaling ghi mỗi data block **hai lần**, một cái giá đắt cho một chuyện hiếm như crash. Với workload ghi tuần tự như của `orders`, băng thông ghi tụt còn một nửa đỉnh của ổ, và còn thêm seek giữa journal với vùng chính[^dj-cost]. Dạng phổ biến hơn là *ordered journaling* hay *metadata journaling*. Nó gần như giống hệt, trừ việc dữ liệu người dùng không vào journal: chỉ `TxB`, `I[v2]`, `B[v2]`, `TxE` được ghi[^md-journal].
 
-Nhưng nảy sinh câu hỏi *khi nào ghi `Db`*. Nếu ghi sau khi transaction commit: crash lúc `I[v2]`, `B[v2]` đã nằm trong log mà `Db` chưa tới đĩa, recovery replay metadata và tạo ra file system nhất quán về metadata nhưng inode trỏ tới rác (kịch bản 4 ở §1).[^md-order] Giao thức đúng:[^md-proto]
+Nhưng lúc nào thì ghi `Db`? Nếu ghi sau khi transaction đã commit, crash xen vào giữa sẽ để `I[v2]` và `B[v2]` nằm trong log mà `Db` chưa tới đĩa. Recovery replay metadata, ra một file system nhất quán về metadata nhưng inode lại trỏ tới rác, chính là kịch bản 4 ở mục 1[^md-order]. Giao thức đúng như sau[^md-proto]:
 
-1. **Data write** — ghi dữ liệu ra vị trí cuối cùng (có thể chưa cần chờ).
-2. **Journal metadata write** — ghi begin block và metadata vào log.
-3. **Journal commit** — ghi commit block; chờ xong.
+1. **Data write**: ghi dữ liệu ra vị trí cuối cùng (có thể chưa cần chờ).
+2. **Journal metadata write**: ghi begin block và metadata vào log.
+3. **Journal commit**: ghi commit block, chờ xong.
 4. **Checkpoint metadata**.
 5. **Free**.
 
-Quy tắc cốt lõi: *ghi đối tượng được trỏ tới trước đối tượng trỏ tới nó*. Không bắt buộc chờ bước 1 xong trước bước 2; yêu cầu thật sự chỉ là bước 1 và 2 hoàn tất trước khi phát block commit.[^md-proto]
-
-Theo OSTEP, metadata journaling "nhiều hơn" phổ biến hơn full data journaling: Windows NTFS và SGI XFS đều dùng dạng metadata journaling; ext3 cho chọn data, ordered hoặc unordered; mọi mode đều giữ metadata nhất quán, chỉ khác ngữ nghĩa với dữ liệu.[^md-popular]
+Quy tắc đằng sau là ghi cái được trỏ tới trước cái trỏ tới nó (nhận xét của người soạn, rút từ giao thức trên). Bước 1 không nhất thiết phải xong trước khi bắt đầu bước 2; yêu cầu thật sự chỉ là bước 1 và 2 hoàn tất trước khi phát block commit[^md-proto].
 
 ### 3.1 ext4: ba mode `data=`
 
-Tài liệu kernel cho ext4 mô tả ba mode:[^ext4-journal][^ext4-ordered][^ext4-wb]
+Tài liệu kernel cho ext4 mô tả ba mode như sau:
 
 | Mode | Ngữ nghĩa theo docs | Lưu ý |
 |---|---|---|
-| `data=journal` | Toàn bộ dữ liệu được commit vào journal trước khi ghi vào file system chính | Tắt delayed allocation và hỗ trợ `O_DIRECT`; chậm nhất, trừ khi vừa đọc vừa ghi cùng lúc |
-| `data=ordered` (mặc định) | Dữ liệu được đẩy ra file system chính **trước** khi metadata của chúng được commit vào journal | Chỉ metadata thật sự vào journal; nhưng nhóm metadata liên quan vào cùng transaction với dữ liệu[^ordered-group] |
-| `data=writeback` | Không bảo đảm thứ tự: dữ liệu có thể được ghi sau khi metadata đã commit | Sau crash có thể thấy dữ liệu sai trong file vừa ghi; thường nhanh nhất[^wb-incorrect] |
+| `data=journal` | Toàn bộ dữ liệu được commit vào journal trước khi ghi vào file system chính[^ext4-journal] | Tắt delayed allocation và hỗ trợ `O_DIRECT`; chậm nhất, trừ khi vừa đọc vừa ghi cùng lúc |
+| `data=ordered` (mặc định) | Dữ liệu được đẩy ra file system chính **trước** khi metadata của chúng được commit vào journal[^ext4-ordered] | Chỉ metadata thật sự vào journal; nhưng nhóm metadata liên quan vào cùng transaction với dữ liệu[^ordered-group] |
+| `data=writeback` | Không bảo đảm thứ tự: dữ liệu có thể được ghi sau khi metadata đã commit[^ext4-wb] | Sau crash có thể thấy dữ liệu sai trong file vừa ghi; thường nhanh nhất[^wb-incorrect] |
 
-Phần cảnh báo về `data=writeback` trong tài liệu: chạy mode này có thể để lộ dữ liệu cũ (stale data) trong file mới ghi sau shutdown không sạch — có thể là vấn đề bảo mật trong vài tình huống.[^wb-sec] Với jbd2, tài liệu nói: mặc định ext4 chỉ ghi metadata qua journal nên khối dữ liệu file *không* được bảo đảm ở trạng thái nhất quán nào sau crash.[^jbd2-default] Hãy đọc cho kỹ: "mặc định" bảo đảm *file system* nhất quán, không bảo đảm *nội dung file* của ứng dụng bạn (xem Chương 06).
+Với `writeback`, docs cảnh báo: chạy mode này có thể để lộ dữ liệu cũ (stale data) trong các file mới ghi sau một lần shutdown không sạch, và trong vài tình huống đó là vấn đề bảo mật[^wb-sec]. Còn mode mặc định chỉ ghi metadata qua journal, nên khối dữ liệu file *không* được bảo đảm ở trạng thái nhất quán nào sau crash[^jbd2-default]. Hãy đọc cho kỹ: "mặc định" bảo đảm *file system* nhất quán, không bảo đảm *nội dung file* của ứng dụng. Với `orders`, một lần mất điện có thể để lại `orders.log` mà phần đuôi không đúng những gì `orders` đã ghi; cách phòng là `fsync` đúng chỗ, xem [Chương 06](06-durability-trong-thuc-te.md).
 
-Có một trường hợp đáng nhớ với backend: ứng dụng ghi `foo.new` rồi `rename` đè `foo` mà không `fsync`. Nếu `auto_da_alloc` bật, ext4 phát hiện mẫu replace-via-rename/replace-via-truncate và ép các block delayed-allocation được cấp phát sao cho ở lần journal commit tiếp theo, trong mode ordered mặc định, dữ liệu file mới được đẩy xuống đĩa trước khi `rename()` được commit; docs gọi đó là tránh vấn đề "zero-length".[^autoda] Đây là cơ chế bù cụ thể của ext4 cho "ứng dụng thiếu fsync" (docs gọi thẳng là *broken applications*), không phải bảo đảm chung của mọi file system hay của POSIX (nhận xét của người soạn, dựa trên cách docs mô tả).
+Có một trường hợp đáng nhớ với backend. Giả sử `orders` ghi snapshot trạng thái ra `state.new` rồi `rename` đè lên `state` mà không `fsync`. Nếu `auto_da_alloc` bật, ext4 nhận ra mẫu replace-via-rename (và replace-via-truncate), rồi ép các block delayed-allocation được cấp phát để ở lần journal commit kế tiếp, trong mode ordered mặc định, dữ liệu file mới xuống đĩa trước khi `rename()` được commit. Docs gọi đó là tránh vấn đề "zero-length"[^autoda]. Đây là cơ chế bù cụ thể của ext4 cho ứng dụng thiếu `fsync` (docs gọi thẳng là *broken applications*), không phải bảo đảm chung của mọi file system hay của POSIX (nhận xét của người soạn, dựa trên cách docs mô tả).
 
-<details><summary>Đi sâu: ghim nguồn kernel cho các mount option</summary>
+<details><summary>Đi sâu: metadata journaling ở các file system khác và ghim nguồn kernel</summary>
 
-Lưu ý về nguồn: các trang `docs.kernel.org` dùng ở đây là bản docs mới nhất, **không ghim phiên bản**. Các câu về `data=`, `journal_checksum`, `journal_async_commit`, `commit=`, `barrier`, `auto_da_alloc` và `REQ_PREFLUSH/REQ_FUA` đã được đối chiếu với source kernel ghim tag v6.8 (`Documentation/admin-guide/ext4.rst`, `Documentation/block/writeback_cache_control.rst`) và giống nhau.[^v68]
+Metadata journaling phổ biến hơn full data journaling: Windows NTFS và SGI XFS đều dùng một dạng metadata journaling, còn ext3 cho chọn data, ordered hoặc unordered. Mọi mode đều giữ metadata nhất quán, chỉ khác nhau về ngữ nghĩa với dữ liệu[^md-popular].
+
+Về nguồn: các trang `docs.kernel.org` dùng ở đây là bản docs mới nhất, **không ghim phiên bản**. Các câu về `data=`, `journal_checksum`, `journal_async_commit`, `commit=`, `barrier`, `auto_da_alloc` và `REQ_PREFLUSH/REQ_FUA` đã được đối chiếu với source kernel ghim tag v6.8 (`Documentation/admin-guide/ext4.rst`, `Documentation/block/writeback_cache_control.rst`) và giống nhau[^v68].
 
 </details>
 
@@ -194,21 +197,21 @@ Lưu ý về nguồn: các trang `docs.kernel.org` dùng ở đây là bản doc
 
 ## 4. Block reuse và revoke record (Q4)
 
-> **Trả lời ngắn.** Khi một block bị xóa rồi cấp phát lại cho file khác, journal có thể còn giữ bản ghi cũ của block đó; replay nó sẽ đè nội dung cũ lên dữ liệu mới[^reuse]. Revoke record là loại record báo cho recovery không replay các block đã bị revoke[^revoke].
+> **Trả lời ngắn.** Khi một block bị xóa rồi cấp phát lại cho file khác, journal có thể còn giữ bản ghi cũ của block đó. Replay bản ghi ấy sẽ đè nội dung cũ lên dữ liệu mới[^reuse]. Revoke record là loại record báo cho recovery đừng replay các block đã bị revoke[^revoke].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): phiếu cũ vẫn nằm trong nhật ký, nhưng nếu nó mang dấu "đã hủy" thì khi làm lại nhật ký ta bỏ qua nó thay vì ghi đè lên thứ mới đặt vào chỗ đó.
+*Với service `orders`.* Giả sử `orders` có thư mục `spool/` chứa các đơn chờ xử lý. Xử lý xong, nó xóa cả thư mục rồi tạo file `report.csv`, và file mới này lại nhận đúng block mà thư mục vừa nhả ra (ví dụ giả định của người soạn). Nếu máy sập vào lúc đó, journal có thể bắt `report.csv` mang nội dung của thư mục cũ. Mục này giải thích vì sao, và ext3/ext4 chặn chuyện đó ra sao.
 
-Đây là một góc hiểm của journaling. Stephen Tweedie (một trong những người chính của ext3) được OSTEP dẫn: phần "hideous" của hệ thống là xóa file — mọi thứ liên quan đến việc block bị xóa rồi cấp phát lại đều dễ gây ác mộng.[^tweedie]
+Đây là một góc hiểm của journaling: mọi thứ liên quan tới việc xóa, tức block bị xóa rồi cấp phát lại, đều rắc rối[^tweedie].
 
-Kịch bản (metadata journaling): thư mục `foo` có block dữ liệu 1000; thêm một entry → nội dung thư mục (là metadata) được ghi vào log (`D[foo]`, đích 1000). Sau đó người dùng xóa sạch thư mục, block 1000 được giải phóng; rồi tạo file `bar` dùng lại block 1000. Chỉ inode của `bar` vào journal (dữ liệu không vào journal). Nếu bây giờ crash khi cả hai transaction vẫn nằm trong log, recovery sẽ replay mọi thứ, **kể cả ghi `D[foo]` vào block 1000**, đè lên dữ liệu hiện tại của `bar` bằng nội dung thư mục cũ.[^reuse]
+Kịch bản cụ thể (metadata journaling), vẫn theo ví dụ trên: thư mục `foo` có block dữ liệu 1000. Thêm một entry vào `foo` thì nội dung thư mục, vốn là metadata, được ghi vào log (`D[foo]`, đích là block 1000). Sau đó người dùng xóa sạch thư mục, block 1000 được giải phóng, rồi tạo file `bar` dùng lại block 1000. Chỉ inode của `bar` vào journal, còn dữ liệu của `bar` thì không. Nếu lúc này crash trong khi cả hai transaction vẫn nằm trong log, recovery sẽ replay mọi thứ, **kể cả ghi `D[foo]` vào block 1000**, và đè nội dung thư mục cũ lên dữ liệu hiện tại của `bar`[^reuse].
 
-Có nhiều cách: ví dụ không tái sử dụng block cho tới khi việc xóa đã checkpoint khỏi journal. Cách ext3 chọn là thêm loại record mới: **revoke record**. Xóa thư mục sinh revoke record; khi replay, hệ thống quét revoke record trước và không bao giờ replay các block bị revoke.[^revoke]
+Cách ext3 chọn là thêm một loại record mới, **revoke record**. Xóa thư mục sinh ra một revoke record; khi replay, hệ thống quét các revoke record trước và không bao giờ replay những block đã bị revoke[^revoke].
 
 <details><summary>Đi sâu: revocation block trong jbd2</summary>
 
-Trong jbd2, revocation block ngăn replay một block của transaction trước, thường khi block metadata được giải phóng rồi cấp phát lại làm block dữ liệu file; cơ chế này **không** dùng để nói "block journal này bị block khác thay thế".[^jbd2-revoke]
+Trong jbd2, revocation block ngăn replay một block của transaction trước, thường khi block metadata được giải phóng rồi cấp phát lại làm block dữ liệu file. Cơ chế này **không** dùng để nói "block journal này bị block khác thay thế"[^jbd2-revoke].
 
 </details>
 
@@ -216,26 +219,28 @@ Trong jbd2, revocation block ngăn replay một block của transaction trước
 
 ## 5. Thứ tự thật sự cần barrier / flush / FUA (Q5)
 
-> **Trả lời ngắn.** Ổ đĩa có bộ nhớ đệm ghi và có thể báo "xong" trước khi dữ liệu thật sự bền, nên thứ tự "ghi A xong rồi mới ghi B" không còn được bảo đảm nếu không ép[^barrier-aside][^wbc-intro]. Linux dùng hai cờ block layer để ép: `REQ_PREFLUSH` (flush cache trước khi I/O bắt đầu) và `REQ_FUA` (chỉ báo hoàn tất khi dữ liệu đã bền)[^wbc-flush][^wbc-fua].
+> **Trả lời ngắn.** Ổ đĩa có bộ nhớ đệm ghi và có thể báo "xong" trước khi dữ liệu thật sự bền, nên muốn giữ thứ tự "A xong rồi mới B" thì OS phải ép dữ liệu ra[^wbc-intro]. Linux ép bằng hai cờ của block layer. `REQ_PREFLUSH` flush cache trước khi I/O gắn cờ bắt đầu[^wbc-flush]. `REQ_FUA` chỉ báo hoàn tất khi dữ liệu đã bền[^wbc-fua].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhân viên giao hàng nói "đã giao" khi mới đặt kiện ở quầy lễ tân; muốn chắc kiện tới đúng phòng thì phải bắt ký nhận. Flush và FUA là chữ ký nhận đó.
+*Với service `orders`.* Giả sử `orders` gọi `fsync` sau khi nối một đơn vào `orders.log` và nhận về kết quả thành công. Nếu ổ đĩa vừa báo "xong" mà dữ liệu mới nằm trong cache của nó thì mất điện lúc này vẫn mất đơn, và cả thứ tự journal-rồi-commit của mục 2 cũng đổ theo. Các giao thức ở trên đều nói "chờ xong", và mục này hỏi: "xong" ở đâu?
 
-Các giao thức trên nói "chờ xong" — nhưng "xong" ở đâu? OSTEP: thời xưa chỉ cần phát A, chờ ổ ngắt báo xong rồi phát B. Với write cache trong ổ, ổ báo hoàn tất khi dữ liệu mới chỉ ở bộ nhớ cache của nó, nên thứ tự không được bảo toàn. Giải pháp: tắt write buffering, hoặc dùng **write barrier** tường minh. OSTEP cũng cảnh báo một số nhà sản xuất cố ý bỏ qua barrier để ổ trông nhanh hơn, ở cái giá là chạy sai.[^barrier-aside]
+Thời xưa mọi chuyện đơn giản: phát A, chờ ổ ngắt báo xong, rồi phát B. Với write cache trong ổ, ổ báo hoàn tất khi dữ liệu mới nằm ở cache của nó, nên thứ tự không còn được bảo toàn. Có hai lối ra: tắt write buffering, hoặc dùng **write barrier** tường minh. Đáng lưu ý là một số nhà sản xuất cố ý bỏ qua barrier để ổ trông nhanh hơn, và cái giá là chạy sai[^barrier-aside].
 
-Ở Linux, tài liệu block layer: nhiều thiết bị có write-back cache dễ bay hơi — báo hoàn tất cho OS trước khi dữ liệu thật sự vào bộ nhớ không mất điện — nên OS phải ép dữ liệu ra khi làm thao tác bảo toàn dữ liệu như `fsync`, `sync` hay unmount.[^wbc-intro] Block layer có hai cơ chế:[^wbc-flush][^wbc-fua]
+Ở Linux, tài liệu block layer nói nhiều thiết bị có write-back cache dễ bay hơi, báo hoàn tất cho OS trước khi dữ liệu thật sự vào bộ nhớ không mất điện. Vì vậy OS phải ép dữ liệu ra khi làm thao tác bảo toàn dữ liệu như `fsync`, `sync` hay unmount[^wbc-intro]. Block layer có hai cơ chế cho việc này:
 
-- `REQ_PREFLUSH`: bảo đảm cache dễ bay hơi đã được flush *trước khi* I/O gắn cờ bắt đầu, tức các request ghi đã hoàn tất trước đó đã nằm trên bộ nhớ không mất điện.
-- `REQ_FUA` (Force Unit Access): hoàn tất của request chỉ được báo sau khi dữ liệu đã commit vào bộ nhớ không mất điện.
+- `REQ_PREFLUSH`: bảo đảm cache dễ bay hơi đã được flush *trước khi* I/O gắn cờ bắt đầu, tức các request ghi đã hoàn tất trước đó đã nằm trên bộ nhớ không mất điện[^wbc-flush].
+- `REQ_FUA` (Force Unit Access): hoàn tất của request chỉ được báo sau khi dữ liệu đã commit vào bộ nhớ không mất điện[^wbc-fua].
 
-Một file system chỉ cần đặt cờ này; không cần lo thiết bị có cần flush tường minh hay FUA được hiện thực thế nào.[^wbc-impl]
+Phía file system gọn hơn nhiều: chỉ cần đặt hai cờ này, không phải lo thiết bị có cần flush tường minh hay FUA được hiện thực ra sao[^wbc-impl].
 
 <details><summary>Đi sâu: thiết bị không có cache, và cờ nào ext4/jbd2 thật sự dùng</summary>
 
-Với thiết bị không hỗ trợ write cache dễ bay hơi, docs mô tả block layer hoàn tất ngay request `REQ_PREFLUSH` rỗng và bỏ hai cờ khỏi request có payload (đoạn này nằm trong phần về driver kiểu `request_fn`).[^wbc-nocache]
+Với thiết bị không hỗ trợ write cache dễ bay hơi, docs mô tả block layer hoàn tất ngay request `REQ_PREFLUSH` rỗng và bỏ hai cờ khỏi request có payload (đoạn này nằm trong phần về driver kiểu `request_fn`)[^wbc-nocache].
 
-Vai trò của hai cờ trong commit của ext4. Docs ext4/jbd2 chỉ nói kết quả: transaction được ghi xong và được flush khỏi cache ghi của đĩa rồi mới ghi commit record,[^jbd2-intro] và `barrier=1` (mặc định) bảo đảm thứ tự đúng của journal commit trên đĩa; nếu ổ có pin dự phòng thì tắt barrier có thể an toàn.[^barrier-opt] Docs **không** nêu tên cờ nào được dùng. Tên cờ lấy từ source kernel v6.8 (chi tiết cài đặt, có thể đổi ở bản khác): `fs/jbd2/commit.c`, khi `JBD2_BARRIER` bật và không dùng `journal_async_commit`, block commit được ghi với `REQ_PREFLUSH | REQ_FUA`.[^commit-src] Ghép với ngữ nghĩa hai cờ ở trên (suy luận của người soạn): `REQ_PREFLUSH` đưa các block transaction đã hoàn tất lên bộ nhớ bền *trước khi* commit block bắt đầu ghi, còn `REQ_FUA` làm commit block đã bền khi hoàn tất được báo, nên checkpoint sau đó không vượt mặt nó. Với `journal_async_commit`, source v6.8 không gắn hai cờ này ở bước ghi commit (bù bằng checksum). Ext4 bật barrier mặc định còn ext3 thì không.[^barrier-default]
+Còn trong commit của ext4, docs ext4/jbd2 chỉ nói kết quả: transaction được ghi xong và được flush khỏi cache ghi của đĩa rồi mới ghi commit record[^jbd2-intro]. Docs cũng nói `barrier=1` (mặc định) bảo đảm thứ tự đúng của journal commit trên đĩa, và nếu ổ có pin dự phòng thì tắt barrier có thể an toàn[^barrier-opt]. Nhưng docs **không** nêu tên cờ nào được dùng.
+
+Tên cờ lấy từ source kernel v6.8 (chi tiết cài đặt, có thể đổi ở bản khác): trong `fs/jbd2/commit.c`, khi `JBD2_BARRIER` bật và không dùng `journal_async_commit`, block commit được ghi với `REQ_PREFLUSH | REQ_FUA`[^commit-src]. Ghép với ngữ nghĩa hai cờ ở trên (suy luận của người soạn): `REQ_PREFLUSH` đưa các block transaction đã hoàn tất lên bộ nhớ bền *trước khi* commit block bắt đầu ghi, còn `REQ_FUA` làm commit block đã bền khi hoàn tất được báo, nên checkpoint sau đó không vượt mặt nó. Với `journal_async_commit`, source v6.8 không gắn hai cờ này ở bước ghi commit (bù bằng checksum). Cuối cùng, ext4 bật barrier mặc định còn ext3 thì không[^barrier-default].
 
 </details>
 
@@ -247,29 +252,31 @@ Vai trò của hai cờ trong commit của ext4. Docs ext4/jbd2 chỉ nói kết
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì tẩy xóa bản hợp đồng cũ, in bản mới rồi đổi con trỏ "bản hiện hành"; bản cũ còn nguyên cho tới khi dọn.
+*Với service `orders`.* Journaling mới là một cách giữ cho `orders.log` không vỡ khi mất điện. Nếu `orders` chạy trên file system khác, ví dụ ZFS hay btrfs, sự nhất quán có thể đến từ một cơ chế khác hẳn (nhận xét của người soạn). Mục này điểm qua các cơ chế đó, để thấy journaling là một lựa chọn trong số nhiều lựa chọn.
 
 ### 6.1 Soft updates, COW, backpointer
 
-OSTEP điểm qua các giải pháp thay thế:[^others]
+OSTEP điểm qua ba hướng thay thế[^others]:
 
-- **Soft Updates** (Ganger & Patt): sắp xếp cẩn thận mọi lần ghi để cấu trúc trên đĩa không bao giờ ở trạng thái bất nhất — ví dụ ghi block dữ liệu trước inode trỏ tới nó. Khó hiện thực vì cần hiểu sâu từng cấu trúc, trong khi lớp journaling cần ít hiểu biết về cấu trúc cụ thể.[^softupd]
-- **Copy-on-write (COW)**: không bao giờ ghi đè tại chỗ; ghi cập nhật sang chỗ chưa dùng rồi "lật" cấu trúc gốc để trỏ vào cấu trúc mới (như ZFS). Chi tiết cơ chế và btrfs/ZFS: [Chương 07](07-raid-va-copy-on-write-fs.md).
-- **Backpointer-based consistency** và **optimistic crash consistency**: hướng nghiên cứu của chính nhóm OSTEP (không bàn thêm ở đây).[^bbc]
+- **Soft Updates** (Ganger & Patt): sắp xếp cẩn thận mọi lần ghi để cấu trúc trên đĩa không bao giờ ở trạng thái bất nhất, ví dụ ghi block dữ liệu trước inode trỏ tới nó. Hướng này khó hiện thực vì cần hiểu sâu từng cấu trúc, trong khi lớp journaling cần ít hiểu biết về cấu trúc cụ thể[^softupd].
+- **Copy-on-write (COW)**: không bao giờ ghi đè tại chỗ; ghi cập nhật sang chỗ chưa dùng rồi "lật" cấu trúc gốc để trỏ vào cấu trúc mới, như ZFS. Chi tiết cơ chế và btrfs/ZFS: [Chương 07](07-raid-va-copy-on-write-fs.md).
+- **Backpointer-based consistency** và **optimistic crash consistency**: hướng nghiên cứu của chính nhóm OSTEP, không bàn thêm ở đây[^bbc].
 
-Kết luận của OSTEP: journaling giảm thời gian recovery từ O(kích thước volume) xuống O(kích thước log);[^summary] dạng thông dụng nhất là ordered metadata journaling, giảm lưu lượng journal mà vẫn bảo đảm hợp lý cho metadata lẫn dữ liệu;[^summary2] còn bảo đảm mạnh cho *dữ liệu người dùng* vẫn là mảng "đang làm dở".[^summary3]
+Tổng kết lại, journaling giảm thời gian recovery từ O(kích thước volume) xuống O(kích thước log)[^summary]. Dạng thông dụng nhất là ordered metadata journaling, giảm lưu lượng journal mà vẫn bảo đảm hợp lý cho cả metadata lẫn dữ liệu[^summary2]. Còn bảo đảm mạnh cho *dữ liệu người dùng* vẫn là mảng đang làm dở[^summary3].
 
 ### 6.2 Log-structured file system (tổng quan)
 
-LFS (Rosenblum & Ousterhout, 1991)[^lfs-date] đi theo hướng khác hẳn: biến **mọi** cập nhật thành ghi tuần tự. Động lực: bộ nhớ lớn hơn nên đọc phần lớn được cache và hiệu năng quyết định bởi ghi; khoảng cách giữa I/O ngẫu nhiên và tuần tự lớn; file system hiện có kém với workload phổ biến; và file system không "biết" RAID.[^lfs-motive] LFS đệm mọi cập nhật (cả metadata!) trong một *segment* trong RAM; đầy thì ghi một lần dài, tuần tự vào vùng đĩa chưa dùng; **không bao giờ ghi đè dữ liệu cũ**.[^lfs-idea]
+LFS (Rosenblum & Ousterhout, 1991)[^lfs-date] đi theo hướng khác hẳn: biến **mọi** cập nhật thành ghi tuần tự. Họ có bốn động lực. Bộ nhớ ngày càng lớn nên đọc phần lớn được cache và hiệu năng do ghi quyết định. Khoảng cách giữa I/O ngẫu nhiên và tuần tự rất lớn. File system hiện có kém với workload phổ biến. Và file system không "biết" RAID[^lfs-motive].
+
+Cách làm của LFS: đệm mọi cập nhật, cả metadata, trong một *segment* ở RAM. Segment đầy thì ghi ra đĩa một lần dài, tuần tự, vào vùng chưa dùng. LFS **không bao giờ ghi đè dữ liệu cũ**[^lfs-idea].
 
 <details><summary>Đi sâu: kích thước segment, imap, cleaner và roll forward</summary>
 
-Ghi tuần tự thôi chưa đủ — phải ghi các đoạn lớn để bù chi phí định vị. OSTEP tính: với positioning 10 ms, tốc độ đỉnh 100 MB/s, muốn đạt 90% băng thông đỉnh thì cần đệm D = 9 MB.[^lfs-buffer] (Công thức D = F/(1−F) × R_peak × T_position; 0,9/0,1 × 100 MB/s × 0,01 s = 9 MB, đúng với số của sách.)
+Ghi tuần tự thôi chưa đủ; phải ghi các đoạn lớn để bù chi phí định vị. Ví dụ OSTEP: với positioning 10 ms và tốc độ đỉnh 100 MB/s, muốn đạt 90% băng thông đỉnh thì cần đệm D = 9 MB[^lfs-buffer]. (Công thức D = F/(1−F) × R_peak × T_position; 0,9/0,1 × 100 MB/s × 0,01 s = 9 MB, đúng với số của sách.)
 
-Các mảnh ghép: **inode map (imap)** ánh xạ số inode tới địa chỉ bản mới nhất, vì inode không còn ở chỗ cố định;[^lfs-pieces1] **segment summary** ghi (số inode, offset) của mỗi block để cleaner biết block còn sống hay không;[^lfs-pieces2] cleaner đọc M segment cũ, nén phần còn sống thành N < M segment mới.[^lfs-cleaner]
+Các mảnh ghép còn lại: **inode map (imap)** ánh xạ số inode tới địa chỉ bản mới nhất, vì inode không còn ở chỗ cố định[^lfs-pieces1]. **Segment summary** ghi (số inode, offset) của mỗi block để cleaner biết block còn sống hay không[^lfs-pieces2]. Cleaner đọc M segment cũ, nén phần còn sống thành N < M segment mới[^lfs-cleaner].
 
-Về crash: CR được ghi luân phiên hai bản ở hai đầu đĩa, với timestamp ở đầu và cuối, bản nào timestamp không khớp bị bỏ; còn phần log ghi sau checkpoint cuối được cứu bằng kỹ thuật **roll forward**: từ CR tìm cuối log rồi đọc các segment tiếp theo để áp dụng cập nhật hợp lệ.[^lfs-crash] OSTEP nối LFS với COW ("shadow paging" trong database).[^lfs-cow]
+Về crash: LFS giữ hai bản checkpoint region (CR) ở hai đầu đĩa và ghi luân phiên, với timestamp ở đầu và cuối; bản nào timestamp không khớp thì bị bỏ[^lfs-crash]. Phần log ghi sau checkpoint cuối được cứu bằng kỹ thuật **roll forward**: từ CR tìm cuối log rồi đọc các segment tiếp theo để áp dụng cập nhật hợp lệ. Cuối cùng, OSTEP nối LFS với COW, thứ mà database gọi là "shadow paging"[^lfs-cow].
 
 </details>
 
@@ -277,27 +284,30 @@ Về crash: CR được ghi luân phiên hai bản ở hai đầu đĩa, với t
 
 ## 7. Toàn vẹn dữ liệu: checksum, LSE, misdirected write, scrubbing (Q7)
 
-> **Trả lời ngắn.** Journaling chỉ bảo vệ khỏi crash; đĩa còn có kiểu hỏng riêng: một vài block không đọc được hoặc chứa nội dung sai[^failpartial]. Checksum lưu cùng dữ liệu phát hiện corruption im lặng[^checksum]; misdirected write cần thêm physical ID[^misdirected]; scrubbing định kỳ đọc kiểm mọi block[^scrub].
+> **Trả lời ngắn.** Journaling chỉ bảo vệ khỏi crash, còn đĩa có kiểu hỏng riêng: vài block không đọc được hoặc chứa nội dung sai[^failpartial]. Checksum lưu cùng dữ liệu giúp phát hiện corruption im lặng[^checksum]. Misdirected write cần thêm physical ID[^misdirected]. Còn scrubbing là việc định kỳ đọc kiểm mọi block để bắt lỗi sớm[^scrub].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tem niêm phong trên thùng hàng cho biết ruột có bị đổi không, nhưng không cho biết thùng giao nhầm địa chỉ hay hãng báo "đã gửi" mà chưa gửi. Mỗi kiểu hỏng cần một cách kiểm riêng.
+*Với service `orders`.* Một đơn hàng từ tháng trước nằm trong `orders.log`, và hôm nay `orders` đọc lại để đối soát. Journaling không giúp gì ở đây, vì máy đâu có crash. Nhưng ổ đĩa vẫn có thể trả về một block sai mà không báo lỗi nào. Mục này đi qua các kiểu hỏng đó và cách phát hiện từng kiểu.
 
-Journaling chỉ bảo vệ khỏi crash. Đĩa còn có kiểu hỏng riêng; OSTEP nêu mô hình **fail-partial**: đĩa vẫn chạy nhưng một vài block không truy cập được hoặc chứa nội dung sai.[^failpartial]
+OSTEP mô tả mô hình **fail-partial**: đĩa vẫn chạy bình thường nhưng một vài block không truy cập được hoặc chứa nội dung sai[^failpartial]. Có hai kiểu:
 
-- **Latent sector error (LSE)**: sector hỏng; ổ không sửa được bằng ECC thì trả lỗi khi đọc, nên lỗi *dễ phát hiện* và khôi phục bằng dư thừa sẵn có (mirror, parity).[^lse]
-- **Corruption**: ổ trả dữ liệu sai mà không báo — hỏng im lặng.[^silent]
-- Với RAID-4/5, gặp LSE khi đang dựng lại một ổ hỏng toàn phần thì không hoàn tất được.[^raid-lse] (RAID: [Chương 07](07-raid-va-copy-on-write-fs.md).)
+- **Latent sector error (LSE)**: sector hỏng. Ổ không sửa được bằng ECC thì trả lỗi khi đọc, nên lỗi này *dễ phát hiện*, và khôi phục được bằng dư thừa sẵn có (mirror, parity)[^lse].
+- **Corruption**: ổ trả dữ liệu sai mà không báo gì, tức hỏng im lặng[^silent].
 
-**Checksum** là cơ chế chính để phát hiện corruption.[^checksum] Khi đọc, so *stored* với *computed* checksum; lệch thì dùng bản sao dư thừa hoặc trả lỗi — "không phải viên đạn bạc".[^usechecksum]
+LSE còn có một hệ quả riêng với RAID-4/5: gặp LSE khi đang dựng lại một ổ hỏng toàn phần thì việc dựng lại không hoàn tất được[^raid-lse]. (RAID: [Chương 07](07-raid-va-copy-on-write-fs.md).)
 
-**Misdirected write** (ghi đúng dữ liệu, sai chỗ) cần thêm physical ID (đĩa, block) cạnh checksum.[^misdirected] **Lost write** (báo đã ghi mà chưa bền) thì cả checksum lẫn physical ID đều không thấy vì bản cũ vẫn khớp;[^lost] ZFS đặt checksum của từng block trong inode và indirect block.[^zfs-cs] **Scrubbing**: định kỳ đọc mọi block kiểm checksum, vì dữ liệu ít đọc có thể hỏng dần; thường hằng đêm hoặc hằng tuần.[^scrub]
+Cơ chế chính để phát hiện corruption là **checksum**[^checksum]. Khi đọc, hệ thống so checksum đã lưu (*stored*) với checksum vừa tính lại từ dữ liệu (*computed*); lệch thì dùng bản sao dư thừa hoặc trả lỗi. Dù vậy checksum không phải viên đạn bạc[^usechecksum].
+
+Có hai kiểu hỏng checksum đơn thuần không bắt hết. **Misdirected write** là ghi đúng dữ liệu nhưng sai chỗ; để bắt nó cần thêm physical ID (đĩa, block) cạnh checksum[^misdirected]. **Lost write** là ổ báo đã ghi mà thực ra chưa bền: lúc này cả checksum lẫn physical ID đều không thấy gì, vì bản cũ vẫn khớp cả hai[^lost]. ZFS giải bài này bằng cách đặt checksum của từng block trong inode và indirect block[^zfs-cs].
+
+Cuối cùng là **scrubbing**. Dữ liệu ít được đọc có thể hỏng dần mà không ai hay, nên hệ thống định kỳ đọc mọi block để kiểm checksum; thường là hằng đêm hoặc hằng tuần[^scrub]. Với `orders`, đơn hàng cũ chính là loại dữ liệu ít ai đọc (nhận xét của người soạn).
 
 <details><summary>Đi sâu: số liệu về LSE/corruption, Fletcher, collision, chi phí checksum</summary>
 
-Trong nghiên cứu ~3 năm, hơn 1,5 triệu ổ: ổ "cheap" có 9,40% gặp ít nhất một LSE và 0,50% gặp corruption; ổ "costly" là 1,40% và 0,05%.[^freq] Scrubbing là cách tìm ra phần lớn LSE.[^findings]
+Một nghiên cứu kéo dài khoảng 3 năm trên hơn 1,5 triệu ổ cho thấy: ổ loại "cheap" có 9,40% gặp ít nhất một LSE và 0,50% gặp corruption; ổ "costly" là 1,40% và 0,05%[^freq]. Scrubbing là cách tìm ra phần lớn LSE[^findings].
 
-Fletcher bắt mọi lỗi 1 và 2 bit và nhiều burst,[^checksum-fns] nhưng không checksum nào hoàn hảo vì có thể có *collision*.[^collision] Chi phí điển hình 8 byte cho block 4 KB, tức 0,19%.[^overhead]
+Về checksum: Fletcher bắt mọi lỗi 1 và 2 bit và nhiều lỗi burst[^checksum-fns], nhưng không checksum nào hoàn hảo vì hai block khác nội dung vẫn có thể có cùng checksum, gọi là *collision*[^collision]. Chi phí điển hình là 8 byte cho block 4 KB, tức 0,19% dung lượng[^overhead].
 
 </details>
 
@@ -305,19 +315,21 @@ Fletcher bắt mọi lỗi 1 và 2 bit và nhiều burst,[^checksum-fns] nhưng 
 
 ## 8. Liên hệ backend: WAL của database và journal của file system (Q8)
 
-> **Trả lời ngắn.** Journal của file system và WAL của database là cùng một ý tưởng: ghi log trước, sửa file dữ liệu sau[^wal-db][^wal-idea]. PostgreSQL nhờ vậy không cần flush data page mỗi lần commit, vì sau crash khôi phục được từ log[^pg-wal].
+> **Trả lời ngắn.** Journal của file system và WAL của database là cùng một ý tưởng: ghi log trước, sửa file dữ liệu sau[^wal-db]. Nhờ vậy PostgreSQL không cần flush data page mỗi lần commit, vì sau crash nó khôi phục được từ log[^pg-wal].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): file system là "DB của đĩa", còn DB là "file system của giao dịch"; cả hai đều giữ một cuốn nhật ký ghi thay đổi trước khi sửa dữ liệu thật.
+*Với service `orders`.* Đơn hàng của `orders` cuối cùng vào một database PostgreSQL (ví dụ giả định của người soạn). Vậy `orders` có hai lớp cùng ghi log trước: ext4 ghi journal cho file system, còn PostgreSQL ghi WAL cho dữ liệu của nó. Mục này hỏi lớp nào lo việc gì, và `orders` còn phải tự làm gì.
 
-PostgreSQL: thay đổi vào file dữ liệu chỉ được ghi *sau khi* đã log, nên không cần flush data page mỗi lần commit vì sau crash khôi phục được từ log;[^pg-wal] một lần `fsync` WAL có thể commit nhiều transaction[^pg-wal2] — tương tự batching ở mục 2.3 (nhận xét của người soạn: DB gọi là *group commit*; docs PostgreSQL 16 ở đây không dùng thuật ngữ này).
+PostgreSQL chỉ ghi thay đổi vào file dữ liệu *sau khi* đã log: các WAL record mô tả thay đổi phải được flush ra bộ nhớ lâu dài trước. Làm đúng quy trình này thì không cần flush data page mỗi lần commit, vì crash xong có log để khôi phục[^pg-wal]. Hơn nữa, một lần `fsync` file WAL có thể commit nhiều transaction cùng lúc[^pg-wal2]. Điều này giống batching ở mục 2.3 (nhận xét của người soạn: database gọi là *group commit*; docs PostgreSQL 16 ở đây không dùng thuật ngữ đó).
 
-Nhận xét của người soạn: nếu ứng dụng tự giữ WAL/append-only log, nó làm đúng việc file system làm ở tầng dưới, hai tầng không thay thế nhau; ứng dụng vẫn phải `fsync` đúng chỗ, kể cả thư mục chứa file mới.[^fsync-dir] Xem [Chương 06](06-durability-trong-thuc-te.md).
+Hai tầng không thay thế nhau (nhận xét của người soạn). Nếu `orders` tự giữ một WAL hay append-only log, nó làm đúng việc file system làm ở tầng dưới, và vẫn phải `fsync` đúng chỗ, kể cả thư mục chứa file mới, vì `fsync` một file chưa chắc đã đưa entry của file đó trong thư mục xuống đĩa[^fsync-dir]. Xem [Chương 06](06-durability-trong-thuc-te.md).
 
 <details><summary>Đi sâu: CRC, full page image, journaled file system và flush cache trong PostgreSQL</summary>
 
-Hai điểm tương ứng nữa: mỗi record WAL có CRC-32C kiểm khi recovery (cùng ý checksum journal của ext4);[^pg-crc] page 8192 byte có thể ghi dở khi mất điện nên định kỳ ghi *full page image* vào WAL.[^pg-torn] Tài liệu PostgreSQL 16 còn viết journaled file system không cần cho độ tin cậy của file dữ liệu/WAL (dù giúp boot nhanh hơn sau crash).[^pg-tip] Lệnh flush cache của ổ (FLUSH CACHE EXT, SYNCHRONIZE CACHE) cũng không gọi trực tiếp từ PostgreSQL mà qua file system như ZFS, ext4;[^pg-flush] đây là cùng lớp cơ chế với mục 5 (suy luận của người soạn: docs PostgreSQL không nhắc tên `REQ_PREFLUSH`/`REQ_FUA`).
+PostgreSQL còn có những điểm tương ứng nữa với file system. Mỗi record WAL có CRC-32C để kiểm khi recovery, cùng ý với checksum journal của ext4[^pg-crc]. Page 8192 byte có thể ghi dở khi mất điện, nên định kỳ PostgreSQL ghi *full page image* vào WAL[^pg-torn].
+
+Tài liệu PostgreSQL 16 còn viết rằng journaled file system không cần thiết cho độ tin cậy của file dữ liệu và WAL, dù chúng giúp boot nhanh hơn sau crash[^pg-tip]. Lệnh flush cache của ổ (FLUSH CACHE EXT, SYNCHRONIZE CACHE) cũng không được PostgreSQL gọi trực tiếp mà đi qua file system như ZFS hay ext4[^pg-flush]. Đây là cùng lớp cơ chế với mục 5 (suy luận của người soạn: docs PostgreSQL không nhắc tên `REQ_PREFLUSH`/`REQ_FUA`).
 
 </details>
 
@@ -325,7 +337,11 @@ Hai điểm tương ứng nữa: mỗi record WAL có CRC-32C kiểm khi recover
 
 ## Liên hệ với Rust
 
-Rust `std::fs::File` có hai hàm: `sync_all` (cố gắng đồng bộ mọi nội dung và metadata do OS giữ trong bộ nhớ xuống đĩa) đồng bộ cả nội dung lẫn metadata,[^rust-sync-all] và `sync_data`, tương tự nhưng *có thể* không đồng bộ metadata của file; docs còn lưu ý một số nền tảng cài `sync_data` bằng chính `sync_all`.[^rust-sync][^rust-sync-plat] Cặp này cùng ý với `fsync`/`fdatasync`, trong đó `fdatasync` không flush metadata trừ khi metadata đó cần để đọc lại dữ liệu.[^fdatasync] Docs `File` không nói syscall nào được gọi; ở source Rust 1.95.0 trên Linux, `sync_all` gọi `libc::fsync` và `sync_data` gọi `libc::fdatasync` (chi tiết cài đặt, không phải bảo đảm của docs; trên Apple cả hai dùng `F_FULLFSYNC`).[^rust-impl-all][^rust-impl-data][^rust-apple] (Suy luận của người soạn: đây là cách chương trình Rust kích hoạt chuỗi "journal write → commit → flush" ở trên; việc fsync thư mục chứa file mới là chuyện riêng, xem [Chương 08](08-rust-va-luu-tru.md).)
+Trong Rust, `orders` đẩy dữ liệu xuống đĩa bằng `std::fs::File`, và type này có hai hàm. `sync_all` cố gắng đồng bộ mọi nội dung và metadata do OS giữ trong bộ nhớ xuống đĩa[^rust-sync-all]. `sync_data` tương tự nhưng *có thể* không đồng bộ metadata của file[^rust-sync]. Docs còn lưu ý một số nền tảng cài `sync_data` bằng chính `sync_all`[^rust-sync-plat].
+
+Cặp này cùng ý với `fsync`/`fdatasync` của POSIX, trong đó `fdatasync` không flush metadata trừ khi metadata đó cần để đọc lại dữ liệu[^fdatasync]. Docs `File` không nói syscall nào được gọi. Ở source Rust 1.95.0 trên Linux (chi tiết cài đặt, không phải bảo đảm của docs), `sync_all` gọi `libc::fsync`[^rust-impl-all] và `sync_data` gọi `libc::fdatasync`[^rust-impl-data]. Trên Apple cả hai dùng `F_FULLFSYNC`[^rust-apple].
+
+Với `orders`, đây là cách chương trình Rust kích hoạt chuỗi "journal write → commit → flush" ở trên (suy luận của người soạn). Việc `fsync` thư mục chứa file mới là chuyện riêng, xem [Chương 08](08-rust-va-luu-tru.md).
 
 ## Tóm tắt
 
@@ -370,21 +386,21 @@ Log đầy thì không commit được nữa và log lớn làm recovery lâu; s
 5. Trong metadata journaling, vì sao phải ghi dữ liệu trước khi commit?
 <details><summary>Đáp án</summary>
 
-Nếu không, recovery có thể replay metadata trỏ tới block dữ liệu chưa được ghi.[^md-order][^md-proto]
+Nếu không, recovery có thể replay metadata trỏ tới block dữ liệu chưa được ghi.[^md-order]
 
 </details>
 
 6. Ba mode `data=` của ext4 khác nhau thế nào?
 <details><summary>Đáp án</summary>
 
-journal: dữ liệu vào journal; ordered (mặc định): dữ liệu ghi trước khi metadata commit; writeback: không bảo đảm thứ tự.[^ext4-journal][^ext4-ordered][^ext4-wb]
+`journal`: dữ liệu vào journal.[^ext4-journal] `ordered` (mặc định): dữ liệu ghi trước khi metadata commit.[^ext4-ordered] `writeback`: không bảo đảm thứ tự.[^ext4-wb]
 
 </details>
 
 7. Revoke record giải quyết điều gì?
 <details><summary>Đáp án</summary>
 
-Block đã xóa rồi tái dùng; không có revoke thì replay đè nội dung cũ lên dữ liệu mới.[^reuse][^revoke]
+Block đã xóa rồi tái dùng; không có revoke thì replay đè nội dung cũ lên dữ liệu mới.[^reuse]
 
 </details>
 
@@ -416,7 +432,6 @@ Không: bản cũ vẫn khớp checksum và physical ID.[^lost]
 [^fsck-phases1]: OSTEP, Ch.42, mục 42.2 — <https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf> — "it is run before the file system is mounted and made available (fsck assumes that no other file-system activity is on-going while it runs)"
 [^fsck-phases2]: OSTEP, Ch.42, mục 42.2 — <https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf> — "If an allocated inode is discovered but no directory refers to it, it is moved to the lost+found directory."
 [^fsck-slow]: OSTEP, Ch.42, mục 42.2 — <https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf> — "scanning the entire disk to find all the allocated blocks and read the entire directory tree may take many minutes or hours"
-[^keys]: OSTEP, Ch.42, mục 42.2 — <https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf> — "This situation is akin to dropping your keys on the floor in your bedroom"
 [^wal-idea]: OSTEP, Ch.42, mục 42.3 — <https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf> — "By design, journaling thus adds a bit of work during updates to greatly reduce the amount of work required during recovery."
 [^journal-place]: OSTEP, Ch.42, mục 42.3 — <https://pages.cs.wisc.edu/~remzi/OSTEP/file-journaling.pdf> — "sometimes it is placed on a separate device, or as a file within the file system"
 [^jbd2-inode]: Linux kernel docs, ext4 Journal (jbd2) — <https://docs.kernel.org/filesystems/ext4/journal.html> — "The journal inode is typically inode 8. The first 68 bytes of the journal inode are replicated in the ext4 superblock. The journal itself is normal (but hidden) file within the filesystem."

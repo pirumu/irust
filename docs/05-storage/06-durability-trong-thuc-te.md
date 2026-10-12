@@ -15,6 +15,8 @@ Phạm vi: chương này chỉ bàn Linux và macOS.
 
 ## Kiến thức cần trước
 
+Bạn đã viết service ghi log hoặc ghi file bằng Rust và quen với việc `write` trả về `Ok`; chương này hỏi `Ok` đó thật sự bảo đảm gì. Bốn chương trước đặt nền cho câu trả lời:
+
 - [Chương 04 — File descriptor và VFS](../01-linux/04-file-descriptor-va-vfs.md): fd, inode, thư mục là gì.
 - [Chương 01 của P5 — Thiết bị lưu trữ](./01-thiet-bi-luu-tru.md): đĩa, cache trong đĩa.
 - [Chương 04 của P5 — Page cache và direct I/O](./04-page-cache-va-direct-io.md): dữ liệu ghi nằm ở page cache ra sao (chương này chỉ nhắc ngắn).
@@ -24,17 +26,19 @@ Phạm vi: chương này chỉ bàn Linux và macOS.
 
 ## 1. `write()` thành công chưa có nghĩa là dữ liệu đã bền (Q1)
 
-> **Trả lời ngắn.** `write()` trả về thành công chỉ nói kernel đã nhận dữ liệu, không bảo đảm dữ liệu đã được commit xuống đĩa[^write-nogarantee]; man page nói cách duy nhất để chắc là gọi `fsync(2)` sau khi ghi xong[^write-fsync] (đó là lời khuyên cho ghi buffered thông thường; mở file bằng `O_SYNC`/`O_DSYNC` là đường khác, xem mục 6). Trên đường đi, dữ liệu có thể nằm ở bộ đệm trong tiến trình, page cache của kernel và cache ghi dễ bay hơi của thiết bị[^wcc-intro].
+> **Trả lời ngắn.** `write()` trả về thành công chỉ cho biết kernel đã nhận dữ liệu; nó không hứa dữ liệu đã nằm trên đĩa[^write-nogarantee]. Man page nói cách duy nhất để chắc là gọi `fsync(2)` sau khi ghi xong[^write-fsync] (đó là lời khuyên cho ghi buffered thông thường; mở file bằng `O_SYNC`/`O_DSYNC` là đường khác, xem mục 6). Trên đường từ chương trình xuống đĩa, dữ liệu có thể đang nằm ở bộ đệm trong process, ở page cache của kernel, hoặc ở cache ghi dễ bay hơi của thiết bị[^wcc-intro].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): gửi thư qua bưu điện. Nhân viên nhận thư và nói "đã nhận" (`write` trả về), nhưng thư chưa tới tay người nhận.
+*Với service của bạn.* Hãy hình dung `ledger`, một service Rust ghi sổ chuyển tiền. Mỗi request `POST /transfers`, nó nối một dòng vào file `ledger.log`, và ngay khi `write` trả về `Ok` thì trả `201 Created` cho client. Giả sử một giây sau đó máy mất điện. Khởi động lại, dòng của giao dịch vừa được báo "đã tạo" có còn trong `ledger.log` không? Ta sẽ bám theo `ledger` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này là `201` đó dựa trên lời hứa nào của kernel, và câu trả lời là không có lời hứa nào về đĩa.
 
-Khi bạn gọi `write(fd, buf, n)` và nhận về `n`, nhiều người hiểu "dữ liệu đã nằm trên đĩa". Trang man của Linux nói ngược lại, rất thẳng: một lần `write()` trả về thành công không bảo đảm gì về việc dữ liệu đã được commit xuống đĩa.[^write-nogarantee] Cũng trang đó nói cách duy nhất để chắc chắn là gọi `fsync(2)` sau khi ghi xong toàn bộ dữ liệu.[^write-fsync]
+### 1.1 `write` hứa gì
 
-### Cơ chế: dữ liệu đi qua ít nhất ba "bến đỗ"
+Nhiều người đọc "`write(fd, buf, n)` trả về `n`" thành "dữ liệu đã nằm trên đĩa". Man page của Linux nói ngược lại, rất thẳng: một lần `write()` thành công không bảo đảm gì về việc dữ liệu đã được commit xuống đĩa[^write-nogarantee]. Cũng trang đó cho biết muốn chắc thì phải gọi `fsync(2)` sau khi ghi xong toàn bộ dữ liệu[^write-fsync]. Vậy nếu `ledger` trả `201` ngay sau `write`, nó mới hứa với client rằng kernel đã nhận dòng đó, chưa hơn (suy luận của người soạn).
 
-Hãy theo dõi một lần ghi từ ứng dụng đến vật chất:
+### 1.2 Dòng ghi đi qua những chỗ nào
+
+Thử theo một dòng của `ledger` từ lúc ứng dụng ghi cho tới khi nằm trên phương tiện lưu trữ:
 
 ```mermaid
 flowchart LR
@@ -43,41 +47,53 @@ flowchart LR
     C -->|flush| D["Phương tiện bền<br/>(NAND / từ tính)"]
 ```
 
-1. **Bộ đệm trong tiến trình** (ví dụ `BufWriter` của Rust, `stdio` của C): `write()` chưa hề được gọi. Chương này không bàn thêm; chương Rust sẽ quay lại ([Chương 08](./08-rust-va-luu-tru.md)).
-2. **Page cache của kernel**: `write()` copy dữ liệu vào đây và đánh dấu trang là dirty rồi trả về. Kernel ghi xuống thiết bị sau. Tham số `vm.dirty_expire_centisecs` định nghĩa khi nào dữ liệu dirty "đủ cũ" để thread flusher của kernel ghi ra, và `vm.dirty_writeback_centisecs` là chu kỳ thức dậy của các thread ấy.[^vm-expire][^vm-writeback] OSTEP mô tả cùng ý ở mức khái niệm: các thao tác ghi không xảy ra ngay khi `write()`, mà nằm trong bộ nhớ một lúc (ví dụ 5 hoặc 30 giây) rồi file system mới gửi yêu cầu xuống đĩa.[^ostep-5-30] Nếu crash trong khoảng đó thì mất.
-3. **Cache ghi của thiết bị**: ngay cả khi kernel đã gửi lệnh ghi xuống, nhiều thiết bị — tài liệu kernel nói đặc biệt là thiết bị thị trường tiêu dùng — có volatile write-back cache, nghĩa là báo "xong" cho hệ điều hành trước khi dữ liệu thực sự nằm trên phương tiện không mất điện.[^wcc-intro] Đây là bến đỗ mà nhiều lập trình viên quên.
+Trên đường đó dữ liệu có thể dừng ở ít nhất ba chỗ, và chỗ nào cũng mất được khi mất điện:
 
-<details><summary>Đi sâu: lỗi bị hoãn và đánh đổi durability/performance</summary>
+1. **Bộ đệm trong process.** Nếu `ledger` bọc file trong `BufWriter` của Rust (hay dùng `stdio` của C) thì `write()` còn chưa được gọi. Chương này không bàn thêm; [Chương 08](./08-rust-va-luu-tru.md) sẽ quay lại.
+2. **Page cache của kernel.** `write()` chép dữ liệu vào đây, đánh dấu trang là dirty rồi trả về; kernel mới ghi xuống thiết bị sau. Sau bao lâu thì do hai tham số của kernel quyết định. `vm.dirty_expire_centisecs` cho biết dữ liệu dirty phải "cũ" đến đâu thì thread flusher của kernel ghi ra[^vm-expire]. `vm.dirty_writeback_centisecs` là chu kỳ thức dậy của các thread ấy[^vm-writeback]. Ở mức khái niệm, các lần ghi nằm trong bộ nhớ một lúc (ví dụ 5 hoặc 30 giây) rồi file system mới gửi yêu cầu xuống đĩa[^ostep-5-30]. Crash trong khoảng đó thì phần chưa ghi mất theo. Với `ledger`, đây thường là nơi dòng giao dịch đang nằm khi client nhận `201` (nhận xét của người soạn).
+3. **Cache ghi của thiết bị.** Kernel gửi lệnh ghi xuống rồi cũng chưa hết chuyện: nhiều thiết bị, và tài liệu kernel nhắc riêng thiết bị thị trường tiêu dùng, có volatile write-back cache, tức là báo "xong" cho OS trước khi dữ liệu thực sự nằm trên phương tiện không mất điện[^wcc-intro]. Đây là chỗ nhiều lập trình viên quên.
 
-Trên một số filesystem (kể cả NFS), lỗi ghi có thể bị hoãn đến một lần `write()` sau, đến `fsync(2)`, hoặc thậm chí đến `close(2)`.[^write-delayed]
+<details><summary>Đi sâu: lỗi ghi đến muộn, và đánh đổi durability/performance</summary>
 
-OSTEP gọi đây là một sự đánh đổi durability/performance: muốn ghi xong là bền ngay thì phải làm đủ công việc commit xuống đĩa nên chậm; chịu mất một ít dữ liệu thì hệ thống có thể gom ghi trong bộ nhớ và ghi sau.[^ostep-tradeoff] Ứng dụng như database không chấp nhận mất, nên chủ động ép ghi bằng `fsync()`, bằng direct I/O, hoặc bỏ qua file system.[^ostep-force]
+**Lỗi ghi có thể đến muộn.** Trên một số filesystem (kể cả NFS), lỗi ghi có thể bị hoãn đến một lần `write()` sau, đến `fsync(2)`, hoặc thậm chí đến `close(2)`[^write-delayed].
+
+**Đánh đổi durability/performance.** Muốn ghi xong là bền ngay thì hệ thống phải làm đủ việc commit xuống đĩa, nên chậm; chịu mất một ít dữ liệu thì nó có thể gom các lần ghi trong bộ nhớ và ghi sau[^ostep-tradeoff]. Database không chấp nhận mất nên chủ động ép ghi: gọi `fsync()`, dùng direct I/O, hoặc bỏ qua file system[^ostep-force].
 
 </details>
 
-**Quay lại Q1:** `write()` chỉ giao dữ liệu cho kernel; bền hay không còn tùy page cache và cache của thiết bị.
+**Quay lại Q1:** `write()` chỉ giao dữ liệu cho kernel; với `ledger`, `201` trả ngay sau `write` chưa bảo đảm giao dịch còn sau mất điện, vì bền hay không còn tùy page cache và cache của thiết bị.
 
 ---
 
 ## 2. `fsync` và `fdatasync` (Q2)
 
-> **Trả lời ngắn.** `fsync` đẩy mọi dữ liệu bẩn của file xuống thiết bị lưu trữ bền và, theo man page Linux, gồm cả ghi xuyên qua hoặc flush cache của đĩa, rồi chặn tới khi thiết bị báo xong[^fsync-def][^fsync-cache]. `fdatasync` giống nhưng không flush metadata không cần để đọc lại dữ liệu; đổi kích thước file thì vẫn phải flush[^fdatasync-def].
+> **Trả lời ngắn.** `fsync` chuyển mọi dữ liệu dirty của file xuống thiết bị lưu trữ bền, để dù crash hay reboot vẫn lấy lại được[^fsync-def]. Man page Linux nói rõ việc đó gồm cả ghi xuyên qua hoặc flush cache của đĩa, và lời gọi chặn tới khi thiết bị báo xong[^fsync-cache]. `fdatasync` giống `fsync` nhưng bỏ qua metadata không cần cho việc đọc lại dữ liệu; đổi kích thước file thì vẫn phải flush[^fdatasync-def]. Cả hai đều đắt hơn `write` thuần cỡ vài trăm lần trong lần đo của mình (phần Đi sâu có số liệu).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `fsync` như bước chốt đơn hàng, chỉ trả lời sau khi kho xác nhận đã nhập; `fdatasync` bỏ bớt thủ tục giấy tờ phụ không ảnh hưởng nội dung đơn.
+*Với `ledger`.* Để `201` có nghĩa, `ledger` phải gọi `fsync` (hoặc `fdatasync`) sau `write` rồi mới trả lời. Mục này trả lời hai câu: hai hàm đó hứa chính xác điều gì, và mỗi request của `ledger` phải trả thêm bao nhiêu thời gian.
 
-### Hợp đồng của `fsync(2)`
+### 2.1 Hợp đồng của `fsync(2)`
 
-Theo man page, `fsync()` chuyển ("flush") mọi dữ liệu in-core đã sửa của file (tức các trang buffer cache dirty) xuống thiết bị đĩa hoặc thiết bị lưu trữ bền khác, để mọi thông tin đã đổi có thể lấy lại được dù hệ thống crash hay reboot.[^fsync-def] Hai câu tiếp theo rất quan trọng: lệnh này **bao gồm việc ghi xuyên qua hoặc flush disk cache nếu có**, và lời gọi chặn cho đến khi thiết bị báo việc chuyển đã hoàn tất.[^fsync-cache] Nghĩa là trên Linux, `fsync` được định nghĩa để chạm tới bến đỗ thứ ba ở mục 1. Ở tầng block, tài liệu kernel nêu cơ chế mà filesystem dùng cho các thao tác toàn vẹn dữ liệu như `fsync` (mình không lần theo code kernel để xác nhận đường gọi từ `fsync` tới từng cờ): block layer có cờ `REQ_PREFLUSH` (đảm bảo cache volatile của thiết bị được flush trước khi I/O được gắn cờ bắt đầu)[^wcc-preflush] và `REQ_FUA` (chỉ báo hoàn tất I/O sau khi dữ liệu đã được commit xuống bộ nhớ không mất điện),[^wcc-flags] và filesystem chỉ cần đặt hai cờ này mà không phải lo thiết bị cụ thể có cần flush hay không.[^wcc-simple]
+`fsync()` chuyển ("flush") mọi dữ liệu in-core đã sửa của file (tức các trang buffer cache dirty) xuống đĩa hoặc thiết bị lưu trữ bền khác, để mọi thông tin đã đổi vẫn lấy lại được dù hệ thống crash hay reboot[^fsync-def]. Điểm đáng chú ý nằm ở hai câu kế tiếp của man page: lệnh này bao gồm cả việc ghi xuyên qua hoặc flush disk cache nếu có, và lời gọi chặn cho đến khi thiết bị báo việc chuyển đã hoàn tất[^fsync-cache]. Nói cách khác, trên Linux `fsync` được định nghĩa để chạm tới bến thứ ba ở mục 1, chứ không dừng ở page cache.
 
-Lưu ý giới hạn nguồn: man page cũng thừa nhận cài đặt `fsync` ở kernel cũ và filesystem ít dùng không biết cách flush disk cache; trong trường hợp đó cần tắt disk cache bằng `hdparm(8)` hoặc `sdparm(8)` mới an toàn.[^fsync-old] Vậy "`fsync` chạm tới đĩa" là bảo đảm của tài liệu dành cho cấu hình bình thường, không phải lời thề cho mọi phần cứng và mọi filesystem.
+Có một giới hạn cần nhớ. Man page thừa nhận cài đặt `fsync` ở kernel cũ và filesystem ít dùng không biết flush disk cache, và trong trường hợp đó phải tắt disk cache bằng `hdparm(8)` hoặc `sdparm(8)` mới an toàn[^fsync-old]. Vì vậy "`fsync` chạm tới đĩa" là bảo đảm của tài liệu cho cấu hình bình thường, không phải lời thề cho mọi phần cứng và mọi filesystem.
 
-### `fdatasync` bỏ bớt metadata
+### 2.2 `fdatasync` bỏ bớt metadata
 
-`fdatasync()` tương tự `fsync()` nhưng không flush metadata đã sửa trừ khi metadata đó cần cho việc đọc lại dữ liệu đúng. Man page đưa ví dụ: đổi `st_atime`/`st_mtime` không cần flush vì không cần cho việc đọc dữ liệu; còn đổi kích thước file (`st_size`, ví dụ do `ftruncate(2)`) thì cần flush metadata.[^fdatasync-def] Mục tiêu là giảm hoạt động đĩa cho ứng dụng không cần đồng bộ mọi metadata.[^fdatasync-aim]
+`fdatasync()` giống `fsync()` nhưng không flush metadata đã sửa, trừ khi metadata đó cần để đọc lại dữ liệu cho đúng. Man page đưa ví dụ: đổi `st_atime`/`st_mtime` không cần flush vì không ảnh hưởng việc đọc dữ liệu, còn đổi kích thước file (`st_size`, chẳng hạn do `ftruncate(2)`) thì phải flush metadata[^fdatasync-def]. Mục tiêu là giảm hoạt động đĩa cho ứng dụng không cần đồng bộ mọi metadata[^fdatasync-aim].
 
-Hệ quả (suy luận của người soạn từ định nghĩa trên): ghi đè vùng đã có thì `fdatasync` rẻ hơn; append làm file dài ra thì kích thước đổi nên vẫn phải flush metadata đó.
+Hệ quả cho `ledger` (suy luận của người soạn từ định nghĩa trên): ghi đè vùng file đã có thì `fdatasync` rẻ hơn `fsync`, nhưng `ledger` chỉ append, file dài ra, kích thước đổi, nên `fdatasync` vẫn phải flush metadata kích thước.
+
+### 2.3 Giá phải trả
+
+Trong lần đo của mình (một lần chạy, chỉ đọc được bậc độ lớn; bảng đầy đủ ở phần Đi sâu), mỗi lần ghi có sync tốn 265–338 µs trên overlay, so với 0,8 µs của `write` thuần, tức khoảng 330–420 lần. Nếu mỗi request của `ledger` chờ một lần sync như vậy thì thread handler bị chặn thêm cỡ vài trăm µs mỗi request trên đĩa ảo của lab (suy luận của người soạn; số trên phần cứng của bạn sẽ khác). Cách giảm thường dùng là gom nhiều request vào một lần sync, sẽ gặp lại ở mục 6.
+
+<details><summary>Đi sâu: từ <code>fsync</code> xuống block layer</summary>
+
+Ở tầng block, tài liệu kernel nêu hai cờ mà filesystem dùng cho các thao tác toàn vẹn dữ liệu như `fsync` (mình không lần theo code kernel để xác nhận đường gọi từ `fsync` tới từng cờ). `REQ_PREFLUSH` bảo đảm cache volatile của thiết bị được flush trước khi I/O được gắn cờ bắt đầu[^wcc-preflush]. `REQ_FUA` chỉ báo hoàn tất I/O sau khi dữ liệu đã được commit xuống bộ nhớ không mất điện[^wcc-flags]. Filesystem chỉ cần đặt hai cờ này mà không phải lo thiết bị cụ thể có cần flush hay không[^wcc-simple].
+
+</details>
 
 <details><summary>Đi sâu: số đo thực tế (một lần chạy, để thấy bậc độ lớn)</summary>
 
@@ -95,21 +111,27 @@ Trên overlay, mỗi lần ghi có sync tốn 265–338 µs so với 0,8 µs c�
 
 </details>
 
-**Quay lại Q2:** `fsync` ép tới thiết bị (gồm cache đĩa), `fdatasync` rẻ hơn vì bỏ metadata không cần, và cả hai đều tốn bậc độ lớn hơn `write` thuần.
+**Quay lại Q2:** `fsync` ép tới thiết bị (gồm cache đĩa), `fdatasync` rẻ hơn vì bỏ metadata không cần, và cả hai đều tốn bậc độ lớn hơn `write` thuần; với `ledger`, đó là giá của mỗi lần trả `201` có nghĩa.
 
 ---
 
 ## 3. Fsync file mới thì phải fsync cả thư mục cha (Q3)
 
-> **Trả lời ngắn.** Nội dung file và entry tên trong thư mục là hai thứ riêng; `fsync(fd)` làm bền nội dung nhưng không nhất thiết bảo đảm entry thư mục đã xuống đĩa, nên cần `fsync` fd của chính thư mục cha[^fsync-dir]. PostgreSQL làm đúng vậy sau `rename` và `unlink`[^pg-rename][^pg-unlink].
+> **Trả lời ngắn.** Nội dung file và entry tên của nó trong thư mục là hai thứ riêng. `fsync(fd)` làm bền nội dung nhưng không nhất thiết bảo đảm entry thư mục đã xuống đĩa, nên cần `fsync` thêm file descriptor của chính thư mục cha[^fsync-dir]. PostgreSQL làm đúng vậy sau `rename`[^pg-rename]. Sau `unlink` nó cũng làm thế[^pg-unlink].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư viện nhận sách vào kho (nội dung đã bền) nhưng chưa cập nhật thẻ mục lục (entry thư mục). Mất điện lúc đó thì sách còn đó mà không ai tìm ra.
+*Với `ledger`.* Khi `ledger.log` đầy, `ledger` tạo segment mới `ledger-0002.log`, ghi dòng đầu tiên, `fsync` file rồi trả `201`. Nếu máy mất điện ngay sau đó, `fsync` đã làm bền nội dung, nhưng tên `ledger-0002.log` có còn trong thư mục không? Mục này trả lời câu đó.
 
-Một file gồm hai thứ riêng biệt: nội dung + inode, và **mục (entry) tên trong thư mục** trỏ tới inode đó (xem [Chương 04 P1](../01-linux/04-file-descriptor-va-vfs.md)). `fsync(fd)` trên file làm bền thứ thứ nhất. Man page nói rõ: gọi `fsync()` không nhất thiết bảo đảm entry trong thư mục chứa file cũng đã xuống đĩa; để làm việc đó cần một `fsync()` tường minh trên file descriptor của chính thư mục.[^fsync-dir]
+### 3.1 Hai thứ riêng biệt
 
-Hậu quả: bạn tạo `log.dat`, ghi, `fsync` — và sau crash, nội dung vẫn có thể nằm đâu đó trên đĩa nhưng tên `log.dat` không tồn tại trong thư mục, vì bản cập nhật thư mục chưa được flush. Man page `fsync(2)` chỉ nói về entry của file; với `rename`/`unlink` nó không nói gì. Về thực hành, mã nguồn PostgreSQL 16 (`durable_rename`) `fsync` thư mục chứa file sau `rename` để việc đổi tên bền,[^pg-rename] và `durable_unlink` `fsync` thư mục cha sau khi xoá.[^pg-unlink] Đó là cách làm của một ứng dụng chuyên về durability, không phải lời hứa của kernel; lý do bên dưới (bản cập nhật nội dung thư mục chưa được flush) vẫn là suy luận của người soạn.
+Một file gồm nội dung cùng inode, và **mục (entry) tên trong thư mục** trỏ tới inode đó (xem [Chương 04 P1](../01-linux/04-file-descriptor-va-vfs.md)). `fsync(fd)` trên file làm bền thứ nhất. Man page nói rõ: gọi `fsync()` không nhất thiết bảo đảm entry trong thư mục chứa file cũng đã xuống đĩa; muốn vậy cần một `fsync()` tường minh trên file descriptor của chính thư mục[^fsync-dir].
+
+### 3.2 Hậu quả với `ledger`, và cách PostgreSQL làm
+
+Vậy `ledger` tạo `ledger-0002.log`, ghi, `fsync`, rồi crash thì nội dung vẫn có thể nằm đâu đó trên đĩa mà tên `ledger-0002.log` không có trong thư mục, vì bản cập nhật thư mục chưa được flush (suy luận của người soạn). Cách chặn là `fsync` thư mục cha.
+
+Man page `fsync(2)` chỉ nói về entry của file; với `rename` và `unlink` nó không nói gì. Về thực hành, mã nguồn PostgreSQL 16 `fsync` thư mục chứa file sau `rename` để việc đổi tên bền (hàm `durable_rename`)[^pg-rename]. Hàm `durable_unlink` cũng `fsync` thư mục cha sau khi xoá[^pg-unlink]. Đó là cách làm của một ứng dụng chuyên về durability, không phải lời hứa của kernel, còn lý do bên dưới (bản cập nhật nội dung thư mục chưa được flush) vẫn là suy luận của người soạn.
 
 <details><summary>Đi sâu: cách làm trong Rust, đã chạy thật</summary>
 
@@ -124,21 +146,19 @@ Kết quả quan sát: mở thư mục bằng `File::open` rồi `sync_all` tr�
 
 </details>
 
-**Quay lại Q3:** `fsync` file không đủ vì entry tên là dữ liệu của thư mục; phải `fsync` fd thư mục cha.
+**Quay lại Q3:** `fsync` file không đủ vì entry tên là dữ liệu của thư mục; `ledger` tạo segment mới thì phải `fsync` cả fd thư mục cha.
 
 ---
 
 ## 4. Mẫu ghi an toàn: tạo tạm → fsync → rename → fsync thư mục (Q4)
 
-> **Trả lời ngắn.** Ghi bản mới ra file tạm cùng thư mục, `fsync` file tạm, `rename` đè lên tên cũ, rồi `fsync` thư mục. `rename` thay tên cũ một cách atomic theo góc nhìn của tiến trình khác[^rename-atomic]; `fsync` file tạm trước `rename` để tránh thứ tự "tên đã đổi mà dữ liệu chưa bền" (ext4 có `auto_da_alloc` giảm hậu quả, nhưng đó là hành vi riêng của ext4[^ext4-autoda]); `fsync` thư mục làm bền việc đổi tên theo thực hành của PostgreSQL[^pg-rename].
+> **Trả lời ngắn.** Ghi bản mới ra file tạm cùng thư mục, `fsync` file tạm, `rename` đè lên tên cũ, rồi `fsync` thư mục. `rename` thay tên cũ một cách atomic theo góc nhìn của process khác[^rename-atomic]. Phải `fsync` file tạm trước `rename` để tránh thứ tự "tên đã đổi mà dữ liệu chưa bền" (ext4 có `auto_da_alloc` giảm hậu quả, nhưng đó là hành vi riêng của ext4[^ext4-autoda]). Bước `fsync` thư mục cuối cùng làm bền việc đổi tên, theo thực hành của PostgreSQL[^pg-rename].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): viết bản hợp đồng mới ra tờ nháp, kiểm xong mới thay vào hồ sơ. Lúc nào trong hồ sơ cũng có đúng một bản nguyên vẹn, cũ hoặc mới.
+*Với `ledger`.* Ngoài log, `ledger` giữ một file `cfg` chứa cấu hình đang chạy. Admin đẩy cấu hình mới qua API, và `ledger` phải thay `cfg` sao cho dù crash giữa chừng, lúc khởi động lại vẫn đọc được một bản nguyên vẹn. Nếu `ledger` `open(O_TRUNC)` rồi `write` đè thẳng lên `cfg` thì crash giữa chừng để lại file rỗng hoặc viết dở. Thứ `ledger` cần là một thao tác "hoặc bản cũ nguyên vẹn, hoặc bản mới nguyên vẹn".
 
-Bạn muốn thay nội dung file cấu hình `cfg` bằng bản mới. Nếu `open(O_TRUNC)` + `write` đè trực tiếp thì crash giữa chừng để lại file rỗng hoặc nửa chừng. Cần một thao tác "hoặc bản cũ nguyên vẹn, hoặc bản mới nguyên vẹn".
-
-### Các bước và lý do mỗi bước
+### 4.1 Các bước và lý do mỗi bước
 
 ```mermaid
 sequenceDiagram
@@ -153,14 +173,18 @@ sequenceDiagram
     Note over FS: việc đổi tên đã bền
 ```
 
-1. **Ghi vào file tạm cùng thư mục** (cùng filesystem: `rename(2)` trả `EXDEV` khi `oldpath` và `newpath` không nằm trên cùng một mounted filesystem, và không hoạt động xuyên các mount point khác nhau dù cùng một filesystem được mount ở cả hai).[^rename-exdev]
-2. **`fsync` file tạm trước khi rename.** Nếu không, thứ tự "rename xuống đĩa nhưng dữ liệu chưa" có thể xảy ra và sau crash tên `cfg` trỏ tới file rỗng. ext4 có tuỳ chọn `auto_da_alloc` để giảm hậu quả của thói quen này: tài liệu ext4 nói nhiều ứng dụng "hỏng" không `fsync()` khi thay file bằng chuỗi `open("foo.new")/write/close/rename`, và khi `auto_da_alloc` bật, ext4 phát hiện mẫu replace-via-rename, ép các block cấp phát trễ được cấp phát sao cho ở lần journal commit tiếp theo (chế độ mặc định `data=ordered`) dữ liệu của file mới được ghi xuống trước khi `rename()` được commit.[^ext4-autoda] Đây là hành vi riêng của ext4, không phải bảo đảm chung; đừng dựa vào nó (nhận xét của người soạn).
-3. **`rename` đè lên tên cũ.** Man page `rename(2)`: nếu `newpath` đã tồn tại, nó bị thay thế một cách atomic, để tiến trình khác không bao giờ thấy `newpath` biến mất.[^rename-atomic] Cần đọc đúng phạm vi: câu này nói về góc nhìn của tiến trình khác đang chạy, không phải lời hứa về trạng thái trên đĩa sau mất điện. Việc nó có bền hay không là do bước sau.
-4. **`fsync` thư mục.** Man page `fsync(2)` chỉ nói về entry thư mục chứa file (mục 3); việc áp dụng cho `rename` dựa trên thực hành của PostgreSQL, vốn `fsync` thư mục chứa file sau khi rename.[^pg-rename]
+1. **Ghi vào file tạm cùng thư mục.** Phải cùng filesystem: `rename(2)` trả `EXDEV` khi `oldpath` và `newpath` không nằm trên cùng một mounted filesystem, và không chạy xuyên các mount point khác nhau dù cùng một filesystem được mount ở cả hai[^rename-exdev].
+2. **`fsync` file tạm trước khi rename.** Nếu bỏ bước này, thứ tự "rename xuống đĩa nhưng dữ liệu chưa" có thể xảy ra, và sau crash tên `cfg` trỏ tới file rỗng. Đừng trông vào filesystem sửa hộ: ext4 có `auto_da_alloc` để giảm hậu quả, nhưng đó là hành vi riêng của ext4, không phải bảo đảm chung (nhận xét của người soạn; chi tiết ở phần Đi sâu).
+3. **`rename` đè lên tên cũ.** Nếu `newpath` đã tồn tại, nó bị thay thế một cách atomic, để không process nào đang truy cập `newpath` thấy nó biến mất[^rename-atomic]. Cần đọc đúng phạm vi: câu này nói về góc nhìn của process khác đang chạy, không phải lời hứa về trạng thái trên đĩa sau mất điện. Bền hay không là việc của bước sau.
+4. **`fsync` thư mục.** Man page `fsync(2)` chỉ nói về entry thư mục chứa file (mục 3). Việc áp dụng cho `rename` dựa trên thực hành của PostgreSQL, vốn `fsync` thư mục chứa file sau khi rename[^pg-rename].
 
-Thiếu bước nào thì lỗi kiểu đó: thiếu bước 2 → có thể thấy `cfg` rỗng sau crash; thiếu bước 4 → sau crash có thể vẫn thấy bản `cfg` cũ (hoặc còn cả `cfg.tmp`), nghĩa là thao tác "mất" nhưng không hỏng (suy luận của người soạn).
+Thiếu bước nào thì gặp lỗi tương ứng (suy luận của người soạn). Thiếu bước 2, `ledger` có thể thấy `cfg` rỗng sau crash. Thiếu bước 4, sau crash có thể vẫn thấy bản `cfg` cũ (hoặc còn cả `cfg.tmp`): thao tác bị "mất" nhưng file không hỏng.
 
-<details><summary>Đi sâu: ví dụ Rust (đã chạy)</summary>
+<details><summary>Đi sâu: auto_da_alloc của ext4 và ví dụ Rust (đã chạy)</summary>
+
+**`auto_da_alloc`.** Tài liệu ext4 nói nhiều ứng dụng "hỏng" không `fsync()` khi thay file bằng chuỗi `open("foo.new")`/`write`/`close`/`rename`. Khi `auto_da_alloc` bật, ext4 phát hiện mẫu replace-via-rename và ép các block cấp phát trễ được cấp phát sao cho ở lần journal commit tiếp theo (chế độ mặc định `data=ordered`) dữ liệu của file mới được ghi xuống trước khi `rename()` được commit[^ext4-autoda]. Đây là hành vi riêng của ext4; đừng dựa vào nó.
+
+**Ví dụ Rust.**
 
 ```rust
 fn atomic_write(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<()> {
@@ -176,113 +200,123 @@ fn atomic_write(dir: &Path, name: &str, data: &[u8]) -> std::io::Result<()> {
 }
 ```
 
-Mình chạy hàm này (`strace` ở mục 8) và trên Linux nó phát ra đúng chuỗi syscall `openat(…cfg.tmp…) → write → fsync → close → renameat → openat(thư mục) → fsync → close`. Lưu ý đây chỉ chứng minh **thứ tự lời gọi**; chương trình chạy bình thường không chứng minh được tính bền sau mất điện — muốn thế phải có fault injection (cắt điện hoặc giết tiến trình có kiểm soát), việc mà chương này không làm.
+Mình chạy hàm này (`strace` ở mục 8) và trên Linux nó phát ra đúng chuỗi syscall `openat(…cfg.tmp…) → write → fsync → close → renameat → openat(thư mục) → fsync → close`. Lưu ý đây chỉ chứng minh **thứ tự lời gọi**; chương trình chạy bình thường không chứng minh được tính bền sau mất điện — muốn thế phải có fault injection (cắt điện hoặc giết process có kiểm soát), việc mà chương này không làm.
 
 </details>
 
-**Quay lại Q4:** thứ tự file tạm → fsync → rename → fsync thư mục cho "hoặc bản cũ nguyên vẹn, hoặc bản mới nguyên vẹn", mỗi bước chặn một kiểu lỗi.
+**Quay lại Q4:** thứ tự file tạm → fsync → rename → fsync thư mục cho "hoặc bản cũ nguyên vẹn, hoặc bản mới nguyên vẹn", mỗi bước chặn một kiểu lỗi; `ledger` thay `cfg` theo đúng chuỗi này.
 
 ---
 
 ## 5. Khi `fsync` thất bại: errseq và "fsyncgate" (Q5)
 
-> **Trả lời ngắn.** Khi writeback thất bại, Linux báo lỗi cho mỗi người theo dõi chỉ một lần, nên một lần `fsync` sau đó có thể trả `0` dù dữ liệu đã mất[^errseq-once]. "fsyncgate" (tên gọi của cộng đồng) là chuyện PostgreSQL thử lại `fsync` thất bại, nhận thành công giả rồi cắt bớt WAL và mất dữ liệu[^atc-pg]; vì vậy PostgreSQL mặc định PANIC rồi phục hồi từ WAL[^pg-off][^pg-why].
+> **Trả lời ngắn.** Khi writeback thất bại, Linux báo lỗi cho mỗi bên theo dõi đúng một lần, nên một lần `fsync` sau đó có thể trả `0` dù dữ liệu đã mất[^errseq-once]. Cộng đồng gọi chuyện này là "fsyncgate": PostgreSQL thử lại `fsync` thất bại, nhận thành công giả, rồi cắt bớt WAL và mất dữ liệu[^atc-pg]. Vì vậy PostgreSQL mặc định PANIC khi `fsync` dữ liệu lỗi[^pg-off]. Lý do là cách duy nhất tránh mất dữ liệu là phục hồi từ WAL sau mọi lỗi được báo[^pg-why].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chuông báo cháy chỉ kêu một lần. Ai không nghe lần đầu thì lần sau thấy yên lặng, không có nghĩa là đã hết cháy.
+*Với `ledger`.* Giả sử một lần `fsync` của `ledger` trả `EIO`: đĩa hỏng, hết chỗ với thin provisioning, hay NFS mất kết nối. Phản xạ tự nhiên của người viết service là ghi log rồi gọi lại `fsync`, và nếu lần sau trả `0` thì coi như xong. Mục này cho thấy phản xạ đó sai ở đâu: dữ liệu dirty trong page cache sau lần lỗi đầu ở trạng thái gì, và `fsync` thứ hai thật sự làm gì?
 
-Giả sử ghi nền xuống đĩa lỗi (đĩa hỏng, hết chỗ với thin provisioning, mất kết nối mạng với NFS…). Dữ liệu dirty trong page cache giờ ở trạng thái gì, và `fsync` thứ hai làm gì?
+### 5.1 Linux báo lỗi writeback thế nào: `errseq_t`
 
-### Linux báo lỗi writeback thế nào: `errseq_t`
+Từ Linux 4.13, lỗi write-back được báo cho mọi file descriptor có thể đã ghi dữ liệu gây ra lỗi; NFS theo dõi chi tiết hơn, còn hầu hết filesystem cục bộ báo cho mọi fd đang mở trên file khi lỗi được ghi nhận[^fsync-eio]. Vì vậy `EIO` từ `fsync` có thể liên quan đến dữ liệu ghi qua một fd khác của cùng file.
 
-Man page `fsync(2)` ghi `EIO` có thể liên quan đến dữ liệu ghi qua một file descriptor khác của cùng file, và từ Linux 4.13 lỗi write-back được báo cho mọi file descriptor có thể đã ghi dữ liệu gây lỗi; NFS theo dõi chi tiết hơn, còn hầu hết filesystem cục bộ báo cho mọi fd đang mở trên file khi lỗi được ghi nhận.[^fsync-eio]
+Cơ chế nằm sau là `errseq_t`: một cách ghi lỗi ở một nơi và cho phép nhiều "subscriber" biết nó có đổi kể từ lần lấy mẫu trước hay không. Use case ban đầu của nó là theo dõi lỗi cho các syscall đồng bộ file (`fsync`, `fdatasync`, `msync`, `sync_file_range`)[^errseq-def]. Điều đáng nhớ là cách báo: khi lỗi được ghi, mỗi bên theo dõi nhận lỗi **một lần** vào lần kiểm tra kế tiếp, các lần sau trả 0 cho đến khi có lỗi mới[^errseq-once]. Dịch sang ngôn ngữ ứng dụng: sau khi `fsync` của `ledger` đã trả `EIO` một lần, `fsync` kế tiếp có thể trả `0` mà dữ liệu vẫn chưa xuống đĩa.
 
-Cơ chế nằm sau là `errseq_t`. Tài liệu kernel mô tả: đó là cách ghi lỗi ở một nơi và cho phép nhiều "subscriber" biết nó có đổi kể từ một lần lấy mẫu trước hay không; use case ban đầu là theo dõi lỗi cho các syscall đồng bộ file (`fsync`, `fdatasync`, `msync`, `sync_file_range`).[^errseq-def] Nó là số 32 bit không dấu: các bit thấp chứa mã lỗi, các bit cao là bộ đếm.[^errseq-bits] Ví dụ trong tài liệu: khi lỗi được ghi, mỗi người theo dõi nhận lỗi **một lần** vào lần kiểm tra kế tiếp; các lần gọi sau trả 0 cho đến khi có lỗi mới.[^errseq-once] Hiểu theo ngôn ngữ ứng dụng: sau khi `fsync` của bạn đã trả `EIO` một lần, `fsync` kế tiếp có thể trả `0`.
+### 5.2 "fsyncgate" và bài báo ATC 2020
 
-### "fsyncgate" và bài báo ATC 2020
+Bài báo USENIX ATC 2020 "Can Applications Recover from fsync Failures?" mở đầu bằng quan sát rằng hành vi của `fsync` khi lỗi không được định nghĩa rõ. Một số hệ thống đánh dấu trang là clean khi `fsync` thất bại dù trang dirty chưa được ghi đúng xuống đĩa, nên phản ứng đơn giản như thử lại `fsync` không chạy như mong đợi và dẫn đến hỏng hoặc mất dữ liệu[^atc-intro].
 
-Bài báo USENIX ATC 2020 "Can Applications Recover from fsync Failures?" mở đầu bằng quan sát: hành vi của `fsync` khi lỗi là không được định nghĩa rõ; một số hệ thống đánh dấu trang là clean khi `fsync` thất bại dù trang dirty chưa ghi đúng xuống đĩa, nên phản ứng đơn giản như thử lại `fsync` không hoạt động như mong đợi, dẫn đến hỏng hoặc mất dữ liệu.[^atc-intro] Bài báo kể lại chuyện PostgreSQL: trên nhiều filesystem Linux, trang không ghi được bị đánh dấu clean khi `fsync` gọi và lỗi; do đó khi PostgreSQL thử lại `fsync` lần hai, không còn trang dirty nào, `fsync` thứ hai thành công mà không ghi gì, và PostgreSQL tiếp tục cắt bớt write-ahead log — mất dữ liệu.[^atc-pg] Bài viết nói PostgreSQL đã dùng `fsync` sai suốt 20 năm.[^atc-20y] Phản ứng: PostgreSQL đổi sang crash và restart thay vì thử lại, rồi dựng lại trạng thái từ WAL; WiredTiger/MongoDB và MySQL cũng sửa logic thử lại `fsync` của họ (bài báo không nói họ chọn đúng cách crash-và-restart).[^atc-fix] (Sự kiện này trong cộng đồng thường gọi là "fsyncgate"; tên gọi đó là cách gọi cộng đồng, mình không có nguồn chính thức cho tên.)
+Chuyện PostgreSQL là ví dụ nổi tiếng nhất. Trên nhiều filesystem Linux, trang không ghi được bị đánh dấu clean ngay khi `fsync` gọi và lỗi. Khi PostgreSQL thử lại `fsync` lần hai thì không còn trang dirty nào, nên `fsync` thứ hai thành công mà không ghi gì, và PostgreSQL tiếp tục cắt bớt write-ahead log, tức là mất dữ liệu[^atc-pg]. Bài báo nói PostgreSQL đã dùng `fsync` sai suốt 20 năm[^atc-20y]. Sau đó PostgreSQL đổi sang crash và restart thay vì thử lại, rồi dựng lại trạng thái từ WAL; WiredTiger/MongoDB và MySQL cũng sửa logic thử lại `fsync` của họ (bài báo không nói họ chọn đúng cách crash-và-restart)[^atc-fix]. Tên "fsyncgate" là cách gọi của cộng đồng; mình không có nguồn chính thức cho tên đó.
 
-### Khuyến nghị đã thành cấu hình: `data_sync_retry` của PostgreSQL
+### 5.3 Khuyến nghị đã thành cấu hình: `data_sync_retry`
 
-Tài liệu PostgreSQL 16, tham số `data_sync_retry`: mặc định `off`, khi `fsync` dữ liệu thất bại thì PostgreSQL phát lỗi mức PANIC và server sập.[^pg-off] Lý do tài liệu nêu: trên một số hệ điều hành, trạng thái dữ liệu trong page cache của kernel là không rõ sau khi write-back thất bại; có thể nó đã bị quên hoàn toàn nên thử lại là không an toàn — lần thử hai có thể báo thành công trong khi dữ liệu đã mất; cách duy nhất tránh mất dữ liệu là khôi phục từ WAL sau mọi lỗi được báo.[^pg-why] Đặt `on` chỉ nên làm sau khi điều tra cách hệ điều hành xử lý dữ liệu buffered khi write-back lỗi.[^pg-on]
+Tham số `data_sync_retry` của PostgreSQL 16 mặc định là `off`: khi `fsync` dữ liệu thất bại, PostgreSQL phát lỗi mức PANIC và server sập[^pg-off]. Tài liệu giải thích: trên một số hệ điều hành, trạng thái dữ liệu trong page cache của kernel là không rõ sau khi write-back thất bại, có thể nó đã bị quên hoàn toàn, nên thử lại là không an toàn vì lần hai có thể báo thành công trong khi dữ liệu đã mất. Cách duy nhất tránh mất dữ liệu là khôi phục từ WAL sau mọi lỗi được báo[^pg-why]. Chỉ nên đặt `on` sau khi đã điều tra cách hệ điều hành xử lý dữ liệu buffered khi write-back lỗi[^pg-on].
 
-(Nhận xét của người soạn) Bài học cho code của bạn: nếu có đường dẫn `fsync` lỗi trong dịch vụ quan trọng, coi dữ liệu chưa sync của file đó là **không còn tin được**; ghi log, fail-stop hoặc dựng lại từ nguồn thật (WAL, replica) thay vì lặp `fsync` đến khi trả 0.
+Bài học cho `ledger` (nhận xét của người soạn): nếu `fsync` của một service quan trọng lỗi, coi dữ liệu chưa sync của file đó là **không còn tin được**. Ghi log, fail-stop, hoặc dựng lại từ nguồn thật (WAL, replica) thay vì lặp `fsync` đến khi nó trả 0.
 
-<details><summary>Đi sâu: ba filesystem trong bài báo ATC 2020</summary>
+<details><summary>Đi sâu: cách errseq_t lưu lỗi, và ba filesystem trong bài báo ATC 2020</summary>
 
-Bài báo cũng đo trên ba filesystem (ext4, XFS, Btrfs): cả ba đều đánh dấu trang clean sau khi `fsync` thất bại, nên retry ở mức ứng dụng không hiệu quả; nội dung của trang clean đó khác nhau tùy filesystem.[^atc-all3] Chi tiết: ext4 và XFS giữ trang chứa dữ liệu mới nhất, Btrfs hoàn lại trạng thái trong bộ nhớ cho khớp với đĩa.[^atc-detail] Thử nghiệm của bài báo dùng Linux 5.2.11.[^atc-kernel] Đó là kết quả trên một kernel cụ thể; kernel hiện tại có thể khác (mình không kiểm chứng lại).
+`errseq_t` là một số 32 bit không dấu: các bit thấp chứa mã lỗi, các bit cao là bộ đếm[^errseq-bits].
+
+Bài báo cũng đo trên ba filesystem (ext4, XFS, Btrfs): cả ba đều đánh dấu trang clean sau khi `fsync` thất bại, nên retry ở mức ứng dụng không hiệu quả[^atc-all3]. Nội dung của trang clean đó khác nhau tùy filesystem: ext4 và XFS giữ trang chứa dữ liệu mới nhất, còn Btrfs hoàn lại trạng thái trong bộ nhớ cho khớp với đĩa[^atc-detail]. Thử nghiệm của bài báo dùng Linux 5.2.11[^atc-kernel]. Đó là kết quả trên một kernel cụ thể; kernel hiện tại có thể khác (mình không kiểm chứng lại).
 
 </details>
 
-**Quay lại Q5:** sau lỗi `fsync`, đừng coi dữ liệu là bền chỉ vì lần gọi kế tiếp trả 0; PostgreSQL chọn PANIC và dựng lại từ WAL.
+**Quay lại Q5:** sau lỗi `fsync`, đừng coi dữ liệu là bền chỉ vì lần gọi kế tiếp trả 0; PostgreSQL chọn PANIC và dựng lại từ WAL, và `ledger` nên làm tương tự.
 
 ---
 
 ## 6. `sync_file_range(2)`, `O_SYNC`, `O_DSYNC` (Q6)
 
-> **Trả lời ngắn.** `sync_file_range` không ghi metadata và không flush cache đĩa, nên man page cảnh báo không dùng nó làm công cụ bền vững[^sfr-warn1][^sfr-warn2]. `O_SYNC`/`O_DSYNC` biến mỗi `write` thành đồng bộ với mức hoàn tất tương ứng file integrity / data integrity completion[^osync-def][^osync-notes].
+> **Trả lời ngắn.** `sync_file_range` không ghi metadata của file ra[^sfr-warn1]. Nó cũng không flush cache ghi của đĩa[^sfr-warn2], nên đừng dùng làm công cụ bền vững. `O_SYNC`/`O_DSYNC` biến mỗi `write` thành đồng bộ, với mức hoàn tất tương ứng là file integrity / data integrity completion[^osync-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `sync_file_range` như bảo kho bắt đầu xếp hàng lên xe mà không bảo đảm hàng đã tới nơi; `O_SYNC` như bắt ký nhận cho từng kiện.
+*Với `ledger`.* Mỗi lần `fsync` tốn vài trăm µs (mục 2), nên người viết `ledger` dễ nghĩ tới hai lối tắt: gợi ý kernel ghi sớm bằng `sync_file_range`, hoặc mở `ledger.log` với `O_DSYNC` để khỏi gọi `fsync` bằng tay. Mục này xét từng lối tắt xem nó thay được `fsync` tới đâu.
 
-### `sync_file_range`: đừng dùng làm công cụ bền vững
+### 6.1 `sync_file_range`: đừng dùng làm công cụ bền vững
 
-Man page mở đầu phần Warning bằng: lời gọi này "cực kỳ nguy hiểm", không nên dùng trong chương trình portable; không thao tác nào của nó ghi metadata của file ra, nên trừ khi ứng dụng chỉ ghi đè các block đã có sẵn trên đĩa, không có bảo đảm gì dữ liệu còn sau crash.[^sfr-warn1] Tài liệu thêm: không có giao diện nào cho ứng dụng biết một lần ghi có phải thuần ghi đè hay không; trên filesystem copy-on-write (ví dụ btrfs) ghi đè block đã cấp phát là không thể; và nó **không flush disk write cache**, nên không cung cấp bảo đảm toàn vẹn dữ liệu trên hệ thống có volatile write cache.[^sfr-warn2]
+Phần Warning của man page mở đầu bằng việc gọi lời gọi này là "cực kỳ nguy hiểm", không nên dùng trong chương trình portable, và không thao tác nào của nó ghi metadata của file ra. Hệ quả là trừ khi ứng dụng chỉ ghi đè các block đã có sẵn trên đĩa, không có bảo đảm gì dữ liệu còn sau crash[^sfr-warn1]. Tài liệu còn thêm ba điều: không có giao diện nào cho ứng dụng biết một lần ghi có phải thuần ghi đè hay không, trên filesystem copy-on-write (ví dụ btrfs) ghi đè block đã cấp phát là không thể, và lời gọi **không flush disk write cache**, nên không cung cấp bảo đảm toàn vẹn dữ liệu trên hệ thống có volatile write cache[^sfr-warn2].
 
-Cờ `SYNC_FILE_RANGE_WRITE` đơn lẻ là thao tác flush bất đồng bộ và "không phù hợp cho các thao tác toàn vẹn dữ liệu".[^sfr-write] Vậy chỗ dùng hợp lý (nhận xét của người soạn): chỉ để *gợi ý* kernel bắt đầu ghi sớm nhằm san phẳng tải I/O (ví dụ database ghi checkpoint từ từ), và luôn kết thúc bằng `fsync`/`fdatasync` thật.
+Riêng cờ `SYNC_FILE_RANGE_WRITE` là thao tác flush bất đồng bộ và "không phù hợp cho các thao tác toàn vẹn dữ liệu"[^sfr-write]. Vậy chỗ dùng hợp lý (nhận xét của người soạn) là chỉ *gợi ý* kernel bắt đầu ghi sớm để san phẳng tải I/O, chẳng hạn khi database ghi checkpoint từ từ, và luôn kết thúc bằng `fsync`/`fdatasync` thật. Với `ledger`, `sync_file_range` không thể thay `fsync` trước khi trả `201`.
 
-### `O_SYNC` và `O_DSYNC`
+### 6.2 `O_SYNC` và `O_DSYNC`
 
-Hai cờ của `open(2)` biến mỗi `write` thành đồng bộ: `O_DSYNC` làm thao tác ghi hoàn tất theo yêu cầu "synchronized I/O data integrity completion", `O_SYNC` theo "synchronized I/O file integrity completion".[^osync-def] `O_SYNC` flush dữ liệu và mọi metadata liên quan xuống phần cứng; `O_DSYNC` flush dữ liệu và chỉ flush cập nhật metadata cần cho việc đọc lại.[^osync-notes] Tức `O_SYNC` ≈ `write` + `fsync`, `O_DSYNC` ≈ `write` + `fdatasync` về mặt ngữ nghĩa (suy luận của người soạn từ hai định nghĩa trên, man page không viết phép tương đương này) — tương ứng với cặp `fsync`/`fdatasync` ở mục 2.
+Hai cờ của `open(2)` này biến mỗi `write` thành đồng bộ. `O_DSYNC` làm thao tác ghi hoàn tất theo yêu cầu "synchronized I/O data integrity completion", còn `O_SYNC` theo "synchronized I/O file integrity completion"[^osync-def]. `O_SYNC` flush dữ liệu và mọi metadata liên quan xuống phần cứng, còn `O_DSYNC` flush dữ liệu và chỉ flush cập nhật metadata cần cho việc đọc lại[^osync-notes]. Về ngữ nghĩa, đó là cặp `fsync`/`fdatasync` ở mục 2 gắn sẵn vào từng `write`: `O_SYNC` ≈ `write` + `fsync`, `O_DSYNC` ≈ `write` + `fdatasync` (suy luận của người soạn từ hai định nghĩa trên; man page không viết phép tương đương này).
 
-<details><summary>Đi sâu: lịch sử <code>O_SYNC</code> và <code>O_DIRECT</code></summary>
+Vậy `ledger` nên chọn cách nào? `O_SYNC` có ích khi mỗi lần ghi đều cần bền, vì chỉ tốn một syscall thay vì hai. `fsync` riêng có ích khi `ledger` gom nhiều `write` của nhiều request rồi sync một lần (group commit), và số đo ở mục 2 cho thấy `O_DSYNC`/`O_SYNC` cùng bậc chi phí với `write` + sync tương ứng (nhận xét của người soạn).
 
-Lịch sử đáng biết: trước Linux 2.6.33 Linux chỉ cài `O_SYNC` và đa số filesystem thực tế cung cấp ngữ nghĩa của `O_DSYNC`;[^osync-before] từ 2.6.33 mới có `O_SYNC` đúng nghĩa.[^osync-history] Số đo mục 2: `O_DSYNC`/`O_SYNC` cùng bậc chi phí với `write` + sync tương ứng. `O_SYNC` có ích khi mỗi lần ghi đều cần bền (một syscall thay vì hai); `fsync` riêng có ích khi bạn gom nhiều `write` rồi sync một lần (group commit — nhận xét của người soạn).
+<details><summary>Đi sâu: lịch sử <code>O_SYNC</code> và chuyện <code>O_DIRECT</code></summary>
 
-`O_DIRECT` là chuyện khác: man page nhấn mạnh `O_DIRECT` một mình không bảo đảm dữ liệu và metadata đã chuyển xong; muốn đồng bộ thật cần thêm `O_SYNC`.[^odirect-sync] Chi tiết `O_DIRECT` ở [Chương 04](./04-page-cache-va-direct-io.md).
+Trước Linux 2.6.33, Linux chỉ cài cờ `O_SYNC` cho `open()`[^osync-before], và đa số filesystem thực tế cung cấp ngữ nghĩa của `O_DSYNC`. Từ 2.6.33 mới có `O_SYNC` đúng nghĩa[^osync-history].
+
+`O_DIRECT` là chuyện khác. Man page nhấn mạnh muốn đồng bộ thật thì phải thêm `O_SYNC`; `O_DIRECT` một mình không bảo đảm dữ liệu và metadata đã chuyển xong[^odirect-sync]. Chi tiết `O_DIRECT` ở [Chương 04](./04-page-cache-va-direct-io.md).
 
 </details>
 
-**Quay lại Q6:** `sync_file_range` chỉ gợi ý ghi sớm; muốn bền thì `fsync`/`fdatasync` hoặc `O_SYNC`/`O_DSYNC`.
+**Quay lại Q6:** `sync_file_range` chỉ gợi ý ghi sớm; muốn bền thì `ledger` dùng `fsync`/`fdatasync` hoặc `O_SYNC`/`O_DSYNC`.
 
 ---
 
 ## 7. Volatile write cache của đĩa, và macOS (Q7)
 
-> **Trả lời ngắn.** Nhiều thiết bị có volatile write-back cache và báo "xong" cho OS trước khi dữ liệu nằm trên bộ nhớ không mất điện[^wcc-intro2], nên OS phải ép flush khi làm thao tác như `fsync`. Trên Linux `fsync` được định nghĩa gồm việc đó[^fsync-cache]; trên macOS `fsync()` chỉ đẩy dữ liệu tới drive, và muốn ép drive flush phải dùng `fcntl` `F_FULLFSYNC`[^apple-drive][^apple-full].
+> **Trả lời ngắn.** Nhiều thiết bị có volatile write-back cache và báo "xong" cho OS trước khi dữ liệu nằm trên bộ nhớ không mất điện[^wcc-intro2], nên OS phải ép flush khi làm thao tác như `fsync`. Trên Linux `fsync` được định nghĩa gồm việc đó[^fsync-cache]. Trên macOS `fsync()` chỉ đẩy dữ liệu tới drive[^apple-drive]; muốn ép drive flush phải dùng `fcntl` `F_FULLFSYNC`[^apple-full].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bưu tá chuyển thư tới quầy lễ tân tòa nhà (drive) rồi báo "đã giao", trong khi thư chưa tới tay người nhận (phương tiện bền).
+*Với `ledger`.* Dev chạy thử `ledger` trên MacBook, còn production chạy trên Linux. Cùng một lời gọi `fsync` sau mỗi `write`, nhưng "xong" trên hai máy có cùng nghĩa không? Mục này xét bến đỗ cuối cùng của dữ liệu, cache ghi trong chính cái đĩa, và chỗ hai hệ điều hành đối xử với nó khác nhau.
 
-### Linux
+### 7.1 Linux
 
-Tài liệu kernel `block/writeback_cache_control` nói thẳng: nhiều thiết bị có volatile write-back cache, nên hệ điều hành cần ép dữ liệu ra bộ nhớ không mất điện khi thực hiện một thao tác toàn vẹn dữ liệu như `fsync`, `sync` hay unmount.[^wcc-intro2] Ở cấp mount, `ext4` cũng có tùy chọn `barrier` (mặc định bật): tài liệu nói write barrier bảo đảm thứ tự đúng trên đĩa của journal commit, giúp việc dùng volatile disk write cache an toàn, đổi lại giảm chút hiệu năng.[^ext4-barrier] OSTEP giải thích nguyên nhân cùng gốc: với write buffering bật (còn gọi "immediate reporting"), đĩa báo ghi xong khi dữ liệu mới nằm trong cache của đĩa, và không bảo đảm các lần ghi sau đến đĩa sau các lần trước, nên thứ tự không được giữ.[^ostep-immediate]
+Tài liệu kernel `block/writeback_cache_control` nói thẳng: nhiều thiết bị có volatile write-back cache, nên hệ điều hành cần ép dữ liệu ra bộ nhớ không mất điện khi thực hiện một thao tác toàn vẹn dữ liệu như `fsync`, `sync` hay unmount[^wcc-intro2]. Ở cấp mount, `ext4` có tùy chọn `barrier` (mặc định bật): write barrier bảo đảm thứ tự đúng trên đĩa của journal commit, giúp dùng volatile disk write cache an toàn, đổi lại giảm chút hiệu năng[^ext4-barrier]. Nguyên nhân cùng gốc này cũng được OSTEP giải thích: khi write buffering bật (còn gọi "immediate reporting"), đĩa báo ghi xong lúc dữ liệu mới nằm trong cache của đĩa, và không bảo đảm các lần ghi sau đến đĩa sau các lần trước, nên thứ tự không được giữ[^ostep-immediate].
 
-### macOS khác Linux
+### 7.2 macOS khác Linux
 
-Trang man `fsync(2)` của Apple (bản archive trong tài liệu iOS) mô tả: `fsync()` đẩy toàn bộ dữ liệu từ host sang drive (thiết bị lưu trữ bền), nhưng chỉ đến đó;[^apple-drive] drive có thể chưa ghi vật lý trong một thời gian khá dài và có thể ghi không theo thứ tự.[^apple-reorder] Cụ thể, nếu drive mất điện hoặc OS crash, ứng dụng có thể thấy chỉ một phần hoặc không có dữ liệu nào được ghi.[^apple-lose] Apple nói tình huống này dễ tái hiện với workload thật và tắt nguồn thật.[^apple-notheory] Với ứng dụng cần bảo đảm chặt hơn, Mac OS X cung cấp `fcntl` `F_FULLFSYNC`: nó yêu cầu drive flush mọi dữ liệu buffered xuống bộ nhớ bền, và ứng dụng như database cần thứ tự ghi nghiêm ngặt nên dùng nó.[^apple-full]
+Trang man `fsync(2)` của Apple (bản archive trong tài liệu iOS) mô tả: `fsync()` đẩy toàn bộ dữ liệu từ host sang drive (thiết bị lưu trữ bền), nhưng chỉ đến đó[^apple-drive]. Drive có thể chưa ghi vật lý trong một thời gian khá dài, và có thể ghi không theo thứ tự[^apple-reorder]. Cụ thể, nếu drive mất điện hoặc OS crash, ứng dụng có thể thấy chỉ một phần dữ liệu, hoặc không có gì, được ghi[^apple-lose]. Apple nói đây không phải tình huống lý thuyết: nó dễ tái hiện với workload thật và tắt nguồn thật[^apple-notheory]. Với ứng dụng cần bảo đảm chặt hơn, Mac OS X có `fcntl` `F_FULLFSYNC`, yêu cầu drive flush mọi dữ liệu buffered xuống bộ nhớ bền; ứng dụng như database, cần thứ tự ghi nghiêm ngặt, nên dùng nó[^apple-full].
+
+Cho `ledger`: trên laptop macOS, `fsync` sau mỗi `write` chưa đủ để `201` có nghĩa như trên Linux (suy luận của người soạn từ hai đoạn trên). Mục 8 cho thấy `File::sync_all` của Rust lo chuyện này thế nào.
 
 <details><summary>Đi sâu: đối chiếu Linux/macOS và độ tin cậy của nguồn Apple</summary>
 
-Đối chiếu với Linux: man page Linux định nghĩa chính `fsync` là gồm cả flush disk cache (mục 2), còn Apple tách việc đó sang `F_FULLFSYNC`. Cho nên cùng gọi `fsync()` mà bảo đảm khác nhau giữa hai hệ điều hành. Nguồn Apple ở đây là trang man bản archive; mình không biết nó khớp macOS hiện tại đến đâu. Trang `fcntl(2)` cùng bộ archive còn nói `F_FULLFSYNC` "làm như `fsync(2)` rồi yêu cầu drive flush" và lúc đó chỉ cài trên HFS, FAT và UDF[^apple-fcntl-fs] — danh sách này cũ (không nhắc APFS), đừng suy ra APFS không hỗ trợ. Nguồn ghim ổn định hơn: header XNU ở tag `xnu-10002.1.13` vẫn định nghĩa `F_FULLFSYNC`, với chú thích trong header là chạy `fsync` rồi yêu cầu drive flush xuống phương tiện[^xnu-fullfsync] (tag này chỉ chứng minh định nghĩa lệnh tồn tại, không chứng minh hành vi của từng filesystem hay từng loại ổ). Mình không tìm được trang man macOS hiện hành truy cập được.
+Đối chiếu với Linux: man page Linux định nghĩa chính `fsync` là gồm cả flush disk cache (mục 2), còn Apple tách việc đó sang `F_FULLFSYNC`. Cho nên cùng gọi `fsync()` mà bảo đảm khác nhau giữa hai hệ điều hành.
+
+Nguồn Apple ở đây là trang man bản archive; mình không biết nó khớp macOS hiện tại đến đâu. Trang `fcntl(2)` cùng bộ archive còn nói `F_FULLFSYNC` "làm như `fsync(2)` rồi yêu cầu drive flush" và lúc đó chỉ cài trên HFS, FAT và UDF[^apple-fcntl-fs]. Danh sách này cũ (không nhắc APFS), đừng suy ra APFS không hỗ trợ. Nguồn ghim ổn định hơn là header XNU ở tag `xnu-10002.1.13`: nó vẫn định nghĩa `F_FULLFSYNC`, với chú thích là chạy `fsync` rồi yêu cầu drive flush xuống phương tiện[^xnu-fullfsync]. Tag này chỉ chứng minh định nghĩa lệnh tồn tại, không chứng minh hành vi của từng filesystem hay từng loại ổ. Mình không tìm được trang man macOS hiện hành truy cập được.
 
 </details>
 
-**Quay lại Q7:** cache ghi của đĩa là bến đỗ cuối cùng cần ép; Linux gộp việc đó vào `fsync`, macOS tách sang `F_FULLFSYNC`.
+**Quay lại Q7:** cache ghi của đĩa là bến đỗ cuối cùng cần ép; Linux gộp việc đó vào `fsync`, macOS tách sang `F_FULLFSYNC`, nên `ledger` chạy trên macOS cần chú ý hơn.
 
 ---
 
 ## 8. Rust gọi syscall nào: `strace` và `sync_all` (Q8)
 
-> **Trả lời ngắn.** Theo source Rust 1.95.0, trên Linux `File::sync_all` gọi `fsync` và `File::sync_data` gọi `fdatasync`[^src-fs-all][^src-fs-data][^src-fsync-other][^src-datasync], còn trên Apple cả hai dùng `fcntl(F_FULLFSYNC)`[^src-fsync][^src-datasync-apple] (chi tiết cài đặt, không phải bảo đảm của docs). Rust std không có hàm riêng để sync thư mục: mở thư mục chỉ-đọc bằng `File::open` rồi gọi `sync_all` (đã quan sát trên Linux, xem mục 3 và phần strace ở trên).
+> **Trả lời ngắn.** Theo source Rust 1.95.0, trên Linux `File::sync_all` gọi `fsync`[^src-fsync-other]. Còn `File::sync_data` gọi `fdatasync`[^src-datasync]. Trên Apple, `sync_all` dùng `fcntl(F_FULLFSYNC)`[^src-fsync]. `sync_data` cũng vậy[^src-datasync-apple]. Đó là chi tiết cài đặt, không phải bảo đảm của docs. Rust std không có hàm riêng để sync thư mục: mở thư mục chỉ-đọc bằng `File::open` rồi gọi `sync_all` (đã quan sát trên Linux, xem mục 3 và phần strace ở dưới).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `strace` giống sao kê ngân hàng của chương trình: nó liệt kê đúng những syscall đã gọi, dù code Rust nhìn gọn hơn nhiều.
+*Với `ledger`.* `ledger` viết bằng Rust nên không gọi `fsync` trực tiếp mà gọi `File::sync_all`. Câu hỏi của mục này: lời gọi đó thực sự đi tới syscall nào, trên Linux và trên macOS, và `ledger` phải làm gì cho thư mục và cho `BufWriter`?
+
+### 8.1 Nhìn bằng `strace`
 
 Chương trình thử (rút gọn) gọi lần lượt `write`, `sync_data`, `sync_all`, rồi `atomic_write` ở mục 4. Mình biên dịch bằng `rustc 1.95.0 -O` và chạy `strace -f` trong container lab (kernel `6.8.0-117-generic`), lọc bớt syscall nạp thư viện:
 
@@ -304,124 +338,124 @@ close(3)                                = 0
 
 Quan sát được: (1) `sync_data` → `fdatasync`, `sync_all` → `fsync` trên Linux; (2) `fs::rename` ra `renameat`; (3) fsync thư mục chỉ là `openat(…, O_RDONLY…)` rồi `fsync` trên fd đó; (4) `File::create` dùng `O_TRUNC`. strace **không** cho biết thiết bị có flush cache hay không, và thư mục `d` nằm trên virtiofs, nên đây chỉ là bằng chứng về syscall, không về hành vi đĩa.
 
-### `sync_all` và `sync_data`
+### 8.2 `sync_all` và `sync_data` trong docs
 
-Docs Rust 1.95.0: `File::sync_all` "cố gắng" (attempts) đảm bảo mọi nội dung và metadata do OS giữ trong bộ nhớ đã lên đĩa; hàm này cố bảo đảm dữ liệu trong bộ nhớ đến filesystem trước khi trả về.[^rust-syncall][^rust-syncall2] Docs còn nói hàm này dùng để bắt các lỗi mà nếu không sẽ chỉ bị bắt khi `File` đóng, vì drop một `File` bỏ qua mọi lỗi;[^rust-dropign] và `sync_all` thường đắt hơn đóng bằng drop vì drop không bắt buộc chặn đến khi dữ liệu đã ghi.[^rust-drop] `sync_data` giống `sync_all` ngoại trừ việc có thể không đồng bộ metadata của file, mục đích giảm thao tác đĩa; và docs cảnh báo một số nền tảng có thể cài nó đơn giản bằng `sync_all`.[^rust-syncdata]
+Docs Rust 1.95.0 viết `File::sync_all` "cố gắng" (attempts) đảm bảo mọi nội dung và metadata do OS giữ trong bộ nhớ đã lên đĩa[^rust-syncall]. Hàm này cố bảo đảm dữ liệu trong bộ nhớ đến filesystem trước khi trả về[^rust-syncall2]. Docs còn nói nó dùng để bắt các lỗi mà nếu không sẽ chỉ bị bắt khi `File` đóng, vì drop một `File` bỏ qua mọi lỗi[^rust-dropign]. Vì drop không bắt buộc chặn đến khi dữ liệu đã ghi, `sync_all` thường đắt hơn đóng bằng drop[^rust-drop]. `sync_data` giống `sync_all` ngoại trừ việc có thể không đồng bộ metadata của file, với mục đích giảm thao tác đĩa; docs cảnh báo một số nền tảng có thể cài nó đơn giản bằng `sync_all`[^rust-syncdata].
 
-Ý nghĩa thực tế: `write_all` thành công rồi để `File` bị drop thì lỗi lúc đóng bị bỏ qua và drop không bắt buộc chặn đến khi dữ liệu đã ghi xuống filesystem, nên chưa có gì bảo đảm tính bền; muốn bền và muốn bắt lỗi phải gọi `sync_all`/`sync_data` rồi kiểm `Result`. (Nhận xét của người soạn, dựa trên hai đoạn docs trên.)
+Ở tầng source, `File::sync_all` chuyển thẳng sang `self.inner.fsync()`[^src-fs-all]. `File::sync_data` chuyển sang `self.inner.datasync()`[^src-fs-data]. Việc chọn syscall nằm ở nhánh theo nền tảng bên dưới (phần Đi sâu).
 
-### Thư mục
+Với `ledger`, ý nghĩa thực tế là: `write_all` thành công rồi để `File` bị drop thì lỗi lúc đóng bị bỏ qua và drop không bắt buộc chặn đến khi dữ liệu xuống filesystem, nên chưa có gì bảo đảm tính bền. Muốn bền và muốn bắt lỗi thì phải gọi `sync_all`/`sync_data` rồi kiểm `Result` (nhận xét của người soạn, dựa trên hai đoạn docs trên).
 
-Rust std không có hàm riêng "sync dir"; mẫu là `File::open(dir)?.sync_all()` như mục 3 và mục 4 (đã chạy trên Linux). `File::open` trên thư mục thành công vì mở chỉ-đọc, `File::create` lỗi `IsADirectory`.
+### 8.3 Thư mục và `BufWriter`
 
-### `BufWriter`
+Rust std không có hàm riêng "sync dir"; mẫu là `File::open(dir)?.sync_all()` như ở mục 3 và mục 4 (đã chạy trên Linux). `File::open` trên thư mục thành công vì mở chỉ-đọc, còn `File::create` lỗi `IsADirectory`.
 
-`File` không đệm trong user space; `BufWriter<File>` có. Muốn bền phải `flush()` (hoặc `into_inner()`) rồi mới `sync_all()`. Chi tiết ở [Chương 08](./08-rust-va-luu-tru.md).
+`File` không đệm trong user space, nhưng `BufWriter<File>` thì có. Nếu `ledger` bọc log trong `BufWriter`, nó phải `flush()` (hoặc `into_inner()`) rồi mới `sync_all()`. Chi tiết ở [Chương 08](./08-rust-va-luu-tru.md).
 
 <details><summary>Đi sâu: cài đặt theo nền tảng (source tag 1.95.0)</summary>
 
-Source `library/std/src/sys/fs/unix.rs` ở tag 1.95.0 là nơi quyết định syscall (đây là chi tiết cài đặt, có thể đổi giữa các phiên bản — đã đọc đúng tag):
+Source `library/std/src/sys/fs/unix.rs` ở tag 1.95.0 là nơi quyết định syscall (đây là chi tiết cài đặt, có thể đổi giữa các phiên bản; mình đã đọc đúng tag):
 
-- `fsync` (dùng cho `sync_all`): trên `target_vendor = "apple"` gọi `libc::fcntl(fd, libc::F_FULLFSYNC)`, còn trên các mục tiêu khác gọi `libc::fsync(fd)`.[^src-fsync][^src-fsync-other]
-- `datasync` (dùng cho `sync_data`): trên `target_vendor = "apple"` cũng là `libc::fcntl(fd, libc::F_FULLFSYNC)`;[^src-datasync-apple] trên Linux (cùng FreeBSD, Android, NetBSD, OpenBSD…) là `libc::fdatasync(fd)`; các nền tảng khác rơi về `libc::fsync(fd)`.[^src-datasync]
+- `fsync` (dùng cho `sync_all`): trên `target_vendor = "apple"` gọi `libc::fcntl(fd, libc::F_FULLFSYNC)`[^src-fsync]. Trên các mục tiêu khác nó gọi `libc::fsync(fd)`[^src-fsync-other].
+- `datasync` (dùng cho `sync_data`): trên `target_vendor = "apple"` cũng là `libc::fcntl(fd, libc::F_FULLFSYNC)`[^src-datasync-apple]. Trên Linux (cùng FreeBSD, Android, NetBSD, OpenBSD…) nó là `libc::fdatasync(fd)`; các nền tảng khác rơi về `libc::fsync(fd)`[^src-datasync].
 
-Vậy trả lời câu hỏi "macOS `sync_all` có dùng `F_FULLFSYNC` không?": **có**, theo source 1.95.0 — và `sync_data` trên macOS cũng vậy. Hệ quả (suy luận của người soạn, dựa trên mục 7): code Rust gọi `sync_all` cho chuỗi bền vững giống nhau trên Linux và macOS, nhưng trên macOS nó đắt hơn và đúng hơn so với gọi `libc::fsync` trần. Chuỗi syscall bạn thấy từ `strace` ở Linux (`fdatasync`/`fsync`) khớp với nhánh `not(apple)` của code trên — đã đối chiếu với `strace` ở đầu mục này. Đoạn code trên không có nhánh dự phòng sang `fsync`: nếu `fcntl(F_FULLFSYNC)` trả lỗi thì `sync_all` trả lỗi (đọc source, không chạy). Mình không chạy trên macOS để quan sát `F_FULLFSYNC` (không có công cụ vết syscall dùng được không cần quyền cao), nên mọi điều về macOS ở đây là đọc tài liệu và source, không phải quan sát.
+Vậy trả lời câu hỏi "macOS `sync_all` có dùng `F_FULLFSYNC` không?": **có**, theo source 1.95.0, và `sync_data` trên macOS cũng vậy. Hệ quả (suy luận của người soạn, dựa trên mục 7): code Rust gọi `sync_all` cho chuỗi bền vững giống nhau trên Linux và macOS, nhưng trên macOS nó đắt hơn và đúng hơn so với gọi `libc::fsync` trần. Chuỗi syscall bạn thấy từ `strace` ở Linux (`fdatasync`/`fsync`) khớp với nhánh `not(apple)` của code trên, như đã đối chiếu ở đầu mục này. Đoạn code đó không có nhánh dự phòng sang `fsync`: nếu `fcntl(F_FULLFSYNC)` trả lỗi thì `sync_all` trả lỗi (đọc source, không chạy). Mình không chạy trên macOS để quan sát `F_FULLFSYNC` (không có công cụ vết syscall dùng được không cần quyền cao), nên mọi điều về macOS ở đây là đọc tài liệu và source, không phải quan sát.
 
 </details>
 
-**Quay lại Q8:** `sync_all` → `fsync` và `sync_data` → `fdatasync` trên Linux (đã thấy trong strace); trên Apple cả hai dùng `F_FULLFSYNC`.
+**Quay lại Q8:** `sync_all` → `fsync` và `sync_data` → `fdatasync` trên Linux (đã thấy trong strace); trên Apple cả hai dùng `F_FULLFSYNC`; `ledger` cần thêm `fsync` thư mục và `flush` `BufWriter` trước `sync_all`.
 
 ---
 
 ## Tóm tắt
 
-- `write()` thành công chỉ nói dữ liệu đã được kernel nhận (thường vào page cache), không nói đã bền; man page khuyên `fsync` sau khi ghi cho ghi buffered thông thường (`O_SYNC`/`O_DSYNC` là đường khác, mục 6).
-- Dữ liệu đi qua bộ đệm user → page cache → cache của thiết bị → phương tiện; mỗi bến có thể mất khi crash/mất điện.
-- `fsync` (Linux) được định nghĩa gồm flush disk cache và chặn đến khi thiết bị báo xong; `fdatasync` bỏ metadata không cần cho việc đọc lại, nhưng kích thước file đổi thì vẫn phải flush.
+- `write()` thành công chỉ nói dữ liệu đã được kernel nhận (thường vào page cache), không nói đã bền; man page khuyên `fsync` sau khi ghi cho ghi buffered thông thường (`O_SYNC`/`O_DSYNC` là đường khác, mục 6). Với `ledger`, trả `201` ngay sau `write` chưa bảo đảm gì về đĩa.
+- Dữ liệu đi qua bộ đệm user → page cache → cache của thiết bị → phương tiện; mỗi bến có thể mất khi crash hoặc mất điện.
+- `fsync` (Linux) được định nghĩa gồm flush disk cache và chặn đến khi thiết bị báo xong; `fdatasync` bỏ metadata không cần cho việc đọc lại, nhưng kích thước file đổi thì vẫn phải flush. Cả hai tốn bậc độ lớn hơn `write` thuần.
 - File mới (hay rename) cần `fsync` thư mục cha, vì entry thư mục là dữ liệu riêng.
 - Mẫu ghi an toàn: ghi file tạm cùng thư mục → `fsync` file → `rename` → `fsync` thư mục.
-- `fsync` thất bại: lỗi chỉ báo một lần cho mỗi người theo dõi (errseq), trang có thể bị đánh dấu clean, retry có thể "thành công" giả; PostgreSQL chọn PANIC rồi phục hồi từ WAL.
-- `sync_file_range` không ghi metadata, không flush cache đĩa — không dùng làm công cụ bền vững.
-- `O_SYNC`/`O_DSYNC` đòi hỏi mức hoàn tất tương ứng với file integrity / data integrity completion của `fsync`/`fdatasync` cho mỗi lần ghi (phép tương đương `write`+`fsync` là suy luận của người soạn).
+- `fsync` thất bại: lỗi chỉ báo một lần cho mỗi bên theo dõi (errseq), trang có thể bị đánh dấu clean, retry có thể "thành công" giả; PostgreSQL chọn PANIC rồi phục hồi từ WAL.
+- `sync_file_range` không ghi metadata, không flush cache đĩa, nên không dùng làm công cụ bền vững.
+- `O_SYNC`/`O_DSYNC` đòi mỗi lần ghi hoàn tất theo mức file integrity / data integrity completion của `fsync`/`fdatasync` (phép tương đương `write` + `fsync` là suy luận của người soạn).
 - macOS: `fsync` không bắt drive flush hết cache; cần `F_FULLFSYNC`. Rust 1.95.0 dùng `F_FULLFSYNC` cho cả `sync_all` và `sync_data` trên Apple.
 - Rust: `sync_all` ↔ `fsync`, `sync_data` ↔ `fdatasync` trên Linux (đã quan sát bằng strace); fsync thư mục = `File::open(dir)?.sync_all()`.
 
 ## Câu hỏi tự kiểm tra
 
-1. `write()` trả về `n` bytes thành công. Liệt kê các nơi dữ liệu có thể đang nằm và có thể mất khi mất điện.
+1. `ledger` gọi `write()` và nhận về `n` byte thành công. Liệt kê các nơi dữ liệu có thể đang nằm và có thể mất khi mất điện.
 <details><summary>Đáp án</summary>
 
-Bộ đệm user (nếu có `BufWriter`/stdio, thậm chí chưa tới `write`), page cache của kernel, và cache ghi volatile của thiết bị.[^write-nogarantee][^wcc-intro]
+Bộ đệm user (nếu có `BufWriter`/stdio thì dữ liệu thậm chí chưa tới `write`), page cache của kernel, và cache ghi volatile của thiết bị. `write()` thành công không bảo đảm dữ liệu đã commit xuống đĩa[^write-nogarantee]. Thiết bị cũng có thể báo xong trước khi dữ liệu nằm trên phương tiện bền[^wcc-intro].
 
 </details>
 
 2. Hai dòng man page nào làm `fsync` Linux khác trực giác "chỉ đẩy xuống kernel"?
 <details><summary>Đáp án</summary>
 
-Nó bao gồm ghi xuyên qua hoặc flush disk cache nếu có, và chặn cho đến khi thiết bị báo hoàn tất.[^fsync-cache]
+Nó bao gồm ghi xuyên qua hoặc flush disk cache nếu có, và chặn cho đến khi thiết bị báo hoàn tất[^fsync-cache].
 
 </details>
 
 3. Khi nào `fdatasync` vẫn phải flush metadata?
 <details><summary>Đáp án</summary>
 
-Khi metadata cần cho việc đọc lại đúng dữ liệu, ví dụ kích thước file đổi (`ftruncate`); không cần cho `atime`/`mtime`.[^fdatasync-def]
+Khi metadata cần cho việc đọc lại đúng dữ liệu, ví dụ kích thước file đổi (`ftruncate`); không cần cho `atime`/`mtime`[^fdatasync-def].
 
 </details>
 
-4. Bạn tạo file mới, ghi, `fsync(fd)` rồi crash. Còn rủi ro nào, và cách chặn?
+4. `ledger` tạo file mới, ghi, `fsync(fd)` rồi crash. Còn rủi ro nào, và cách chặn?
 <details><summary>Đáp án</summary>
 
-Entry thư mục có thể chưa lên đĩa; cần `fsync` fd của thư mục cha.[^fsync-dir]
+Entry thư mục có thể chưa lên đĩa; cần `fsync` fd của thư mục cha[^fsync-dir].
 
 </details>
 
 5. Trong mẫu ghi an toàn, vì sao phải `fsync` file tạm *trước* `rename`?
 <details><summary>Đáp án</summary>
 
-Nếu không, rename có thể bền trước dữ liệu và sau crash tên đích trỏ tới file rỗng; ext4 có `auto_da_alloc` để giảm vấn đề này nhưng đó là hành vi riêng của ext4, không phải bảo đảm chung.[^ext4-autoda]
+Nếu không, rename có thể bền trước dữ liệu và sau crash tên đích trỏ tới file rỗng. ext4 có `auto_da_alloc` để giảm vấn đề này, nhưng đó là hành vi riêng của ext4, không phải bảo đảm chung[^ext4-autoda].
 
 </details>
 
 6. `rename` atomic nghĩa là gì và không có nghĩa là gì?
 <details><summary>Đáp án</summary>
 
-Tiến trình khác không thấy `newpath` biến mất.[^rename-atomic] Nó không phải lời hứa về trạng thái trên đĩa sau mất điện; cần fsync thư mục: man page nói về entry thư mục chứa file,[^fsync-dir] còn với rename thì đây là thực hành của PostgreSQL.[^pg-rename]
+Process khác không thấy `newpath` biến mất[^rename-atomic]. Nó không phải lời hứa về trạng thái trên đĩa sau mất điện; muốn bền cần `fsync` thư mục. Man page nói về entry thư mục chứa file[^fsync-dir]. Với rename thì đây là thực hành của PostgreSQL[^pg-rename].
 
 </details>
 
 7. `fsync` trả `EIO` lần 1; bạn gọi lại và nhận 0. Có thể kết luận dữ liệu đã bền không?
 <details><summary>Đáp án</summary>
 
-Không. Lỗi errseq báo một lần cho mỗi người theo dõi và trang có thể đã bị đánh dấu clean, nên lần hai thành công giả.[^errseq-once][^atc-pg]
+Không. Lỗi errseq chỉ báo một lần cho mỗi bên theo dõi[^errseq-once]. Trang cũng có thể đã bị đánh dấu clean, nên lần hai thành công giả[^atc-pg].
 
 </details>
 
 8. PostgreSQL phản ứng với `fsync` dữ liệu lỗi ra sao (mặc định) và vì sao?
 <details><summary>Đáp án</summary>
 
-PANIC, server sập, rồi phục hồi từ WAL, vì trạng thái dữ liệu trong page cache sau lỗi là không rõ.[^pg-off][^pg-why]
+PANIC, server sập, rồi phục hồi từ WAL[^pg-off]. Lý do là trạng thái dữ liệu trong page cache sau lỗi không rõ[^pg-why].
 
 </details>
 
 9. Vì sao `sync_file_range` không thay được `fdatasync`?
 <details><summary>Đáp án</summary>
 
-Không ghi metadata, không flush disk write cache, không có bảo đảm sau crash nếu không chỉ là ghi đè block có sẵn.[^sfr-warn1][^sfr-warn2]
+Nó không ghi metadata, và không có bảo đảm sau crash nếu không chỉ là ghi đè block có sẵn[^sfr-warn1]. Nó cũng không flush disk write cache[^sfr-warn2].
 
 </details>
 
 10. `O_SYNC` khác `O_DSYNC` ở đâu?
 <details><summary>Đáp án</summary>
 
-`O_SYNC` flush dữ liệu và mọi metadata liên quan; `O_DSYNC` chỉ flush metadata cần cho việc đọc lại.[^osync-notes]
+`O_SYNC` flush dữ liệu và mọi metadata liên quan; `O_DSYNC` chỉ flush metadata cần cho việc đọc lại[^osync-notes].
 
 </details>
 
 11. Trên macOS, `File::sync_all` của Rust 1.95.0 gọi gì, và vì sao khác Linux?
 <details><summary>Đáp án</summary>
 
-`fcntl(fd, F_FULLFSYNC)`.[^src-fsync] Vì `fsync()` trên macOS không bắt drive flush hết cache còn `F_FULLFSYNC` thì có.[^apple-full]
+`fcntl(fd, F_FULLFSYNC)`[^src-fsync]. Lý do là `fsync()` trên macOS không bắt drive flush hết cache còn `F_FULLFSYNC` thì có[^apple-full].
 
 </details>
 

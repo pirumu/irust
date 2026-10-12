@@ -1,6 +1,8 @@
 # P5 · Chương 08 — Rust và lưu trữ
 
-Các chương trước của phase này đi từ thiết bị, file system, page cache đến crash consistency và durability. Chương này gom lại phía Rust: thư viện chuẩn (`std::fs`, `std::io`, `std::os::unix::fs`) và hai crate hay gặp (`memmap2`, `tokio::fs`) chuyển thành những system call nào, bảo đảm gì, và bẫy nằm ở đâu. Mọi ví dụ đều đã chạy thật bằng rustc 1.95.0 trong container Linux (aarch64, kernel của Lima/Colima), và syscall được xác nhận bằng `strace`.
+Các chương trước của phase này đi từ thiết bị, file system, page cache đến crash consistency và durability. Chương này đứng ở phía Rust: `std::fs`, `std::io`, `std::os::unix::fs` và hai crate hay gặp (`memmap2`, `tokio::fs`) chuyển thành những system call nào, hứa gì với bạn, và bẫy nằm ở đâu. Mọi ví dụ đều đã chạy thật bằng rustc 1.95.0 trong container Linux (aarch64, kernel của Lima/Colima), và syscall được xác nhận bằng `strace`.
+
+Xuyên suốt chương ta bám theo `ledger`, một service Rust ghi sổ thanh toán (nhận xét của người soạn: ví dụ giả định, không phải code trong repo). Mỗi giao dịch `ledger` nối một dòng vào `journal.log`; định kỳ nó ghi `state.json` làm checkpoint; cuối ngày nó xuất báo cáo CSV; nó giữ một file khóa để chỉ một instance chạy trên máy; khi khởi động nó đọc lại các file segment và tra một file index lớn; còn handler async của nó đọc file cấu hình qua `tokio::fs`. Mỗi mục dưới đây lấy một việc trong số đó và hỏi: Rust gọi kernel thế nào, và `ledger` được bảo đảm gì.
 
 ## Bạn sẽ hiểu được gì
 
@@ -24,15 +26,17 @@ Các chương trước của phase này đi từ thiết bị, file system, page
 
 ## 1. `OpenOptions`: cờ nào đi xuống kernel (Q1)
 
-> **Trả lời ngắn.** Mỗi phương thức của `OpenOptions` bật một cờ của `open(2)`: `append` → `O_APPEND`, `truncate` → `O_TRUNC`, `create_new` → `O_CREAT|O_EXCL` (đây là quan sát bằng `strace` trên Linux; docs Rust chỉ hứa hành vi, không hứa tên cờ). `create_new` là cách tạo file "chỉ khi chưa tồn tại" không có race, vì docs nói nó nguyên tử còn "kiểm tra tồn tại rồi tạo" thì có TOCTOU race[^rs-createnew-atomic]. `append` bảo đảm mỗi lần ghi nằm ở cuối file kể cả khi nhiều process cùng ghi[^rs-append].
+> **Trả lời ngắn.** Mỗi phương thức của `OpenOptions` bật một cờ của `open(2)`: `append` → `O_APPEND`, `truncate` → `O_TRUNC`, `create_new` → `O_CREAT|O_EXCL` (đây là quan sát bằng `strace` trên Linux; docs Rust chỉ hứa hành vi, không hứa tên cờ). `create_new` là cách tạo file "chỉ khi chưa tồn tại" không có race, vì nó nguyên tử còn "kiểm tra tồn tại rồi tạo" thì có TOCTOU race[^rs-createnew-atomic]. `append` bảo đảm mỗi lần ghi nằm ở cuối file kể cả khi nhiều process cùng ghi[^rs-append].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mở file giống thủ tục ở quầy giấy tờ. Bạn điền một tờ phiếu: chỉ đọc hay có ghi, nếu chưa có hồ sơ thì tạo mới không, nếu có rồi thì xóa nội dung cũ không. `OpenOptions` là tờ phiếu đó; các cờ `open(2)` là những ô đã được đánh dấu mà kernel đọc.
+*Với `ledger`.* Ngay lúc khởi động `ledger` đã phải mở ba file, mỗi file với một ý định khác nhau: `journal.log` để nối thêm, `state.json` để ghi đè từ đầu, file khóa chỉ được tạo nếu chưa ai tạo. Ý định nào cũng phải nói rõ trước khi kernel đưa fd: chỉ đọc hay có ghi, chưa có thì tạo không, có rồi thì xóa nội dung cũ không. `OpenOptions` là chỗ khai báo những lựa chọn đó, và mỗi lựa chọn trở thành một cờ của `open(2)`. Câu hỏi của mục này: cờ nào, và với từng cờ `ledger` được hứa gì?
 
-`File::open` chỉ mở để đọc, `File::create` tạo/cắt file để ghi. Mọi tổ hợp khác (nối đuôi, tạo độc quyền, đọc-ghi không cắt) cần `OpenOptions`. Câu hỏi thực tế: mỗi phương thức builder bật cờ nào của `open(2)`? Docs Rust nói về hành vi; để biết cờ thật, ta chạy và đọc `strace`.
+`File::open` chỉ mở để đọc, `File::create` tạo hoặc cắt file để ghi. Mọi tổ hợp khác (nối đuôi, tạo độc quyền, đọc-ghi không cắt) cần `OpenOptions`. Docs Rust chỉ mô tả hành vi, nên muốn biết cờ thật ta phải chạy và đọc `strace`.
 
-**Bảng cờ quan sát được.** Một chương trình Rust mở file theo bảy cách khác nhau; `strace -e trace=openat` cho:
+### 1.1 Bảng cờ quan sát được
+
+Một chương trình Rust mở file theo bảy cách khác nhau; `strace -e trace=openat` cho:
 
 | Mã Rust | `openat` flags quan sát được (Linux, std 1.95.0) |
 |---|---|
@@ -44,27 +48,37 @@ Hình dung (nhận xét của người soạn): mở file giống thủ tục �
 | `.read(true).write(true)` | `O_RDWR\|O_CLOEXEC` |
 | `.write(true).create(true)` | `O_WRONLY\|O_CREAT\|O_CLOEXEC` |
 
-Đây là **quan sát** một lần chạy trên Linux; docs Rust không hứa tên cờ, chỉ hứa hành vi. `O_CLOEXEC` luôn xuất hiện: std tự đặt close-on-exec để fd không rò sang process con (xem chương [Rust trên giao diện hệ thống](../01-linux/07-rust-tren-giao-dien-he-thong.md)). Mode `0666` là mode yêu cầu; kernel còn áp `umask`.
+Đây là **quan sát** một lần chạy trên Linux; docs Rust không hứa tên cờ, chỉ hứa hành vi. `O_CLOEXEC` lúc nào cũng có: std tự đặt close-on-exec để fd không rò sang process con (xem chương [Rust trên giao diện hệ thống](../01-linux/07-rust-tren-giao-dien-he-thong.md)). Mode `0666` là mode xin kernel; kernel còn áp `umask` lên đó.
 
-**Từng cờ nghĩa là gì.**
+### 1.2 `append`: journal của `ledger`
 
-**`append(true)` → `O_APPEND`.** Docs Rust: chế độ append bảo đảm mỗi lần ghi nằm ở cuối file, kể cả khi nhiều process/thread cùng ghi, khác với `seek(End(0))` rồi `write()` vốn có race giữa hai bước.[^rs-append] Man page nói cùng điều ở tầng kernel: dịch chuyển offset và ghi là một bước nguyên tử.[^man-oappend] Nhưng "nguyên tử vị trí" không phải "nguyên tử nội dung": docs Rust cảnh báo một `write()` thành công được phép chỉ ghi một phần nên dữ liệu của các writer có thể xen kẽ nếu bạn không gom thông điệp vào một lần ghi.[^rs-append-interleave] Và trên NFS, `O_APPEND` có thể làm hỏng file khi nhiều process cùng nối đuôi.[^man-nfs-append]
+`journal.log` mở bằng `.append(true).create(true)`, tức `O_APPEND`. Docs Rust hứa mỗi lần ghi nằm ở cuối file, kể cả khi nhiều process hoặc thread cùng nối vào một file[^rs-append]. Man page nói cùng ý ở tầng kernel: dịch offset và ghi diễn ra trong một bước nguyên tử[^man-oappend]. Ghi bằng `seek(End(0))` rồi `write()` thì là hai bước, nên giữa hai bước đó một writer khác có thể chen vào (suy luận của người soạn).
 
-**`truncate(true)` → `O_TRUNC`.** Cắt về độ dài 0 nếu file đã tồn tại, và cần quyền ghi.[^rs-trunc] Man page: với regular file mở có quyền ghi thì bị cắt về 0.[^man-otrunc] `File::create` chính là `write + create + truncate`. Hệ quả vận hành (nhận xét của người soạn): ngay khoảnh khắc `open` thành công, nội dung cũ đã mất; nếu tiến trình chết trước khi ghi xong, bạn có file rỗng hoặc dở dang. Đó là lý do chương [Durability](./06-durability-trong-thuc-te.md) dùng file tạm + rename thay vì ghi đè tại chỗ.
+Nhưng "nguyên tử về vị trí" chưa phải "nguyên tử về nội dung". Một lần `write()` thành công vẫn được phép chỉ ghi một phần dữ liệu, cho nên dù `ledger` đưa trọn một dòng journal vào một lần gọi, docs Rust vẫn không bảo đảm dòng đó được ghi đủ[^rs-append-interleave]. Hệ quả (suy luận của người soạn): hai writer cùng nối vào một journal vẫn có thể làm dòng của nhau bị cắt xen.
 
-**`create_new(true)` → `O_CREAT|O_EXCL`.** Docs Rust: không được có file nào ở vị trí đó, kể cả symlink treo; nếu lệnh thành công, file trả về được bảo đảm là file mới.[^rs-createnew] Docs còn nói rõ lợi ích: nó nguyên tử, còn "kiểm tra tồn tại rồi tạo" có TOCTOU race.[^rs-createnew-atomic] Khi `create_new` bật, `create` và `truncate` bị bỏ qua.[^rs-createnew-ignored] Man page: với `O_EXCL` đi cùng `O_CREAT`, nếu đường dẫn đã tồn tại thì `open()` lỗi `EEXIST`,[^man-oexcl] và Rust ánh xạ thành `ErrorKind::AlreadyExists`.[^rs-errors] Chương trình thí nghiệm của tôi xác nhận: lần mở thứ hai trả `openat(...) = -1 EEXIST` và `AlreadyExists File exists`.
+### 1.3 `truncate`: cái giá của ghi đè tại chỗ
 
-Ứng dụng điển hình: lock file kiểu "tạo được là mình giữ khóa", hoặc tên file tạm duy nhất (mục 4).
+`state.json` mà `ledger` ghi bằng `File::create` mang cờ `O_TRUNC`: nếu file đã có thì bị cắt về độ dài 0[^rs-trunc]. Man page nói rõ điều kiện: file là regular file và được mở với quyền ghi[^man-otrunc]. Còn `File::create` nói gọn là `write + create + truncate`, đúng như bảng ở trên.
 
-**Hiểu lầm hay gặp:** `.create(true)` không có `.write(true)`/`.append(true)` không phải là "tạo file rỗng"; docs nói `open` sẽ lỗi `InvalidInput`.[^rs-create-needs-write]
+Hệ quả vận hành (nhận xét của người soạn): ngay khi `open` thành công, nội dung checkpoint cũ đã mất. Nếu `ledger` chết trước khi ghi xong, trên đĩa chỉ còn file rỗng hoặc dở dang, và đây là lý do chương [Durability](./06-durability-trong-thuc-te.md) dùng file tạm cộng `rename` thay vì ghi đè tại chỗ.
 
-<details><summary>Đi sâu: <code>Drop</code> của <code>File</code> và lỗi khi đóng</summary>
+### 1.4 `create_new`: file khóa và file tạm
 
-Docs: file tự đóng khi ra khỏi scope và lỗi lúc đóng bị `Drop` bỏ qua; nếu cần xử lý lỗi thì dùng `sync_all`.[^rs-file-drop] Điểm này quay lại ở mục 3.
+`create_new(true)` đi xuống thành `O_CREAT|O_EXCL`. Hai thứ nó cần: không được có file nào ở vị trí đó (kể cả symlink treo), và nếu lệnh thành công thì file trả về chắc chắn là file mới[^rs-createnew]. Lợi ích chính là tính nguyên tử: nếu bạn kiểm tra file có tồn tại rồi mới tạo, giữa hai bước đó process khác có thể tạo mất, và đó là TOCTOU race[^rs-createnew-atomic]. Khi `create_new` bật, `create` và `truncate` bị bỏ qua[^rs-createnew-ignored].
+
+Với file khóa của `ledger`, điều đó có nghĩa là "tạo được là mình giữ". Nếu file đã tồn tại, kernel trả `EEXIST`[^man-oexcl] và Rust đổi nó thành `ErrorKind::AlreadyExists`[^rs-errors]. Chương trình thí nghiệm xác nhận: lần mở thứ hai trả `openat(...) = -1 EEXIST` và `AlreadyExists File exists`. Cùng cơ chế này cho ta tên file tạm độc nhất ở mục 4.
+
+Một hiểu lầm hay gặp: `.create(true)` mà không kèm `.write(true)` hoặc `.append(true)` không tạo ra file rỗng, mà `open` báo lỗi `InvalidInput`[^rs-create-needs-write].
+
+<details><summary>Đi sâu: <code>Drop</code> của <code>File</code>, lỗi khi đóng và <code>O_APPEND</code> trên NFS</summary>
+
+File tự đóng khi ra khỏi scope, và `Drop` bỏ qua lỗi lúc đóng; nếu cần xử lý lỗi đó thì gọi `sync_all`[^rs-file-drop]. Điểm này quay lại ở mục 3.
+
+Nếu `journal.log` nằm trên NFS thì phải thận trọng hơn: man page cảnh báo `O_APPEND` có thể làm hỏng file khi nhiều process cùng nối đuôi[^man-nfs-append].
 
 </details>
 
-**Quay lại Q1:** mỗi phương thức builder bật một cờ `open(2)`; muốn "tạo nếu chưa có" không race thì dùng `create_new` (`O_CREAT|O_EXCL`).
+**Quay lại Q1:** mỗi phương thức builder bật một cờ `open(2)`; muốn "tạo nếu chưa có" không race, như với file khóa của `ledger`, thì dùng `create_new` (`O_CREAT|O_EXCL`).
 
 ## 2. `write`, `write_all` và `BufWriter` (Q2)
 
@@ -72,13 +86,13 @@ Docs: file tự đóng khi ra khỏi scope và lỗi lúc đóng bị `Drop` b�
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn chuyển nhà bằng xe tải. `write` là một chuyến xe có thể không chở hết đồ bạn xếp ra, nên phải đi thêm chuyến; `write_all` là vòng lặp đi cho đến hết. `BufWriter` là cái thùng ở sân: bạn bỏ đồ vào thùng, thùng đầy mới gọi xe. Nếu bạn bỏ đi mà không chốt đơn (`flush`), xe có gặp sự cố trên đường thì không ai báo lại cho bạn.
+*Với `ledger`.* Cuối ngày `ledger` xuất báo cáo CSV: hàng chục nghìn dòng ngắn, ghi lần lượt vào một file. Có hai câu hỏi. Một là mỗi lần gọi ghi có chắc ghi hết dòng không? Hai là gọi `File::write` hàng chục nghìn lần thì có đắt không, và nếu đĩa đầy giữa chừng thì `ledger` có biết không?
 
-**`write` có thể ghi ít hơn bạn yêu cầu.**
+### 2.1 `write` có thể ghi ít hơn bạn yêu cầu
 
-Trait `Write::write` trả về `Ok(n)` với `n` là số byte đã ghi; docs nói không coi là lỗi nếu không ghi hết buffer.[^rs-write-partial] Man page `write(2)` liệt kê nguyên nhân: hết chỗ trên thiết bị, chạm `RLIMIT_FSIZE`, bị signal handler ngắt sau khi đã ghi một phần, và người gọi nên gọi `write()` lại cho phần còn lại.[^man-write-partial]
+`Write::write` trả `Ok(n)` với `n` là số byte đã ghi. Ghi chưa hết buffer không bị coi là lỗi[^rs-write-partial]. Man page của `write(2)` kể các nguyên nhân: hết chỗ trên thiết bị, chạm `RLIMIT_FSIZE`, hoặc bị signal handler ngắt sau khi đã ghi một phần; khi đó người gọi nên gọi `write()` lại cho phần còn lại[^man-write-partial].
 
-`write_all` là vòng lặp làm việc đó: gọi `write` liên tục đến khi hết dữ liệu hoặc gặp lỗi không phải `Interrupted`.[^rs-write-all] Thí nghiệm với một writer giả cố tình chỉ nhận 3 byte mỗi lần:
+`write_all` chính là vòng lặp làm việc đó: nó gọi `write` liên tục đến khi hết dữ liệu hoặc gặp lỗi không phải `Interrupted`[^rs-write-all]. Thí nghiệm với một writer giả cố tình chỉ nhận 3 byte mỗi lần:
 
 ```rust
 struct Short(Vec<u8>);
@@ -94,12 +108,11 @@ impl Write for Short {
 // s.write_all(b"abcdefgh") -> Ok(()), s.0.len() == 11 (3 + 8)
 ```
 
-Chạy thật: `write -> 3`, rồi sau `write_all` tổng độ dài là 11. Quy tắc (nhận xét của người soạn): luôn dùng `write_all` trừ khi bạn thực sự muốn điều khiển từng lần ghi (ví dụ non-blocking I/O); bỏ qua giá trị trả về của `write` là một bug im lặng.
+Chạy thật: `write -> 3`, rồi sau `write_all` tổng độ dài là 11. Quy tắc (nhận xét của người soạn): luôn dùng `write_all` trừ khi bạn thật sự muốn điều khiển từng lần ghi, chẳng hạn với non-blocking I/O. Bỏ qua giá trị trả về của `write` là một bug im lặng.
 
-**`BufWriter`: gom nhiều lần ghi nhỏ.**
+### 2.2 `BufWriter` gom ghi nhỏ
 
-Mỗi `File::write` là một syscall. `BufWriter` giữ buffer trong bộ nhớ và ghi xuống theo mẻ lớn; docs nói nó giúp khi có nhiều lần ghi nhỏ, nhưng không giúp khi ghi một lượng rất lớn một lần hoặc chỉ ghi một vài lần.[^rs-bufwriter-when] Dung lượng mặc định "hiện là 8 KiB, nhưng có thể đổi trong tương lai".[^rs-bufwriter-8k]
-
+Mỗi lần gọi `File::write` là một syscall, nên ghi từng dòng CSV một sẽ tốn rất nhiều syscall. `BufWriter` giữ một buffer trong bộ nhớ và chỉ ghi xuống theo mẻ lớn. Docs nói nó có ích khi có nhiều lần ghi nhỏ, và không giúp gì khi ghi một lượng rất lớn một lần hoặc chỉ ghi vài lần[^rs-bufwriter-when]. Dung lượng mặc định hiện là 8 KiB và có thể đổi trong tương lai[^rs-bufwriter-8k].
 
 ```mermaid
 flowchart LR
@@ -109,9 +122,9 @@ flowchart LR
   C --> D[(page cache)]
 ```
 
-**`BufWriter::drop` nuốt lỗi — vì sao phải `flush()`.**
+### 2.3 `BufWriter::drop` nuốt lỗi, nên phải `flush()`
 
-Docs nói thẳng: "điều quan trọng là gọi `flush` trước khi `BufWriter` bị drop. Dù drop sẽ cố flush, mọi lỗi xảy ra khi đó bị bỏ qua."[^rs-bufwriter-flush] `Drop` không thể trả lỗi (không có giá trị trả về), nên không có cách nào báo cáo.
+Cái giá của việc gom là dữ liệu nằm trong buffer chưa tới kernel, và lúc `BufWriter` bị drop thì nó cố xả buffer nốt. Nhưng `Drop` không có giá trị trả về nên không báo lỗi được, vì vậy docs dặn: gọi `flush` trước khi drop, vì mọi lỗi xảy ra lúc drop đều bị bỏ qua[^rs-bufwriter-flush].
 
 Thí nghiệm dùng `/dev/full` (thiết bị luôn trả `ENOSPC` khi ghi):
 
@@ -125,9 +138,9 @@ let f = OpenOptions::new().write(true).open("/dev/full")?;
 // into_inner() cũng trả Err(IntoInnerError) mang lỗi ENOSPC
 ```
 
-Kết quả thật: `write_all` thành công, sau khi drop không có dấu hiệu lỗi nào ở mức chương trình, trong khi `strace` cho thấy `write(3, "data", 4) = -1 ENOSPC` đã xảy ra bên trong drop. Còn `flush()` và `into_inner()` đều trả `Err` với "No space left on device (os error 28)". Docs còn nói thêm: gọi `flush` xong thì buffer rỗng nên drop sẽ không thử thao tác file nào nữa.[^rs-bufwriter-flush]
+Kết quả thật: `write_all` thành công, sau khi drop không có dấu hiệu lỗi nào ở mức chương trình, trong khi `strace` cho thấy `write(3, "data", 4) = -1 ENOSPC` đã xảy ra bên trong drop. Còn `flush()` và `into_inner()` đều trả `Err` với "No space left on device (os error 28)". Gọi `flush` xong thì buffer rỗng, nên drop sau đó không thử thao tác file nào nữa[^rs-bufwriter-flush].
 
-Đối chiếu với backend (nhận xét của người soạn): đây là phiên bản thu nhỏ của lỗi "log/tệp xuất ra hỏng mà job báo thành công". Mẫu đúng cho code cần tin kết quả:
+Với `ledger` (nhận xét của người soạn), đây là phiên bản thu nhỏ của lỗi quen thuộc: báo cáo cuối ngày bị cụt vì đĩa đầy mà job vẫn báo thành công. Mẫu đúng cho code cần tin kết quả:
 
 ```rust
 let mut w = BufWriter::new(file);
@@ -147,52 +160,58 @@ Số đo (quan sát một lần chạy, 100.000 lần `write_all` 17 byte = 1.70
 
 Chạy lại thí nghiệm: các lần ghi xuống kernel đều là `write(5, ..., 8177)` — không phải đúng 8192. Lý do (quan sát): mỗi bản ghi dài 17 byte nên buffer 8 KiB chứa tối đa 481 bản ghi = 8177 byte, và `BufWriter` xả khi bản ghi kế tiếp không còn vừa. Vậy 1.700.000 byte thành 207 lần ghi 8177 byte cộng một lần ghi 7361 byte (lúc `flush`) = 208, cộng một `write` in ra stdout = 209. Với thí nghiệm khác, ghi 20.000 byte một lần vào `BufWriter` cho đúng một `write(3, ..., 20000)` ngay lập tức: lượng dữ liệu lớn hơn buffer đi thẳng xuống, buffer không giữ lại (quan sát; docs không hứa chi tiết này).
 
-`BufReader` đối xứng: mặc định 8 KiB,[^rs-bufreader-8k] đọc 3 byte đơn lẻ chỉ gây một `read(3, ..., 8192)` đầu tiên (quan sát). Cạm bẫy: tạo nhiều `BufReader` trên cùng một stream có thể làm mất dữ liệu vì dữ liệu đã đọc trước nằm trong buffer của reader bị bỏ đi.[^rs-bufreader-loss]
+`BufReader` đối xứng: mặc định 8 KiB[^rs-bufreader-8k], và đọc 3 byte đơn lẻ chỉ gây một `read(3, ..., 8192)` đầu tiên (quan sát). Cạm bẫy: tạo nhiều `BufReader` trên cùng một stream có thể làm mất dữ liệu, vì phần đã đọc trước nằm trong buffer của reader bị bỏ đi[^rs-bufreader-loss].
 
 </details>
 
-**Quay lại Q2:** `write` có thể ghi thiếu nên dùng `write_all`; `BufWriter` gom ghi nhỏ nhưng drop nuốt lỗi, vì vậy phải `flush()` tường minh và kiểm tra kết quả.
+**Quay lại Q2:** `write` có thể ghi thiếu nên dùng `write_all`; `BufWriter` gom ghi nhỏ nhưng drop nuốt lỗi, vì vậy khi xuất báo cáo `ledger` phải `flush()` tường minh và kiểm tra kết quả.
 
 ## 3. `sync_all` và `sync_data` (Q3)
 
-> **Trả lời ngắn.** `sync_all` cố bảo đảm mọi dữ liệu trong bộ nhớ của OS đến được file system[^rs-sync-all-attempt]; `sync_data` tương tự nhưng có thể không đồng bộ metadata[^rs-sync-data]. `File::drop` không thay được chúng: drop không bắt buộc phải chờ dữ liệu xuống đĩa[^rs-sync-all] và lỗi lúc đóng bị bỏ qua[^rs-file-drop].
+> **Trả lời ngắn.** `sync_all` cố bảo đảm mọi dữ liệu trong bộ nhớ của OS đến được file system[^rs-sync-all-attempt]; `sync_data` tương tự nhưng có thể không đồng bộ metadata[^rs-sync-data]. `File::drop` không thay được chúng. Drop không bắt buộc phải chờ dữ liệu xuống đĩa[^rs-sync-all], và lỗi lúc đóng bị bỏ qua[^rs-file-drop].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): gửi thư. `flush` là đưa thư cho nhân viên bưu điện (kernel); `sync_all` là đứng chờ biên nhận rằng thư đã lên xe chuyển phát (thiết bị lưu trữ). Có thư trong tay nhân viên chưa có nghĩa là thư đã đi.
+*Với `ledger`.* `ledger` vừa ghi xong một giao dịch, vừa trả "đã nhận" cho client thì máy mất điện. Khi khởi động lại, giao dịch đó còn trong journal không? Câu trả lời phụ thuộc dữ liệu đã đi tới đâu trước lúc mất điện, và mục này vạch ra đường đi đó.
 
-`flush()` của `BufWriter` chỉ đẩy dữ liệu từ buffer user-space xuống kernel (page cache). Docs `File::sync_all`: "cố gắng bảo đảm mọi dữ liệu trong bộ nhớ của OS đến được file system"[^rs-sync-all-attempt] và lưu ý nó thường đắt hơn đóng file bằng drop, vì drop không bắt buộc phải chờ dữ liệu xuống đĩa.[^rs-sync-all] `sync_data` tương tự nhưng "có thể không đồng bộ metadata";[^rs-sync-data] docs cũng cảnh báo một số nền tảng cài nó bằng chính `sync_all`.[^rs-sync-data-platform]
+`flush()` của `BufWriter` chỉ đẩy dữ liệu từ buffer user-space xuống kernel, cụ thể là page cache. Từ page cache xuống thiết bị lưu trữ còn một chặng nữa, và chặng đó là việc của `sync_all`. Docs `File::sync_all` hứa sẽ cố bảo đảm mọi dữ liệu trong bộ nhớ của OS đến được file system trước khi trả về[^rs-sync-all-attempt]. Docs cũng lưu ý nó thường đắt hơn việc đóng file bằng drop[^rs-sync-all], và đó là lý do drop rẻ hơn: drop không phải chờ.
 
-Trên Linux ta quan sát đúng như vậy: `sync_all()` → `fsync(3)`, `sync_data()` → `fdatasync(3)` (strace). Hợp đồng của kernel cho hai lời gọi này (xả cache của đĩa, metadata nào bị bỏ qua, việc `fsync` file không bảo đảm entry thư mục) và phân tích sâu (errseq, fsyncgate, chi phí thực) ở [chương 06, mục 2, 3 và 5](./06-durability-trong-thuc-te.md).
+`sync_data` làm gần như cùng việc nhưng có thể bỏ qua metadata[^rs-sync-data]. Docs cảnh báo thêm: một số nền tảng cài `sync_data` bằng chính `sync_all`[^rs-sync-data-platform].
+
+Trên Linux ta quan sát đúng như vậy: `sync_all()` → `fsync(3)`, `sync_data()` → `fdatasync(3)` (strace). Hợp đồng của kernel cho hai lời gọi này (xả cache của đĩa, metadata nào bị bỏ qua, việc `fsync` file không bảo đảm entry thư mục) và phân tích sâu (errseq, fsyncgate, chi phí thực) nằm ở [chương 06, mục 2, 3 và 5](./06-durability-trong-thuc-te.md).
 
 <details><summary>Đi sâu: <code>File::flush</code> là no-op và không thay được <code>fsync</code></summary>
 
-Cạm bẫy Rust: `File` **không có buffer riêng** (mục 2: 100.000 lần `write_all` cho 100.001 `write`), nên với `File` trần không có buffer user-space nào để `flush`. Source std 1.95.0 chốt điều này: doc comment của `File::flush` ghi "vì `File` không chứa buffer nào, hàm này hiện là no-op trên Unix và Windows" và có thể đổi trong tương lai;[^rs-file-flush] phần cài đặt Unix chỉ là `Ok(())`.[^src-file-flush] Vậy `flush()` của `File` không thay được `fsync`. Docs của `tokio::fs::File` nhắc đúng điều này cho kiểu async: flush không bảo đảm file đã ghi hết xuống đĩa, "hệ điều hành có thể giữ thay đổi trong buffer bộ nhớ", và hãy dùng `sync_all`.[^tokio-file-flush]
+Một cạm bẫy riêng của Rust: `File` **không có buffer riêng** (mục 2: 100.000 lần `write_all` cho 100.001 `write`), nên với `File` trần không có buffer user-space nào để `flush`. Docs ghi thẳng điều này: vì `File` không chứa buffer nào, `flush` hiện là no-op trên Unix và Windows[^rs-file-flush]. Source std 1.95.0 cho thấy phần cài đặt Unix chỉ là `Ok(())`[^src-file-flush]. Cho nên `flush()` của `File` không thay được `fsync`.
+
+Docs của `tokio::fs::File` nhắc điều tương tự cho kiểu async: flush không bảo đảm file đã ghi hết xuống đĩa vì hệ điều hành có thể giữ thay đổi trong buffer bộ nhớ[^tokio-file-flush].
 
 </details>
 
-**Quay lại Q3:** `flush` chỉ tới kernel; muốn xuống thiết bị phải `sync_all`/`sync_data`, còn drop của `File` không làm việc đó.
+**Quay lại Q3:** `flush` chỉ tới kernel; muốn giao dịch của `ledger` sống sót qua mất điện thì phải `sync_all`/`sync_data`, còn drop của `File` không làm việc đó.
 
 ## 4. Ghi nguyên tử: `fs::write`, `rename` và file tạm (Q4)
 
-> **Trả lời ngắn.** Mẫu đúng: ghi vào một file tạm mới (`create_new`), `sync_all`, `rename` đè lên file đích, rồi `sync_all` thư mục cha (man page: `fsync` file không bảo đảm entry thư mục chứa nó đã xuống đĩa, cần `fsync` cả thư mục[^man-fsync-dir]). `rename` thay đích một cách nguyên tử, không có thời điểm nào process khác thấy đích biến mất[^man-rename]. Còn `fs::write` thay hoàn toàn nội dung tại chỗ[^rs-fs-write] và (quan sát bằng `strace`) không có `fsync`, nên không nguyên tử và không bền (suy luận của người soạn).
+> **Trả lời ngắn.** Mẫu đúng: ghi vào một file tạm mới (`create_new`), `sync_all`, `rename` đè lên file đích, rồi `sync_all` thư mục cha. Bước cuối cần vì `fsync` file chưa chắc đã đưa entry thư mục chứa nó xuống đĩa[^man-fsync-dir]. `rename` thay đích một cách nguyên tử, không có thời điểm nào process khác thấy đích biến mất[^man-rename]. Còn `fs::write` thay hoàn toàn nội dung tại chỗ[^rs-fs-write] và (quan sát bằng `strace`) không có `fsync`, nên không nguyên tử và không bền (suy luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): sửa bản hợp đồng đang để trên bàn chung. Nếu bạn xóa bản cũ rồi mới viết lại, ai đi ngang giữa chừng sẽ thấy tờ giấy trắng. Cách đúng là viết bản mới ở bàn bên cạnh, kiểm tra cho chắc, rồi đặt nó chồng lên bản cũ trong một động tác.
+*Với `ledger`.* Checkpoint `state.json` là file mà mất nửa chừng là thảm họa: khởi động lại mà đọc phải file cụt thì `ledger` không biết số dư. Ở mục 1 ta đã thấy ghi đè tại chỗ làm file rỗng ngay khi `open`. Mục này đưa ra cách ghi mà người đọc, kể cả `ledger` sau khi crash, chỉ thấy hoặc bản cũ nguyên vẹn hoặc bản mới nguyên vẹn.
+
+### 4.1 Hai hàm tiện ích và vì sao chúng chưa đủ
 
 Hai hàm tiện ích cho trường hợp "cả file một lần":
 
-- `fs::write(path, bytes)`: tạo file nếu chưa có và **thay hoàn toàn** nội dung nếu có;[^rs-fs-write] trên Linux ta thấy `openat(..., O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666)`, `write(3, "v1", 2)`, `close(3)` — không `fsync`.
-- `fs::read_to_string(path)`: mở, đọc hết, lỗi nếu không phải UTF-8, tự retry khi gặp `Interrupted`.[^rs-fs-rts] Quan sát: nó gọi `statx` trên fd để lấy kích thước làm gợi ý cấp phát, rồi `read(3, ..., 2)` và một `read` nữa trả 0 để phát hiện EOF.
+- `fs::write(path, bytes)` tạo file nếu chưa có và **thay hoàn toàn** nội dung nếu có[^rs-fs-write]. Trên Linux ta thấy `openat(..., O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC, 0666)`, `write(3, "v1", 2)`, `close(3)` — không `fsync`.
+- `fs::read_to_string(path)` mở file, đọc hết, lỗi nếu không phải UTF-8, và tự retry khi gặp `Interrupted`[^rs-fs-rts]. Quan sát: nó gọi `statx` trên fd để lấy kích thước làm gợi ý cấp phát, rồi `read(3, ..., 2)` và một `read` nữa trả 0 để phát hiện EOF.
 
-Hệ quả: `fs::write` là đường **không bền** và **không nguyên tử** (cắt rồi mới ghi). Nó phù hợp với file dễ tái tạo; không phù hợp với config/state mà mất nửa chừng là thảm họa (nhận xét của người soạn).
+Hệ quả: `fs::write` đi đường **không bền** và **không nguyên tử** (cắt rồi mới ghi). Nó hợp với file dễ tái tạo; nó không hợp với config hay state như `state.json` (nhận xét của người soạn).
 
-**`fs::rename` và mẫu ghi nguyên tử.**
+### 4.2 `rename` và mẫu ghi nguyên tử
 
-Docs `fs::rename`: đổi tên và thay thế đích nếu có; không chạy qua ranh giới mount point.[^rs-rename] Man page `rename(2)`: nếu `newpath` tồn tại, nó bị thay thế nguyên tử, không có thời điểm nào process khác thấy `newpath` biến mất.[^man-rename] Khác mount point thì kernel trả `EXDEV`[^man-exdev] và docs Rust liệt kê "from and to are on separate filesystems" trong các tình huống lỗi.[^rs-rename-err]
+Chỗ dựa của mẫu này là `fs::rename`: nó đổi tên và thay thế đích nếu đích đã có, nhưng không chạy qua ranh giới mount point[^rs-rename]. Ở tầng kernel, man page `rename(2)` nói nếu `newpath` đã tồn tại thì nó bị thay thế nguyên tử, không có lúc nào process khác thấy `newpath` biến mất[^man-rename]. Khác mount point thì kernel trả `EXDEV`[^man-exdev], và docs Rust liệt kê "from và to ở hai file system khác nhau" trong các tình huống lỗi[^rs-rename-err]. Vì vậy file tạm phải nằm cùng thư mục, tức cùng file system, với file đích (suy luận của người soạn).
 
-Ghép với mục 3 ta được mẫu đã phân tích ở chương 06 (lý do từng bước ở đó); đây là bản Rust, đã chạy thật:
+Ghép với mục 3 ta được mẫu đã phân tích ở chương 06 (lý do từng bước ở đó). Dưới đây là bản Rust, đã chạy thật:
 
 ```rust
 fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
@@ -210,11 +229,11 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 
 <details><summary>Đi sâu: thứ tự syscall quan sát được và tên file tạm</summary>
 
-`strace` xác nhận đúng thứ tự: `openat(... .config.tmp, O_WRONLY|O_CREAT|O_EXCL ...)` → `write(3, "version-2", 9)` → `fsync(3)` → `close(3)` → `renameat(...)` → `openat(dir, O_RDONLY)` → `fsync(3)`. Hai điểm Rust: `create_new` cho tên tạm độc quyền (nếu hai tiến trình dùng chung tên tạm cố định như ví dụ này, cái thứ hai nhận `AlreadyExists`, tốt hơn là âm thầm giẫm lên nhau; thực tế nên đặt tên tạm có PID/ngẫu nhiên — nhận xét của người soạn); và mở thư mục bằng `File::open(dir)` rồi `sync_all` là cách `std` cho phép `fsync` một thư mục trên Unix (quan sát: `openat(dir, O_RDONLY)` rồi `fsync`).
+`strace` xác nhận đúng thứ tự: `openat(... .config.tmp, O_WRONLY|O_CREAT|O_EXCL ...)` → `write(3, "version-2", 9)` → `fsync(3)` → `close(3)` → `renameat(...)` → `openat(dir, O_RDONLY)` → `fsync(3)`. Hai điểm Rust cần lưu ý. Thứ nhất, `create_new` cho tên tạm độc quyền: nếu hai tiến trình dùng chung tên tạm cố định như ví dụ này thì cái thứ hai nhận `AlreadyExists`, tốt hơn là âm thầm giẫm lên nhau; thực tế nên đặt tên tạm có PID hoặc số ngẫu nhiên (nhận xét của người soạn). Thứ hai, mở thư mục bằng `File::open(dir)` rồi `sync_all` là cách `std` cho phép `fsync` một thư mục trên Unix (quan sát: `openat(dir, O_RDONLY)` rồi `fsync`).
 
 </details>
 
-**Quay lại Q4:** ghi file tạm → `sync_all` → `rename` → sync thư mục; `fs::write` thì không nguyên tử, không bền.
+**Quay lại Q4:** ghi file tạm → `sync_all` → `rename` → sync thư mục; `fs::write` thì không nguyên tử, không bền, nên không dùng cho `state.json`.
 
 ## 5. Seek, `pread` và `pwrite` (Q5)
 
@@ -222,62 +241,68 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `seek` + `read` giống ngón tay chỉ dòng trên một trang sách dùng chung — ai chạm vào cũng dời dòng của người khác. `read_at` là nói thẳng "đọc từ dòng 8" mà không động tới ngón tay của ai.
+*Với `ledger`.* Khi khởi động `ledger` tra một file index gồm các record nằm ở những offset biết trước, và nhiều handler thread cùng tra trên một `File` dùng chung. Nếu mỗi thread `seek` tới record của mình rồi `read`, chúng sẽ giẫm lên vị trí của nhau. Mục này giải thích vì sao, và `read_at` tránh điều đó thế nào. Nó cũng nói tới bẫy khi ta thử dùng `write_at` để vá một record trong `journal.log` vốn mở bằng `append`.
 
-**Con trỏ vị trí dùng chung.**
+### 5.1 Con trỏ vị trí dùng chung
 
-`File` implement `Seek`, nhắc rằng file chứa một con trỏ logic bên trong.[^rs-file-seek] Con trỏ đó nằm trong open file description của kernel và dùng chung giữa các fd nhân bản bằng `dup`/`fork` (xem [chương 04 P1](../01-linux/04-file-descriptor-va-vfs.md)). Do đó `seek` rồi `read` là hai bước có trạng thái chia sẻ: hai thread dùng chung một `File` qua `&File` có thể giẫm vị trí của nhau (suy luận của người soạn từ mô hình OFD).
+`File` implement `Seek`, tức bên trong file có một con trỏ logic mà `seek` dịch chuyển[^rs-file-seek]. Con trỏ đó nằm trong open file description của kernel và dùng chung giữa các fd nhân bản bằng `dup` hoặc `fork` (xem [chương 04 P1](../01-linux/04-file-descriptor-va-vfs.md)). Do đó `seek` rồi `read` là hai bước có trạng thái chia sẻ: hai thread dùng chung một `File` qua `&File` có thể giẫm vị trí của nhau (suy luận của người soạn từ mô hình OFD).
 
-**`FileExt::read_at`/`write_at`.**
+### 5.2 `FileExt::read_at` và `write_at`
 
-Trait `std::os::unix::fs::FileExt` cho đọc/ghi tại offset chỉ định mà **không đụng con trỏ file**: docs nói offset tính từ đầu file, độc lập với cursor, và cursor không bị ảnh hưởng.[^rs-readat] Chữ ký của chúng nhận `&self`,[^rs-fileext-self] nên (suy luận của người soạn) có thể gọi qua tham chiếu chung từ nhiều thread. Trên Linux chúng thành `pread64`/`pwrite64`: strace của thí nghiệm cho `pread64(4, "2", 3, 8) = 1`, `pwrite64(4, "XY", 2, 2) = 2`, `pread64(4, "veX", 3, 0) = 3`.
+Trait `std::os::unix::fs::FileExt` cho đọc/ghi tại offset chỉ định mà **không đụng con trỏ file**: offset tính từ đầu file, độc lập với cursor, và cursor không bị ảnh hưởng[^rs-readat]. Chữ ký của chúng nhận `&self`[^rs-fileext-self], nên các thread của `ledger` có thể gọi qua tham chiếu chung mà không cần khóa riêng cho con trỏ (suy luận của người soạn). Trên Linux chúng thành `pread64`/`pwrite64`: strace của thí nghiệm cho `pread64(4, "2", 3, 8) = 1`, `pwrite64(4, "XY", 2, 2) = 2`, `pread64(4, "veX", 3, 0) = 3`.
 
-**Bẫy `O_APPEND`.** Docs của chính `write_at` ghi rõ một "Bug": trên một số hệ thống, file mở với `O_APPEND` thì `pwrite64` không tôn trọng offset mà luôn ghi vào cuối.[^rs-writeat-bug] Với Linux, man page `pwrite(2)` mục BUGS xác nhận: POSIX yêu cầu `O_APPEND` không ảnh hưởng vị trí ghi của `pwrite()`, nhưng trên Linux nó vẫn nối vào cuối bất kể `offset`.[^man-pwrite-bug] Thí nghiệm (chạy lại trong container): file 5 byte `12345`, mở bằng `.append(true)`, gọi `write_at(b"sushi", 10)` → strace `pwrite64(4, "sushi", 5, 10) = 5`, độ dài file là 10 (nối đuôi, không có khoảng đệm 0 tại offset 10). Ứng dụng kiểu database (ghi page tại offset) không được mở file bằng `append(true)` (nhận xét của người soạn).
+### 5.3 Bẫy `O_APPEND`
+
+Giờ đến `journal.log`, file mở bằng `append(true)`. Nếu `ledger` thử `write_at` để sửa một record cũ, nó sẽ không sửa gì cả. Chính docs của `write_at` ghi một "Bug": trên một số hệ thống, file mở với `O_APPEND` thì `pwrite64` không tôn trọng offset mà luôn ghi vào cuối[^rs-writeat-bug]. Trên Linux, mục BUGS của man page `pwrite(2)` xác nhận: POSIX yêu cầu `O_APPEND` không ảnh hưởng vị trí ghi của `pwrite()`, nhưng Linux vẫn nối vào cuối bất kể `offset`[^man-pwrite-bug].
+
+Thí nghiệm (chạy lại trong container): file 5 byte `12345`, mở bằng `.append(true)`, gọi `write_at(b"sushi", 10)` → strace `pwrite64(4, "sushi", 5, 10) = 5`, độ dài file là 10 (nối đuôi, không có khoảng đệm 0 tại offset 10). Kết luận (nhận xét của người soạn): file mà ứng dụng ghi page tại offset, như database làm, không được mở bằng `append(true)`.
 
 <details><summary>Đi sâu: short read, <code>read_exact_at</code>/<code>write_all_at</code> và ghi vượt cuối file</summary>
 
-Như `read`/`write`, chúng có thể trả short: `read_at` đọc yêu cầu 3 byte tại offset 8 của file dài 9 byte chỉ trả 1 byte (đúng do hết file). Docs: "không phải lỗi khi trả short read".[^rs-readat-short] Vì vậy có `read_exact_at` và `write_all_at` để lặp cho đủ. Ghi vượt cuối file thì file được kéo dài và khoảng giữa điền 0.[^rs-writeat-extend]
+Như `read`/`write`, hai hàm này có thể trả short: `read_at` đọc yêu cầu 3 byte tại offset 8 của file dài 9 byte chỉ trả 1 byte (đúng do hết file). Docs nói trả short read không phải lỗi[^rs-readat-short]. Vì vậy có `read_exact_at` và `write_all_at` để lặp cho đủ. Ghi vượt cuối file thì file được kéo dài và khoảng giữa điền 0[^rs-writeat-extend].
 
 </details>
 
-**Quay lại Q5:** `read_at`/`write_at` không đụng con trỏ file, nhưng `O_APPEND` làm `write_at` bỏ qua offset trên Linux.
+**Quay lại Q5:** `read_at`/`write_at` không đụng con trỏ file nên nhiều thread tra index của `ledger` không giẫm nhau, nhưng `O_APPEND` làm `write_at` bỏ qua offset trên Linux.
 
 ## 6. Mục phụ trợ: `read_dir`, metadata và quyền
 
-> **Trả lời ngắn.** Thứ tự các entry mà `fs::read_dir` trả về phụ thuộc nền tảng và file system, và có thể đổi giữa các lần gọi[^rs-readdir-order][^rs-readdir-platform]. Cần thứ tự ổn định thì phải tự sắp xếp.
+> **Trả lời ngắn.** Thứ tự các entry mà `fs::read_dir` trả về phụ thuộc nền tảng và file system[^rs-readdir-platform]. Nó còn có thể đổi giữa các lần gọi[^rs-readdir-order]. Cần thứ tự ổn định thì phải tự sắp xếp.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư mục giống ngăn kéo hồ sơ không xếp theo thứ tự nào — thứ tự bạn lôi hồ sơ ra tùy cách ngăn kéo tổ chức bên trong, không phải thứ tự bạn bỏ vào.
+*Với `ledger`.* Khi khởi động, `ledger` replay các file segment `journal-000.log`, `journal-001.log`, … trong thư mục dữ liệu. Nếu nó đi theo thứ tự `read_dir` trả về và cho rằng đó là thứ tự tạo file, thì giao dịch sẽ bị replay lộn thứ tự.
 
-`fs::read_dir`: docs nói thứ tự trả về có thể đổi giữa các lần gọi và nếu cần ổn định thì tự sắp xếp;[^rs-readdir-order] nó "phụ thuộc nền tảng và file system".[^rs-readdir-platform] Quan sát: trong thư mục thí nghiệm có 9 entry (gồm 7 file tạo theo thứ tự `zeta, alpha, mid, beta, omega, a1, k`), `read_dir` trả `["alpha.txt", "omega.txt", "ap", "a1.txt", "k.txt", "lock", "zeta.txt", "beta.txt", "mid.txt"]` — không theo thứ tự tạo hay thứ tự chữ cái. Đây là virtiofs trong container của tôi; file system khác cho thứ tự khác. Với test hoặc output cần tái lập, thu entry vào `Vec` rồi `sort()` (nhận xét của người soạn). Cơ chế thư mục ở [chương 03](./03-cai-dat-file-system.md).
+`fs::read_dir` không hứa thứ tự nào: docs nói thứ tự có thể đổi giữa các lần gọi, và nếu cần tái lập thì phải sắp xếp tường minh[^rs-readdir-order]. Thứ tự đó phụ thuộc nền tảng và file system[^rs-readdir-platform]. Quan sát: trong thư mục thí nghiệm có 9 entry (gồm 7 file tạo theo thứ tự `zeta, alpha, mid, beta, omega, a1, k`), `read_dir` trả `["alpha.txt", "omega.txt", "ap", "a1.txt", "k.txt", "lock", "zeta.txt", "beta.txt", "mid.txt"]` — không theo thứ tự tạo hay thứ tự chữ cái. Đó là virtiofs trong container thí nghiệm; file system khác cho thứ tự khác.
+
+Cách xử lý (nhận xét của người soạn): thu entry vào một `Vec` rồi `sort()`; tên segment đánh số cố định độ rộng như `journal-000.log` sort theo chữ cái là đúng thứ tự. Test hay output cần tái lập cũng làm vậy. Cơ chế thư mục ở [chương 03](./03-cai-dat-file-system.md).
 
 <details><summary>Đi sâu: <code>metadata</code>, <code>PermissionsExt</code> và <code>statx</code></summary>
 
-`File::metadata` và `fs::metadata` lấy thông tin inode; ở Linux std dùng `statx` (quan sát từ strace). `fs::Permissions` trên Unix mở rộng bởi `PermissionsExt` với `mode()`, `set_mode()`, `from_mode()`.[^rs-permsext] Thí nghiệm: file tạo bởi `fs::write` có `mode()` = `0o100644` — tức giá trị `st_mode` đầy đủ gồm cả bit loại file `0o100000` (regular file) lẫn quyền `0o644` (quan sát; nhớ mask `& 0o7777` nếu chỉ muốn quyền). `fs::set_permissions(p, Permissions::from_mode(0o600))` chạy ra `fchmodat(AT_FDCWD, ..., 0600)`.
+`File::metadata` và `fs::metadata` lấy thông tin inode; ở Linux std dùng `statx` (quan sát từ strace). `fs::Permissions` trên Unix được mở rộng bởi `PermissionsExt` với `mode()`, `set_mode()`, `from_mode()`[^rs-permsext]. Thí nghiệm: file tạo bởi `fs::write` có `mode()` = `0o100644` — tức giá trị `st_mode` đầy đủ gồm cả bit loại file `0o100000` (regular file) lẫn quyền `0o644` (quan sát; nhớ mask `& 0o7777` nếu chỉ muốn quyền). `fs::set_permissions(p, Permissions::from_mode(0o600))` chạy ra `fchmodat(AT_FDCWD, ..., 0600)`.
 
 </details>
 
-**Chốt mục phụ trợ:** không dựa vào thứ tự `read_dir`; `mode()` trên Unix trả cả bit loại file lẫn quyền.
+**Chốt mục phụ trợ:** không dựa vào thứ tự `read_dir` khi replay segment; `mode()` trên Unix trả cả bit loại file lẫn quyền.
 
 ## 7. File locking: `File::lock` (Q6)
 
-> **Trả lời ngắn.** Có: `File::lock` đã stable từ 1.89.0[^src-lock-stable]. Trên Unix nó hiện tương ứng với `flock`[^rs-lock-flock]; khóa có thể là advisory hoặc mandatory tùy nền tảng[^rs-lock-advisory]. Trên Linux, advisory nghĩa là process khác vẫn tự do bỏ qua khóa và I/O file nếu có quyền[^man-flock-advisory].
+> **Trả lời ngắn.** Có: `File::lock` đã stable từ 1.89.0[^src-lock-stable]. Trên Unix nó hiện tương ứng với `flock`[^rs-lock-flock]. Khóa có thể là advisory hoặc mandatory tùy nền tảng[^rs-lock-advisory]. Trên Linux, advisory nghĩa là process khác vẫn tự do bỏ qua khóa và I/O file nếu có quyền[^man-flock-advisory].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): khóa advisory giống tấm biển "đang họp" treo trên cửa phòng — chỉ người chịu đọc biển mới tôn trọng; ai đẩy cửa đi vào thì không có gì cản.
+*Với `ledger`.* Chạy hai instance `ledger` cùng ghi một thư mục dữ liệu là cách nhanh nhất để hỏng journal. Nên `ledger` giữ một file khóa: instance nào khóa được thì chạy, instance kia thoát. Trước 1.89.0 việc này cần crate ngoài (`fs2`, `fs4`) hoặc `libc::flock`. Giờ `std` có sẵn, và câu hỏi là khóa đó thực sự bảo vệ được tới đâu.
 
-Trước đây phải dùng crate ngoài (`fs2`, `fs4`) hoặc `libc::flock`. Source std 1.95.0 đánh dấu `File::lock` là `stable(feature = "file_lock", since = "1.89.0")`,[^src-lock-stable] và docs 1.95.0 ghi "1.89.0" cạnh chữ ký hàm.[^rs-lock-stable] Các phương thức: `lock`, `lock_shared`, `try_lock`, `try_lock_shared`, `unlock`; `try_lock` trả `Err(TryLockError::WouldBlock)` nếu có khóa khác đang giữ qua handle khác.[^rs-trylock]
+Source std 1.95.0 đánh dấu `File::lock` là `stable(feature = "file_lock", since = "1.89.0")`[^src-lock-stable], và docs 1.95.0 cũng ghi phiên bản 1.89.0 cạnh chữ ký hàm[^rs-lock-stable]. Các phương thức gồm `lock`, `lock_shared`, `try_lock`, `try_lock_shared`, `unlock`. Riêng `try_lock` trả `Err(TryLockError::WouldBlock)` nếu một khóa khác đang giữ qua handle khác[^rs-trylock]; đó là cách instance thứ hai của `ledger` biết mình phải thoát.
 
-Bảo đảm cần nắm:
+Có bốn điều cần nắm:
 
-- Khóa "có thể là advisory hoặc mandatory"; tương tác với `read`/`write` là tùy nền tảng.[^rs-lock-advisory]
-- Trên Unix hiện tương ứng với `flock` (`LOCK_EX`, `LOCK_SH`), và docs nói điều này "có thể đổi trong tương lai".[^rs-lock-flock] Source std 1.95.0 cho Linux gọi `flock` với `LOCK_EX | LOCK_NB` cho `try_lock`.[^src-trylock-flock]
-- Nếu handle này (hoặc bản clone) đã giữ khóa thì hành vi gọi lại là không xác định và tùy nền tảng, kể cả deadlock.[^rs-lock-reentrant]
-- Khóa được nhả khi file (và mọi descriptor nhân bản) bị đóng, hoặc khi gọi `unlock`.[^rs-lock-release]
+- Khóa có thể là advisory hoặc mandatory; tương tác của nó với `read`/`write` tùy nền tảng[^rs-lock-advisory].
+- Trên Unix nó hiện tương ứng với `flock` (`LOCK_EX`, `LOCK_SH`), và docs nói điều này có thể đổi trong tương lai[^rs-lock-flock]. Source std 1.95.0 cho Linux gọi `flock` với `LOCK_EX | LOCK_NB` cho `try_lock`[^src-trylock-flock].
+- Nếu handle này (hoặc bản clone của nó) đã giữ khóa thì gọi lại là hành vi không xác định và tùy nền tảng, kể cả deadlock[^rs-lock-reentrant].
+- Khóa nhả khi file (cùng mọi descriptor nhân bản từ nó) bị đóng, hoặc khi gọi `unlock`[^rs-lock-release].
 
-Cái "advisory" nghĩa là gì ở tầng Linux: man page `flock(2)` nói process vẫn tự do bỏ qua khóa và I/O trên file nếu có quyền.[^man-flock-advisory] Và khóa gắn với open file description, nên fd nhân bản bằng `fork`/`dup` cùng chia sẻ một khóa.[^man-flock-ofd]
+Chữ "advisory" ở tầng Linux có nghĩa cụ thể: man page `flock(2)` nói process vẫn tự do bỏ qua khóa và I/O trên file nếu có quyền[^man-flock-advisory]. Thêm nữa, khóa gắn với open file description, nên fd nhân bản bằng `fork` hoặc `dup` cùng chia sẻ một khóa[^man-flock-ofd]. Với `ledger`: khóa chỉ ngăn được những instance cũng chịu hỏi khóa, chứ không ngăn được một công cụ khác cứ thế mở và ghi vào journal.
 
 <details><summary>Đi sâu: thí nghiệm hai handle và <code>flock</code></summary>
 
@@ -295,7 +320,7 @@ b.try_lock()           -> Ok (sau unlock)
 
 </details>
 
-**Quay lại Q6:** `File::lock` stable từ 1.89.0, hiện là `flock` advisory — chỉ dùng cho các bên hợp tác.
+**Quay lại Q6:** `File::lock` stable từ 1.89.0, hiện là `flock` advisory — đủ để `ledger` chặn instance thứ hai, nhưng chỉ dùng cho các bên hợp tác.
 
 ## 8. Memory-mapped file với `memmap2` (Q7)
 
@@ -303,23 +328,25 @@ b.try_lock()           -> Ok (sau unlock)
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mmap giống dán một trang của cuốn sổ chung lên tường nhà bạn. Bạn đọc `&[u8]` tưởng đó là bản chụp bất biến, nhưng người khác vẫn đang sửa chính cuốn sổ phía sau trang đó.
+*Với `ledger`.* File index của `ledger` lớn và các handler tra theo offset ngẫu nhiên, nên map nó vào bộ nhớ trông rất hấp dẫn: tra index chỉ còn là đọc một `&[u8]`, không syscall `read` nào. Nhưng chính vì `&[u8]` trông như dữ liệu bất biến, mà file phía sau lại là file thật mà process khác (ví dụ job rebuild index) có thể ghi, nên API đánh dấu `unsafe`. Mục này giải thích chỗ nguy hiểm.
 
-`std` không có mmap. Crate phổ biến là `memmap2`; ví dụ ở đây ghim `memmap2 = "=0.9.11"` (docs.rs/memmap2/0.9.11).
+`std` không có mmap; crate phổ biến là `memmap2`, và ví dụ ở đây ghim `memmap2 = "=0.9.11"` (docs.rs/memmap2/0.9.11).
 
-**Cơ chế.**
+### 8.1 Cơ chế
 
-`mmap(2)` với `MAP_SHARED`: cập nhật trên mapping nhìn thấy được bởi process khác map cùng vùng và (với file-backed) được chuyển xuống file nền;[^man-mmap-shared] muốn kiểm soát chính xác lúc nào xuống file phải dùng `msync(2)`.[^man-msync] `memmap2::Mmap` là handle cho buffer map bất biến,[^mm-immutable] `MmapMut` là phiên bản khả biến.[^mm-mutable] Mapping độc lập với `File` đã tạo ra nó: vẫn hợp lệ sau khi `File` bị drop.[^mm-independent] Truy cập byte có thể gây page fault (chuyển trang vào RAM), chi tiết tùy nền tảng,[^mm-pagefault] cơ chế xem [chương bộ nhớ tiến trình](../03-memory/05-bo-nho-tien-trinh-linux.md) và [page fault](../03-memory/04-page-fault-va-swapping.md).
+Với `mmap(2)` và `MAP_SHARED`, cập nhật trên mapping nhìn thấy được với process khác map cùng vùng, và với file-backed mapping thì được chuyển xuống file nền[^man-mmap-shared]. Muốn kiểm soát chính xác lúc nào chuyển xuống file thì phải dùng `msync(2)`[^man-msync]. Trong `memmap2`, `Mmap` là handle cho buffer map bất biến[^mm-immutable], còn `MmapMut` là phiên bản khả biến[^mm-mutable]. Mapping không phụ thuộc vào `File` đã tạo ra nó: nó vẫn hợp lệ sau khi `File` bị drop[^mm-independent]. Truy cập byte có thể gây page fault (chuyển trang vào RAM), chi tiết tùy nền tảng[^mm-pagefault]; cơ chế xem [chương bộ nhớ tiến trình](../03-memory/05-bo-nho-tien-trinh-linux.md) và [page fault](../03-memory/04-page-fault-va-swapping.md).
 
-**Vì sao `Mmap::map` là `unsafe`.**
+### 8.2 Vì sao `Mmap::map` là `unsafe`
 
-Docs memmap2 (mục Safety): mọi constructor file-backed đều `unsafe` vì có thể có Undefined Behavior khi dùng map nếu file nền sau đó bị sửa, trong hay ngoài process; ứng dụng phải tự cân nhắc rủi ro, các biện pháp như quyền file, khóa hay file private (đã unlink) tồn tại nhưng phụ thuộc nền tảng và hạn chế.[^mm-safety]
+Docs memmap2 (mục Safety) giải thích: mọi constructor file-backed đều `unsafe` vì có thể có Undefined Behavior khi dùng map nếu file nền sau đó bị sửa, trong hay ngoài process. Ứng dụng phải tự cân nhắc rủi ro; các biện pháp như quyền file, khóa hay file private (đã unlink) có tồn tại nhưng phụ thuộc nền tảng và hạn chế[^mm-safety].
 
-Hiểu theo mô hình Rust (suy luận của người soạn): `&[u8]` lấy từ `Mmap` hứa là bất biến trong suốt lifetime; nhưng RAM phía sau thực ra là page cache dùng chung, một process khác (hoặc chính ta qua đường khác) có thể ghi vào cùng trang. Compiler tối ưu dựa trên giả định bất biến nên mâu thuẫn đó là UB. Một dạng khác là truncation: man page `mmap(2)` mô tả `SIGBUS` khi truy cập trang nằm ngoài cuối file đã map.[^man-sigbus] Signal này không đi qua `Result` của Rust (suy luận của người soạn: truy cập `&[u8]` là phép đọc bộ nhớ thường, không có chỗ trả lỗi).
+Hiểu theo mô hình Rust (suy luận của người soạn): `&[u8]` lấy từ `Mmap` hứa là bất biến trong suốt lifetime. Nhưng RAM phía sau thực ra là page cache dùng chung, nên một process khác, hoặc chính ta qua đường khác, có thể ghi vào cùng trang. Compiler tối ưu dựa trên giả định bất biến, nên mâu thuẫn đó là UB.
 
-**Khi nào dùng.**
+Truncation là dạng khác của cùng vấn đề. Nếu job rebuild index làm file ngắn đi thì truy cập vào trang nằm ngoài cuối file đã map cho `SIGBUS`[^man-sigbus]. Signal này không đi qua `Result` của Rust, vì truy cập `&[u8]` chỉ là một phép đọc bộ nhớ thường, không có chỗ để trả lỗi (suy luận của người soạn).
 
-Trade-off (nhận xét của người soạn): mmap bỏ đi một lần copy kernel→user và cho truy cập ngẫu nhiên tiện, nhưng lỗi I/O trở thành signal (`SIGBUS`) thay vì `Result`, độ trễ page fault khó thấy trong profile, và an toàn phụ thuộc kỷ luật không ai sửa file. Nhiều database chọn `pread`/`pwrite` hoặc direct I/O chính vì kiểm soát được lỗi và lịch ghi — xem [page cache và direct I/O](./04-page-cache-va-direct-io.md).
+### 8.3 Khi nào dùng
+
+Trade-off (nhận xét của người soạn): mmap bỏ một lần copy kernel→user và cho truy cập ngẫu nhiên tiện. Đổi lại, lỗi I/O trở thành signal (`SIGBUS`) thay vì `Result`, độ trễ page fault khó thấy trong profile, và an toàn dựa vào kỷ luật không ai sửa file. Nhiều database chọn `pread`/`pwrite` hoặc direct I/O chính vì kiểm soát được lỗi và lịch ghi; xem [page cache và direct I/O](./04-page-cache-va-direct-io.md).
 
 <details><summary>Đi sâu: thí nghiệm — hai mapping thấy nhau, slice "bất biến" đổi dưới chân</summary>
 
@@ -338,7 +365,7 @@ Hai mapping của cùng file nhìn thấy nhau; slice mà type system gọi là 
 
 </details>
 
-**Quay lại Q7:** `Mmap::map` là `unsafe` vì an toàn bộ nhớ phụ thuộc việc không ai sửa file nền, điều type system không kiểm tra được.
+**Quay lại Q7:** `Mmap::map` là `unsafe` vì an toàn bộ nhớ phụ thuộc việc không ai sửa file nền, điều type system không kiểm tra được; với index của `ledger`, đó là rủi ro bạn phải tự quản.
 
 ## 9. `tokio::fs`: async trên bề mặt, thread pool bên dưới (Q8)
 
@@ -346,109 +373,113 @@ Hai mapping của cùng file nhìn thấy nhau; slice mà type system gọi là 
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhà hàng có quầy gọi món rất gọn (`async`), nhưng người nấu thật là một nhóm đầu bếp làm việc chặn (thread pool). Khách thấy "không phải đợi" vì việc nặng đã được giao đi chỗ khác.
+*Với `ledger`.* Handler async của `ledger` đọc file cấu hình bằng `tokio::fs::read_to_string(...).await`. Nhìn vào code, người ta dễ nghĩ kernel đang đọc file bất đồng bộ và task không chặn gì cả. Thực tế không phải vậy, và hiểu đúng giúp bạn đoán được vì sao một loạt đọc file nhỏ có thể làm pool bận.
 
-Docs tokio 1.53.2: đa số hệ điều hành không có API async cho file system, nên Tokio dùng thao tác file blocking thông thường phía sau, chạy trên thread pool `spawn_blocking`.[^tokio-blocking] Docs module nói hiện luôn dùng `spawn_blocking` trên mọi nền tảng và có thể đổi sang API async như io_uring trong tương lai.[^tokio-uring] Câu đó đã cũ so với source: docs của `tokio::fs::read` ghi rằng trên Linux, để dùng io_uring cần `--cfg tokio_unstable`, cargo feature `io-uring` và tùy chọn runtime `Builder::enable_io_uring`, và hỗ trợ này còn thử nghiệm (experimental).[^tokio-fs-uring][^tokio-fs-uring-exp] Vậy `spawn_blocking` là đường mặc định; chi tiết ba điều kiện và cách đọc hai đoạn docs không khớp nhau ở [P7 · Chương 03, mục 6](../07-io-async/03-kqueue-io-uring.md). Chỉ nên dùng `tokio::fs` cho file thường: docs nói dùng nó với named pipe trên Linux có thể gây hành vi bất ngờ như treo lúc shutdown runtime; với file đặc biệt hãy dùng `tokio::net::unix::pipe` hoặc `AsyncFd`.[^tokio-special]
+Tokio dùng thao tác file blocking thông thường phía sau, chạy trên thread pool `spawn_blocking`[^tokio-blocking]. Task gọi `.await` chỉ nhường executor trong lúc một thread của pool làm việc blocking đó (suy luận của người soạn). Docs của module còn nói hiện Tokio luôn dùng `spawn_blocking` trên mọi nền tảng và có thể đổi sang API async như io_uring trong tương lai[^tokio-uring]; câu này đã lỗi thời so với source, xem phần Đi sâu.
 
-Hệ quả hiệu năng theo docs: gộp thao tác vào ít lần `spawn_blocking` nhất có thể,[^tokio-batch] ví dụ `tokio::fs::read`/`write` làm cả file trong một lần; và dùng `BufReader`/`BufWriter` để gom nhiều đọc/ghi nhỏ.[^tokio-bufwriter] Tương tự `BufWriter` đồng bộ, docs `tokio::fs::File` dặn gọi `flush` trước khi drop.[^tokio-file-flush] Cơ chế `spawn_blocking`, executor và so sánh với io_uring ở phase P7: [Tokio](../07-io-async/08-tokio.md) và [kqueue/io_uring](../07-io-async/03-kqueue-io-uring.md).
+Hệ quả thực hành, theo docs, là gộp thao tác vào ít lần `spawn_blocking` nhất có thể[^tokio-batch]. Chẳng hạn `tokio::fs::read` và `tokio::fs::write` làm cả file trong một lần. Với nhiều lần đọc ghi nhỏ, hãy dùng `BufReader`/`BufWriter` để gom lại[^tokio-bufwriter]. Cũng như `BufWriter` đồng bộ, docs của `tokio::fs::File` dặn gọi `flush` trước khi drop[^tokio-file-flush]. Cơ chế `spawn_blocking`, executor và so sánh với io_uring ở phase P7: [Tokio](../07-io-async/08-tokio.md) và [kqueue/io_uring](../07-io-async/03-kqueue-io-uring.md).
 
-<details><summary>Đi sâu: xác nhận bằng <code>strace</code> thread nào chạy <code>open</code></summary>
+<details><summary>Đi sâu: io_uring, named pipe và xác nhận bằng <code>strace</code> thread nào chạy <code>open</code></summary>
 
-Xác nhận bằng strace (`current_thread` runtime, `tokio = "=1.53.2"`): `std::fs::write` chạy trên thread chính (tid 91) nhưng `tokio::fs::read_to_string(...).await` cho `[pid 92] openat(... O_RDONLY|O_CLOEXEC)` sau một lần `clone(...CLONE_THREAD...)` — `open` chạy trên thread khác sinh ra cho pool.
+**io_uring.** Câu "luôn dùng `spawn_blocking`" trong docs module đã cũ so với source. Docs của `tokio::fs::read` ghi rằng trên Linux muốn dùng io_uring cần `--cfg tokio_unstable`, cargo feature `io-uring` và tùy chọn runtime `Builder::enable_io_uring`[^tokio-fs-uring]. Hỗ trợ này còn đang thử nghiệm (experimental)[^tokio-fs-uring-exp]. Vậy `spawn_blocking` vẫn là đường mặc định; chi tiết ba điều kiện và cách đọc hai đoạn docs không khớp nhau ở [P7 · Chương 03, mục 6](../07-io-async/03-kqueue-io-uring.md).
+
+**File đặc biệt.** Chỉ nên dùng `tokio::fs` cho file thường: docs nói dùng nó với named pipe trên Linux có thể gây hành vi bất ngờ như treo lúc shutdown runtime[^tokio-special]. Với file đặc biệt hãy dùng `tokio::net::unix::pipe` hoặc `AsyncFd`.
+
+**Xác nhận bằng strace** (`current_thread` runtime, `tokio = "=1.53.2"`): `std::fs::write` chạy trên thread chính (tid 91) nhưng `tokio::fs::read_to_string(...).await` cho `[pid 92] openat(... O_RDONLY|O_CLOEXEC)` sau một lần `clone(...CLONE_THREAD...)` — `open` chạy trên thread khác sinh ra cho pool.
 
 </details>
 
-**Quay lại Q8:** `tokio::fs` là giao diện async bọc thao tác blocking trên thread pool (mặc định; io_uring chỉ là đường thử nghiệm opt-in); gộp thao tác để giảm số lần `spawn_blocking`.
+**Quay lại Q8:** `tokio::fs` là giao diện async bọc thao tác blocking trên thread pool (mặc định; io_uring chỉ là đường thử nghiệm opt-in), nên handler của `ledger` nên gộp thao tác để giảm số lần `spawn_blocking`.
 
 ## Tóm tắt
 
 - `OpenOptions` ánh xạ: `append`→`O_APPEND`, `truncate`→`O_TRUNC`, `create_new`→`O_CREAT|O_EXCL`; `File::create` = write+create+truncate (đã strace; docs Rust chỉ hứa hành vi, không hứa tên cờ).
-- `create_new` là cách nguyên tử để "tạo nếu chưa tồn tại"; lỗi trả `AlreadyExists`.[^rs-createnew-atomic][^rs-errors]
-- `write` có thể ghi thiếu; `write_all` lặp lại đến hết hoặc lỗi.[^rs-write-partial][^rs-write-all]
-- `File` không có buffer (`File::flush` là no-op);[^rs-file-flush] `BufWriter` mặc định 8 KiB[^rs-bufwriter-8k] gom 100.000 lần ghi thành 209 syscall (số đo một lần chạy); drop của `BufWriter` nuốt lỗi flush nên phải `flush()` tường minh.[^rs-bufwriter-flush]
-- `flush` chỉ tới kernel; muốn xuống thiết bị: `sync_all` (`fsync`) hoặc `sync_data` (`fdatasync`),[^rs-sync-all-attempt][^rs-sync-data] và với file mới phải sync cả thư mục.[^man-fsync-dir]
-- Mẫu bền: file tạm `create_new` → `sync_all` → `rename` → sync thư mục; `fs::write` thì không nguyên tử, không bền (suy luận của người soạn từ quan sát `strace`).
-- `FileExt::read_at/write_at` = `pread/pwrite`, không đổi cursor,[^rs-readat] nhưng `O_APPEND` làm `write_at` bỏ qua offset.[^rs-writeat-bug]
-- `read_dir` không bảo đảm thứ tự; muốn ổn định thì sort.[^rs-readdir-order]
-- `File::lock` stable từ 1.89.0,[^src-lock-stable] hiện là `flock`, advisory hoặc mandatory tùy nền tảng, nhả khi đóng hoặc `unlock`.[^rs-lock-flock][^rs-lock-release]
-- `Mmap::map` `unsafe` vì file nền bị sửa thì UB;[^mm-safety] `tokio::fs` mặc định chạy trên `spawn_blocking` (io_uring chỉ là đường thử nghiệm opt-in, ba điều kiện ở P7·03 mục 6).[^tokio-blocking]
+- `create_new` là cách nguyên tử để "tạo nếu chưa tồn tại", như file khóa của `ledger`[^rs-createnew-atomic]. Khi file đã có, lỗi trả về là `AlreadyExists`[^rs-errors].
+- `write` có thể ghi thiếu[^rs-write-partial]; `write_all` lặp lại đến hết hoặc lỗi[^rs-write-all].
+- `File` không có buffer nên `File::flush` là no-op[^rs-file-flush]. `BufWriter` mặc định 8 KiB[^rs-bufwriter-8k] và gom 100.000 lần ghi thành 209 syscall (số đo một lần chạy). Drop của `BufWriter` nuốt lỗi flush nên phải `flush()` tường minh[^rs-bufwriter-flush].
+- `flush` chỉ tới kernel. Muốn xuống thiết bị thì dùng `sync_all` (`fsync`)[^rs-sync-all-attempt] hoặc `sync_data` (`fdatasync`)[^rs-sync-data]. Với file mới phải sync cả thư mục[^man-fsync-dir].
+- Mẫu bền cho `state.json`: file tạm `create_new` → `sync_all` → `rename` → sync thư mục; `fs::write` thì không nguyên tử, không bền (suy luận của người soạn từ quan sát `strace`).
+- `FileExt::read_at/write_at` = `pread/pwrite`, không đổi cursor[^rs-readat]. Nhưng `O_APPEND` làm `write_at` bỏ qua offset[^rs-writeat-bug].
+- `read_dir` không bảo đảm thứ tự; muốn ổn định thì sort[^rs-readdir-order].
+- `File::lock` stable từ 1.89.0[^src-lock-stable]. Hiện nó là `flock`, advisory hoặc mandatory tùy nền tảng[^rs-lock-flock], và nhả khi đóng hoặc `unlock`[^rs-lock-release].
+- `Mmap::map` là `unsafe` vì file nền bị sửa thì UB[^mm-safety]. `tokio::fs` mặc định chạy trên `spawn_blocking` (io_uring chỉ là đường thử nghiệm opt-in, ba điều kiện ở P7·03 mục 6)[^tokio-blocking].
 
 ## Câu hỏi tự kiểm tra
 
 1. `OpenOptions::new().write(true).create_new(true)` truyền cờ `open(2)` nào, và lỗi khi file đã tồn tại là gì?
 <details><summary>Đáp án</summary>
 
-`O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC`; `EEXIST` ↔ `ErrorKind::AlreadyExists`. [^man-oexcl] [^rs-createnew]
+`O_WRONLY|O_CREAT|O_EXCL|O_CLOEXEC`. Khi file đã có, kernel trả `EEXIST`[^man-oexcl] và Rust đổi thành `ErrorKind::AlreadyExists`. Nếu lệnh thành công, file trả về chắc chắn là file mới[^rs-createnew].
 
 </details>
 
 2. Vì sao `seek(End(0))` + `write` không thay được `append(true)`?
 <details><summary>Đáp án</summary>
 
-Có race giữa seek và write; `O_APPEND` làm việc đó thành một bước nguyên tử. [^rs-append] [^man-oappend]
+Có race giữa seek và write[^rs-append]. `O_APPEND` gộp việc dịch offset và ghi thành một bước nguyên tử[^man-oappend].
 
 </details>
 
 3. `BufWriter` drop khi đĩa đầy: chương trình thấy gì, và cách đúng?
 <details><summary>Đáp án</summary>
 
-Không thấy gì (lỗi bị bỏ qua); gọi `flush()` (hoặc `into_inner()`) và kiểm tra `Result`. [^rs-bufwriter-flush]
+Không thấy gì vì lỗi bị bỏ qua. Cách đúng là gọi `flush()` (hoặc `into_inner()`) và kiểm tra `Result`[^rs-bufwriter-flush].
 
 </details>
 
 4. `write` trả `Ok(3)` cho buffer 8 byte: có phải lỗi không?
 <details><summary>Đáp án</summary>
 
-Không; phải gọi lại, hoặc dùng `write_all`. [^rs-write-partial] [^rs-write-all]
+Không, đó không bị coi là lỗi[^rs-write-partial]. Phải gọi lại phần còn lại, hoặc dùng `write_all`[^rs-write-all].
 
 </details>
 
 5. `flush()` của `BufWriter` có bảo đảm dữ liệu bền khi mất điện không?
 <details><summary>Đáp án</summary>
 
-Không, chỉ tới kernel (và `File::flush` là no-op); cần `sync_all`/`sync_data`. [^rs-sync-all] [^tokio-file-flush] [^rs-file-flush]
+Không, nó chỉ đẩy dữ liệu tới kernel. `File::flush` còn là no-op[^rs-file-flush]. Muốn bền thì cần `sync_all`/`sync_data`: drop không phải chờ dữ liệu xuống đĩa[^rs-sync-all], và docs `tokio::fs::File` nói flush không bảo đảm file đã ghi hết xuống đĩa[^tokio-file-flush].
 
 </details>
 
 6. Điều gì xảy ra nếu file mở bằng `append(true)` rồi `write_at(buf, 10)`?
 <details><summary>Đáp án</summary>
 
-Dữ liệu vẫn được ghi vào cuối file, bỏ qua offset. [^rs-writeat-bug]
+Dữ liệu vẫn được ghi vào cuối file, bỏ qua offset[^rs-writeat-bug].
 
 </details>
 
 7. Vì sao test dựa vào thứ tự `read_dir` là sai?
 <details><summary>Đáp án</summary>
 
-Thứ tự phụ thuộc nền tảng/file system và có thể đổi giữa các lần gọi. [^rs-readdir-order] [^rs-readdir-platform]
+Thứ tự phụ thuộc nền tảng và file system[^rs-readdir-platform]. Nó còn có thể đổi giữa các lần gọi[^rs-readdir-order].
 
 </details>
 
 8. `File::lock` ngăn process khác ghi vào file được không?
 <details><summary>Đáp án</summary>
 
-Không bảo đảm: trên Linux là `flock` advisory; tiến trình có quyền vẫn ghi được (đã chạy thật). [^man-flock-advisory] [^rs-lock-advisory]
+Không bảo đảm: trên Linux là `flock` advisory và tiến trình có quyền vẫn ghi được (đã chạy thật)[^man-flock-advisory]. Docs Rust cũng chỉ nói khóa có thể là advisory hoặc mandatory tùy nền tảng[^rs-lock-advisory].
 
 </details>
 
 9. Vì sao `Mmap::map` là `unsafe` dù chỉ để đọc?
 <details><summary>Đáp án</summary>
 
-File nền bị sửa trong hay ngoài process có thể gây UB khi dùng map. [^mm-safety]
+File nền bị sửa trong hay ngoài process có thể gây UB khi dùng map[^mm-safety].
 
 </details>
 
 10. `tokio::fs::read_to_string` chạy trên thread nào, và vì sao?
 <details><summary>Đáp án</summary>
 
-Mặc định trên thread của pool `spawn_blocking`, vì OS phổ thông thiếu async file API. [^tokio-blocking] Chỉ khi bật `--cfg tokio_unstable` + feature `io-uring` + `Builder::enable_io_uring` thì Linux mới có đường io_uring thử nghiệm.[^tokio-fs-uring]
+Mặc định trên thread của pool `spawn_blocking`, vì OS phổ thông thiếu async file API[^tokio-blocking]. Chỉ khi bật `--cfg tokio_unstable` + feature `io-uring` + `Builder::enable_io_uring` thì Linux mới có đường io_uring thử nghiệm[^tokio-fs-uring].
 
 </details>
 
 11. Vì sao nên `create_new` cho file tạm trong mẫu ghi nguyên tử?
 <details><summary>Đáp án</summary>
 
-Bảo đảm file là mới và tránh TOCTOU/giẫm lên file của bên khác. [^rs-createnew-atomic]
+Bảo đảm file là mới và tránh TOCTOU hay giẫm lên file của bên khác[^rs-createnew-atomic].
 
 </details>
 

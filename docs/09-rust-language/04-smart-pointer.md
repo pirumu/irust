@@ -19,48 +19,49 @@ Chương này đi qua họ smart pointer của thư viện chuẩn Rust: `Box`, 
 - [P7 · Chương 06 — async/await và Pin](../07-io-async/06-async-await-pin.md): `Pin` được giải thích đầy đủ ở đó.
 - Đã đọc Rust Book tới generics/traits/lifetimes (ch15 sẽ được dùng làm nguồn chính).
 
+Ví dụ chạy xuyên chương là `gateway`, một API gateway viết bằng Rust. Mỗi request nó chuẩn hóa path, tra bảng route, chạy một chuỗi middleware, mượn một connection từ pool để gọi backend rồi trả kết quả; nhiều handler thread của nó dùng chung một bản cấu hình. Đây là ví dụ giả định của người soạn, không phải code trong repo. Mỗi mục bắt đầu bằng việc `gateway` cần gì, rồi mới đi vào kiểu tương ứng.
+
 ## 1. Smart pointer là gì, và `Deref` (Q1)
 
-> **Trả lời ngắn.** Reference chỉ trỏ tới dữ liệu và không có khả năng đặc biệt nào khác[^book-ref-plain]; smart pointer là cấu trúc dữ liệu hoạt động như con trỏ nhưng có thêm metadata và khả năng[^book-sp-def]. Hai trait làm nên "tính smart" là `Deref` (dùng như reference) và `Drop` (code chạy khi ra khỏi scope)[^book-sp-traits]. `Deref` cho phép `*p` và deref coercion: compiler tự đổi reference tới smart pointer thành reference tới kiểu bên trong, ví dụ `&String` thành `&str`[^book-deref-coerce]. Nhờ vậy gọi được method của `T` trực tiếp trên smart pointer.
+> **Trả lời ngắn.** Reference chỉ trỏ tới dữ liệu và không có khả năng đặc biệt nào khác[^book-ref-plain]. Smart pointer thì là cấu trúc dữ liệu hoạt động như con trỏ nhưng có thêm metadata và khả năng[^book-sp-def]. Hai trait làm nên "tính smart" là `Deref` (dùng như reference) và `Drop` (code chạy khi ra khỏi scope)[^book-sp-traits]. `Deref` cho phép `*p` và deref coercion: compiler tự đổi reference tới smart pointer thành reference tới kiểu bên trong, ví dụ `&String` thành `&str`[^book-deref-coerce]. Nhờ vậy gọi được method của `T` trực tiếp trên smart pointer.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): reference là tấm biển chỉ đường tới một căn nhà; smart pointer là chiếc chìa khóa kèm sổ quản lý — biết mình đang giữ nhà nào và tự trả nhà khi hết người dùng.
+*Với service `gateway`.* Một handler của `gateway` cần gọi backend, nên nó mượn một connection từ pool, gửi request, rồi phải trả connection về pool. Nếu connection chỉ là `&Conn` thì handler nhìn và dùng được nó, nhưng không ai lo chuyện trả lại; `&Conn` chỉ trỏ vào dữ liệu, ngoài ra không biết làm gì khác. Muốn "dùng như connection thường, nhưng hết scope thì tự trả về pool" thì cần một smart pointer. Mục này nói smart pointer là gì và `Deref` giúp gì; mục 2 nói phần "tự trả" do `Drop` lo.
 
 ### 1.1 Reference và smart pointer
 
-**Vấn đề.** Reference `&T` chỉ trỏ vào dữ liệu: nó không sở hữu, không quyết định dữ liệu sống bao lâu, không đếm được ai đang dùng. Rust Book mô tả: reference "không có khả năng đặc biệt nào ngoài việc trỏ tới dữ liệu và không có overhead"[^book-ref-plain], còn smart pointer là cấu trúc dữ liệu hoạt động như con trỏ nhưng có thêm metadata và khả năng.[^book-sp-def]
+**Vấn đề.** Reference `&T` không sở hữu dữ liệu, không quyết định dữ liệu sống bao lâu và không đếm được ai đang dùng. Nó chỉ trỏ, và không có overhead[^book-ref-plain]. Smart pointer thì làm được nhiều hơn, vì ngoài địa chỉ nó còn mang thêm metadata và khả năng[^book-sp-def].
 
-**Cơ chế.** Một smart pointer, theo Book, thường được cài bằng `struct` và nhiều khi sở hữu dữ liệu nó trỏ tới;[^book-sp-own] khác struct thường ở chỗ cài đặt hai trait `Deref` và `Drop`.[^book-sp-traits] Hai trait đó chia việc rõ ràng:
+**Cơ chế.** Một smart pointer thường là `struct`, và nhiều khi sở hữu luôn dữ liệu nó trỏ tới[^book-sp-own]. Cái làm nó khác struct thường là hai trait `Deref` và `Drop`[^book-sp-traits], chia việc như sau:
 
 | Trait | Việc | Hệ quả quan sát được |
 |---|---|---|
 | `Deref` / `DerefMut` | cho phép `*p` và deref coercion, để smart pointer dùng như reference | gọi method của `T` trực tiếp trên `p` |
 | `Drop` | code chạy khi giá trị ra khỏi scope | giải phóng heap, giảm bộ đếm, nhả lock… |
 
-Bảng tổng quan để định hướng cả chương (phần "chi phí" là **nhận xét của người soạn** dựa trên các ví dụ chạy bên dưới):
+Bảng dưới là bản đồ cho cả chương. Cột "Chi phí chính" và cột `gateway` là **nhận xét của người soạn**, dựa trên các ví dụ chạy ở những mục sau:
 
-| Kiểu | Sở hữu | Thread | Mutation | Chi phí chính |
-|---|---|---|---|---|
-| `Box<T>` | duy nhất | theo `T` | qua `&mut` bình thường | 1 allocation |
-| `Rc<T>` | chung | một thread (`!Send`, `!Sync`)[^std-rc-notsend] | không (chỉ `&T`) | bộ đếm không-atomic |
-| `Arc<T>` | chung | nhiều thread | không (chỉ `&T`) | bộ đếm atomic |
-| `Cell<T>` | duy nhất | chuyển được nếu `T: Send`[^std-cell-send], nhưng `!Sync` | thay cả giá trị | gần như không |
-| `RefCell<T>` | duy nhất | chuyển được nếu `T: Send`[^std-refcell-send], nhưng `!Sync` | `borrow_mut()` kiểm tra lúc chạy | cờ đếm + nguy cơ panic |
-| `Cow<'a, B>` | mượn *hoặc* sở hữu | theo `B` | `to_mut()` clone khi cần | enum tag |
-| `OnceCell<T>` / `LazyCell<T>` | duy nhất | chuyển được nếu `T` (và `F`) là `Send`[^std-oncecell-send][^std-lazycell-send], nhưng `!Sync` | ghi một lần | enum Option |
+| Kiểu | Sở hữu | Thread | Mutation | Chi phí chính | Chỗ dùng trong `gateway` |
+|---|---|---|---|---|---|
+| `Box<T>` | duy nhất | theo `T` | qua `&mut` bình thường | 1 allocation | chuỗi middleware `Vec<Box<dyn …>>`, kiểu lỗi chung |
+| `Rc<T>` | chung | một thread (`!Send`, `!Sync`)[^std-rc-notsend] | không (chỉ `&T`) | bộ đếm không-atomic | cây route dựng lúc khởi động trên một thread |
+| `Arc<T>` | chung | nhiều thread | không (chỉ `&T`) | bộ đếm atomic | cấu hình dùng chung giữa các handler thread |
+| `Cell<T>` | duy nhất | chuyển được nếu `T: Send`[^std-cell-send], nhưng `!Sync` | thay cả giá trị | gần như không | bộ đếm số request trong một context |
+| `RefCell<T>` | duy nhất | chuyển được nếu `T: Send`[^std-refcell-send], nhưng `!Sync` | `borrow_mut()` kiểm tra lúc chạy | cờ đếm + nguy cơ panic | danh sách sự kiện log của một request |
+| `Cow<'a, B>` | mượn *hoặc* sở hữu | theo `B` | `to_mut()` clone khi cần | enum tag | chuẩn hóa path |
+| `OnceCell<T>` | duy nhất | chuyển được nếu `T: Send`[^std-oncecell-send], nhưng `!Sync` | ghi một lần | enum Option | khởi tạo lười một lần |
+| `LazyCell<T, F>` | duy nhất | chuyển được nếu `T` và `F` đều `Send`[^std-lazycell-send], nhưng `!Sync` | khởi tạo ở lần truy cập đầu | enum Option | khởi tạo lười một lần |
 
 <details><summary>Đi sâu: smart pointer trong tài liệu std của <code>Deref</code></summary>
 
-Tài liệu std của `Deref` nói thêm: các kiểu cài đặt `Deref`/`DerefMut` thường được gọi là smart pointer, và cơ chế deref coercion được thiết kế riêng để hỗ trợ hành vi giống con trỏ ấy.[^std-deref-sp] Mục đích của smart pointer thường là đổi *ownership semantics* (như `Rc`, `Cow`) hoặc *storage semantics* (như `Box`) của giá trị bên trong (cũng theo std docs).[^std-deref-purpose]
+Tài liệu std của `Deref` nói thêm: các kiểu cài `Deref`/`DerefMut` thường được gọi là smart pointer, và cơ chế deref coercion được thiết kế riêng để hỗ trợ hành vi giống con trỏ ấy[^std-deref-sp]. Mục đích của smart pointer thường là đổi *ownership semantics* của giá trị bên trong (như `Rc`, `Cow`) hoặc *storage semantics* của nó (như `Box`)[^std-deref-purpose].
 
 </details>
 
 ### 1.2 `Deref`: `*` và `.`
 
-Hình dung (nhận xét của người soạn): deref coercion là nhân viên lễ tân tự mở từng lớp cửa giúp bạn cho tới khi tới đúng phòng cần vào.
-
-Ví dụ tối thiểu — một `MyBox<T>` chỉ cài `Deref`:
+Quay lại connection của `gateway`: handler muốn viết `conn.send(...)` chứ không muốn viết `conn.inner.send(...)`. `Deref` làm được điều đó. Dưới đây là một `MyBox<T>` chỉ cài `Deref`:
 
 ```rust
 use std::ops::Deref;
@@ -73,7 +74,9 @@ fn main() {
 }
 ```
 
-Kết quả chạy thật: `deref coercion: 4`. Chuỗi biến đổi `&MyBox<String>` → `&String` → `&str` do compiler tự chèn. Book định nghĩa: deref coercion chuyển một reference tới kiểu cài `Deref` thành reference tới kiểu khác, ví dụ `&String` thành `&str`.[^book-deref-coerce] Nó áp dụng cho ba trường hợp `&T→&U`, `&mut T→&mut U`, `&mut T→&U`; chiều ngược lại (`&T→&mut U`) bị cấm, vì Book nói Rust có thể ép tham chiếu mutable thành immutable nhưng *ngược lại thì không*.[^book-deref-mut]
+Kết quả chạy thật: `deref coercion: 4`. Hàm `hello` nhận `&str` mà ta đưa `&MyBox<String>`; compiler tự chèn hai bước đổi `&MyBox<String>` → `&String` → `&str`. Đó là deref coercion: reference tới một kiểu cài `Deref` được đổi thành reference tới kiểu khác, như `&String` thành `&str`[^book-deref-coerce].
+
+Coercion này có ba chiều hợp lệ: `&T→&U`, `&mut T→&mut U` và `&mut T→&U`. Chiều ngược lại (`&T→&mut U`) bị cấm, vì Rust chỉ ép được reference mutable thành immutable, không ép theo chiều ngược lại[^book-deref-mut].
 
 <details><summary>Đi sâu: hai điểm hay bị hiểu nhầm (<code>Rc</code> không có <code>DerefMut</code>, không move ra bằng <code>*</code>)</summary>
 
@@ -86,7 +89,7 @@ Hai điểm hay bị hiểu nhầm:
      = help: trait `DerefMut` is required to modify through a dereference, but it is not implemented for `Rc<Vec<i32>>`
   ```
 
-- Không thể move giá trị ra khỏi smart pointer chỉ bằng `*`: `let s: String = *r;` với `r: Rc<String>` cho `error[E0507]: cannot move out of an `Rc``. (`Box` cho phép move ra bằng `*`: `let val: u8 = *boxed;` nằm trong ví dụ của std docs.[^std-box-intro])
+- Không thể move giá trị ra khỏi smart pointer chỉ bằng `*`: `let s: String = *r;` với `r: Rc<String>` cho `error[E0507]: cannot move out of an `Rc``. (`Box` cho phép move ra bằng `*`: `let val: u8 = *boxed;` nằm trong ví dụ của std docs[^std-box-intro].)
 
 </details>
 
@@ -94,20 +97,22 @@ Hai điểm hay bị hiểu nhầm:
 
 ## 2. `Drop` và thứ tự: tự động vs `mem::drop` (Q2)
 
-> **Trả lời ngắn.** `Drop` là code chạy khi giá trị ra khỏi scope, dùng để giải phóng tài nguyên như file hoặc kết nối mạng[^book-drop]. Biến cục bộ bị drop theo thứ tự ngược lúc tạo[^book-drop-rev], field của struct theo thứ tự khai báo[^ref-field-order]. Không gọi `Drop::drop` bằng tay được; muốn drop sớm thì dùng `std::mem::drop`[^book-drop-explicit].
+> **Trả lời ngắn.** `Drop` là code chạy khi giá trị ra khỏi scope, dùng để giải phóng tài nguyên như file hoặc kết nối mạng[^book-drop]. Biến cục bộ bị drop theo thứ tự ngược lúc tạo[^book-drop-rev]. Field của struct thì bị drop theo thứ tự khai báo[^ref-field-order]. Không gọi `Drop::drop` bằng tay được; muốn drop sớm thì dùng `std::mem::drop`[^book-drop-explicit].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): như dọn bàn ăn theo chồng đĩa — đĩa xếp sau cùng được dỡ ra trước; bạn không tự tay giật đĩa khỏi chồng mà nhờ người phục vụ (`mem::drop`) bê đi sớm.
+*Với service `gateway`.* Một handler của `gateway` giữ vài thứ cùng lúc: connection mượn từ pool, buffer chứa body, có khi cả một lock. Handler không bao giờ gọi "trả connection" bằng tay; nó chỉ để biến ra khỏi scope. Câu hỏi của mục này là: chuyện trả đó xảy ra lúc nào, và nếu có nhiều thứ cần trả thì cái nào trả trước.
 
-`Drop` là phần còn lại của "smart". Book: có thể cài `Drop` cho bất kỳ kiểu nào, và code đó dùng để giải phóng tài nguyên như file hoặc kết nối mạng.[^book-drop] Các quy tắc cốt lõi (move xem [P3·08 mục 2](../03-memory/08-rust-va-bo-nho.md), thứ tự drop xem [P3·08 mục 3](../03-memory/08-rust-va-bo-nho.md)):
+`Drop` là phần còn lại của "smart". Ta có thể cài `Drop` cho bất kỳ kiểu nào, và code đó dùng để giải phóng tài nguyên như file hay kết nối mạng[^book-drop]. Các quy tắc cốt lõi (move xem [P3·08 mục 2](../03-memory/08-rust-va-bo-nho.md), thứ tự drop xem [P3·08 mục 3](../03-memory/08-rust-va-bo-nho.md)):
 
-- Biến cục bộ bị drop theo thứ tự ngược lại với lúc tạo.[^book-drop-rev] Reference cũng viết: khi ra khỏi scope, mọi biến bị drop theo thứ tự ngược khai báo (biến) hoặc ngược tạo (temporary).[^ref-scope-order]
-- Field của struct bị drop theo thứ tự khai báo.[^ref-field-order]
-- Không thể gọi `Drop::drop` bằng tay; muốn drop sớm dùng `std::mem::drop`.[^book-drop-explicit] Hàm này "không có phép màu": nó được định nghĩa đúng là `pub fn drop<T>(_x: T) {}` — `_x` bị move vào hàm nên tự bị drop khi hàm return.[^std-mem-drop]
-- Không thể vừa `Copy` vừa `Drop`.[^std-copy-drop]
+- Biến cục bộ bị drop theo thứ tự ngược với lúc tạo[^book-drop-rev]. Reference nói rõ hơn: khi ra khỏi scope, biến bị drop theo thứ tự ngược khai báo, còn temporary theo thứ tự ngược lúc tạo[^ref-scope-order]. Với `gateway`, connection lấy sau thì được trả trước.
+- Field của struct bị drop theo thứ tự khai báo[^ref-field-order].
+- Không thể gọi `Drop::drop` bằng tay[^book-drop-explicit]. Muốn trả connection sớm, chẳng hạn trước khi handler làm bước serialize chậm, thì dùng `std::mem::drop`.
+- `mem::drop` không có phép màu gì: nó được định nghĩa đúng là `pub fn drop<T>(_x: T) {}`. `_x` bị move vào hàm nên tự bị drop khi hàm return[^std-mem-drop].
 
 <details><summary>Đi sâu: thí nghiệm thứ tự drop, <code>let _</code> và temporary</summary>
+
+Một kiểu không thể vừa `Copy` vừa `Drop`[^std-copy-drop].
 
 Chạy thật một chương trình quan sát thứ tự (code đầy đủ bên dưới):
 
@@ -139,7 +144,13 @@ drop y
 drop x
 ```
 
-Đọc kết quả: (1) `drop(e)` chạy ngay. (2) `let _ = D(...)` **không** gắn giá trị vào biến. Pattern `_` "không copy, move hay borrow" giá trị nó khớp,[^ref-wildcard] còn vế phải `D("underscore")` là một temporary mà phạm vi (temporary scope) là câu lệnh chứa nó,[^ref-temp-scope] nên bị drop ngay cuối câu lệnh — khác `let _p = ...` giữ đến hết scope. Hệ quả cần nhớ: `let _ = x;` với `x` là **biến có sẵn** (place expression) không move và không drop `x` — `x` vẫn sống đến hết scope (chạy thật: `let z = D("z"); let _ = z;` không in `drop z` ngay; nó chỉ in ở cuối `main`, sau `_p`, trước `_y`). Vậy "`let _` drop ngay" chỉ đúng khi vế phải là temporary (kết quả hàm, constructor), không đúng với biến. (3) Cuối `main`, `_p` (khai báo sau cùng) bị drop trước: field `a` rồi `b` (đúng thứ tự khai báo field), rồi `_y`, rồi `_x`. Lưu ý `p` đã bị move vào `_p`, nên nó không bị drop lần thứ hai.
+Đọc kết quả theo từng bước:
+
+1. `drop(e)` chạy ngay, nên `drop early` in trước `after early`.
+2. `let _ = D(...)` **không** gắn giá trị vào biến. Pattern `_` không copy, move hay borrow giá trị nó khớp[^ref-wildcard]. Vế phải `D("underscore")` là một temporary, và phạm vi của temporary là câu lệnh chứa nó[^ref-temp-scope], nên nó bị drop ngay cuối câu lệnh. `let _p = ...` thì khác: giá trị được giữ đến hết scope.
+3. Cuối `main`, `_p` (khai báo sau cùng) bị drop trước: field `a` rồi `b` (đúng thứ tự khai báo field), rồi `_y`, rồi `_x`. `p` đã bị move vào `_p` nên không bị drop lần thứ hai.
+
+Hệ quả cần nhớ: `let _ = x;` với `x` là **biến có sẵn** (place expression) không move và không drop `x`; `x` vẫn sống đến hết scope. Chạy thật: `let z = D("z"); let _ = z;` không in `drop z` ngay mà chỉ in ở cuối `main`, sau `_p`, trước `_y`. Vậy "`let _` drop ngay" chỉ đúng khi vế phải là temporary (kết quả hàm, constructor), không đúng với biến.
 
 </details>
 
@@ -147,17 +158,17 @@ drop x
 
 ## 3. `Box<T>`: sở hữu duy nhất (kèm `Box<dyn Error>` và `Pin<Box<T>>`) (Q3)
 
-> **Trả lời ngắn.** `Box<T>` là con trỏ sở hữu duy nhất một heap allocation kiểu `T`[^std-box-def]. Nó giải ba bài toán: kiểu đệ quy (box có kích thước biết trước nên làm kiểu hữu hạn)[^book-box-recursive], trait object (con trỏ tới instance và bảng tra method)[^book-trait-obj], và chuyển ownership dữ liệu lớn mà không sao chép[^book-box-large]. `Box<dyn Error>` là một trait object dùng làm kiểu lỗi chung, để toán tử `?` hội tụ nhiều kiểu lỗi khác nhau trong cùng một `Result`[^book-box-dyn-error]. `Pin` bọc một con trỏ để "ghim" pointee tại chỗ, ngăn nó bị move hoặc vô hiệu trừ khi nó là `Unpin`[^std-pin-def]. `Pin<Box<T>>` là con trỏ ghim sở hữu tới `T` được ghim[^std-pin-box].
+> **Trả lời ngắn.** `Box<T>` là con trỏ sở hữu duy nhất một heap allocation kiểu `T`[^std-box-def]. Nó giải ba bài toán. Một là kiểu đệ quy: box có kích thước biết trước nên làm kiểu hữu hạn được[^book-box-recursive]. Hai là trait object, tức con trỏ tới instance cùng bảng tra method[^book-trait-obj]. Ba là chuyển ownership dữ liệu lớn mà không sao chép[^book-box-large]. `Box<dyn Error>` là một trait object dùng làm kiểu lỗi chung, để toán tử `?` hội tụ nhiều kiểu lỗi khác nhau trong cùng một `Result`[^book-box-dyn-error]. `Pin` bọc một con trỏ để "ghim" pointee tại chỗ, ngăn nó bị move hoặc vô hiệu trừ khi nó là `Unpin`[^std-pin-def]. `Pin<Box<T>>` là con trỏ ghim sở hữu tới `T` được ghim[^std-pin-box].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Box` là tờ giấy nhận hàng nhỏ gọn cầm trong tay, còn món hàng lớn hoặc chưa biết kích cỡ nằm trong kho (heap).
+*Với service `gateway`.* `gateway` có ba chỗ cần `Box`. Chuỗi middleware gồm nhiều kiểu khác nhau (log, auth, rate limit) mà phải nằm chung trong một `Vec`. Mỗi bước trong chuỗi có thể trả lỗi thuộc kiểu riêng, mà handler muốn gom về một kiểu. Và body request vài trăm KB phải đi qua nhiều tầng mà không sao chép từng lần. Cả ba đều là việc của `Box`.
 
-std docs định nghĩa `Box<T>` là kiểu con trỏ sở hữu duy nhất một heap allocation kiểu `T`.[^std-box-def] Bố cục `Box` trong bộ nhớ xem [P3·08 mục 4](../03-memory/08-rust-va-bo-nho.md), allocator xem [P3·08 mục 5](../03-memory/08-rust-va-bo-nho.md); ở đây ta tập trung vào ba cách dùng mà Book liệt kê.
+Std định nghĩa `Box<T>` là kiểu con trỏ sở hữu duy nhất một heap allocation kiểu `T`[^std-box-def]. Bố cục `Box` trong bộ nhớ xem [P3·08 mục 4](../03-memory/08-rust-va-bo-nho.md), allocator xem [P3·08 mục 5](../03-memory/08-rust-va-bo-nho.md); ở đây ta tập trung vào ba cách dùng ở trên.
 
 ### 3.1 Kiểu đệ quy
 
-Một enum chứa chính nó thì kích thước vô hạn. Thử:
+Giả sử `gateway` cho cấu hình route lồng nhau: một bộ lọc có thể chứa các bộ lọc con. Kiểu như vậy chứa chính nó, nên nếu không có gì chen vào thì kích thước vô hạn. Ví dụ nhỏ nhất của vấn đề là một danh sách liên kết:
 
 ```rust
 enum List { Cons(i32, List), Nil }
@@ -173,7 +184,7 @@ error[E0072]: recursive type `List` has infinite size
 help: insert some indirection (e.g., a `Box`, `Rc`, or `&`) to break the cycle
 ```
 
-Book (cùng lỗi E0072) giải thích: vì box có kích thước biết trước, ta dùng nó chen vào định nghĩa đệ quy để kiểu hữu hạn.[^book-box-recursive] Sửa thành `Cons(i32, Box<List>)` rồi chạy:
+Cách sửa là chen một `Box` vào chỗ đệ quy, vì box có kích thước biết trước nên kiểu trở lại hữu hạn[^book-box-recursive]. Sửa thành `Cons(i32, Box<List>)` rồi chạy:
 
 ```rust
 enum List { Cons(i32, Box<List>), Nil }
@@ -182,12 +193,11 @@ fn sum(l: &List) -> i32 { match l { Cons(v, r) => v + sum(r), Nil => 0 } }
 // Cons(1, Box::new(Cons(2, Box::new(Cons(3, Box::new(Nil)))))) → sum = 6
 ```
 
-Đầu ra thật: `sum=6`. Kích thước đo được: `size_of::<List>() = 16`, `size_of::<Box<List>>() = 8`. Giải thích (suy luận của người soạn từ số đo): `i32` (4 byte) cộng con trỏ 8 byte cần căn lề 8 nên thành 16; việc phân biệt `Nil` có thể dùng chỗ trống (niche) của con trỏ hoặc một tag riêng — chưa đo riêng nên không khẳng định.
-
+Đầu ra thật: `sum=6`. Kích thước đo được: `size_of::<List>() = 16`, `size_of::<Box<List>>() = 8`. Giải thích (suy luận của người soạn từ số đo): `i32` (4 byte) cộng con trỏ 8 byte cần căn lề 8 nên thành 16. Việc phân biệt `Nil` có thể dùng chỗ trống (niche) của con trỏ hoặc một tag riêng; chưa đo riêng nên không khẳng định.
 
 ### 3.2 Trait object
 
-Trait object là một con trỏ "béo": Book nói nó trỏ tới cả instance của kiểu cài trait và một bảng để tra method lúc chạy; tạo trait object bằng cách đặt sau một loại con trỏ như reference hoặc `Box<T>` rồi `dyn Trait`.[^book-trait-obj]
+Chuỗi middleware của `gateway` là `Vec<Box<dyn Middleware>>`: mỗi phần tử là một kiểu khác nhau, nhưng đều cài chung một trait. Trait object là con trỏ "béo": nó trỏ tới cả instance của kiểu cài trait lẫn một bảng để tra method lúc chạy. Muốn tạo trait object thì đặt `dyn Trait` sau một loại con trỏ như reference hoặc `Box<T>`[^book-trait-obj]. Ví dụ dưới thay middleware bằng hai hình khác nhau cho gọn:
 
 ```rust
 trait Shape { fn area(&self) -> f64; }
@@ -198,23 +208,23 @@ let v: Vec<Box<dyn Shape>> = vec![Box::new(Sq(2.0)), Box::new(Ci(1.0))];
 // areas: [4.0, 3.0]
 ```
 
-Số đo thật trên aarch64: `Box<i32> = 8`, `Box<dyn Shape> = 16`, `&dyn Shape = 16`, `Option<Box<i32>> = 8`. Nghĩa là `Box<dyn Trait>` gồm hai từ — con trỏ dữ liệu và con trỏ vtable (đây là số đo hiện tại, không phải bảo đảm ngôn ngữ: Reference chỉ hứa con trỏ tới kiểu unsized "ít nhất bằng" con trỏ thường; vtable và fat pointer xem [P10·03 mục 2](../10-rust-internals/03-dst-fat-pointer-vtable.md) và [mục 4](../10-rust-internals/03-dst-fat-pointer-vtable.md), hợp đồng `dyn` xem [02-trait.md mục 6](02-trait.md)). Riêng `Option<Box<T>>` cùng size với `Box<T>` thì khác: std *bảo đảm* điều đó cho `Box<U, Global>`, không chỉ là quan sát (xem [P10·02 mục 6](../10-rust-internals/02-type-layout.md)).
+Số đo thật trên aarch64: `Box<i32> = 8`, `Box<dyn Shape> = 16`, `&dyn Shape = 16`, `Option<Box<i32>> = 8`. Nghĩa là `Box<dyn Trait>` gồm hai từ: con trỏ dữ liệu và con trỏ vtable. Đây là số đo hiện tại, không phải bảo đảm ngôn ngữ: Reference chỉ hứa con trỏ tới kiểu unsized "ít nhất bằng" con trỏ thường. Vtable và fat pointer xem [P10·03 mục 2](../10-rust-internals/03-dst-fat-pointer-vtable.md) và [mục 4](../10-rust-internals/03-dst-fat-pointer-vtable.md), hợp đồng `dyn` xem [02-trait.md mục 6](02-trait.md). Riêng `Option<Box<T>>` cùng size với `Box<T>` thì khác: std *bảo đảm* điều đó cho `Box<U, Global>`, không chỉ là quan sát (xem [P10·02 mục 6](../10-rust-internals/02-type-layout.md)).
 
 ### 3.3 Giá trị lớn
 
-Book nêu tình huống: có nhiều dữ liệu và muốn chuyển ownership mà không muốn bị sao chép — lúc đó đặt dữ liệu lên heap trong box.[^book-box-large] Ví dụ chạy thật: `let big = [0u8; 100_000]; let b = Box::new(big);` in `box big len 100000`. (Nhận xét của người soạn: hãy phân biệt hai chuyện — *move* một `Box` chỉ copy 8 byte con trỏ; còn `Box::new(big)` vẫn có thể copy 100 KB vào heap một lần. Không đo thì đừng khẳng định cách tối ưu.)
+Body request của `gateway` có thể rất lớn, và ta muốn chuyển ownership của nó qua các tầng xử lý mà không sao chép. Lúc đó đặt dữ liệu lên heap trong một box[^book-box-large]. Ví dụ chạy thật: `let big = [0u8; 100_000]; let b = Box::new(big);` in `box big len 100000`.
+
+Có hai chuyện cần phân biệt (nhận xét của người soạn): *move* một `Box` chỉ copy 8 byte con trỏ, còn `Box::new(big)` vẫn có thể copy 100 KB vào heap một lần. Không đo thì đừng khẳng định cách tối ưu.
 
 <details><summary>Đi sâu: allocator của <code>Box</code></summary>
 
-Với giá trị kích thước khác 0, `Box` dùng `Global` allocator để cấp phát.[^std-box-layout]
+Với giá trị kích thước khác 0, `Box` dùng `Global` allocator để cấp phát[^std-box-layout].
 
 </details>
 
 ### 3.4 `Box<dyn Error>`
 
-Hình dung (nhận xét của người soạn): thùng đựng lỗi chung — mọi loại lỗi bỏ vào được, nhưng lấy ra thì chỉ còn biết nó là "một lỗi".
-
-Book dùng `Box<dyn Error>` làm kiểu lỗi chung: `main() -> Result<(), Box<dyn Error>>` cho phép `?` trên nhiều kiểu lỗi; và đây là một trait object.[^book-box-dyn-error] Chạy thật:
+Một handler của `gateway` có thể thất bại vì nhiều lý do: header sai, JSON hỏng, backend trả lỗi. Mỗi lý do là một kiểu lỗi riêng, mà hàm chỉ có một kiểu trả về. `Box<dyn Error>` giải bài toán đó: mọi loại lỗi bỏ vào được, nên `?` dùng được trên nhiều kiểu lỗi khác nhau, kể cả trong `main() -> Result<(), Box<dyn Error>>`. Đây là một trait object[^book-box-dyn-error]. Chạy thật:
 
 ```rust
 fn parse(s: &str) -> Result<i32, Box<dyn Error>> {
@@ -226,15 +236,13 @@ fn parse(s: &str) -> Result<i32, Box<dyn Error>> {
 
 <details><summary>Đi sâu: kết quả chạy thật và giá phải trả</summary>
 
-`parse("12") = Ok(12)`, `parse("x")` in lỗi `invalid digit found in string`, `parse("-1")` in `negative`. Giá phải trả (nhận xét của người soạn): kiểu lỗi bị xoá, người gọi chỉ còn `downcast` để biết loại; thiết kế lỗi đầy đủ (`thiserror`, `anyhow`) và vì sao cần `+ Send + Sync` ở [05-error-handling.md, mục 4–5](05-error-handling.md).
+`parse("12") = Ok(12)`, `parse("x")` in lỗi `invalid digit found in string`, `parse("-1")` in `negative`. Giá phải trả (nhận xét của người soạn): kiểu lỗi bị xóa, người gọi chỉ còn `downcast` để biết loại. Thiết kế lỗi đầy đủ (`thiserror`, `anyhow`) và vì sao cần `+ Send + Sync` ở [05-error-handling.md, mục 4–5](05-error-handling.md).
 
 </details>
 
 ### 3.5 `Pin<Box<T>>`: nhắc
 
-Hình dung (nhận xét của người soạn): `Pin` như đóng đinh một món đồ vào bàn — nó không được dời chỗ nữa, trừ khi món đồ vốn không bận tâm bị dời (`Unpin`).
-
-`Pin` bọc một con trỏ để "ghim" pointee tại chỗ, ngăn nó bị move hoặc vô hiệu trừ khi nó là `Unpin`.[^std-pin-def] `Pin<Box<T>>` là con trỏ ghim *sở hữu* tới `T` được ghim;[^std-pin-box] và với `T: Unpin` nó hoạt động y hệt `Box<T>` thường.[^std-pin-unpin]
+Nếu handler của `gateway` viết bằng async thì sớm muộn bạn gặp `Pin` (lý do ghim future nằm ở P7·06). `Pin` bọc một con trỏ để "ghim" pointee tại chỗ, ngăn nó bị move hoặc vô hiệu, trừ khi pointee là `Unpin`[^std-pin-def]. `Pin<Box<T>>` là con trỏ ghim *sở hữu* tới `T` được ghim[^std-pin-box]. Với `T: Unpin` nó hoạt động y hệt `Box<T>` thường[^std-pin-unpin].
 
 <details><summary>Đi sâu: quan sát và nơi giải thích đầy đủ</summary>
 
@@ -246,26 +254,32 @@ Chạy thật: `Box::pin(7)` cho `Pin<Box<i32>>` deref ra `7`; `size_of::<Pin<Bo
 
 ## 4. `Rc<T>`, `Weak<T>` và `Arc<T>`: chia sẻ ownership (Q4)
 
-> **Trả lời ngắn.** `Rc<T>` là con trỏ đếm tham chiếu đơn thread: theo dõi số tham chiếu để biết giá trị còn được dùng hay không[^std-rc-def][^book-rc-count]. Trong cây cha–con, cha sở hữu con bằng `Rc`, còn con trỏ ngược lên cha bằng `Weak` — tham chiếu không sở hữu nên không tạo vòng và không rò[^book-tree-own][^std-weak-def]. `Arc` là con trỏ đếm tham chiếu thread-safe, dùng thao tác atomic cho bộ đếm nên chia sẻ được giữa các thread, với cái giá là atomic đắt hơn truy cập bộ nhớ thường[^std-arc-def][^std-arc-atomic]. Nếu không chia sẻ allocation giữa các thread thì docs khuyên dùng `Rc`[^std-arc-rc].
+> **Trả lời ngắn.** `Rc<T>` là con trỏ đếm tham chiếu đơn thread[^std-rc-def]. Nó theo dõi số tham chiếu để biết giá trị còn được dùng hay không[^book-rc-count]. Trong cây cha–con, cha sở hữu con bằng `Rc`[^book-tree-own]. Con trỏ ngược lên cha thì dùng `Weak`, một tham chiếu không sở hữu nên không tạo vòng và không rò[^std-weak-def]. `Arc` là con trỏ đếm tham chiếu thread-safe[^std-arc-def]. Nó dùng thao tác atomic cho bộ đếm nên chia sẻ được giữa các thread, với cái giá là atomic đắt hơn truy cập bộ nhớ thường[^std-arc-atomic]. Nếu không chia sẻ allocation giữa các thread thì docs khuyên dùng `Rc`[^std-arc-rc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Rc` là thẻ thư viện chung của một cuốn sách — sách chỉ được trả khi thẻ cuối cùng bị hủy; `Weak` là tờ ghi chú "cuốn này ở đâu" không giữ sách lại.
+*Với service `gateway`.* `gateway` có hai nhu cầu "nhiều chỗ cùng giữ một giá trị" và hai nhu cầu đó khác nhau. Thứ nhất, bảng route là một cây (route cha chứa route con, route con cần biết route cha) và được dựng một lần lúc khởi động, trên một thread. Thứ hai, bản cấu hình dùng chung cho mọi handler thread. Cái đầu hợp với `Rc` + `Weak`, cái sau cần `Arc`. Phần còn lại của mục này tách hai trường hợp đó ra.
 
 ### 4.1 `Rc<T>`
 
-Std docs: `Rc` là "con trỏ đếm tham chiếu đơn thread".[^std-rc-def] Book mô tả `Rc<T>` theo dõi số tham chiếu tới một giá trị để biết nó còn được dùng hay không.[^book-rc-count] Nó chỉ cho truy cập qua reference bất biến, để tránh vi phạm quy tắc borrowing,[^book-rc-immut] và Book nhấn mạnh nó chỉ dành cho kịch bản một thread.[^book-rc-single] Trạng thái "không `Send`" được hiện thực qua `impl !Send for Rc<T, A>`.[^std-rc-notsend] Lỗi thật khi đưa `Rc` sang thread:
+`Rc` là con trỏ đếm tham chiếu đơn thread[^std-rc-def]. Nó theo dõi số tham chiếu tới giá trị để biết giá trị còn được dùng hay không[^book-rc-count].
+
+Vì nhiều chỗ cùng giữ, `Rc` chỉ cho truy cập qua reference bất biến, để khỏi vi phạm quy tắc borrowing[^book-rc-immut]. Nó cũng chỉ dành cho kịch bản một thread[^book-rc-single]. Về mặt kiểu, điều này được hiện thực bằng `impl !Send for Rc<T, A>`[^std-rc-notsend], nên đưa `Rc` sang thread khác là lỗi biên dịch. Lỗi thật:
 
 ```
 error[E0277]: `Rc<i32>` cannot be sent between threads safely
   = help: within `{closure@d.rs:2:51: 2:58}`, the trait `Send` is not implemented for `Rc<i32>`
 ```
 
+Điều này giải thích vì sao `gateway` không thể đưa `Rc` cho handler thread. Cây route chỉ dùng `Rc` khi nó nằm gọn trên thread khởi động.
+
 Số đo thật: `size_of::<Rc<i32>>() = 8`, `Option<Rc<i32>> = 8` (quan sát: `Rc` không nằm trong danh sách kiểu std bảo đảm niche, xem [P10·02 mục 6](../10-rust-internals/02-type-layout.md)). Chi tiết "bộ đếm nằm ở đâu" xem [P3·08 mục 6](../03-memory/08-rust-va-bo-nho.md).
 
 ### 4.2 Cây cha–con với `Weak`
 
-Nếu cha giữ `Rc` tới con *và* con giữ `Rc` tới cha thì tạo vòng, không bao giờ về 0. Book dùng đúng ví dụ này: cha nên sở hữu con (cha bị drop thì con cũng bị drop), con không nên sở hữu cha — đó là trường hợp dùng weak reference.[^book-tree-own] `Weak` là phiên bản `Rc` giữ tham chiếu không sở hữu: nó không ngăn giá trị bị drop, nên `upgrade` có thể trả `None`; nhưng nó *có* ngăn vùng nhớ nền (backing store) bị giải phóng.[^std-weak-def][^std-weak-backing]
+Giờ dựng cây route. Nếu route cha giữ `Rc` tới route con *và* route con giữ `Rc` tới cha thì ta có một vòng, và bộ đếm không bao giờ về 0. Vì vậy cha nên sở hữu con (cha bị drop thì con cũng bị drop), còn con không nên sở hữu cha: đây chính là trường hợp dùng weak reference[^book-tree-own].
+
+`Weak` là phiên bản của `Rc` giữ tham chiếu không sở hữu[^std-weak-def]. Nó không ngăn giá trị bị drop, nên khi cha đã mất thì `upgrade` trả `None`. Nhưng nó *có* ngăn vùng nhớ nền (backing store) bị giải phóng[^std-weak-backing].
 
 ```rust
 use std::cell::RefCell;
@@ -286,31 +300,33 @@ leaf parent = None        // sau khi branch ra khỏi scope
 leaf strong=1 weak=0
 ```
 
-Đọc: `branch` có 1 strong (biến) và 1 weak (trỏ từ `leaf.parent`); `leaf` có 2 strong (biến + `branch.children`). Khi `branch` hết scope, strong về 0 nên node bị drop, `upgrade()` trả `None`, và `leaf` về lại 1 strong — không rò. Book mô tả `Weak::upgrade` trả `Option<Rc<T>>` và cần gọi nó để bảo đảm giá trị còn tồn tại trước khi dùng.[^book-weak-upgrade]
+Đọc kết quả: `branch` có 1 strong (biến) và 1 weak (trỏ từ `leaf.parent`); `leaf` có 2 strong (biến + `branch.children`). Khi `branch` hết scope, strong về 0 nên node bị drop, `upgrade()` trả `None`, và `leaf` về lại 1 strong, không rò. Cũng vì `upgrade` trả `Option<Rc<T>>` nên trước khi dùng giá trị mà `Weak` trỏ tới, ta phải kiểm là nó còn tồn tại[^book-weak-upgrade].
 
 ### 4.3 Vòng tham chiếu vẫn rò, và rò là safe
 
-Book: ngăn rò bộ nhớ hoàn toàn không phải là bảo đảm của Rust, nên leak là memory safe; ví dụ là `Rc` + `RefCell` tạo vòng, vì bộ đếm của mỗi phần tử không bao giờ về 0.[^book-leak-safe][^book-leak-cycle] Thí nghiệm thật: hai node `a`, `b` trỏ nhau bằng `Rc<N>` (có `impl Drop` in `drop a`/`drop b`). Chương trình in `a=2 b=2`, thoát với mã 0 và **không in dòng drop nào** — destructor không bao giờ chạy.
+Nếu quên `Weak` thì sao? Rust không báo gì. Ngăn rò bộ nhớ hoàn toàn không phải là bảo đảm của Rust, nên leak là memory safe[^book-leak-safe]. Ví dụ điển hình là `Rc` + `RefCell` tạo vòng: bộ đếm của mỗi phần tử trong vòng không bao giờ về 0, nên chúng không bao giờ bị drop[^book-leak-cycle].
+
+Thí nghiệm thật: hai node `a`, `b` trỏ nhau bằng `Rc<N>` (có `impl Drop` in `drop a`/`drop b`). Chương trình in `a=2 b=2`, thoát với mã 0 và **không in dòng drop nào**: destructor không bao giờ chạy. Trong một service chạy dài như `gateway`, vòng kiểu này là rò thật, dù compiler không cảnh báo (nhận xét của người soạn).
 
 <details><summary>Đi sâu: <code>Rc&lt;T&gt;</code> còn lại gì khi bạn cần sửa (<code>get_mut</code>, <code>make_mut</code>)</summary>
 
 ### 4.4 `Rc<T>` còn lại gì khi bạn cần sửa?
 
-`Rc::get_mut` chỉ trả `&mut` khi không còn `Rc` hay `Weak` nào khác trỏ tới cùng allocation (nếu không trả `None`);[^std-rc-getmut] `Rc::make_mut` clone-on-write (xem §6).[^std-cow-makemut] Còn khi bạn muốn nhiều owner **và** sửa — đó là lúc `RefCell` (§5.2) vào cuộc.
+`Rc::get_mut` chỉ trả `&mut` khi không còn `Rc` hay `Weak` nào khác trỏ tới cùng allocation (nếu không thì trả `None`)[^std-rc-getmut]. `Rc::make_mut` là clone-on-write (xem §6)[^std-cow-makemut]. Còn khi bạn muốn nhiều owner **và** sửa được thì đó là lúc `RefCell` (§5.2) vào cuộc.
 
 </details>
 
 ### 4.5 `Arc<T>`: khi nào
 
-Hình dung (nhận xét của người soạn): `Arc` giống `Rc` nhưng sổ đếm được khóa chống nhiều người ghi cùng lúc — an toàn hơn, chậm hơn.
+Giờ đến bản cấu hình dùng chung. Các handler thread của `gateway` đều cần đọc nó, và chúng chạy song song, nên `Rc` bị loại (`!Send`). Cái cần dùng là `Arc`, "Atomically Reference Counted": con trỏ đếm tham chiếu thread-safe cho giá trị cấp phát trên heap[^std-arc-def].
 
-`Arc` là "Atomically Reference Counted": con trỏ đếm tham chiếu thread-safe cho giá trị cấp phát trên heap.[^std-arc-def] Khác `Rc`, nó dùng thao tác atomic cho bộ đếm, nên thread-safe; cái giá là atomic đắt hơn truy cập bộ nhớ thường.[^std-arc-atomic] Docs khuyên: nếu không chia sẻ allocation giữa các thread thì dùng `Rc` cho overhead thấp hơn.[^std-arc-rc] Cơ sở `Send`/`Sync` và ví dụ chia sẻ giữa thread xem [P4·08 §4](../04-concurrency/08-rust-concurrency.md).
+Khác `Rc`, `Arc` dùng thao tác atomic cho bộ đếm, nên thread-safe. Cái giá là atomic đắt hơn truy cập bộ nhớ thường[^std-arc-atomic]. Vì vậy nếu không chia sẻ allocation giữa các thread thì docs khuyên dùng `Rc` cho overhead thấp hơn[^std-arc-rc]. Cơ sở `Send`/`Sync` và ví dụ chia sẻ giữa thread xem [P4·08 §4](../04-concurrency/08-rust-concurrency.md).
 
 Chạy thật: 2 thread đọc `Arc::new(5)` cộng `i` in `5` và `6`. Số đo thật: `size_of::<Arc<i32>>() = 8`.
 
 <details><summary>Đi sâu: <code>Arc</code> chỉ cho <code>&amp;T</code></summary>
 
-Dù đã là `Arc`, bạn vẫn chỉ có `&T`; muốn sửa thì `Arc<Mutex<T>>`/`Arc<RwLock<T>>` — bàn ở P4·08, không lặp ở đây.
+Dù đã là `Arc`, bạn vẫn chỉ có `&T`; muốn sửa thì `Arc<Mutex<T>>`/`Arc<RwLock<T>>`, bàn ở P4·08, không lặp ở đây.
 
 </details>
 
@@ -318,17 +334,17 @@ Dù đã là `Arc`, bạn vẫn chỉ có `&T`; muốn sửa thì `Arc<Mutex<T>>
 
 ## 5. Interior mutability: `Cell`, `RefCell`, `Rc<RefCell<T>>`, `OnceCell`/`LazyCell` (Q5)
 
-> **Trả lời ngắn.** Interior mutability cho phép sửa dữ liệu dù chỉ có reference bất biến tới nó[^book-interior]. `Cell` chuyển giá trị vào/ra khỏi ô và không bao giờ cho mượn `&T`[^std-cell-moves]; `RefCell` kiểm quy tắc borrow lúc chạy và panic nếu vi phạm[^book-refcell-panic]; `try_borrow_mut` là bản không panic[^std-try-borrowmut]. Book kết hợp `Rc<T>` (nhiều owner nhưng chỉ đọc) với `RefCell<T>` để có giá trị nhiều owner **và** sửa được[^book-rc-refcell]. Giá phải trả (nhận xét của người soạn): panic lúc chạy khi vi phạm borrow, rò bộ nhớ qua vòng, và không thread-safe; với cây/đồ thị lớn có thể dùng `Vec` + chỉ số. `OnceCell<T>` là ô về danh nghĩa chỉ ghi được một lần, cho lấy `&T` mà không cần kiểm borrow lúc chạy[^std-oncecell-def]. `LazyCell<T, F>` là giá trị khởi tạo ở lần truy cập đầu tiên[^std-lazycell-def].
+> **Trả lời ngắn.** Interior mutability cho phép sửa dữ liệu dù chỉ có reference bất biến tới nó[^book-interior]. `Cell` chuyển giá trị vào/ra khỏi ô và không bao giờ cho mượn `&T`[^std-cell-moves]. `RefCell` kiểm quy tắc borrow lúc chạy và panic nếu vi phạm[^book-refcell-panic]. `try_borrow_mut` là bản không panic[^std-try-borrowmut]. Kết hợp `Rc<T>` (nhiều owner nhưng chỉ đọc) với `RefCell<T>` thì có giá trị nhiều owner **và** sửa được[^book-rc-refcell]. Giá phải trả (nhận xét của người soạn): panic lúc chạy khi vi phạm borrow, rò bộ nhớ qua vòng, và không thread-safe; với cây/đồ thị lớn có thể dùng `Vec` + chỉ số. `OnceCell<T>` là ô về danh nghĩa chỉ ghi được một lần, cho lấy `&T` mà không cần kiểm borrow lúc chạy[^std-oncecell-def]. `LazyCell<T, F>` là giá trị khởi tạo ở lần truy cập đầu tiên[^std-lazycell-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Cell` là hộp thư — chỉ bỏ vào hoặc lấy ra cả thư, không ai được thò tay đọc giữa chừng; `RefCell` là phòng đọc có người gác cổng, vi phạm nội quy lúc đang chạy thì bị đuổi (panic).
+*Với service `gateway`.* Trong lúc xử lý một request, `gateway` có một context chỉ truyền đi dưới dạng `&Context`: nhiều middleware cùng giữ reference tới nó. Nhưng chính các middleware lại muốn ghi vào context đó, ví dụ tăng bộ đếm số bước đã chạy, hoặc thêm một dòng vào danh sách sự kiện log. Quy tắc borrow thông thường không cho sửa qua `&`. Mục này nói cách vượt qua quy tắc đó an toàn, và cái giá của từng cách. Ở cuối mục còn một chuyện liên quan: bản cấu hình chỉ cần nạp một lần, ở lần dùng đầu tiên.
 
-**Vấn đề.** Quy tắc borrow thông thường là "một `&mut` hoặc nhiều `&`", kiểm lúc compile. Có những thiết kế hợp lệ nhưng compiler không chứng minh được (static analysis "thận trọng" tự nhiên — Book).[^book-conservative] Interior mutability cho phép sửa dữ liệu dù đang có reference bất biến tới nó; mẫu này dùng `unsafe` bên trong cấu trúc dữ liệu để "bẻ" luật thông thường.[^book-interior]
+**Vấn đề.** Quy tắc borrow thông thường là "một `&mut` hoặc nhiều `&`", và nó được kiểm lúc compile. Có những thiết kế hợp lệ mà compiler không chứng minh được, vì static analysis vốn "thận trọng"[^book-conservative]. Interior mutability là mẫu thiết kế cho phép sửa dữ liệu dù đang có reference bất biến tới nó[^book-interior]. Bên trong cấu trúc dữ liệu, mẫu này dùng `unsafe` để "bẻ" luật thông thường.
 
 ### 5.1 `Cell<T>`: thay cả giá trị, không bao giờ cho mượn
 
-`Cell<T>` cài interior mutability bằng cách *chuyển giá trị vào/ra* khỏi ô: không bao giờ lấy được `&T` tới bên trong.[^std-cell-moves] Không có borrow nên không có gì để panic:
+Cách đơn giản nhất để sửa qua `&` là không bao giờ đưa ra reference tới bên trong. `Cell<T>` làm đúng vậy: nó chuyển giá trị vào và ra khỏi ô[^std-cell-moves]. Không có borrow thì không có gì để panic. Với `gateway`, một bộ đếm bước trong context là chỗ vừa vặn cho `Cell`:
 
 ```rust
 let c = Cell::new(5); c.set(c.get()+1);       // 6
@@ -336,11 +352,15 @@ let c = Cell::new(String::from("a"));
 let old = c.take();                            // "a", để lại String rỗng
 ```
 
-Chạy thật: `cell 6`; `take` trả `"a"` rồi lần sau `""`. `Cell<T>` là `!Sync`,[^std-cell-notsync] nên không chia sẻ `&Cell<T>` giữa các thread được; nhưng `Cell<T>` vẫn là `Send` khi `T: Send`,[^std-cell-send] tức là chuyển (move) được sang thread khác — khác `Rc`, vốn `!Send` (xem [P4·08 mục 5](../04-concurrency/08-rust-concurrency.md)). `size_of::<Cell<i32>>() = 4` (quan sát: không thêm cờ đếm).
+Chạy thật: `cell 6`; `take` trả `"a"` rồi lần sau `""`.
+
+Về thread: `Cell<T>` là `!Sync`[^std-cell-notsync], nên không chia sẻ `&Cell<T>` giữa các thread được. Nhưng nó vẫn là `Send` khi `T: Send`[^std-cell-send], tức chuyển (move) được sang thread khác; điểm này khác `Rc`, vốn `!Send` (xem [P4·08 mục 5](../04-concurrency/08-rust-concurrency.md)). `size_of::<Cell<i32>>() = 4` (quan sát: không thêm cờ đếm).
 
 ### 5.2 `RefCell<T>`: borrow checker chạy lúc runtime
 
-std: `RefCell` là "vùng nhớ mutable với quy tắc borrow được kiểm tra động".[^std-refcell-def] Book nói với `RefCell<T>` các bất biến này được thực thi lúc runtime, và nếu vi phạm thì chương trình panic rồi thoát.[^book-refcell-runtime][^book-refcell-panic] Quy tắc: nhiều `borrow()` đồng thời được phép;[^std-borrow-multi] `borrow()` panic nếu đang bị mượn mutable;[^std-borrow-panic] `borrow_mut()` panic nếu đang bị mượn bất kỳ kiểu nào.[^std-borrowmut-panic] Có bản không panic: `try_borrow_mut` trả `Result<RefMut, BorrowMutError>` ("variant không panic của `borrow_mut`").[^std-try-borrowmut]
+Khi cần mượn thật sự, ví dụ lấy `&mut Vec` để thêm sự kiện log vào context, thì `Cell` không đủ. `RefCell` là vùng nhớ mutable với quy tắc borrow được kiểm tra động[^std-refcell-def]. Các bất biến của borrow checker vẫn còn đó, nhưng được thực thi lúc runtime[^book-refcell-runtime]. Nếu vi phạm thì chương trình panic rồi thoát[^book-refcell-panic].
+
+Quy tắc cụ thể như sau. Nhiều `borrow()` đồng thời được phép[^std-borrow-multi]. `borrow()` panic nếu giá trị đang bị mượn mutable[^std-borrow-panic]. `borrow_mut()` panic nếu giá trị đang bị mượn bất kỳ kiểu nào[^std-borrowmut-panic]. Muốn tránh panic thì có `try_borrow_mut`, trả `Result<RefMut, BorrowMutError>`, là bản không panic của `borrow_mut`[^std-try-borrowmut].
 
 Chạy thật:
 
@@ -371,7 +391,7 @@ Tiến trình thoát mã **101** (panic). Chiều ngược lại: giữ `borrow_
 
 ### 5.3 Vì sao panic này khó thấy
 
-Vi phạm borrow lúc runtime thường đến từ **reentrancy**, không phải hai dòng cạnh nhau như ví dụ trên. Thí nghiệm thật:
+Vi phạm borrow lúc runtime thường đến từ **reentrancy**, không phải hai dòng cạnh nhau như ví dụ trên. Với `gateway`, hình dung một middleware duyệt danh sách sự kiện của context trong lúc gọi một middleware khác, mà middleware kia lại thêm sự kiện vào đúng danh sách đó. Thí nghiệm thật:
 
 ```rust
 let shared = Rc::new(RefCell::new(vec![1,2,3]));
@@ -379,15 +399,13 @@ let s2 = shared.clone();
 for x in shared.borrow().iter() { if *x==2 { s2.borrow_mut().push(9); } }
 ```
 
-Chương trình panic tại dòng `borrow_mut` với `RefCell already borrowed`, mã thoát 101: vòng `for` giữ `Ref` suốt thời gian lặp, và code bên trong lại mượn mutable qua một handle khác. (Nhận xét của người soạn: loại lỗi này dễ chỉ nổ ở một đường dữ liệu hiếm mà test không chạm tới.)
+Chương trình panic tại dòng `borrow_mut` với `RefCell already borrowed`, mã thoát 101: vòng `for` giữ `Ref` suốt thời gian lặp, và code bên trong lại mượn mutable qua một handle khác. Loại lỗi này dễ chỉ nổ ở một đường dữ liệu hiếm mà test không chạm tới (nhận xét của người soạn).
 
 </details>
 
 ### 5.4 `Rc<RefCell<T>>`: pattern phổ biến và cảnh báo
 
-Hình dung (nhận xét của người soạn): nhiều người cùng giữ chìa khóa một phòng có người gác cổng — tiện, nhưng bạn đổi lỗi lúc biên dịch lấy lỗi lúc chạy.
-
-Book: kết hợp `Rc<T>` (nhiều owner nhưng chỉ đọc) với `RefCell<T>` cho ra giá trị có nhiều owner **và** sửa được.[^book-rc-refcell]
+Ghép hai mảnh lại: `Rc<T>` cho nhiều owner nhưng chỉ đọc, `RefCell<T>` cho sửa qua `&`. Kết hợp chúng cho ra giá trị có nhiều owner **và** sửa được[^book-rc-refcell]. Trên `gateway`, đó là cách nhiều middleware cùng giữ một danh sách sự kiện của request rồi cùng ghi vào, miễn là mọi thứ nằm trên một thread.
 
 ```rust
 let shared = Rc::new(RefCell::new(vec![1]));
@@ -396,19 +414,19 @@ s2.borrow_mut().push(2);
 // shared.borrow() = [1, 2], strong_count = 2
 ```
 
-Chạy thật in `[1, 2] rc=2`. Pattern này chính là công cụ để dựng đồ thị, observer, cây có tham chiếu ngược — những cấu trúc ownership không thành cây.
+Chạy thật in `[1, 2] rc=2`. Pattern này là công cụ để dựng đồ thị, observer, cây có tham chiếu ngược, tức những cấu trúc ownership không thành cây.
 
-**Cảnh báo (nhận xét của người soạn, dựa trên hai thí nghiệm ở §4.3 và §5.3):**
+**Cảnh báo (nhận xét của người soạn, dựa trên hai thí nghiệm ở §4.3 và §5.3).** Pattern này tiện, nhưng bạn đổi lỗi lúc biên dịch lấy lỗi lúc chạy:
 
-1. *Panic runtime*: tham chiếu động nghĩa là bạn đổi lỗi compile lấy lỗi chạy; mỗi `borrow_mut` là một chỗ có thể panic.
-2. *Rò bộ nhớ qua vòng*: `Rc<RefCell<…>>` hai chiều rò mà compiler không báo (§4.3) — phải chủ động dùng `Weak`.
-3. *Không qua thread*: cả `Rc` lẫn `RefCell` đều không thread-safe; sang đa luồng phải đổi thành `Arc<Mutex<…>>`, tức đổi cả API.
+1. *Panic runtime*: tham chiếu động nghĩa là mỗi `borrow_mut` là một chỗ có thể panic.
+2. *Rò bộ nhớ qua vòng*: `Rc<RefCell<…>>` hai chiều rò mà compiler không báo (§4.3), nên phải chủ động dùng `Weak`.
+3. *Không qua thread*: cả `Rc` lẫn `RefCell` đều không thread-safe. Sang đa luồng phải đổi thành `Arc<Mutex<…>>`, tức đổi cả API.
 
 <details><summary>Đi sâu: khi nào tránh — arena/index</summary>
 
 ### 5.5 Khi nào tránh — arena/index
 
-Với cây hoặc đồ thị mà vòng đời node gắn với cả cấu trúc, lựa chọn thường dùng là **lưu node trong một `Vec` và tham chiếu nhau bằng chỉ số** (arena/index). Toàn bộ phần này là nhận xét của người soạn. Ví dụ chạy thật:
+Với cây hoặc đồ thị mà vòng đời node gắn với cả cấu trúc (như cây route của `gateway`), lựa chọn thường dùng là **lưu node trong một `Vec` và tham chiếu nhau bằng chỉ số** (arena/index). Toàn bộ phần này là nhận xét của người soạn. Ví dụ chạy thật:
 
 ```rust
 struct Tree { nodes: Vec<TNode> }
@@ -426,17 +444,15 @@ impl Tree {
 }
 ```
 
-Dựng cây 3 mức, in `depth g=2 children of r=[1] val=3`. Ưu điểm so với `Rc<RefCell>`: một owner (`Tree`), borrow checker thường vẫn kiểm tra tại compile time, không vòng tham chiếu (vì không có con trỏ), không panic borrow, dễ `Send`. Nhược điểm: chỉ số là "con trỏ không an toàn kiểu" — xóa node làm chỉ số cũ trỏ sai node (kiểu lỗi ABA); cần thêm generation hoặc không bao giờ xóa. Chọn theo bài toán, không theo thói quen.
+Dựng cây 3 mức, in `depth g=2 children of r=[1] val=3`. Ưu điểm so với `Rc<RefCell>`: một owner (`Tree`), borrow checker thường vẫn kiểm tra tại compile time, không vòng tham chiếu (vì không có con trỏ), không panic borrow, dễ `Send`. Nhược điểm: chỉ số là "con trỏ không an toàn kiểu". Xóa node làm chỉ số cũ trỏ sai node (kiểu lỗi ABA), nên cần thêm generation hoặc không bao giờ xóa. Chọn theo bài toán, không theo thói quen.
 
 </details>
 
 ### 5.6 `OnceCell` và `LazyCell`: khởi tạo một lần
 
-Hình dung (nhận xét của người soạn): `OnceCell` là biên bản ký một lần rồi niêm phong; `LazyCell` là món ăn chỉ nấu khi có khách đầu tiên gọi.
+Còn bản cấu hình của `gateway`: nạp nó tốn kém, và có thể chưa cần tới nếu không có request nào. Ta muốn nạp đúng một lần, ở lần dùng đầu tiên. `OnceCell<T>` là ô "về danh nghĩa chỉ ghi được một lần": lấy được `&T` mà không copy hay thay thế (khác `Cell`) và không kiểm borrow runtime (khác `RefCell`)[^std-oncecell-def]. `set` trả `Ok(())` nếu ô chưa khởi tạo và `Err(value)` nếu đã có[^std-oncecell-set]. Riêng `get_or_init` thì có một cảnh báo: khởi tạo reentrant từ chính closure là lỗi và gây panic[^std-oncecell-reent].
 
-**`OnceCell<T>`** là ô "về danh nghĩa chỉ ghi được một lần": lấy được `&T` mà không copy hay thay thế (khác `Cell`) và không kiểm borrow runtime (khác `RefCell`).[^std-oncecell-def] `set` trả `Ok(())` nếu ô chưa khởi tạo, `Err(value)` nếu đã có.[^std-oncecell-set] `get_or_init` còn cảnh báo: khởi tạo reentrant từ chính closure là lỗi và panic.[^std-oncecell-reent]
-
-**`LazyCell<T, F>`** là giá trị khởi tạo lúc truy cập đầu tiên; phiên bản thread-safe là `std::sync::LazyLock`.[^std-lazycell-def]
+`LazyCell<T, F>` đi xa hơn một bước: nó là giá trị tự khởi tạo ở lần truy cập đầu tiên, nên không cần gọi `get_or_init` mỗi chỗ dùng. Phiên bản thread-safe của nó là `std::sync::LazyLock`[^std-lazycell-def].
 
 ```rust
 let cell: OnceCell<String> = OnceCell::new();
@@ -449,7 +465,9 @@ println!("before"); println!("{}", *lazy); println!("{}", *lazy);
 
 <details><summary>Đi sâu: kết quả chạy thật, bản đa luồng và <code>!Sync</code></summary>
 
-Đầu ra thật: `None`, `first`, `Err("second")`, rồi `before`, `init!`, `42`, `42` — closure chạy đúng một lần, ở lần deref đầu. Cả hai kiểu biên dịch trên 1.95.0 mà không cần `#![feature]` (quan sát từ ví dụ trên). Phiên bản đa luồng (`OnceLock`/`LazyLock`) xem [P4·08 mục 7](../04-concurrency/08-rust-concurrency.md). Cả `OnceCell` lẫn `LazyCell` đều `!Sync` (không chia sẻ `&` giữa thread được)[^std-oncecell-notsync][^std-lazycell-notsync], nhưng vẫn `Send` khi giá trị bên trong là `Send`.[^std-oncecell-send][^std-lazycell-send]
+Đầu ra thật: `None`, `first`, `Err("second")`, rồi `before`, `init!`, `42`, `42`. Closure chạy đúng một lần, ở lần deref đầu. Cả hai kiểu biên dịch trên 1.95.0 mà không cần `#![feature]` (quan sát từ ví dụ trên). Phiên bản đa luồng (`OnceLock`/`LazyLock`) xem [P4·08 mục 7](../04-concurrency/08-rust-concurrency.md), và đây mới là loại `gateway` cần nếu cấu hình được nạp lười từ nhiều handler thread (nhận xét của người soạn).
+
+`OnceCell` là `!Sync`[^std-oncecell-notsync]. `LazyCell` cũng vậy[^std-lazycell-notsync]. Nghĩa là không chia sẻ `&` giữa thread được. Cả hai vẫn `Send` khi giá trị bên trong là `Send`. Cụ thể, `OnceCell<T>` là `Send` khi `T: Send`[^std-oncecell-send]. `LazyCell<T, F>` là `Send` khi cả `T` và `F` đều `Send`[^std-lazycell-send].
 
 </details>
 
@@ -457,13 +475,15 @@ println!("before"); println!("{}", *lazy); println!("{}", *lazy);
 
 ## 6. `Cow<'a, B>`: mượn nếu được, sở hữu nếu cần (Q6)
 
-> **Trả lời ngắn.** `Cow` là smart pointer clone-on-write: bao bọc và cho truy cập bất biến tới dữ liệu được mượn, và chỉ clone khi cần sửa hoặc cần sở hữu[^std-cow-def]. Nhờ vậy hàm trả `Cow` không phải cấp phát khi input đã sạch.
+> **Trả lời ngắn.** `Cow` là smart pointer clone-on-write: nó bao bọc và cho truy cập bất biến tới dữ liệu được mượn, và chỉ clone khi cần sửa hoặc cần sở hữu[^std-cow-def]. Nhờ vậy hàm trả `Cow` không phải cấp phát khi input đã sạch.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn mượn bản photo của đồng nghiệp để đọc; chỉ khi cần gạch chú thích mới photo riêng bản của mình.
+*Với service `gateway`.* Bước đầu tiên của mỗi request là chuẩn hóa path. Phần lớn path client gửi lên đã đúng dạng, chỉ một số ít cần sửa. Nếu hàm chuẩn hóa luôn trả `String` thì mọi request đều tốn một lần cấp phát, kể cả khi không có gì để sửa. Nếu nó trả `&str` thì không sửa được những path cần sửa. `Cow` cho ra kết quả "đa số là mượn y nguyên input, chỉ khi cần mới tạo bản mới".
 
-**Vấn đề.** Hàm chuẩn hoá chuỗi: đa số input đã chuẩn, chỉ vài cái cần sửa. Trả `String` luôn thì cấp phát thừa; trả `&str` thì không sửa được. std: `Cow` là smart pointer clone-on-write — có thể bao bọc và cho truy cập bất biến tới dữ liệu được mượn, và clone dữ liệu một cách lazy khi cần sửa hoặc cần sở hữu.[^std-cow-def] Nó cài `Deref`, nên gọi được method không mutating trực tiếp; muốn sửa thì `to_mut` lấy `&mut` tới giá trị sở hữu, clone nếu cần.[^std-cow-deref][^std-cow-tomut]
+**Cơ chế.** `Cow` là smart pointer clone-on-write: nó có thể bao bọc và cho truy cập bất biến tới dữ liệu được mượn, và clone dữ liệu một cách lazy khi cần sửa hoặc cần sở hữu[^std-cow-def]. Nó cài `Deref`, nên gọi được method không mutating trực tiếp[^std-cow-deref]. Muốn sửa thì `to_mut` lấy `&mut` tới giá trị sở hữu, clone nếu cần[^std-cow-tomut].
+
+Ví dụ dưới đổi dấu cách thành `_` (thay cho một phép chuẩn hóa path thật):
 
 ```rust
 use std::borrow::Cow;
@@ -482,9 +502,9 @@ xy! owned=true      // norm("xy") rồi c.to_mut().push('!')
 
 <details><summary>Đi sâu: kích thước, <code>make_mut</code> và trade-off</summary>
 
-Tức: input cần sửa thì được cấp phát; input sạch thì **không** cấp phát. `size_of::<Cow<str>>() = 24`, bằng `size_of::<String>()` trong đo này (quan sát; do niche, không phải bảo đảm). Với `Rc`/`Arc` có biến thể tương tự: `Rc::make_mut` và `Arc::make_mut`.[^std-cow-makemut]
+Tức là input cần sửa thì được cấp phát, còn input sạch thì **không** cấp phát. `size_of::<Cow<str>>() = 24`, bằng `size_of::<String>()` trong đo này (quan sát; do niche, không phải bảo đảm). Với `Rc`/`Arc` có biến thể tương tự: `Rc::make_mut` và `Arc::make_mut`[^std-cow-makemut].
 
-Trade-off (nhận xét của người soạn): `Cow` thêm lifetime `'a` vào chữ ký; chỉ đáng khi đa số trường hợp không cần sở hữu.
+Trade-off (nhận xét của người soạn): `Cow` thêm lifetime `'a` vào chữ ký, nên chỉ đáng khi đa số trường hợp không cần sở hữu.
 
 </details>
 
@@ -496,9 +516,9 @@ Trade-off (nhận xét của người soạn): `Cow` thêm lifetime `'a` vào ch
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): guard là thẻ ra vào tạm — dùng thẻ để mở cửa, và khi bạn rời phòng thẻ tự được trả lại.
+*Với service `gateway`.* Quay lại connection mượn từ pool ở mục 1. Thứ handler cầm không phải bản thân connection mà là một guard: gọi `guard.send(...)` thì chạy như trên connection thật, và khi guard hết scope thì connection tự về pool. Guard đó chính là hai mảnh `Deref`/`DerefMut` (dùng như connection) cộng một mảnh `Drop` (trả về pool). Đây cũng là mô hình của `MutexGuard`, `Ref` và `RefMut`.
 
-Ghép lại ba mảnh: một guard mượn `&mut Vec<i32>`, cho dùng như `Vec` (qua `Deref`/`DerefMut`), và làm việc dọn dẹp khi bị drop — mô hình của `MutexGuard`/`Ref`/`RefMut`:
+Ví dụ dưới thu nhỏ bài toán: guard mượn một `&mut Vec<i32>` thay cho connection, cho dùng như `Vec` qua `Deref`/`DerefMut`, và làm việc dọn dẹp (ở đây là in một dòng) khi bị drop:
 
 ```rust
 use std::ops::{Deref, DerefMut};
@@ -525,11 +545,11 @@ drop guard g (len=2)
 [1, 2]
 ```
 
-`g.push(2)` gọi được vì auto-deref đi qua `DerefMut`; `drop` chạy ở cuối khối trong, đúng lúc `v` được mượn lại (ở đây `Guard` giữ `&'a mut`, nên dòng in `v` chỉ biên dịch được sau khi `g` hết đời — borrow checker kiểm).
+`g.push(2)` gọi được vì auto-deref đi qua `DerefMut`. `drop` chạy ở cuối khối trong, đúng lúc `v` được mượn lại: `Guard` giữ `&'a mut`, nên dòng in `v` chỉ biên dịch được sau khi `g` hết đời, và borrow checker kiểm điều đó.
 
 <details><summary>Đi sâu: guard và dọn dẹp gắn với scope</summary>
 
-Guard gắn việc dọn dẹp vào scope mà không cần gọi tay (xem [P3·08 mục 3](../03-memory/08-rust-va-bo-nho.md)). (Nhận xét của người soạn: chỉ cài `Deref` cho kiểu thực sự là con trỏ; dùng nó để "kế thừa" method kiểu OOP dễ gây bất ngờ.)
+Guard gắn việc dọn dẹp vào scope mà không cần gọi tay (xem [P3·08 mục 3](../03-memory/08-rust-va-bo-nho.md)). Một lời khuyên (nhận xét của người soạn): chỉ cài `Deref` cho kiểu thực sự là con trỏ; dùng nó để "kế thừa" method kiểu OOP dễ gây bất ngờ.
 
 </details>
 
@@ -569,84 +589,84 @@ Toàn chương này là Rust, nên phần "liên hệ" là bản đồ chọn ki
 1. Hai trait nào phân biệt smart pointer với struct thường, mỗi trait lo việc gì?
 <details><summary>Đáp án</summary>
 
-`Deref` (và `DerefMut`) cho dùng như reference/deref coercion; `Drop` cho dọn dẹp khi ra scope.[^book-sp-traits][^std-deref-sp]
+`Deref` (và `DerefMut`) cho dùng như reference/deref coercion; `Drop` cho dọn dẹp khi ra scope[^book-sp-traits]. Cơ chế deref coercion được thiết kế riêng để hỗ trợ hành vi giống con trỏ đó[^std-deref-sp].
 
 </details>
 
 2. Vì sao `enum List { Cons(i32, List), Nil }` không biên dịch và sửa thế nào?
 <details><summary>Đáp án</summary>
 
-E0072 vì kích thước vô hạn; thêm indirection như `Box<List>` vì box có kích thước biết trước.[^book-box-recursive]
+E0072 vì kích thước vô hạn; thêm indirection như `Box<List>` vì box có kích thước biết trước[^book-box-recursive].
 
 </details>
 
 3. `Box<dyn Shape>` khác `Box<i32>` về kích thước ra sao trên máy này, và vì sao?
 <details><summary>Đáp án</summary>
 
-16 byte vs 8 (quan sát trên aarch64): con trỏ dữ liệu cộng thông tin tra method lúc chạy; trait object trỏ tới instance và bảng tra method.[^book-trait-obj]
+16 byte vs 8 (quan sát trên aarch64): con trỏ dữ liệu cộng thông tin tra method lúc chạy; trait object trỏ tới instance và bảng tra method[^book-trait-obj].
 
 </details>
 
 4. Trong cây cha–con, phía nào dùng `Rc`, phía nào dùng `Weak`, vì sao?
 <details><summary>Đáp án</summary>
 
-Cha sở hữu con (`Rc` trong `children`), con trỏ ngược cha bằng `Weak` vì con không sở hữu cha.[^book-tree-own]
+Cha sở hữu con (`Rc` trong `children`), con trỏ ngược cha bằng `Weak` vì con không sở hữu cha[^book-tree-own].
 
 </details>
 
 5. Vòng tham chiếu `Rc` có làm chương trình undefined behavior không?
 <details><summary>Đáp án</summary>
 
-Không: leak là memory safe trong Rust; hậu quả là destructor không chạy.[^book-leak-safe]
+Không: leak là memory safe trong Rust; hậu quả là destructor không chạy[^book-leak-safe].
 
 </details>
 
 6. Khi nào chọn `Arc` thay `Rc`?
 <details><summary>Đáp án</summary>
 
-Khi chia sẻ qua thread; `Arc` dùng atomic nên đắt hơn, nên nếu không qua thread thì dùng `Rc`.[^std-arc-atomic][^std-arc-rc]
+Khi chia sẻ qua thread; `Arc` dùng atomic nên đắt hơn[^std-arc-atomic]. Vì vậy nếu không qua thread thì dùng `Rc`[^std-arc-rc].
 
 </details>
 
 7. `RefCell::borrow_mut` trong lúc đang có `Ref` sống thì chuyện gì xảy ra; cách không panic?
 <details><summary>Đáp án</summary>
 
-Panic ("RefCell already borrowed", mã thoát 101 trong thí nghiệm); dùng `try_borrow_mut` trả `Err(BorrowMutError)`.[^std-borrowmut-panic][^std-try-borrowmut]
+Panic ("RefCell already borrowed", mã thoát 101 trong thí nghiệm)[^std-borrowmut-panic]. Cách không panic là `try_borrow_mut`, trả `Err(BorrowMutError)`[^std-try-borrowmut].
 
 </details>
 
 8. `Cell` và `RefCell` khác nhau ở cách truy cập nội dung như thế nào?
 <details><summary>Đáp án</summary>
 
-`Cell` chỉ chuyển giá trị vào/ra, không bao giờ đưa `&T`; `RefCell` đưa `Ref`/`RefMut` với borrow check động.[^std-cell-moves][^std-refcell-def]
+`Cell` chỉ chuyển giá trị vào/ra, không bao giờ đưa `&T`[^std-cell-moves]. `RefCell` đưa `Ref`/`RefMut` với borrow check động[^std-refcell-def].
 
 </details>
 
 9. Nêu ba rủi ro của `Rc<RefCell<T>>` và một thay thế.
 <details><summary>Đáp án</summary>
 
-Panic runtime, rò vòng, không thread-safe (nhận xét của người soạn, §5.4); thay thế: `Vec` + chỉ số. Nền: [^book-rc-refcell][^book-refcell-panic][^book-leak-cycle].
+Panic runtime, rò vòng, không thread-safe (nhận xét của người soạn, §5.4); thay thế: `Vec` + chỉ số. Nền: kết hợp `Rc` với `RefCell` cho nhiều owner và sửa được[^book-rc-refcell]. Vi phạm borrow thì chương trình panic[^book-refcell-panic]. Vòng tham chiếu thì rò[^book-leak-cycle].
 
 </details>
 
 10. `Cow::to_mut` làm gì khi giá trị đang là `Borrowed`?
 <details><summary>Đáp án</summary>
 
-Clone thành giá trị sở hữu rồi trả `&mut`; thí nghiệm `norm("xy")` thành `Owned` sau `to_mut`.[^std-cow-tomut]
+Clone thành giá trị sở hữu rồi trả `&mut`; thí nghiệm `norm("xy")` thành `Owned` sau `to_mut`[^std-cow-tomut].
 
 </details>
 
 11. `let _ = D("x");` và `let _d = D("x");` khác nhau thế nào về lúc drop?
 <details><summary>Đáp án</summary>
 
-Cái đầu (vế phải là temporary) drop ngay cuối câu lệnh (thí nghiệm: `drop underscore` in trước `after underscore`); cái sau drop cuối scope theo thứ tự ngược khai báo.[^ref-scope-order][^ref-temp-scope] Lưu ý `let _ = x;` với biến `x` có sẵn thì `_` không move giá trị[^ref-wildcard] nên `x` vẫn drop ở cuối scope.
+Cái đầu (vế phải là temporary) drop ngay cuối câu lệnh (thí nghiệm: `drop underscore` in trước `after underscore`)[^ref-temp-scope]. Cái sau drop cuối scope theo thứ tự ngược khai báo[^ref-scope-order]. Lưu ý `let _ = x;` với biến `x` có sẵn thì `_` không move giá trị[^ref-wildcard], nên `x` vẫn drop ở cuối scope.
 
 </details>
 
 12. Vì sao không gọi được `x.drop()` và `mem::drop` làm gì?
 <details><summary>Đáp án</summary>
 
-Gọi tay sẽ gây double free vì compiler vẫn tự drop cuối scope; `mem::drop(x)` chỉ move `x` vào hàm rỗng để nó bị drop.[^book-drop-explicit][^std-mem-drop]
+Gọi tay sẽ gây double free vì compiler vẫn tự drop cuối scope; muốn drop sớm thì dùng `mem::drop`[^book-drop-explicit]. Hàm này chỉ move `x` vào một hàm rỗng để nó bị drop[^std-mem-drop].
 
 </details>
 

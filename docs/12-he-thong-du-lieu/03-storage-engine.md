@@ -1,6 +1,6 @@
 # P12 · Chương 03 — Storage engine: log-structured vs B-tree, OLTP vs OLAP
 
-> Chương này lấy *Designing Data-Intensive Applications* (DDIA, Kleppmann, ấn bản 1) chỉ làm **khung chủ đề**: chương 3 "Storage and Retrieval" nằm trong Part I "Foundations of Data Systems" theo mục lục do ETH Library lưu[^ddia-toc0][^ddia-toc]; không trích sách. Mọi khẳng định dựa vào paper gốc (O'Neil 1996 qua bản trên trang tác giả, Bigtable OSDI'06, C-Store VLDB'05, Abadi SIGMOD'08), tài liệu dự án (LevelDB 1.23, RocksDB wiki, PostgreSQL 16, SQLite, Parquet 2.12.0) và docs.rs của các crate Rust có ghim phiên bản; chỗ nào là suy luận hay nhận xét của người soạn đều gắn nhãn. Trang wiki RocksDB không có số phiên bản (chỉ đọc được bản mới nhất tại thời điểm soạn). Ví dụ code chỉ để minh họa, **không** được biên dịch hay chạy khi soạn.
+> Chương này mượn khung chủ đề từ *Designing Data-Intensive Applications* (DDIA, Kleppmann, ấn bản 1): chương 3 của sách là "Storage and Retrieval"[^ddia-toc]. Chương đó nằm trong Part I "Foundations of Data Systems" theo mục lục do ETH Library lưu[^ddia-toc0]. Sách chỉ làm khung, chương này không trích nội dung sách. Mọi khẳng định dựa vào paper gốc (O'Neil 1996 qua bản trên trang tác giả, Bigtable OSDI'06, C-Store VLDB'05, Abadi SIGMOD'08), tài liệu dự án (LevelDB 1.23, RocksDB wiki, PostgreSQL 16, SQLite, Parquet 2.12.0) và docs.rs của các crate Rust có ghim phiên bản. Chỗ nào là suy luận hay nhận xét của người soạn đều có nhãn. Trang wiki RocksDB không ghi số phiên bản, nên ta chỉ đọc được bản mới nhất lúc soạn. Ví dụ code chỉ để minh họa, **không** được biên dịch hay chạy khi soạn.
 
 ## Bạn sẽ hiểu được gì
 
@@ -15,29 +15,35 @@
 
 ## Kiến thức cần trước
 
-- [P5 · Chương 04 — Page cache, writeback và direct I/O](../05-storage/04-page-cache-va-direct-io.md): `write()` mới chỉ chép vào page cache.
-- [P5 · Chương 05 — Crash consistency và journaling](../05-storage/05-crash-consistency-va-journaling.md): write-ahead logging (WAL) là gì, vì sao ghi log trước rồi mới sửa dữ liệu. Chương này **dùng lại** khái niệm đó cho database, không giải thích lại.
+- [P5 · Chương 04 — Page cache, writeback và direct I/O](../05-storage/04-page-cache-va-direct-io.md): `write()` mới chỉ chép dữ liệu vào page cache.
+- [P5 · Chương 05 — Crash consistency và journaling](../05-storage/05-crash-consistency-va-journaling.md): write-ahead logging (WAL) là gì, và vì sao phải ghi log trước rồi mới sửa dữ liệu. Chương này **dùng lại** khái niệm đó cho database, không giải thích lại.
 - [P5 · Chương 06 — Durability trong thực tế](../05-storage/06-durability-trong-thuc-te.md): `fsync`/`fdatasync`, fsync thư mục. Mọi chỗ dưới đây nói "đã bền" đều quy về các chương này.
-- [P12 · Chương 02 — Mô hình dữ liệu](02-mo-hinh-du-lieu.md): bảng, document, graph là *hình dạng logic*; chương này nói chúng được lưu xuống đĩa thế nào.
+- [P12 · Chương 02 — Mô hình dữ liệu](02-mo-hinh-du-lieu.md): bảng, document, graph là *hình dạng logic* của dữ liệu; chương này nói chúng được lưu xuống đĩa thế nào.
 
-(Chủ đề xung quanh nằm ở chương khác: encoding byte của record ở [Chương 04](04-encoding-va-tien-hoa-schema.md); replication dùng log ở [Chương 05](05-replication.md); chia dữ liệu ra nhiều node ở [Chương 06](06-partitioning.md); transaction ở [Chương 07](07-transaction.md); kiến trúc operational vs analytical, ETL, warehouse/lake ở [Chương 13](13-kien-truc-he-du-lieu.md).)
+Các chủ đề xung quanh nằm ở chương khác: encoding byte của record ở [Chương 04](04-encoding-va-tien-hoa-schema.md); replication dùng log ở [Chương 05](05-replication.md); chia dữ liệu ra nhiều node ở [Chương 06](06-partitioning.md); transaction ở [Chương 07](07-transaction.md); kiến trúc operational vs analytical, ETL, warehouse/lake ở [Chương 13](13-kien-truc-he-du-lieu.md).
 
 ## 1. Log chỉ ghi nối thêm và hash index (Q1)
 
-> **Trả lời ngắn.** Cách đơn giản nhất để lưu key-value là chỉ *ghi thêm vào cuối* một file, không bao giờ sửa chỗ cũ; ghi nối thêm là ghi tuần tự nên không cần dịch đầu đĩa[^bc-append]. Để đọc nhanh, giữ trong RAM một hash table trỏ từ mỗi key tới vị trí của bản ghi mới nhất[^bc-keydir]. Cái giá: toàn bộ key phải vừa RAM[^bc-ram], và file phình dần nên phải có bước dọn[^bc-merge].
+> **Trả lời ngắn.** Cách đơn giản nhất để lưu key-value là chỉ *ghi thêm vào cuối* một file và không bao giờ sửa chỗ cũ. Ghi nối thêm là ghi tuần tự nên không cần dịch đầu đĩa[^bc-append]. Để đọc nhanh, ta giữ trong RAM một hash table trỏ từ mỗi key tới vị trí bản ghi mới nhất của key đó[^bc-keydir]. Cái giá là toàn bộ key phải vừa RAM[^bc-ram]. File cũng cứ phình dần nên phải có bước dọn[^bc-merge].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cuốn sổ cái kế toán viết bằng bút mực. Muốn đổi số dư thì không tẩy mà viết thêm một dòng mới ở cuối; còn "mục lục" trong đầu bạn chỉ ghi: tài khoản A — dòng mới nhất ở trang 412. Tra số dư = nhìn mục lục rồi mở đúng trang.
+*Với service `orders`.* Hãy hình dung `orders`, một service viết bằng Rust, chuyên lưu đơn hàng. Mỗi đơn có id, email khách, ngày tạo và tổng tiền. Đơn mới đến liên tục, và trạng thái của một đơn đổi theo thời gian (đã thanh toán, đã giao). Ta sẽ bám theo `orders` suốt chương, mỗi mục đặt cho nó một câu hỏi lưu trữ khác: tra đơn theo id (mục 1–5), nhận lượng ghi lớn (mục 2, 3, 6), tra đơn theo email (mục 7), báo cáo doanh thu theo ngày (mục 8). Đây là ví dụ giả định của người soạn, không phải code trong repo. Câu hỏi của mục này: nếu tự viết lớp lưu đơn xuống đĩa, cách đơn giản nhất là gì và nó gãy ở đâu?
 
-Bitcask (Basho/Riak) là ví dụ gọn nhất của hướng này (nhận xét của người soạn: cơ chế đơn giản, tài liệu ngắn). Cơ chế từng bước:
+### 1.1 Ghi vào cuối file, đọc qua một bảng trong RAM
 
-1. **File active và file bất biến.** Một Bitcask là một thư mục; chỉ một process hệ điều hành được mở nó để ghi tại một thời điểm[^bc-onewriter]. Mỗi lúc có đúng một file "active" nhận ghi; khi đạt ngưỡng kích thước thì đóng lại và tạo file mới; file đã đóng được coi là bất biến, không bao giờ mở để ghi nữa[^bc-immutable].
-2. **Ghi = nối thêm.** File active chỉ được ghi bằng append nên không cần dịch đầu đĩa[^bc-append]. Xóa không xóa gì cả: nó là một lần ghi giá trị đặc biệt gọi là *tombstone* (bia mộ), sẽ bị loại ở lần merge sau[^bc-tomb].
-3. **Keydir.** Sau mỗi append, một cấu trúc trong RAM tên *keydir* được cập nhật: đó là một hash table ánh xạ mọi key tới cấu trúc kích thước cố định gồm file, offset và size của bản ghi mới nhất của key[^bc-keydir].
-4. **Đọc.** Tra keydir lấy (file, offset, size) rồi đọc đúng chỗ đó; tài liệu nói việc này không bao giờ cần quá một lần seek đĩa[^bc-read].
-5. **Merge (compaction).** Mô hình này tốn dần chỗ vì chỉ ghi giá trị mới mà không đụng bản cũ[^bc-merge]. Tiến trình merge duyệt các file bất biến và ghi ra file chỉ chứa phiên bản mới nhất của mỗi key[^bc-merge2]; cùng lúc tạo *hint file* (chứa vị trí/size thay vì giá trị) để khởi động nhanh[^bc-hint].
-6. **Phục hồi.** Vì file dữ liệu *chính là* commit log nên tài liệu nói recovery tầm thường, không cần replay[^bc-recover]; khi mở, process quét các data file để dựng keydir, file nào có hint file thì quét hint file cho nhanh[^bc-scan].
+Cách đơn giản nhất là coi file như một cuốn sổ chỉ viết thêm. Mỗi lần `orders` nhận hay đổi một đơn, nó ghi (id, nội dung mới) vào cuối file và không đụng tới dòng cũ. Ghi kiểu này tuần tự nên không cần dịch đầu đĩa[^bc-append].
+
+Vấn đề nằm ở phía đọc. Đơn #42 có thể đã được ghi ba lần ở ba chỗ khác nhau, và bản đúng là bản nằm cuối cùng. Quét cả file để tìm nó thì quá chậm, nên `orders` giữ trong RAM một hash table: key là id đơn, value là vị trí bản ghi mới nhất của id đó. Bảng này trong Bitcask tên là *keydir*.
+
+Bitcask (Basho/Riak) là bản cài đặt gọn nhất của ý tưởng này nên ta mổ xẻ nó (nhận xét của người soạn: cơ chế đơn giản, tài liệu ngắn). Cơ chế đi theo sáu bước:
+
+1. **File active và file bất biến.** Một Bitcask là một thư mục, và tại một thời điểm chỉ một process hệ điều hành được mở nó để ghi[^bc-onewriter]. Luôn có đúng một file "active" nhận ghi. Khi file đạt ngưỡng kích thước thì nó được đóng lại và một file mới được mở. File đã đóng coi là bất biến và không bao giờ mở để ghi nữa[^bc-immutable].
+2. **Ghi = nối thêm.** File active chỉ nhận append, nên không cần dịch đầu đĩa[^bc-append]. Xóa cũng không xóa gì cả: nó là một lần ghi một giá trị đặc biệt gọi là *tombstone* (bia mộ), và tombstone chỉ biến mất ở lần merge sau[^bc-tomb].
+3. **Keydir.** Sau mỗi append, keydir trong RAM được cập nhật. Đó là một hash table ánh xạ mọi key tới một cấu trúc kích thước cố định gồm file, offset và size của bản ghi mới nhất của key đó[^bc-keydir].
+4. **Đọc.** Tra keydir lấy (file, offset, size) rồi đọc đúng chỗ đó. Tài liệu nói thao tác này không bao giờ cần quá một lần seek đĩa[^bc-read].
+5. **Merge (compaction).** Mô hình này tốn chỗ dần theo thời gian, vì nó chỉ ghi giá trị mới mà không đụng bản cũ[^bc-merge]. Vì vậy có tiến trình merge: nó duyệt các file bất biến và ghi ra những file chỉ chứa phiên bản mới nhất của mỗi key[^bc-merge2]. Cùng lúc nó tạo một *hint file* (chứa vị trí và size thay vì giá trị) để lần khởi động sau nhanh hơn[^bc-hint].
+6. **Phục hồi.** File dữ liệu *chính là* commit log, nên tài liệu nói recovery tầm thường, không cần replay[^bc-recover]. Khi mở, process quét các data file để dựng lại keydir, và với file nào có hint file thì quét hint file cho nhanh[^bc-scan].
 
 ```mermaid
 flowchart LR
@@ -50,41 +56,55 @@ flowchart LR
 
 *Sơ đồ: minh họa của người soạn, tổng hợp từ các chú thích ở trên (không phải hình trích từ nguồn).*
 
-Giới hạn (suy luận của người soạn từ thiết kế trên): hash table không giữ thứ tự key nên duyệt theo khoảng key (`WHERE k BETWEEN a AND b`) không có sẵn; còn keydir phải nằm trọn trong RAM nên số key bị chặn bởi bộ nhớ, không phải bởi đĩa. Tài liệu Bitcask tự nêu giới hạn RAM[^bc-ram] nhưng nói nó nhỏ trong thực tế (vài triệu key vẫn dưới 1 GB trong bản cài đặt lúc đó)[^bc-ram2].
+Áp vào `orders`: đổi trạng thái đơn #42 là một lần append cộng một lần ghi vào keydir, còn `get(42)` là một lần tra hash table cộng một lần đọc đĩa (suy luận của người soạn từ thiết kế trên).
+
+### 1.2 Chỗ gãy
+
+Thiết kế này gãy ở hai điểm (suy luận của người soạn). Điểm thứ nhất: hash table không giữ thứ tự key, nên `orders` không thể hỏi "các đơn có id từ a đến b" (`WHERE k BETWEEN a AND b`). Điểm thứ hai: keydir phải nằm trọn trong RAM, nên số key tối đa bị chặn bởi bộ nhớ chứ không phải bởi đĩa. Tài liệu Bitcask tự nêu giới hạn RAM[^bc-ram]. Nó nói giới hạn này nhỏ trong thực tế: với bản cài đặt lúc đó, vài triệu key vẫn dùng dưới 1 GB bộ nhớ[^bc-ram2].
 
 <details><summary>Đi sâu: "log" ở đây khác "WAL" ở P5·05 thế nào; durability; chi phí đọc</summary>
 
-- **Hai vai trò của một cuốn nhật ký** (nhận xét của người soạn, đối chiếu P5·05 với tài liệu Bitcask). WAL của database ([P5·05](../05-storage/05-crash-consistency-va-journaling.md)) là *bản sao dự phòng* để sửa lại file dữ liệu sau crash; còn ở Bitcask, log *là* nơi dữ liệu sống: tài liệu nói file dữ liệu và commit log là một[^bc-recover]. Cùng là append-only, khác ở chỗ không còn "file dữ liệu thật" nào khác để cập nhật. LSM-tree (mục 2) đứng giữa: có cả WAL lẫn file dữ liệu bất biến.
-- **Bền tới đâu.** Bitcask có tùy chọn `sync on put` để đồng bộ file ghi sau mỗi lần ghi, và hàm `sync` ép ghi xuống[^bc-sync]. Nghĩa là mặc định một `put` thành công chưa chắc đã chịu được mất điện — đúng bài học ở [P5·06 mục 1](../05-storage/06-durability-trong-thuc-te.md) (suy luận của người soạn: mặc định không đồng bộ ngụ ý như vậy).
-- **Đọc dựa vào page cache.** Tài liệu nói họ dựa vào cache của file system cho hiệu năng đọc và chưa chắc cache riêng trong Bitcask có đáng không[^bc-cache]; xem [P5·04](../05-storage/04-page-cache-va-direct-io.md).
-- **Không nén.** Bitcask không nén dữ liệu vì chi phí/lợi ích phụ thuộc ứng dụng[^bc-nocomp]; mục 8 quay lại chuyện nén.
-- **Con số trong tài liệu** (5000–6000 ghi/giây trên laptop đĩa chậm, 2010) là phép đo của chính tác giả ở phần cứng cũ[^bc-bench]; không dùng nó để suy ra tốc độ hôm nay.
+- **Hai vai trò của một cuốn nhật ký** (nhận xét của người soạn, đối chiếu P5·05 với tài liệu Bitcask). WAL của database ([P5·05](../05-storage/05-crash-consistency-va-journaling.md)) là *bản sao dự phòng*, dùng để sửa lại file dữ liệu sau crash. Ở Bitcask thì log *là* nơi dữ liệu sống: tài liệu nói file dữ liệu và commit log là một[^bc-recover]. Cả hai đều append-only, nhưng ở Bitcask không còn "file dữ liệu thật" nào khác để cập nhật. LSM-tree (mục 2) đứng giữa: có cả WAL lẫn file dữ liệu bất biến.
+- **Bền tới đâu.** Bitcask có tùy chọn `sync on put` để đồng bộ file ghi sau mỗi lần ghi, và hàm `sync` để ép ghi xuống[^bc-sync]. Suy luận của người soạn: vì phải bật tùy chọn mới đồng bộ, nên mặc định một `put` thành công chưa chắc sống sót qua mất điện. Đó đúng là bài học ở [P5·06 mục 1](../05-storage/06-durability-trong-thuc-te.md).
+- **Đọc dựa vào page cache.** Tài liệu nói họ dựa vào cache của file system cho hiệu năng đọc và chưa chắc một cache riêng trong Bitcask có đáng không[^bc-cache]. Xem thêm [P5·04](../05-storage/04-page-cache-va-direct-io.md).
+- **Không nén.** Bitcask không nén dữ liệu vì chi phí/lợi ích phụ thuộc ứng dụng[^bc-nocomp]. Mục 8 quay lại chuyện nén.
+- **Con số trong tài liệu.** 5000–6000 ghi/giây trên laptop đĩa chậm (2010) là phép đo của chính tác giả trên phần cứng cũ[^bc-bench]. Đừng dùng nó để suy ra tốc độ ngày nay.
 
 </details>
 
-**Quay lại Q1:** log chỉ ghi thêm cho ghi rất rẻ, hash index trong RAM cho đọc một bước; đổi lại key phải vừa RAM và phải có merge để dọn bản cũ.
+**Quay lại Q1:** với `orders`, log chỉ ghi thêm cho ghi rất rẻ và hash index trong RAM cho đọc một bước; đổi lại mọi id đơn phải vừa RAM, không duyệt được theo khoảng, và phải có merge để dọn bản cũ.
 
 ## 2. SSTable và LSM-tree: memtable, log, file bất biến đã sắp xếp (Q2)
 
-> **Trả lời ngắn.** LSM-tree (log-structured merge-tree) giữ các ghi mới trong một cấu trúc đã sắp xếp trong RAM (*memtable*) và đồng thời ghi vào một log tuần tự để phòng crash[^bt-memlog][^lsm-log]. Khi memtable đầy, nó được "đóng băng" và ghi xuống đĩa thành một file bất biến, đã sắp xếp theo key gọi là *SSTable*[^bt-minor][^bt-sstable]. Đọc là đọc trên bản hợp nhất của memtable và các SSTable[^bt-merged]; xóa là ghi một *deletion marker*[^ldb-sorted].
+> **Trả lời ngắn.** LSM-tree (log-structured merge-tree) giữ các ghi mới trong một cấu trúc đã sắp xếp nằm trong RAM, gọi là *memtable*, và đồng thời ghi chúng vào một log tuần tự để phòng crash[^bt-memlog]. Khi memtable đầy, nó được "đóng băng" rồi ghi xuống đĩa thành một file bất biến, đã sắp theo key, gọi là *SSTable*[^bt-minor]. Đọc là đọc trên bản hợp nhất của memtable và các SSTable[^bt-merged]. Xóa là ghi thêm một *deletion marker*[^ldb-sorted].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): quầy tiếp nhận hồ sơ. Hồ sơ mới xếp vào khay trên bàn (memtable, đã sắp theo thứ tự) và nhân viên ghi tên vào sổ nhập (log) phòng khi mất điện. Khay đầy thì cả xấp được đóng thành một tập đã sắp xếp, cất vào kho (SSTable) và không bao giờ sửa; muốn tìm hồ sơ thì lục khay trước, rồi các tập từ mới tới cũ.
+*Với service `orders`.* Ở mục 1, `orders` phải giữ mọi id đơn trong RAM và không duyệt được theo khoảng id. Muốn bỏ cả hai ràng buộc đó mà vẫn ghi tuần tự thì file dữ liệu phải được *sắp xếp theo key*. Nhưng chèn một đơn mới vào giữa file đã sắp xếp lại là ghi ngẫu nhiên (nhận xét của người soạn). LSM-tree tránh chuyện đó bằng cách sắp xếp ngay trong RAM, rồi mới ghi xuống đĩa từng cục lớn đã xếp sẵn.
 
-Bài báo gốc của O'Neil, Cheng, Gawlick và O'Neil (Acta Informatica 33(4), 1996)[^bt-ref1996] đặt bài toán là chỉ mục chi phí thấp cho một file có tốc độ insert (và delete) rất cao[^lsm-goal]; giải pháp là thuật toán *hoãn và gộp lô* thay đổi của chỉ mục, đẩy chúng từ thành phần nằm trong bộ nhớ qua một hay nhiều thành phần trên đĩa theo cách "gợi nhớ tới merge sort"[^lsm-batch]. Bigtable (Google, OSDI 2006) tự nhận cách mình dùng memtable và SSTable để lưu cập nhật là tương tự cách LSM-tree lưu cập nhật chỉ mục[^bt-analog]. LevelDB và RocksDB là hai bản cài đặt mã nguồn mở theo mô hình này (wiki RocksDB xếp chiến lược compaction của nó vào họ LSM-tree[^rdb-lsm]).
+### 2.1 Từ bài báo gốc đến LevelDB và RocksDB
 
-**Đường ghi** (từng bước):
+Ý tưởng này đến từ bài của O'Neil, Cheng, Gawlick và O'Neil (Acta Informatica 33(4), 1996)[^bt-ref1996]. Bài đặt bài toán là lập chỉ mục chi phí thấp cho một file chịu tốc độ insert (và delete) rất cao trong thời gian dài[^lsm-goal]. Lời giải là một thuật toán *hoãn và gộp lô* các thay đổi của chỉ mục: nó đẩy chúng từ thành phần nằm trong bộ nhớ qua một hay nhiều thành phần trên đĩa, theo cách bài gọi là gợi nhớ tới merge sort[^lsm-batch].
 
-1. **Ghi log trước.** Với mỗi row mới, một log record để khôi phục insert được ghi vào log tuần tự trước, rồi mới thêm vào cấu trúc trong bộ nhớ[^lsm-log]. Bigtable cũng ghi mutation hợp lệ vào commit log (chứa redo record) rồi mới đưa vào memtable, và dùng *group commit* để tăng thông lượng của nhiều mutation nhỏ[^bt-write]. RocksDB nói mỗi update ghi vào hai nơi: memtable và WAL trên đĩa[^rdb-wal2].
-2. **Chèn vào memtable.** Thao tác chèn vào thành phần trong bộ nhớ không tốn I/O[^lsm-c0]. Memtable mặc định của RocksDB là skip list[^rdb-skiplist].
-3. **Flush.** Khi memtable đạt ngưỡng, nó bị đóng băng, memtable mới được tạo, bản bị đóng băng được chuyển thành một SSTable[^bt-minor]. Ngưỡng là tham số: LevelDB mặc định khoảng 4 MB cho log file[^ldb-log]; `write_buffer_size` của RocksDB mặc định 64 MB[^rdb-wbs].
+Bigtable (Google, OSDI 2006) tự nhận cách nó dùng memtable và SSTable để lưu cập nhật là tương tự cách LSM-tree lưu cập nhật chỉ mục[^bt-analog]. LevelDB và RocksDB là hai bản cài đặt mã nguồn mở theo mô hình này; wiki RocksDB xếp chiến lược compaction của nó vào họ LSM-tree[^rdb-lsm].
 
-**Đường đọc.** Bigtable thực thi read trên bản hợp nhất (merged view) của dãy SSTable và memtable; vì cả hai đều đã sắp theo thứ tự từ điển nên việc hợp nhất hiệu quả[^bt-merged]. Bài LSM gốc: tìm entry thì nhìn C0 (trong RAM) trước rồi mới tới C1 (trên đĩa)[^lsm-search]. LevelDB giữ một bản của log file hiện hành trong memtable và tra nó ở mọi lần đọc để thấy mọi update đã ghi[^ldb-memtable].
+### 2.2 Đường ghi
 
-**Xóa và ghi đè.** Một entry của sorted table là giá trị của key *hoặc* một deletion marker; marker được giữ để che các giá trị cũ còn ở SSTable cũ hơn[^ldb-sorted]. Bigtable tương tự: SSTable do compaction không-toàn-bộ tạo ra có thể chứa deletion entry để đè lên dữ liệu đã xóa trong SSTable cũ[^bt-tomb].
+Một lần `put` đơn hàng đi qua ba bước:
 
-**Phục hồi sau crash.** Bigtable khôi phục tablet bằng cách đọc metadata (danh sách SSTable và các redo point), nạp chỉ mục SSTable vào RAM, rồi dựng lại memtable bằng cách áp mọi update đã commit kể từ redo point[^bt-recover]. Với LevelDB, recovery đọc `CURRENT` để biết MANIFEST mới nhất, đọc MANIFEST, dọn file thừa, rồi chuyển đoạn log thành một sstable level-0 mới[^ldb-recovery]; chính MANIFEST cũng là một log ghi mọi thay đổi tập file[^ldb-manifest].
+1. **Ghi log trước.** Với mỗi row mới, một log record đủ để khôi phục lần insert đó được ghi vào log tuần tự trước, rồi mới thêm vào cấu trúc trong bộ nhớ[^lsm-log]. Bigtable cũng ghi mutation hợp lệ vào commit log (chứa redo record) rồi mới đưa vào memtable, và dùng *group commit* để tăng thông lượng khi có nhiều mutation nhỏ[^bt-write]. RocksDB nói mỗi update được ghi vào hai nơi: memtable và WAL trên đĩa[^rdb-wal2].
+2. **Chèn vào memtable.** Chèn một entry vào thành phần trong bộ nhớ không tốn I/O[^lsm-c0]. Memtable mặc định của RocksDB là skip list[^rdb-skiplist].
+3. **Flush.** Khi memtable chạm ngưỡng, nó bị đóng băng, một memtable mới được tạo, và bản bị đóng băng được chuyển thành một SSTable[^bt-minor]. Ngưỡng là tham số: LevelDB mặc định khoảng 4 MB cho log file[^ldb-log]. `write_buffer_size` của RocksDB mặc định là 64 MB[^rdb-wbs].
+
+Thứ tự này có lý do: memtable nằm trong RAM nên mất khi crash, còn log là thứ dựng lại nó (xem phần phục hồi bên dưới).
+
+### 2.3 Đường đọc, xóa và phục hồi
+
+**Đọc.** Bigtable thực thi một lần đọc trên bản hợp nhất của dãy SSTable và memtable. Vì cả hai đều đã sắp theo thứ tự từ điển nên việc hợp nhất hiệu quả[^bt-merged]. Bài LSM gốc nói cụ thể hơn về thứ tự tra: tìm một entry thì nhìn C0 (trong RAM) trước rồi mới tới C1 (trên đĩa)[^lsm-search]. LevelDB giữ một bản của log file hiện hành trong memtable và tra nó ở mọi lần đọc, để mọi update đã ghi đều hiện ra[^ldb-memtable].
+
+**Xóa và ghi đè.** Khi `orders` hủy một đơn, engine không xóa chỗ cũ (file bất biến mà). Một entry của sorted table là giá trị của key *hoặc* một deletion marker, và marker được giữ lại để che các giá trị cũ còn nằm ở SSTable cũ hơn[^ldb-sorted]. Bigtable làm tương tự: SSTable do compaction không-toàn-bộ tạo ra có thể chứa deletion entry để đè lên dữ liệu đã xóa trong SSTable cũ[^bt-tomb].
+
+**Phục hồi sau crash.** Bigtable khôi phục một tablet bằng cách đọc metadata (danh sách SSTable và các redo point), nạp chỉ mục SSTable vào RAM, rồi dựng lại memtable bằng cách áp mọi update đã commit kể từ redo point[^bt-recover]. LevelDB thì đọc `CURRENT` để biết MANIFEST mới nhất, đọc MANIFEST, dọn file thừa, rồi chuyển đoạn log thành một sstable level-0 mới[^ldb-recovery]. Chính MANIFEST cũng là một log ghi mọi thay đổi của tập file[^ldb-manifest].
 
 ```mermaid
 flowchart TB
@@ -98,48 +118,41 @@ flowchart TB
   end
 ```
 
-*Sơ đồ: minh họa của người soạn. Thứ tự "SSTable mới → cũ" là suy luận của người soạn: Bigtable chỉ nói đọc trên "merged view"[^bt-merged], bài LSM gốc nói tra C0 trước rồi mới tới C1[^lsm-search].*
+*Sơ đồ: minh họa của người soạn. Thứ tự "SSTable mới → cũ" là suy luận của người soạn: Bigtable chỉ nói đọc trên "merged view"[^bt-merged]. Bài LSM gốc nói tra C0 trước rồi mới tới C1[^lsm-search].*
 
-Vì sao *bất biến* đáng giá: Bigtable ghi nhận rằng SSTable bất biến nên không cần đồng bộ hóa truy cập file system khi đọc[^bt-nosync]; chỉ memtable là cấu trúc vừa đọc vừa ghi[^bt-immut1]; việc xóa vĩnh viễn dữ liệu thành bài toán dọn rác các SSTable lỗi thời[^bt-immut2].
+Còn một điều làm file bất biến đáng giá. Bigtable ghi nhận rằng SSTable bất biến nên khi đọc không cần đồng bộ hóa truy cập file system[^bt-nosync]. Nhờ vậy chỉ memtable là cấu trúc vừa đọc vừa ghi[^bt-immut1]. Việc xóa vĩnh viễn dữ liệu cũng biến thành bài toán dọn rác các SSTable lỗi thời[^bt-immut2].
 
 <details><summary>Đi sâu: C0/C1 và rolling merge của bài gốc; bố cục file LevelDB; mức bền mặc định</summary>
 
-- **Bài gốc.** Thành phần C0 trong RAM không nhất thiết là B-tree: nút có thể có kích thước tùy ý vì nó không bao giờ nằm trên đĩa, nên (2-3)-tree hay AVL-tree đều dùng được[^lsm-c0shape]. Phần dữ liệu trên đĩa C1 có cấu trúc thư mục tương tự B-tree nhưng tối ưu cho truy cập đĩa tuần tự[^lsm-c1shape]; một *rolling merge* liên tục lấy một đoạn liền kề các entry khỏi C0 và trộn nó vào C1[^lsm-rolling]. Khối mới được merge được ghi ra vị trí đĩa mới, nên khối cũ không bị ghi đè và còn dùng được cho recovery[^lsm-newpos]. Với nhiều thành phần (không chỉ hai), bài chứng minh tổng I/O nhỏ nhất đạt được khi kích thước các thành phần trung gian tăng theo cấp số nhân[^lsm-geom] — cùng tinh thần với các level lớn dần theo một hệ số nhân ở mục 3 (nhận xét của người soạn: bài gốc không nêu hệ số 10 và không nhắc LevelDB).
-- **Khi nào LSM hợp.** Bài nói thẳng: find cần trả lời ngay sẽ mất hiệu quả I/O trong vài trường hợp, nên LSM-tree có ích nhất khi insert chỉ mục nhiều hơn truy vấn lấy entry[^lsm-finds]. Động lực của bài: với B-tree chuẩn, việc duy trì chỉ mục thời gian thực cho bảng lịch sử tăng nhanh làm gần gấp đôi chi phí I/O của giao dịch[^lsm-double].
-- **Bố cục một SSTable.** LevelDB: các data block đã sắp xếp nằm liền nhau ở đầu file, sau đó là meta block, metaindex block, index block và footer cố định ở cuối file[^ldb-layout]. Index block có một entry cho mỗi data block, khóa là chuỗi lớn hơn hoặc bằng key cuối của block đó và đứng trước key đầu của block kế[^ldb-index]; mỗi data block có thể được nén[^ldb-compress]. Bigtable: block (thường 64 KB, cấu hình được) và một block index ở cuối SSTable để định vị block[^bt-sstblocks]. Nhờ vậy đọc một key là tìm trong index (nhỏ, nạp RAM) rồi đọc *một* block (suy luận của người soạn).
-- **Mức bền mặc định.** LevelDB: mỗi write mặc định *không đồng bộ*: trả về sau khi đẩy từ process vào hệ điều hành; crash của máy có thể mất vài update cuối, nhưng crash riêng process thì không mất gì[^ldb-async]; bật `sync` thì gọi `fsync`/`fdatasync`/`msync`[^ldb-sync], và tài liệu nói write bất đồng bộ thường nhanh hơn hơn một nghìn lần[^ldb-1000]. RocksDB: cấu hình mặc định bảo đảm nhất quán khi crash *process* bằng cách flush WAL sau mỗi user write[^rdb-walflush]. Ý nghĩa hai câu đó về "bền khi mất điện" xem [P5·06](../05-storage/06-durability-trong-thuc-te.md).
-- **Xóa thật sự và dữ liệu nhạy cảm.** Compaction toàn phần của Bigtable là cách bảo đảm dữ liệu đã xóa biến mất khỏi hệ thống đúng lúc, điều tài liệu gọi là quan trọng với dịch vụ giữ dữ liệu nhạy cảm[^bt-deleted]. Chuyện xóa dữ liệu theo yêu cầu pháp lý nằm ở [Chương 14](14-trach-nhiem-voi-du-lieu.md).
+- **Bài gốc.** Thành phần C0 trong RAM không nhất thiết là B-tree: nút có thể có kích thước tùy ý vì nó không bao giờ nằm trên đĩa, nên (2-3)-tree hay AVL-tree đều dùng được[^lsm-c0shape]. Phần dữ liệu trên đĩa, C1, có cấu trúc thư mục tương tự B-tree nhưng tối ưu cho truy cập đĩa tuần tự[^lsm-c1shape]. Một *rolling merge* chạy liên tục: nó lấy một đoạn liền kề các entry khỏi C0 và trộn vào C1[^lsm-rolling]. Khối mới trộn được ghi ra vị trí đĩa mới, nên khối cũ không bị ghi đè và còn dùng được cho recovery[^lsm-newpos]. Với nhiều thành phần (không chỉ hai), bài chứng minh tổng I/O nhỏ nhất đạt được khi kích thước các thành phần trung gian tăng theo cấp số nhân[^lsm-geom]. Điều này cùng tinh thần với các level lớn dần theo một hệ số nhân ở mục 3 (nhận xét của người soạn: bài gốc không nêu hệ số 10 và không nhắc LevelDB).
+- **Khi nào LSM hợp.** Bài nói thẳng: find cần trả lời ngay sẽ mất hiệu quả I/O trong vài trường hợp, nên LSM-tree có ích nhất khi insert chỉ mục nhiều hơn truy vấn lấy entry[^lsm-finds]. Động lực của bài: với B-tree chuẩn, việc duy trì chỉ mục thời gian thực cho một bảng lịch sử tăng nhanh làm gần gấp đôi chi phí I/O của giao dịch[^lsm-double].
+- **Bố cục một SSTable.** LevelDB đặt các data block đã sắp xếp liền nhau ở đầu file, rồi tới meta block, metaindex block, index block, và cuối cùng là footer cố định ở cuối file[^ldb-layout]. Index block có một entry cho mỗi data block, với khóa là chuỗi lớn hơn hoặc bằng key cuối của block đó và đứng trước key đầu của block kế[^ldb-index]. Mỗi data block có thể được nén[^ldb-compress]. Bigtable cũng chia SSTable thành các block (thường 64 KB, cấu hình được)[^bt-sstblocks]. Suy luận của người soạn: nhờ index nhỏ nạp sẵn RAM, đọc một key là tìm trong index rồi đọc *một* block.
+- **Mức bền mặc định.** Mỗi write của LevelDB mặc định là *không đồng bộ*: nó trả về sau khi đẩy dữ liệu từ process vào hệ điều hành. Crash của cả máy có thể làm mất vài update cuối, còn crash riêng process thì không mất gì[^ldb-async]. Bật `sync` thì LevelDB gọi `fsync`/`fdatasync`/`msync` trước khi trả về[^ldb-sync]. Tài liệu nói write bất đồng bộ thường nhanh hơn hơn một nghìn lần[^ldb-1000]. RocksDB mặc định bảo đảm nhất quán khi crash *process* bằng cách flush WAL sau mỗi user write[^rdb-walflush]. Hai câu đó nghĩa gì với "bền khi mất điện" thì xem [P5·06](../05-storage/06-durability-trong-thuc-te.md).
+- **Xóa thật sự và dữ liệu nhạy cảm.** Compaction toàn phần của Bigtable là cách bảo đảm dữ liệu đã xóa biến mất khỏi hệ thống đúng lúc. Tài liệu gọi điều này là quan trọng với dịch vụ giữ dữ liệu nhạy cảm[^bt-deleted]. Chuyện xóa dữ liệu theo yêu cầu pháp lý nằm ở [Chương 14](14-trach-nhiem-voi-du-lieu.md).
 
 </details>
 
-**Quay lại Q2:** ghi vào log + memtable rồi flush thành SSTable bất biến; đọc hợp nhất memtable với các SSTable (thứ tự mới → cũ là suy luận của người soạn); xóa là ghi marker; recovery (theo cách Bigtable mô tả) là áp lại các update đã commit từ redo point[^bt-recover].
+**Quay lại Q2:** `orders` ghi vào log và memtable rồi flush thành SSTable bất biến; đọc hợp nhất memtable với các SSTable (thứ tự mới → cũ là suy luận của người soạn); xóa là ghi marker; recovery theo cách Bigtable mô tả là áp lại các update đã commit từ redo point[^bt-recover].
 
 ## 3. Compaction: leveled vs size-tiered, và ba loại amplification (Q3)
 
-> **Trả lời ngắn.** Mỗi lần flush sinh thêm một SSTable; nếu không dọn thì đọc có thể phải trộn cập nhật từ số SSTable không bị chặn[^bt-bound]. *Compaction* là bước nền gộp SSTable, bỏ bản ghi bị ghi đè và deletion marker không còn cần[^ldb-drop]. *Leveled* gộp run nhỏ vào run lớn một cách tích cực nên tốn ghi nhiều hơn tiered[^rdb-univ-diff][^rdb-comp-lvl-wa], và wiki RocksDB xếp Classic Leveled vào hướng tối thiểu hóa space amplification[^rdb-comp-lvl]; *tiered* chờ nhiều run cùng cỡ rồi mới gộp nên ghi ít hơn, đổi lại read và space amplification cao hơn[^rdb-comp-tier].
+> **Trả lời ngắn.** Mỗi lần flush sinh thêm một SSTable, và nếu không dọn thì một lần đọc có thể phải trộn cập nhật từ số SSTable không bị chặn[^bt-bound]. *Compaction* là bước nền gộp các SSTable, bỏ bản ghi bị ghi đè và deletion marker không còn cần[^ldb-drop]. *Leveled* gộp run nhỏ vào run lớn một cách tích cực, nên tốn ghi nhiều hơn tiered[^rdb-univ-diff]; wiki RocksDB xếp Classic Leveled vào hướng tối thiểu hóa space amplification[^rdb-comp-lvl]. *Tiered* chờ nhiều run cùng cỡ rồi mới gộp, nên ghi ít hơn, đổi lại read và space amplification cao hơn[^rdb-comp-tier].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): dọn kho hồ sơ. Cách "leveled": mỗi ngày đem tập hồ sơ nhỏ trộn vào đúng kệ lớn đã sắp xếp — kệ lúc nào cũng gọn nhưng ngày nào cũng phải xếp lại phần lớn kệ. Cách "tiered": cứ chất tập mới cạnh nhau, đến khi có vài tập cỡ ngang nhau mới trộn thành tập to một lần — ít công xếp lại, nhưng tìm một hồ sơ phải lục nhiều tập.
+*Với service `orders`.* Trạng thái đơn đổi liên tục, nên cùng một id đơn xuất hiện ở nhiều SSTable: bản "đã tạo" nằm ở file cũ, bản "đã thanh toán" ở file mới hơn, và có thể cả một marker nếu đơn bị hủy (nhận xét của người soạn). Để tìm bản mới nhất, `orders` phải xét các file đó theo thứ tự, và flush càng nhiều thì số file càng tăng. Compaction là việc nền gộp các file để số file không tăng mãi và bản cũ được dọn. Câu hỏi của mục này là gộp *khi nào* và *với cái gì*, vì cách chọn quyết định `orders` tốn bao nhiêu băng thông ghi.
 
-*Bước 1 — Vì sao phải compaction.* Mỗi minor compaction tạo một SSTable mới; nếu để mặc, đọc có thể phải trộn cập nhật từ số SSTable tùy ý (không bị chặn), nên Bigtable chặn số file đó bằng cách định kỳ chạy một merging compaction nền[^bt-bound]. Compaction gộp tất cả SSTable thành đúng một gọi là *major compaction*[^bt-major]; SSTable do compaction không-toàn-bộ có thể còn deletion entry, còn sản phẩm của major compaction không chứa deletion entry hay dữ liệu đã xóa[^bt-major2].
+### 3.1 Vì sao phải compaction
 
-*Bước 2 — Leveled (LevelDB / RocksDB).* Thuật ngữ **sorted run**: mỗi level (trừ level 0) là một sorted run — dữ liệu chia theo khoảng key thành nhiều file SST, key trong mỗi file đã sắp xếp[^rdb-leveled]. Level 0 đặc biệt: file ở "young level" có thể chồng khóa nhau, còn mọi level khác có các khoảng khóa tách biệt[^ldb-l0]. Khi tổng kích thước level L vượt ngưỡng thì một file của level L cùng mọi file chồng lấn ở level L+1 được trộn thành file mới cho level L+1[^ldb-levelsize]; LevelDB đặt ngưỡng 10 MB cho level 1, 100 MB cho level 2… (mỗi level gấp 10)[^ldb-levelsize]. Hiệu ứng là dữ liệu mới di cư dần xuống level lớn nhất chỉ bằng đọc/ghi hàng loạt, tránh seek đắt[^ldb-bulk]. RocksDB chọn level cần dọn bằng một *điểm số*: với level khác 0 là kích thước level chia kích thước mục tiêu[^rdb-score]; với level 0 là số file chia `level0_file_num_compaction_trigger` (hoặc kích thước chia `max_bytes_for_level_base`, lấy giá trị lớn hơn)[^rdb-score0]; compaction L0→L1 bắt đầu khi số file L0 chạm `level0_file_num_compaction_trigger`[^rdb-l0trigger].
+Mỗi minor compaction tạo một SSTable mới. Nếu để mặc, một lần đọc có thể phải trộn cập nhật từ số SSTable tùy ý, không bị chặn. Vì thế Bigtable chặn số file bằng cách định kỳ chạy một merging compaction ở nền[^bt-bound]. Compaction gộp tất cả SSTable thành đúng một file gọi là *major compaction*[^bt-major]. Sản phẩm của major compaction không chứa deletion entry hay dữ liệu đã xóa, còn SSTable do compaction không-toàn-bộ tạo ra thì có thể vẫn còn deletion entry[^bt-major2].
 
-*Bước 3 — Tiered / size-tiered.* RocksDB gọi kiểu này là Universal: nó nhắm tới trường hợp cần *write amplification thấp hơn*, đổi lấy read amplification và space amplification[^rdb-univ-intro]. Khác biệt cốt lõi: leveled có xu hướng gộp run nhỏ vào run lớn hơn một cách tích cực, còn tiered đợi tới khi có vài run kích thước tương tự rồi gộp chúng với nhau[^rdb-univ-diff][^rdb-univ-wait]. Ví dụ minh họa (của người soạn, không phải mặc định của hệ nào): bốn run 64 MB gộp thành một run 256 MB; mỗi byte được viết lại một lần mỗi khi nó lên một "bậc" cỡ, thay vì bị trộn lại với dữ liệu cũ của level kế.
+### 3.2 Leveled (LevelDB / RocksDB)
 
-*Bước 4 — Ba loại amplification.* Tài liệu tuning của RocksDB định nghĩa: **write amplification** là tỉ lệ byte ghi xuống thiết bị trên byte ghi vào database[^rdb-wa-def]; **read amplification** là số lần đọc đĩa mỗi truy vấn[^rdb-ra-def]; **space amplification** là tỉ lệ dung lượng file database trên đĩa trên kích thước dữ liệu[^rdb-sa-def]. Ví dụ của chính tài liệu: ghi 10 MB/s vào database mà đĩa thấy 30 MB/s thì write amplification bằng 3[^rdb-wa-ex]; và write amplification cao còn làm giảm tuổi thọ flash[^rdb-wa-flash] (cơ chế flash ở [P5·01 mục 4](../05-storage/01-thiet-bi-luu-tru.md); suy luận của người soạn: amplification của ứng dụng *nhân* với write amplification của FTL bên dưới).
+Ta cần một thuật ngữ trước: **sorted run** là một dãy dữ liệu đã sắp theo key. Mỗi level trừ level 0 là một sorted run, chia theo khoảng key thành nhiều file SST, và key trong mỗi file đã được sắp xếp[^rdb-leveled]. Level 0 đặc biệt: file ở "young level" có thể chồng khóa nhau, còn mọi level khác có các khoảng khóa tách biệt[^ldb-l0].
 
-*Bước 5 — Con số cho leveled.* Tài liệu RocksDB tính ví dụ: database 500 GB, level 1 là 512 MB, hệ số giữa các level 10, thì mỗi byte đầu tiên được ghi ra level 0, rồi nén sang level 1 (hệ số 2 vì level 1 cùng cỡ level 0), và mỗi lần xuống level kế lại bị trộn với khoảng 10 byte của level lớn hơn[^rdb-wa33a]; tổng write amplification xấp xỉ 1 + 2 + 10 + 10 + 10 = 33[^rdb-wa33]. Cùng ví dụ, space amplification là 1,14[^rdb-sa114]. LevelDB tính trường hợp xấu nhất cho một compaction thường: một file 2 MB ở level L chồng khoảng 12 file ở level L+1 (10 vì level sau lớn gấp 10, cộng 2 ở biên) nên phải đọc 26 MB và ghi 26 MB[^ldb-26mb]. Wiki RocksDB cũng nói write amplification thông thường của leveled thường lớn hơn 10[^rdb-wa10].
+Quy tắc dọn như sau. Khi tổng kích thước level L vượt ngưỡng, một file của level L cùng mọi file chồng lấn ở level L+1 được trộn thành file mới cho level L+1[^ldb-levelsize]. LevelDB đặt ngưỡng 10 MB cho level 1, 100 MB cho level 2, và cứ thế mỗi level gấp 10 lần[^ldb-levelsize]. Kết quả là dữ liệu mới di cư dần xuống level lớn nhất chỉ bằng đọc/ghi hàng loạt, tránh được seek đắt[^ldb-bulk].
 
-| | Leveled | Tiered (size-tiered / Universal) |
-|---|---|---|
-| Write amp | cao hơn: mỗi level ghi lại phần dữ liệu cũ, per-level ≈ fanout trong trường hợp xấu[^rdb-comp-lvl-wa] | thấp: per-level bằng 1[^rdb-comp-tier-wa] |
-| Read amp | thấp hơn tiered ở trường hợp xấu (suy luận từ ô bên cạnh); nhưng wiki lưu ý Classic Leveled vẫn đánh đổi read amplification để giảm space amplification[^rdb-comp-lvl] | cao hơn: số sorted run trường hợp xấu cao hơn nhiều[^rdb-univ-cost] |
-| Space amp | Classic Leveled nhắm tới tối thiểu hóa space amplification[^rdb-comp-lvl] | cao hơn; full compaction tạm thời gấp đôi dung lượng[^rdb-univ-double] |
-| Hình dạng tải nền | đều hơn (suy luận của người soạn từ câu bên cạnh) | rất "giật" (spiky)[^rdb-univ-spiky] |
-
-Ghi chú: các số per-level (≈ fanout / bằng 1) là của họ thuật toán Classic Leveled và Tiered trong wiki RocksDB, không phải số đo trên RocksDB; RocksDB cài biến thể lai Tiered+Leveled và Universal[^rdb-taxonomy].
+RocksDB chọn level cần dọn bằng một *điểm số*. Với level khác 0, điểm số là kích thước level chia kích thước mục tiêu[^rdb-score]. Với level 0, điểm số là số file chia `level0_file_num_compaction_trigger`, hoặc kích thước chia `max_bytes_for_level_base`, lấy giá trị lớn hơn[^rdb-score0]. Compaction L0→L1 bắt đầu khi số file L0 chạm `level0_file_num_compaction_trigger`[^rdb-l0trigger].
 
 ```mermaid
 flowchart TB
@@ -151,32 +164,71 @@ flowchart TB
 
 *Sơ đồ: minh họa của người soạn. Quy tắc "một file + các file chồng lấn" theo LevelDB[^ldb-levelsize]; hệ số ~10 là ví dụ của mục này, không phải hằng số của mọi cấu hình.*
 
+### 3.3 Tiered (size-tiered)
+
+RocksDB gọi kiểu này là Universal. Nó nhắm tới trường hợp cần *write amplification thấp hơn*, đổi lấy read amplification và space amplification[^rdb-univ-intro]. Khác biệt cốt lõi với leveled nằm ở chỗ leveled có xu hướng gộp một run nhỏ vào run lớn hơn một cách tích cực[^rdb-univ-diff]. Tiered thì đợi tới khi có vài run kích thước tương tự rồi gộp chúng với nhau[^rdb-univ-wait].
+
+Ví dụ minh họa (của người soạn, không phải mặc định của hệ nào): bốn run 64 MB gộp thành một run 256 MB. Mỗi byte chỉ bị viết lại một lần mỗi khi nó lên một "bậc" cỡ, thay vì bị trộn lại với dữ liệu cũ của level kế.
+
+### 3.4 Ba loại amplification
+
+Để so hai cách trên, ta cần đo chi phí. Tài liệu tuning của RocksDB định nghĩa ba thứ. **Write amplification** là tỉ lệ byte ghi xuống thiết bị trên byte ghi vào database[^rdb-wa-def]. **Read amplification** là số lần đọc đĩa trên mỗi truy vấn[^rdb-ra-def]. **Space amplification** là tỉ lệ dung lượng file database trên đĩa trên kích thước dữ liệu[^rdb-sa-def].
+
+Ví dụ của chính tài liệu: ghi 10 MB/s vào database mà đĩa thấy 30 MB/s thì write amplification bằng 3[^rdb-wa-ex]. Write amplification cao còn làm giảm tuổi thọ flash[^rdb-wa-flash]. Cơ chế flash nằm ở [P5·01 mục 4](../05-storage/01-thiet-bi-luu-tru.md); suy luận của người soạn: amplification của ứng dụng *nhân* với write amplification của FTL bên dưới.
+
+### 3.5 Con số cho leveled
+
+Tài liệu RocksDB tính một ví dụ: database 500 GB, level 1 là 512 MB, hệ số giữa các level là 10. Mỗi byte đầu tiên được ghi ra level 0, rồi nén sang level 1 (hệ số 2 vì level 1 cùng cỡ level 0), và mỗi lần xuống level kế lại bị trộn với khoảng 10 byte của level lớn hơn[^rdb-wa33a]. Tổng write amplification xấp xỉ 1 + 2 + 10 + 10 + 10 = 33[^rdb-wa33]. Cùng ví dụ đó, space amplification là 1,14[^rdb-sa114].
+
+LevelDB tính trường hợp xấu nhất cho một compaction thường: một file 2 MB ở level L chồng khoảng 12 file ở level L+1 (10 vì level sau lớn gấp 10, cộng 2 ở biên), nên compaction phải đọc 26 MB và ghi 26 MB[^ldb-26mb]. Wiki RocksDB cũng nói write amplification thông thường của leveled thường lớn hơn 10[^rdb-wa10].
+
+Đặt hai cách cạnh nhau:
+
+| | Leveled | Tiered (size-tiered / Universal) |
+|---|---|---|
+| Write amp | cao hơn: mỗi level ghi lại phần dữ liệu cũ, per-level ≈ fanout trong trường hợp xấu[^rdb-comp-lvl-wa] | thấp: per-level bằng 1[^rdb-comp-tier-wa] |
+| Read amp | thấp hơn tiered ở trường hợp xấu (suy luận từ ô bên cạnh); nhưng wiki lưu ý Classic Leveled vẫn đánh đổi read amplification để giảm space amplification[^rdb-comp-lvl] | cao hơn: số sorted run trường hợp xấu cao hơn nhiều[^rdb-univ-cost] |
+| Space amp | Classic Leveled nhắm tới tối thiểu hóa space amplification[^rdb-comp-lvl] | cao hơn; full compaction tạm thời gấp đôi dung lượng[^rdb-univ-double] |
+| Hình dạng tải nền | đều hơn (suy luận của người soạn từ câu bên cạnh) | rất "giật" (spiky)[^rdb-univ-spiky] |
+
+Ghi chú: các số per-level (≈ fanout / bằng 1) là của họ thuật toán Classic Leveled và Tiered trong wiki RocksDB, không phải số đo trên RocksDB; RocksDB cài biến thể lai Tiered+Leveled và Universal[^rdb-taxonomy].
+
 <details><summary>Đi sâu: tắc nghẽn L0, dynamic level bytes, intra-L0, TTL, họ thuật toán</summary>
 
-- **Compaction tụt lại phía sau thì đọc chậm đi.** LevelDB ví dụ: nếu giới hạn tốc độ ghi nền ở 10% của 100 MB/s mà người dùng ghi 10 MB/s thì tích lũy khoảng 50 file level-0, làm đắt đáng kể mỗi lần đọc vì phải trộn nhiều file; một trong các hướng giải được nêu là giảm tốc độ ghi một cách có chủ ý khi số file level-0 tăng[^ldb-slowdown1][^ldb-slowdown2]. Tuning Guide của RocksDB mô tả triệu chứng tương ứng: compaction cố ghi nhiều hơn mức SSD chịu được có thể gây write stall, hoặc làm đọc chậm do compaction backlog[^rdb-stall]. (Nhận xét của người soạn: khi vận hành RocksDB, theo dõi số file L0 là việc đầu tiên.)
-- **`level_compaction_dynamic_level_bytes`.** Khi bật, kích thước đích của level cuối bằng kích thước thực của level lớn nhất, các level phía trên chia dần theo hệ số; mục tiêu là cấu trúc ổn định trong đó khoảng 90% dữ liệu nằm ở level cuối[^rdb-dyn90]. Wiki ghi đây là khuyến nghị và là mặc định từ phiên bản 8.4[^rdb-dyn-rec]; header `advanced_options.h` của RocksDB v11.8.1 khai báo mặc định `true`[^rdb-dyn-hdr]. Docs.rs của crate `rocksdb` 0.25.0 lại ghi "Default: false" cho `set_level_compaction_dynamic_level_bytes`[^rs-dyn]; crate này phụ thuộc `librocksdb-sys ^0.19.0`[^rs-sys-dep], và docs.rs ghi bản 0.19.0 của `librocksdb-sys` là `0.19.0+11.8.1`, tức bundle RocksDB 11.8.1[^rs-sys-ver]. Kết luận (suy luận của người soạn từ các nguồn đó, chưa chạy thử): dòng "Default: false" là chú thích cũ của wrapper, còn mặc định của bản RocksDB bundle là `true`; muốn chắc chắn thì đặt tường minh.
-- **Intra-L0.** Khi quá nhiều file L0, RocksDB có thể gộp một số file L0 với nhau: đổi thêm 1 đơn vị write amplification lấy việc giảm read amplification ở L0[^rdb-intra].
-- **TTL và periodic compaction.** File có thể nằm im rất lâu nếu khoảng khóa của nó không còn được ghi (ví dụ "soft delete" bằng giá trị rỗng); tùy chọn `ttl` đưa dữ liệu quá cũ đi qua compaction để thu hồi chỗ[^rdb-ttl].
-- **Họ thuật toán.** Wiki RocksDB phân loại: Classic Leveled, Tiered, Tiered+Leveled, Leveled-N, FIFO; RocksDB cài Tiered+Leveled (gọi là "Level Compaction"), Tiered ("Universal") và FIFO[^rdb-taxonomy]. Nghĩa là "leveled" trong RocksDB đã là biến thể lai, không phải thuật toán gốc của bài LSM (suy luận của người soạn); Classic Leveled được gán cho bài LSM của O'Neil[^rdb-comp-lvl].
+- **Compaction tụt lại phía sau thì đọc chậm đi.** Ví dụ của LevelDB: nếu giới hạn tốc độ ghi nền ở 10% của 100 MB/s mà người dùng ghi 10 MB/s thì tích lũy khoảng 50 file level-0. Mỗi lần đọc khi đó đắt hơn đáng kể vì phải trộn nhiều file hơn[^ldb-slowdown1]. Một trong các hướng giải được nêu là cố ý giảm tốc độ ghi khi số file level-0 tăng[^ldb-slowdown2]. Tuning Guide của RocksDB mô tả triệu chứng tương ứng: compaction cố ghi nhiều hơn mức SSD chịu được có thể gây write stall, hoặc làm đọc chậm do compaction backlog[^rdb-stall]. Nhận xét của người soạn: khi vận hành RocksDB, theo dõi số file L0 là việc đầu tiên.
+- **`level_compaction_dynamic_level_bytes`.** Khi bật, kích thước đích của level cuối bằng kích thước thực của level lớn nhất, và các level phía trên chia dần theo hệ số. Mục tiêu là một cấu trúc ổn định trong đó khoảng 90% dữ liệu nằm ở level cuối[^rdb-dyn90]. Wiki ghi đây là khuyến nghị và là mặc định từ phiên bản 8.4[^rdb-dyn-rec]. Header `advanced_options.h` của RocksDB v11.8.1 khai báo mặc định `true`[^rdb-dyn-hdr]. Docs.rs của crate `rocksdb` 0.25.0 lại ghi "Default: false" cho `set_level_compaction_dynamic_level_bytes`[^rs-dyn]. Crate này phụ thuộc `librocksdb-sys ^0.19.0`[^rs-sys-dep]. Docs.rs ghi bản 0.19.0 của `librocksdb-sys` là `0.19.0+11.8.1`, tức bundle RocksDB 11.8.1[^rs-sys-ver]. Kết luận (suy luận của người soạn từ các nguồn đó, chưa chạy thử): dòng "Default: false" là chú thích cũ của wrapper, còn mặc định của bản RocksDB bundle là `true`. Muốn chắc chắn thì đặt tường minh.
+- **Intra-L0.** Khi có quá nhiều file L0, RocksDB có thể gộp một số file L0 với nhau: đổi thêm 1 đơn vị write amplification lấy việc giảm read amplification ở L0[^rdb-intra].
+- **TTL và periodic compaction.** Một file có thể nằm im rất lâu nếu khoảng khóa của nó không còn được ghi (ví dụ "soft delete" bằng giá trị rỗng). Tùy chọn `ttl` đưa dữ liệu quá cũ đi qua compaction để thu hồi chỗ[^rdb-ttl].
+- **Họ thuật toán.** Wiki RocksDB phân loại: Classic Leveled, Tiered, Tiered+Leveled, Leveled-N, FIFO. RocksDB cài Tiered+Leveled (gọi là "Level Compaction"), Tiered ("Universal") và FIFO[^rdb-taxonomy]. Nghĩa là "leveled" trong RocksDB đã là biến thể lai, không phải thuật toán gốc của bài LSM (suy luận của người soạn); Classic Leveled mới là cái được gán cho bài LSM của O'Neil[^rdb-comp-lvl].
 - **Giới hạn Universal.** Nếu `num_levels = 1`, toàn bộ database có lúc bị gộp thành một file SST, và index block có thể vượt giới hạn 4 GB mỗi block[^rdb-univ-limit].
 
 </details>
 
-**Quay lại Q3:** compaction trả giá bằng ghi lại dữ liệu để đổi lấy số file bị chặn và bớt rác; so với tiered, leveled ghi nhiều hơn nhưng giảm space amplification và số sorted run xấu nhất, còn tiered ghi ít hơn nhưng đọc và chiếm chỗ nhiều hơn.
+**Quay lại Q3:** compaction trả giá bằng việc ghi lại dữ liệu để đổi lấy số file bị chặn và bớt rác. So với tiered, leveled ghi nhiều hơn nhưng giảm space amplification và số sorted run xấu nhất; tiered ghi ít hơn nhưng đọc và chiếm chỗ nhiều hơn. Với `orders`, đó là lựa chọn giữa tốn băng thông ghi (leveled) và tốn chỗ cùng chậm khi đọc (tiered).
 
 ## 4. Bloom filter: biết chắc "không có" mà không cần đọc đĩa (Q4)
 
-> **Trả lời ngắn.** Đọc một key ở LSM-tree có thể phải xét nhiều SSTable. Bloom filter là một mảng bit gắn với mỗi SSTable, được nạp vào RAM khi mở file[^rdb-bloom-ram], trả lời "key này *có thể* có trong file" hoặc "*chắc chắn không* có"[^rdb-bloom-def]. Bigtable ghi nhận nhờ vậy phần lớn lần tra key không tồn tại không phải chạm đĩa[^bt-bloom2]. Nó không giúp truy vấn theo khoảng[^rdb-tune-range].
+> **Trả lời ngắn.** Đọc một key ở LSM-tree có thể phải xét nhiều SSTable. Bloom filter là một mảng bit gắn với mỗi SSTable và được nạp vào RAM khi mở file[^rdb-bloom-ram]. Nó trả lời "key này *có thể* có trong file" hoặc "*chắc chắn không* có"[^rdb-bloom-def]. Bigtable ghi nhận nhờ vậy phần lớn lần tra key không tồn tại không phải chạm đĩa[^bt-bloom2]. Nó không giúp được truy vấn theo khoảng[^rdb-tune-range].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảo vệ tòa nhà cầm một tờ giấy ghi các "dấu hiệu" từ tên khách mời. Thấy dấu hiệu thiếu thì chắc chắn tên này không nằm trong danh sách; thấy đủ dấu hiệu thì chỉ "có thể" có — phải lên văn phòng kiểm tra (đọc đĩa). Đôi khi báo "có thể" oan (false positive) nhưng *không bao giờ* bỏ sót người có tên.
+*Với service `orders`.* Mỗi request tạo đơn mang một idempotency key, để client gửi lại khi timeout mà không tạo đơn hai lần. Trước khi ghi, `orders` phải hỏi "key này đã dùng chưa?", và trong thực tế phần lớn câu trả lời là chưa (nhận xét của người soạn: giả định về tải, không có nguồn). Ở LSM-tree, một lần tra key *không tồn tại* là lần tra tệ nhất: engine phải xét memtable rồi lần lượt các file mới tới cũ, chỉ để kết luận là không có gì. Bloom filter được sinh ra để cắt đúng chi phí đó.
 
-Cơ chế: với tập key của một SST, nhiều hàm băm được áp lên mỗi key, mỗi hàm chỉ một bit trong mảng và bit đó được đặt thành 1; lúc đọc, áp cùng các hàm băm lên key cần tìm, và key chắc chắn không tồn tại nếu ít nhất một bit kiểm tra ra 0[^rdb-bloom-how]. RocksDB tạo một Bloom filter nhúng ngay trong mỗi file SST mới để biết file đó có thể chứa key cần tìm không[^rdb-bloom-perfile]; Bigtable cho phép client yêu cầu Bloom filter cho SSTable trong một locality group, hỏi được SSTable có thể chứa dữ liệu của một cặp row/column hay không, và nói rằng việc này khiến phần lớn lần tra hàng/cột không tồn tại không phải chạm đĩa[^bt-bloom1][^bt-bloom2]. LevelDB: `NewBloomFilterPolicy(10)` giữ 10 bit mỗi key trong bộ nhớ, giảm lượng đọc đĩa thừa của `Get()` khoảng một trăm lần; khuyến nghị dùng khi working set không vừa RAM và nhiều random read[^ldb-bloom100].
+### 4.1 Cơ chế
 
-Vì sao có ích đúng chỗ này: read amplification của LSM đến từ việc nhiều file phải xét. Với leveled, point lookup phải xem mọi file ở level 0 và tối đa một file ở mỗi level còn lại; Bloom filter giúp giảm mạnh read amplification đó[^rdb-tune-ra].
+Với tập key của một SST, nhiều hàm băm được áp lên mỗi key. Mỗi hàm chỉ ra một bit trong mảng, và bit đó được đặt thành 1. Lúc đọc, ta áp cùng các hàm băm lên key cần tìm. Nếu ít nhất một bit kiểm tra ra 0 thì key chắc chắn không tồn tại[^rdb-bloom-how]. Ngược lại, nếu mọi bit đều là 1 thì key chỉ "có thể" có, vì các bit ấy có thể do key khác đặt ra. Báo "có thể" oan như vậy là dương tính giả (false positive); filter *không bao giờ* báo "không có" khi key thực sự nằm trong file (suy luận của người soạn từ cơ chế trên).
 
-Đánh đổi bit/key lấy tỉ lệ dương tính giả (số liệu từ wiki RocksDB): 4,9 bit/key cho FP 10% (hiệu quả 90% so với 100 bit/key), 9,9 bit/key cho 1% (99%), 15,5 bit/key cho 0,1% (99,9%)[^rdb-bloom-bits]. Tính của người soạn: 1 triệu key ở 10 bit/key là 10 triệu bit, khoảng 1,25 MB RAM; nhân với số key là thấy vì sao filter có thể chiếm phần đáng kể RAM của một node.
+Các hệ thống dùng nó như sau:
+
+- RocksDB tạo một Bloom filter nhúng ngay trong mỗi file SST mới, để biết file đó có thể chứa key cần tìm không[^rdb-bloom-perfile].
+- Bigtable cho client yêu cầu Bloom filter cho các SSTable trong một locality group[^bt-bloom1]. Với filter đó, hệ thống hỏi được liệu một SSTable có thể chứa dữ liệu của một cặp row/column hay không.
+- LevelDB có `NewBloomFilterPolicy(10)`: giữ 10 bit mỗi key trong bộ nhớ và giảm lượng đọc đĩa thừa của `Get()` khoảng một trăm lần. Tài liệu khuyến nghị dùng khi working set không vừa RAM và có nhiều random read[^ldb-bloom100].
+
+### 4.2 Vì sao hợp với LSM, và giá phải trả
+
+Read amplification của LSM đến từ việc nhiều file phải xét. Với leveled, một point lookup phải xem mọi file ở level 0 và tối đa một file ở mỗi level còn lại. Bloom filter giảm mạnh read amplification đó[^rdb-tune-ra].
+
+Giá là RAM. Wiki RocksDB nêu đánh đổi giữa bit/key và tỉ lệ dương tính giả: 4,9 bit/key cho FP 10% (hiệu quả 90% so với 100 bit/key), 9,9 bit/key cho 1% (99%), 15,5 bit/key cho 0,1% (99,9%)[^rdb-bloom-bits]. Tính của người soạn: 1 triệu key ở 10 bit/key là 10 triệu bit, khoảng 1,25 MB RAM. Nhân với số key thật là thấy vì sao filter có thể chiếm phần đáng kể RAM của một node.
 
 ```mermaid
 flowchart TB
@@ -193,27 +245,29 @@ flowchart TB
 
 <details><summary>Đi sâu: giới hạn, Ribbon filter, filter theo block của LevelDB</summary>
 
-- **Không giúp range scan.** Wiki tuning: Bloom filter không có ích cho range scan; read amplification của range scan ngắn khoảng `số_file_L0 + số_level_không_rỗng`[^rdb-tune-range]. (Có *prefix Bloom* cho truy vấn theo tiền tố, nhưng cần cấu hình riêng[^rdb-bloom-prefix].)
-- **Không trộn được.** Bloom filter của các SST khác nhau nhìn chung không kết hợp tối ưu được bằng AND/OR; khi gộp hai SST, filter mới được tạo lại từ đầu từ các key của file mới[^rdb-bloom-rebuild].
-- **Ribbon filter.** Thay thế drop-in từ RocksDB 6.15.0: tiết kiệm khoảng 30% dung lượng filter (chủ yếu là RAM) nhưng dùng gấp khoảng 3–4 lần CPU cho filter[^rdb-ribbon].
+- **Không giúp range scan.** Wiki tuning nói Bloom filter không có ích cho range scan, và read amplification của một range scan ngắn khoảng `số_file_L0 + số_level_không_rỗng`[^rdb-tune-range]. (Có *prefix Bloom* cho truy vấn theo tiền tố, nhưng cần cấu hình riêng[^rdb-bloom-prefix].)
+- **Không trộn được.** Bloom filter của các SST khác nhau nhìn chung không kết hợp tối ưu được bằng AND/OR. Khi gộp hai SST, filter mới được tạo lại từ đầu từ các key của file mới[^rdb-bloom-rebuild].
+- **Ribbon filter.** Đây là thay thế drop-in từ RocksDB 6.15.0: tiết kiệm khoảng 30% dung lượng filter (chủ yếu là RAM) nhưng dùng gấp khoảng 3–4 lần CPU cho filter[^rdb-ribbon].
 - **LevelDB.** Nếu có `FilterPolicy`, mỗi table có một filter block trong meta block[^ldb-filterblock].
-- **Tùy chọn, không mặc định.** Ở LevelDB, `FilterPolicy` là cơ chế tùy chọn để giảm số lần đọc đĩa[^ldb-filteropt]; ở crate Rust `rocksdb` nó là `BlockBasedOptions::set_bloom_filter` (xem mục Liên hệ với Rust).
+- **Tùy chọn, không mặc định.** Ở LevelDB, `FilterPolicy` là cơ chế tùy chọn để giảm số lần đọc đĩa[^ldb-filteropt]. Ở crate Rust `rocksdb` nó là `BlockBasedOptions::set_bloom_filter` (xem mục Liên hệ với Rust).
 
 </details>
 
-**Quay lại Q4:** Bloom filter đổi vài bit RAM mỗi key lấy việc bỏ qua hầu hết file không chứa key; nó không thay thế được thứ tự key khi quét khoảng.
+**Quay lại Q4:** với `orders`, Bloom filter đổi vài bit RAM mỗi key lấy việc bỏ qua hầu hết file không chứa key, nên lần kiểm tra idempotency key mới thường không chạm đĩa; nó không thay được thứ tự key khi quét khoảng.
 
 ## 5. B-tree: page, split, WAL và biến thể copy-on-write (Q5)
 
-> **Trả lời ngắn.** B-tree là cây nhiều nhánh cân bằng ("multi-way balanced tree")[^pg-btree-def], mỗi nút là một *page* kích thước cố định (PostgreSQL thường dùng 8 kB[^pg-page8k]); tìm key bằng cách đi từ gốc xuống lá (suy luận của người soạn từ cấu trúc nhiều tầng ở dưới). Chèn vào page đầy thì page bị tách đôi (*split*) và có thể lan lên cha, thậm chí tạo gốc mới làm cây cao thêm một tầng[^pg-split][^pg-rootsplit]. Page bị sửa *tại chỗ*, nên crash giữa chừng có thể để lại trạng thái dở; PostgreSQL áp dụng quy tắc WAL: thay đổi vào file dữ liệu chỉ được ghi sau khi WAL record mô tả chúng đã flush xuống bộ nhớ bền[^pg-wal-concept]; riêng page ghi dở được xử lý bằng full-page write ở dưới[^pg-fpw].
+> **Trả lời ngắn.** B-tree là cây nhiều nhánh cân bằng ("multi-way balanced tree")[^pg-btree-def]. Mỗi nút là một *page* kích thước cố định, và PostgreSQL thường dùng 8 kB[^pg-page8k]. Tìm key bằng cách đi từ gốc xuống lá (suy luận của người soạn từ cấu trúc nhiều tầng ở dưới). Chèn vào page đầy thì page bị tách đôi (*split*), việc này có thể lan lên cha và thậm chí tạo gốc mới làm cây cao thêm một tầng[^pg-rootsplit]. Page bị sửa *tại chỗ* nên crash giữa chừng có thể để lại trạng thái dở. PostgreSQL xử lý bằng quy tắc WAL: thay đổi vào file dữ liệu chỉ được ghi sau khi các WAL record mô tả chúng đã flush xuống bộ nhớ bền[^pg-wal-concept]. Riêng page ghi dở được xử lý bằng full-page write ở dưới.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mục lục sách nhiều tầng. Trang mục lục gốc ghi "A–F → trang 10, G–M → trang 11…"; trang 10 lại chia nhỏ tới từng trang nội dung. Một trang chỉ chứa được ngần ấy dòng; hết chỗ thì xé đôi trang rồi thêm một dòng vào trang cha.
+*Với service `orders`.* Giả sử `orders` không tự dựng engine mà đặt đơn vào bảng `orders` của PostgreSQL hay SQLite, với `id` là khóa chính. Khi đó mỗi lần đổi trạng thái đơn #42 là sửa đúng một row, ở đúng một chỗ, thay vì ghi thêm một bản mới như ở LSM. Mục này giải thích cấu trúc cho phép làm vậy và cái giá của nó: sửa tại chỗ có nghĩa là crash giữa chừng để lại page dở, nên engine phải chuẩn bị sẵn cách khôi phục.
 
-Cấu trúc trong PostgreSQL (chương B-Tree Indexes): đa tầng, mỗi tầng dùng được như một danh sách liên kết đôi các page[^pg-struct]; có một metapage ở vị trí cố định[^pg-meta]; leaf page chứa tuple trỏ tới row của bảng, internal page chứa tuple trỏ xuống tầng kế[^pg-leaf]. Thường hơn 99% số page là leaf[^pg-99]. B-tree xử lý được truy vấn bằng và theo khoảng trên dữ liệu có thể sắp thứ tự[^pg-types-bt]. (Suy luận của người soạn: vì các leaf nối với nhau và sắp theo key nên quét khoảng là đọc liên tiếp các leaf.)
+### 5.1 Cấu trúc cây
 
-Chèn một entry (theo mô tả của PostgreSQL): tìm leaf page; nếu không vừa tuple mới thì *page split* chuyển một phần item sang page mới; split cũng phải chèn một downlink vào page cha, có thể làm cha split theo, "lan lên" đệ quy; khi gốc không còn chỗ cho downlink, *root split* tạo gốc mới cao hơn một tầng[^pg-rootsplit]. Hệ quả (suy luận của người soạn): chiều cao cây chỉ tăng khi gốc bị tách, nên mọi đường đi từ gốc tới lá luôn dài bằng nhau. Với fanout f ≈ 500 (giả định minh họa, phụ thuộc kích thước key) ba tầng nội đã chỉ tới khoảng 1,25 × 10⁸ lá và bốn tầng 6,25 × 10¹⁰; vì thế tìm một key thường chỉ cần vài lần đọc page, và các tầng trên cùng nhiều khả năng nằm sẵn trong cache (suy luận của người soạn; xem [P5·04](../05-storage/04-page-cache-va-direct-io.md)).
+Trong PostgreSQL, B-tree là cấu trúc đa tầng, và mỗi tầng dùng được như một danh sách liên kết đôi các page[^pg-struct]. Ở vị trí cố định có một metapage[^pg-meta]. Leaf page chứa các tuple trỏ tới row của bảng, còn internal page chứa các tuple trỏ xuống tầng kế[^pg-leaf]. Thường hơn 99% số page là leaf[^pg-99].
+
+Vì các leaf nối với nhau và sắp theo key, quét theo khoảng chỉ là đọc liên tiếp các leaf (suy luận của người soạn). Tài liệu PostgreSQL cũng nói B-tree xử lý được truy vấn bằng và truy vấn theo khoảng trên dữ liệu có thể sắp thứ tự[^pg-types-bt]. Sơ đồ dưới là một cây ba tầng với số liệu tự đặt:
 
 ```mermaid
 flowchart TB
@@ -229,78 +283,118 @@ flowchart TB
 
 *Sơ đồ: minh họa của người soạn với số liệu tự đặt, không phải hình trích từ nguồn.*
 
-*Vì sao cần WAL.* Cập nhật B-tree là sửa page *tại chỗ*. SQLite mô tả cách cổ điển (rollback journal): chép nội dung gốc chưa đổi vào một file journal riêng rồi ghi thay đổi thẳng vào file database; sau crash thì phát lại nội dung gốc từ journal để hoàn nguyên[^sqlite-rj]. Cách đảo ngược (WAL): giữ nguyên nội dung gốc trong file database và nối thay đổi vào một file WAL riêng[^sqlite-wal]. PostgreSQL ghi log trước, sửa file dữ liệu sau, nên không phải flush data page ở mỗi lần commit mà vẫn redo được sau crash[^pg-wal-concept][^pg-redo]; chỉ cần flush file WAL, vốn ghi tuần tự[^pg-wal-fewer]. Giao thức WAL/journal và so sánh journal của file system với WAL của database đã trình bày ở [P5·05 mục 2 và mục 8](../05-storage/05-crash-consistency-va-journaling.md), `fsync` đúng chỗ ở [P5·06](../05-storage/06-durability-trong-thuc-te.md); chương này không lặp lại.
+### 5.2 Chèn và tách page
 
-*Torn page (ghi dở).* Một lần ghi page đang dở khi hệ điều hành crash có thể chỉ hoàn thành một phần, để lại page trộn lẫn dữ liệu cũ và mới; dữ liệu thay đổi ở mức row trong WAL không đủ để dựng lại page như vậy, nên PostgreSQL (mặc định `full_page_writes = on`) ghi toàn bộ page vào WAL ở lần sửa đầu tiên của page sau mỗi checkpoint, đổi lại WAL phình thêm[^pg-fpw]. Hai chi tiết đi kèm: header của page có trường đầu ghi WAL entry gần nhất liên quan tới page, và trường thứ hai là checksum nếu bật data checksums[^pg-hdr] (xem thêm [P5·05 mục 7](../05-storage/05-crash-consistency-va-journaling.md) về checksum).
+Chèn một entry diễn ra thế này, theo mô tả của PostgreSQL. Engine tìm leaf page; nếu page không vừa tuple mới thì *page split* chuyển một phần item sang một page mới. Split cũng phải chèn một downlink vào page cha, và nếu cha đầy thì cha cũng split, cứ "lan lên" đệ quy. Khi gốc không còn chỗ cho downlink, một *root split* tạo gốc mới cao hơn một tầng[^pg-rootsplit].
 
-*Biến thể copy-on-write (COW).* Thay vì sửa tại chỗ, dữ liệu B-tree không bị ghi đè: sửa tạo bản mới của page cùng các page tổ tiên tới gốc, rồi mới chuyển con trỏ gốc/primary sang bản mới (mô tả chung của người soạn). redb (crate Rust) là ví dụ: dữ liệu được lưu trong một tập các B+tree copy-on-write[^redb-cow]; mỗi lần commit mặc định chỉ một `fsync` — ghi toàn bộ dữ liệu cùng checksum và số transaction tăng đơn điệu, lật "primary", gọi `fsync`[^redb-1pc]; sau crash thì kiểm tra primary có transaction id lớn hơn và mọi checksum hợp lệ, nếu không thì thay bằng bản thứ cấp[^redb-crash]. Cách này không cần WAL riêng vì "bản mới" chính là ghi mới (nhận xét của người soạn). Nguyên lý COW ở tầng file system: [P5·07](../05-storage/07-raid-va-copy-on-write-fs.md).
+Suy luận của người soạn: chiều cao cây chỉ tăng khi gốc bị tách, nên mọi đường đi từ gốc tới lá luôn dài bằng nhau. Với fanout f ≈ 500 (giả định minh họa, phụ thuộc kích thước key), ba tầng nội đã chỉ tới khoảng 1,25 × 10⁸ lá và bốn tầng tới 6,25 × 10¹⁰. Vì thế tìm một đơn theo id thường chỉ cần vài lần đọc page, và các tầng trên cùng nhiều khả năng nằm sẵn trong cache (suy luận của người soạn; xem [P5·04](../05-storage/04-page-cache-va-direct-io.md)).
+
+### 5.3 Vì sao cần WAL
+
+Cập nhật B-tree là sửa page *tại chỗ*, và giữa chừng máy có thể sập. Có hai cách cổ điển để chuẩn bị cho chuyện đó, và SQLite mô tả cả hai. Cách thứ nhất là rollback journal: chép nội dung gốc chưa đổi vào một file journal riêng, rồi ghi thay đổi thẳng vào file database; sau crash thì phát lại nội dung gốc từ journal để hoàn nguyên[^sqlite-rj]. Cách thứ hai đảo ngược lại: giữ nguyên nội dung gốc trong file database và nối thay đổi vào một file WAL riêng[^sqlite-wal].
+
+PostgreSQL theo cách thứ hai: ghi log trước, sửa file dữ liệu sau. Nhờ vậy nó không phải flush data page ở mỗi lần commit mà vẫn redo được sau crash[^pg-redo]. Chỉ cần flush file WAL, vốn được ghi tuần tự, nên chi phí đồng bộ thấp hơn nhiều[^pg-wal-fewer]. Với `orders`, nghĩa là `COMMIT` một lần đổi trạng thái đơn tốn một lần flush WAL tuần tự, không phải một lần flush page nằm đâu đó giữa bảng.
+
+Giao thức WAL/journal và so sánh journal của file system với WAL của database đã trình bày ở [P5·05 mục 2 và mục 8](../05-storage/05-crash-consistency-va-journaling.md), còn `fsync` đúng chỗ ở [P5·06](../05-storage/06-durability-trong-thuc-te.md). Chương này không lặp lại.
+
+### 5.4 Torn page (ghi dở)
+
+WAL ghi mức row chưa đủ. Nếu hệ điều hành crash giữa lúc ghi một page, lần ghi đó có thể chỉ hoàn thành một phần, để lại một page trộn lẫn dữ liệu cũ và mới[^pg-fpw]. Thay đổi mức row trong WAL không dựng lại được page như vậy. Vì thế PostgreSQL, với `full_page_writes = on` mặc định, ghi toàn bộ page vào WAL ở lần sửa đầu tiên của page sau mỗi checkpoint, và đổi lại WAL phình thêm. Hai chi tiết đi kèm: header của page có trường đầu ghi WAL entry gần nhất liên quan tới page, còn trường thứ hai là checksum nếu bật data checksums[^pg-hdr]. Xem thêm [P5·05 mục 7](../05-storage/05-crash-consistency-va-journaling.md) về checksum.
+
+### 5.5 Biến thể copy-on-write (COW)
+
+Nếu không muốn sửa tại chỗ thì còn một lối khác. Dữ liệu B-tree không bị ghi đè: mỗi lần sửa tạo bản mới của page cùng các page tổ tiên tới gốc, rồi mới chuyển con trỏ gốc (primary) sang bản mới (mô tả chung của người soạn). redb, một crate Rust, là ví dụ: dữ liệu được lưu trong một tập các B+tree copy-on-write[^redb-cow].
+
+Mỗi lần commit mặc định chỉ tốn một `fsync`. Redb ghi toàn bộ dữ liệu cùng checksum và một số transaction tăng đơn điệu, lật "primary", rồi gọi `fsync`[^redb-1pc]. Sau crash, nó kiểm tra primary có transaction id lớn hơn và mọi checksum hợp lệ; nếu không thì thay bản cập nhật dở bằng bản thứ cấp[^redb-crash]. Cách này không cần WAL riêng vì "bản mới" chính là lần ghi mới (nhận xét của người soạn). Nguyên lý COW ở tầng file system nằm ở [P5·07](../05-storage/07-raid-va-copy-on-write-fs.md).
 
 <details><summary>Đi sâu: layout page PostgreSQL, giới hạn entry, dọn rác, HOT</summary>
 
-- **Layout page.** Mỗi page có header 24 byte; sau đó là mảng *item identifier* (mỗi cái 4 byte), item được cấp phát *ngược* từ cuối vùng trống; vì item identifier không bị dời cho đến khi giải phóng nên chỉ số của nó dùng làm tham chiếu lâu dài tới item dù item có bị dời trong page để gom chỗ trống[^pg-layout1][^pg-layout2].
+- **Layout page.** Mỗi page có header 24 byte[^pg-layout1]. Sau header là mảng *item identifier* (mỗi cái 4 byte), còn item được cấp phát *ngược* từ cuối vùng trống. Item identifier không bị dời cho đến khi được giải phóng, nên chỉ số của nó dùng làm tham chiếu lâu dài tới item dù item có bị dời trong page để gom chỗ trống[^pg-layout2].
 - **Giới hạn entry.** Một entry index không được vượt khoảng một phần ba page (sau khi TOAST nén nếu có)[^pg-btintro].
-- **Rác do MVCC.** B-tree của PostgreSQL xóa dần các index tuple "version churn" bằng các lượt *bottom-up index deletion* kích hoạt khi dự đoán một page split do version churn[^pg-bottomup]; một lượt VACUUM vẫn cần để dọn tổng thể[^pg-vacuum]. Nghĩa là B-tree cũng có "compaction" của nó, chỉ nhỏ và cục bộ hơn LSM (nhận xét của người soạn).
-- **HOT.** MVCC làm update phải thêm phiên bản row mới, có thể cần thêm index entry cho mỗi row được update[^pg-hot1]; tối ưu *heap-only tuple* tránh điều đó khi update không đổi cột nào được index tham chiếu (không tính summarizing index như BRIN) và page chứa row cũ còn đủ chỗ[^pg-hot2][^pg-hot-space]. Chi tiết MVCC: [Chương 07](07-transaction.md).
-- **SQLite.** SQLite dùng hai biến thể: *table b-tree* khóa nguyên 64-bit và lưu mọi dữ liệu ở lá[^sqlite-bt0]; *index b-tree* khóa tùy ý, không lưu dữ liệu[^sqlite-bt].
-- **B-tree trong bộ nhớ của Rust std.** `BTreeMap` cũng là B-tree nhưng tối ưu cho cache CPU chứ không cho page đĩa: mỗi nút chứa B-1 tới 2B-1 phần tử trong một mảng liền kề[^std-btree]; xem mục Liên hệ với Rust.
+- **Rác do MVCC.** B-tree của PostgreSQL xóa dần các index tuple "version churn" bằng các lượt *bottom-up index deletion*; mỗi lượt được kích hoạt khi dự đoán sắp có một page split do version churn[^pg-bottomup]. Dù vậy một lượt VACUUM vẫn cần để dọn tổng thể[^pg-vacuum]. Nghĩa là B-tree cũng có "compaction" của nó, chỉ nhỏ và cục bộ hơn LSM (nhận xét của người soạn).
+- **HOT.** MVCC làm mỗi update phải thêm một phiên bản row mới, và việc đó có thể cần thêm index entry cho mỗi row được update[^pg-hot1]. Tối ưu *heap-only tuple* tránh được điều đó khi update không đổi cột nào mà index tham chiếu (không tính summarizing index như BRIN)[^pg-hot2]. Điều kiện còn lại là page chứa row cũ phải còn đủ chỗ[^pg-hot-space]. Chi tiết MVCC ở [Chương 07](07-transaction.md).
+- **SQLite.** SQLite dùng hai biến thể. *Table b-tree* khóa nguyên 64-bit và lưu mọi dữ liệu ở lá[^sqlite-bt0]. *Index b-tree* khóa tùy ý và không lưu dữ liệu[^sqlite-bt].
+- **B-tree trong bộ nhớ của Rust std.** `BTreeMap` cũng là B-tree nhưng tối ưu cho cache CPU chứ không cho page đĩa: mỗi nút chứa B-1 tới 2B-1 phần tử trong một mảng liền kề[^std-btree]. Xem mục Liên hệ với Rust.
 
 </details>
 
-**Quay lại Q5:** B-tree chia dữ liệu thành page cố định, chèn đầy thì tách và có thể lan lên gốc; vì sửa tại chỗ nên cần WAL (hoặc COW) để sống sót qua crash giữa chừng.
+**Quay lại Q5:** B-tree chia dữ liệu thành page cố định, chèn đầy thì tách và có thể lan lên gốc. Vì sửa tại chỗ nên cần WAL (hoặc COW) để sống sót qua crash giữa chừng; với `orders` trên PostgreSQL, một lần đổi trạng thái đơn là một lần sửa row tại chỗ kèm một WAL record.
 
 ## 6. LSM-tree vs B-tree: đánh đổi (Q6)
 
-> **Trả lời ngắn.** LSM-tree *hoãn và gộp lô* thay đổi chỉ mục[^lsm-batch] (ở LevelDB: chỉ bằng đọc/ghi hàng loạt, tránh seek đắt[^ldb-bulk]) và trả bằng việc *viết lại dữ liệu nhiều lần* qua compaction cùng đọc phải xét nhiều file[^rdb-wa33][^rdb-tune-ra]. B-tree sửa page tại chỗ nên (suy luận của người soạn) một lần đọc đi theo một đường gốc → lá, nhưng mỗi cập nhật là ghi ngẫu nhiên kèm WAL (và đôi khi cả page đầy đủ)[^pg-wal-concept][^pg-fpw]. Không có bên nào thắng chung; chọn theo tỉ lệ ghi/đọc và loại tải (nhận xét của người soạn).
+> **Trả lời ngắn.** LSM-tree *hoãn và gộp lô* thay đổi của chỉ mục[^lsm-batch]. Ở LevelDB, việc đó chỉ dùng đọc/ghi hàng loạt và tránh seek đắt[^ldb-bulk]. Cái giá là *viết lại dữ liệu nhiều lần* qua compaction[^rdb-wa33]. Đọc cũng phải xét nhiều file[^rdb-tune-ra]. B-tree sửa page tại chỗ, nên (suy luận của người soạn) một lần đọc đi theo một đường gốc → lá, nhưng mỗi cập nhật là một lần ghi ngẫu nhiên kèm WAL[^pg-wal-concept]. Đôi khi còn phải ghi cả page đầy đủ[^pg-fpw]. Không bên nào thắng chung; chọn theo tỉ lệ ghi/đọc và loại tải (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): LSM giống hộp thư đến — nhận thư rất nhanh, nhưng hôm nào cũng phải dọn và tìm một lá thư cũ có thể phải lật nhiều ngăn. B-tree giống tủ hồ sơ sắp theo vần — tìm nhanh và có một chỗ duy nhất cho mỗi hồ sơ, nhưng mỗi lần nhét thêm là phải mở đúng ngăn và đôi khi tách ngăn.
+*Với service `orders`.* Giả sử `orders` có hai kiểu ngày: ngày thường chủ yếu là khách tra đơn của mình (đọc nhiều), còn ngày sale thì đơn đổ về liên tục (ghi nhiều). Hai kiểu tải này kéo việc chọn engine về hai phía ngược nhau. Mục này gom mọi thứ từ mục 1–5 vào một bảng để ta thấy mỗi engine tốn gì ở đâu (nhận xét của người soạn: kiểu tải là giả định).
 
-Cùng đặt cạnh nhau, chỉ dùng các điểm có nguồn:
+Bảng dưới chỉ dùng các điểm có nguồn:
 
 | Tiêu chí | LSM-tree | B-tree |
 |---|---|---|
-| Đường ghi | log tuần tự + memtable (chèn vào memtable không tốn I/O)[^lsm-log][^lsm-c0] | tìm đúng leaf và sửa page tại chỗ; WAL ghi trước[^pg-wal-concept] |
+| Đường ghi | log tuần tự[^lsm-log] + memtable (chèn vào memtable không tốn I/O[^lsm-c0]) | tìm đúng leaf và sửa page tại chỗ; WAL ghi trước[^pg-wal-concept] |
 | Ghi lại dữ liệu | compaction viết lại dữ liệu qua nhiều level (ví dụ ~33 ở cấu hình mẫu)[^rdb-wa33] | WAL + page; thêm full page image sau checkpoint[^pg-fpw] |
 | Đọc điểm | xét memtable + nhiều file; Bloom filter cắt phần lớn[^rdb-tune-ra] | cây nhiều tầng, đi từ gốc xuống lá (suy luận của người soạn từ cấu trúc nhiều tầng[^pg-struct]) |
 | Đọc theo khoảng | phải xét mọi file L0 và từng level không rỗng, Bloom không giúp[^rdb-tune-range] | duyệt lá nối tiếp (suy luận của người soạn) |
-| Chỗ trống / rác | bản cũ và tombstone nằm lại tới khi compaction[^ldb-drop] | page chưa đầy sau split (suy luận của người soạn); rác MVCC dọn bằng bottom-up deletion + VACUUM[^pg-bottomup][^pg-vacuum] |
+| Chỗ trống / rác | bản cũ và tombstone nằm lại tới khi compaction[^ldb-drop] | page chưa đầy sau split (suy luận của người soạn); rác MVCC dọn bằng bottom-up deletion + VACUUM[^pg-bottomup] |
 | Độ giật tải nền | compaction nền, tiered đặc biệt giật[^rdb-univ-spiky]; L0 tích tụ có thể phải làm chậm ghi[^ldb-slowdown2] | checkpoint/split (không có nguồn trong chương này) |
 | Cập nhật tại chỗ | không (SSTable bất biến)[^bt-sstable] | có (trừ biến thể COW như redb)[^redb-cow] |
 
-Điểm cốt lõi: nơi LSM nâng hiệu năng ghi là *hoãn và gộp lô*, như bài gốc nói[^lsm-batch], và bài gốc cũng nói LSM-tree hữu ích nhất khi insert chỉ mục nhiều hơn find[^lsm-finds]. Động lực của bài gốc: với chỉ mục theo account-id trên bảng History tăng nhanh trong ví dụ TPC-A, B-tree chuẩn về thực chất làm gấp đôi chi phí I/O của giao dịch để duy trì chỉ mục đó theo thời gian thực[^lsm-double]. (Cảnh báo, suy luận của người soạn: bài viết năm 1996 với mô hình chi phí cánh tay đĩa; không áp thẳng con số đó cho NVMe ngày nay.) Với SSD, nhớ rằng cả hai đều chồng lên write amplification của FTL ([P5·01 mục 4](../05-storage/01-thiet-bi-luu-tru.md)).
+### 6.1 Điểm cốt lõi
 
-Hai lưu ý khác: (1) ranh giới giữa hai họ mờ dần — C-Store tách "Writeable Store" nhận ghi nhanh và "Read-optimized Store" nhận chuyển lô qua một *tuple mover*[^cs-ws-rs], và bài Bigtable tự nêu cách làm của C-Store và Bigtable giống nhau ở chỗ có hai cấu trúc dữ liệu — một cho ghi gần đây và một cho dữ liệu sống lâu — cùng một cơ chế chuyển dữ liệu từ dạng này sang dạng kia[^bt-cstore]; (2) redb (B+tree COW) và các engine LSM đều nhận ACID/MVCC ở tầng trên, nên so sánh *độ cô lập* thuộc [Chương 07](07-transaction.md) chứ không phải thuộc cấu trúc lưu trữ.
+LSM nâng hiệu năng ghi ở chỗ *hoãn và gộp lô*, như bài gốc nói[^lsm-batch]. Chính bài gốc cũng nói LSM-tree hữu ích nhất khi insert chỉ mục nhiều hơn find[^lsm-finds]. Động lực của bài là chỉ mục theo account-id trên bảng History tăng nhanh trong ví dụ TPC-A: B-tree chuẩn về thực chất làm gấp đôi chi phí I/O của giao dịch để duy trì chỉ mục đó theo thời gian thực[^lsm-double]. Cảnh báo (suy luận của người soạn): đây là bài năm 1996 với mô hình chi phí cánh tay đĩa, nên đừng áp thẳng con số đó cho NVMe ngày nay. Với SSD, cả hai họ đều chồng lên write amplification của FTL ([P5·01 mục 4](../05-storage/01-thiet-bi-luu-tru.md)).
+
+### 6.2 Hai lưu ý
+
+Thứ nhất, ranh giới giữa hai họ mờ dần. C-Store tách một "Writeable Store" nhận ghi nhanh và một "Read-optimized Store" nhận dữ liệu chuyển lô qua một *tuple mover*[^cs-ws-rs]. Bài Bigtable cũng tự nêu rằng cách làm của C-Store và Bigtable giống nhau ở chỗ có hai cấu trúc dữ liệu, một cho ghi gần đây và một cho dữ liệu sống lâu, cùng một cơ chế chuyển dữ liệu từ dạng này sang dạng kia[^bt-cstore].
+
+Thứ hai, redb (B+tree COW) và các engine LSM đều nhận ACID/MVCC ở tầng trên. Vì vậy so sánh *độ cô lập* thuộc [Chương 07](07-transaction.md) chứ không thuộc cấu trúc lưu trữ.
 
 <details><summary>Đi sâu: cách đo và cách hỏi trước khi chọn</summary>
 
-- **Đo cái gì.** Dùng ba amplification ở mục 3 làm ngôn ngữ chung: wiki RocksDB nói rõ compaction là chìa khóa để đổi qua lại giữa ba thứ đó[^rdb-tune-amp]. Với B-tree, khái niệm tương ứng là: byte ghi vào WAL + byte page ghi lúc checkpoint trên byte logic (suy luận của người soạn; chương này không có nguồn đo).
+- **Đo cái gì.** Dùng ba amplification ở mục 3 làm ngôn ngữ chung: wiki RocksDB nói rõ compaction là chìa khóa để đổi qua lại giữa ba thứ đó[^rdb-tune-amp]. Với B-tree, khái niệm tương ứng là byte ghi vào WAL cộng byte page ghi lúc checkpoint, chia cho byte logic (suy luận của người soạn; chương này không có nguồn đo).
 - **Câu hỏi nên đặt** (nhận xét của người soạn): ghi hay đọc chiếm đa số? Có range scan dài không? Dữ liệu nóng vừa RAM không? Chịu được độ trễ đuôi (tail latency) do compaction không? Cần xóa dữ liệu thật sự (tuân thủ) hay chấp nhận tombstone nằm lại? Mỗi câu ánh xạ về một dòng của bảng.
-- **Công cụ thực tế.** RocksDB còn có `ttl` cho compaction và kiểu FIFO; xem họ thuật toán ở mục 3[^rdb-taxonomy] (nhận xét của người soạn: cả hai liên quan tới dữ liệu hết hạn, nhưng chương này không đọc chi tiết cơ chế FIFO).
+- **Công cụ thực tế.** RocksDB còn có `ttl` cho compaction và kiểu FIFO; xem họ thuật toán ở mục 3[^rdb-taxonomy]. Nhận xét của người soạn: cả hai liên quan tới dữ liệu hết hạn, nhưng chương này không đọc chi tiết cơ chế FIFO.
 
 </details>
 
-**Quay lại Q6:** LSM đổi chi phí ghi ngẫu nhiên lấy chi phí viết lại và đọc nhiều file; B-tree đổi ngược lại; chọn theo tỉ lệ ghi/đọc, không có đáp án chung.
+**Quay lại Q6:** LSM đổi chi phí ghi ngẫu nhiên lấy chi phí viết lại và đọc nhiều file; B-tree đổi ngược lại. `orders` chọn theo tỉ lệ ghi/đọc của chính nó, vì không có đáp án chung.
 
 ## 7. Secondary index, clustered index, covering index (Q7)
 
-> **Trả lời ngắn.** Chỉ mục chính (*clustered*) là nơi chính các row nằm theo thứ tự khóa; chỉ mục phụ (*secondary / non-clustered*) là cấu trúc riêng chứa khóa chỉ mục kèm con trỏ tới row[^ms-clustered][^ms-nonclustered]. PostgreSQL thì lưu row ở một "heap" và *mọi* index của nó đều là secondary[^pg-secondary]. *Covering index* chứa luôn cột cần thiết để truy vấn trả lời chỉ từ index, khỏi đụng vào bảng[^pg-ios][^pg-covering].
+> **Trả lời ngắn.** Chỉ mục chính (*clustered*) là nơi chính các row nằm theo thứ tự khóa[^ms-clustered]. Chỉ mục phụ (*secondary / non-clustered*) là cấu trúc riêng chứa khóa chỉ mục kèm con trỏ tới row[^ms-nonclustered]. PostgreSQL lưu row ở một "heap" và *mọi* index của nó đều là secondary[^pg-secondary]. *Covering index* chứa luôn các cột cần thiết để truy vấn trả lời chỉ từ index, khỏi đụng vào bảng[^pg-covering].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư viện. Sách xếp trên kệ theo mã số — đó là clustered: tìm theo mã số thì đi thẳng. Cuốn "mục lục theo tác giả" chỉ ghi tên tác giả và mã số kệ — đó là secondary: tra xong còn phải ra kệ lấy sách (một bước nữa). Nếu mục lục có chép luôn nhan đề thì đọc nhan đề không cần ra kệ — đó là covering.
+*Với service `orders`.* Cho tới giờ ta tra đơn theo id. Nhưng màn hình "đơn của tôi" tra theo email: `SELECT total FROM orders WHERE email = $1`. Bảng chỉ sắp theo một thứ tự, nên để tra theo email `orders` cần thêm một cấu trúc nữa. Mục này trả lời cấu trúc đó trỏ về row bằng cách nào, nó tốn gì khi ghi, và khi nào truy vấn trên khỏi phải đụng tới bảng.
 
-*Heap + secondary (PostgreSQL).* Mọi index của PostgreSQL là secondary: lưu tách khỏi vùng dữ liệu chính (heap)[^pg-secondary]. Vì thế index scan thường phải lấy dữ liệu cả từ index lẫn heap cho mỗi row[^pg-ios], và các row do index trỏ tới có thể nằm bất kỳ đâu trong heap nên truy cập heap là truy cập ngẫu nhiên, chậm trên đĩa quay[^pg-heaprand]. Leaf của B-tree PostgreSQL chứa tuple trỏ tới row của bảng[^pg-leaf].
+### 7.1 Heap + secondary (PostgreSQL)
 
-*Clustered (SQL Server, SQLite).* SQL Server: clustered index sắp xếp và lưu các row dữ liệu theo giá trị khóa; mỗi bảng chỉ có một clustered index vì dữ liệu chỉ nằm theo một thứ tự[^ms-clustered]. Với bảng có clustered index, "row locator" của non-clustered index chính là *khóa clustered*[^ms-locator]. Hệ quả (suy luận của người soạn): tra theo secondary index thì đi hai lần cây — lần một trong secondary để lấy khóa chính, lần hai trong clustered để lấy row — nên khóa chính dài làm mọi secondary index phình theo. SQLite có cùng ý: bảng `WITHOUT ROWID` là bảng dùng clustered index làm khóa chính[^sqlite-norowid], và tài liệu coi đó chỉ là tối ưu, không thêm khả năng mới[^sqlite-norowid3]; lợi ích duy nhất là đôi khi dùng ít chỗ và/hoặc nhanh hơn một chút[^sqlite-norowid2].
+Mọi index của PostgreSQL là secondary: chúng được lưu tách khỏi vùng dữ liệu chính, tức heap[^pg-secondary]. Vì thế một index scan thường phải lấy dữ liệu cả từ index lẫn heap cho mỗi row[^pg-ios]. Các row do index trỏ tới có thể nằm bất kỳ đâu trong heap, nên truy cập heap là truy cập ngẫu nhiên, chậm trên đĩa quay[^pg-heaprand]. Leaf của B-tree PostgreSQL chứa tuple trỏ tới row của bảng[^pg-leaf].
 
-*Gom cụm tại chỗ ở PostgreSQL.* Lệnh `CLUSTER` sắp lại vật lý bảng theo một index, nhưng chỉ là thao tác một lần: các update sau đó không được giữ theo thứ tự đó[^pg-cluster]; nó còn khóa `ACCESS EXCLUSIVE` bảng suốt lúc chạy[^pg-cluster-lock].
+### 7.2 Clustered (SQL Server, SQLite)
 
-*Covering và index-only scan.* PostgreSQL có *index-only scan* trả lời truy vấn chỉ từ index mà không truy cập heap, với hai điều kiện: loại index phải hỗ trợ (B-tree luôn có), và truy vấn chỉ tham chiếu cột có trong index[^pg-ios-cond]. Còn một điều kiện nữa: phải xác minh row *nhìn thấy được* với snapshot MVCC, mà thông tin hiển thị chỉ nằm ở heap, nên index-only scan chỉ có lợi nếu một phần đáng kể page heap có bit all-visible[^pg-vis][^pg-ios-win]. *Covering index* là index thiết kế riêng để chứa các cột truy vấn cần; PostgreSQL cho khai báo cột "payload" không thuộc khóa tìm kiếm bằng `INCLUDE`[^pg-covering][^pg-include].
+Với SQL Server, clustered index sắp xếp và lưu các row dữ liệu ngay theo giá trị khóa. Vì dữ liệu chỉ nằm theo một thứ tự nên mỗi bảng chỉ có một clustered index[^ms-clustered]. Với bảng có clustered index, "row locator" của non-clustered index chính là *khóa clustered*[^ms-locator].
 
-*Chỉ mục nhiều cột.* B-tree nhiều cột dùng được với điều kiện trên bất kỳ tập con cột nào nhưng hiệu quả nhất khi có ràng buộc ở các cột đầu (trái nhất)[^pg-multicol] — nên thứ tự cột trong index quan trọng.
+Suy luận của người soạn từ đó: tra theo secondary index phải đi hai lần cây, một lần trong secondary để lấy khóa chính và một lần trong clustered để lấy row. Cho nên khóa chính dài làm mọi secondary index phình theo. Với `orders`, nếu khóa chính là một chuỗi dài thì index theo email cũng mang chuỗi đó trong từng entry.
 
-*Giá phải trả khi ghi.* Mỗi index thêm là thêm chỗ phải cập nhật: PostgreSQL ghi nhận update có thể cần thêm index entry cho mỗi row được cập nhật[^pg-hot1]. Ở LSM, `fjall` ghi chú trong ví dụ của docs rằng mỗi keyspace là một LSM-tree vật lý riêng[^fjall-keyspace] (nhận xét của người soạn: nếu mỗi index được đặt trong một keyspace riêng thì cập nhật nhiều index là ghi vào nhiều cây, và tính nguyên tử giữa chúng cần cơ chế ở trên — fjall có "cross-keyspace atomic semantics"[^fjall-features]).
+SQLite có cùng ý. Bảng `WITHOUT ROWID` là bảng dùng clustered index làm khóa chính[^sqlite-norowid]. Tài liệu coi đó chỉ là một tối ưu, không thêm khả năng mới[^sqlite-norowid3]. Lợi ích duy nhất là đôi khi dùng ít chỗ và/hoặc nhanh hơn một chút[^sqlite-norowid2].
+
+PostgreSQL không có clustered index theo nghĩa đó, nhưng có lệnh `CLUSTER` sắp lại vật lý bảng theo một index. Đây chỉ là thao tác một lần: các update sau đó không được giữ theo thứ tự đó[^pg-cluster]. Lệnh còn khóa `ACCESS EXCLUSIVE` bảng suốt lúc chạy[^pg-cluster-lock].
+
+### 7.3 Covering và index-only scan
+
+Quay lại truy vấn theo email. Nếu index chứa luôn cột `total` thì engine trả lời chỉ từ index, khỏi vào heap. PostgreSQL gọi đó là *index-only scan*, và nó cần hai điều kiện. Loại index phải hỗ trợ (B-tree luôn có), và truy vấn chỉ được tham chiếu cột có trong index[^pg-ios-cond].
+
+Còn một điều kiện nữa. Engine phải xác minh row *nhìn thấy được* với snapshot MVCC của truy vấn, mà thông tin hiển thị chỉ nằm ở heap. Vì vậy index-only scan chỉ có lợi nếu một phần đáng kể page heap có bit all-visible[^pg-ios-win].
+
+*Covering index* là index thiết kế riêng để chứa các cột truy vấn cần[^pg-covering]. PostgreSQL cho khai báo cột "payload" không thuộc khóa tìm kiếm bằng `INCLUDE`[^pg-include]. Đối với `orders`, đó sẽ là index khóa theo `email` với `total` đặt trong `INCLUDE`.
+
+### 7.4 Index nhiều cột và giá phải trả khi ghi
+
+B-tree nhiều cột dùng được với điều kiện trên bất kỳ tập con cột nào, nhưng hiệu quả nhất khi có ràng buộc ở các cột đầu (trái nhất)[^pg-multicol]. Nên thứ tự cột trong index quan trọng.
+
+Mỗi index thêm là thêm chỗ phải cập nhật. PostgreSQL ghi nhận một update có thể cần thêm index entry cho mỗi row được cập nhật[^pg-hot1]. Ở LSM thì `fjall` ghi chú trong ví dụ của docs rằng mỗi keyspace là một LSM-tree vật lý riêng[^fjall-keyspace]. Nhận xét của người soạn: nếu mỗi index nằm trong một keyspace riêng thì cập nhật nhiều index là ghi vào nhiều cây, và tính nguyên tử giữa chúng cần cơ chế bảo đảm; fjall có "cross-keyspace atomic semantics"[^fjall-features].
 
 ```mermaid
 flowchart LR
@@ -316,27 +410,35 @@ flowchart LR
 
 *Sơ đồ: minh họa của người soạn từ các chú thích ở trên, không phải hình trích từ nguồn.*
 
-<details><summary>Đi sâu: HOT, fillfactor, visibility map, covering unique, LSM</summary>
+<details><summary>Đi sâu: HOT, fillfactor, visibility map, LSM</summary>
 
-- **HOT và fillfactor.** Heap-only tuple chỉ khả thi nếu update không đổi cột nào được index tham chiếu (không tính summarizing index như BRIN[^pg-hot2]) và page chứa row cũ còn đủ chỗ[^pg-hot-space]; hạ `fillfactor` của bảng làm tăng khả năng đủ chỗ[^pg-hot3]. Khi đó các phiên bản cũ có thể được dọn ngay trong hoạt động bình thường (kể cả `SELECT`) thay vì chờ vacuum định kỳ[^pg-hot4].
-- **Visibility map.** PostgreSQL theo dõi, cho mỗi page heap, xem mọi row trong page có được coi là nhìn thấy với mọi transaction hay không; chỉ khi đó index-only scan bỏ qua được việc truy cập heap[^pg-vismap]. Vì thế index-only scan chỉ có lợi nếu một phần đáng kể page heap có bit all-visible[^pg-ios-win]; bảng có phần lớn row không đổi thì rất phổ biến và scan loại này rất hữu ích trong thực tế[^pg-ios-unch].
-- **Chỉ mục trên LSM** (suy luận của người soạn). Vì SSTable bất biến, một cách cài secondary index trên engine LSM là thêm một keyspace/cây khác (như keyspace riêng ở `fjall` ở trên) thay vì cấu trúc gắn trong bảng; chương này không có nguồn mô tả cách một hệ cụ thể (RocksDB, Cassandra…) tổ chức secondary index nên không đi xa hơn.
+- **HOT và fillfactor.** Heap-only tuple chỉ khả thi nếu update không đổi cột nào được index tham chiếu (không tính summarizing index như BRIN)[^pg-hot2]. Page chứa row cũ cũng phải còn đủ chỗ[^pg-hot-space]. Hạ `fillfactor` của bảng làm tăng khả năng đủ chỗ[^pg-hot3]. Khi đó các phiên bản cũ có thể được dọn ngay trong hoạt động bình thường (kể cả `SELECT`) thay vì chờ vacuum định kỳ[^pg-hot4].
+- **Visibility map.** PostgreSQL theo dõi, cho mỗi page heap, xem mọi row trong page có đủ cũ để được coi là nhìn thấy với mọi transaction hiện tại và tương lai hay không[^pg-vismap]. Chỉ khi đó index-only scan mới bỏ qua được việc truy cập heap, và vì vậy kiểu scan này chỉ có lợi khi một phần đáng kể page heap có bit all-visible[^pg-ios-win]. Bảng có phần lớn row không đổi thì rất phổ biến, và scan loại này rất hữu ích trong thực tế[^pg-ios-unch]. Lý do cần cả heap: thông tin hiển thị không nằm trong index entry mà chỉ nằm ở heap[^pg-vis].
+- **Chỉ mục trên LSM** (suy luận của người soạn). Vì SSTable bất biến, một cách cài secondary index trên engine LSM là thêm một keyspace/cây khác (như keyspace riêng ở `fjall` ở trên) thay vì cấu trúc gắn trong bảng. Chương này không có nguồn mô tả cách một hệ cụ thể (RocksDB, Cassandra…) tổ chức secondary index nên không đi xa hơn.
 
 </details>
 
-**Quay lại Q7:** clustered là row nằm ngay trong cây khóa; secondary là cây riêng trỏ về row; covering chép thêm cột vào index để khỏi quay lại bảng — mỗi cái đổi chỗ trống và chi phí ghi lấy tốc độ đọc.
+**Quay lại Q7:** clustered là row nằm ngay trong cây khóa; secondary là cây riêng trỏ về row; covering chép thêm cột vào index để khỏi quay lại bảng. Mỗi cái đổi chỗ trống và chi phí ghi lấy tốc độ đọc; với `orders`, index theo email có `INCLUDE (total)` là cách truy vấn "đơn của tôi" khỏi vào heap.
 
 ## 8. OLTP vs OLAP, lưu theo cột và nén (Q8)
 
-> **Trả lời ngắn.** Theo C-Store, DBMS lưu theo hàng (mọi thuộc tính của một bản ghi nằm liền nhau) chỉ cần một lần ghi đĩa để đẩy cả bản ghi ra, nên hợp ứng dụng kiểu OLTP[^cs-row][^cs-oltp]. Hệ hướng tới truy vấn thăm dò trên lượng dữ liệu lớn thì cần *read-optimized*; lưu theo cột (mỗi cột nằm liền nhau) chỉ cần đọc các cột truy vấn dùng[^cs-col], và với truy vấn tổng hợp trên rất nhiều bản ghi thì có lợi thế hiệu năng đáng kể[^cs-agg]. Dữ liệu cùng cột dễ nén hơn[^ab-compress], và nén giảm thời gian I/O[^ab-perf]. (Cách nói gọn "OLTP = nhiều giao dịch nhỏ trên từng bản ghi; OLAP = thường tổng hợp trên vài cột" là của người soạn.)
+> **Trả lời ngắn.** DBMS lưu theo hàng (mọi thuộc tính của một bản ghi nằm liền nhau) chỉ cần một lần ghi đĩa để đẩy cả bản ghi ra, nên hợp ứng dụng kiểu OLTP[^cs-row]. Hệ hướng tới truy vấn thăm dò trên lượng dữ liệu lớn thì cần *read-optimized*[^cs-oltp]. Lưu theo cột (mỗi cột nằm liền nhau) chỉ cần đọc các cột truy vấn dùng[^cs-col]. Với truy vấn tổng hợp trên rất nhiều bản ghi, nó có lợi thế hiệu năng đáng kể[^cs-agg]. Dữ liệu cùng cột dễ nén hơn[^ab-compress]. Nén lại giảm thời gian I/O[^ab-perf]. Cách nói gọn "OLTP = nhiều giao dịch nhỏ trên từng bản ghi; OLAP = thường tổng hợp trên vài cột" là của người soạn.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảng tính 100 cột × 1 tỉ dòng. Xử lý đơn hàng cần "mở dòng của đơn #123, sửa 3 ô" — rất hợp nếu cả dòng nằm sát nhau. Báo cáo cần "tổng cột doanh_thu theo ngày" — mở cả dòng chỉ để lấy 2 ô là phí 98% I/O; nếu mỗi cột nằm riêng, chỉ đọc 2 cột.
+*Với service `orders`.* Cùng một bảng `orders` phải phục vụ hai việc rất khác nhau. Việc thứ nhất là xử lý đơn: mở đơn #123, sửa vài trường, ghi lại. Việc thứ hai là báo cáo: "tổng doanh thu theo ngày trong quý này", tức quét hàng chục triệu đơn nhưng chỉ cần hai cột là `created_at` và `total`. Nếu mỗi đơn nằm trọn trong một khối liền nhau trên đĩa thì việc thứ nhất rất nhanh, còn việc thứ hai buộc phải đọc cả những cột không dùng tới (nhận xét của người soạn). Mục này giải thích vì sao có hai họ thiết kế tách nhau.
 
-*Hai loại tải.* C-Store (Stonebraker và cộng sự, VLDB 2005) mô tả các DBMS lưu theo hàng — mọi thuộc tính của một bản ghi đặt liền nhau — thì một lần ghi đĩa đủ đẩy cả bản ghi ra, nên hiệu năng ghi cao; họ gọi hệ này là *write-optimized*, đặc biệt hiệu quả với ứng dụng kiểu OLTP; ngược lại hệ hướng tới truy vấn thăm dò (ad-hoc) trên lượng dữ liệu lớn nên *read-optimized*[^cs-row][^cs-oltp]. Kho dữ liệu (data warehouse) là một lớp read-optimized[^cs-wh]; mô hình điển hình trong đó là nạp lô dữ liệu mới định kỳ, rồi một thời gian dài truy vấn ad-hoc[^cs-bulk]. TPC-H, bộ benchmark cho loại tải này, tự mô tả là benchmark *decision support* gồm một bộ truy vấn ad-hoc hướng nghiệp vụ và các thay đổi dữ liệu đồng thời[^tpch]. (Mô hình tổ chức dữ liệu giữa hệ vận hành và hệ phân tích — ETL, warehouse, lake — thuộc [Chương 13](13-kien-truc-he-du-lieu.md).)
+### 8.1 Hai loại tải
 
-*Vì sao lưu theo cột.* Với kiến trúc column store, DBMS chỉ cần đọc giá trị của các cột mà truy vấn đòi hỏi và tránh đưa các thuộc tính không liên quan vào bộ nhớ[^cs-col]; trong môi trường kho dữ liệu, nơi truy vấn điển hình là tính tổng hợp trên rất nhiều bản ghi, column store có lợi thế hiệu năng đáng kể[^cs-agg]. Abadi–Madden–Hachem (SIGMOD 2008) nêu cùng ý: column store hiệu quả I/O hơn với truy vấn chỉ đọc vì chỉ đọc các thuộc tính truy vấn dùng[^ab-io], nhưng họ cũng cảnh báo rằng *giả vờ* có column store trên một row store (chia dọc schema hoặc index mọi cột) không đủ: muốn hưởng đủ lợi ích phải thay đổi cả tầng lưu trữ lẫn bộ thực thi truy vấn[^ab-concl].
+C-Store (Stonebraker và cộng sự, VLDB 2005) mô tả các DBMS lưu theo hàng, nghĩa là mọi thuộc tính của một bản ghi đặt liền nhau. Với kiến trúc đó một lần ghi đĩa đủ đẩy cả bản ghi ra, nên hiệu năng ghi cao; họ gọi hệ này là *write-optimized*[^cs-row]. Nó đặc biệt hiệu quả với ứng dụng kiểu OLTP, còn các hệ nhắm tới truy vấn ad-hoc trên lượng dữ liệu lớn thì nên là *read-optimized*[^cs-oltp].
+
+Kho dữ liệu (data warehouse) là một lớp read-optimized[^cs-wh]. Mô hình điển hình ở đó là nạp lô dữ liệu mới định kỳ, rồi một thời gian dài truy vấn ad-hoc[^cs-bulk]. TPC-H, bộ benchmark cho loại tải này, tự mô tả là benchmark *decision support* gồm một bộ truy vấn ad-hoc hướng nghiệp vụ và các thay đổi dữ liệu đồng thời[^tpch]. Mô hình tổ chức dữ liệu giữa hệ vận hành và hệ phân tích (ETL, warehouse, lake) thuộc [Chương 13](13-kien-truc-he-du-lieu.md).
+
+### 8.2 Vì sao lưu theo cột
+
+Với kiến trúc column store, DBMS chỉ cần đọc giá trị của các cột mà truy vấn đòi hỏi, và tránh đưa các thuộc tính không liên quan vào bộ nhớ[^cs-col]. Báo cáo doanh thu của `orders` vì thế chỉ đọc hai cột thay vì cả chục. Trong môi trường kho dữ liệu, nơi truy vấn điển hình là tính tổng hợp trên rất nhiều bản ghi, column store có lợi thế hiệu năng đáng kể[^cs-agg].
+
+Abadi, Madden và Hachem (SIGMOD 2008) nêu cùng ý: column store hiệu quả I/O hơn với truy vấn chỉ đọc, vì chỉ đọc các thuộc tính truy vấn dùng[^ab-io]. Nhưng họ cũng cảnh báo rằng *giả vờ* có column store trên một row store (chia dọc schema hoặc index mọi cột) là không đủ. Muốn hưởng đủ lợi ích phải thay đổi cả tầng lưu trữ lẫn bộ thực thi truy vấn[^ab-concl].
 
 ```mermaid
 flowchart LR
@@ -354,28 +456,38 @@ flowchart LR
 
 *Sơ đồ: minh họa của người soạn, không phải hình trích từ nguồn.*
 
-*Nén.* Lưu theo cột cho phép nén tốt hơn vì dữ liệu cùng cột giống nhau hơn: Abadi nêu ví dụ bảng khách hàng, trong đó các số điện thoại giống nhau hơn so với các trường văn bản xung quanh; và nếu dữ liệu sắp theo một cột, cột đó "siêu dễ nén" — chuỗi giá trị lặp có thể mã hóa run-length[^ab-compress]. Nén còn tăng *hiệu năng* (không chỉ giảm dung lượng) vì giảm thời gian I/O khi đọc đĩa vào bộ nhớ[^ab-perf]; và nếu bộ thực thi hoạt động trực tiếp trên dữ liệu đã nén thì tránh được cả giải nén[^ab-direct]. Run-length encoding thay một dãy giá trị lặp bằng đếm và giá trị, nhờ thế một phép toán áp được lên nhiều giá trị cột cùng lúc[^ab-rle].
+### 8.3 Nén
 
-Parquet (định dạng file cột mã nguồn mở[^pq-def]) cho thấy bố cục thực tế: tệp gồm *row group* (một lát ngang của dữ liệu); mỗi row group có đúng một *column chunk* cho mỗi cột; mỗi column chunk được đảm bảo nằm liền khối trong file (README không đảm bảo cấu trúc vật lý nào cho cả row group); column chunk chia thành *page*[^pq-hier1][^pq-hier2][^pq-page]. Parquet cho chọn nén theo từng cột[^pq-percol] và có mã hóa dictionary: xây từ điển các giá trị gặp trong một cột, mỗi giá trị lưu thành số nguyên trỏ vào từ điển[^pq-dict]; từ điển quá lớn thì encoder lùi về mã hóa thường[^pq-dict2]; cùng mã hóa lai RLE/bit-packing để lưu gọn giá trị lặp[^pq-rle].
+Lưu theo cột cho phép nén tốt hơn vì dữ liệu cùng cột giống nhau hơn. Abadi nêu ví dụ bảng khách hàng, trong đó các số điện thoại giống nhau hơn so với các trường văn bản xung quanh. Nếu dữ liệu được sắp theo một cột thì cột đó "siêu dễ nén", vì chuỗi giá trị lặp có thể mã hóa run-length[^ab-compress]. Cột `created_at` của `orders`, nếu sắp theo ngày, là loại cột như vậy (suy luận của người soạn).
 
-*Ghi vào kho cột.* Lưu cột theo thứ tự khác thứ tự nhập làm việc chèn rất khó và đắt[^cs-insert]; C-Store giải bằng cách kết hợp một Writeable Store nhỏ nhận ghi hiệu quả và một Read-optimized Store lớn, hai bên nối bằng *tuple mover* chuyển lô — RS chỉ hỗ trợ một dạng insert rất hạn chế là lô chuyển từ WS sang[^cs-ws-rs]. Chính C-Store nói tuple mover dùng "một biến thể của khái niệm LSM-tree"[^cs-lsm]; Bigtable cũng đối chiếu cách làm của mình với C-Store[^bt-cstore] (nhận xét của người soạn: nên khi thấy engine OLAP hiện đại có phần "delta" mới ghi và phần "main" nén, hãy nhìn nó như LSM nhiều hơn là một thiết kế mới).
+Nén còn tăng *hiệu năng*, không chỉ giảm dung lượng, vì giảm thời gian I/O khi đọc đĩa vào bộ nhớ[^ab-perf]. Nếu bộ thực thi hoạt động trực tiếp trên dữ liệu đã nén thì tránh được cả giải nén[^ab-direct]. Run-length encoding thay một dãy giá trị lặp bằng đếm và giá trị, nhờ thế một phép toán áp được lên nhiều giá trị cột cùng lúc[^ab-rle].
+
+Parquet là định dạng file cột mã nguồn mở[^pq-def] và cho thấy bố cục thực tế. Một file gồm các *row group*, mỗi row group là một lát ngang của dữ liệu và không có cấu trúc vật lý nào được bảo đảm cho nó[^pq-hier1]. Mỗi row group có đúng một *column chunk* cho mỗi cột, và column chunk được bảo đảm nằm liền khối trong file[^pq-hier2]. Column chunk lại chia thành các *page*[^pq-page].
+
+Về nén, Parquet cho chọn thuật toán theo từng cột[^pq-percol]. Nó cũng có mã hóa dictionary: xây từ điển các giá trị gặp trong một cột, rồi lưu mỗi giá trị thành số nguyên trỏ vào từ điển[^pq-dict]. Nếu từ điển quá lớn, encoder lùi về mã hóa thường[^pq-dict2]. Ngoài ra còn mã hóa lai RLE/bit-packing để lưu gọn giá trị lặp[^pq-rle].
+
+### 8.4 Ghi vào kho cột
+
+Có một cái giá: lưu cột theo thứ tự khác thứ tự nhập làm việc chèn rất khó và đắt[^cs-insert]. Với `orders`, mỗi đơn mới phải chen vào từng cột riêng. C-Store giải bằng cách kết hợp một Writeable Store (WS) nhỏ nhận ghi hiệu quả và một Read-optimized Store (RS) lớn. Hai bên nối với nhau bằng một *tuple mover* chuyển lô; RS chỉ hỗ trợ một dạng insert rất hạn chế là lô chuyển từ WS sang[^cs-ws-rs].
+
+Chính C-Store nói tuple mover dùng "một biến thể của khái niệm LSM-tree"[^cs-lsm]. Bigtable cũng đối chiếu cách làm của mình với C-Store[^bt-cstore]. Nhận xét của người soạn: nên khi thấy một engine OLAP hiện đại có phần "delta" mới ghi và phần "main" đã nén, hãy nhìn nó như LSM nhiều hơn là một thiết kế mới.
 
 <details><summary>Đi sâu: late materialization, projection, kết quả đo của Abadi, nén trong OLTP</summary>
 
-- **Late materialization.** Cuối cùng cột vẫn phải ghép lại thành hàng[^ab-odbc] (tài liệu nêu ODBC/JDBC trả kết quả theo từng entity). Column store "ngây thơ" dựng tuple sớm (*early materialization*) rồi chạy toán tử kiểu hàng, bỏ phí nhiều tiềm năng; các hệ như C-Store giữ dữ liệu ở dạng cột lâu hơn và dùng *danh sách vị trí* để khớp kết quả vị từ giữa các cột[^ab-late1][^ab-late2]. Trong thí nghiệm của bài (trên bộ benchmark SSBM), nén cải thiện hiệu năng khoảng gần gấp đôi trung bình[^ab-2x]. Đó là một thí nghiệm cụ thể; không suy ra "cột nhanh gấp N lần" chung.
-- **Projection của C-Store.** C-Store lưu các cột theo nhóm được sắp cùng một thuộc tính gọi là *projection*, và cho phép lưu nhiều bản redundant theo thứ tự khác nhau để tăng hiệu năng truy xuất lẫn tính sẵn sàng[^cs-proj][^cs-redund]. Đây là đánh đổi chỗ trống lấy tốc độ đọc, giống covering index ở mục 7 (nhận xét của người soạn).
-- **Loại mã hóa theo đặc điểm cột.** C-Store chọn mã hóa theo hai yếu tố: cột tự sắp thứ tự hay không, và ít hay nhiều giá trị khác nhau; ví dụ cột "tự sắp, ít giá trị khác nhau" được biểu diễn bằng chuỗi bộ ba (giá trị, vị trí xuất hiện đầu, số lần xuất hiện)[^cs-type1].
-- **Nén ở LSM, ở WAL của PostgreSQL và ở kho cột.** Data block của LevelDB có thể được nén sau khi tạo[^ldb-compress]; PostgreSQL có `wal_compression` nén full page image ghi vào WAL (mặc định tắt; tham số này nén bản sao page trong WAL, không nén page của B-tree)[^pg-walcomp]; docs `fjall` liệt kê nén dựng sẵn (mặc định LZ4)[^fjall-comp]. Bitcask thì không nén[^bc-nocomp]. Lựa chọn thuật toán nén là một đánh đổi CPU lấy I/O — Abadi nhận xét các sơ đồ nén mạnh (Lempel-Ziv, Huffman, arithmetic) có thể kém phù hợp hơn sơ đồ "nhẹ" hy sinh tỉ lệ nén để giải nén nhanh[^ab-light].
+- **Late materialization.** Cuối cùng cột vẫn phải ghép lại thành hàng[^ab-odbc] (tài liệu nêu ODBC/JDBC trả kết quả theo từng entity). Column store "ngây thơ" dựng tuple sớm (*early materialization*) rồi chạy toán tử kiểu hàng, và bỏ phí nhiều tiềm năng[^ab-late1]. Các hệ như C-Store giữ dữ liệu ở dạng cột lâu hơn và dùng *danh sách vị trí* để khớp kết quả vị từ giữa các cột[^ab-late2]. Trong thí nghiệm của bài (trên bộ benchmark SSBM), nén cải thiện hiệu năng khoảng gần gấp đôi trung bình[^ab-2x]. Đó là một thí nghiệm cụ thể; đừng suy ra "cột nhanh gấp N lần" chung.
+- **Projection của C-Store.** C-Store lưu các cột theo nhóm được sắp cùng một thuộc tính, gọi là *projection*[^cs-proj]. Nó cho lưu nhiều bản redundant theo thứ tự khác nhau để tăng cả hiệu năng truy xuất lẫn tính sẵn sàng[^cs-redund]. Đây là đánh đổi chỗ trống lấy tốc độ đọc, giống covering index ở mục 7 (nhận xét của người soạn).
+- **Loại mã hóa theo đặc điểm cột.** C-Store chọn mã hóa theo hai yếu tố: cột tự sắp thứ tự hay không, và ít hay nhiều giá trị khác nhau. Ví dụ cột "tự sắp, ít giá trị khác nhau" được biểu diễn bằng chuỗi bộ ba (giá trị, vị trí xuất hiện đầu, số lần xuất hiện)[^cs-type1].
+- **Nén ở LSM, ở WAL của PostgreSQL và ở kho cột.** Data block của LevelDB có thể được nén sau khi tạo[^ldb-compress]. PostgreSQL có `wal_compression` nén full page image ghi vào WAL (mặc định tắt; tham số này nén bản sao page trong WAL, không nén page của B-tree)[^pg-walcomp]. Docs `fjall` liệt kê nén dựng sẵn (mặc định LZ4)[^fjall-comp]. Bitcask thì không nén[^bc-nocomp]. Chọn thuật toán nén là đánh đổi CPU lấy I/O: Abadi nhận xét các sơ đồ nén mạnh (Lempel-Ziv, Huffman, arithmetic) có thể kém phù hợp hơn sơ đồ "nhẹ" hy sinh tỉ lệ nén để giải nén nhanh[^ab-light].
 
 </details>
 
-**Quay lại Q8:** OLTP cần ghi/đọc từng bản ghi nên hợp lưu theo hàng; OLAP đọc ít cột trên rất nhiều bản ghi nên hợp lưu theo cột, nơi dữ liệu cùng cột dễ nén hơn.
+**Quay lại Q8:** OLTP cần ghi/đọc từng bản ghi nên hợp lưu theo hàng; OLAP đọc ít cột trên rất nhiều bản ghi nên hợp lưu theo cột, nơi dữ liệu cùng cột dễ nén hơn. Với `orders`, việc xử lý đơn hợp bảng theo hàng còn báo cáo doanh thu hợp kho cột.
 
 ## Liên hệ với Rust
 
-Mọi crate dưới đây ghim theo docs.rs; "bảo đảm" nghĩa là câu trong docs của crate, không phải điều người soạn đo được.
+Đây là các lựa chọn của `orders` khi nó là service Rust cần lưu đơn hàng: tự dựng log từ `std`, nhúng một engine thuần Rust (`redb`, `sled`, `fjall`), nhúng RocksDB, hoặc xuất file cột `parquet` cho báo cáo. Mọi crate dưới đây ghim theo docs.rs; "bảo đảm" nghĩa là câu trong docs của crate, không phải điều người soạn đo được.
 
-**`std`: các viên gạch để tự dựng log.** `OpenOptions::append(true)` bảo đảm mỗi `write` được định vị tại cuối file, kể cả khi nhiều process/thread cùng append — khác `seek(End)` rồi `write`[^std-append]; docs cũng lưu ý điều đó không nhất thiết bảo đảm dữ liệu do các process/thread khác nhau append không xen kẽ nhau[^std-append-il]. `File::sync_all` cố đưa mọi nội dung và metadata xuống bộ nhớ bền[^std-syncall]; `sync_data` giống nhưng có thể không đồng bộ metadata, để giảm thao tác đĩa, và một số nền tảng cài nó bằng `sync_all`[^std-syncdata]. `read_at` (trait `std::os::unix::fs::FileExt`) đọc từ một offset cho trước, không dịch con trỏ file[^std-readat]. Những hàm này là thứ một bản Bitcask tự dựng ở mục 1 cần (suy luận của người soạn); chi tiết syscall: [P5·08 mục 3 và 5](../05-storage/08-rust-va-luu-tru.md) và [P5·06](../05-storage/06-durability-trong-thuc-te.md).
+**`std`: các viên gạch để tự dựng log.** `OpenOptions::append(true)` bảo đảm mỗi `write` được định vị tại cuối file, kể cả khi nhiều process/thread cùng append, khác với `seek(End)` rồi `write`[^std-append]. Docs cũng lưu ý điều đó không nhất thiết bảo đảm dữ liệu do các process/thread khác nhau append không xen kẽ nhau[^std-append-il]. `File::sync_all` cố đưa mọi nội dung và metadata xuống bộ nhớ bền[^std-syncall]. `sync_data` giống nó nhưng có thể không đồng bộ metadata, để giảm thao tác đĩa; một số nền tảng cài nó bằng `sync_all`[^std-syncdata]. `read_at` (trait `std::os::unix::fs::FileExt`) đọc từ một offset cho trước và không dịch con trỏ file[^std-readat]. Suy luận của người soạn: đó là những thứ một bản Bitcask tự dựng ở mục 1 cần. Chi tiết syscall nằm ở [P5·08 mục 3 và 5](../05-storage/08-rust-va-luu-tru.md) và [P5·06](../05-storage/06-durability-trong-thuc-te.md).
 
 ```rust
 // Minh họa (KHÔNG biên dịch/chạy khi soạn): Bitcask rút gọn.
@@ -414,13 +526,13 @@ impl LogKv {
 }
 ```
 
-**`std::collections::BTreeMap`: B-tree trong RAM, không phải B-tree trên đĩa.** Docs viết rằng B-tree là sự thỏa hiệp giữa hiệu quả cache và việc giảm thiểu lượng công việc khi tìm kiếm[^std-btree0]; mỗi nút chứa B-1 tới 2B-1 phần tử trong một mảng liền kề để giảm số lần cấp phát và tăng hiệu quả cache[^std-btree]. Cùng ý "nút = đơn vị đọc một lần" như page đĩa nhưng đơn vị là cache line chứ không phải page 8 kB (suy luận của người soạn). `BTreeMap<Vec<u8>, Option<Vec<u8>>>` là memtable đủ dùng để minh họa: `None` đóng vai tombstone (nhận xét của người soạn).
+**`std::collections::BTreeMap`: B-tree trong RAM, không phải B-tree trên đĩa.** Docs viết rằng B-tree là sự thỏa hiệp giữa hiệu quả cache và việc giảm thiểu lượng công việc khi tìm kiếm[^std-btree0]. Mỗi nút chứa B-1 tới 2B-1 phần tử trong một mảng liền kề, để giảm số lần cấp phát và tăng hiệu quả cache[^std-btree]. Ý "nút = đơn vị đọc một lần" giống page đĩa, nhưng đơn vị ở đây là cache line chứ không phải page 8 kB (suy luận của người soạn). `BTreeMap<Vec<u8>, Option<Vec<u8>>>` là một memtable đủ dùng để minh họa, trong đó `None` đóng vai tombstone (nhận xét của người soạn).
 
-**`redb` 4.3.0 — B+tree copy-on-write, thuần Rust.** Docs: một embedded key-value store đơn giản, di động, hiệu năng cao, ACID[^redb-def]; dữ liệu lưu trong tập các B+tree copy-on-write[^redb-cow]; API kiểu `BTreeMap`, zero-copy, thread-safe[^redb-feat]; một writer cùng nhiều reader đồng thời, MVCC cho isolation, một mức isolation duy nhất là serializable[^redb-single]. `WriteTransaction::set_durability` mặc định `Durability::Immediate`[^redb-defdur]; commit đó được bảo đảm bền ngay khi `commit` trả về, còn `Durability::None` thì không bền trừ khi sau đó có commit `Immediate`[^redb-dur]; thiết kế commit một pha + checksum dùng một `fsync`[^redb-1pc]; `set_two_phase_commit(true)` đổi sang hai `fsync`[^redb-2pc] để đối phó một kịch bản tấn công lý thuyết với dữ liệu độc hại[^redb-2pc-why]. Giá trị lấy ra qua `AccessGuard` (zero-copy theo mô tả crate).
+**`redb` 4.3.0: B+tree copy-on-write, thuần Rust.** Docs mô tả nó là một embedded key-value store đơn giản, di động, hiệu năng cao, ACID[^redb-def]. Dữ liệu lưu trong một tập các B+tree copy-on-write[^redb-cow]. API kiểu `BTreeMap`, zero-copy, thread-safe[^redb-feat]. Nó hỗ trợ một writer cùng nhiều reader đồng thời, dùng MVCC cho isolation, và chỉ có một mức isolation là serializable[^redb-single]. `WriteTransaction::set_durability` mặc định là `Durability::Immediate`[^redb-defdur]. Commit ở mức này được bảo đảm bền ngay khi `commit` trả về, còn `Durability::None` thì không bền trừ khi sau đó có một commit `Immediate`[^redb-dur]. Thiết kế commit một pha kèm checksum chỉ dùng một `fsync`[^redb-1pc]. `set_two_phase_commit(true)` đổi sang hai `fsync`[^redb-2pc]. Việc đó nhằm đối phó một kịch bản tấn công lý thuyết với dữ liệu độc hại[^redb-2pc-why]. Giá trị lấy ra qua `AccessGuard` (zero-copy theo mô tả crate).
 
-**`sled` 0.34.7.** API giống `BTreeMap<[u8], [u8]>`, thread-safe và mọi thao tác nguyên tử[^sled-doc]; hỗ trợ transaction ACID trên nhiều item[^sled-tx]. `Db::flush` đồng bộ mọi buffer I/O bẩn và gọi `fsync`; nếu thành công thì mọi write trước đó được bảo đảm khôi phục được sau crash[^sled-flush]. Nghĩa là (suy luận của người soạn từ câu trên): `insert` thành công chưa phải đã bền — hợp với bài học ở [P5·06](../05-storage/06-durability-trong-thuc-te.md). Cấu hình có `use_compression` (zstd) [^sled-comp]. (Người soạn không đánh giá độ chín muồi của `sled`: docs trích ở đây không nói về nó, nên chương không đưa khuyến nghị.)
+**`sled` 0.34.7.** API giống `BTreeMap<[u8], [u8]>`, thread-safe và mọi thao tác nguyên tử[^sled-doc]. Nó hỗ trợ transaction ACID trên nhiều item[^sled-tx]. `Db::flush` đồng bộ mọi buffer I/O bẩn và gọi `fsync`; nếu thành công thì mọi write trước đó được bảo đảm khôi phục được sau crash[^sled-flush]. Suy luận của người soạn từ câu trên: `insert` thành công chưa phải đã bền, hợp với bài học ở [P5·06](../05-storage/06-durability-trong-thuc-te.md). Cấu hình có `use_compression` (zstd)[^sled-comp]. Người soạn không đánh giá độ chín muồi của `sled`: docs trích ở đây không nói về nó, nên chương không đưa khuyến nghị.
 
-**`rocksdb` 0.25.0 (wrapper Rust của RocksDB).** Crate là "Rust wrapper for RocksDB"[^rs-wrapper]. Các núm tương ứng với mục 2–4:
+**`rocksdb` 0.25.0 (wrapper Rust của RocksDB).** Crate là "Rust wrapper for RocksDB"[^rs-wrapper]. Các núm tương ứng với mục 2–4 nằm trong đoạn code dưới đây:
 
 ```rust
 // Minh họa (KHÔNG biên dịch/chạy khi soạn); tên API lấy từ docs.rs rocksdb 0.25.0.
@@ -439,11 +551,15 @@ wo.set_sync(true);                             // flush từ buffer cache của 
 db.put_opt(b"k", b"v", &wo)?;
 ```
 
-`set_bloom_filter` nằm trong `BlockBasedOptions`, mô tả "Sets a Bloom filter policy to reduce disk reads"[^rs-bloom]; `Options::set_compaction_style` mặc định `DBCompactionStyle::Level`[^rs-style]; ví dụ trong docs đặt `DBCompactionStyle::Universal`[^rs-style2]. `WriteOptions::set_sync(true)`: bản ghi được flush từ buffer cache của hệ điều hành trước khi coi là hoàn tất, và ghi chậm hơn[^rs-sync]; `disable_wal(true)`: ghi không đi qua WAL và có thể mất khi crash[^rs-nowal]. Tham số thứ hai `block_based` của `set_bloom_filter`: ví dụ trong docs crate dùng `true`, còn ví dụ trong wiki RocksDB dùng `false` cho `NewBloomFilterPolicy`[^rdb-bloom-cfg]. Trong mã nguồn wrapper, `true` gọi `rocksdb_filterpolicy_create_bloom` còn `false` gọi `rocksdb_filterpolicy_create_bloom_full`[^rs-bloom-src]; cả hai hàm C API chuyển cho `NewBloomFilterPolicy`[^rdb-c-bloom], và từ RocksDB 7.0 tham số `use_block_based_builder` của hàm đó bị bỏ qua[^rdb-bloom-ign]. Suy luận của người soạn từ ba nguồn đó (chưa chạy thử): với bản RocksDB 11.8.1 bundle, `true` và `false` cho cùng một chính sách filter. Các hàm trích trong docs (ví dụ `DB::open`, `get`, `put`) đều không khai báo `async fn`, nên gọi chúng từ Tokio là chuyện blocking (suy luận của người soạn): xem [P7·09 mục 5](../07-io-async/09-async-trong-production.md) về `spawn_blocking`.
+`set_bloom_filter` nằm trong `BlockBasedOptions`, mô tả là "Sets a Bloom filter policy to reduce disk reads"[^rs-bloom]. `Options::set_compaction_style` mặc định là `DBCompactionStyle::Level`[^rs-style]. Ví dụ trong docs đặt `DBCompactionStyle::Universal`[^rs-style2]. `WriteOptions::set_sync(true)` làm bản ghi được flush từ buffer cache của hệ điều hành trước khi coi là hoàn tất, và ghi chậm hơn[^rs-sync]. `disable_wal(true)` cho ghi không đi qua WAL và có thể mất khi crash[^rs-nowal].
 
-**`fjall` 3.1.12 — LSM thuần Rust.** Docs: một storage engine key-value nhúng, log-structured, viết bằng Rust[^fjall-def]; lưu trữ dựa trên LSM-tree tương tự RocksDB, API kiểu `BTreeMap`, range/prefix, nén dựng sẵn (mặc định LZ4), serializable transaction tùy chọn[^fjall-features]. `PersistMode` có ba mức: `Buffer` (đẩy vào buffer OS, không bảo đảm bền khi mất điện hay crash OS[^fjall-pm1]), `SyncData` (`fdatasync`[^fjall-pm2]), `SyncAll` (`fsync` cả metadata[^fjall-pm3]). Docs ví dụ: gọi `db.persist(PersistMode::SyncAll)` để chắc chắn bền[^fjall-persist].
+Tham số thứ hai `block_based` của `set_bloom_filter` đáng một đoạn riêng. Ví dụ trong docs crate dùng `true`, còn ví dụ trong wiki RocksDB dùng `false` cho `NewBloomFilterPolicy`[^rdb-bloom-cfg]. Trong mã nguồn wrapper, `true` gọi `rocksdb_filterpolicy_create_bloom` còn `false` gọi `rocksdb_filterpolicy_create_bloom_full`[^rs-bloom-src]. Cả hai hàm C API chuyển cho `NewBloomFilterPolicy`[^rdb-c-bloom]. Từ RocksDB 7.0, tham số `use_block_based_builder` của hàm đó bị bỏ qua[^rdb-bloom-ign]. Suy luận của người soạn từ ba nguồn đó (chưa chạy thử): với bản RocksDB 11.8.1 bundle, `true` và `false` cho cùng một chính sách filter.
 
-**`parquet` 60.0.0 (OLAP).** Crate là bản cài Rust "chính thức" của Apache Parquet, thuộc dự án Apache Arrow[^rs-parquet]; Parquet là định dạng cột — giá trị được duyệt theo cột thay vì theo hàng[^rs-parquet-col]. Dùng để đọc/ghi file cột (ví dụ của người soạn: đầu ra của job batch, xem [Chương 10](10-batch-processing.md)); encoding byte và schema: [Chương 04](04-encoding-va-tien-hoa-schema.md).
+Một lưu ý nữa cho service async: các hàm trích trong docs (ví dụ `DB::open`, `get`, `put`) đều không khai báo `async fn`, nên gọi chúng từ Tokio là chuyện blocking (suy luận của người soạn). Xem [P7·09 mục 5](../07-io-async/09-async-trong-production.md) về `spawn_blocking`.
+
+**`fjall` 3.1.12: LSM thuần Rust.** Docs mô tả nó là một storage engine key-value nhúng, log-structured, viết bằng Rust[^fjall-def]. Lưu trữ dựa trên LSM-tree tương tự RocksDB, API kiểu `BTreeMap`, có range/prefix, nén dựng sẵn (mặc định LZ4) và serializable transaction tùy chọn[^fjall-features]. `PersistMode` có ba mức. `Buffer` đẩy dữ liệu vào buffer OS và không bảo đảm bền khi mất điện hay crash OS[^fjall-pm1]. `SyncData` dùng `fdatasync`[^fjall-pm2]. `SyncAll` dùng `fsync` cho cả metadata[^fjall-pm3]. Docs ví dụ gọi `db.persist(PersistMode::SyncAll)` để chắc chắn bền[^fjall-persist].
+
+**`parquet` 60.0.0 (OLAP).** Crate là bản cài Rust "chính thức" của Apache Parquet, thuộc dự án Apache Arrow[^rs-parquet]. Parquet là định dạng cột: giá trị được duyệt theo cột thay vì theo hàng[^rs-parquet-col]. Với `orders`, nó là cách xuất dữ liệu đơn hàng cho báo cáo mục 8 (ví dụ của người soạn: đầu ra của job batch, xem [Chương 10](10-batch-processing.md)). Encoding byte và schema ở [Chương 04](04-encoding-va-tien-hoa-schema.md).
 
 ## Tóm tắt
 
@@ -475,18 +591,18 @@ db.put_opt(b"k", b"v", &wo)?;
 
 <details><summary>Đáp án</summary>
 
-1. Keydir trong RAM cho (file, offset, size) của bản mới nhất; đọc đúng vị trí đó[^bc-keydir][^bc-read]. Bị giới hạn bởi RAM vì keydir phải nằm trọn trong bộ nhớ[^bc-ram].
-2. Bitcask: file dữ liệu *là* commit log, recovery không cần replay[^bc-recover]. LSM: WAL dùng để dựng lại memtable[^bt-memlog][^bt-recover]; dữ liệu đã flush nằm trong SSTable bất biến[^bt-sstable].
-3. Ghi log tuần tự → chèn memtable (không I/O)[^lsm-log][^lsm-c0]; Bigtable còn group commit[^bt-write]. Log phải đứng trước vì memtable ở RAM mất khi crash; log là thứ khôi phục nó[^bt-recover].
-4. Đọc metadata và redo point, nạp index SSTable, áp mọi update đã commit kể từ redo point[^bt-recover]; LevelDB chuyển đoạn log thành sstable level-0[^ldb-recovery].
-5. Deletion marker che các giá trị cũ ở SSTable cũ hơn[^ldb-sorted][^ldb-sorted2]; compaction chỉ bỏ marker khi không có level cao hơn chứa file chồng khóa với key đó[^ldb-drop]; Bigtable: sản phẩm của major compaction không còn dữ liệu đã xóa[^bt-major][^bt-major2].
-6. 1 (ghi ra L0) + 2 (L0→L1) + 10 + 10 + 10 (mỗi lần xuống level kế bị trộn với ~10 byte)[^rdb-wa33]; đến từ việc compaction viết lại dữ liệu cũ khi trộn.
-7. So với tiered, leveled ghi nhiều hơn nhưng có số sorted run xấu nhất thấp hơn và nhắm tới space amplification thấp; tiered: write thấp, read/space cao hơn[^rdb-comp-lvl][^rdb-comp-tier]. Lý do: leveled gộp run nhỏ vào run lớn liên tục (viết lại nhiều)[^rdb-univ-diff]; tiered có số sorted run xấu nhất rất cao nên đọc tốn hơn[^rdb-univ-cost] và full compaction cần chỗ gấp đôi[^rdb-univ-double].
-8. Có thể báo "có thể có" oan (dương tính giả); không bao giờ báo "không có" khi key có[^rdb-bloom-def][^rdb-bloom-how]. Không giúp range scan[^rdb-tune-range] (filter chỉ trả lời cho một key / tiền tố cấu hình riêng[^rdb-bloom-prefix]).
-9. Sửa page tại chỗ có thể bị crash giữa chừng; WAL ghi trước để redo[^pg-wal-concept][^pg-redo]. `full_page_writes` chống page ghi dở (trộn cũ/mới) mà WAL mức row không dựng lại được[^pg-fpw].
-10. Clustered: row nằm theo khóa[^ms-clustered]; secondary: cấu trúc riêng trỏ về row[^ms-nonclustered]; covering: chứa cột truy vấn cần[^pg-covering]. Index-only scan không lợi khi phần lớn page heap không có bit all-visible vì vẫn phải vào heap kiểm tra visibility[^pg-vis][^pg-ios-win].
-11. Chỉ đọc cột cần dùng[^cs-col]; dữ liệu cột giống nhau nên dễ nén hơn, sắp xếp thì RLE được[^ab-compress]; nén giảm I/O[^ab-perf]. Hai kỹ thuật: RLE và dictionary (+bit-packing)[^pq-dict][^pq-rle].
-12. `rocksdb`: `WriteOptions::set_sync(true)` rồi `put_opt`[^rs-sync] (và đừng `disable_wal`[^rs-nowal]); `redb`: để `Durability::Immediate` (mặc định)[^redb-defdur][^redb-dur].
+1. Keydir trong RAM cho (file, offset, size) của bản mới nhất, và đọc đúng vị trí đó[^bc-keydir]. Chỉ cần một seek[^bc-read]. Số key bị giới hạn bởi RAM vì keydir phải nằm trọn trong bộ nhớ[^bc-ram].
+2. Bitcask: file dữ liệu *là* commit log, recovery không cần replay[^bc-recover]. LSM: WAL dùng để dựng lại memtable[^bt-recover]. Dữ liệu đã flush nằm trong SSTable bất biến[^bt-sstable].
+3. Ghi log tuần tự rồi chèn memtable (không I/O)[^lsm-log]; Bigtable còn dùng group commit[^bt-write]. Log phải đứng trước vì memtable ở RAM mất khi crash, và log là thứ khôi phục nó[^bt-recover].
+4. Đọc metadata và redo point, nạp index SSTable, rồi áp mọi update đã commit kể từ redo point[^bt-recover]. LevelDB thì chuyển đoạn log thành sstable level-0[^ldb-recovery].
+5. Deletion marker che các giá trị cũ ở SSTable cũ hơn[^ldb-sorted2]. Compaction chỉ bỏ marker khi không có level cao hơn chứa file chồng khóa với key đó[^ldb-drop]. Ở Bigtable, sản phẩm của major compaction mới không còn dữ liệu đã xóa[^bt-major2].
+6. 1 (ghi ra L0) + 2 (L0→L1) + 10 + 10 + 10 (mỗi lần xuống level kế bị trộn với ~10 byte)[^rdb-wa33]. Nó đến từ việc compaction viết lại dữ liệu cũ khi trộn.
+7. So với tiered, leveled ghi nhiều hơn nhưng có số sorted run xấu nhất thấp hơn và nhắm tới space amplification thấp[^rdb-comp-lvl]; tiered có write thấp, read và space cao hơn[^rdb-comp-tier]. Lý do về ghi: leveled gộp run nhỏ vào run lớn liên tục nên viết lại nhiều[^rdb-univ-diff]. Lý do về đọc: tiered có số sorted run xấu nhất rất cao[^rdb-univ-cost]. Lý do về chỗ: full compaction của tiered cần chỗ gấp đôi[^rdb-univ-double].
+8. Nó có thể báo "có thể có" oan (dương tính giả), nhưng không bao giờ báo "không có" khi key có[^rdb-bloom-def]. Nó không giúp range scan[^rdb-tune-range], vì filter chỉ trả lời cho một key; tiền tố cần cấu hình riêng[^rdb-bloom-prefix].
+9. Sửa page tại chỗ có thể bị crash giữa chừng, nên WAL ghi trước để redo[^pg-redo]. `full_page_writes` chống page ghi dở (trộn cũ/mới) mà WAL mức row không dựng lại được[^pg-fpw].
+10. Clustered: row nằm theo khóa[^ms-clustered]. Secondary: cấu trúc riêng trỏ về row[^ms-nonclustered]. Covering: chứa cột truy vấn cần[^pg-covering]. Index-only scan không lợi khi phần lớn page heap không có bit all-visible, vì vẫn phải vào heap kiểm tra visibility[^pg-ios-win].
+11. Column store chỉ đọc cột cần dùng[^cs-col]. Dữ liệu cột giống nhau nên dễ nén hơn, và nếu sắp xếp thì RLE được[^ab-compress]. Nén giảm I/O[^ab-perf]. Hai kỹ thuật là RLE[^pq-rle]. Kỹ thuật còn lại là dictionary (cùng bit-packing)[^pq-dict].
+12. `rocksdb`: `WriteOptions::set_sync(true)` rồi `put_opt`[^rs-sync]. Đừng `disable_wal`[^rs-nowal]. `redb`: để `Durability::Immediate` (mặc định)[^redb-defdur].
 
 </details>
 
@@ -618,7 +734,6 @@ db.put_opt(b"k", b"v", &wo)?;
 [^ldb-filteropt]: LevelDB 1.23, doc/index.md — <https://raw.githubusercontent.com/google/leveldb/1.23/doc/index.md> — "The optional FilterPolicy mechanism can be used to reduce the number of disk reads substantially."
 [^rdb-bloom-cfg]: RocksDB wiki, Bloom Filter — <https://raw.githubusercontent.com/wiki/facebook/rocksdb/RocksDB-Bloom-Filter.md> — "table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, false));"
 [^pg-page8k]: PostgreSQL 16, mục 73.6 Database Page Layout — <https://www.postgresql.org/docs/16/storage-page-layout.html> — "Every table and index is stored as an array of pages of a fixed size (usually 8 kB, although a different page size can be selected when compiling the server)."
-[^pg-split]: PostgreSQL 16, mục 67.4 B-Tree Implementation — <https://www.postgresql.org/docs/16/btree-implementation.html> — "A page split operation makes room for items that originally belonged on the overflowing page by moving a portion of the items to a new page. Page splits must also insert a new downlink to the new page in the parent page, which may cause the parent to split in turn."
 [^pg-rootsplit]: PostgreSQL 16, mục 67.4 B-Tree Implementation — <https://www.postgresql.org/docs/16/btree-implementation.html> — "When the root page finally cannot fit a new downlink, a root page split operation takes place. This adds a new level to the tree structure by creating a new root page that is one level above the original root page."
 [^pg-wal-concept]: PostgreSQL 16, mục 30.3 — <https://www.postgresql.org/docs/16/wal-intro.html> — "changes to data files (where tables and indexes reside) must be written only after those changes have been logged, that is, after WAL records describing the changes have been flushed to permanent storage."
 [^pg-struct]: PostgreSQL 16, mục 67.4 — <https://www.postgresql.org/docs/16/btree-implementation.html> — "PostgreSQL B-Tree indexes are multi-level tree structures, where each level of the tree can be used as a doubly-linked list of pages."

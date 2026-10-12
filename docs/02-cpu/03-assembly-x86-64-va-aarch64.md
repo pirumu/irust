@@ -15,29 +15,31 @@
 - [Chương 01 — Mô hình máy và ISA](01-mo-hinh-may-va-isa.md): ISA là gì, thanh ghi, chu trình fetch–decode–execute.
 - [Chương 02 — Biểu diễn dữ liệu](02-bieu-dien-du-lieu.md): số nguyên có dấu/không dấu, two's complement, endianness, zero-/sign-extension.
 
+Bạn đã viết service bằng Rust nhưng chưa cần đọc assembly bao giờ. Chương này bám theo một service giả định tên `orders` (nhận xét của người soạn: ví dụ giả định, không phải code trong repo). Giả sử `orders` đang chậm, flamegraph chỉ vào một hàm nóng, và bạn muốn biết compiler thực sự cho CPU chạy những lệnh gì. Muốn trả lời thì phải đọc được assembly, và chương này dạy đúng phần đó. Các hàm ví dụ trong chương có tên trung tính (`load_idx`, `max`, `sw`…) để asm ngắn gọn; ta chỉ tưởng tượng mỗi hàm là hình dạng của một việc quen thuộc trong `orders`.
+
 Quy ước gọi hàm, stack frame, căn lề stack và tail call ở [Chương 04](04-calling-convention-va-stack-frame.md); pipeline và giá của nhánh đoán sai ở [Chương 05](05-pipeline-va-speculation.md); `opt-level` và bounds check được đào sâu hơn ở [Chương 07](07-rust-va-may.md) (mục 1 và 3).
 
 ## 1. Cú pháp AT&T và Intel (x86-64) (Q1)
 
-> **Trả lời ngắn.** Cùng một lệnh x86-64 có hai cách viết: AT&T (nguồn trước, đích sau, `$imm`, `%reg`) và Intel (đích trước); GNU as nêu rõ hai cú pháp dùng thứ tự nguồn và đích ngược nhau[^gasorder]. `rustc --emit=asm` in AT&T (quan sát), còn `asm!` viết tay trong Rust mặc định dùng Intel[^rustasm]. Với A64, tài liệu và output trong chương này luôn viết đích trước[^armops].
+> **Trả lời ngắn.** Cùng một lệnh x86-64 có hai cách viết: AT&T ghi nguồn trước, đích sau, kèm `$` cho hằng và `%` cho thanh ghi; Intel ghi đích trước. Hai cú pháp dùng thứ tự nguồn và đích ngược nhau[^gasorder]. `rustc --emit=asm` in AT&T (quan sát), còn `asm!` viết tay trong Rust mặc định dùng Intel[^rustasm]. Với A64, mọi tài liệu và output trong chương này đều viết đích trước[^armops].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ghi "chuyển từ A sang B" hay "chuyển tới B từ A": cùng một việc, chỉ khác thứ tự đọc.
+*Với service `orders`.* Bạn mở assembly của một hàm trong `orders` và dòng đầu tiên đã đặt ra một câu hỏi: lệnh này lấy từ đâu, ghi vào đâu? Câu trả lời tùy tool đang in ra cú pháp nào, và đọc ngược toán hạng sẽ khiến bạn hiểu ngược cả điều kiện của một nhánh. Mục này cho bạn bảng đối chiếu hai cú pháp để không nhầm.
 
-Cùng một ISA, hai cách viết. Tài liệu GNU as liệt kê khác biệt chính[^gasdiff].
+### 1.1 Hai cách viết một lệnh
+
+Hai cú pháp mô tả cùng một ISA, chỉ khác cách ghi. Bảng dưới gom các khác biệt chính:
 
 | Điểm | AT&T | Intel |
 |---|---|---|
-| Thứ tự toán hạng | nguồn, đích | đích, nguồn |
-| Hằng (immediate) | `$4` | `4` |
-| Thanh ghi | `%rax` | `rax` |
-| Kích thước toán hạng bộ nhớ | hậu tố mnemonic `b/w/l/q` | tiền tố `byte/word/dword/qword ptr` |
-| Tham chiếu bộ nhớ | `disp(base,index,scale)` | `[base + index*scale + disp]` |
+| Thứ tự toán hạng | nguồn, đích[^gasorder] | đích, nguồn |
+| Hằng (immediate) | `$4`[^gasdiff] | `4` |
+| Thanh ghi | `%rax`[^gasdiff] | `rax` |
+| Kích thước toán hạng bộ nhớ | hậu tố mnemonic `b/w/l/q`[^gassize] | tiền tố `byte/word/dword/qword ptr`[^gasptr] |
+| Tham chiếu bộ nhớ | `disp(base,index,scale)` | `[base + index*scale + disp]`[^gasscale] |
 
-Nguồn các hàng: thứ tự nguồn/đích[^gasorder]; `$` và `%`[^gasdiff]; hậu tố `b/w/l/q` so với tiền tố `… ptr`[^gassize][^gasptr]; dạng tham chiếu bộ nhớ[^gasscale].
-
-Ví dụ thật — cùng một hàm `load_idx(p: &[i32], i: usize) -> i32 { p[i] }` ở hai cú pháp (đường nhanh, đã rút gọn bỏ nhánh panic):
+Thử với `load_idx(p: &[i32], i: usize) -> i32 { p[i] }`, hàm lấy phần tử thứ `i` của một mảng, chẳng hạn giá của dòng hàng thứ `i` trong một đơn. Dưới đây là đường nhanh của nó ở hai cú pháp (đã rút gọn, bỏ nhánh panic):
 
 ```asm
 # AT&T (mặc định)                 # Intel (-x86-asm-syntax=intel)
@@ -48,33 +50,35 @@ load_idx:                         load_idx:
     retq                              ret
 ```
 
-Hai dòng `movl` và `mov … dword ptr` là một lệnh máy. Lưu ý `cmpq %rsi, %rdx` (AT&T) so `rdx` với `rsi`, tức `i` với `len`: thứ tự đảo so với cách đọc tự nhiên nên rất dễ nhầm khi đọc `jae` (nhận xét của người soạn; quy tắc của `cmp` ở mục 4). Chương này dùng AT&T cho phần x86-64 vì đó là thứ `rustc --emit=asm` in ra (quan sát) và cũng là mặc định của `gcc`[^gccmasm]; phần AArch64 viết đích trước như đã nói ở trên.
+Hai dòng `movl` và `mov … dword ptr` là cùng một lệnh máy. Chỗ dễ nhầm nhất là `cmpq %rsi, %rdx`: vì AT&T viết nguồn trước, lệnh này so `rdx` với `rsi`, tức `i` với `len`, ngược với thứ tự đọc tự nhiên. Quên điều này khi đọc `jae` ngay sau đó là hiểu sai điều kiện (nhận xét của người soạn; quy tắc của `cmp` nằm ở mục 4). Phần x86-64 của chương dùng AT&T, vì đó là thứ `rustc --emit=asm` in ra (quan sát) và cũng là mặc định của `gcc`[^gccmasm]. Phần AArch64 viết đích trước như đã nói ở đầu mục.
 
-**Cú pháp mặc định.** Rust phát x86-64 ở cú pháp AT&T trong các file `.s` (quan sát ở mọi output dưới đây: `%rax`, `$1`); LLVM chọn AT&T làm mặc định cho x86 và cho đổi bằng tùy chọn `x86-asm-syntax`[^llvmasmsyntax]. Ngược lại, với `asm!` viết tay trong Rust, trên x86, chế độ `.intel_syntax noprefix` của GAS được dùng theo mặc định[^rustasm]; còn option `att_syntax` mới chuyển sang AT&T[^rustatt]. Bạn sẽ gặp cả hai. Để ép `--emit=asm` ra Intel syntax, tôi đã chạy thật `rustc -C llvm-args=-x86-asm-syntax=intel`; `-C llvm-args` chuyển thẳng tham số cho LLVM nên không thuộc bảo đảm ổn định của CLI rustc, có thể đổi[^llvmargs].
+### 1.2 Cú pháp mặc định phụ thuộc tool
+
+File `.s` do rustc sinh cho x86-64 là AT&T (quan sát ở mọi output dưới đây: `%rax`, `$1`). LLVM chọn AT&T làm mặc định cho x86, và cho đổi bằng tùy chọn `x86-asm-syntax`[^llvmasmsyntax]. Với `asm!` viết tay trong Rust thì ngược lại: trên x86, GAS chạy ở chế độ `.intel_syntax noprefix` theo mặc định[^rustasm]. Option `att_syntax` mới chuyển sang AT&T[^rustatt]. Nên bạn sẽ gặp cả hai trong thực tế.
+
+Muốn ép `--emit=asm` ra Intel, tôi đã chạy thật `rustc -C llvm-args=-x86-asm-syntax=intel`. `-C llvm-args` chuyển thẳng tham số cho LLVM nên không thuộc bảo đảm ổn định của CLI rustc, có thể đổi[^llvmargs].
 
 <details><summary>Đi sâu: trích GNU as về thứ tự, kích thước và scale</summary>
 
-Tài liệu nói: cú pháp AT&T và Intel dùng thứ tự ngược nhau cho toán hạng nguồn và đích; ví dụ Intel `add eax, 4` là `addl $4, %eax` trong AT&T[^gasorder]. Về kích thước: AT&T xác định kích thước toán hạng bộ nhớ từ ký tự cuối của mnemonic lệnh[^gassize] (vì thế `movq`, `addl`, `cmpq` trong output), còn Intel đặt `qword ptr` (hay `byte`/`word`/`dword ptr`) trước toán hạng bộ nhớ[^gasptr]. Khi GAS dịch tham chiếu bộ nhớ Intel `section:[base + index*scale + disp]` sang AT&T `section:disp(base, index, scale)`, `scale` nhận giá trị 1, 2, 4 hoặc 8 và nhân với `index` để tính địa chỉ[^gasscale].
+Ví dụ của chính tài liệu GNU as: Intel `add eax, 4` là `addl $4, %eax` trong AT&T[^gasorder]. Về kích thước toán hạng bộ nhớ, AT&T lấy từ ký tự cuối của mnemonic[^gassize], nên output có `movq`, `addl`, `cmpq`. Intel thì đặt `qword ptr` (hay `byte`/`word`/`dword ptr`) trước toán hạng bộ nhớ[^gasptr]. Khi GAS dịch tham chiếu bộ nhớ Intel `section:[base + index*scale + disp]` sang AT&T `section:disp(base, index, scale)`, `scale` nhận giá trị 1, 2, 4 hoặc 8 và nhân với `index` để ra địa chỉ[^gasscale].
 
 </details>
 
-**Quay lại Q1:** AT&T là nguồn-đích với `$`/`%` và hậu tố kích thước, Intel là đích-nguồn; cùng một lệnh máy.
+**Quay lại Q1:** với `orders`, AT&T là nguồn-đích kèm `$`/`%` và hậu tố kích thước, Intel là đích-nguồn; cùng một lệnh máy, chỉ khác cách ghi.
 
 ## 2. Thanh ghi: `rax`/`eax`/`ax`/`al`, `x0`/`w0`, `xzr`/`sp` (Q2)
 
-> **Trả lời ngắn.** Trên x86-64, `rax`, `eax`, `ax`, `al` là các cỡ 64/32/16/8 bit của cùng một thanh ghi[^x86sub][^x86low8]; A64 có `x0`–`x30` 64 bit và dùng tên `w0`–`w30` cho ngữ cảnh 32 bit[^aapcsregs]. Ghi vào phần 32 bit trên x86-64 xoá nửa trên về 0, còn ghi 8/16 bit thì không[^sdm32][^sdm816]. `xzr` luôn đọc ra 0 và mọi lần ghi vào nó bị bỏ qua[^armzr]; nó dùng chung số hiệu thanh ghi 31 với `sp`, và lệnh nào hiểu số 31 là cái nào thì tuỳ lệnh[^armr31].
+> **Trả lời ngắn.** Trên x86-64, `rax`, `eax`, `ax`, `al` là bốn cỡ 64, 32, 16 và 8 bit của cùng một thanh ghi[^x86sub]. A64 có `x0`–`x30` 64 bit, và `w0`–`w30` là tên dùng cho ngữ cảnh 32 bit[^aapcsregs]. Có một quy tắc dễ gây nhầm: ghi vào phần 32 bit trên x86-64 thì nửa trên bị xoá về 0[^sdm32]. Ghi 8 hoặc 16 bit thì không[^sdm816]. Còn `xzr` luôn đọc ra 0 và mọi lần ghi vào nó bị bỏ qua[^armzr]; nó dùng chung số hiệu 31 với `sp`, và lệnh nào hiểu số 31 là cái nào thì tùy lệnh[^armr31].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một ngăn kéo dài 64 ô: `eax`, `ax`, `al` là các đoạn cuối của ngăn kéo đó; ghi đủ 4 ô cuối thì máy tự dọn sạch các ô còn lại.
+*Với service `orders`.* Hàm nóng của `orders` thường làm việc với số nhỏ: một mã trạng thái 1 byte (`u8`), một chỉ số 32 bit, một số tiền `i64`. Mỗi cỡ có tên thanh ghi riêng, nên đọc output là phải biết `%dil` hay `%eax` đang nói về phần nào của thanh ghi nào, và ghi vào phần đó thì phần còn lại ra sao. [Chương 01](01-mo-hinh-may-va-isa.md) (mục 3, phần Đi sâu) đã điểm qua số lượng thanh ghi, thanh ghi con và quy tắc ghi 32 bit; mục này đi vào chi tiết từng ISA kèm output thật.
 
-[Chương 01, mục 3](01-mo-hinh-may-va-isa.md) (phần Đi sâu) đã điểm qua số lượng thanh ghi, thanh ghi con và quy tắc ghi 32-bit; mục này đi vào chi tiết từng ISA kèm output thật.
+### 2.1 x86-64
 
-**x86-64**
+x86-64 có 16 thanh ghi 64 bit: `%rax, %rbx, %rcx, %rdx, %rdi, %rsi, %rsp, %rbp` và `%r8`–`%r15`[^x86regs]. Intel SDM cũng đếm cả 16 là thanh ghi đa dụng ở 64-bit mode[^sdm16]. Trừ `%rsp` và `%rbp`, các thanh ghi còn lại chứa dữ liệu 64 bit đa dụng[^x86gp]; `%rsp` và `%rbp` là con trỏ stack và con trỏ frame[^x86sp]. Ngoài ra còn `%rip` (instruction pointer), chương trình không ghi trực tiếp vào nó được[^x86rip].
 
-x86-64 có 16 thanh ghi 64-bit: `%rax, %rbx, %rcx, %rdx, %rdi, %rsi, %rsp, %rbp` và `%r8`–`%r15`[^x86regs]; Intel SDM đếm cả 16 là thanh ghi đa dụng ở 64-bit mode[^sdm16]. Theo Dive into Systems, mọi thanh ghi trừ `%rsp` và `%rbp` chứa dữ liệu 64-bit đa dụng[^x86gp], còn `%rsp`/`%rbp` là con trỏ stack và con trỏ frame[^x86sp]; ngoài ra có `%rip` (instruction pointer) mà chương trình không ghi trực tiếp được[^x86rip].
-
-**Sub-register.** Với tám thanh ghi đầu (`%rax`…`%rbp`), đổi `r` trong tên thành `e` để chọn 32 bit thấp (`%eax`) và lấy hai chữ cuối của tên để chọn 16 bit thấp (`%ax`)[^x86sub]; byte thấp của bốn thanh ghi đầu có tên kết thúc bằng `l` (`%al`)[^x86low8], còn các tên như `%dil`, `%sil` có trong bảng dưới. Với `%r8`–`%r15` thì hậu tố `d`, `w`, `b` chọn 32/16/8 bit thấp (`%r9d` truy cập 32 bit thấp của thanh ghi `%r9`)[^x86r8].
+Mỗi thanh ghi có tên riêng cho từng phần thấp của nó (sub-register). Với tám thanh ghi đầu (`%rax`…`%rbp`), đổi `r` trong tên thành `e` để chọn 32 bit thấp (`%eax`), và lấy hai chữ cuối của tên để chọn 16 bit thấp (`%ax`)[^x86sub]. Byte thấp của bốn thanh ghi đầu có tên kết thúc bằng `l`, như `%al`[^x86low8]; các tên như `%dil`, `%sil` có trong bảng dưới. Với `%r8`–`%r15` thì hậu tố `d`, `w`, `b` chọn 32, 16, 8 bit thấp: `%r9d` là 32 bit thấp của `%r9`[^x86r8].
 
 | 64-bit | 32-bit | 16-bit | 8-bit thấp |
 |---|---|---|---|
@@ -82,7 +86,7 @@ x86-64 có 16 thanh ghi 64-bit: `%rax, %rbx, %rcx, %rdx, %rdi, %rsi, %rsp, %rbp`
 | `%rdi` | `%edi` | `%di` | `%dil` |
 | `%r9` | `%r9d` | `%r9w` | `%r9b` |
 
-**Quy tắc bẫy: ghi 32-bit xoá nửa trên, ghi 8/16-bit thì không.** Intel SDM, 64-bit mode: toán hạng 8-bit và 16-bit cho kết quả 8-bit hoặc 16-bit; 56 bit hoặc 48 bit cao (tương ứng) của thanh ghi đa dụng đích không bị phép toán sửa đổi[^sdm816], trong khi toán hạng 32-bit cho kết quả 32-bit, được zero-extend thành kết quả 64-bit trong thanh ghi đa dụng đích[^sdm32]. Hệ quả bạn thấy ngay trong output:
+Bây giờ đến quy tắc dễ gây nhầm: **ghi 32 bit xoá nửa trên, ghi 8 hay 16 bit thì không.** Ở 64-bit mode, toán hạng 8 và 16 bit cho kết quả 8 hay 16 bit, và 56 hay 48 bit cao của thanh ghi đích không bị phép toán sửa đổi[^sdm816]. Toán hạng 32 bit thì khác: kết quả 32 bit được zero-extend thành 64 bit trong thanh ghi đích[^sdm32]. Đổi mã trạng thái `u8` của một đơn thành `u32` cho thấy hệ quả ngay trong output:
 
 ```asm
 byte32:                 # fn byte32(x: u8) -> u32 { x as u32 }
@@ -90,11 +94,13 @@ byte32:                 # fn byte32(x: u8) -> u32 { x as u32 }
     retq
 ```
 
-Ghi `%eax` đủ để `rax` mang giá trị `u32` đã zero-extend (hệ quả của quy tắc 32-bit ở trên[^sdm32]). Cùng lý do, `xorl %eax, %eax` (ví dụ ở `sw`, mục 5) đặt `rax = 0` (suy luận của người soạn từ quy tắc 32-bit).
+Ghi `%eax` là đủ để `rax` mang giá trị `u32` đã zero-extend, hệ quả trực tiếp của quy tắc 32 bit[^sdm32]. Cùng lý do, `xorl %eax, %eax` (gặp ở `sw`, mục 5) đặt `rax = 0` (suy luận của người soạn từ quy tắc 32 bit).
 
-**AArch64**
+### 2.2 AArch64
 
-AArch64 (ARMv8-A, tập lệnh A64) có 31 thanh ghi đa dụng 64-bit `x0`–`x30`[^armregs]. AAPCS64 viết cùng nội dung: ba mươi mốt thanh ghi đa dụng (số nguyên) 64-bit; trong ngữ cảnh 64-bit gọi bằng `x0`–`x30`, còn trong ngữ cảnh 32-bit thì dùng `w0`–`w30`[^aapcsregs]. `w0`–`w30` là nửa thấp 32 bit của cùng thanh ghi: tài liệu Arm nói nếu ghi như một word 32-bit thì nửa trên của thanh ghi bị xoá[^armzeroupper], và Dive into Systems nói tương tự khi dữ liệu 32-bit nằm trong `w0`[^armw] — cùng hành vi như x86-64 khi ghi 32-bit. Trong output dưới đây, nơi x86-64 dùng `movzbl`, A64 dùng `and w0, w0, #0xff` trên `w0` (quan sát ở `byte32`). Tôi đã chạy thật trên máy `aarch64-apple-darwin`: sau `mov x0, #-1` rồi `mov w0, #1`, `x0` đọc ra `0x1`.
+AArch64 (ARMv8-A, tập lệnh A64) có 31 thanh ghi đa dụng 64 bit `x0`–`x30`[^armregs]. Khi cần làm việc với 32 bit thì dùng tên `w0`–`w30`[^aapcsregs]; đó là nửa thấp 32 bit của chính các thanh ghi ấy. Ghi vào như một word 32 bit thì nửa trên của thanh ghi bị xoá[^armzeroupper]. Dive into Systems nói tương tự khi dữ liệu 32 bit nằm trong `w0`[^armw]. Vậy A64 cùng hành vi với x86-64 khi ghi 32 bit.
+
+Trong output dưới đây, chỗ x86-64 dùng `movzbl`, A64 dùng `and w0, w0, #0xff` trên `w0` (quan sát ở `byte32`). Tôi đã chạy thật trên máy `aarch64-apple-darwin`: sau `mov x0, #-1` rồi `mov w0, #1`, `x0` đọc ra `0x1`.
 
 ```asm
 byte32:                 // aarch64: fn byte32(x: u8) -> u32 { x as u32 }
@@ -102,39 +108,45 @@ byte32:                 // aarch64: fn byte32(x: u8) -> u32 { x as u32 }
     ret
 ```
 
-Các thanh ghi đặc biệt:
+Ngoài `x0`–`x30` còn vài thanh ghi có vai trò riêng:
 
 | Tên | Vai trò | Nguồn |
 |---|---|---|
-| `sp` | stack pointer; chỉ dùng được với một số lượng lệnh hạn chế | [^aapcssp] |
+| `sp` | stack pointer; chỉ dùng được trong một số ít lệnh | [^aapcssp] |
 | `pc` | program counter; chương trình không ghi trực tiếp | [^armpc] |
 | `xzr` / `wzr` (DiS gọi "zr") | luôn đọc ra 0, ghi vào bị bỏ qua | [^armzr] |
-| `x30` = `lr` | link register: địa chỉ trả về của `bl` | [^armbl] |
+| `x30` = `lr` | link register: chứa địa chỉ trả về của `bl` | [^armbl] |
 | `x29` = `fp` | frame pointer | [^aapcsfp] |
 
-Dive into Systems viết thanh ghi zero "chỉ hữu ích làm thanh ghi nguồn"[^armsp]; nhưng Arm nói rõ ghi vào nó bị bỏ qua và `cmp` được mã hoá thành `sub` có đích là thanh ghi zero[^armzr], nên dùng nó làm đích để bỏ kết quả cũng là cách dùng thật (xem mục 4).
+Dive into Systems viết thanh ghi zero "chỉ hữu ích làm thanh ghi nguồn"[^armsp]. Nhưng Arm nói rõ ghi vào nó bị bỏ qua, và `cmp` được mã hoá thành `sub` có đích là thanh ghi zero[^armzr]. Vậy dùng nó làm đích để vứt kết quả cũng là cách dùng thật (mục 4 có ví dụ).
 
 <details><summary>Đi sâu: tên <code>dil</code>, quy ước gọi hàm, và thí nghiệm <code>xzr</code>/<code>sp</code> trong LLVM</summary>
 
-(`%dil`: bảng tên thanh ghi ở 64-bit mode của SDM liệt kê `DIL`, `SIL`, `BPL`, `SPL`, `R8B`–`R15B` ở cột có tiền tố REX[^sdmbyte].)
+**Tên `%dil`.** Bảng tên thanh ghi ở 64-bit mode của SDM liệt kê `DIL`, `SIL`, `BPL`, `SPL`, `R8B`–`R15B` ở cột có tiền tố REX[^sdmbyte].
 
-Calling convention gắn với tên thanh ghi: theo Dive into Systems, sáu tham số đầu tiên của một hàm được nạp vào các thanh ghi `%rdi`, `%rsi`, `%rdx`, `%rcx`, `%r8` và `%r9`[^x86args], còn giá trị trả về nằm ở `%rax` hoặc một thanh ghi con của nó như `%eax`[^x86ret]. Do đó `fn add(a: i64, b: i64)` đọc `%rdi`, `%rsi` và trả `%rax` (suy luận của người soạn từ hai câu trên; chi tiết ở [Chương 04](04-calling-convention-va-stack-frame.md)). Lưu ý: hàm Rust khai báo không có `extern` dùng ABI "Rust" — calling convention gốc cho hàm và closure Rust, không đưa ra bảo đảm ổn định nào[^rustabi]; việc nó trùng với quy ước C trong các ví dụ ở đây là quan sát, không phải bảo đảm.
+**Gắn với calling convention.** Sáu tham số đầu của một hàm được nạp vào các thanh ghi `%rdi`, `%rsi`, `%rdx`, `%rcx`, `%r8` và `%r9`[^x86args]. Giá trị trả về nằm ở `%rax` hoặc một thanh ghi con của nó như `%eax`[^x86ret]. Từ đó `fn add(a: i64, b: i64)` đọc `%rdi`, `%rsi` và trả về ở `%rax` (suy luận của người soạn từ hai câu trên; chi tiết ở [Chương 04](04-calling-convention-va-stack-frame.md)). Lưu ý: hàm Rust khai báo không có `extern` dùng ABI "Rust", calling convention gốc cho hàm và closure Rust, và ABI này không đưa ra bảo đảm ổn định nào[^rustabi]. Việc nó trùng với quy ước C trong các ví dụ ở đây là quan sát, không phải bảo đảm.
 
-Trong phần mã hoá, `xzr` và `sp` dùng chung một số hiệu thanh ghi (31): Arm nói cả hai được mã hoá bằng core register 31 và chỉ một số ít lệnh hiểu số đó là `sp`, còn lại coi nó là thanh ghi zero[^armr31]. Các lệnh hiểu là `sp` gồm: mọi lệnh load/store (làm thanh ghi base), `and`/`orr`/`eor` dạng immediate không đặt cờ (làm đích), và `add`/`sub` dạng immediate hoặc dạng extend (làm đích hoặc toán hạng nguồn đầu)[^armspinstr]. LLVM khai báo cả hai thanh ghi với số hiệu 31[^llvmreg31] và chọn bằng lớp thanh ghi mà từng toán hạng của lệnh chấp nhận — `GPR64` là `x0`–`x30` cộng `XZR`[^llvmgpr64], còn `GPR64sp` là `x0`–`x30` cộng `SP`[^llvmgpr]. Hệ quả tôi đã thử bằng `asm!` (rustc 1.95.0, `aarch64-apple-darwin`): `add x8, sp, #0` được assembler chấp nhận (ở dạng immediate, số 31 của toán hạng nguồn là `sp`), `add x8, xzr, #7` bị từ chối "invalid operand", còn `add x8, xzr, x1` chạy và cho `7` khi `x1 = 7` (dạng thanh ghi, số 31 là `xzr`); `adds xzr, x8, #1` chạy được vì đích `xzr` bỏ kết quả. Kết quả khớp mô tả của Arm ở trên và việc `cmp reg, #0` thực chất là `subs xzr, reg, #0`[^llvmcmp] (mục 4). Đây là hành vi của assembler LLVM kết hợp tài liệu Arm; đặc tả đầy đủ nằm ở Arm ARM, trang developer.arm.com trả 403 lúc soạn.
+**`xzr` và `sp` chung số 31.** Trong phần mã hoá, `xzr` và `sp` dùng chung một số hiệu thanh ghi (31). Chỉ một số ít lệnh hiểu số đó là `sp`, còn lại coi nó là thanh ghi zero[^armr31]. Các lệnh hiểu là `sp` gồm: mọi lệnh load/store (làm thanh ghi base), `and`/`orr`/`eor` dạng immediate không đặt cờ (làm đích), và `add`/`sub` dạng immediate hoặc dạng extend (làm đích hoặc toán hạng nguồn đầu)[^armspinstr]. Phía LLVM, cả hai thanh ghi được khai báo với số hiệu 31[^llvmreg31]. LLVM chọn giữa chúng bằng lớp thanh ghi mà từng toán hạng của lệnh chấp nhận: `GPR64` là `x0`–`x30` cộng `XZR`[^llvmgpr64]. Còn `GPR64sp` là `x0`–`x30` cộng `SP`[^llvmgpr].
+
+Tôi đã thử hệ quả bằng `asm!` (rustc 1.95.0, `aarch64-apple-darwin`): `add x8, sp, #0` được assembler chấp nhận (ở dạng immediate, số 31 của toán hạng nguồn là `sp`), `add x8, xzr, #7` bị từ chối "invalid operand", còn `add x8, xzr, x1` chạy và cho `7` khi `x1 = 7` (dạng thanh ghi, số 31 là `xzr`); `adds xzr, x8, #1` chạy được vì đích `xzr` bỏ kết quả. Kết quả khớp mô tả của Arm ở trên và việc `cmp reg, #0` thực chất là `subs xzr, reg, #0`[^llvmcmp] (mục 4). Đây là hành vi của assembler LLVM kết hợp tài liệu Arm; đặc tả đầy đủ nằm ở Arm ARM, trang developer.arm.com trả 403 lúc soạn.
 
 </details>
 
-**Quay lại Q2:** sub-register là các cỡ của cùng một thanh ghi (ghi 32 bit xoá nửa trên, ghi 8/16 bit thì không); `xzr` đọc ra 0 (ghi vào bị bỏ qua) và dùng chung số 31 với `sp`.
+**Quay lại Q2:** với `orders`, sub-register là các cỡ của cùng một thanh ghi (ghi 32 bit xoá nửa trên, ghi 8/16 bit thì không); `xzr` đọc ra 0 (ghi vào bị bỏ qua) và dùng chung số 31 với `sp`.
 
 ## 3. Lệnh cơ bản, load/store và addressing mode (Q3)
 
-> **Trả lời ngắn.** x86-64 chủ yếu là lệnh hai toán hạng, đích cũng là nguồn[^x86sd][^x86add], và không cho phép bộ nhớ vừa là nguồn vừa là đích trong một lệnh[^x86mem]; hầu hết lệnh A64 có dạng ba toán hạng (đích, nguồn 1, nguồn 2)[^armops] và theo mô hình load/store: dữ liệu phải ở thanh ghi, chỉ các lệnh load/store chuyên dụng (như `ldr`/`str`) mới chạm bộ nhớ[^ldst]. Toán hạng bộ nhớ x86-64 theo công thức Base + Index×Scale + Displacement[^sdmea].
+> **Trả lời ngắn.** x86-64 chủ yếu là lệnh hai toán hạng, và đích cũng là một nguồn[^x86sd]. Một lệnh không được dùng bộ nhớ vừa làm nguồn vừa làm đích[^x86mem]. A64 thì phần lớn là lệnh ba toán hạng (đích, nguồn 1, nguồn 2)[^armops], theo mô hình load/store: dữ liệu phải nằm trong thanh ghi, và chỉ các lệnh load/store chuyên dụng như `ldr`/`str` mới chạm bộ nhớ[^ldst]. Địa chỉ bộ nhớ x86-64 tính theo công thức Base + Index×Scale + Displacement[^sdmea].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): x86 như thợ làm thẳng trên bàn đầy đồ (làm việc ngay trên bộ nhớ); A64 như bếp phải lấy nguyên liệu ra mặt bếp (thanh ghi) rồi mới nấu.
+*Với service `orders`.* Hầu như hàm nóng nào của `orders` cũng làm hai việc: tính toán trên vài số, và đọc ghi mảng hay struct trong bộ nhớ. Hai ISA chia hai việc này rất khác nhau, nên cùng một hàm Rust cho hai chuỗi lệnh có hình dạng khác hẳn. Mục này đi lần lượt: cách ghi toán hạng của lệnh số học, cách chạm bộ nhớ, rồi các dạng địa chỉ.
 
-Với x86-64, lệnh hai toán hạng thường theo định dạng nguồn, đích (S, D) (AT&T)[^x86sd], và với lệnh số học đích cũng là một nguồn: `add S, D` tính `S + D → D`[^x86add]. Với A64, hầu hết lệnh có dạng `opcode D, O1, O2` với `D` là thanh ghi đích; ví dụ `add w0, w0, #0x2` có thanh ghi đích là w0 và hai toán hạng là w0 và #0x2[^armops]. Một hệ quả thiết kế (nhận xét của người soạn): x86-64 chủ yếu là lệnh **hai** toán hạng, đích cũng là nguồn (`addq %rsi, %rdi`: `rdi += rsi`), còn A64 thường là **ba** toán hạng nên đích không bắt buộc trùng nguồn (như `add x8, x1, x0` ở [Chương 01, mục 6](01-mo-hinh-may-va-isa.md); trong `add(a,b)` dưới đây compiler chọn đích `x0` vì không cần giữ lại `a`/`b`). Output hàm `add(a,b)` làm rõ:
+### 3.1 Lệnh số học: hai toán hạng hay ba
+
+Lệnh hai toán hạng của x86-64 thường theo định dạng nguồn, đích (S, D) ở AT&T[^x86sd]. Với lệnh số học thì đích cũng là một nguồn: `add S, D` tính `S + D → D`[^x86add]. A64 thì hầu hết lệnh có dạng `opcode D, O1, O2`, với `D` là thanh ghi đích. Ví dụ `add w0, w0, #0x2` có đích là `w0` và hai toán hạng là `w0` và `#0x2`[^armops].
+
+Hệ quả (nhận xét của người soạn): x86-64 chủ yếu là lệnh **hai** toán hạng, đích cũng là nguồn (`addq %rsi, %rdi` nghĩa là `rdi += rsi`), còn A64 thường là **ba** toán hạng nên đích không bắt buộc trùng nguồn (như `add x8, x1, x0` ở [Chương 01, mục 6](01-mo-hinh-may-va-isa.md)). Hàm cộng hai khoản tiền `add(a: i64, b: i64)` cho thấy rõ:
 
 ```asm
 # x86-64 (AT&T)               # AArch64
@@ -143,11 +155,13 @@ add:                          _add:
     retq                          ret
 ```
 
-x86-64 dùng `lea` thay `add` để có đích khác nguồn (suy luận của người soạn). DiS: `lea` không bao gồm việc tra cứu bộ nhớ[^lea] — tức tính `rdi+rsi` mà không truy cập bộ nhớ.
+Ở A64, compiler chọn đích `x0` vì không cần giữ lại `a`, `b`. Ở x86-64, nó dùng `lea` thay `add` để có đích khác nguồn (suy luận của người soạn). `lea` không tra cứu bộ nhớ[^lea]: nó chỉ tính `rdi + rsi` rồi đặt kết quả vào thanh ghi.
 
-**Truy cập bộ nhớ: load/store và mov**
+### 3.2 Chạm bộ nhớ: load/store và `mov`
 
-A64 theo mô hình load/store: dữ liệu không thể được đọc hoặc ghi vào bộ nhớ trực tiếp mà phải được xử lý trong thanh ghi[^ldst]. Vì vậy `add`, `cmp`… chỉ làm trên thanh ghi, còn việc chạm RAM do các lệnh load/store chuyên dụng đảm nhiệm: `ldr` (load), `str` (store) và `ldp`/`stp` (nạp/lưu cặp thanh ghi 64-bit, thay cho load/store-multiple và push/pop của ARM cũ[^armpushpop]). x86-64 thì `mov` vừa nạp vừa lưu, và nhiều lệnh số học nhận một toán hạng bộ nhớ (`addq 8(%rdi), %rax`), nhưng dạng bộ nhớ không thể vừa là toán hạng nguồn vừa là toán hạng đích trong một lệnh[^x86mem]. Cặp hàm thật dưới đây (rút gọn, `p: &[u64;4]`):
+A64 theo mô hình load/store: dữ liệu không thể đọc hay ghi thẳng vào bộ nhớ mà phải xử lý trong thanh ghi[^ldst]. Vì vậy `add`, `cmp`… chỉ làm trên thanh ghi, còn việc chạm RAM do các lệnh load/store chuyên dụng lo: `ldr` (load), `str` (store), và `ldp`/`stp` nạp hay lưu một cặp thanh ghi 64 bit, thay cho load/store-multiple và push/pop của ARM cũ[^armpushpop].
+
+x86-64 thì khác: `mov` vừa nạp vừa lưu, và nhiều lệnh số học nhận được một toán hạng bộ nhớ (`addq 8(%rdi), %rax`). Giới hạn duy nhất là bộ nhớ không thể vừa là nguồn vừa là đích trong cùng một lệnh[^x86mem]. Cặp hàm dưới đây cộng hai bộ đếm trong một mảng 4 phần tử `p: &[u64;4]` (rút gọn):
 
 ```asm
 # fn ld(p: &[u64;4]) -> u64 { p[1] + p[3] }
@@ -159,11 +173,13 @@ ld:                               _ld:
                                       ret
 ```
 
-Cùng một công việc: x86-64 gộp load vào `addq`, A64 tách `ldr` + `add`. Offset `8` và `24` là byte (`1*8`, `3*8`). Một lệnh ghi tương ứng (`p[1] = v`) sẽ là `movq %rsi, 8(%rdi)` / `str x1, [x0, #8]` (ví dụ minh hoạ của người soạn, không phải output đã dán).
+Cùng một việc, nhưng x86-64 gộp load vào `addq` còn A64 tách thành `ldr` rồi `add`. Offset `8` và `24` tính bằng byte (`1*8`, `3*8`). Một lệnh ghi tương ứng (`p[1] = v`) sẽ là `movq %rsi, 8(%rdi)` / `str x1, [x0, #8]` (ví dụ minh hoạ của người soạn, không phải output đã dán).
 
-**Addressing mode**
+### 3.3 Addressing mode
 
-Dive into Systems mô tả toán hạng bộ nhớ x86-64 như `-0x4(%rbp)`: cộng -0x4 vào giá trị trong thanh ghi `%rbp`, rồi tra cứu bộ nhớ[^x86memform]; và A64 như `[sp, #12]`: cộng 12 vào giá trị trong thanh ghi `sp`, rồi tra cứu bộ nhớ[^armmemform]. Công thức tổng quát x86-64 trong Intel SDM: `Offset = Base + (Index * Scale) + Displacement`[^sdmea], với Scale ∈ {1,2,4,8}[^gasscale]. Bảng đối chiếu các dạng gặp thật trong output (các ô "cần lệnh riêng" và "(hai lệnh)" là nhận xét của người soạn, không phải khẳng định của nguồn):
+Một toán hạng bộ nhớ x86-64 như `-0x4(%rbp)` nghĩa là cộng -0x4 vào giá trị trong `%rbp` rồi tra bộ nhớ[^x86memform]. Với A64, `[sp, #12]` nghĩa là cộng 12 vào giá trị trong `sp` rồi tra bộ nhớ[^armmemform]. Dạng tổng quát của x86-64 là `Offset = Base + (Index * Scale) + Displacement`[^sdmea]. Trong đó Scale nhận giá trị 1, 2, 4 hoặc 8[^gasscale].
+
+Bảng dưới đối chiếu các dạng gặp thật trong output. Hai ô "cần lệnh riêng" và "(hai lệnh)" là nhận xét của người soạn, không phải khẳng định của nguồn.
 
 | Ý nghĩa | x86-64 (AT&T) | AArch64 |
 |---|---|---|
@@ -176,36 +192,48 @@ Dive into Systems mô tả toán hạng bộ nhớ x86-64 như `-0x4(%rbp)`: c�
 
 <details><summary>Đi sâu: thí nghiệm pre-/post-index và <code>uxtw</code>/<code>sxtw</code>, địa chỉ position-independent</summary>
 
-Các dạng `[x0, x2, lsl #2]`, `[x0, w3, SXTW]` có trong bảng toán hạng của DiS cho ARM64[^armscaled]; dạng `uxtw` là bản zero-extend của `sxtw` (suy luận của người soạn từ tên lệnh): tôi đã chạy `ldr x, [base, w, uxtw #3]` với `w = 0x80000000` và nó đọc đúng phần tử ở `base + 0x4_0000_0000` (zero-extend, không phải âm), còn `sxtw` với cùng `w` cho `base − 0x4_0000_0000`. Với pre-index (`[x, #imm]!`) và post-index (`[x], #imm`), LLVM mô tả chế độ chung của hai kiểu: ở pre-index địa chỉ truy cập là con trỏ base cộng/trừ offset[^llvmpre], ở post-index địa chỉ truy cập chính là base pointer, còn offset được cộng vào base sau khi truy cập bộ nhớ[^llvmpost]; ở A64, cả hai biến thể của `ldr` có thêm kết quả ghi lại (`$wback`) buộc vào thanh ghi base `$Rn`[^llvmwb]. Đọc vào output: `ldr x11, [x10], #8` đọc từ `x10` rồi tăng `x10` thêm 8, chính là bước `p++` của vòng cộng mảng `u64`; `stp x29, x30, [sp, #-16]!` trừ `sp` 16 rồi mới ghi cặp. Tôi đã chạy thật: `ldr x, [p], #8` đọc `10` và `p` tăng 8 byte; `ldr y, [p, #8]!` đọc `20` (phần tử kế) và `p` tăng 8 byte.
+Các dạng `[x0, x2, lsl #2]`, `[x0, w3, SXTW]` có trong bảng toán hạng của Dive into Systems cho ARM64[^armscaled]. Dạng `uxtw` là bản zero-extend của `sxtw` (suy luận của người soạn từ tên lệnh). Tôi đã chạy `ldr x, [base, w, uxtw #3]` với `w = 0x80000000`: nó đọc đúng phần tử ở `base + 0x4_0000_0000` (zero-extend, không phải âm), còn `sxtw` với cùng `w` cho `base − 0x4_0000_0000`.
 
-Cặp `adrp`+`add … @PAGEOFF` (macOS, A64) và `leaq sym(%rip)`/`@GOTPCREL(%rip)` (Linux, x86-64) là cách lấy địa chỉ symbol theo kiểu tương đối (quan sát trong output của chương); chương này chỉ cần nhận ra chúng, cơ chế GOT/relocation nằm ở [P11·06](../11-do-dac-va-go-loi/06-elf-linker-loader.md).
+Với pre-index (`[x, #imm]!`) và post-index (`[x], #imm`), LLVM mô tả chế độ chung của hai kiểu. Ở pre-index, địa chỉ truy cập là con trỏ base cộng hoặc trừ offset[^llvmpre]. Ở post-index, địa chỉ truy cập chính là base pointer, còn offset được cộng vào base sau khi truy cập bộ nhớ[^llvmpost]. Với `ldr` ở A64, cả hai biến thể có thêm một kết quả ghi lại (`$wback`) buộc vào thanh ghi base `$Rn`[^llvmwb]. Đọc vào output: `ldr x11, [x10], #8` đọc từ `x10` rồi tăng `x10` thêm 8, chính là bước `p++` của vòng cộng mảng `u64`; `stp x29, x30, [sp, #-16]!` trừ `sp` 16 rồi mới ghi cặp. Tôi đã chạy thật: `ldr x, [p], #8` đọc `10` và `p` tăng 8 byte; `ldr y, [p, #8]!` đọc `20` (phần tử kế) và `p` tăng 8 byte.
+
+Cặp `adrp`+`add … @PAGEOFF` (macOS, A64) và `leaq sym(%rip)`/`@GOTPCREL(%rip)` (Linux, x86-64) là cách lấy địa chỉ symbol theo kiểu tương đối (quan sát trong output của chương). Chương này chỉ cần bạn nhận ra chúng; cơ chế GOT/relocation nằm ở [P11·06](../11-do-dac-va-go-loi/06-elf-linker-loader.md).
 
 </details>
 
-**Quay lại Q3:** x86-64 hai toán hạng và cho toán hạng bộ nhớ; A64 thường ba toán hạng và chỉ các lệnh load/store (như `ldr`/`str`) chạm RAM.
+**Quay lại Q3:** với `orders`, x86-64 hai toán hạng và cho toán hạng bộ nhớ ngay trong lệnh số học; A64 thường ba toán hạng và chỉ các lệnh load/store (như `ldr`/`str`) chạm RAM.
 
 ## 4. Condition flags, nhảy có điều kiện và `cmov`/`csel` (Q4)
 
-> **Trả lời ngắn.** `cmp`/`test` không ghi kết quả vào thanh ghi đích mà đặt các cờ điều kiện[^x86cmp]; lệnh nhảy có điều kiện đọc các cờ đó[^sdmflags]. Hậu tố điều kiện của lệnh nhảy quyết định so sánh có dấu hay không dấu[^jsuffix]. `cmov`/`csel` chọn giá trị mà không nhảy, tránh gián đoạn pipeline do nhánh[^cmov][^brexp], nhưng compiler thận trọng khi có tác dụng phụ[^cmovcare] và chúng không phải lúc nào cũng nhanh hơn nhánh ([Chương 05, mục 7](05-pipeline-va-speculation.md)).
+> **Trả lời ngắn.** `cmp` và `test` không ghi kết quả vào thanh ghi mà đặt các cờ điều kiện[^x86cmp]. Lệnh nhảy có điều kiện đọc các cờ đó[^sdmflags]. Hậu tố của lệnh nhảy quyết định so sánh có dấu hay không dấu[^jsuffix]. `cmov`/`csel` chọn giá trị mà không nhảy, nhờ vậy không làm gián đoạn pipeline như một nhánh[^brexp]. Nhưng compiler thận trọng khi hai nhánh có tác dụng phụ[^cmovcare], và `cmov` không phải lúc nào cũng nhanh hơn nhánh ([Chương 05, mục 7](05-pipeline-va-speculation.md)).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `cmp` như bật một đèn hiệu; lệnh nhảy kế tiếp nhìn đèn rồi mới rẽ. `cmov` như chuẩn bị sẵn cả hai đáp án rồi chọn một, không rẽ hướng.
+*Với service `orders`.* Hàm nóng của `orders` đầy `if`: số dư đủ không, retry hết lượt chưa, id có nằm trong mảng không. Compiler dịch mỗi `if` thành hai bước: một lệnh so sánh để đặt cờ, rồi một lệnh rẽ hoặc chọn đọc cờ đó. Hiểu hai bước này là đọc được hầu hết nhánh trong asm.
 
-Hai họ kiến trúc đều có **thanh ghi cờ** do lệnh so sánh/số học ghi và lệnh nhảy/chọn đọc. DiS cho x86-64: `cmp` và `test` không sửa thanh ghi đích; chúng sửa một loạt giá trị một bit gọi là condition code flags (cờ điều kiện)[^x86cmp]; các cờ nằm trong FLAGS register[^x86flagsreg]. Intel SDM: các lệnh Jcc dùng trạng thái của các cờ trạng thái trong thanh ghi EFLAGS làm điều kiện để rẽ nhánh[^sdmflags]. Với A64 cờ nằm trong PSTATE (trạng thái bộ xử lý ARM)[^pstate], cập nhật bởi `cmp`, `tst` và biến thể `s` của lệnh số học (`adds`, `subs`; LLVM dùng chính `ADDS`/`SUBS` để lấy cờ tràn và carry, như `UADDO` → `ADDS` rồi điều kiện `HS`[^llvmusubo]). Về cấu tạo lệnh, `cmp` là tên khác của `subs` còn `tst` là tên khác của `ands`, cả hai với đích là thanh ghi zero để bỏ kết quả: Arm nói `CMP` được mã hoá thành `SUB` có đích là thanh ghi zero[^armzr], LLVM ghi cụ thể `cmp reg, #0` là `subs xzr, reg, #0`[^llvmcmp], và định nghĩa alias của LLVM biến `tst` thành `ands` với đích `xzr`/`wzr`[^llvmtst].
+### 4.1 Cờ điều kiện
 
-| Cờ | x86-64 | AArch64 | Dùng cho |
+Cả hai họ kiến trúc đều có thanh ghi cờ: lệnh so sánh hoặc số học ghi vào, lệnh nhảy hoặc chọn đọc ra. Trên x86-64, `cmp` và `test` không sửa thanh ghi đích; chúng sửa một loạt giá trị một bit gọi là condition code flags (cờ điều kiện)[^x86cmp]. Các cờ này nằm trong FLAGS register[^x86flagsreg]. Các lệnh Jcc dùng trạng thái của cờ trạng thái trong thanh ghi EFLAGS làm điều kiện để rẽ nhánh[^sdmflags]. Trên A64, cờ nằm trong PSTATE, trạng thái bộ xử lý ARM[^pstate]. Lệnh `cmp`, `tst` và biến thể `s` của lệnh số học (`adds`, `subs`) cập nhật chúng.
+
+Về cấu tạo lệnh, `cmp` chỉ là tên khác của `subs`, còn `tst` là tên khác của `ands`, cả hai với đích là thanh ghi zero để bỏ kết quả. Arm nói `CMP` được mã hoá thành `SUB` có đích là thanh ghi zero[^armzr]. LLVM ghi cụ thể `cmp reg, #0` là `subs xzr, reg, #0`[^llvmcmp]. Còn `tst` thì alias của LLVM biến nó thành `ands` với đích `xzr`/`wzr`[^llvmtst].
+
+Bốn cờ cần nhớ, với tên ở hai ISA:
+
+| Cờ | x86-64[^x86flagtab] | AArch64[^armflagtab] | Dùng cho |
 |---|---|---|---|
 | Bằng/không | ZF | Z | `==`, `!=` |
 | Âm (dấu) | SF | N | so sánh có dấu (cùng OF/V) |
 | Tràn có dấu | OF | V | so sánh có dấu |
 | Nhớ (carry) | CF (sau phép trừ: 1 khi *có* borrow) | C (sau phép trừ: 0 khi *có* borrow) | so sánh không dấu |
 
-Nguồn cho bảng cờ: tên và nghĩa các cờ x86-64[^x86flagtab] và A64[^armflagtab]; vai trò có dấu/không dấu ở đoạn dưới, và hàng carry khi trừ được giải thích ngay sau đó.
+Cờ nào dùng cho so sánh nào? Trên x86, SF và OF dùng cho so sánh số nguyên có dấu, còn CF dùng cho so sánh không dấu[^x86flagsuse]. A64 tương tự: V hữu ích cho so sánh có dấu, C hữu ích cho so sánh không dấu[^armflags].
 
-Phân vai theo DiS: x86 cờ SF và OF dùng cho phép so sánh trên số nguyên có dấu, còn cờ CF dùng cho so sánh trên số nguyên không dấu[^x86flagsuse]; A64: V hữu ích cho so sánh có dấu, C hữu ích cho so sánh không dấu[^armflags]. Thứ tự toán hạng của `cmp`: DiS viết `cmp O1, O2` của A64 là tính O1 - O2[^armcmp], còn `cmp R1, R2` của x86 là trừ R1 khỏi R2, tức tính R2 - R1[^x86cmpord]; vì vậy `cmpq %rsi, %rdx` (AT&T, mục 1) tính `rdx - rsi`. **Carry khi trừ: hai ISA ngược nhau.** Trên x86-64, CF được đặt khi phép tính số học tạo một carry hoặc borrow ra khỏi bit cao nhất[^sdmcf], nên sau một phép trừ `a - b` (như `cmp`) thì CF=1 khi `a < b` không dấu, và `jae` nhảy khi CF=0, `jb` khi CF=1[^sdmjae] (suy luận của người soạn từ định nghĩa borrow). Trên A64, source LLVM ghi điều kiện `HS` ứng với C == 1 và `LO` ứng với C == 0[^llvmnzcv], và `usub.with.overflow` (borrow) được lower thành `subs` với điều kiện `LO`[^llvmusubo], tức borrow ứng với C = 0, hay C là NOT borrow; LLVM cũng ghi rõ SBCS dùng carry chứ không phải borrow[^llvmsbcs]. `HS` là cao hơn hoặc bằng, không dấu[^llvmcc].
+Thứ tự toán hạng của `cmp` là chỗ hay nhầm nhất. `cmp O1, O2` của A64 tính O1 - O2[^armcmp]. Còn `cmp R1, R2` của x86 trừ R1 khỏi R2, tức tính R2 - R1[^x86cmpord]. Vì vậy `cmpq %rsi, %rdx` ở mục 1 tính `rdx - rsi`, tức `i - len`.
 
-**Hậu tố điều kiện.** Lệnh nhảy x86 bắt đầu bằng `j`, hậu tố của mỗi lệnh cho biết điều kiện của lệnh nhảy, và cũng quyết định việc diễn giải so sánh số là có dấu hay không dấu[^jsuffix]. A64 tương tự với `b.` + hậu tố: hậu tố cũng quyết định có dấu hay không dấu, và cùng bộ hậu tố dùng cho `csel`[^bsuffix].
+**Carry khi trừ: hai ISA ngược nhau.** Trên x86-64, CF được đặt khi phép tính số học tạo một carry hoặc borrow ra khỏi bit cao nhất[^sdmcf]. Nên sau một phép trừ `a - b` (như `cmp`) thì CF=1 khi `a < b` không dấu; `jae` nhảy khi CF=0 và `jb` nhảy khi CF=1[^sdmjae] (suy luận của người soạn từ định nghĩa borrow). Trên A64 thì ngược lại: source LLVM ghi điều kiện `HS` ứng với C == 1 và `LO` ứng với C == 0[^llvmnzcv]. Nói cách khác, sau phép trừ không có borrow thì C = 1. `HS` là "higher or same", cao hơn hoặc bằng, không dấu[^llvmcc].
+
+### 4.2 Hậu tố điều kiện
+
+Lệnh nhảy x86 bắt đầu bằng `j`; hậu tố của mỗi lệnh cho biết điều kiện nhảy, và cũng quyết định so sánh được hiểu là có dấu hay không dấu[^jsuffix]. A64 tương tự với `b.` cộng hậu tố: hậu tố cũng quyết định có dấu hay không dấu, và cùng bộ hậu tố ấy dùng cho `csel`[^bsuffix].
 
 | Điều kiện | x86[^jsufftab] | A64[^bsufftab] | Dấu |
 |---|---|---|---|
@@ -216,7 +244,9 @@ Phân vai theo DiS: x86 cờ SF và OF dùng cho phép so sánh trên số nguy�
 | `>=` unsigned | `jae` | `b.hs` (còn gọi `b.cs`)[^llvmalias] | unsigned |
 | `>` unsigned | `ja` | `b.hi` | unsigned |
 
-**Dạng chọn.** Với `if a > b { a } else { b }` không có tác dụng phụ, LLVM sinh lệnh chọn (quan sát ở output dưới):
+### 4.3 Chọn thay vì nhảy: `cmov` và `csel`
+
+Khi `if` chỉ chọn giữa hai giá trị và không có tác dụng phụ, LLVM sinh lệnh chọn thay vì nhảy (quan sát ở output dưới). Hàm lấy giá trị lớn hơn của hai số đo, `max(a: i64, b: i64)`, là ví dụ:
 
 ```asm
 # fn max(a: i64, b: i64) -> i64 { if a > b { a } else { b } }
@@ -227,33 +257,41 @@ max:                          _max:                    # AArch64
     retq
 ```
 
-DiS giải thích: `cmov` thực hiện một phép chuyển dữ liệu có điều kiện: cả then_statement lẫn else_statement của điều kiện đều được thực thi, và dữ liệu được đặt vào thanh ghi phù hợp[^cmov]; `csel` tương tự cho A64[^csel]. Động cơ là nhánh thường rất tốn kém để thực thi, do sự gián đoạn chúng có thể gây ra cho instruction pipeline (DiS nói câu này ở phần A64)[^brexp] — cơ chế đó giải thích kỹ ở [Chương 05](05-pipeline-va-speculation.md), kể cả vì sao branchless không phải lúc nào cũng nhanh hơn (mục 7 của chương đó). Cũng theo DiS, compiler rất thận trọng khi tối ưu lệnh nhảy thành lệnh cmov, đặc biệt trong trường hợp có tác dụng phụ và giá trị con trỏ[^cmovcare]; ví dụ `br` ở mục 5 là trường hợp có tác dụng phụ nên giữ nhánh (nhận xét của người soạn).
+`cmov` thực hiện một phép chuyển dữ liệu có điều kiện: cả then lẫn else đều được thực thi, và dữ liệu được đặt vào thanh ghi phù hợp[^cmov]. `csel` làm tương tự trên A64[^csel]. Lý do dùng chúng là nhánh thường rất tốn kém khi chạy, vì có thể làm gián đoạn instruction pipeline[^brexp]. Cơ chế đó được giải thích kỹ ở [Chương 05](05-pipeline-va-speculation.md), kể cả vì sao branchless không phải lúc nào cũng nhanh hơn (mục 7 của chương đó).
 
-**Ví dụ `collatz`.** Với `n = if n % 2 == 0 { n / 2 } else { 3*n + 1 }`, cả hai ISA tính trước cả hai vế rồi chọn bằng lệnh có điều kiện (mã chạy lại với rustc 1.95.0 `-O`). x86-64: `leaq (%rdi,%rdi,2), %rax; incq %rax` (`rax = 3n+1`), `movq %rdi, %rcx; shrq %rcx` (`rcx = n/2`), `testb $1, %dil`, rồi `cmoveq %rcx, %rax` (chẵn thì lấy `n/2`). AArch64: `lsr x8, x0, #1` (`x8 = n/2`), `add x9, x0, x0, lsl #1` (`x9 = 3n`), `tst x0, #0x1`, rồi `csinc x0, x8, x9, eq`. `csinc Rd, Rn, Rm, cond` cho `Rn` khi `cond` đúng, ngược lại `Rm + 1`: Arm gọi nhóm này là Conditional Select and Increment[^armcsinc], và LLVM định nghĩa `csinc` là phép chọn có điều kiện trên `Rm + 1` (`inc` là phép cộng 1)[^llvmcsinc]; tôi đã chạy thật `cmp x, #5; csinc r, p, q, eq` với `p=100`, `q=200`: `x=5` cho `100`, `x=6` cho `201`. Vì vậy `eq` (số chẵn, bit 0 = 0) chọn `n/2`, còn lại `3n + 1`: bước `+1` của vế lẻ được gộp vào chính lệnh chọn.
+Ngược lại, compiler rất thận trọng khi tối ưu lệnh nhảy thành `cmov`, nhất là khi có tác dụng phụ hoặc giá trị con trỏ[^cmovcare]. Ví dụ `br` ở mục 5 gọi hai hàm khác nhau, có tác dụng phụ, nên giữ nhánh (nhận xét của người soạn).
 
-<details><summary>Đi sâu: carry khi trừ, bảng điều kiện đầy đủ, <code>cbz</code> và tầm nhảy</summary>
+<details><summary>Đi sâu: <code>collatz</code> với <code>csinc</code>, carry khi trừ, bảng điều kiện đầy đủ, <code>cbz</code> và tầm nhảy</summary>
 
-Tôi đã chạy thật `subs xzr, a, b` rồi `cset r, hs`: `a=5, b=3` cho `1`; `a=3, b=5` cho `0`. Vậy `b.hs` (C=1) và `jae` (CF=0) cùng nghĩa "a ≥ b không dấu" dù giá trị cờ ngược nhau. Đây là kết luận từ source LLVM[^llvmnzcv] và thí nghiệm, không phải từ Arm ARM (403 lúc soạn). Với `adds`/`add`, carry-out của cả hai ISA cùng chiều (C/CF=1 khi tràn không dấu; `UADDO` được LLVM map sang `HS`[^llvmusubo]).
+**Chọn có điều kiện kèm phép cộng: `collatz`.** Với `n = if n % 2 == 0 { n / 2 } else { 3*n + 1 }`, cả hai ISA tính trước cả hai vế rồi chọn bằng lệnh có điều kiện (mã chạy lại với rustc 1.95.0 `-O`). Trên x86-64: `leaq (%rdi,%rdi,2), %rax; incq %rax` (`rax = 3n+1`), `movq %rdi, %rcx; shrq %rcx` (`rcx = n/2`), `testb $1, %dil`, rồi `cmoveq %rcx, %rax` (chẵn thì lấy `n/2`). Trên AArch64: `lsr x8, x0, #1` (`x8 = n/2`), `add x9, x0, x0, lsl #1` (`x9 = 3n`), `tst x0, #0x1`, rồi `csinc x0, x8, x9, eq`.
 
-Trong output: `jae`/`b.hs` ở hàm `load_idx` cho kiểm tra `i >= len` kiểu không dấu (chỉ số `usize`), còn `b.lt` ở `wh` là so sánh `i32` có dấu — khớp quy tắc "có dấu ↔ l/g/lt/gt/ge/le, không dấu ↔ a/b/hi/hs/lo/ls" (đã thấy trong các output; DiS ghép cặp có dấu/không dấu của x86 là `jg`/`ja`, `jge`/`jae`, `jl`/`jb`, `jle`/`jbe`[^jsufftab] và của A64 là `gt`/`hi`, `ge`/`hs`, `lt`/`lo`, `le`/`ls`[^bsufftab]). Bảng điều kiện x86 đầy đủ ở SDM Vol. 1 Table 7-4[^sdmjae]; phía A64, tên và nghĩa các điều kiện nằm trong `enum CondCode` của LLVM, nơi `HS` và `LO` có alias `cs` và `cc` ở assembler[^llvmcc][^llvmalias]; nghĩa của `hi`, `ls`, `ge`, `lt`, `gt` ở phần còn lại của enum đó[^llvmcc2].
+`csinc Rd, Rn, Rm, cond` cho `Rn` khi `cond` đúng, ngược lại cho `Rm + 1`. Arm gọi nhóm này là Conditional Select and Increment[^armcsinc]. LLVM thì định nghĩa `csinc` là phép chọn có điều kiện trên `Rm + 1` (`inc` là phép cộng 1)[^llvmcsinc]. Tôi đã chạy thật `cmp x, #5; csinc r, p, q, eq` với `p=100`, `q=200`: `x=5` cho `100`, `x=6` cho `201`. Vì vậy `eq` (số chẵn, bit 0 = 0) chọn `n/2`, còn lại chọn `3n + 1`: bước `+1` của vế lẻ được gộp vào chính lệnh chọn.
 
-**Nhảy theo thanh ghi, không qua cờ.** A64 có thêm `cbz`/`cbnz`: nếu R bằng 0, nhánh được thực hiện và pc được đặt thành addr (`cbz`)[^cbz], như `cbz x1, LBB7_3` ở đầu `sum` ("len == 0"; dòng này không nằm trong đoạn trích ở mục 5). **Tầm nhảy**: `b` đổi `pc` trong phạm vi 128 MB[^b128], còn nhánh điều kiện chỉ có tầm hạn chế hơn nhiều (1 MB)[^brange]. Hệ quả: AAPCS64 nói các lệnh branch A64 không với tới mọi đích, nên linker có thể phải chèn một veneer (đoạn mã nối trung gian) giữa hàm gọi và hàm được gọi[^aapcsveneer].
+**Carry khi trừ, phần còn lại.** Tôi đã chạy thật `subs xzr, a, b` rồi `cset r, hs`: `a=5, b=3` cho `1`; `a=3, b=5` cho `0`. Vậy `b.hs` (C=1) và `jae` (CF=0) cùng nghĩa "a ≥ b không dấu" dù giá trị cờ ngược nhau. Kết luận này đến từ source LLVM[^llvmnzcv] và thí nghiệm, không phải từ Arm ARM (403 lúc soạn). Về phía borrow, `usub.with.overflow` được LLVM lower thành `subs` với điều kiện `LO`[^llvmusubo], nên borrow ứng với C = 0, hay C là NOT borrow. LLVM cũng ghi rõ SBCS dùng carry chứ không phải borrow[^llvmsbcs]. Còn với `adds`/`add`, carry-out của cả hai ISA cùng chiều: C/CF=1 khi tràn không dấu, và LLVM map `UADDO` sang `HS` (qua `ADDS`)[^llvmusubo].
+
+**Bảng điều kiện đầy đủ.** Trong output, `jae`/`b.hs` ở hàm `load_idx` kiểm tra `i >= len` kiểu không dấu (chỉ số `usize`), còn `b.lt` ở `wh` là so sánh `i32` có dấu. Hai chỗ này khớp quy tắc: có dấu ứng với l/g/lt/gt/ge/le, không dấu ứng với a/b/hi/hs/lo/ls. Dive into Systems ghép cặp có dấu/không dấu của x86 là `jg`/`ja`, `jge`/`jae`, `jl`/`jb`, `jle`/`jbe`[^jsufftab]. Của A64 là `gt`/`hi`, `ge`/`hs`, `lt`/`lo`, `le`/`ls`[^bsufftab]. Bảng điều kiện x86 đầy đủ nằm ở SDM Vol. 1 Table 7-4[^sdmjae]. Phía A64, tên và nghĩa các điều kiện nằm trong `enum CondCode` của LLVM[^llvmcc]. Trong đó `HS` và `LO` có alias `cs` và `cc` ở assembler[^llvmalias]. Nghĩa của `hi`, `ls`, `ge`, `lt`, `gt` nằm ở phần còn lại của enum đó[^llvmcc2].
+
+**Nhảy theo thanh ghi, không qua cờ.** A64 có thêm `cbz`/`cbnz`: nếu R bằng 0 thì nhánh được thực hiện và pc được đặt thành addr (`cbz`)[^cbz]. Ví dụ `cbz x1, LBB7_3` ở đầu `sum` ("len == 0"; dòng này không nằm trong đoạn trích ở mục 5).
+
+**Tầm nhảy.** `b` đổi `pc` trong phạm vi 128 MB[^b128]. Nhánh điều kiện thì chỉ có tầm hạn chế hơn nhiều, 1 MB[^brange]. Hệ quả là các lệnh branch A64 không với tới mọi đích[^aapcsveneer]; linker có thể phải chèn một veneer (đoạn mã nối trung gian) giữa hàm gọi và hàm được gọi.
 
 </details>
 
-**Quay lại Q4:** cờ do `cmp`/`test`/lệnh `s` đặt và lệnh nhảy/chọn đọc; hậu tố cho biết có dấu hay không; `cmov`/`csel` chọn không cần nhánh.
+**Quay lại Q4:** với `orders`, cờ do `cmp`/`test`/lệnh `s` đặt và lệnh nhảy hoặc chọn đọc; hậu tố cho biết có dấu hay không; `cmov`/`csel` chọn giá trị mà không cần nhánh.
 
 ## 5. Dịch `if`, `while`, `for`, `match` (Q5)
 
-> **Trả lời ngắn.** Compiler dịch điều kiện thành lệnh sửa con trỏ lệnh để nhảy tới một địa chỉ không phải lệnh kế tiếp[^armcond]; công cụ cụ thể là nhảy không điều kiện, so sánh đặt cờ rồi nhảy có điều kiện, hoặc chọn có điều kiện không nhảy (mục 4). `if` có tác dụng phụ giữ dạng nhánh[^cmovcare]; trong ví dụ C của DiS, vòng `for` cho assembly giống hệt vòng `while`[^forwhile], còn Rust định nghĩa `for` qua `IntoIterator` và `loop`[^reffor]. `match` trả hằng được LLVM đổi thành bảng tra, và lời gọi ở vị trí đuôi có thể thành `jmp`/`b` (cả hai là quan sát).
+> **Trả lời ngắn.** Compiler dịch điều kiện thành lệnh sửa con trỏ lệnh để nhảy tới một địa chỉ khác lệnh kế tiếp[^armcond]. Công cụ cụ thể là nhảy không điều kiện, so sánh đặt cờ rồi nhảy có điều kiện, hoặc chọn có điều kiện không nhảy (mục 4). `if` có tác dụng phụ giữ dạng nhánh[^cmovcare]. Trong ví dụ C của Dive into Systems, vòng `for` cho assembly giống hệt vòng `while`[^forwhile]. Còn Rust định nghĩa `for` qua `IntoIterator` và `loop`[^reffor]. `match` trả hằng được LLVM đổi thành bảng tra, và lời gọi ở vị trí đuôi có thể thành `jmp`/`b` (cả hai là quan sát).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đường rẽ trong khu dân cư: `if` là ngã ba, vòng lặp là vòng xuyến, `match` là bảng chỉ dẫn tra số để đến thẳng nhà.
+*Với service `orders`.* Code của `orders` có đủ bốn kiểu cấu trúc: `if` (hoàn tiền hay thu tiền), `while` (thử lại), `for` (duyệt các dòng hàng), `match` (đổi mã trạng thái thành một giá trị). Mục này xem compiler dịch mỗi kiểu thành khung nhánh nào. Một lưu ý trước: output là kết quả của LLVM chứ không dịch từng dòng, nên asm có thể thiếu hẳn một `call` hay một nhánh mà bạn đã viết.
 
-Nguyên lý chung (tổng hợp của người soạn từ mục 4): compiler dùng bốn công cụ — nhảy không điều kiện (`jmp`/`b`), so sánh đặt cờ, nhảy có điều kiện (`jcc`/`b.cond`), và chọn có điều kiện không nhảy (`cmov`/`csel`). DiS: compiler dịch các điều kiện thành lệnh assembly sửa instruction pointer (pc)[^armcond].
+Nguyên lý chung (tổng hợp của người soạn từ mục 4): compiler có bốn công cụ, gồm nhảy không điều kiện (`jmp`/`b`), so sánh đặt cờ, nhảy có điều kiện (`jcc`/`b.cond`), và chọn có điều kiện không nhảy (`cmov`/`csel`). Mọi cấu trúc điều khiển đều là tổ hợp của bốn thứ này.
 
-**Dạng nhánh.** Khi hai nhánh gọi hàm khác nhau (có tác dụng phụ), compiler không thể "chạy cả hai", nên nó giữ nhánh (nhận xét của người soạn; DiS cũng lưu ý compiler thận trọng với tác dụng phụ[^cmovcare]). Hàm thật:
+### 5.1 `if` có tác dụng phụ: giữ nhánh
+
+Khi hai nhánh gọi hai hàm khác nhau (có tác dụng phụ), compiler không thể "chạy cả hai" như `cmov`, nên phải giữ nhánh (nhận xét của người soạn; Dive into Systems cũng lưu ý compiler thận trọng với tác dụng phụ[^cmovcare]). Hàm dưới đây giả sử `f` hoàn tiền còn `g` thu tiền:
 
 ```rust
 pub unsafe fn br(x: i32) { if x < 0 { f() } else { g() } }
@@ -269,13 +307,15 @@ br:                              _br:
     jmpq  *f@GOTPCREL(%rip)
 ```
 
-Mỗi bên kiểm tra dấu của `x` theo cách riêng: x86 `test` + `js` (nhảy khi cờ dấu SF=1[^sdmjs]), A64 `tbnz w0, #31` (test bit and branch if non-zero: nhảy khi bit 31, tức bit dấu của `w0`, bằng 1). Nguồn (chi tiết cài đặt của LLVM 22.1.0, có thể đổi): khi lower phép so sánh `x < 0` (`SETLT` với 0), LLVM sinh `TBNZ` trên vị trí bit dấu[^llvmtbnz], và `tbnz` tương đương `tst` bit đó rồi rẽ nhánh khi kết quả khác 0 (`ands xzr, reg, #1<<bit` với điều kiện `NE`)[^llvmtbnzsem]. Tôi cũng chạy thật `tbnz w, #31, label`: nhảy với `w = -3`, không nhảy với `w = 3`. Điều đáng nhớ hơn: **không có `call`/`bl`/`ret`**. Lời gọi `f()`/`g()` nằm ở vị trí đuôi (tail position) nên compiler thay bằng nhảy `jmp`/`b` — hàm đích sẽ `ret` thẳng về caller của `br`. Đây là tối ưu của compiler, không phải bảo đảm ngôn ngữ (nhận xét của người soạn); tail call được nói riêng ở [Chương 04, mục 7](04-calling-convention-va-stack-frame.md).
+Mỗi bên kiểm tra dấu của `x` theo cách riêng. x86 dùng `test` rồi `js`, nhảy khi cờ dấu SF=1[^sdmjs]. A64 dùng `tbnz w0, #31` (test bit and branch if non-zero): nhảy khi bit 31, tức bit dấu của `w0`, bằng 1.
 
-**`while`, `for`**
+Điều đáng chú ý hơn là **không có `call`/`bl`/`ret`**. Lời gọi `f()`/`g()` nằm ở vị trí đuôi (tail position) nên compiler thay bằng nhảy `jmp`/`b`, và hàm đích sẽ `ret` thẳng về caller của `br`. Đây là tối ưu của compiler, không phải bảo đảm ngôn ngữ (nhận xét của người soạn); tail call được nói riêng ở [Chương 04, mục 7](04-calling-convention-va-stack-frame.md).
 
-DiS: một vòng `for` cho ra assembly giống hệt ví dụ vòng while của họ[^forwhile] (ví dụ C `sumUp`/`sumUp2` của DiS) — nên với ví dụ đó chỉ còn một khuôn: *khởi tạo → (kiểm tra → thân → bước nhảy) → thoát*. Trong Rust, Reference định nghĩa `for` là tương đương một `loop` chứa `match` trên `Iterator::next(&mut iter)`, với `iter` lấy từ `IntoIterator::into_iter(iter_expr)`[^reffor]; assembly cuối cùng của `for` và `while` có giống nhau hay không là việc của optimizer, nên chương này chỉ nói về các output `-O` đã dán (nhận xét của người soạn).
+### 5.2 `while` và `for`
 
-Hàm `wh(mut n: i32) { while n > 0 { f(); n -= 1; } }` (với `f` là hàm ngoài) cho, trên AArch64 (đã bỏ `stp`/`ldp`):
+Trong ví dụ C của Dive into Systems (`sumUp`/`sumUp2`), một vòng `for` cho ra assembly giống hệt vòng `while`[^forwhile]. Với ví dụ đó chỉ còn một khuôn: *khởi tạo → (kiểm tra → thân → bước nhảy) → thoát*. Rust thì định nghĩa `for` là tương đương một `loop` chứa `match` trên `Iterator::next(&mut iter)`, với `iter` lấy từ `IntoIterator::into_iter(iter_expr)`[^reffor]. Assembly cuối cùng của `for` và `while` có giống nhau hay không là việc của optimizer, nên chương này chỉ nói về các output `-O` đã dán (nhận xét của người soạn).
+
+Hàm `wh(mut n: i32) { while n > 0 { f(); n -= 1; } }` (với `f` là hàm ngoài) giống một vòng retry gọi `f` tối đa `n` lần. Trên AArch64 nó cho (đã bỏ `stp`/`ldp`):
 
 ```asm
     cmp   w0, #1
@@ -291,13 +331,15 @@ LBB3_4: ret
 
 x86-64 có cùng khung (`testl; jle`, `callq *%r14`, `decl %ebx; cmpl $1; ja`).
 
-**`match` / `switch`**
+### 5.3 `match` và `switch`
+
+Giả sử `orders` đổi mã trạng thái thành thời gian chờ retry:
 
 ```rust
 pub fn sw(x: u32) -> u32 { match x { 0 => 10, 1 => 20, 2 => 35, 3 => 7, 4 => 99, _ => 0 } }
 ```
 
-Hai kiến trúc cho cùng một chiến lược — **bảng tra (lookup table)** chứ không phải chuỗi so sánh (quan sát ở output dưới):
+Hai kiến trúc cho cùng một chiến lược: **bảng tra (lookup table)** chứ không phải chuỗi so sánh (quan sát ở output dưới):
 
 ```asm
 # x86-64                                  # AArch64
@@ -312,15 +354,15 @@ sw:                                       _sw:
 .Lswitch.table.sw: .long 10,20,35,7,99    l_switch.table.sw: .long 10,20,35,7,99
 ```
 
-Nhánh `_ =>` trở thành một lần so sánh miền (`x > 4` unsigned) rồi nhảy; phần còn lại là một lệnh load đánh chỉ số vào bảng 5 phần tử `.long` (4 byte). Khi mỗi nhánh *trả về một hằng số*, LLVM biến cả `match` thành bảng dữ liệu (quan sát). Với thân phức tạp hơn tôi không chạy ví dụ nên không khẳng định hình dạng.
+Nhánh `_ =>` trở thành một lần so sánh miền (`x > 4` unsigned) rồi nhảy. Phần còn lại là một lệnh load đánh chỉ số vào bảng 5 phần tử `.long` (4 byte). Khi mỗi nhánh *trả về một hằng số*, LLVM biến cả `match` thành bảng dữ liệu (quan sát). Với thân phức tạp hơn tôi không chạy ví dụ nên không khẳng định hình dạng.
 
-<details><summary>Đi sâu: hình dạng vòng <code>while</code> và vector hoá</summary>
+<details><summary>Đi sâu: <code>tbnz</code> trong LLVM, hình dạng vòng <code>while</code> và vector hoá</summary>
 
-Hình dạng: một **guard** trước vòng lặp (`n <= 0` thì không vào), rồi thân vòng ở nhãn `LBB3_2` nằm *trước* phép kiểm tra cuối (bottom-tested loop), nên mỗi lượt chỉ cần một nhảy có điều kiện ngược. Đây là khác với khuôn "nhảy xuống kiểm tra trước, rồi quay lại" mà DiS minh hoạ cho `sumUp` (`jmp <sumUp+33>` rồi `jle` ngược)[^loopjmp]; biến của ví dụ DiS nằm trên stack (`-0x4(%rbp)`), nên trông là mã chưa tối ưu (suy luận của người soạn). Bộ đếm được biến đổi thành đếm xuống (`n+1`, giảm, so với 1); `ja`/`b.hi` là nhảy *unsigned* vì LLVM đã chứng minh giá trị không âm (suy luận của người soạn).
+**`tbnz` từ phía LLVM.** Đây là chi tiết cài đặt của LLVM 22.1.0, có thể đổi. Khi lower phép so sánh `x < 0` (`SETLT` với 0), LLVM sinh `TBNZ` trên vị trí bit dấu[^llvmtbnz]. Và `tbnz` tương đương `tst` bit đó rồi rẽ nhánh khi kết quả khác 0 (`ands xzr, reg, #1<<bit` với điều kiện `NE`)[^llvmtbnzsem]. Tôi cũng chạy thật `tbnz w, #31, label`: nhảy với `w = -3`, không nhảy với `w = 3`.
 
-**Vòng lặp có truy cập mảng và vector hoá**
+**Hình dạng vòng `while`.** Ở `wh`, có một **guard** trước vòng lặp (`n <= 0` thì không vào), rồi thân vòng ở nhãn `LBB3_2` nằm *trước* phép kiểm tra cuối (bottom-tested loop), nên mỗi lượt chỉ cần một nhảy có điều kiện ngược. Khác với khuôn "nhảy xuống kiểm tra trước, rồi quay lại" mà Dive into Systems minh hoạ cho `sumUp` (`jmp <sumUp+33>` rồi `jle` ngược)[^loopjmp]. Biến của ví dụ đó nằm trên stack (`-0x4(%rbp)`), nên trông là mã chưa tối ưu (suy luận của người soạn). Bộ đếm của `wh` được biến đổi thành đếm xuống (`n+1`, giảm, so với 1); `ja`/`b.hi` là nhảy *unsigned* vì LLVM đã chứng minh giá trị không âm (suy luận của người soạn).
 
-`sum(p: &[i64]) -> i64` với `for i in 0..p.len() { s += p[i] }` ở `-O` được **vector hoá**: thân scalar vẫn còn (xử lý phần dư), nhưng có thêm vòng chính dùng thanh ghi SIMD (A64 có 32 thanh ghi SIMD/FP `v0`–`v31`[^aapcssimd]). Trích phần cốt lõi:
+**Vòng lặp có truy cập mảng và vector hoá.** `sum(p: &[i64]) -> i64` với `for i in 0..p.len() { s += p[i] }` (tổng các khoản trong một đơn) ở `-O` được **vector hoá**: thân scalar vẫn còn để xử lý phần dư, nhưng có thêm vòng chính dùng thanh ghi SIMD. A64 có 32 thanh ghi SIMD/FP `v0`–`v31`[^aapcssimd]. Trích phần cốt lõi:
 
 ```asm
 # AArch64 (đã rút gọn): vòng vector, bộ đếm giảm 8 mỗi lượt, rồi vòng scalar cho phần dư
@@ -336,19 +378,19 @@ LBB7_8:
     b.ne  LBB7_8
 ```
 
-Trên x86-64, vòng chính dùng `movdqu`/`paddq` với `%xmm` (128-bit; output chỉ chứa thanh ghi `%xmm`, quan sát). Trong vòng không còn bounds check — compiler đã chứng minh `i < len` (suy luận của người soạn; [Chương 07, mục 3](07-rust-va-may.md) phân tích kỹ việc compiler bỏ hoặc đưa bounds check ra ngoài vòng) — và `subs … ; b.ne` là mẫu "đếm xuống đến 0" của A64.
+Trên x86-64, vòng chính dùng `movdqu`/`paddq` với `%xmm` (128 bit; output chỉ chứa thanh ghi `%xmm`, quan sát). Trong vòng không còn bounds check: compiler đã chứng minh `i < len` (suy luận của người soạn; [Chương 07, mục 3](07-rust-va-may.md) phân tích kỹ việc compiler bỏ hoặc đưa bounds check ra ngoài vòng). Còn `subs … ; b.ne` là mẫu "đếm xuống đến 0" của A64.
 
 </details>
 
-**Quay lại Q5:** `if` thành nhánh khi có tác dụng phụ; `for` và `while` chung khung trong ví dụ C của DiS (Rust định nghĩa `for` qua iterator); `match` trả hằng thành bảng tra; output không dịch từng dòng.
+**Quay lại Q5:** với `orders`, `if` thành nhánh khi có tác dụng phụ; `for` và `while` chung khung trong ví dụ C của Dive into Systems (Rust định nghĩa `for` qua iterator); `match` trả hằng thành bảng tra; output không dịch từng dòng.
 
 ## 6. Gọi hàm: `call`/`bl` và `ret` (Q6)
 
-> **Trả lời ngắn.** `callq` cất địa chỉ trả về (`%rip` kế tiếp) lên stack[^callx86]; `bl` ghi `pc+4` vào thanh ghi `x30` (LR)[^blarm]. `ret` trên x86-64 nạp `%rip` từ stack[^retx86], còn trên A64 lấy `pc = x30`[^retarm].
+> **Trả lời ngắn.** `callq` cất địa chỉ trả về (giá trị `%rip` kế tiếp) lên stack[^callx86]. `bl` ghi `pc+4` vào thanh ghi `x30` (LR)[^blarm]. `ret` trên x86-64 nạp lại `%rip` từ stack[^retx86]. Trên A64, `ret` đặt `pc = x30`[^retarm].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): x86 để mảnh giấy ghi đường về vào ngăn kéo chung (stack); A64 giữ mảnh giấy trong túi áo (`x30`), nên gọi tiếp lần nữa thì phải cất giấy cũ đi.
+*Với service `orders`.* Một request đi qua `orders` là một chuỗi lời gọi hàm lồng nhau: handler gọi parse, parse gọi validate, và cứ thế. Mỗi hàm chạy xong, CPU phải biết quay lại đúng chỗ đã gọi. Hai ISA lưu "địa chỉ quay lại" ở hai nơi khác nhau, và khác biệt đó giải thích vì sao hàm A64 hay mở đầu bằng `stp x29, x30` còn hàm x86-64 thì không.
 
 Hai ISA khác nhau ở **nơi cất địa chỉ trả về**:
 
@@ -358,9 +400,9 @@ Hai ISA khác nhau ở **nơi cất địa chỉ trả về**:
 | Về | `retq`: nạp `%rip` từ stack[^retx86] | `ret`: `pc = x30`[^retarm] |
 | Địa chỉ trả về nằm ở | bộ nhớ (stack) | thanh ghi |
 
-DiS: khi hàm gọi thực thi lệnh callq, giá trị hiện tại của %rip được lưu trên stack để biểu diễn địa chỉ trả về[^callx86]; khi hàm gọi thực thi lệnh bl, giá trị pc + 4 được lưu trong thanh ghi x30[^blarm]; AAPCS64 diễn đạt cùng ý: BL chuyển giá trị kế tiếp theo thứ tự của program counter — tức địa chỉ trả về — vào link register (LR)[^aapcsbl].
+Tài liệu ABI của Arm diễn đạt cùng ý: `BL` chuyển giá trị kế tiếp của program counter, tức địa chỉ trả về, vào link register (LR)[^aapcsbl].
 
-Hệ quả thấy ngay trong code của `caller(x) = callee(x) + 1` (cả hai `#[inline(never)]`/`no_mangle`):
+Ví dụ: `caller(x) = callee(x) + 1`, với `callee(x) = x.wrapping_mul(31)`, kiểu một bước băm id trong `orders` (cả hai `#[inline(never)]`/`no_mangle`):
 
 ```asm
 # x86-64                          # AArch64
@@ -378,39 +420,43 @@ callee:                           _callee:
     retq
 ```
 
-`callee` là `x.wrapping_mul(31)`: cả hai ISA thay phép nhân bằng dịch bit rồi trừ (`x*32 - x`). `caller` là *non-leaf* (gọi hàm khác): trên A64 `bl` ghi đè `x30` còn `ret` lấy địa chỉ từ `x30`, nên prologue phải cất `x30` lên stack bằng `stp` rồi `ldp` khôi phục trước `ret` (suy luận của người soạn từ hai định nghĩa ở bảng trên); còn trên x86 `call` tự đẩy địa chỉ trả về lên stack nên `pushq %rax` chỉ để căn lề stack (suy luận của người soạn; xem Đi sâu). Hàm *leaf* như `callee` không cần cất gì. Bố cục stack frame và danh sách thanh ghi caller-/callee-saved nằm ở [Chương 04](04-calling-convention-va-stack-frame.md).
+`callee` là `x.wrapping_mul(31)`: cả hai ISA thay phép nhân bằng dịch bit rồi trừ (`x*32 - x`). Chỗ đáng xem là `caller`, một hàm *non-leaf* (gọi hàm khác). Trên A64, `bl` ghi đè `x30` còn `ret` lấy địa chỉ từ `x30`, nên prologue phải cất `x30` lên stack bằng `stp` rồi khôi phục bằng `ldp` trước `ret` (suy luận của người soạn từ hai định nghĩa ở bảng trên). Trên x86, `call` tự đẩy địa chỉ trả về lên stack, nên `pushq %rax` ở đây chỉ để căn lề stack (suy luận của người soạn; xem Đi sâu). Hàm *leaf* như `callee` không cần cất gì. Bố cục stack frame và danh sách thanh ghi caller-/callee-saved nằm ở [Chương 04](04-calling-convention-va-stack-frame.md).
 
 <details><summary>Đi sâu: căn lề stack ở x86-64 và AArch64</summary>
 
-Căn lề stack ở x86-64: System V psABI nói stack cần căn 16 (32 hoặc 64) byte ngay trước khi lệnh `call` được thực thi, và ngay khi vào hàm (địa chỉ trả về vừa được đẩy) thì `%rsp + 8` là bội của 16[^sysvalign]. Vì vậy khi vừa vào `caller`, `%rsp` lệch 8 so với bội của 16, và `pushq` 8 byte đưa nó về bội của 16 trước `callq` (suy luận của người soạn từ câu trích). Phía AArch64, AAPCS64 đòi `SP` chia hết cho 16 mỗi khi truy cập bộ nhớ qua SP (phần cứng yêu cầu)[^aapcsalign]; `stp x29, x30, [sp, #-16]!` ở trên trừ SP đúng 16 nên giữ được điều đó (suy luận của người soạn). Quy tắc này, red zone và prologue/epilogue được nói kỹ ở [Chương 04, mục 4 và 6](04-calling-convention-va-stack-frame.md).
+Ở x86-64, System V psABI nói stack cần căn 16 (32 hoặc 64) byte ngay trước khi lệnh `call` được thực thi, và ngay khi vào hàm (địa chỉ trả về vừa được đẩy) thì `%rsp + 8` là bội của 16[^sysvalign]. Vì vậy khi vừa vào `caller`, `%rsp` lệch 8 so với bội của 16, và `pushq` 8 byte đưa nó về bội của 16 trước `callq` (suy luận của người soạn từ câu trích). Phía AArch64, AAPCS64 đòi `SP` chia hết cho 16 mỗi khi truy cập bộ nhớ qua SP (phần cứng yêu cầu)[^aapcsalign]. `stp x29, x30, [sp, #-16]!` ở trên trừ SP đúng 16 nên giữ được điều đó (suy luận của người soạn). Quy tắc này, red zone và prologue/epilogue được nói kỹ ở [Chương 04, mục 4 và 6](04-calling-convention-va-stack-frame.md).
 
 </details>
 
-**Quay lại Q6:** x86-64 cất địa chỉ trả về lên stack, A64 cất vào `x30`.
+**Quay lại Q6:** với `orders`, x86-64 cất địa chỉ trả về lên stack, A64 cất vào `x30`.
 
 ## 7. Sinh và đọc assembly do `rustc` tạo ra (Q7)
 
-> **Trả lời ngắn.** Sinh asm bằng `rustc -O --emit=asm`[^emit] (`-O` là `opt-level=3`[^opt]); `--target` chọn target tuple, tức kiến trúc và hệ điều hành đích[^target]. Output là kết quả của LLVM chứ không dịch từng dòng. Khi đọc: lọc directive, tìm nhánh tới `core::panicking` (bounds check[^bounds]), so `opt-level=0` với `-O` để thấy overflow check[^ovf], và để ý thanh ghi SIMD trong thân vòng để nhận ra vector hoá (Đi sâu ở mục 5).
+> **Trả lời ngắn.** Sinh asm bằng `rustc -O --emit=asm`[^emit]; `-O` là `opt-level=3`[^opt]. `--target` chọn target tuple, tức kiến trúc và hệ điều hành đích[^target]. Output là kết quả của LLVM chứ không dịch từng dòng. Khi đọc, lọc directive trước, rồi tìm nhánh tới `core::panicking`: đó là bounds check[^bounds]. So `opt-level=0` với `-O` thì thấy overflow check[^ovf]. Thanh ghi SIMD trong thân vòng cho biết vòng đã được vector hoá (Đi sâu ở mục 5).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): đọc asm như đọc phim X-quang: không thấy tên biến, nhưng thấy hình dáng xương (nhánh, vòng lặp, bảng).
+*Với service `orders`.* Khi một hàm nóng của `orders` chậm, bạn mở assembly của nó để trả lời ba câu hỏi: bounds check có nằm trong vòng lặp không, còn phép tính nào mang overflow check không, vòng lặp có được vector hoá không (nhận xét của người soạn). Mục này chỉ cách sinh asm, lọc nhiễu và đọc ba dấu hiệu đó.
 
-Mọi ví dụ trong chương được sinh bằng `rustc 1.95.0` trên máy `aarch64-apple-darwin`; rustc 1.95.0 dùng LLVM 22[^rustllvm], nên các trích dẫn mã LLVM trong chương ghim ở tag 22.1.0 (bản LLVM đi kèm rustc có thể khác vài chi tiết). Phần x86-64 sinh bằng cross-target `x86_64-unknown-linux-gnu`: `--emit=asm` không yêu cầu loại output `link`, vốn chỉ là mặc định khi không có `--emit`[^emitlink], nên không có bước liên kết và không cần linker Linux (suy luận của người soạn từ câu đó). Lệnh:
+### 7.1 Sinh asm
+
+Mọi ví dụ trong chương được sinh bằng `rustc 1.95.0` trên máy `aarch64-apple-darwin`. rustc 1.95.0 dùng LLVM 22[^rustllvm], nên các trích dẫn mã LLVM trong chương ghim ở tag 22.1.0 (bản LLVM đi kèm rustc có thể khác vài chi tiết). Phần x86-64 sinh bằng cross-target `x86_64-unknown-linux-gnu`. Cách này chạy được vì loại output `link` chỉ là mặc định khi không có `--emit`[^emitlink], nên `--emit=asm` không có bước liên kết và không cần linker Linux (suy luận của người soạn từ câu đó). Lệnh:
 
 ```sh
 rustc -O --emit=asm a.rs -o arm.s --target aarch64-apple-darwin
 rustc -O --emit=asm a.rs -o x86.s --target x86_64-unknown-linux-gnu
 ```
 
-`--emit=asm` tạo ra một file chứa assembly của crate[^emit]; `-O` là bí danh của `-C opt-level=3`[^opt]. File nguồn bắt đầu bằng `#![crate_type="lib"]` và mỗi hàm có `#[no_mangle] pub fn` để tên symbol giữ nguyên (`add` thay vì `_RNv…`)[^nomangle]. Tôi cũng xoá các directive nhiễu (`.cfi_*`, `.p2align`, `.size`, `.section`…) khỏi bản dán bên dưới và đã ghi chú mỗi đoạn "rút gọn" — các lệnh còn lại là nguyên văn. Trong file có hai kiểu nhãn: `LBBn_m` (macOS, có thể có thêm tiền tố `_` ở tên hàm) và `.LBBn_m` (ELF/Linux); đó là chuyện của object format chứ không phải của ISA (quan sát).
+`--emit=asm` tạo ra một file chứa assembly của crate[^emit]; `-O` là bí danh của `-C opt-level=3`[^opt]. File nguồn bắt đầu bằng `#![crate_type="lib"]`, và mỗi hàm có `#[no_mangle] pub fn` để tên symbol giữ nguyên (`add` thay vì `_RNv…`)[^nomangle]. Tôi xoá các directive nhiễu (`.cfi_*`, `.p2align`, `.size`, `.section`…) khỏi bản dán bên dưới và ghi chú mỗi đoạn "rút gọn"; các lệnh còn lại là nguyên văn. Trong file có hai kiểu nhãn: `LBBn_m` (macOS, có thể có thêm tiền tố `_` ở tên hàm) và `.LBBn_m` (ELF/Linux). Đó là chuyện của object format chứ không phải của ISA (quan sát).
 
 Output là **kết quả của LLVM ở `-O`**, không phải dịch từng dòng; `opt-level=0` cho code khác hẳn (xem bước 3 bên dưới). Phiên bản rustc/LLVM khác có thể sinh khác (nhận xét của người soạn).
 
-1. **Lọc nhiễu.** Directive là chỉ thị cho assembler, tên bắt đầu bằng `.`[^gasdirective]; ví dụ `.cfi_*` (mở và đóng mục unwind của hàm trong `.eh_frame`[^gascfi]), `.p2align`, `.section`, `.size`, `.loh` (chỉ thấy ở output macOS, quan sát). Nhãn là một symbol kết thúc bằng `:`[^gaslabel] (nhãn cục bộ như `.LBB5_2:` cũng bắt đầu bằng `.` nhưng có `:`; quan sát), và phần lệnh là những dòng còn lại.
-2. **Tìm các "dấu vân tay" của Rust.** Một nhánh dẫn tới `…core9panicking…` (tên symbol của `core::panicking`, quan sát) là *panic*. Ví dụ `load_idx` có nhánh `cmp x2, x1 ; b.hs LBB5_2` rồi `bl …panic_bounds_check`: đây chính là kiểm tra chỉ số lúc chạy mà Reference nói: một kiểm tra sẽ được thực hiện lúc chạy và đưa thread vào trạng thái panic nếu nó thất bại[^bounds]. Đường nhanh (`ldr w0, [x0, x2, lsl #2]`) chỉ có `cmp` + một nhánh chưa lấy.
-3. **Đọc debug và release khác nhau.** Reference: toán tử số nguyên sẽ panic khi tràn nếu biên dịch ở chế độ debug[^ovf]; rustc book: nếu không chỉ định, debug assertions tự bật chỉ khi `opt-level` là 0[^debugassert], và overflow checks bật khi debug assertions bật[^ovfchecks]. Vì vậy so asm của cùng một hàm ở `opt-level=0` và `-O` (`-O` là `opt-level=3`) cho thấy overflow check: ở `-O` kiểm tra không được phát ra, chứ không phải optimizer "chứng minh" không tràn (suy luận của người soạn từ hai câu trên). Listing nằm ở Đi sâu bên dưới; [Chương 07, mục 1](07-rust-va-may.md) đối chiếu cùng cặp `-O0`/`-O3` cho một hàm `u64`.
-4. **Nhận ra vector hoá.** Vòng lặp mà thân xử lý nhiều phần tử mỗi lượt bằng thanh ghi SIMD đã được vector hoá: trên A64 là các thanh ghi SIMD `v0`–`v31`[^aapcssimd] (trong output xuất hiện dưới tên `q4`, `q5`, `v0`…; quan sát), trên x86-64 là `%xmm…`. Ví dụ `sum` ở Đi sâu của mục 5 có `ldp q4, q5` và `add.2d` ở A64, `movdqu`/`paddq` ở x86-64 (quan sát).
+### 7.2 Bốn bước đọc
+
+1. **Lọc nhiễu.** Directive là chỉ thị cho assembler, tên bắt đầu bằng `.`[^gasdirective]. Ví dụ `.cfi_*` mở và đóng mục unwind của hàm trong `.eh_frame`[^gascfi], cùng với `.p2align`, `.section`, `.size`, `.loh` (chỉ thấy ở output macOS, quan sát). Nhãn là một symbol kết thúc bằng `:`[^gaslabel]; nhãn cục bộ như `.LBB5_2:` cũng bắt đầu bằng `.` nhưng có `:` (quan sát). Phần lệnh là những dòng còn lại.
+2. **Tìm "dấu vân tay" của Rust.** Một nhánh dẫn tới `…core9panicking…` (tên symbol của `core::panicking`, quan sát) là một *panic*. Ví dụ `load_idx` có nhánh `cmp x2, x1 ; b.hs LBB5_2` rồi `bl …panic_bounds_check`: đó chính là kiểm tra chỉ số lúc chạy. Reference nói một kiểm tra sẽ được thực hiện lúc chạy và đưa thread vào trạng thái panic nếu nó thất bại[^bounds]. Đường nhanh (`ldr w0, [x0, x2, lsl #2]`) chỉ có `cmp` và một nhánh không được lấy.
+3. **So debug với release.** Toán tử số nguyên sẽ panic khi tràn nếu biên dịch ở chế độ debug[^ovf]. Nếu không chỉ định, debug assertions tự bật chỉ khi `opt-level` là 0[^debugassert]. Còn overflow checks bật khi debug assertions bật[^ovfchecks]. Vì vậy so asm của cùng một hàm ở `opt-level=0` và `-O` (`-O` là `opt-level=3`) sẽ cho thấy overflow check: ở `-O` kiểm tra không được phát ra, chứ không phải optimizer "chứng minh" không tràn (suy luận của người soạn từ hai câu trên). Listing nằm ở Đi sâu bên dưới; [Chương 07, mục 1](07-rust-va-may.md) đối chiếu cùng cặp `-O0`/`-O3` cho một hàm `u64`.
+4. **Nhận ra vector hoá.** Vòng lặp mà thân xử lý nhiều phần tử mỗi lượt bằng thanh ghi SIMD là vòng đã được vector hoá. Trên A64 đó là các thanh ghi SIMD `v0`–`v31`[^aapcssimd], xuất hiện trong output dưới tên `q4`, `q5`, `v0`… (quan sát); trên x86-64 là `%xmm…`. Ví dụ `sum` ở Đi sâu của mục 5 có `ldp q4, q5` và `add.2d` ở A64, `movdqu`/`paddq` ở x86-64 (quan sát).
 
 **Hiểu lầm phổ biến**
 
@@ -436,18 +482,18 @@ LBB0_1: ldr x0, [sp, #8] ; ldp x29, x30, [sp, #16] ; add sp, sp, #32 ; ret
 LBB0_2: ... bl ...panic_const_add_overflow
 ```
 
-Ở `-O` cùng hàm chỉ còn một lệnh (`add x0, x1, x0` / `leaq`) vì kiểm tra không còn được phát ra. Cờ `V`/`OF` ở đây là "tràn có dấu" của bảng mục 4: `adds … cset vs` đọc cờ V ngay sau lệnh cộng; ở x86-64 lệnh `jo` nhảy khi OF = 1[^sdmjs]. Chương này không dán output x86-64 ở `opt-level=0` nên không khẳng định dạng lệnh cụ thể ở đó (suy luận của người soạn: tương tự, đọc cờ OF sau `addq`).
+Ở `-O` cùng hàm chỉ còn một lệnh (`add x0, x1, x0` / `leaq`) vì kiểm tra không còn được phát ra. Cờ `V`/`OF` ở đây là "tràn có dấu" của bảng mục 4: `adds … cset vs` đọc cờ V ngay sau lệnh cộng. Ở x86-64, lệnh `jo` nhảy khi OF = 1[^sdmjs]. Chương này không dán output x86-64 ở `opt-level=0` nên không khẳng định dạng lệnh cụ thể ở đó (suy luận của người soạn: tương tự, đọc cờ OF sau `addq`).
 
 </details>
 
-**Quay lại Q7:** sinh bằng `--emit=asm`, lọc directive, tìm nhánh panic, so debug với release để thấy overflow check, và nhận ra vector hoá qua thanh ghi SIMD.
+**Quay lại Q7:** với `orders`, sinh bằng `--emit=asm`, lọc directive, tìm nhánh panic, so debug với release để thấy overflow check, và nhận ra vector hoá qua thanh ghi SIMD.
 
 ## Liên hệ với Rust
 
-- Lệnh sinh asm: `rustc --emit=asm`[^emit]; `--target` chọn target tuple[^target]. Cargo: `cargo rustc --release -- --emit=asm` (nhận xét của người soạn, chưa chạy).
-- `-O` = `opt-level=3`[^opt]; việc kiểm tra tràn số có thể điều khiển trực tiếp bằng `-C overflow-checks` / `-C debug-assertions`[^ovfflags], mặc định của chúng phụ thuộc `opt-level` như ở mục 7.
-- Rust ABI không ổn định[^rustabi], nên nếu viết `asm!` hoặc gọi vào code ngoài, dùng `extern "C"` để bám vào ABI mặc định của compiler C cho target[^rustabic] (chi tiết ở [Chương 04, mục 8](04-calling-convention-va-stack-frame.md)).
-- `asm!` trong Rust dùng Intel syntax mặc định trên x86, `att_syntax` để đổi[^rustasm][^rustatt]. Cùng câu trong Reference còn nhắc chế độ `.syntax unified` cho "ARM" nói chung; chương không dùng nó để khẳng định gì về AArch64 (nhận xét của người soạn).
+- Lệnh sinh asm là `rustc --emit=asm`[^emit]. `--target` chọn target tuple[^target]. Với Cargo: `cargo rustc --release -- --emit=asm` (nhận xét của người soạn, chưa chạy).
+- `-O` là `opt-level=3`[^opt]. Việc kiểm tra tràn số có thể điều khiển trực tiếp bằng `-C overflow-checks` / `-C debug-assertions`[^ovfflags], và mặc định của chúng phụ thuộc `opt-level` như ở mục 7.
+- Rust ABI không ổn định[^rustabi], nên nếu viết `asm!` hoặc gọi vào code ngoài thì dùng `extern "C"`. Khi đó bạn bám vào ABI mặc định của compiler C cho target[^rustabic] (chi tiết ở [Chương 04, mục 8](04-calling-convention-va-stack-frame.md)).
+- `asm!` trong Rust dùng Intel syntax mặc định trên x86[^rustasm]; `att_syntax` để đổi[^rustatt]. Cùng câu trong Reference còn nhắc chế độ `.syntax unified` cho "ARM" nói chung; chương không dùng nó để khẳng định gì về AArch64 (nhận xét của người soạn).
 
 ## Tóm tắt
 
@@ -465,7 +511,7 @@ LBB0_2: ... bl ...panic_const_add_overflow
 1. `movl %edi, %eax` thay đổi những bit nào của `%rax`? Còn `movb %dil, %al`?
 <details><summary>Đáp án</summary>
 
-`movl` ghi 32-bit, SDM: kết quả được zero-extend lên 64-bit nên bit 63–32 thành 0[^sdm32]; `movb` ghi 8-bit và 56 bit cao của đích không đổi[^sdm816].
+`movl` ghi 32 bit, kết quả được zero-extend lên 64 bit nên bit 63–32 thành 0[^sdm32]. `movb` ghi 8 bit và 56 bit cao của đích không đổi[^sdm816].
 
 </details>
 
@@ -479,35 +525,35 @@ LBB0_2: ... bl ...panic_const_add_overflow
 3. Vì sao `cmpq %rsi, %rdx` rồi `jae` tương ứng với `rdx >= rsi` (`i >= len`) mà không phải `rsi >= rdx`?
 <details><summary>Đáp án</summary>
 
-AT&T có nguồn trước đích[^gasorder]; `cmp` trừ toán hạng đứng trước khỏi toán hạng đứng sau: DiS viết `cmp R1, R2` của x86 là tính R2 - R1[^x86cmpord] (còn `cmp O1, O2` của A64 tính O1 - O2[^armcmp]). Với `cmpq %rsi, %rdx` đó là `rdx - rsi`, và `jae` nhảy khi CF = 0, tức không borrow: `rdx >= rsi` không dấu[^sdmjae].
+AT&T có nguồn trước đích[^gasorder]. `cmp` trừ toán hạng đứng trước khỏi toán hạng đứng sau: `cmp R1, R2` của x86 tính R2 - R1[^x86cmpord]. Còn `cmp O1, O2` của A64 tính O1 - O2[^armcmp]. Với `cmpq %rsi, %rdx` đó là `rdx - rsi`, và `jae` nhảy khi CF = 0, tức không borrow: `rdx >= rsi` không dấu[^sdmjae].
 
 </details>
 
 4. `ldr w0, [x8, w0, uxtw #2]` đọc từ địa chỉ nào?
 <details><summary>Đáp án</summary>
 
-`x8 + (zext(w0) << 2)`: chỉ số 32-bit zero-extend rồi nhân 4 — là dạng "scaled/extended" trong bảng addressing mode (đã chạy thật, xem mục 3; dạng `sxtw` tương tự có trong DiS)[^armscaled].
+`x8 + (zext(w0) << 2)`: chỉ số 32 bit được zero-extend rồi nhân 4, là dạng "scaled/extended" trong bảng addressing mode (đã chạy thật, xem mục 3; dạng `sxtw` tương tự có trong Dive into Systems)[^armscaled].
 
 </details>
 
 5. Khi nào compiler dùng `cmov`/`csel` thay vì nhánh, và vì sao?
 <details><summary>Đáp án</summary>
 
-Khi hai nhánh chỉ chọn giá trị, không tác dụng phụ; `cmov` thực hiện "chuyển dữ liệu có điều kiện" thay vì "chuyển điều khiển có điều kiện" để tránh phí nhánh[^cmov][^brexp][^cmovcare]. Không phải lúc nào cũng nhanh hơn nhánh: xem [Chương 05, mục 7](05-pipeline-va-speculation.md).
+Khi hai nhánh chỉ chọn giá trị và không có tác dụng phụ. `cmov` thực hiện "chuyển dữ liệu có điều kiện" thay vì "chuyển điều khiển có điều kiện"[^cmov]. Mục đích là tránh phí nhánh[^brexp]. Compiler ngại làm vậy khi có tác dụng phụ[^cmovcare]. Và `cmov` không phải lúc nào cũng nhanh hơn nhánh: xem [Chương 05, mục 7](05-pipeline-va-speculation.md).
 
 </details>
 
 6. Phân biệt `jl` và `jb` (x86) / `b.lt` và `b.lo` (A64).
 <details><summary>Đáp án</summary>
 
-Hậu tố quyết định so sánh có dấu hay không dấu[^jsuffix]; có dấu dùng SF/OF (N/V), không dấu dùng CF (C)[^x86flagsuse][^armflags].
+Hậu tố quyết định so sánh có dấu hay không dấu[^jsuffix]. Trên x86, so sánh có dấu dùng SF/OF, không dấu dùng CF[^x86flagsuse]. A64 tương tự: V cho so sánh có dấu, C cho so sánh không dấu[^armflags].
 
 </details>
 
 7. Vì sao `caller` trên AArch64 phải `stp x29, x30, …` còn `callee` thì không?
 <details><summary>Đáp án</summary>
 
-`bl` ghi địa chỉ trả về vào `x30`[^blarm] và `ret` lấy lại `pc = x30`[^retarm]; hàm non-leaf gọi `bl` sẽ ghi đè `x30` của chính nó, nên phải cất rồi khôi phục trước `ret` (suy luận của người soạn từ hai định nghĩa đó). `callee` là leaf, không gọi ai.
+`bl` ghi địa chỉ trả về vào `x30`[^blarm]. Còn `ret` lấy lại `pc = x30`[^retarm]. Hàm non-leaf gọi `bl` sẽ ghi đè `x30` của chính nó, nên phải cất rồi khôi phục trước `ret` (suy luận của người soạn từ hai định nghĩa đó). `callee` là leaf, không gọi ai.
 
 </details>
 
@@ -521,7 +567,7 @@ Hai lời gọi nằm ở vị trí đuôi nên compiler thay bằng nhảy; hà
 9. Hai dấu hiệu nào trong output `opt-level=0` của `a + b` cho thấy overflow check?
 <details><summary>Đáp án</summary>
 
-AArch64: `adds` (cộng và đặt cờ) rồi `cset w8, vs` đọc cờ tràn và `tbnz` tới `panic_const_add_overflow`. Reference: debug build panic khi tràn[^ovf]; rustc book: debug assertions và overflow checks mặc định bật ở `opt-level=0`[^debugassert][^ovfchecks]. Với x86-64 chương không dán output ở `opt-level=0`; việc đọc cờ OF bằng `jo`[^sdmjs] là suy luận của người soạn.
+AArch64: `adds` (cộng và đặt cờ) rồi `cset w8, vs` đọc cờ tràn và `tbnz` tới `panic_const_add_overflow`. Reference nói debug build panic khi tràn[^ovf]. Debug assertions mặc định bật khi `opt-level` là 0[^debugassert]. Overflow checks bật theo debug assertions[^ovfchecks]. Với x86-64, chương không dán output ở `opt-level=0`; việc đọc cờ OF bằng `jo`[^sdmjs] là suy luận của người soạn.
 
 </details>
 
@@ -535,7 +581,7 @@ x86-64: CF = 0 (không borrow), nên `jae` (CF = 0) nhảy[^sdmjae]. AArch64: C 
 11. `cmp x0, #0` trên AArch64 thực chất là lệnh gì, và vì sao dùng `xzr`?
 <details><summary>Đáp án</summary>
 
-Là `subs xzr, x0, #0`[^llvmcmp]. Arm nói thanh ghi zero luôn đọc ra 0, ghi vào bị bỏ qua, và `CMP` được mã hoá thành `SUB` với đích là thanh ghi zero[^armzr] — chỉ cờ được cập nhật, kết quả bị bỏ.
+Là `subs xzr, x0, #0`[^llvmcmp]. Thanh ghi zero luôn đọc ra 0, ghi vào bị bỏ qua, và `CMP` được mã hoá thành `SUB` với đích là thanh ghi zero[^armzr]. Nên chỉ cờ được cập nhật, kết quả bị bỏ.
 
 </details>
 

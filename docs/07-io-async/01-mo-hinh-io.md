@@ -19,70 +19,78 @@
 
 ## 1. Một `read()` mà dữ liệu chưa đến, và blocking I/O (Q1)
 
-> **Trả lời ngắn.** Khi socket chưa có dữ liệu, `read()` không thể trả dữ liệu, nên chỉ còn ba hướng (cách phân loại của người soạn): đứng đợi trong lời gọi, trả về ngay kết quả "chưa có", hoặc đăng ký trước để được báo rồi làm việc khác. Mặc định (blocking), lời gọi đọc trên socket chờ đến khi có dữ liệu,[^man-recv-wait] và thread gọi bị treo trong lúc chờ còn các thread khác vẫn chạy được.[^ostep-thread-natural] Các mục sau lần lượt gỡ từng mô hình trong số năm mô hình I/O của chương.
+> **Trả lời ngắn.** Socket chưa có dữ liệu thì `read()` không có gì để trả, nên chỉ còn ba hướng (cách phân loại của người soạn): thread đứng đợi ngay trong lời gọi, lời gọi trả về ngay kết quả "chưa có", hoặc thread đăng ký trước để được báo rồi đi làm việc khác. Mặc định socket là blocking, tức lời gọi đọc chờ đến khi có dữ liệu.[^man-recv-wait] Thread gọi bị treo trong lúc chờ, còn các thread khác vẫn chạy bình thường.[^ostep-thread-natural] Các mục sau lần lượt đi qua năm mô hình I/O sinh ra từ ba hướng này.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn chờ cà phê ở quán. Có ba cách: đứng ở quầy đến khi pha xong; hỏi "xong chưa?", nghe "chưa" thì quay đi ngay; hoặc để lại số điện thoại để quán gọi khi xong. Ba cách đó tương ứng ba hướng dưới đây.
+*Với service `gateway`.* Hãy hình dung `gateway`, một service viết bằng Rust giữ kết nối TCP với hàng chục nghìn client (app di động, trình duyệt). Phần lớn kết nối nằm rảnh; thỉnh thoảng một client gửi một dòng lệnh, `gateway` đọc dòng đó rồi chuyển cho backend phía sau. Ta sẽ bám theo `gateway` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Câu hỏi của mục này rất cụ thể: client vừa nối vào mà chưa gửi byte nào, thread của `gateway` gọi `read` trên socket đó thì chuyện gì xảy ra?
 
+### 1.1 Ba hướng xử lý
 
-Một socket đã kết nối, bạn gọi `read(fd, buf, n)` nhưng đối tác chưa gửi gì: lời gọi không thể trả dữ liệu. Chỉ còn ba hướng:
+Thread của `gateway` gọi `read(fd, buf, n)` trên một socket đã kết nối, nhưng đối tác chưa gửi gì. Lời gọi không có dữ liệu để trả, nên chỉ còn ba hướng:
 
-- thread **đứng đợi** trong lời gọi đến khi có dữ liệu;
+- thread **đứng đợi** trong lời gọi cho đến khi có dữ liệu;
 - lời gọi **trả về ngay** với một kết quả "chưa có";
-- bạn **đăng ký trước** để được báo, rồi làm việc khác.
+- thread **đăng ký trước** để được báo, rồi làm việc khác.
 
-Năm mô hình I/O trong chương là các cách tổ hợp ba hướng này (cách chia của người soạn; mục 6 đối chiếu với ba chiến lược nền mà Kegel liệt kê). Trước khi đi tiếp, cần gỡ một chỗ rất dễ gây hiểu nhầm: **tên gọi**. OSTEP định nghĩa interface *blocking* (đồng bộ) là interface "làm hết việc rồi mới trả về", còn *non-blocking* (mà OSTEP gọi là bất đồng bộ) là interface "bắt đầu việc rồi trả về ngay".[^ostep-block] Tức OSTEP dùng "asynchronous" cho cái mà phần dưới gọi là non-blocking. Trong khi đó "asynchronous I/O" của POSIX (`aio(7)`) và của `io_uring` là một mô hình khác hẳn, như sẽ thấy ở mục 5. Cách chắc ăn (nhận xét của người soạn): hỏi "thread làm gì khi dữ liệu chưa đến, và ai lấy dữ liệu?".
+Năm mô hình I/O trong chương là các cách tổ hợp ba hướng này (cách chia của người soạn; mục 6 đối chiếu với ba chiến lược nền mà Kegel liệt kê).
 
-**Mô hình 1 — blocking I/O.**
+### 1.2 Cẩn thận với tên gọi
 
-Mặc định, một file descriptor ở chế độ blocking: man page `recv(2)` ghi rằng khi chưa có message, các lời gọi nhận chờ message đến, trừ khi socket là nonblocking.[^man-recv-wait] Phía kernel, thread gọi được đưa vào trạng thái **ngủ** cho đến khi có dữ liệu, EOF hoặc lỗi (nhận xét của người soạn; số đo ở mục 2 cho thấy ~0 CPU khi chờ kiểu này). OSTEP mô tả hiện tượng tương ứng ở phía thread-based server: thread phát I/O request bị treo (chờ I/O hoàn thành), các thread khác vẫn chạy được.[^ostep-thread-natural]
+Trước khi đi tiếp cần gỡ một chỗ rất dễ nhầm: chữ "asynchronous". OSTEP gọi interface *blocking* là đồng bộ, vì nó làm hết việc rồi mới trả về. Interface bắt đầu việc rồi trả về ngay (non-blocking) thì OSTEP gọi là bất đồng bộ.[^ostep-block] Trong khi đó "asynchronous I/O" của POSIX (`aio(7)`) và của `io_uring` là một mô hình khác hẳn, mục 5 sẽ nói. Gặp chữ "asynchronous" ở đâu, cách chắc ăn là tự hỏi hai câu: thread làm gì khi dữ liệu chưa đến, và ai là người lấy dữ liệu về (nhận xét của người soạn).
+
+### 1.3 Mô hình 1: blocking I/O
+
+Trong mô hình này `gateway` cho mỗi socket một thread, và thread gọi `read` rồi ngủ luôn ở đó. Cách làm này là mặc định: khi socket chưa có message thì các lời gọi nhận chờ message đến, trừ khi socket được đặt nonblocking.[^man-recv-wait] Phía kernel, thread gọi được đưa vào trạng thái **ngủ** cho đến khi có dữ liệu, EOF hoặc lỗi (nhận xét của người soạn; số đo ở mục 2 cho thấy ~0 CPU khi chờ kiểu này). Thread ngủ thì không tốn CPU, còn các thread khác của `gateway` vẫn chạy, và việc I/O của thread này chồng lên tính toán của thread kia là chuyện rất tự nhiên với lập trình thread.[^ostep-thread-natural]
 
 ```mermaid
 sequenceDiagram
-  participant T as Thread ứng dụng
+  participant T as Thread của gateway
   participant K as Kernel
   T->>K: read(fd) — chưa có dữ liệu
   Note over T,K: thread ngủ trong kernel (mục 2 đo được ~0 CPU)
   K-->>T: n byte (khi dữ liệu đã đến)
 ```
 
-Code tuần tự, trạng thái nằm trên stack của thread;[^ostep-msm] nhưng **một thread chỉ phục vụ được một thứ tại một thời điểm**, nên N kết nối cần N thread (suy luận của người soạn; xem mục 4).
+Ưu điểm lớn nhất là code tuần tự: trạng thái của kết nối nằm ngay trên stack của thread.[^ostep-msm] Cái giá là một thread chỉ phục vụ được một thứ tại một thời điểm, nên với hàng chục nghìn client rảnh, `gateway` cần hàng chục nghìn thread đang ngủ (suy luận của người soạn; mục 4 nói tiếp chuyện này).
 
 <details><summary>Đi sâu: <code>read</code> trả 0 là EOF; trả ít hơn yêu cầu không phải lỗi</summary>
 
-`read` trả về 0 nghĩa là hết dữ liệu (EOF), không phải "chưa có".[^man-read-eof] Ngược lại, trả về ít byte hơn yêu cầu không phải lỗi: man page nêu ví dụ là vì hiện chỉ có chừng đó byte.[^man-read-short] Vì vậy vòng đọc phải phân biệt ba kết quả: `0` (EOF), `n > 0` (có thể ít hơn buffer), và `-1` kèm `errno` (lỗi, trong đó có `EAGAIN` ở mục 2) (suy luận của người soạn từ hai nguồn trên).
+`read` trả về 0 nghĩa là hết dữ liệu (EOF), chứ không phải "chưa có".[^man-read-eof] Ngược lại, `read` trả ít byte hơn bạn yêu cầu thì không phải lỗi: man page nêu ví dụ là hiện chỉ có chừng đó byte.[^man-read-short] Vì vậy vòng đọc của `gateway` phải phân biệt ba kết quả: `0` (EOF), `n > 0` (có thể ít hơn buffer), và `-1` kèm `errno` (lỗi, trong đó có `EAGAIN` ở mục 2). Đây là suy luận của người soạn từ hai nguồn trên.
 
 </details>
 
-**Quay lại Q1:** với `read()` chưa có dữ liệu chỉ có ba hướng (đợi, trả ngay, đăng ký trước); blocking là hướng "đợi", thread ngủ trong kernel.
+**Quay lại Q1:** `read()` chưa có dữ liệu thì chỉ có ba hướng (đợi, trả ngay, đăng ký trước); blocking là hướng "đợi", và thread của `gateway` ngủ trong kernel đến khi client gửi.
 
 ## 2. Non-blocking I/O, `EAGAIN` và busy-polling (Q2)
 
-> **Trả lời ngắn.** Cờ `O_NONBLOCK` bật được lúc `open(2)` hoặc sau đó bằng `fcntl(2)` `F_SETFL`.[^man-open-nb][^man-fcntl] Khi bật, `read` mà lẽ ra phải chờ sẽ trả `-1` với `errno` là `EAGAIN` (hoặc `EWOULDBLOCK` trên socket), nghĩa là "chưa có, thử lại sau".[^man-read-eagain] Cờ này không cho biết khi nào nên thử lại (nó không ảnh hưởng đến `poll`/`select`/`epoll`),[^man-open-poll] nên nếu chỉ có nó thì phải gọi `read` liên tục (busy-polling; suy luận của người soạn). Số đo một lần chạy ở phần Đi sâu cho thấy vòng lặp như vậy dùng gần 100% một core (quan sát, không phải bảo đảm).
+> **Trả lời ngắn.** Cờ `O_NONBLOCK` có thể bật ngay lúc `open(2)`.[^man-open-nb] Sau đó vẫn bật được bằng `fcntl(2)` với `F_SETFL`.[^man-fcntl] Khi cờ bật, `read` mà lẽ ra phải chờ sẽ trả `-1` với `errno` là `EAGAIN` (hoặc `EWOULDBLOCK` trên socket), nghĩa là "chưa có, thử lại sau".[^man-read-eagain] Cờ này không cho biết khi nào nên thử lại, vì nó không ảnh hưởng đến `poll`/`select`/`epoll`.[^man-open-poll] Nếu chỉ có nó thì thread phải gọi `read` liên tục (busy-polling; suy luận của người soạn), và số đo một lần chạy ở phần Đi sâu cho thấy vòng lặp như vậy dùng gần 100% một core (quan sát, không phải bảo đảm).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn không đứng chờ ở quầy mà cứ vài giây lại chạy tới hỏi "xong chưa?". Không bị kẹt, nhưng bạn không làm được việc gì khác ngoài chạy qua chạy lại.
+*Với service `gateway`.* Giả sử `gateway` không muốn thread của mình ngủ chết ở một socket rảnh. Bật `O_NONBLOCK` là cách đầu tiên ai cũng nghĩ tới: `read` trả ngay thay vì chờ. Nhưng từ lúc đó thread phải tự quyết khi nào hỏi lại, và với hàng chục nghìn socket rảnh thì chuyện này dẫn tới đâu chính là câu hỏi của mục này.
 
-**Bật cờ.**
+### 2.1 Bật cờ
 
-Man page `open(2)` mô tả `O_NONBLOCK`: khi có thể, file được mở ở chế độ nonblocking, và cả `open()` lẫn mọi I/O sau đó trên fd không làm tiến trình gọi phải chờ.[^man-open-nb] Không nhất thiết phải bật lúc `open`: `fcntl(2)` với `F_SETFL` đổi *file status flags* (cờ trạng thái của open file description mà fd trỏ tới), và trên Linux chỉ đổi được năm cờ `O_APPEND`, `O_ASYNC`, `O_DIRECT`, `O_NOATIME`, `O_NONBLOCK`.[^man-fcntl] Vì đó là cờ của open file description, các fd nhân bản bằng `dup` hoặc `fork` cùng thấy chế độ này (xem [P1 · Chương 04](../01-linux/04-file-descriptor-va-vfs.md) mục 2).[^man-fcntl-share] Cách làm thường gặp là `F_GETFL`, OR thêm `O_NONBLOCK`, rồi `F_SETFL` (nhận xét của người soạn; đó là chuỗi mà `nonblocking_pipe` ở phần Đi sâu của mục 7 gọi bằng `libc::fcntl`, còn chương trình đo ở mục này dùng `set_nonblocking` của `std`, thực chất là `ioctl(FIONBIO)` như mục 7 giải thích).
+`open(2)` mô tả `O_NONBLOCK` như sau: khi có thể, file được mở ở chế độ nonblocking, và cả `open()` lẫn mọi I/O sau đó trên fd không bắt tiến trình gọi phải chờ.[^man-open-nb] Không nhất thiết phải bật lúc `open`. `fcntl(2)` với `F_SETFL` đổi *file status flags*, tức các cờ trạng thái của open file description mà fd trỏ tới, và trên Linux nó chỉ đổi được năm cờ `O_APPEND`, `O_ASYNC`, `O_DIRECT`, `O_NOATIME`, `O_NONBLOCK`.[^man-fcntl] Vì đó là cờ của open file description, các fd nhân bản bằng `dup` hoặc `fork` cùng thấy chế độ này (xem [P1 · Chương 04](../01-linux/04-file-descriptor-va-vfs.md) mục 2).[^man-fcntl-share]
 
-**`read` làm gì khi không có dữ liệu.**
+Cách làm thường gặp trong C là `F_GETFL`, OR thêm `O_NONBLOCK`, rồi `F_SETFL` (nhận xét của người soạn). Đó là chuỗi mà `nonblocking_pipe` ở phần Đi sâu của mục 7 gọi bằng `libc::fcntl`. Chương trình đo ở mục này thì dùng `set_nonblocking` của `std`, thực chất là `ioctl(FIONBIO)`, như mục 7 giải thích.
 
-Với fd non-blocking, `read` mà lẽ ra phải chờ sẽ trả `-1` và đặt `errno`. Man page `read(2)` tách hai trường hợp: fd không phải socket thì lỗi là `EAGAIN`;[^man-read-eagain-file] fd là socket thì là `EAGAIN` **hoặc** `EWOULDBLOCK`, và POSIX.1-2001 cho phép trả một trong hai mà không bắt buộc hai hằng số có cùng giá trị.[^man-read-eagain] Hệ quả: code portable phải kiểm tra cả hai. `errno(3)` mô tả `EAGAIN` là "Resource temporarily unavailable" (và ghi nó có thể cùng giá trị với `EWOULDBLOCK`);[^man-errno-eagain] nghĩa là *thử lại sau* — đó **không** phải lỗi hỏng của fd (nhận xét của người soạn).
+### 2.2 `read` làm gì khi không có dữ liệu
 
-**Hai giới hạn.**
+Với fd non-blocking, `read` mà lẽ ra phải chờ sẽ trả `-1` và đặt `errno`. Nếu fd không phải socket, lỗi là `EAGAIN`.[^man-read-eagain-file] Nếu fd là socket, lỗi là `EAGAIN` **hoặc** `EWOULDBLOCK`: POSIX.1-2001 cho phép trả một trong hai và không bắt hai hằng số có cùng giá trị.[^man-read-eagain] Hệ quả là code C portable phải kiểm tra cả hai. `errno(3)` mô tả `EAGAIN` là "Resource temporarily unavailable" và ghi rằng nó có thể cùng giá trị với `EWOULDBLOCK`.[^man-errno-eagain] Nói cách khác, đây là "thử lại sau" chứ không phải fd bị hỏng (nhận xét của người soạn).
 
-- **File thường và block device không bị ảnh hưởng.** Man page `open(2)` nói rõ cờ này không có tác dụng với regular file và block device: I/O trên chúng vẫn (ngắn hạn) chặn khi cần truy cập thiết bị, bất kể `O_NONBLOCK`.[^man-open-reg] Vì thế `O_NONBLOCK` không biến disk I/O thành bất đồng bộ (suy luận của người soạn từ câu trên). Kegel (C10K) cũng ghi chiến lược "nonblocking calls + readiness notification" thường chỉ dùng được cho network I/O, không cho disk I/O.[^c10k-readiness]
-- **`O_NONBLOCK` không tự mang kênh thông báo nào.** Chính `open(2)` viết rằng cờ này không ảnh hưởng đến `poll(2)`, `select(2)`, `epoll(7)`: các interface đó chỉ báo fd "ready", nghĩa là một I/O trên fd *khi cờ tắt* sẽ không bị chặn.[^man-open-poll] Tức `O_NONBLOCK` chỉ giải quyết nửa đầu ("đừng ngủ"), còn nửa sau ("khi nào có dữ liệu") thuộc về cơ chế khác (suy luận của người soạn).
+### 2.3 Hai giới hạn của `O_NONBLOCK`
 
-**Vì sao `O_NONBLOCK` một mình dẫn tới busy-polling.**
+Giới hạn thứ nhất: **file thường và block device không bị ảnh hưởng.** `open(2)` nói rõ cờ này không có tác dụng với regular file và block device; I/O trên chúng vẫn chặn (ngắn hạn) khi cần truy cập thiết bị, bất kể `O_NONBLOCK`.[^man-open-reg] Vì vậy, nếu `gateway` đọc file cấu hình từ đĩa, `O_NONBLOCK` không biến việc đó thành bất đồng bộ (suy luận của người soạn từ câu trên). Kegel cũng ghi rằng chiến lược "non-blocking call kèm readiness notification" thường chỉ dùng được cho network I/O, không cho disk I/O.[^c10k-readiness]
 
-Nếu chỉ có `O_NONBLOCK`, cách duy nhất để biết dữ liệu đã đến là gọi `read` lặp đi lặp lại cho đến khi nó thành công (suy luận của người soạn, từ hai giới hạn trên: cờ không cung cấp kênh thông báo nào). Vòng lặp đó không bao giờ ngủ nên có thể chiếm gần trọn một core cho một fd rảnh, và với N fd thì mỗi vòng phải thử cả N lần `read`, hầu hết trả `EAGAIN` (cùng suy luận; số đo ở phần Đi sâu).
+Giới hạn thứ hai: **`O_NONBLOCK` không tự mang kênh thông báo nào.** `open(2)` viết rằng cờ này không ảnh hưởng đến `poll(2)`, `select(2)`, `epoll(7)`, vì các interface đó chỉ báo fd đang "ready", nghĩa là một I/O trên fd *khi cờ tắt* sẽ không bị chặn.[^man-open-poll] Nói gọn, `O_NONBLOCK` mới giải quyết nửa đầu ("đừng ngủ"), còn nửa sau ("khi nào có dữ liệu") thuộc về cơ chế khác (suy luận của người soạn).
 
-Non-blocking chỉ có ích khi đi cùng cơ chế *ngủ cho đến khi có fd sẵn sàng* — mô hình 3 (mục 3).
+### 2.4 Vì sao `O_NONBLOCK` một mình dẫn tới busy-polling
+
+Từ hai giới hạn trên suy ra: nếu chỉ có `O_NONBLOCK`, cách duy nhất để biết dữ liệu đã đến là gọi `read` lặp đi lặp lại cho đến khi nó thành công (suy luận của người soạn). Vòng lặp đó không bao giờ ngủ, nên với một fd rảnh nó có thể chiếm gần trọn một core. Với N socket thì mỗi vòng phải thử `read` cả N lần, và hầu hết trả `EAGAIN` (cùng suy luận; số đo ở phần Đi sâu). Hàng chục nghìn client rảnh của `gateway` sẽ biến thành hàng chục nghìn lời gọi vô ích mỗi vòng.
+
+Vậy non-blocking chỉ có ích khi đi cùng một cơ chế cho thread *ngủ cho đến khi có fd sẵn sàng*. Đó là mô hình 3 ở mục 3.
 
 <details><summary>Đi sâu: đo busy-polling bằng một chương trình Rust (quan sát một lần chạy)</summary>
 
@@ -132,34 +140,35 @@ read 4 bytes "ping" after 305 ms, WouldBlock returned 0 times
 real 0m0.307s   user 0m0.001s   sys 0m0.000s
 ```
 
-Cùng 305 ms chờ, biến thể non-blocking gọi `read` thất bại ~1,45 triệu lần và đốt ~0,31 s CPU trong ~0,31 s thực — gần 100% một core — còn biến thể blocking tốn ~0 CPU. Chạy dưới `strace -f` thấy đúng chuỗi `ioctl(4, FIONBIO, [1])` rồi hàng loạt `recvfrom(4, ..., 16, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)`. Đây là quan sát, không phải bảo đảm. Người review chạy lại trên Linux aarch64: 1.416.758 lần `WouldBlock` trong 300 ms (user 0,037 s + sys 0,261 s, real 0,301 s) cho non-blocking, 0 lần và ~0 CPU cho blocking — cùng bậc độ lớn.
+Cùng 305 ms chờ, biến thể non-blocking gọi `read` thất bại ~1,45 triệu lần và đốt ~0,31 s CPU trong ~0,31 s thực, tức gần 100% một core. Biến thể blocking tốn ~0 CPU. Chạy dưới `strace -f` thấy đúng chuỗi `ioctl(4, FIONBIO, [1])` rồi hàng loạt `recvfrom(4, ..., 16, 0, NULL, NULL) = -1 EAGAIN (Resource temporarily unavailable)`. Đây là quan sát, không phải bảo đảm. Người review chạy lại trên Linux aarch64: 1.416.758 lần `WouldBlock` trong 300 ms (user 0,037 s + sys 0,261 s, real 0,301 s) cho non-blocking, 0 lần và ~0 CPU cho blocking, cùng bậc độ lớn.
 
 Đọc số (suy luận của người soạn): phần lớn CPU của biến thể non-blocking là `sys` (0,245 s so với `user` 0,062 s). Điều này khớp với việc mỗi lần thử là một lời gọi hệ thống (`recvfrom` trong `strace`) đi vào kernel rồi trả `EAGAIN` ngay; chi phí vào kernel xem [P1 · Chương 02](../01-linux/02-system-call.md) mục 5. Biến thể blocking gần như không tốn CPU vì thread ngủ ở `read`, đúng như mô hình 1 ở mục 1.
 
 </details>
 
-**Quay lại Q2:** `O_NONBLOCK` chỉ giải quyết "đừng ngủ"; vì không có kênh báo, dùng một mình nó thì phải gọi lại liên tục và đốt CPU.
+**Quay lại Q2:** `O_NONBLOCK` chỉ giải quyết "đừng ngủ"; vì không có kênh báo, thread của `gateway` dùng một mình nó thì phải gọi lại liên tục và đốt CPU.
 
 ## 3. I/O multiplexing và readiness (Q3)
 
-> **Trả lời ngắn.** Ở mô hình này một thread hỏi kernel "trong tập fd này, cái nào sẵn sàng?" bằng `select`/`poll`/`epoll`/`kqueue` và chờ ngay ở lời gọi hỏi đó thay vì ở `read`; ví dụ man page `select(2)` mô tả đúng việc chờ đến khi một hay nhiều fd "ready".[^man-select-ready] Khi tỉnh dậy, nó gọi `read`/`write` non-blocking trên các fd được báo (nhận xét của người soạn; Kegel mô tả chiến lược này là dùng non-blocking call để bắt đầu I/O và readiness notification để biết khi nào được bắt đầu I/O kế tiếp).[^c10k-readiness] Kernel chỉ báo "có thể làm", còn việc lấy dữ liệu vẫn là của ứng dụng; đó là *readiness*.
+> **Trả lời ngắn.** Ở mô hình này một thread hỏi kernel "trong tập fd này, cái nào sẵn sàng?" bằng `select`/`poll`/`epoll`/`kqueue`, và chờ ngay ở lời gọi hỏi đó thay vì ở `read`. Ví dụ, man page `select(2)` mô tả đúng việc chờ đến khi một hay nhiều fd "ready".[^man-select-ready] Khi tỉnh dậy, thread gọi `read`/`write` non-blocking trên các fd được báo (nhận xét của người soạn). Kegel mô tả chiến lược này là dùng non-blocking call để bắt đầu I/O, và readiness notification để biết khi nào được bắt đầu I/O kế tiếp.[^c10k-readiness] Kernel chỉ báo "có thể làm", còn việc lấy dữ liệu vẫn là của ứng dụng; đó là *readiness*.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một nhân viên trực đứng trước bảng đèn của nhiều quầy; anh ngồi nghỉ cho đến khi có đèn sáng, rồi mới đi tới quầy đó xử lý, thay vì canh riêng từng quầy.
+*Với service `gateway`.* Thay vì cho mỗi client một thread, `gateway` dùng một thread hỏi kernel một câu duy nhất: trong vài chục nghìn socket này, socket nào đã có dữ liệu? Thread ngủ ở câu hỏi đó, không ngủ ở từng `read`. Khi có client gửi dòng lệnh, kernel đánh thức thread và chỉ ra socket nào, lúc ấy `gateway` mới `read` đúng socket đó. Mục này nói rõ ba bước ấy và cái mà kernel thật sự trao cho `gateway`.
 
+### 3.1 Ba bước
 
-Các bước (nhận xét của người soạn, tổng hợp từ các nguồn dưới đây):
+Các bước sau là nhận xét của người soạn, tổng hợp từ các nguồn bên dưới:
 
 1. Ứng dụng đặt nhiều fd non-blocking vào một tập rồi gọi một lời gọi hỏi/chờ (`select`/`poll`/`epoll_wait`/`kevent`); thread **ngủ ở lời gọi đó**, không phải ở `read`.
 2. Khi ít nhất một fd sẵn sàng, lời gọi trả về và cho biết fd nào.
 3. Ứng dụng gọi `read`/`write` non-blocking trên các fd được báo.
 
-OSTEP nêu `select()` hoặc `poll()` là API cơ bản có sẵn ở hầu hết hệ thống để kiểm tra xem có I/O nào đến cần xử lý không.[^ostep-select] Man page `select(2)` định nghĩa fd là *ready* khi một I/O tương ứng (ví dụ `read(2)`) có thể thực hiện mà không chặn.[^man-select-ready]
+Về nguồn: `select()` và `poll()` là API cơ bản mà hầu hết hệ thống có sẵn để kiểm tra xem có I/O nào đến cần xử lý không.[^ostep-select] Còn "sẵn sàng" nghĩa là gì thì man page `select(2)` định nghĩa: fd là *ready* khi một I/O tương ứng (ví dụ `read(2)`) có thể thực hiện mà không chặn.[^man-select-ready]
 
 ```mermaid
 sequenceDiagram
-  participant T as Thread ứng dụng
+  participant T as Thread của gateway
   participant K as Kernel
   T->>K: epoll_wait() (tập nhiều fd)
   Note over T,K: thread ngủ ở đây, không ở read
@@ -168,41 +177,41 @@ sequenceDiagram
   K-->>T: n byte (hoặc EAGAIN nếu báo "ready" giả)
 ```
 
-Điểm mấu chốt: thứ kernel trao cho bạn là *một thông báo "có thể làm"*; chính ứng dụng vẫn phải gọi `read` để lấy dữ liệu. Đây là bản chất của **readiness**. Cơ chế bên trong `select`/`poll`/`epoll` (cấu trúc dữ liệu, level- vs edge-triggered) thuộc [Chương 02](02-select-poll-epoll.md); `kqueue` và `io_uring` thuộc [Chương 03](03-kqueue-io-uring.md).
+### 3.2 Readiness là thông báo, chưa phải dữ liệu
+
+Điểm mấu chốt: thứ kernel trao cho `gateway` chỉ là một thông báo "có thể làm"; chính `gateway` vẫn phải gọi `read` để lấy dữ liệu. Đó là bản chất của **readiness**. Cơ chế bên trong `select`/`poll`/`epoll` (cấu trúc dữ liệu, level- và edge-triggered) thuộc [Chương 02](02-select-poll-epoll.md); `kqueue` và `io_uring` thuộc [Chương 03](03-kqueue-io-uring.md).
 
 <details><summary>Đi sâu: thông báo "ready" đôi khi sai</summary>
 
-Trên Linux, `select(2)` ghi rằng socket có thể được báo "ready for reading" mà `read` sau đó vẫn chặn (ví dụ dữ liệu đến nhưng checksum sai nên bị bỏ), và có thể còn các trường hợp khác báo "ready" giả; vì thế dùng `O_NONBLOCK` trên socket *có thể* an toàn hơn.[^select-spurious] Đó là lý do sơ đồ ở trên vẽ nhánh `EAGAIN` sau thông báo "ready", và vì sao multiplexing thường đi cùng fd non-blocking (nhận xét của người soạn; [Chương 02](02-select-poll-epoll.md) mục 2 nhắc lại điểm này).
+Trên Linux, `select(2)` ghi rằng một socket có thể được báo "ready for reading" mà `read` sau đó vẫn chặn. Ví dụ dữ liệu đến nhưng checksum sai nên bị bỏ. Man page còn nói có thể có những trường hợp khác cũng báo "ready" giả, và vì thế dùng `O_NONBLOCK` trên socket *có thể* an toàn hơn.[^select-spurious] Đó là lý do sơ đồ ở trên vẽ nhánh `EAGAIN` sau thông báo "ready", và vì sao multiplexing thường đi cùng fd non-blocking (nhận xét của người soạn; [Chương 02](02-select-poll-epoll.md) mục 2 nhắc lại điểm này).
 
 </details>
 
-**Quay lại Q3:** multiplexing là ngủ ở một lời gọi hỏi nhiều fd; kết quả là thông báo "có thể làm" (readiness), và ứng dụng tự `read`.
+**Quay lại Q3:** multiplexing là ngủ ở một lời gọi hỏi nhiều fd; kết quả là thông báo "có thể làm" (readiness), và `gateway` tự `read`.
 
 ## 4. Thread-per-connection và event loop (Q4)
 
-> **Trả lời ngắn.** Cách đơn giản nhất để phục vụ nhiều kết nối là mỗi kết nối một thread với `read`/`write` blocking, nhưng nó dùng một stack cho mỗi client nên tốn bộ nhớ.[^c10k-stack] Event loop thay các thread bằng một vòng lặp chờ sự kiện rồi xử lý từng phần việc nhỏ;[^ostep-loop] cái giá là không được có blocking call,[^ostep-noblock] phải tự quản lý trạng thái,[^ostep-msm] và page fault/multicore làm mất một phần sự đơn giản.[^ostep-pagefault][^ostep-multicpu]
+> **Trả lời ngắn.** Cách đơn giản nhất để `gateway` phục vụ nhiều client là mỗi kết nối một thread với `read`/`write` blocking. Cái giá là mỗi client chiếm một stack, tốn bộ nhớ.[^c10k-stack] Event loop bỏ các thread đó, thay bằng một vòng lặp chờ sự kiện rồi xử lý từng phần việc nhỏ.[^ostep-loop] Đổi lại, handler không được gọi lời gọi blocking.[^ostep-noblock] Code còn phải tự giữ trạng thái của từng kết nối.[^ostep-msm] Page fault và multicore cũng làm mất một phần sự đơn giản.[^ostep-pagefault]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một nhà hàng có thể thuê mỗi bàn một bồi bàn (đơn giản, nhưng nhiều bàn rảnh vẫn tốn lương từng người), hoặc một bồi bàn chạy quanh các bàn và chỉ ghé khi có bàn gọi món (rẻ, nhưng không được đứng chờ ở một bàn, và phải nhớ bàn nào đang ở bước nào).
+*Với service `gateway`.* Mục 1 đã cho thấy mỗi client một thread thì `gateway` cần hàng chục nghìn thread đang ngủ; mục 3 cho thấy một thread có thể trông chừng cả đám socket. Hai hướng này đánh đổi khác nhau: thread-per-connection đổi bộ nhớ lấy code dễ viết, event loop làm ngược lại. Mục này đi qua cả hai, kèm nguồn cho từng cái giá.
 
-**Mỗi kết nối một thread.**
+### 4.1 Mỗi kết nối một thread
 
-Cách đơn giản nhất để phục vụ nhiều kết nối mà vẫn giữ `read` blocking: mỗi kết nối một thread. Kegel liệt kê chiến lược này là "phục vụ một client bằng mỗi server thread... và để `read()` và `write()` chặn".[^c10k-thread]
+Đây là cách đơn giản nhất để phục vụ nhiều kết nối mà vẫn giữ `read` blocking. Kegel liệt kê chiến lược này là phục vụ một client bằng mỗi server thread và để `read()`, `write()` chặn.[^c10k-thread] Ưu điểm là khi một thread chờ I/O, các thread khác chạy tiếp. OSTEP gọi sự chồng lấn giữa I/O và tính toán này là điều làm lập trình thread khá tự nhiên và đơn giản.[^ostep-thread-natural]
 
-Ưu điểm: khi một thread chờ I/O, các thread khác chạy tiếp; OSTEP gọi sự chồng lấn I/O–tính toán này là điều làm lập trình thread "khá tự nhiên và đơn giản".[^ostep-thread-natural]
+Chi phí thì có nguồn nói rõ:
 
-Chi phí có nguồn:
+- **Một stack cho mỗi client.** Kegel viết rằng nhược điểm là phải dùng cả một stack frame cho mỗi client, tốn bộ nhớ.[^c10k-stack] Ông tính ví dụ stack 2 MB trên máy 32-bit có 1 GB virtual memory cho người dùng: hết *virtual memory* ở khoảng 512 thread.[^c10k-512] Đây là nguồn **lịch sử**, xem lưu ý trong phần Đi sâu bên dưới.
+- Rust Book nhận xét rằng trên nhiều hệ điều hành, mỗi thread dùng khá nhiều bộ nhớ.[^book-thread-mem]
+- Tokio so sánh: tạo, chạy, hủy số lượng lớn task là rẻ, "đặc biệt so với OS thread", và chuyển giữa các task không cần context switch.[^tokio-light]
 
-- **Một stack cho mỗi client.** Kegel: nhược điểm là dùng cả một stack frame cho mỗi client, tốn bộ nhớ.[^c10k-stack] Ông tính ví dụ stack 2 MB trên máy 32-bit với 1 GB virtual memory người dùng: hết *virtual memory* ở khoảng 512 thread.[^c10k-512] Đây là nguồn **lịch sử**, xem lưu ý trong phần Đi sâu bên dưới.
-- Rust Book: trên nhiều hệ điều hành, mỗi thread dùng khá nhiều bộ nhớ.[^book-thread-mem]
-- Tokio so sánh: tạo/chạy/hủy số lượng lớn task là rẻ, "đặc biệt so với OS thread", và chuyển giữa task không cần context switch.[^tokio-light]
+Chương này không có nguồn cho con số chung kiểu "bao nhiêu thread thì sập". Hãy đo trên máy của bạn (số đo `VmSize`/`VmRSS` thật trên một máy nằm ở [Chương 04](04-kien-truc-event-loop.md) mục 2).
 
-Không có nguồn cho một con số chung kiểu "bao nhiêu thread thì sập"; hãy đo trên máy của bạn (số đo `VmSize`/`VmRSS` thật trên một máy nằm ở [Chương 04](04-kien-truc-event-loop.md) mục 2).
+### 4.2 Event loop: ý tưởng
 
-**Event-based concurrency và event loop: ý tưởng.**
-
-OSTEP đặt vấn đề: managing concurrency đúng trong chương trình multi-thread là khó (thiếu lock, deadlock...), và với thread, lập trình viên gần như không kiểm soát được thứ tự scheduling.[^ostep-two-fold] Phương án **event-based concurrency**: vòng lặp chờ sự kiện, xác định loại, làm một phần việc nhỏ. Pseudocode:[^ostep-loop]
+OSTEP đặt vấn đề từ phía thread: quản lý concurrency đúng trong chương trình multi-thread là việc khó (thiếu lock, deadlock...), và lập trình viên gần như không kiểm soát được thứ tự scheduling.[^ostep-two-fold] Phương án thay thế là **event-based concurrency**: một vòng lặp chờ sự kiện, xác định loại sự kiện, rồi làm một phần việc nhỏ. Pseudocode của nó:[^ostep-loop]
 
 ```text
 while (1) {
@@ -212,62 +221,66 @@ while (1) {
 }
 ```
 
-Khi một handler đang xử lý một event, nó là hoạt động duy nhất trong hệ thống, nên việc chọn event nào xử lý tiếp "tương đương với scheduling"; OSTEP coi việc kiểm soát tường minh scheduling này là một lợi thế căn bản.[^ostep-sched] Event loop kết hợp trực tiếp với mô hình 3: `getEvents()` chính là `select`/`poll`/`epoll_wait` (nhận xét của người soạn; OSTEP đặt `select()`/`poll()` ngay sau vòng lặp này làm API để nhận event);[^ostep-select] cách một server dùng chúng chi tiết ở [Chương 04](04-kien-truc-event-loop.md).
+Khi một handler đang xử lý một event, nó là hoạt động duy nhất trong hệ thống, nên việc chọn event nào xử lý tiếp tương đương với scheduling. OSTEP coi việc kiểm soát tường minh scheduling này là một lợi thế căn bản.[^ostep-sched] Với `gateway`, event loop khớp thẳng với mô hình 3: `getEvents()` chính là `select`/`poll`/`epoll_wait` (nhận xét của người soạn). OSTEP cũng đặt `select()`/`poll()` ngay sau vòng lặp này làm API để nhận event.[^ostep-select] Cách một server dùng chúng chi tiết ở [Chương 04](04-kien-truc-event-loop.md).
 
-**Ba nhóm vấn đề (tổng hợp từ OSTEP).**
+### 4.3 Ba nhóm vấn đề
 
-1. **Blocking system call.** Nếu một handler gọi lời gọi có thể chặn (OSTEP lấy ví dụ `open()` và `read()` file có thể phải xuống storage), thì với event-based server "không còn thread nào khác để chạy, chỉ có main event loop": cả server dừng cho đến khi lời gọi xong. OSTEP phát biểu quy tắc: không được phép có blocking call.[^ostep-noblock] Từ đó, non-blocking interface là thiết yếu vì lời gọi chặn dừng mọi tiến độ.[^ostep-essential]
-2. **State management.** Khi handler phát một I/O bất đồng bộ, nó phải đóng gói trạng thái chương trình cho handler kế tiếp; chương trình thread không cần vì trạng thái nằm trên stack của thread. Adya và cộng sự gọi việc này là *manual stack management*, và nó là nền tảng của lập trình event-based.[^ostep-msm] OSTEP còn nêu thêm: nếu một routine đổi từ non-blocking sang blocking, handler gọi nó cũng phải đổi theo (tách thành hai nửa).[^ostep-api-change]
-3. **Page fault và multicore.** Event-handler mà gặp page fault thì bị chặn, và server không tiến triển cho đến khi page fault xong; blocking ngầm kiểu này khó tránh.[^ostep-pagefault] Và khi chuyển từ một CPU sang nhiều CPU, sự đơn giản của event-based mất đi một phần: để dùng nhiều CPU, server phải chạy nhiều handler song song và lại phát sinh critical section và lock.[^ostep-multicpu]
+Tổng hợp từ OSTEP, event loop vướng ba nhóm vấn đề.
 
-Một phương án lai mà OSTEP dẫn cho hệ thống không có AIO: dùng event để xử lý gói tin mạng và một thread pool để quản lý các I/O đang chờ.[^ostep-hybrid]
+1. **Blocking system call.** Nếu một handler gọi lời gọi có thể chặn thì cả server dừng theo, vì không còn thread nào khác để chạy, chỉ có main event loop. OSTEP lấy ví dụ `open()` và `read()` file, những lời gọi có thể phải xuống storage. Từ đó có một quy tắc phải tuân thủ: không được phép có blocking call.[^ostep-noblock] Hệ quả là non-blocking interface trở nên thiết yếu, vì lời gọi chặn dừng mọi tiến độ.[^ostep-essential] Với `gateway`, một lần đọc file cấu hình chậm trong handler là đủ làm đứng mọi client.
+2. **State management.** Khi handler phát một I/O bất đồng bộ, nó phải đóng gói trạng thái chương trình cho handler kế tiếp. Chương trình thread không cần việc này vì trạng thái nằm sẵn trên stack của thread. Adya và cộng sự gọi việc đó là *manual stack management*, và nó là nền tảng của lập trình event-based.[^ostep-msm] OSTEP còn nêu thêm: nếu một routine đổi từ non-blocking sang blocking, handler gọi nó cũng phải đổi theo (tách thành hai nửa).[^ostep-api-change]
+3. **Page fault và multicore.** Event-handler mà gặp page fault thì bị chặn, và server không tiến triển cho đến khi page fault xong; kiểu blocking ngầm này khó tránh.[^ostep-pagefault] Còn khi chuyển từ một CPU sang nhiều CPU, sự đơn giản của event-based mất đi một phần. Để dùng nhiều CPU, server phải chạy nhiều handler song song, và critical section cùng lock lại xuất hiện.[^ostep-multicpu]
 
-**Không phải lúc nào event loop cũng thắng.**
+OSTEP còn dẫn một phương án lai cho hệ thống không có AIO: dùng event để xử lý gói tin mạng, và một thread pool để quản lý các I/O đang chờ.[^ostep-hybrid]
 
-Rust Book: nếu công việc có tính song song cao (CPU-bound) thì thread là lựa chọn tốt hơn;[^book-cpu] nếu có tính đồng thời cao (I/O-bound, nhiều nguồn tới với nhịp khác nhau) thì async tốt hơn;[^book-io] và thread với task thường kết hợp tốt.[^book-both]
+### 4.4 Không phải lúc nào event loop cũng thắng
 
-(Nhận xét của người soạn, liên hệ backend: một service có hàng chục nghìn kết nối phần lớn rảnh — websocket, long-poll, proxy — hợp event loop vì mỗi kết nối rảnh chỉ tốn một mục trong interest set thay vì một thread. Service nặng CPU hoặc phải gọi thư viện chỉ có API blocking thì vẫn cần thread pool.)
+Rust Book phân biệt theo tính chất công việc. Nếu công việc có tính song song cao (CPU-bound) thì thread là lựa chọn tốt hơn.[^book-cpu] Nếu công việc có tính đồng thời cao (I/O-bound, nhiều nguồn tới với nhịp khác nhau) thì async tốt hơn.[^book-io] Và thread với task thường kết hợp tốt với nhau.[^book-both]
+
+Liên hệ backend (nhận xét của người soạn): `gateway` giữ hàng chục nghìn kết nối phần lớn rảnh, như websocket, long-poll hay proxy, nên hợp event loop vì mỗi kết nối rảnh chỉ tốn một mục trong interest set thay vì một thread. Một service nặng CPU, hoặc phải gọi thư viện chỉ có API blocking, thì vẫn cần thread pool.
 
 <details><summary>Đi sâu: số liệu C10K của Kegel là lịch sử; stack mặc định của thread Rust</summary>
 
-- Trang C10K nhắc năm 1999 một FTP site đã phục vụ 10.000 client đồng thời qua Gigabit Ethernet,[^c10k-1999] và nhắc mốc "5 October 2003" khi NPTL được merge vào cây glibc.[^c10k-nptl] Bản trang này mang dòng bản quyền 1999–2018,[^c10k-copyright] nhưng các con số trên (ví dụ 32-bit, stack 2 MB) là của thời phần cứng/kernel khoảng 2003 trở về trước (suy luận của người soạn từ các mốc 1999/2003 ở trên), không áp dụng nguyên xi cho Linux 64-bit ngày nay. Chính ông viết rằng khi thread support tiến bộ và 64-bit phổ biến thì có thể dùng một thread mỗi client cho cả 10.000 client, nhưng "hiện tại" ai thật sự cần số đó thì nên dùng paradigm khác.[^c10k-conclusion]
-- **Stack Rust.** Stack mặc định của thread Rust "phụ thuộc nền tảng và có thể đổi"; hiện là 2 MiB trên mọi nền tảng Tier-1.[^std-stack] Đó là kích thước *dành sẵn* trong address space, không tự suy ra là RAM đã dùng (nhận xét của người soạn; xem [P3 · Chương 01](../03-memory/01-address-space.md) mục 2 và [P3 · Chương 04](../03-memory/04-page-fault-va-swapping.md) mục 2 về virtual memory và demand paging; số đo thật trên một máy ở [P7 · Chương 04](04-kien-truc-event-loop.md) mục 2).
+- Trang C10K nhắc rằng năm 1999 một FTP site đã phục vụ 10.000 client đồng thời qua Gigabit Ethernet,[^c10k-1999] và nhắc mốc "5 October 2003", khi NPTL được merge vào cây glibc.[^c10k-nptl] Bản trang này mang dòng bản quyền 1999–2018,[^c10k-copyright] nhưng các con số trên (ví dụ 32-bit, stack 2 MB) là của thời phần cứng và kernel khoảng 2003 trở về trước (suy luận của người soạn từ hai mốc 1999/2003), nên không áp dụng nguyên xi cho Linux 64-bit ngày nay. Chính Kegel viết rằng khi thread support tiến bộ và 64-bit phổ biến thì có thể dùng một thread mỗi client cho cả 10.000 client, nhưng "hiện tại" ai thật sự cần số đó thì nên dùng paradigm khác.[^c10k-conclusion]
+- **Stack Rust.** Stack mặc định của thread Rust phụ thuộc nền tảng và có thể đổi; hiện là 2 MiB trên mọi nền tảng Tier-1.[^std-stack] Đó là kích thước *dành sẵn* trong address space, không tự suy ra là RAM đã dùng (nhận xét của người soạn; xem [P3 · Chương 01](../03-memory/01-address-space.md) mục 2 và [P3 · Chương 04](../03-memory/04-page-fault-va-swapping.md) mục 2 về virtual memory và demand paging; số đo thật trên một máy ở [P7 · Chương 04](04-kien-truc-event-loop.md) mục 2).
 
 </details>
 
-**Quay lại Q4:** thread-per-connection đổi bộ nhớ (một stack mỗi kết nối) lấy code tuần tự; event loop đổi ngược lại, trả bằng non-blocking bắt buộc, tự quản lý state và các bẫy page fault/multicore.
+**Quay lại Q4:** thread-per-connection đổi bộ nhớ (một stack mỗi kết nối) lấy code tuần tự; event loop đổi ngược lại, và `gateway` phải trả bằng non-blocking bắt buộc, tự quản lý state và các bẫy page fault/multicore.
 
 ## 5. Signal-driven I/O và POSIX AIO (Q5)
 
-> **Trả lời ngắn.** Signal-driven I/O nhờ kernel gửi một `SIGIO` mỗi khi I/O trở nên khả thi trên fd (cần `F_SETOWN` để chọn người nhận và `O_ASYNC` để bật);[^man-fcntl-sigio] nó vẫn chỉ báo "có thể làm". POSIX AIO nhờ hệ thống thực hiện thao tác chạy nền rồi báo khi xong.[^man-aio] Việc cả hai ít được dùng cho server là nhận xét của người soạn; riêng AIO thì nguồn nêu lý do: bản AIO trên Linux là cài đặt user-space trong glibc với nhiều hạn chế,[^aio-glibc] và OSTEP nói AIO đĩa không tích hợp đơn giản với async network I/O.[^ostep-aio-uniform] Với signal-driven, các nguồn trong chương không nêu lý do riêng.
+> **Trả lời ngắn.** Signal-driven I/O nhờ kernel gửi một `SIGIO` mỗi khi I/O trở nên khả thi trên fd (cần `F_SETOWN` để chọn người nhận và `O_ASYNC` để bật).[^man-fcntl-sigio] Nó vẫn chỉ báo "có thể làm". POSIX AIO thì nhờ hệ thống thực hiện thao tác chạy nền rồi báo khi xong.[^man-aio] Việc cả hai ít được dùng cho server là nhận xét của người soạn. Riêng AIO thì nguồn nêu lý do: bản AIO trên Linux là cài đặt user-space trong glibc với nhiều hạn chế,[^aio-glibc] và OSTEP nói AIO đĩa không tích hợp đơn giản với async network I/O.[^ostep-aio-uniform] Với signal-driven, các nguồn trong chương không nêu lý do riêng.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): signal-driven giống chuông cửa — có người đến thì chuông kêu, bạn vẫn phải tự ra mở cửa. AIO giống nhờ người khác đi lấy hộ, họ mang đồ về và báo "xong rồi".
+*Với service `gateway`.* Hai mô hình cuối của chương trả lời hai nhu cầu khác nhau của `gateway`. Signal-driven I/O thay lời gọi `epoll_wait` bằng một signal: kernel gọi tới thay vì thread đi hỏi. AIO thì nhắm vào việc kiểu đọc file lớn từ đĩa: `gateway` nộp yêu cầu, làm việc khác, rồi được báo khi dữ liệu đã nằm trong buffer. Mục này xem chúng làm được gì và vì sao server hiếm khi chọn chúng.
 
-**Signal-driven I/O (mô hình 4): `F_SETOWN` + `O_ASYNC`.**
+### 5.1 Signal-driven I/O (mô hình 4): `F_SETOWN` + `O_ASYNC`
 
-Thay vì ngủ ở một lời gọi chờ, ta nhờ kernel gửi signal. Với `fcntl(2)`: `F_SETOWN` đặt process hoặc process group nhận signal (thường là chính tiến trình gọi, `arg = getpid()`),[^man-fcntl-setown] rồi bật `O_ASYNC` bằng `F_SETFL`; từ đó một `SIGIO` được gửi mỗi khi input hoặc output *trở nên khả thi* trên fd.[^man-fcntl-sigio]
+Thay vì ngủ ở một lời gọi chờ, thread nhờ kernel gửi signal. Với `fcntl(2)`, `F_SETOWN` đặt process hoặc process group nhận signal (thường là chính tiến trình gọi, `arg = getpid()`).[^man-fcntl-setown] Sau đó thread bật `O_ASYNC` bằng `F_SETFL`. Từ đó mỗi khi input hoặc output *trở nên khả thi* trên fd, một `SIGIO` được gửi tới.[^man-fcntl-sigio]
 
-Việc signal được gửi khi I/O "trở nên khả thi" cho thấy đây vẫn là thông báo kiểu *readiness*: kernel báo "có thể làm", chứ không làm hộ; ứng dụng vẫn phải tự `read`. Người soạn xếp mô hình 4 vào nhóm readiness, chỉ khác kênh thông báo là signal thay vì một lời gọi chờ (suy luận của người soạn từ các câu trích; không man page nào gán nhãn "readiness" cho `O_ASYNC`). Chi tiết kèm lưu ý nằm ở phần Đi sâu cuối mục.
+Signal chỉ được gửi khi I/O "trở nên khả thi", nghĩa là đây vẫn là thông báo kiểu *readiness*: kernel báo "có thể làm" chứ không làm hộ, và `gateway` vẫn phải tự `read`. Người soạn xếp mô hình 4 vào nhóm readiness, chỉ khác kênh thông báo là signal thay vì một lời gọi chờ (suy luận của người soạn từ các câu trích; không man page nào gán nhãn "readiness" cho `O_ASYNC`). Chi tiết kèm lưu ý nằm ở phần Đi sâu cuối mục.
 
-**Asynchronous I/O (mô hình 5): kernel làm hộ rồi báo xong.**
+### 5.2 Asynchronous I/O (mô hình 5): kernel làm hộ rồi báo xong
 
-Ở mô hình 5, ứng dụng nhờ hệ thống *thực hiện* thao tác và báo khi *xong*. OSTEP: các interface này cho phép phát một I/O request và trả quyền điều khiển ngay, trước khi I/O hoàn tất.[^ostep-aio] POSIX AIO (`aio(7)`) cho khởi tạo một hay nhiều thao tác I/O chạy "nền", và ứng dụng chọn cách được báo xong: signal, tạo thread, hoặc không báo gì.[^man-aio] Muốn biết đã xong chưa, OSTEP mô tả hai cách: poll định kỳ bằng `aio_error()` (trả `EINPROGRESS` nếu chưa xong);[^ostep-aio-poll] hoặc dùng signal để khỏi phải hỏi lặp lại.[^ostep-aio-signal]
+Ở mô hình 5, ứng dụng nhờ hệ thống *thực hiện* thao tác và báo khi *xong*. Các interface kiểu này cho phép phát một I/O request và trả quyền điều khiển ngay cho caller, trước khi I/O hoàn tất.[^ostep-aio] POSIX AIO (`aio(7)`) cho khởi tạo một hay nhiều thao tác I/O chạy nền, và ứng dụng chọn cách được báo xong: signal, tạo thread, hoặc không báo gì.[^man-aio] Muốn biết đã xong chưa, OSTEP mô tả hai cách. Cách thứ nhất là poll định kỳ bằng `aio_error()`, hàm trả `EINPROGRESS` nếu chưa xong.[^ostep-aio-poll] Cách thứ hai là dùng signal để khỏi phải hỏi lặp lại.[^ostep-aio-signal]
 
-So sánh với mô hình 2–3, sự khác biệt nằm ở *ai chạm vào dữ liệu* (nhận xét của người soạn). Ở readiness, `read` vẫn là việc của bạn. Ở completion, bạn đưa sẵn buffer trong yêu cầu, và khi nhận thông báo xong thì buffer đã có dữ liệu. Với POSIX AIO, OSTEP mô tả cấu trúc `aiocb` chứa fd, offset, độ dài và vị trí buffer đích nhận kết quả.[^ostep-aio-struct]
+Khác biệt so với mô hình 2–3 nằm ở chỗ *ai chạm vào dữ liệu* (nhận xét của người soạn). Với readiness, `read` vẫn là việc của bạn. Với completion, bạn đưa sẵn buffer trong yêu cầu, và khi nhận thông báo xong thì buffer đã có dữ liệu. Với POSIX AIO, OSTEP mô tả cấu trúc `aiocb` chứa fd, offset, độ dài và vị trí buffer đích nhận kết quả.[^ostep-aio-struct]
 
-**Vì sao POSIX AIO ít được dùng cho server** (chỉ những gì nguồn nói; "ít được dùng" là nhận định của người soạn):
+### 5.3 Vì sao POSIX AIO ít được dùng cho server
 
-- Man page `aio(7)`: bản cài đặt POSIX AIO hiện tại trên Linux nằm ở **user space trong glibc**, có nhiều hạn chế, nổi bật là việc duy trì nhiều thread để thực hiện I/O là đắt và scale kém; việc làm lại hoàn toàn bằng kernel system call chưa đủ chín.[^aio-glibc]
-- OSTEP: asynchronous disk I/O có thể có trên hầu hết nền tảng nhưng mất rất lâu mới tới được đó, và nó "không bao giờ tích hợp đơn giản và đồng nhất" với async network I/O như người ta tưởng; thường phải kết hợp `select()` cho mạng và các lời gọi AIO cho đĩa.[^ostep-aio-uniform]
-- Kegel (lịch sử): `aio` kiểu "asynchronous call + completion notification" tốt cho cả network và disk I/O,[^c10k-async] nhưng AIO của Ben LaHaise (merge vào kernel từ 2.5.32), tính đến 2.6.0-test2, chưa hỗ trợ socket.[^c10k-aio-socket]
+"Ít được dùng" là nhận định của người soạn; ba nguồn dưới đây chỉ nói những gì họ nói.
 
-Trên Linux còn có `io_uring`: man page mô tả nó là API Linux-specific cho asynchronous I/O, cho nộp một hoặc nhiều request được xử lý bất đồng bộ mà không chặn tiến trình gọi.[^iou-desc] Cơ chế của nó, và vì sao nó thuộc họ completion, nằm ở [Chương 03](03-kqueue-io-uring.md) (mục 3 và 4).
+- `aio(7)` ghi rằng bản cài đặt POSIX AIO hiện tại trên Linux nằm ở **user space trong glibc** và có nhiều hạn chế, nổi bật là việc duy trì nhiều thread để thực hiện I/O thì đắt và scale kém.[^aio-glibc] Man page còn nói việc làm lại hoàn toàn bằng kernel system call chưa đủ chín.
+- OSTEP viết rằng asynchronous disk I/O có thể có trên hầu hết nền tảng nhưng mất rất lâu mới tới được đó, và nó không bao giờ tích hợp đơn giản, đồng nhất với async network I/O như người ta tưởng.[^ostep-aio-uniform] Thường phải kết hợp `select()` cho mạng và các lời gọi AIO cho đĩa, tức `gateway` sẽ phải nuôi hai kênh thông báo.
+- Kegel (lịch sử) nói `aio` kiểu "asynchronous call kèm completion notification" tốt cho cả network lẫn disk I/O.[^c10k-async] Nhưng AIO của Ben LaHaise (merge vào kernel từ 2.5.32), tính đến 2.6.0-test2, chưa hỗ trợ socket.[^c10k-aio-socket]
+
+Trên Linux còn có `io_uring`. Man page mô tả nó là API Linux-specific cho asynchronous I/O, cho nộp một hoặc nhiều request được xử lý bất đồng bộ mà không chặn tiến trình gọi.[^iou-desc] Cơ chế của nó, và vì sao nó thuộc họ completion, nằm ở [Chương 03](03-kqueue-io-uring.md) (mục 3 và 4).
 
 <details><summary>Đi sâu: <code>F_SETSIG</code>/<code>si_fd</code>, cách dùng chữ "asynchronous", tính di động của <code>SIGIO</code></summary>
 
-Chính `fcntl(2)` ghi thêm: khi dùng `F_SETSIG` mà handler không nhận được `si_fd` (không có `SI_SIGIO`), thì không có chỉ dấu fd nào đang pending và phải dùng các cơ chế thường lệ — `select`, `poll`, `read` với `O_NONBLOCK` — để xác định fd nào I/O được.[^man-fcntl-sigio-usual] Man page còn nói rằng với các cơ chế này (gồm `F_SETSIG` và real-time signal) một chương trình có thể cài đặt I/O "fully asynchronous" mà phần lớn thời gian không cần `select`/`poll`[^man-fcntl-fully-async] — lại một cách dùng chữ "asynchronous" khác với mục 1 (nhận xét của người soạn: về cơ chế đây vẫn là kênh báo readiness như đã nói ở trên). Lưu ý về tính di động: man page ghi `O_ASYNC` chỉ có ở BSD và Linux, và POSIX không chỉ định signal `SIGIO`.[^fcntl-posix]
+Chính `fcntl(2)` ghi thêm: khi dùng `F_SETSIG` mà handler không nhận được `si_fd` (không có `SI_SIGIO`), thì không có chỉ dấu fd nào đang pending. Lúc đó phải dùng các cơ chế thường lệ (`select`, `poll`, `read` với `O_NONBLOCK`) để xác định fd nào I/O được.[^man-fcntl-sigio-usual] Man page còn nói rằng với các cơ chế này (gồm `F_SETSIG` và real-time signal), một chương trình có thể cài đặt I/O "fully asynchronous" mà phần lớn thời gian không cần `select`/`poll`.[^man-fcntl-fully-async] Đó lại là một cách dùng chữ "asynchronous" khác với mục 1; về cơ chế đây vẫn là kênh báo readiness như đã nói ở trên (nhận xét của người soạn). Lưu ý về tính di động: man page ghi `O_ASYNC` chỉ có ở BSD và Linux, và POSIX không chỉ định signal `SIGIO`.[^fcntl-posix]
 
 </details>
 
@@ -275,12 +288,13 @@ Chính `fcntl(2)` ghi thêm: khi dùng `F_SETSIG` mà handler không nhận đư
 
 ## 6. Năm mô hình cạnh nhau; readiness và completion (Q6)
 
-> **Trả lời ngắn.** Năm mô hình khác nhau ở chỗ thread làm gì khi chưa có dữ liệu, ai gọi `read`, và kênh nào báo "có việc" (bảng bên dưới, tổng hợp của người soạn). Với *readiness*, kernel chỉ cho biết một I/O trên fd sẽ không chặn, còn việc đọc/ghi vẫn do bạn gọi.[^man-select-ready] Với *completion*, bạn nộp yêu cầu rồi được báo khi đã xong; OSTEP mô tả đó là phát một I/O request và trả quyền điều khiển ngay, trước khi I/O hoàn tất.[^ostep-aio]
+> **Trả lời ngắn.** Năm mô hình khác nhau ở ba điểm: thread làm gì khi chưa có dữ liệu, ai gọi `read`, và kênh nào báo "có việc" (bảng bên dưới là tổng hợp của người soạn). Với *readiness*, kernel chỉ cho biết một I/O trên fd sẽ không chặn, còn việc đọc/ghi vẫn do bạn gọi.[^man-select-ready] Với *completion*, bạn nộp yêu cầu rồi được báo khi đã xong. OSTEP mô tả đó là phát một I/O request và trả quyền điều khiển ngay, trước khi I/O hoàn tất.[^ostep-aio]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): readiness là "kho báo hàng đã về, bạn tự ra lấy"; completion là "shipper giao tận tay và báo đã xong".
+*Với service `gateway`.* Năm mô hình là năm câu trả lời cho cùng một tình huống: client chưa gửi gì, thread của `gateway` làm gì tiếp? Bảng dưới đặt chúng cạnh nhau, rồi mục này tách hai họ lớn là readiness và completion, vì chương 02 và 03 sẽ dựa vào sự khác biệt đó.
 
+### 6.1 Bảng so sánh
 
 | # | Mô hình | Thread làm gì khi chưa có dữ liệu | Ai gọi `read`/sao chép dữ liệu | Kênh báo "có việc" |
 |---|---|---|---|---|
@@ -290,14 +304,18 @@ Hình dung (nhận xét của người soạn): readiness là "kho báo hàng đ
 | 4 | Signal-driven | Làm việc khác | Ứng dụng gọi `read` sau khi nhận `SIGIO` | Signal |
 | 5 | Asynchronous (completion) | Làm việc khác; yêu cầu đã nộp | Kernel/thư viện thực hiện, báo khi xong | Signal, thread, poll trạng thái, hoặc hàng đợi completion |
 
-Bảng là tổng hợp của người soạn từ các nguồn đã trích ở trên; hàng 5, cột kênh báo, nhắc "hàng đợi completion" mà [Chương 03](03-kqueue-io-uring.md) giải thích. Kegel liệt kê ba chiến lược nền cho việc phát nhiều I/O từ một thread (blocking, có thể dùng nhiều thread/process; non-blocking + readiness notification; asynchronous + completion notification),[^c10k-strategies][^c10k-readiness][^c10k-async] còn cách chia năm mô hình ở đây là của người soạn.
+Bảng là tổng hợp của người soạn từ các nguồn đã trích ở trên. Ở hàng 5, cột kênh báo có nhắc "hàng đợi completion", mà [Chương 03](03-kqueue-io-uring.md) sẽ giải thích. Kegel liệt kê ba chiến lược nền cho việc phát nhiều I/O từ một thread, còn cách chia năm mô hình ở đây là của người soạn:
 
-**Readiness và completion: lời giới thiệu.**
+- blocking, có thể dùng nhiều thread hoặc process;[^c10k-strategies]
+- non-blocking kèm readiness notification;[^c10k-readiness]
+- asynchronous kèm completion notification.[^c10k-async]
 
-- **Readiness** (mô hình 3, 4): kernel nói "fd này *có thể* đọc/ghi mà không chặn".[^man-select-ready] Việc làm thật vẫn là của bạn, cần thêm một syscall sau thông báo (suy luận của người soạn từ định nghĩa đó); và theo Kegel cách này thường chỉ dùng được cho network I/O, không cho disk I/O (mục 2).[^c10k-readiness]
-- **Completion** (mô hình 5): bạn nộp một yêu cầu cụ thể kèm buffer đích,[^ostep-aio-struct] hệ thống (kernel hoặc thư viện, như POSIX AIO trong glibc ở mục 5) làm xong rồi nói "đã xong".
+### 6.2 Readiness và completion: lời giới thiệu
 
-Chi tiết: `epoll` ở [Chương 02](02-select-poll-epoll.md), `kqueue`/`io_uring` và so sánh readiness với completion đầy đủ ở [Chương 03](03-kqueue-io-uring.md) (mục 4), reactor ở [Chương 04](04-kien-truc-event-loop.md).
+- **Readiness** (mô hình 3, 4): kernel nói "fd này *có thể* đọc/ghi mà không chặn".[^man-select-ready] Việc làm thật vẫn là của `gateway`, cần thêm một syscall sau thông báo (suy luận của người soạn từ định nghĩa đó). Theo Kegel, cách này thường chỉ dùng được cho network I/O, không cho disk I/O (mục 2).[^c10k-readiness]
+- **Completion** (mô hình 5): `gateway` nộp một yêu cầu cụ thể kèm buffer đích,[^ostep-aio-struct] hệ thống (kernel hoặc thư viện, như POSIX AIO trong glibc ở mục 5) làm xong rồi nói "đã xong".
+
+Chi tiết: `epoll` ở [Chương 02](02-select-poll-epoll.md); `kqueue`/`io_uring` và so sánh readiness với completion đầy đủ ở [Chương 03](03-kqueue-io-uring.md) (mục 4); reactor ở [Chương 04](04-kien-truc-event-loop.md).
 
 <details><summary>Đi sâu: completion ở Windows (IOCP)</summary>
 
@@ -305,7 +323,7 @@ Mio ghi nhận chính sự khác biệt này ở Windows: IOCP dùng completion 
 
 </details>
 
-**Quay lại Q6:** readiness = "có thể làm, bạn tự làm"; completion = "đã làm xong, kết quả nằm trong buffer bạn đưa".
+**Quay lại Q6:** readiness = "có thể làm, `gateway` tự làm"; completion = "đã làm xong, kết quả nằm trong buffer `gateway` đưa".
 
 ## 7. Liên hệ với Rust: `std` I/O, `set_nonblocking` và `WouldBlock` (Q7)
 
@@ -313,19 +331,40 @@ Mio ghi nhận chính sự khác biệt này ở Windows: IOCP dùng completion 
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `std` giống gọi điện và giữ máy chờ; bật non-blocking thì tổng đài trả ngay "bận, gọi lại sau" (`WouldBlock`) thay vì giữ máy.
+*Với service `gateway`.* `gateway` viết bằng Rust sẽ dùng `std::net`, nên cần biết hai điều. Một là nếu không làm gì thêm, `accept` và `read` trên `TcpStream` chặn thread, tức là mô hình 1. Hai là sau `set_nonblocking(true)`, chuyện "chưa có dữ liệu" hiện ra trong Rust thế nào, và code của `gateway` phải xử lý nó ra sao.
 
-**`std` I/O mặc định là blocking.**
+### 7.1 `std` I/O mặc định là blocking
 
-Docs `std` mô tả `TcpListener::accept` là "sẽ chặn thread gọi cho đến khi một kết nối TCP được thiết lập".[^std-accept] Với `read` trên `TcpStream`, trait `Read` không hứa gì về chuyện có chặn hay không: "không đưa ra bảo đảm nào về việc nó có chặn chờ dữ liệu hay không", nhưng nếu một object cần chặn để đọc mà không thể, nó thường báo qua giá trị `Err`.[^std-read-block] Với `TcpStream` trên Unix, source `std` 1.95.0 cho thấy `Socket::read` đi qua `recv_with_flags`, và hàm này gọi `libc::recv`;[^std-src-recv] man page `recv(2)` ghi rằng khi chưa có message, các lời gọi nhận chờ message đến, trừ khi socket là nonblocking.[^man-recv-wait] Vậy nếu bạn *không* gọi `set_nonblocking`, `read` trên `TcpStream` là `recv(2)` blocking như mô hình 1 (suy luận của người soạn từ hai nguồn trên).
+Docs `std` mô tả `TcpListener::accept` sẽ chặn thread gọi cho đến khi một kết nối TCP được thiết lập.[^std-accept] Với `read` trên `TcpStream` thì trait `Read` không hứa gì về chuyện có chặn hay không. Docs chỉ nói thêm rằng nếu một object cần chặn để đọc mà không thể, nó thường báo qua giá trị `Err`.[^std-read-block] Để biết `TcpStream` trên Unix thật sự làm gì, ta nhìn source `std` 1.95.0: `Socket::read` đi qua `recv_with_flags`, và hàm này gọi `libc::recv`.[^std-src-recv] Man page `recv(2)` ghi rằng khi chưa có message thì các lời gọi nhận chờ message đến, trừ khi socket là nonblocking.[^man-recv-wait] Ghép hai nguồn lại: nếu bạn *không* gọi `set_nonblocking`, `read` trên `TcpStream` là `recv(2)` blocking như mô hình 1 (suy luận của người soạn).
 
-**`set_nonblocking` và `ErrorKind::WouldBlock`.**
+### 7.2 `set_nonblocking` và `ErrorKind::WouldBlock`
 
-`TcpStream::set_nonblocking(true)` làm các thao tác `read`, `write`, `recv`, `send` trả ngay; nếu thao tác không hoàn thành và cần thử lại thì trả lỗi có kind `io::ErrorKind::WouldBlock`.[^std-set-nb] Docs còn ghi: trên Unix, gọi phương thức này tương ứng với gọi `fcntl FIONBIO`.[^std-set-nb-unix] Chi tiết cài đặt (syscall thật là `ioctl`) nằm ở phần Đi sâu cuối mục.
+`TcpStream::set_nonblocking(true)` làm các thao tác `read`, `write`, `recv`, `send` trả ngay; nếu thao tác không hoàn thành và cần thử lại thì nó trả lỗi có kind `io::ErrorKind::WouldBlock`.[^std-set-nb] Docs còn ghi: trên Unix, gọi phương thức này tương ứng với gọi `fcntl FIONBIO`.[^std-set-nb-unix] Chi tiết cài đặt (syscall thật là `ioctl`) nằm ở phần Đi sâu cuối mục.
 
-`ErrorKind::WouldBlock` được docs định nghĩa là "thao tác cần chặn để hoàn thành, nhưng thao tác chặn đã được yêu cầu không xảy ra".[^std-wouldblock] Việc ánh xạ từ `errno` về kind này nằm ở `decode_error_kind` trong `std` 1.95.0: nhánh `EAGAIN || EWOULDBLOCK => WouldBlock`, viết bằng guard `if` chứ không phải match clause vì hai hằng có thể trùng giá trị ở hệ này và khác giá trị ở hệ khác (theo chú thích trong source).[^std-errno-map] Nhờ vậy phần kiểm tra hai hằng số mà code C phải làm (mục 2) đã nằm trong `std`. `WouldBlock` **không phải lỗi thật** mà là tín hiệu "chưa sẵn sàng": nên xử lý như luồng điều khiển, không `?` ra ngoài (nhận xét của người soạn). Ví dụ trong docs của `set_nonblocking` có chú thích đúng ý đó: ở nhánh `WouldBlock`, "chờ cho đến khi socket sẵn sàng, thường được cài đặt qua API riêng nền tảng như epoll hoặc IOCP".[^std-set-nb-example]
+Docs định nghĩa `ErrorKind::WouldBlock` là: thao tác cần chặn để hoàn thành, nhưng thao tác chặn đã được yêu cầu không xảy ra.[^std-wouldblock] Việc ánh xạ từ `errno` về kind này nằm ở `decode_error_kind` trong `std` 1.95.0, nhánh `EAGAIN || EWOULDBLOCK => WouldBlock`. Nhánh này viết bằng guard `if` chứ không phải match clause, vì hai hằng có thể trùng giá trị ở hệ này và khác giá trị ở hệ khác (theo chú thích trong source).[^std-errno-map] Nhờ vậy phần kiểm tra hai hằng số mà code C phải làm (mục 2) đã nằm sẵn trong `std`.
 
-**Lên trên đó** (nhận xét của người soạn; nguồn nằm ở các chương đích). `std::net` không đưa ra API "chờ nhiều fd sẵn sàng", nên cần một tầng khác làm việc đó: mio bọc epoll/kqueue ([Chương 07](07-executor-va-mio.md) mục 1 và 4); vòng đời `WouldBlock` → `Pending` → `wake` → `poll` lại nằm ở [Chương 07](07-executor-va-mio.md) mục 3, còn hợp đồng `Future::poll` trả `Pending` thay vì `EAGAIN` ở [Chương 05](05-future-poll-waker.md) mục 2; Tokio ghép các tầng đó lại ([Chương 08](08-tokio.md)).
+`WouldBlock` **không phải lỗi thật** mà là tín hiệu "chưa sẵn sàng", nên xử lý nó như luồng điều khiển, đừng `?` ra ngoài (nhận xét của người soạn). Ví dụ trong docs của `set_nonblocking` có chú thích đúng ý đó: ở nhánh `WouldBlock`, phải chờ cho đến khi socket sẵn sàng, thường được cài đặt qua API riêng nền tảng như epoll hoặc IOCP.[^std-set-nb-example]
+
+Một đoạn minh họa của người soạn (chưa chạy) cho vòng đọc của một kết nối trong `gateway`:
+
+```rust
+use std::io::{ErrorKind, Read};
+use std::net::TcpStream;
+
+fn on_readable(conn: &mut TcpStream, buf: &mut [u8]) -> std::io::Result<()> {
+    match conn.read(buf) {
+        Ok(0) => { /* client đã đóng kết nối (EOF) */ }
+        Ok(n) => { /* xử lý n byte đầu của buf */ }
+        Err(e) if e.kind() == ErrorKind::WouldBlock => { /* chưa có: quay lại chờ */ }
+        Err(e) => return Err(e),
+    }
+    Ok(())
+}
+```
+
+### 7.3 Lên trên đó
+
+Phần này là nhận xét của người soạn; nguồn nằm ở các chương đích. `std::net` không có API kiểu "chờ nhiều fd sẵn sàng", nên cần một tầng khác làm việc đó: mio bọc epoll/kqueue ([Chương 07](07-executor-va-mio.md) mục 1 và 4). Vòng đời `WouldBlock` → `Pending` → `wake` → `poll` lại nằm ở [Chương 07](07-executor-va-mio.md) mục 3. Hợp đồng `Future::poll` trả `Pending` thay vì `EAGAIN` nằm ở [Chương 05](05-future-poll-waker.md) mục 2, và Tokio ghép các tầng đó lại ([Chương 08](08-tokio.md)).
 
 <details><summary>Đi sâu: <code>FIONBIO</code> trong source, và chạy thật <code>nonblocking_pipe</code> trên Linux và macOS</summary>
 
@@ -367,12 +406,12 @@ non-block read  -> WouldBlock again: the pipe is drained
 1. `read` đầu ngủ ~200 ms đến khi thread khác ghi: mô hình 1.
 2. Sau `F_SETFL` + `O_NONBLOCK`, cùng lời gọi trên pipe rỗng trả lỗi sau ~1 µs: mô hình 2.
 3. Số `errno` và giá trị bit `O_NONBLOCK` khác nhau theo hệ điều hành (Linux: 11 và `0o4000`; macOS: 35 và `0o4`), nhưng `std` trả cùng `ErrorKind::WouldBlock`; vì vậy nên so sánh qua tên hằng hoặc `ErrorKind`, không so số (nhận xét của người soạn). Chương trình không minh họa trường hợp `EAGAIN` ≠ `EWOULDBLOCK` mà `read(2)` cảnh báo: trên cả hai hệ điều hành này hai hằng trùng giá trị (dòng `EAGAIN = …, EWOULDBLOCK = …` trong output).
-4. Giá trị `errno` và bit có nguồn đối chiếu: header Linux v6.8 `asm-generic` định nghĩa `EAGAIN` là 11, `EWOULDBLOCK` là `EAGAIN`, `O_NONBLOCK` là `00004000` (octal);[^linux-eagain][^linux-ewouldblock][^linux-onblock] header XNU (nhân macOS) định nghĩa `EAGAIN` là 35 và `O_NONBLOCK` là `0x00000004`.[^xnu-eagain][^xnu-onblock] Đó là header `asm-generic`; header MIPS của cùng phiên bản định nghĩa `O_NONBLOCK` là `0x0080`,[^linux-mips-onblock] nên đây không phải giá trị chung cho mọi kiến trúc Linux.
+4. Giá trị `errno` và bit có nguồn đối chiếu. Header Linux v6.8 `asm-generic` định nghĩa `EAGAIN` là 11.[^linux-eagain] Cùng bộ header đó định nghĩa `EWOULDBLOCK` là `EAGAIN`.[^linux-ewouldblock] `O_NONBLOCK` là `00004000` (octal).[^linux-onblock] Header XNU (nhân macOS) định nghĩa `EAGAIN` là 35.[^xnu-eagain] `O_NONBLOCK` ở đó là `0x00000004`.[^xnu-onblock] Những giá trị Linux trên là của header `asm-generic`; header MIPS của cùng phiên bản định nghĩa `O_NONBLOCK` là `0x0080`,[^linux-mips-onblock] nên đây không phải giá trị chung cho mọi kiến trúc Linux.
 5. Kết quả chương trình là quan sát từ hai lần chạy, không phải bảo đảm của docs.
 
 </details>
 
-**Quay lại Q7:** `std` mặc định chặn; `set_nonblocking(true)` biến "cần chờ" thành `ErrorKind::WouldBlock`, một tín hiệu "chưa sẵn sàng" chứ không phải lỗi thật.
+**Quay lại Q7:** `std` mặc định chặn; `set_nonblocking(true)` biến "cần chờ" thành `ErrorKind::WouldBlock`, một tín hiệu "chưa sẵn sàng" chứ không phải lỗi thật, và code của `gateway` xử lý nó như một nhánh bình thường.
 
 ## Tóm tắt
 
@@ -390,49 +429,49 @@ non-block read  -> WouldBlock again: the pipe is drained
 1. Nêu ba hướng xử lý một `read` khi dữ liệu chưa đến và gán chúng vào năm mô hình.
 <details><summary>Đáp án</summary>
 
-Đợi trong lời gọi = blocking (mục 1); trả ngay = non-blocking (mục 2); đăng ký trước để được báo = multiplexing/signal-driven (readiness, mục 3 và 5) hoặc asynchronous completion (mục 5). Cách gán này là phân loại của người soạn (bảng mục 6); Kegel liệt kê ba chiến lược nền tương ứng: blocking, non-blocking + readiness, asynchronous + completion.[^c10k-strategies][^c10k-readiness][^c10k-async]
+Đợi trong lời gọi = blocking (mục 1); trả ngay = non-blocking (mục 2); đăng ký trước để được báo = multiplexing/signal-driven (readiness, mục 3 và 5) hoặc asynchronous completion (mục 5). Cách gán này là phân loại của người soạn (bảng mục 6). Kegel liệt kê ba chiến lược nền tương ứng: blocking,[^c10k-strategies] non-blocking kèm readiness,[^c10k-readiness] asynchronous kèm completion.[^c10k-async]
 
 </details>
 
 2. OSTEP và POSIX AIO dùng chữ "asynchronous" khác nhau thế nào?
 <details><summary>Đáp án</summary>
 
-OSTEP gọi interface bắt đầu việc rồi trả về ngay là non-blocking/asynchronous;[^ostep-block] còn AIO của POSIX cho khởi tạo I/O chạy nền và báo xong qua signal/thread/không báo.[^man-aio]
+OSTEP gọi interface bắt đầu việc rồi trả về ngay là non-blocking/asynchronous.[^ostep-block] AIO của POSIX thì cho khởi tạo I/O chạy nền và báo xong qua signal/thread/không báo.[^man-aio]
 
 </details>
 
 3. Vì sao code C portable phải kiểm tra cả `EAGAIN` lẫn `EWOULDBLOCK`, còn code Rust thì không?
 <details><summary>Đáp án</summary>
 
-POSIX cho phép trả một trong hai và không buộc hai hằng bằng nhau;[^man-read-eagain] `std` ánh xạ cả hai về `ErrorKind::WouldBlock`.[^std-errno-map]
+POSIX cho phép trả một trong hai và không buộc hai hằng bằng nhau.[^man-read-eagain] `std` ánh xạ cả hai về `ErrorKind::WouldBlock`.[^std-errno-map]
 
 </details>
 
 4. Giải thích bằng nguồn vì sao chỉ có `O_NONBLOCK` thì phải busy-poll, và số đo trong chương cho thấy gì.
 <details><summary>Đáp án</summary>
 
-`open(2)` ghi `O_NONBLOCK` không ảnh hưởng đến `poll`/`select`/`epoll`, những interface chỉ báo fd "ready";[^man-open-poll] tức cờ này không tự mang kênh thông báo nào, nên nếu không có cơ chế khác thì chỉ còn gọi `read` lại (suy luận của người soạn). Số đo (quan sát một lần chạy, không phải nguồn man): ~1,45 triệu `WouldBlock` và user+sys ≈ thời gian thực (≈100% một core) so với ≈0 CPU khi blocking (mục 2, phần Đi sâu).
+`open(2)` ghi `O_NONBLOCK` không ảnh hưởng đến `poll`/`select`/`epoll`, những interface chỉ báo fd "ready".[^man-open-poll] Tức cờ này không tự mang kênh thông báo nào, nên nếu không có cơ chế khác thì chỉ còn gọi `read` lại (suy luận của người soạn). Số đo (quan sát một lần chạy, không phải nguồn man): ~1,45 triệu `WouldBlock` và user+sys ≈ thời gian thực (≈100% một core) so với ≈0 CPU khi blocking (mục 2, phần Đi sâu).
 
 </details>
 
 5. Nêu ba vấn đề OSTEP chỉ ra với event-based concurrency.
 <details><summary>Đáp án</summary>
 
-Blocking system call làm dừng cả server;[^ostep-noblock] state management (manual stack management);[^ostep-msm] page fault chặn ngầm và multicore đưa lại lock.[^ostep-pagefault][^ostep-multicpu]
+Blocking system call làm dừng cả server.[^ostep-noblock] State management (manual stack management).[^ostep-msm] Page fault chặn ngầm.[^ostep-pagefault] Và multicore đưa lại lock.[^ostep-multicpu]
 
 </details>
 
 6. Vì sao nên dùng số liệu của Kegel về thread-per-connection một cách thận trọng?
 <details><summary>Đáp án</summary>
 
-Đó là nguồn lịch sử (nhắc mốc 1999 và 5/10/2003, ví dụ 32-bit 1 GB, stack 2 MB → 512 thread):[^c10k-1999][^c10k-nptl][^c10k-512] ông cũng tự viết rằng thread support và 64-bit đang cải thiện.[^c10k-conclusion]
+Đó là nguồn lịch sử. Trang nhắc năm 1999 một FTP site phục vụ 10.000 client.[^c10k-1999] Nó nhắc mốc 5/10/2003 của NPTL.[^c10k-nptl] Ví dụ thread-per-connection của nó là máy 32-bit, 1 GB, stack 2 MB, hết bộ nhớ ở 512 thread.[^c10k-512] Chính Kegel cũng viết rằng thread support và 64-bit đang cải thiện.[^c10k-conclusion]
 
 </details>
 
 7. `F_SETOWN` và `O_ASYNC` mỗi cái làm gì trong signal-driven I/O, và vì sao xếp nó vào readiness?
 <details><summary>Đáp án</summary>
 
-`F_SETOWN` chọn process/group nhận `SIGIO`;[^man-fcntl-setown] `O_ASYNC` (bật bằng `F_SETFL`) bật việc gửi `SIGIO` mỗi khi input/output trở nên khả thi trên fd.[^man-fcntl-sigio] Xếp vào readiness vì kernel chỉ báo khả năng, không làm hộ việc đọc/ghi (suy luận của người soạn từ câu trích đó).
+`F_SETOWN` chọn process/group nhận `SIGIO`.[^man-fcntl-setown] `O_ASYNC` (bật bằng `F_SETFL`) bật việc gửi `SIGIO` mỗi khi input/output trở nên khả thi trên fd.[^man-fcntl-sigio] Xếp vào readiness vì kernel chỉ báo khả năng, không làm hộ việc đọc/ghi (suy luận của người soạn từ câu trích đó).
 
 </details>
 
@@ -446,7 +485,7 @@ Blocking system call làm dừng cả server;[^ostep-noblock] state management (
 9. Readiness khác completion ở điểm nào?
 <details><summary>Đáp án</summary>
 
-Readiness: kernel báo fd "ready", I/O sau đó vẫn do ứng dụng làm;[^man-open-poll] completion: ứng dụng nộp yêu cầu rồi được báo khi đã xong;[^ostep-aio] ví dụ Windows IOCP dùng completion model.[^mio-iocp]
+Readiness: kernel báo fd "ready", I/O sau đó vẫn do ứng dụng làm.[^man-open-poll] Completion: ứng dụng nộp yêu cầu rồi được báo khi đã xong.[^ostep-aio] Ví dụ Windows IOCP dùng completion model.[^mio-iocp]
 
 </details>
 

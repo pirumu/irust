@@ -1,6 +1,6 @@
 # P13 · Chương 06 — PlusCal: viết thuật toán rồi dịch sang TLA+
 
-> Nguồn chính là *PlusCal User's Manual* của Lamport, bản 1.8 (ngày ghi trên bìa: 11 March 2024), có hai phiên bản cú pháp: P-syntax và C-syntax. Mọi spec trong chương này là **minh họa của người soạn**: không chạy TLC, không chạy translator; chương không khẳng định kết quả model checking, trừ chỗ nguồn nói rõ. Bản dịch TLA+ của ví dụ do người soạn viết tay theo quy tắc trong manual (Phụ lục B) và đối chiếu với bản dịch thật trong repo `tlaplus/Examples`; translator thật có thể khác về định dạng. Trang Learn TLA+ là trang sống (truy cập 2026-10-12), không ghim phiên bản.
+> Nguồn chính là *PlusCal User's Manual* của Lamport, bản 1.8 (ngày ghi trên bìa: 11 March 2024). Manual có hai phiên bản cú pháp, P-syntax và C-syntax. Mọi spec trong chương này là **minh họa của người soạn**: không chạy TLC, không chạy translator, và chương không khẳng định kết quả model checking trừ chỗ nguồn nói rõ. Bản dịch TLA+ của ví dụ do người soạn viết tay theo quy tắc trong manual (Phụ lục B) rồi đối chiếu với bản dịch thật trong repo `tlaplus/Examples`, nên translator thật có thể ra định dạng khác. Trang Learn TLA+ là trang sống (truy cập 2026-10-12), không ghim phiên bản.
 
 ## Bạn sẽ hiểu được gì
 
@@ -15,24 +15,34 @@
 
 ## Kiến thức cần trước
 
-- [Chương 02 — Toán nền tảng](02-toan-nen-tang.md): `/\`, `\/`, `\in`, hàm `[x \in S |-> e]`, `EXCEPT`, record, sequence (`Head`, `Tail`, `\o`). Mọi đoạn TLA+ trong chương này (nhất là bản dịch ở mục 6–8) dùng đúng những ký hiệu đó và chương này không giải thích lại.
-- [Chương 03 — Trạng thái, hành vi, action](03-trang-thai-hanh-vi-action.md): state, behavior, action, `Init`/`Next`/`Spec`, `[][Next]_vars`; chương này dịch PlusCal sang đúng những thứ đó.
-- [Chương 04 — Invariant và TLC](04-invariant-va-tlc.md): invariant, model, TLC, đọc counterexample; chương này dùng lại khi kiểm tra các ví dụ.
-- [Chương 05 — Liveness và fairness](05-liveness-va-fairness.md): weak/strong fairness; mục 4 và mục 7 chỉ nêu phần PlusCal sinh ra, lý thuyết nằm ở đó.
-- [Phase 4 · Chương 03 — Lock](../04-concurrency/03-lock.md), mục 1: race condition `counter += 1` ở mức máy; mục 8 của chương này mô hình hóa đúng kịch bản đó.
-- [Phase 4 · Chương 05 — Bug concurrency và deadlock](../04-concurrency/05-concurrency-bug-va-deadlock.md): deadlock; mục 5 dùng lại khái niệm.
+Chương này dùng lại khá nhiều thứ từ các chương trước của phase:
+
+- [Chương 02 — Toán nền tảng](02-toan-nen-tang.md): `/\`, `\/`, `\in`, hàm `[x \in S |-> e]`, `EXCEPT`, record, sequence (`Head`, `Tail`, `\o`). Mọi đoạn TLA+ ở đây, nhất là bản dịch ở mục 6–8, dùng đúng những ký hiệu đó và không giải thích lại.
+- [Chương 03 — Trạng thái, hành vi, action](03-trang-thai-hanh-vi-action.md): state, behavior, action, `Init`/`Next`/`Spec`, `[][Next]_vars`. Bản dịch PlusCal chính là những thứ này.
+- [Chương 04 — Invariant và TLC](04-invariant-va-tlc.md): invariant, model, TLC, cách đọc counterexample. Chương này dùng lại khi kiểm tra các ví dụ.
+- [Chương 05 — Liveness và fairness](05-liveness-va-fairness.md): weak/strong fairness. Mục 4 và mục 7 chỉ nêu phần PlusCal sinh ra, lý thuyết nằm ở đó.
+- [Phase 4 · Chương 03 — Lock](../04-concurrency/03-lock.md), mục 1: race condition `counter += 1` ở mức máy. Mục 8 mô hình hóa đúng kịch bản đó.
+- [Phase 4 · Chương 05 — Bug concurrency và deadlock](../04-concurrency/05-concurrency-bug-va-deadlock.md): khái niệm deadlock mà mục 5 dùng lại.
 
 ## 1. PlusCal là gì và một file PlusCal trông thế nào (Q1)
 
-> **Trả lời ngắn.** PlusCal là một *ngôn ngữ thuật toán*: ngôn ngữ để viết thuật toán, không phải chương trình[^pm-algo]. Bạn viết thuật toán bằng cú pháp giống code mệnh lệnh; translator biên dịch nó thành một đặc tả TLA+[^pm-translator]; TLC duyệt mọi thực thi có thể của đặc tả đó[^pm-tlc]. Biểu thức bên trong thuật toán vẫn là TLA+ nguyên bản[^pm-expr].
+> **Trả lời ngắn.** PlusCal là ngôn ngữ để viết *thuật toán*, không phải để viết chương trình[^pm-algo]. Bạn viết bằng cú pháp giống code mệnh lệnh, và translator biên dịch nó thành một đặc tả TLA+[^pm-translator]. TLC rồi duyệt mọi cách thuật toán đó có thể chạy[^pm-tlc]. Biểu thức bên trong thuật toán vẫn là TLA+ nguyên bản[^pm-expr].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): TLA+ thuần như viết thẳng máy trạng thái — mỗi hành động là một công thức về "trạng thái trước / trạng thái sau". PlusCal cho bạn viết cùng máy trạng thái đó dưới dạng pseudo-code có `while`, `if`, nhiều thread; translator làm việc của một compiler, sinh ra bản TLA+ mà bạn vẫn đọc được.
+*Với service `mailer`.* Hãy hình dung `mailer`, một service viết bằng Rust chuyên gửi email: request đẩy job vào một hàng đợi, vài worker thread lấy job ra gửi, và một counter `sent` đếm số mail đã gửi để hiện trên `/metrics`. Ta sẽ bám theo `mailer` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Trước khi viết `thread::spawn`, bạn muốn biết thiết kế này có lỗ hổng không. Hai worker cùng tăng `sent` thì có mất lượt đếm không? Worker có thể kẹt chờ job mãi không? Đó là câu hỏi về *thuật toán*, chưa dính gì tới Rust. PlusCal cho bạn viết thuật toán đó ở đúng mức trừu tượng ấy, còn TLC kiểm tra giúp. Mục 8 sẽ đi hết bài toán `sent`.
 
-*Vì sao cần một "ngôn ngữ thuật toán".* Manual nêu ba điểm khác giữa thuật toán và chương trình. Một: thuật toán thao tác trên đối tượng toán học tùy ý (manual lấy ví dụ đồ thị và không gian vector), còn chương trình chỉ thao tác trên đối tượng đơn giản như Boolean và số nguyên[^pm-differ-objects]. Hai: một thuật toán có thể mô tả cả một *lớp* phép tính, chương trình thì mô tả một cách tính[^pm-differ-class]. Ba: thuật toán gồm một dãy bước, và muốn định nghĩa thuật toán đồng thời phải nói rõ cái gì là *một bước nguyên tử*; manual nói chương trình không có khái niệm "một bước" xác định[^pm-steps]. PlusCal phản ánh ba điểm đó: biểu thức là TLA+, có cấu trúc diễn đạt nondeterminism[^pm-nondet], và dùng *label* để mô tả các bước (mục 2).
+Với TLA+ thuần, bạn phải tự viết máy trạng thái: mỗi hành động là một công thức nối "trạng thái trước" với "trạng thái sau". PlusCal cho viết cùng máy trạng thái đó dưới dạng pseudo-code có `while`, `if` và nhiều thread, còn translator làm việc của một compiler và sinh ra bản TLA+ mà bạn vẫn đọc được (nhận xét của người soạn).
 
-*Một file PlusCal gồm gì.* Thuật toán nằm trong một comment của module TLA+; translator ghi bản dịch vào giữa hai dòng comment đặc biệt `\* BEGIN TRANSLATION` và `\* END TRANSLATION`[^pm-in-comment]. Nếu hai dòng này đã có, translator xóa mọi thứ nằm giữa chúng và thay bằng bản dịch mới[^pm-begin-trans] — nên **không sửa tay trong vùng đó**. Dưới đây là khung của một file (minh họa của người soạn, cú pháp P-syntax):
+### 1.1 Vì sao cần một ngôn ngữ cho thuật toán
+
+Thuật toán khác chương trình ở ba điểm, và PlusCal được thiết kế quanh đúng ba điểm đó. Thứ nhất, thuật toán làm việc trên đối tượng toán học bất kỳ, chẳng hạn đồ thị hay không gian vector, còn chương trình chỉ làm việc trên những thứ đơn giản như Boolean và số nguyên[^pm-differ-objects]. Thứ hai, một thuật toán có thể mô tả cả một *lớp* phép tính, trong khi chương trình mô tả một cách tính[^pm-differ-class]. Thứ ba, thuật toán là một dãy bước, và muốn định nghĩa thuật toán đồng thời thì phải nói rõ thế nào là *một bước nguyên tử*; chương trình thì không có khái niệm "một bước" xác định[^pm-steps].
+
+PlusCal đáp lại cả ba: biểu thức là TLA+, ngôn ngữ có cấu trúc chọn không tất định (nondeterminism)[^pm-nondet], và *label* cho biết một bước dài tới đâu (mục 2).
+
+### 1.2 Một file PlusCal gồm những gì
+
+Thuật toán nằm trong một comment duy nhất của module TLA+[^pm-in-comment]. Translator ghi bản dịch vào giữa hai dòng comment đặc biệt `\* BEGIN TRANSLATION` và `\* END TRANSLATION`. Nếu hai dòng này đã có sẵn, translator xóa sạch mọi thứ nằm giữa rồi thay bằng bản dịch mới[^pm-begin-trans], nên **đừng sửa tay trong vùng đó**. Khung dưới đây là một file đầy đủ (minh họa của người soạn, P-syntax):
 
 ```tla
 ---------------------------- MODULE Skeleton ----------------------------
@@ -61,11 +71,13 @@ end algorithm; *)
 =============================================================================
 ```
 
-Các phần theo thứ tự trong ngữ pháp: tên thuật toán, khai báo biến, khối `define`, các `macro`, các `procedure`, rồi hoặc thân của thuật toán một process, hoặc một dãy `process`[^pm-grammar]. Module cần `EXTENDS TLC` nếu thuật toán dùng `print`[^pm-print-ext] hay `assert`[^pm-assert-ext], và `EXTENDS Sequences` nếu có `procedure`[^pm-proc-seq].
+Các phần xuất hiện theo thứ tự cố định: tên thuật toán, khai báo biến, khối `define`, các `macro`, các `procedure`, rồi hoặc thân của thuật toán một process, hoặc một dãy `process`[^pm-grammar]. Module phải `EXTENDS TLC` nếu thuật toán dùng `print`[^pm-print-ext]. Dùng `assert` cũng vậy[^pm-assert-ext]. Còn nếu có `procedure` thì module phải `EXTENDS Sequences`[^pm-proc-seq].
 
-*Khai báo biến.* `variables x = 0` đặt giá trị khởi đầu; `y \in 1..N` cho phép *bất kỳ* giá trị nào trong tập làm giá trị khởi đầu (TLC kiểm tra tất cả các khả năng)[^pm-init-in]. Biến không khai báo giá trị khởi đầu nhận hằng chưa xác định `defaultInitValue`[^pm-defaultinit].
+Về khai báo biến, `variables x = 0` đặt giá trị khởi đầu của `x`. Còn `y \in 1..N` cho phép *bất kỳ* giá trị nào trong tập làm giá trị khởi đầu, và TLC kiểm tra tất cả các khả năng[^pm-init-in]. Biến không khai báo giá trị khởi đầu sẽ nhận hằng chưa xác định `defaultInitValue`[^pm-defaultinit].
 
-*Hai cú pháp.* PlusCal có hai cú pháp: P-syntax dài dòng và C-syntax gọn hơn[^pm-two-syn]. Cùng một đoạn code trong manual:
+### 1.3 Hai cú pháp
+
+PlusCal có hai cú pháp: P-syntax dài dòng và C-syntax gọn hơn[^pm-two-syn]. Đây là cùng một đoạn code trong manual, viết theo hai kiểu.
 
 P-syntax:
 
@@ -104,36 +116,42 @@ Bảng đối chiếu các cấu trúc chính, theo phụ lục A của hai manu
 | `with` | `with x \in S do A end with;` | `with (x \in S) A` |
 | nhóm lệnh | cả khối `then … end if`, `do … end while` | dấu ngoặc nhọn `{ … }` |
 
-Trong C-syntax, một *compound statement* là dãy lệnh ngăn cách bằng dấu chấm phẩy và đặt trong dấu ngoặc nhọn[^pm-c-compound]; thân process cũng là một dãy lệnh trong ngoặc nhọn[^pm-c-procbody]. Danh sách các lệnh không nhãn (`UnlabeledStmt`) trong ngữ pháp C-syntax gồm gán, `if`, `while`, `either`, `with`, `await`/`when`, `print`, `assert`, `skip`, `return`, `goto`, `call` và gọi macro[^pm-c-grammar]; mục 3.2 của P-syntax manual liệt kê cùng các lệnh đó (đối chiếu mục lục hai manual). Cú pháp từng lệnh thì khác (xem bảng trên: `if (t) A else B` thay cho `if t then A else B end if`). Tiện lợi riêng của C-syntax: có thể bao một dãy lệnh vào `{ }` — nhờ đó bao được cả một bước nguyên tử — và label của lệnh đầu đặt trước hoặc sau dấu ngoặc mở đều được[^pm-c-braces].
+Điểm tiện của C-syntax là bao được một dãy lệnh vào `{ }`, và label của lệnh đầu đặt trước hay sau dấu ngoặc mở đều được[^pm-c-braces]. Chương này viết chủ yếu bằng P-syntax, còn ví dụ thật từ repo `tlaplus/Examples` mà mục 7 trích thì viết bằng C-syntax. Mục 8 đưa cả hai phiên bản của cùng một thuật toán.
 
-Chương này viết chủ yếu bằng P-syntax; ví dụ thật từ repo `tlaplus/Examples` mà chương trích (mục 7) viết bằng C-syntax. Mục 8 đưa cả hai phiên bản của cùng một thuật toán.
+### 1.4 Kiểu dữ liệu
 
-*Kiểu dữ liệu.* PlusCal không có kiểu. "Đúng kiểu" là một *tính chất* của thuật toán: giá trị mỗi biến luôn thuộc đúng tập, và bạn kiểm tra bằng một invariant như `TypeOK`[^pm-typecorrect] (chương 04).
+PlusCal không có kiểu. "Đúng kiểu" là một *tính chất* của thuật toán: giá trị mỗi biến luôn thuộc đúng tập của nó, và bạn kiểm tra bằng một invariant như `TypeOK`[^pm-typecorrect] (chương 04).
 
-<details><summary>Đi sâu: cách chạy translator và TLC, <code>pc</code> trong invariant, hai chữ ký checksum, quy tắc đặt tên</summary>
+<details><summary>Đi sâu: chạy translator và TLC, cú pháp C-syntax chi tiết, <code>pc</code> trong invariant, hai chữ ký checksum, quy tắc đặt tên</summary>
 
-- Manual giả định bạn dùng TLA+ Toolbox, nhưng translator và TLC là chương trình Java thường và có thể chạy từ dòng lệnh[^pm-java]. Khi chạy từ dòng lệnh, translator ghi thêm một file `.cfg` để chạy TLC[^pm-cfg]. (Nhận xét của người soạn: nếu bạn dùng VS Code hay `tla2tools.jar`, các bước vẫn là "dịch rồi kiểm tra"; tên lệnh cụ thể thuộc chương 04, ở đây không lặp.)
-- Tùy chọn cho translator đặt trong file bằng dòng `PlusCal options (...)`, dấu `-` có thể bỏ[^pm-options-stmt]. Danh sách đầy đủ ở Phụ lục C của manual; chương này nhắc `-termination`, `-wf`, `-sf`, `-nof`, `-wfNext`, `-label`, `-noDoneDisjunct` ở những mục liên quan.
-- Trong các file mẫu của repo `tlaplus/Examples`, dòng mở vùng dịch có thêm hai checksum, ví dụ `\* BEGIN TRANSLATION (chksum(pcal) = "1d547bc3" /\ chksum(tla) = "8de86c82")`[^ex-peterson-chksum]. Manual 1.8 không mô tả hai checksum này; chương không suy đoán mục đích.
-- TLA+ có quy tắc chung: một định danh đã có nghĩa thì không được gán nghĩa mới[^pm-reuse]. Hệ quả cụ thể trong PlusCal: nếu bạn khai báo biến `j`, một định nghĩa viết sau `END TRANSLATION` không được dùng `j` làm biến buộc (`\A i, j \in ...`), nếu không parser báo "multiply-defined identifier"[^pm-redefine]. Các tên do translator khai báo hoặc định nghĩa gồm: mọi biến toàn cục và local, `pc`, `stack` (khi có procedure), tham số procedure, `ProcSet` (chỉ với thuật toán nhiều process), `vars`, `Init`, `Next`, `Spec`, và một action cho mỗi label[^pm-trans-ids].
-- Từ khóa của PlusCal bị cấm làm tên: `assert await begin call define do either else elsif end goto if macro or print procedure process return skip then variable variables when while with`[^pm-c-reserved]. Ngoài ra `pc`, `stack`, `self` không được làm tên biến[^pm-c-varname], và `Done`, `Error` không được làm label[^pm-implicit].
-- Translator không phân tích biểu thức mà để parser SANY làm việc đó[^pm-no-parse]; ví dụ với phép gán, nó chỉ coi mọi thứ đến ký hiệu dành riêng kế tiếp là biểu thức của phép gán[^pm-assume-expr]. Hệ quả: lỗi có thể được báo ở chỗ sau nguyên nhân thật[^pm-error-source].
+- Manual giả định bạn dùng TLA+ Toolbox, nhưng translator và TLC thực ra là chương trình Java thường và chạy được từ dòng lệnh[^pm-java]. Khi chạy từ dòng lệnh, translator ghi thêm một file `.cfg` để chạy TLC[^pm-cfg]. Nếu bạn dùng VS Code hay `tla2tools.jar` thì các bước vẫn là "dịch rồi kiểm tra"; tên lệnh cụ thể thuộc chương 04 nên ở đây không lặp (nhận xét của người soạn).
+- Tùy chọn cho translator đặt ngay trong file bằng dòng `PlusCal options (...)`, và dấu `-` đầu tên tùy chọn có thể bỏ[^pm-options-stmt]. Danh sách đầy đủ nằm ở Phụ lục C của manual; chương này nhắc `-termination`, `-wf`, `-sf`, `-nof`, `-wfNext`, `-label`, `-noDoneDisjunct` ở những mục liên quan.
+- Trong C-syntax, một *compound statement* là dãy lệnh ngăn cách bằng dấu chấm phẩy và đặt trong dấu ngoặc nhọn[^pm-c-compound]. Thân process cũng là một dãy lệnh trong ngoặc nhọn[^pm-c-procbody].
+- Ngữ pháp C-syntax liệt kê các lệnh không nhãn (`UnlabeledStmt`) gồm gán, `if`, `while`, `either`, `with`, `await`/`when`, `print`, `assert`, `skip`, `return`, `goto`, `call` và gọi macro[^pm-c-grammar]. Mục 3.2 của P-syntax manual liệt kê cùng các lệnh đó (đối chiếu mục lục hai manual), chỉ cú pháp từng lệnh là khác, như `if (t) A else B` thay cho `if t then A else B end if`.
+- Trong các file mẫu của repo `tlaplus/Examples`, dòng mở vùng dịch có thêm hai checksum, ví dụ `\* BEGIN TRANSLATION (chksum(pcal) = "1d547bc3" /\ chksum(tla) = "8de86c82")`[^ex-peterson-chksum]. Manual 1.8 không mô tả hai checksum này, và chương không đoán mục đích của chúng.
+- TLA+ có quy tắc chung: một định danh đã có nghĩa thì không được gán nghĩa mới[^pm-reuse]. Trong PlusCal, hệ quả là nếu bạn khai báo biến `j` thì một định nghĩa viết sau `END TRANSLATION` không được dùng `j` làm biến buộc (`\A i, j \in ...`), nếu không parser báo "multiply-defined identifier"[^pm-redefine]. Các tên do translator khai báo hoặc định nghĩa gồm: mọi biến toàn cục và local, `pc`, `stack` (khi có procedure), tham số procedure, `ProcSet` (chỉ với thuật toán nhiều process), `vars`, `Init`, `Next`, `Spec`, và một action cho mỗi label[^pm-trans-ids].
+- Từ khóa của PlusCal bị cấm làm tên: `assert await begin call define do either else elsif end goto if macro or print procedure process return skip then variable variables when while with`[^pm-c-reserved]. Ngoài ra `pc`, `stack`, `self` không được làm tên biến[^pm-c-varname]. `Done` và `Error` cũng không được làm label[^pm-implicit].
+- Translator không tự phân tích biểu thức mà để parser SANY làm việc đó[^pm-no-parse]. Với phép gán, nó chỉ coi mọi thứ đến ký hiệu dành riêng kế tiếp là biểu thức của phép gán[^pm-assume-expr]. Vì vậy lỗi có thể được báo ở chỗ sau nguyên nhân thật[^pm-error-source].
 
 </details>
 
-**Quay lại Q1:** PlusCal là pseudo-code có ngữ nghĩa chính xác, nằm trong comment của module TLA+, được translator biên dịch thành TLA+ giữa hai dòng `BEGIN/END TRANSLATION`, rồi TLC kiểm tra bản dịch; hai cú pháp P và C chỉ khác nhau ở bề ngoài.
+**Quay lại Q1:** PlusCal là pseudo-code có ngữ nghĩa chính xác, nằm trong comment của module TLA+, được translator biên dịch thành TLA+ giữa hai dòng `BEGIN/END TRANSLATION`, rồi TLC kiểm tra bản dịch; hai cú pháp P và C chỉ khác nhau ở bề ngoài. Với `mailer`, đó là cách viết thiết kế worker pool thành thứ máy kiểm tra được trước khi có một dòng Rust.
 
 ## 2. Label và bước nguyên tử (Q2)
 
-> **Trả lời ngắn.** Một *bước* của PlusCal là phần thực thi từ một label đến label kế tiếp[^pm-step-label]. Cả bước chạy như một khối không thể chen ngang: process khác chỉ có thể chen vào *giữa hai bước*, tức là ở ranh giới label. Vì vậy label quyết định các interleaving mà model checker khám phá.
+> **Trả lời ngắn.** Một *bước* (step) của PlusCal là phần thực thi từ một label đến label kế tiếp[^pm-step-label]. Cả bước chạy liền một khối, không bao giờ chạy dở[^pm-exec-steps]. Vì vậy process khác chỉ chen vào được giữa hai bước, tức tại ranh giới label, và chỗ bạn đặt label quyết định những cách xen kẽ (interleaving) mà model checker khám phá.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): label là các điểm mà scheduler được phép đổi thread. Mọi dòng code nằm giữa hai label là "một lần chạy không bị ngắt"; muốn mô hình hóa việc `counter += 1` có thể bị ngắt giữa lúc đọc và lúc ghi (P4·03 mục 1), bạn phải đặt một label ở giữa.
+*Với service `mailer`.* Sau mỗi mail gửi xong, worker của `mailer` chạy `sent += 1`. Trong Rust đó là một dòng, nhưng ở mức máy nó là đọc `sent`, cộng 1, rồi ghi lại, và scheduler có thể cho worker khác chạy chen vào giữa (xem P4·03 mục 1). Muốn mô hình hóa khả năng bị chen này, bạn phải cắt dòng đó thành hai bước bằng một label ở giữa, vì mỗi label là một chỗ scheduler được phép đổi thread (nhận xét của người soạn). Mục này nói "bước" chính xác nghĩa là gì, và nên cắt thành bao nhiêu bước.
 
-*Định nghĩa chính xác.* Manual định nghĩa *control path* là một đường đi qua code theo cú pháp (bỏ qua việc câu lệnh có thực sự chạy được hay không), và *step* là control path bắt đầu ở một label, kết thúc ở một label và không đi qua label nào khác[^pm-step-cp]. Một lần thực thi thuật toán là một dãy các lần thực thi step; không bao giờ có chuyện chạy một phần của step (ngoại trừ `print`/`assert`, xem phần Đi sâu)[^pm-exec-steps]. Mỗi process kết thúc ở một label ngầm `Done`[^pm-pc-done].
+### 2.1 Bước là gì
 
-*Nhiều process chạy thế nào.* Thuật toán nhiều process chạy bằng cách lặp lại: chọn một process bất kỳ, chạy một step của nó (nếu step đó chạy được)[^pm-multi-exec]. "Bất kỳ" nghĩa là model checker thử *mọi* thứ tự, đó là nguồn của việc tìm ra race. Một step không chạy được khi process đã kết thúc, hoặc khi step chứa `await` mà biểu thức sai (mục 5)[^pm-impossible].
+Manual dùng hai khái niệm. *Control path* là một đường đi qua code theo cú pháp, bỏ qua việc câu lệnh có thực sự chạy được hay không. *Step* là control path bắt đầu ở một label, kết thúc ở một label và không đi qua label nào khác[^pm-step-cp]. Một lần chạy thuật toán là một dãy các lần chạy step, và không có chuyện chạy một phần của step (riêng `print` và `assert` là ngoại lệ, xem phần Đi sâu)[^pm-exec-steps]. Cuối mỗi process có một label ngầm `Done`[^pm-pc-done].
+
+### 2.2 Nhiều process xen kẽ thế nào
+
+Thuật toán nhiều process chạy bằng cách lặp đi lặp lại hai việc: chọn một process bất kỳ, rồi chạy một step của process đó[^pm-multi-exec]. Chữ "bất kỳ" quan trọng: model checker thử *mọi* thứ tự, và đó là chỗ nó tìm ra race (nhận xét của người soạn). Một step không chạy được khi process đã kết thúc, hoặc khi step chứa `await` mà biểu thức sai (mục 5)[^pm-impossible].
 
 ```mermaid
 stateDiagram-v2
@@ -143,11 +161,15 @@ stateDiagram-v2
   Done --> [*]
 ```
 
-Sơ đồ là điều khiển của một thread trong ví dụ mục 8: mỗi mũi tên là một bước nguyên tử, tên trạng thái là giá trị của `pc` của thread đó (mục 7). Hai thread cho hai chuỗi như vậy, và scheduler (ở đây là TLC) chọn xen kẽ.
+Sơ đồ là luồng điều khiển của một worker trong ví dụ ở mục 8. Mỗi mũi tên là một bước nguyên tử, còn tên trạng thái là giá trị `pc` của worker đó (mục 7). Hai worker cho hai chuỗi như vậy, và TLC đóng vai scheduler chọn cách xen kẽ.
 
-*Một vòng `while` là bao nhiêu bước?* Với `L: while test do body end while;`, mỗi lần thực thi cả thân vòng lặp từ `L` về lại `L` là **một** bước; khi `test` sai, bước thực thi phép thử và chuyển điều khiển ra khỏi vòng[^pm-while-exit]. Learn TLA+ nói cùng ý: vòng lặp không nguyên tử, mỗi vòng lặp là một action riêng[^lt-nonatomic]. Nếu muốn mỗi lần lặp tách thành nhiều bước, phải đặt label *bên trong* thân vòng lặp.
+### 2.3 Một vòng `while` là bao nhiêu bước
 
-*Độ hạt nguyên tử là lựa chọn của người viết.* Manual nói rõ: thuật toán đồng thời cần xác định cái gì là một bước nguyên tử[^pm-step-def], và với thuật toán nhiều process bạn thường muốn tự chỉ định độ hạt này[^pm-grain]. Cùng một phép `counter := counter + 1` có thể mô hình hóa theo ba độ hạt:
+Với `L: while test do body end while;`, mỗi lần chạy trọn thân vòng lặp từ `L` về lại `L` là **một** bước. Khi `test` sai, bước đó chạy phép thử rồi chuyển điều khiển ra khỏi vòng[^pm-while-exit]. Nói cách khác, vòng `while` không nguyên tử: mỗi vòng là một action riêng[^lt-nonatomic]. Vòng lặp lấy job của worker `mailer` cũng vậy. Nếu bạn muốn mỗi lần lặp tách thành nhiều bước, phải đặt label *bên trong* thân vòng.
+
+### 2.4 Độ hạt nguyên tử do bạn chọn
+
+Thuật toán đồng thời phải nói rõ cái gì là một bước nguyên tử[^pm-step-def]. Với thuật toán nhiều process, manual cho rằng bạn thường sẽ muốn tự chỉ định độ hạt này[^pm-grain]. Cùng một phép `counter := counter + 1` mô hình hóa được theo ba độ hạt:
 
 ```tla
 \* (a) một label: tăng nguyên tử, như một lệnh fetch-and-add
@@ -163,29 +185,31 @@ Add:    reg := reg + 1;
 Store:  counter := reg;
 ```
 
-(Minh họa của người soạn. Suy luận của người soạn: với bài toán này (b) và (c) cho cùng tập lỗi quan trọng, vì `Add` chỉ chạm biến local; đó là lý do thường gộp thao tác trên biến local vào label lân cận, xem mục 3.) Càng nhiều label, càng nhiều interleaving: Learn TLA+ lưu ý concurrency là một trong các nguồn chính của bùng nổ không gian trạng thái[^lt-explosion].
+Đây là minh họa của người soạn. Theo suy luận của người soạn, với bài toán này (b) và (c) cho cùng tập lỗi quan trọng, vì `Add` chỉ chạm biến local; đó là lý do người ta thường gộp thao tác trên biến local vào label lân cận (mục 3). Cái giá của việc cắt nhỏ là số interleaving tăng lên: concurrency là một trong những nguồn chính làm không gian trạng thái bùng nổ[^lt-explosion].
 
 <details><summary>Đi sâu: step chứa <code>await</code>, <code>print</code>/<code>assert</code>, <code>goto</code>, và <code>if</code> trong một step</summary>
 
 - `if` và phép thử của nó nằm trong *cùng* một step. Trong ví dụ FastMutex của manual, phép thử `y # 0` ở label `l2` là nguyên tử vì step bắt đầu ở `l2` kết thúc khi điều khiển tới `l3` hoặc `l4`[^pm-fastmutex-l2].
 - `goto lab` kết thúc step hiện tại và chuyển điều khiển tới câu lệnh có label `lab`[^pm-goto]. Vì vậy sau `goto` luôn phải có label (mục 3).
-- `await` có thể nằm *ở bất kỳ chỗ nào* trong step, không nhất thiết ở đầu[^pm-await-pos]. Manual cho ví dụ hai đoạn tương đương: `a: x := y + 1; await x > 0; b: ...` và `a: await y + 1 > 0; x := y + 1; b: ...`: step từ `a` đến `b` chỉ chạy được khi giá trị hiện tại của `y+1` dương[^pm-await-equiv]. Nghĩa là `await` được đánh giá với giá trị *đã cập nhật* trong cùng step; và nếu `await` sai thì *cả step* không chạy, mọi phép gán trước nó cũng không có hiệu lực. Learn TLA+ cảnh báo kiểu: `await` tương tác hơi lạ với việc cập nhật biến và khuyên không đặt biến vừa gán vào `await`[^lt-await-odd]. (Nhận xét của người soạn: đặt `await` ở *đầu* label cho khỏi nhầm.)
-- `print` và `assert` là ngoại lệ của quy tắc "không chạy một phần step": TLC có thể in giá trị, hoặc báo `assert` sai, ngay cả khi step không chạy được vì một `await` đứng sau chúng trong step[^pm-print][^pm-assert]. (Nhận xét của người soạn: vì vậy nên đặt `assert` sau mọi `await` của step, hoặc trong step không có `await`.)
+- `await` có thể nằm *ở bất kỳ chỗ nào* trong step, không nhất thiết ở đầu[^pm-await-pos]. Manual cho ví dụ hai đoạn tương đương: `a: x := y + 1; await x > 0; b: ...` và `a: await y + 1 > 0; x := y + 1; b: ...`. Step từ `a` đến `b` chỉ chạy được khi giá trị hiện tại của `y+1` dương[^pm-await-equiv]. Nghĩa là `await` được đánh giá với giá trị *đã cập nhật* trong cùng step, và nếu `await` sai thì *cả step* không chạy, mọi phép gán đứng trước nó cũng không có hiệu lực. Learn TLA+ cảnh báo kiểu: `await` tương tác hơi lạ với việc cập nhật biến[^lt-await-odd]. Vì vậy nên đặt `await` ở *đầu* label cho khỏi nhầm (nhận xét của người soạn).
+- `print` là ngoại lệ của quy tắc "không chạy một phần step": TLC có thể in giá trị ngay cả khi step không chạy được vì một `await` đứng sau nó trong step[^pm-print]. `assert` cũng vậy: TLC có thể báo `assert` sai trong cùng tình huống[^pm-assert]. Vì thế nên đặt `assert` sau mọi `await` của step, hoặc trong step không có `await` (nhận xét của người soạn).
 - Biểu thức trong `define` luôn dùng giá trị biến *ở đầu step*, kể cả khi nó xuất hiện sau một phép gán trong cùng step[^pm-define-start]. Đây là khác biệt tinh vi giữa dùng `define` và viết biểu thức trực tiếp.
 
 </details>
 
-**Quay lại Q2:** label đánh dấu ranh giới giữa các bước; mỗi bước chạy trọn vẹn không bị chen, và model checker thử mọi cách xen kẽ các bước của các process — nên vị trí label chính là độ hạt nguyên tử của mô hình.
+**Quay lại Q2:** label đánh dấu ranh giới giữa các bước; mỗi bước chạy trọn vẹn không bị chen, và model checker thử mọi cách xen kẽ các bước của các process, nên vị trí label chính là độ hạt nguyên tử của mô hình. Với `mailer`, `sent += 1` cắt thành `Load` rồi `Store` là cách nói "worker khác được chen vào giữa".
 
 ## 3. Quy tắc đặt label (Q3)
 
-> **Trả lời ngắn.** Label *bắt buộc* ở đầu mỗi process/procedure/thuật toán một process, ở mỗi `while`, sau `goto`/`return`, sau `call` (trừ khi câu kế là `return` hoặc `goto`), và sau mỗi `if`/`either` có chứa label hay `goto`/`call`/`return` bên trong[^pm-lab-first][^pm-lab-while][^pm-lab-after]. Label *bị cấm* trong thân `macro` và trong phần `do` của `with`[^pm-lab-macro]. Và giữa hai phép gán cùng một biến phải có label[^pm-lab-assign]. Với thuật toán một process mà bạn không gõ label nào, translator tự thêm số label tối thiểu để thỏa các quy tắc[^pm-fewest]; với thuật toán nhiều process thì tùy chọn `-label` không phải mặc định[^pm-label-default] và manual nhắc bạn thường sẽ muốn tự chỉ định độ hạt nguyên tử[^pm-grain].
+> **Trả lời ngắn.** Label *bắt buộc* ở đầu process, procedure hay thuật toán một process[^pm-lab-first]. Mỗi `while` cũng phải có label[^pm-lab-while]. Câu đứng sau `goto` hoặc `return` phải có label, câu đứng sau `call` cũng vậy trừ khi nó là `return` hoặc `goto`[^pm-lab-after]. Sau một `if` hay `either` có chứa label, `goto`, `call` hoặc `return` bên trong cũng phải có label[^pm-lab-if]. Giữa hai phép gán cùng một biến phải có label[^pm-lab-assign]. Ngược lại, label *bị cấm* trong thân `macro` và trong phần `do` của `with`[^pm-lab-macro]. Ngoài các quy tắc cơ học đó, chỗ đặt thêm label là một quyết định mô hình hóa về độ hạt nguyên tử.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): label là cái "thẻ chấm công" của dòng code. Translator cần thẻ ở những chỗ nó phải biết "đã xong bước này, bước kế là đâu", và cấm thẻ ở chỗ bước không thể cắt đôi (trong `macro`, trong `with`).
+*Với service `mailer`.* Worker của `mailer` là một vòng lặp: lấy job, gửi mail, cộng `sent`. Vòng lặp đó đòi một label ở đầu theo quy tắc `while`, nhưng quy tắc không nói gì về việc có cắt `sent += 1` thành hai bước hay không. Đó là câu hỏi về hệ thật: đoạn nào của worker thực sự không bị chen? Mục này đi qua các quy tắc cơ học trước, rồi tới cách chọn chỗ đặt thêm.
 
-Bảng quy tắc (từ mục 3.7 và 2.7 của manual), kèm ví dụ sai và cách sửa — các đoạn dưới là minh họa của người soạn:
+### 3.1 Quy tắc cơ học
+
+Bảng dưới lấy từ mục 3.7 và 2.7 của manual, kèm ví dụ vi phạm và cách sửa (các đoạn code là minh họa của người soạn):
 
 | Quy tắc | Ví dụ vi phạm | Cách sửa |
 |---|---|---|
@@ -194,12 +218,16 @@ Bảng quy tắc (từ mục 3.7 và 2.7 của manual), kèm ví dụ sai và c�
 | Hai phép gán cùng một biến phải cách nhau một label[^pm-lab-assign] | `a: x := x + 1; x := x * 2;` | `a: x := x + 1; b: x := x * 2;` hoặc gộp `x := (x + 1) * 2;` |
 | Câu đứng sau `goto` hoặc `return` phải có label; câu đứng sau `call` cũng vậy, trừ khi nó là `return` hoặc `goto`[^pm-lab-after] | `goto Top; x := 0;` | `goto Top; Next: x := 0;` |
 | `if`/`either` có label/`goto`/`call`/`return` bên trong thì câu sau nó phải có label[^pm-lab-if] | `if c then L: ... end if; y := 1;` | `if c then L: ... end if; M: y := 1;` |
-| Thân `macro` và phần `do` của `with` không được có label[^pm-lab-macro][^pm-with-nolabel] | `with m \in S do L: ... end with;` | bỏ label trong `with`, đưa phần cần label ra ngoài `with` |
+| Thân `macro` và phần `do` của `with` không được có label[^pm-lab-macro] | `with m \in S do L: ... end with;` | bỏ label trong `with`, đưa phần cần label ra ngoài `with` |
 | `Done` và `Error` là label ngầm, không dùng làm label thật[^pm-implicit] | `Done: skip;` | đổi tên |
 
-Quy tắc "hai phép gán cùng biến" áp dụng cho *biến*, không phải thành phần của biến: nhiều phép gán vào các thành phần của cùng một biến có thể đi chung trong một phép gán nhiều vế nối bằng `||`[^pm-multiassign-ok]. Phép gán nhiều vế tính vế phải của mọi phép gán trong nó trước, rồi mới thực hiện các phép gán từ trái sang phải[^pm-multiassign], nên `u := v || v := u` hoán đổi hai giá trị (manual dùng đúng cách này để hoán đổi trong thuật toán Euclid)[^pm-swap]. Ngoài ra `call` và `return` cũng được tính là phép gán vào tham số và biến local của procedure, nên cũng nằm trong quy tắc trên (mục 6)[^pm-callret-assign].
+### 3.2 Hai phép gán cùng biến, và phép gán nhiều vế
 
-Ví dụ dương trong repo tlaplus, một `either` có label bên trong, nên phải có label `d` ngay sau nó:
+Quy tắc "hai phép gán cùng biến" áp dụng cho *biến*, không phải cho thành phần của biến: nhiều phép gán vào các thành phần của cùng một biến có thể đi chung trong một phép gán nhiều vế nối bằng `||`[^pm-multiassign-ok]. Phép gán nhiều vế tính vế phải của mọi phép gán trong nó trước, rồi mới thực hiện các phép gán từ trái sang phải[^pm-multiassign]. Nhờ đó `u := v || v := u` hoán đổi hai giá trị, và manual dùng đúng cách này để hoán đổi trong thuật toán Euclid[^pm-swap]. Ngoài ra `call` và `return` cũng được tính là phép gán vào tham số và biến local của procedure, nên cũng nằm trong quy tắc trên (mục 6)[^pm-callret-assign].
+
+### 3.3 Một ví dụ dương
+
+Ví dụ sau lấy từ repo tlaplus. Đây là một `either` có label bên trong, nên phải có label `d` ngay sau nó:
 
 ```tla
 --algorithm Either
@@ -211,34 +239,50 @@ Ví dụ dương trong repo tlaplus, một `either` có label bên trong, nên p
 end algorithm
 ```
 
-(Nguồn: file test của translator, `test-model/pcal/Either1.tla` trong `tlaplus/tlaplus` ghim SHA `94d0c50…`[^tt-either-src].)
+Nguồn là file test của translator, `test-model/pcal/Either1.tla` trong `tlaplus/tlaplus` ghim SHA `94d0c50…`[^tt-either-src].
 
-*Khi thiếu label.* Translator báo "Missing label at the following location". Manual nhắc nguyên nhân hay bị quên: `call` và `return` cũng là phép gán nên đòi hỏi label[^pm-missing-label]. Muốn translator tự thêm label, dùng tùy chọn `-label`; tùy chọn này là mặc định cho thuật toán một process mà bạn không gõ label nào[^pm-label-default]. `-reportLabels` giống `-label` nhưng cho biết nó đã thêm label ở đâu[^pm-reportlabels] (Phụ lục C xếp nó vào nhóm tùy chọn chỉ dùng ở dòng lệnh).
+### 3.4 Khi thiếu label
 
-*Chọn chỗ đặt label.* Quy tắc cơ học ở trên chỉ nói "phải có chỗ nào"; còn "đặt thêm label ở đâu" là quyết định mô hình hóa. Hai thái cực: chỉ giữ số label tối thiểu mà quy tắc đòi hỏi cho ra ít step nhất và model checking nhanh nhất[^pm-fast], nhưng có thể che mất lỗi vì process khác không có cơ hội chen vào; đặt label trước *mỗi* phép đọc/ghi biến chung cho ra nhiều interleaving nhất, bắt được mọi race ở mức đó nhưng không gian trạng thái lớn. (Nhận xét của người soạn: cách làm ổn là đặt ranh giới label đúng ở ranh giới nguyên tử của hệ thật — một lệnh atomic, một lần acquire lock, một RPC, một lần commit transaction là một label; thao tác chỉ chạm biến local thì gộp vào label lân cận.)
+Nếu thiếu, translator báo "Missing label at the following location". Nguyên nhân hay bị quên là `call` và `return` cũng là phép gán nên đòi hỏi label[^pm-missing-label]. Muốn translator tự thêm label thì dùng tùy chọn `-label`, và đó là mặc định cho thuật toán một process mà bạn không gõ label nào[^pm-label-default]. Với thuật toán như vậy translator thêm số label ít nhất có thể, cho ra ít step nhất[^pm-fewest].
+
+### 3.5 Chọn chỗ đặt label
+
+Quy tắc cơ học chỉ nói "phải có label ở những chỗ nào". Còn đặt thêm label ở đâu là quyết định mô hình hóa, với hai thái cực. Một đầu là giữ số label tối thiểu mà quy tắc đòi hỏi: ít step nhất nên model checking nhanh nhất[^pm-fast], nhưng có thể che mất lỗi vì process khác không có cơ hội chen vào. Đầu kia là đặt label trước *mỗi* lần đọc/ghi biến chung: ra nhiều interleaving nhất nên bắt được mọi race ở mức đó, nhưng không gian trạng thái lớn. Cách làm ổn là đặt ranh giới label đúng ở ranh giới nguyên tử của hệ thật: một lệnh atomic, một lần acquire lock, một RPC, một lần commit transaction là một label, còn thao tác chỉ chạm biến local thì gộp vào label lân cận (nhận xét của người soạn).
+
+Với `mailer`, cách làm đó cho kết quả cụ thể. Nếu worker lấy job bằng `Mutex<VecDeque<Job>>`, thì "lock rồi pop" là một label. Nếu `sent` là một số nguyên thường được đọc rồi ghi, thì đó là hai label, vì không có gì ngăn worker khác chen vào giữa (nhận xét của người soạn).
 
 <details><summary>Đi sâu: tên label, tùy chọn label, fairness trên label</summary>
 
-- Label trở thành *tên action* trong bản dịch (mục 7). Vì vậy hai process không dùng chung tên label (Learn TLA+ nêu điều này)[^lt-labels-share]. Tên label có thể trùng tên biến (hoặc hai biến local ở hai procedure trùng tên); khi đó translator đổi tên một trong hai, phát cảnh báo và ghi các phép đổi tên trong comment ngay sau dòng `BEGIN TRANSLATION`[^pm-rename].
-- `-labelRoot name` đổi tiền tố của các label do translator thêm (mặc định `Lbl`, ra `Lbl1`, `Lbl2`, …)[^pm-labelroot].
+- Label trở thành *tên action* trong bản dịch (mục 7). Vì vậy hai process không dùng chung tên label, như Learn TLA+ nêu[^lt-labels-share].
+- Tên label có thể trùng tên biến, hoặc hai biến local ở hai procedure trùng tên. Khi đó translator đổi tên một trong hai, phát cảnh báo và ghi các phép đổi tên trong comment ngay sau dòng `BEGIN TRANSLATION`[^pm-rename].
+- `-reportLabels` giống `-label` nhưng cho biết translator đã thêm label ở đâu[^pm-reportlabels]. Phụ lục C xếp nó vào nhóm tùy chọn chỉ dùng ở dòng lệnh.
+- `-labelRoot name` đổi tiền tố của các label do translator thêm. Mặc định tiền tố là `Lbl`, ra `Lbl1`, `Lbl2`, …[^pm-labelroot].
+- Với thuật toán nhiều process thì `-label` không phải mặc định[^pm-label-default]. Manual nhắc bạn thường sẽ muốn tự chỉ định độ hạt nguyên tử[^pm-grain], tức là tự đặt label.
 - Hậu tố `+`/`-` sau label (như `l4:+`, `ncs:-`) chỉnh fairness của action tương ứng (mục 4).
-- Với thuật toán một process không có label nào, mọi label đều do translator thêm và số step ít nhất có thể[^pm-fewest]. Với nhiều process, manual nói bạn thường sẽ muốn chỉ định độ hạt nguyên tử một cách tường minh[^pm-grain] — tức là tự đặt label.
 
 </details>
 
-**Quay lại Q3:** bắt buộc: đầu process, mỗi `while`, sau `goto`/`call`/`return`, sau `if`/`either` có label bên trong, và giữa hai phép gán cùng biến; cấm: trong `macro` và trong `do` của `with`; còn chỗ đặt thêm là quyết định về độ hạt nguyên tử, nên đặt đúng ranh giới nguyên tử của hệ thật.
+**Quay lại Q3:** bắt buộc: đầu process, mỗi `while`, sau `goto`/`call`/`return`, sau `if`/`either` có label bên trong, và giữa hai phép gán cùng biến; cấm: trong `macro` và trong `do` của `with`. Chỗ đặt thêm là quyết định về độ hạt nguyên tử, nên đặt đúng ranh giới nguyên tử của hệ thật, như `Mutex` hay `fetch_add` trong `mailer`.
 
 ## 4. `process`: process đơn, tập process, `self`, `fair` (Q4)
 
-> **Trả lời ngắn.** `process P = e` khai báo một process có định danh `e`; `process P \in S` khai báo một *tập* process, mỗi phần tử của `S` là một process chạy cùng đoạn code, trong đó `self` là định danh của process đang chạy[^pm-proc-set][^pm-proc-self]. Biến `variable` khai báo ngay dưới `process` là biến local: mỗi process một bản[^pm-proc-local]. Mặc định process không có giả định fairness nào — có thể "dừng mãi" ở bất kỳ bước nào; `fair process` thêm giả định weak fairness cho mọi action của nó[^pm-fair-proc][^pm-unfair].
+> **Trả lời ngắn.** `process P = e` khai báo đúng một process có định danh `e`, còn `process P \in S` khai báo một *tập* process: mỗi phần tử của `S` là một process chạy cùng đoạn code[^pm-proc-set]. Trong thân của tập process, `self` là định danh của process đang chạy[^pm-proc-self]. Biến khai báo bằng `variable` ngay dưới `process` là biến local, mỗi process một bản[^pm-proc-local]. Mặc định process không có giả định fairness nào[^pm-unfair]. `fair process` thì thêm giả định weak fairness cho mọi action của nó[^pm-fair-proc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `process worker \in 1..N` là thread pool N worker cùng chạy một hàm; `self` là worker id; biến local là biến trên stack của mỗi thread, còn biến toàn cục là bộ nhớ dùng chung.
+*Với service `mailer`.* Worker pool của `mailer` ứng với một tập process: `process worker \in Workers` là N worker chạy cùng một đoạn code, `self` là worker id, biến local như `job` hay `tmp` là biến trên stack của từng thread, còn hàng đợi và `sent` là biến toàn cục dùng chung (nhận xét của người soạn). Câu hỏi của mục này: khai báo thế nào cho đúng, và phải giả định gì về việc worker có chạy tiếp hay không.
 
-*Cú pháp và quy tắc.* Hai dạng khai báo là `process ProcName \in IdSet` (tập process) và `process ProcName = Id` (một process)[^pm-proc-set]. Các định danh của những process khác nhau phải khác nhau[^pm-proc-ids], và nên cùng "kiểu" (đều là số, hoặc đều là chuỗi…), vì ngữ nghĩa TLA+ không nói một chuỗi có bằng một số hay không[^pm-proc-ids-type]; Learn TLA+ diễn đạt: mọi process phải có kiểu so sánh được với nhau[^lt-types]. Tên `ProcName` không có ý nghĩa gì: đổi tên không đổi nghĩa của câu `process`; tên này xuất hiện trong bản dịch TLA+ và nên khác nhau giữa các câu `process`[^pm-proc-name] (ví dụ `Simple.tla` ở mục 7 cho thấy nó thành tên action `proc(self)`). Thân process bắt đầu bằng `begin`, kết thúc bằng `end process` (P-syntax) và câu đầu phải có label[^pm-lab-first]. Trong thân của một tập process, `self` bằng định danh của process hiện hành[^pm-proc-self] — và trong thân procedure được gọi từ process đó, `self` cũng là định danh của process đang thực thi procedure[^pm-proc-self-proc].
+### 4.1 Cú pháp và quy tắc
 
-*Ví dụ: producer/consumer.* Minh họa của người soạn, P-syntax:
+Có hai dạng khai báo: `process ProcName \in IdSet` cho tập process và `process ProcName = Id` cho một process[^pm-proc-set]. Định danh của các process khác nhau trong cùng thuật toán phải khác nhau[^pm-proc-ids]. Chúng cũng nên cùng "kiểu" (đều là số, hoặc đều là chuỗi…), vì ngữ nghĩa TLA+ không nói một chuỗi có bằng một số hay không[^pm-proc-ids-type]. Learn TLA+ diễn đạt cùng ý này: mọi process phải có kiểu so sánh được với nhau[^lt-types].
+
+Tên `ProcName` không mang ý nghĩa nào: đổi tên không đổi nghĩa của câu `process`. Tên này xuất hiện trong bản dịch TLA+ nên cần khác nhau giữa các câu `process`[^pm-proc-name]. Ví dụ `Simple.tla` ở mục 7 cho thấy nó thành tên action `proc(self)`.
+
+Thân process bắt đầu bằng `begin`, kết thúc bằng `end process` (P-syntax), và câu đầu phải có label[^pm-lab-first]. Trong thân của một tập process, `self` bằng định danh của process hiện hành[^pm-proc-self]. Với procedure được gọi từ process đó, `self` trong thân procedure cũng là định danh của process đang chạy procedure[^pm-proc-self-proc].
+
+### 4.2 Ví dụ: producer và consumer
+
+Ví dụ dưới là minh họa của người soạn, viết bằng P-syntax. Ta có thể đọc `producer` là các handler đẩy job vào hàng đợi và `consumer` là worker lấy job ra, gần với khung của `mailer` (nhận xét của người soạn).
 
 ```tla
 ---------------------------- MODULE ProdCons ----------------------------
@@ -270,11 +314,17 @@ end process;
 end algorithm; *)
 ```
 
-`producer` là tập process với định danh `1..NumProducers`, còn `consumer` là một process có định danh `0` — cùng kiểu số, và khác mọi định danh của producer. Mỗi label (`Produce`, `Consume`) là một bước nguyên tử gồm cả phần `await` và phần cập nhật `queue`, tức là việc kiểm tra hàng đợi và thao tác trên nó là một thể (một giả định mô hình hóa: ví dụ hàng đợi bảo vệ bằng mutex, hoặc kênh có sẵn thao tác nguyên tử). `goto Produce` ở cuối là cách lặp mãi, tương đương bọc thân trong `while TRUE`[^lt-goto-loop].
+`producer` là tập process với định danh `1..NumProducers`, còn `consumer` là một process có định danh `0`: cùng là số và khác mọi định danh của producer. Mỗi label (`Produce`, `Consume`) là một bước nguyên tử gồm cả phần `await` lẫn phần cập nhật `queue`, tức là kiểm tra hàng đợi và thao tác trên nó là một thể. Đây là một giả định mô hình hóa, đúng nếu hàng đợi được bảo vệ bằng mutex hoặc kênh có sẵn thao tác nguyên tử. `goto Produce` ở cuối là cách lặp mãi, tương đương bọc thân trong `while TRUE`[^lt-goto-loop].
 
-*Biến local.* Trong bản dịch, biến local của process trở thành *hàm* có miền là tập định danh process (`item` thành `item[self]`)[^pm-localvar]. Learn TLA+ lưu ý hệ quả: biến local không tham chiếu được từ process khác hoặc từ khối `define`[^lt-define-local], vì `define` chỉ được dùng biến toàn cục, `pc` và `stack`[^pm-define-vars]. Cũng vì thế, các invariant dùng biến local phải viết *sau* `END TRANSLATION` (mục 7).
+### 4.3 Biến local
 
-*Fairness.* Mỗi label ứng với một action (mục 7), và "action *enabled* khi nó có thể chạy"[^pm-enabled]. Action như `a: y := 42;` chỉ enabled khi điều khiển đang ở `a` gọi là *non-blocking*; action có `await` như `b: await x > self;` gọi là *blocking*[^pm-nonblock]. Với action non-blocking, fairness nghĩa là process không được dừng mãi tại action đó[^pm-fair-nonblock]. Với action blocking có hai mức: *weak fairness* (process không được dừng nếu action enabled *liên tục mãi mãi*) và *strong fairness* (cũng không được dừng nếu action cứ bị tắt rồi bật lại vô hạn lần)[^pm-wf-sf].
+Khi dịch, biến local của process trở thành *hàm* có miền là tập định danh process, nên `item` thành `item[self]`[^pm-localvar]. Hệ quả mà Learn TLA+ lưu ý là biến local không tham chiếu được từ process khác hay từ khối `define`[^lt-define-local]. Lý do là `define` chỉ được dùng biến toàn cục, `pc` và `stack`[^pm-define-vars]. Cũng vì vậy, invariant nào dùng biến local phải viết *sau* `END TRANSLATION` (mục 7).
+
+### 4.4 Fairness
+
+Mỗi label ứng với một action (mục 7), và một action *enabled* khi nó có thể chạy[^pm-enabled]. Action như `a: y := 42;` chỉ enabled khi điều khiển đang ở `a`, gọi là *non-blocking*. Action có `await` như `b: await x > self;` gọi là *blocking*[^pm-nonblock]. Với action non-blocking, fairness nghĩa là process không được dừng mãi tại action đó[^pm-fair-nonblock]. Với action blocking có hai mức. *Weak fairness* nghĩa là process không được dừng nếu action enabled *liên tục mãi mãi*; *strong fairness* nghĩa là process cũng không được dừng nếu action cứ bị tắt rồi bật lại vô hạn lần[^pm-wf-sf].
+
+Bảng sau tóm tắt cách khai báo quyết định fairness:
 
 | Khai báo | Fairness mặc định của các action |
 |---|---|
@@ -284,36 +334,46 @@ end algorithm; *)
 | nhãn `lab:+` trong process `fair` | action đó strong fair[^pm-fair-label] |
 | nhãn `lab:-` | action đó không có giả định fairness[^pm-fair-label] |
 
-Tùy chọn của translator: `-wf` biến process "unfair" thành `fair`, `-sf` thành `fair+`, `-nof` làm mọi process unfair[^pm-fair-opts]. Fairness của *toàn thuật toán* ("không dừng khi còn action enabled") bật bằng `--fair algorithm` hoặc `-wfNext`[^pm-fair-algorithm]. Vì sao phải quan tâm: tác giả một spec Dining Philosophers trong repo `tlaplus/Examples` ghi chú rằng nếu bỏ `fair` khỏi `fair process`, mỗi process có thể dừng bất cứ lúc nào và không bao giờ chạy lại[^ex-dp-fair-comment]. Suy luận của người soạn: khi đó các tính chất liveness kiểu "triết gia nào cũng cuối cùng lại được ăn" (spec đó viết là `NobodyStarves == \A p \in 1..NP: []<>(~hungry[p])`[^ex-dp-nobody-starves]) có thể sai trên một hành vi "đứng im". Chương 05 giải thích lý thuyết.
+Translator có tùy chọn để đổi mặc định: `-wf` biến process "unfair" thành `fair`, còn `-sf` biến thành `fair+` và `-nof` làm mọi process unfair[^pm-fair-opts]. Fairness của *cả thuật toán*, nghĩa là thuật toán không được dừng khi còn action enabled, bật bằng `--fair algorithm` hoặc `-wfNext`[^pm-fair-algorithm].
+
+Vì sao phải quan tâm? Với `mailer`: nếu worker được phép dừng mãi sau lần gửi đầu tiên thì tính chất "mọi job cuối cùng đều được gửi" sai ngay trên hành vi đứng im đó, dù thuật toán chẳng có lỗi gì (suy luận của người soạn). Spec Dining Philosophers trong `tlaplus/Examples` có ghi chú đúng điều này: nếu bỏ `fair` khỏi `fair process` thì mỗi process có thể dừng bất cứ lúc nào và không bao giờ chạy lại[^ex-dp-fair-comment]. Khi đó tính chất liveness kiểu "triết gia nào cũng cuối cùng lại được ăn" có thể sai trên một hành vi "đứng im" (suy luận của người soạn). Spec đó viết tính chất này là `NobodyStarves == \A p \in 1..NP: []<>(~hungry[p])`[^ex-dp-nobody-starves]. Chương 05 giải thích lý thuyết.
 
 <details><summary>Đi sâu: weak/strong fairness qua ví dụ của manual, <code>-termination</code>, quy tắc giữa các dạng</summary>
 
-- Ví dụ blocking của manual: `b: await x > self; x := x-1;`. Action `b` enabled khi điều khiển ở `b` *và* `x > self`. Weak fairness của `b` nghĩa là nếu `x > self` đúng mãi khi process ở `b`, thì `b` cuối cùng chạy; strong fairness của `b` nghĩa là process không dừng mãi ở `b` chừng nào `x > self` còn đúng mãi *hoặc* cứ liên tục đúng trở lại, dù có lúc sai[^pm-wf-sf].
-- `+`/`-` sau label trong `fair+ process` hoặc process thường: thêm `+` sau label trong `fair+ process` không có tác dụng; thêm `+` hoặc `-` sau label trong process không fair cũng không có tác dụng[^pm-fair-plus-effect][^pm-unfair].
+- Ví dụ blocking của manual: `b: await x > self; x := x-1;`. Action `b` enabled khi điều khiển ở `b` *và* `x > self`. Weak fairness của `b` nghĩa là nếu `x > self` đúng mãi khi process ở `b` thì `b` cuối cùng chạy. Strong fairness của `b` nghĩa là process không dừng mãi ở `b` chừng nào `x > self` còn đúng mãi *hoặc* cứ liên tục đúng trở lại, dù có lúc sai[^pm-wf-sf].
+- Thêm `+` sau label trong `fair+ process` không có tác dụng[^pm-fair-plus-effect]. Thêm `+` hoặc `-` sau label trong process không fair cũng không có tác dụng[^pm-unfair].
 - Ví dụ trong manual: với FastMutex, để kiểm tra tính chất "nếu có process đang cố vào critical section thì cuối cùng có process (không nhất thiết là chính nó) ở trong", người ta đặt `fair` trước process và thêm `-` sau hai label `ncs:` và `cs:` để process được phép ở yên mãi trong noncritical/critical section[^pm-fastmutex-fair].
-- `-termination`: nếu không có tùy chọn fairness nào thì nó tương đương `-wf`[^pm-termination-opt]. (Nhận xét của người soạn: hợp lý vì muốn kiểm tra "luôn kết thúc" thì phải giả định các process không dừng giữa chừng.)
-- Manual cảnh báo: chậm hơn kiểm tra invariant, kiểm tra liveness (kể cả termination) không chạy được trên model lớn bằng kiểm tra invariant[^pm-liveness-slow].
-- Dạng dịch của fairness: với tập process `P`, `Spec` có thêm conjunct `\A self \in S : WF_vars(P(self))`. Ví dụ thật (spec Dining Philosophers có `fair process Philosopher \in 1..NP`): `Spec == /\ Init /\ [][Next]_vars /\ \A self \in 1..NP : WF_vars(Philosopher(self))`[^ex-dp-spec].
+- `-termination`: nếu không có tùy chọn fairness nào thì nó tương đương `-wf`[^pm-termination-opt]. Hợp lý vì muốn kiểm tra "luôn kết thúc" thì phải giả định các process không dừng giữa chừng (nhận xét của người soạn).
+- Kiểm tra liveness (kể cả termination) chậm hơn kiểm tra invariant, và TLC không chạy được liveness trên model lớn như với invariant[^pm-liveness-slow].
+- Dạng dịch của fairness: với tập process `P`, `Spec` có thêm conjunct `\A self \in S : WF_vars(P(self))`. Ví dụ thật, spec Dining Philosophers có `fair process Philosopher \in 1..NP`: `Spec == /\ Init /\ [][Next]_vars /\ \A self \in 1..NP : WF_vars(Philosopher(self))`[^ex-dp-spec].
 
 </details>
 
-**Quay lại Q4:** `process P = e` là một process, `process P \in S` là một tập process dùng `self` làm định danh, biến local là hàm theo `self` sau khi dịch, và `fair process` thêm giả định weak fairness (không có nó, process được phép dừng vĩnh viễn).
+**Quay lại Q4:** `process P = e` là một process, `process P \in S` là một tập process dùng `self` làm định danh, biến local là hàm theo `self` sau khi dịch, và `fair process` thêm giả định weak fairness (không có nó, process được phép dừng vĩnh viễn). Với `mailer`: worker pool là tập process, và chỉ khi worker được giả định không dừng thì mới nói được "job nào rồi cũng được gửi".
 
 ## 5. `await`, `either`, `with`: chờ và chọn không tất định (Q5)
 
-> **Trả lời ngắn.** `await expr` (đồng nghĩa `when expr`) làm bước chỉ chạy được khi `expr` đúng[^pm-await][^pm-when]; nếu sai, bước không chạy và không có gì thay đổi, process thử lại sau[^pm-await-fail]. `either … or …` chọn không tất định *một nhánh chạy được* để thực thi[^pm-either]. `with x \in S do …` chọn không tất định một phần tử của `S` rồi chạy thân; nếu `S` rỗng thì không chạy được[^pm-with]. TLC thử mọi lựa chọn.
+> **Trả lời ngắn.** `await expr` làm bước chỉ chạy được khi `expr` đúng[^pm-await]; `when` là từ đồng nghĩa[^pm-when]. Nếu `expr` sai, bước không chạy, không có gì thay đổi, và process thử lại sau[^pm-await-fail]. `either … or …` chọn không tất định *một nhánh chạy được* để thực thi[^pm-either]. `with x \in S do …` chọn không tất định một phần tử của `S` rồi chạy thân, và nếu `S` rỗng thì không chạy được[^pm-with]. TLC thử mọi lựa chọn.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `await` là "chờ mutex / chờ queue có việc / chờ điều kiện của condvar"; `either` là "môi trường có thể làm một trong các việc này" (mạng có thể mất gói hoặc giao được, node có thể chết hoặc sống); `with` là "chọn bất kỳ phần tử nào" (bất kỳ message trong inbox, bất kỳ replica).
+*Với service `mailer`.* Ba cấu trúc này khớp với ba tình huống của `mailer`. Worker rảnh phải chờ tới khi hàng đợi có job: đó là `await`. Nhà cung cấp SMTP có thể nhận mail hoặc làm rơi nó, mà bạn không điều khiển được bên nào xảy ra: đó là `either`. Còn hàng đợi không đảm bảo thứ tự thì worker có thể lấy bất kỳ job nào: đó là `with` (nhận xét của người soạn). Mục này nói từng cấu trúc, rồi cho thấy chúng dẫn tới deadlock ra sao.
 
-*`await`/`when`.* Một bước chứa `await expr` chỉ thực hiện được khi `expr` bằng TRUE[^pm-await]. Hãy nghĩ "bộ xử lý thử chạy cả bước": thử thành công thì bước chạy thật và điều khiển sang bước kế; thử thất bại (biểu thức sai) thì không có gì đổi và sẽ thử lại sau[^pm-await-fail]. Đó là cách PlusCal biểu diễn việc *chờ*: không có "spin" hay "ngủ", chỉ có một bước chưa được phép.
+### 5.1 `await` và `when`
 
-*`either`.* Cú pháp `either A or B or … end either;`[^pm-either]. Bước chạy được khi ít nhất một nhánh chạy được[^pm-either-enabled]. Hệ quả: `if t then A else B end if` tương đương `either await t; A or await ~t; B end either` — manual nêu đúng sự tương đương đó[^pm-if-either]. Điểm khác là `either` cho phép các điều kiện *không loại trừ nhau* (hoặc không có điều kiện), tức nondeterminism thật.
+Một bước chứa `await expr` chỉ thực hiện được khi `expr` bằng TRUE[^pm-await]. Cách nghĩ dễ nhất là "bộ xử lý thử chạy cả bước": thử thành công thì bước chạy thật và điều khiển sang bước kế, thử thất bại vì biểu thức sai thì không có gì đổi và sẽ thử lại sau[^pm-await-fail]. Đó là cách PlusCal biểu diễn việc *chờ*: không có "spin" hay "ngủ", chỉ có một bước chưa được phép chạy.
 
-*`with`.* `with id \in S do body end with;` chạy `body` với `id` bằng một phần tử được chọn không tất định của `S`; nếu `S` rỗng thì không chạy được[^pm-with]. `with id = expr` chỉ gán tên cho giá trị của `expr`, tương đương `with id \in {expr}`[^pm-with-eq]. Thân `with` không chứa label[^pm-with-nolabel]; hệ quả là trong thân không có `while`, không có hai phép gán cùng biến (trừ phép gán nhiều vế vào các thành phần khác nhau)[^pm-with-consequence].
+### 5.2 `either`
 
-*Ví dụ: kênh có thể mất gói.* Minh họa của người soạn (P-syntax):
+Cú pháp là `either A or B or … end either;`[^pm-either]. Bước chạy được khi ít nhất một nhánh chạy được[^pm-either-enabled]. Hệ quả là `if t then A else B end if` tương đương `either await t; A or await ~t; B end either`, và manual nêu đúng sự tương đương đó[^pm-if-either]. Chỗ khác nhau là `either` cho phép các điều kiện *không loại trừ nhau*, hoặc không có điều kiện, tức nondeterminism thật.
+
+### 5.3 `with`
+
+`with id \in S do body end with;` chạy `body` với `id` bằng một phần tử được chọn không tất định của `S`; nếu `S` rỗng thì không chạy được[^pm-with]. Dạng `with id = expr` chỉ đặt tên cho giá trị của `expr`, tương đương `with id \in {expr}`[^pm-with-eq]. Thân `with` không chứa label[^pm-with-nolabel]. Hệ quả là trong thân không có `while`, và không có hai phép gán cùng biến (trừ phép gán nhiều vế vào các thành phần khác nhau)[^pm-with-consequence].
+
+### 5.4 Ví dụ: kênh có thể làm rơi gói
+
+Ví dụ dưới là minh họa của người soạn (P-syntax). Ta đọc `sender` là `mailer` đẩy mail đi, `receiver` là phía nhận, và `either` là chuyện gói có thể mất trên đường:
 
 ```tla
 ---------------------------- MODULE Channel ----------------------------
@@ -351,16 +411,18 @@ end process;
 end algorithm; *)
 ```
 
-Đọc ví dụ theo ngữ nghĩa trên: mỗi vòng của `Send` là một bước, trong đó `either` chọn giữa gửi và bỏ (cả hai chạy được, nên TLC thử cả hai); mỗi vòng của `Receive` là một bước, trong đó `with` chọn một gói bất kỳ đang bay; khi `inflight` rỗng, `with` không chạy được nên bước `Receive` bị chặn. Nhận xét của người soạn: model này cố ý đơn giản — nó không mô hình hóa thứ tự (tập chứ không phải hàng đợi) hay nhân bản.
+Đọc theo ngữ nghĩa ở trên. Mỗi vòng của `Send` là một bước, trong đó `either` chọn giữa gửi và bỏ; cả hai đều chạy được nên TLC thử cả hai. Mỗi vòng của `Receive` cũng là một bước, trong đó `with` chọn một gói bất kỳ đang bay. Khi `inflight` rỗng, `with` không chạy được nên bước `Receive` bị chặn. Model này cố ý đơn giản: nó không mô hình hóa thứ tự (đây là tập chứ không phải hàng đợi) hay việc nhân bản gói (nhận xét của người soạn).
 
-*Deadlock.* Manual định nghĩa: thuật toán nhiều process bị deadlock nếu không process nào đi tiếp được mà còn process chưa kết thúc; thường xảy ra khi mọi process đang chờ ở `await` sai hoặc ở `with x \in S` mà `S` rỗng[^pm-deadlock]. Ví dụ `Channel` ở trên có đúng tình huống đó: khi `sender` đã `Done` và `inflight` rỗng, `receiver` kẹt ở `Receive` mãi. Theo manual, deadlock thường là lỗi và TLC báo; nếu thuật toán *được phép* dừng khi chưa mọi process kết thúc, tắt kiểm tra deadlock trong model[^pm-deadlock-normal]. (Suy luận của người soạn từ định nghĩa trên: với `Channel`, TLC sẽ báo deadlock trừ khi tắt kiểm tra đó, vì `receiver` là vòng lặp vô hạn nên không bao giờ tới `Done`.) Learn TLA+ có ví dụ tương tự: sau khi mọi writer chạy xong, reader kẹt mãi ở `await`[^lt-deadlock].
+### 5.5 Deadlock
 
-Còn trường hợp tất cả process đều tới `Done`: TLC không coi là deadlock vì translator thêm một action "đứng im" (mục 7).
+Manual định nghĩa: thuật toán nhiều process bị deadlock nếu không process nào đi tiếp được mà vẫn còn process chưa kết thúc[^pm-deadlock]. Ví dụ `Channel` ở trên có đúng tình huống đó. Khi `sender` đã `Done` và `inflight` rỗng, `receiver` kẹt ở `Receive` mãi. Manual nói deadlock thường là lỗi và TLC báo; còn nếu thuật toán *được phép* dừng khi chưa mọi process kết thúc thì bạn tắt kiểm tra deadlock trong model[^pm-deadlock-normal]. Với `Channel`, `receiver` là vòng lặp vô hạn nên không bao giờ tới `Done`, vì vậy TLC sẽ báo deadlock trừ khi tắt kiểm tra đó (suy luận của người soạn từ định nghĩa trên). Learn TLA+ có ví dụ tương tự: sau khi mọi writer chạy xong, reader kẹt mãi ở `await`[^lt-deadlock].
+
+Còn khi tất cả process đều tới `Done` thì TLC không coi là deadlock, vì translator thêm một action "đứng im" (mục 7).
 
 <details><summary>Đi sâu: nhiều biến trong <code>with</code>, <code>either</code> chứa label, khởi tạo không tất định</summary>
 
-- `with` có thể liệt kê nhiều biến: `with id1 \in S1; id2 = e2 do …`; mỗi biến có thể gán bằng `=` hoặc `\in`, và dạng nhiều biến tương đương lồng nhiều `with`[^pm-with-multi].
-- `either` có thể chứa label bên trong nhánh; khi đó câu sau `either` phải có label (mục 3). Bản dịch thật của ví dụ `Either1` ở mục 3 (trong repo tlaplus): action `a` thành một hội gồm `pc = "a"` và một *tuyển* hai nhánh, mỗi nhánh gán `pc'` một giá trị khác nhau và giữ nguyên biến kia:
+- `with` có thể liệt kê nhiều biến: `with id1 \in S1; id2 = e2 do …`. Mỗi biến có thể gán bằng `=` hoặc `\in`, và dạng nhiều biến tương đương lồng nhiều `with`[^pm-with-multi].
+- `either` có thể chứa label bên trong nhánh, và khi đó câu sau `either` phải có label (mục 3). Bản dịch thật của ví dụ `Either1` ở mục 3 (trong repo tlaplus) có action `a` thành một hội gồm `pc = "a"` và một *tuyển* hai nhánh, mỗi nhánh gán `pc'` một giá trị khác nhau và giữ nguyên biến kia:
 
 ```tla
 a == /\ pc = "a"
@@ -374,22 +436,24 @@ a == /\ pc = "a"
 
 Đây là cách `either` được dịch: một tuyển các nhánh[^tt-either-trans].
 
-- Khởi tạo không tất định: `variables v \in 1..N` cho ra nhiều trạng thái đầu. Manual dùng ví dụ `EuclidAlg` với `v \in 1..N`: đặt `N = 4` thì có 4 thực thi[^pm-bfs-n4], và TLC không chạy riêng từng thực thi mà tìm mọi trạng thái đạt tới bằng tìm kiếm theo chiều rộng[^pm-bfs-search].
-- `print` in giá trị của một biểu thức; trong chế độ model-checking, vì TLC duyệt theo chiều rộng nên output của `print` lẫn lộn, và manual khuyên chỉ để một `print` ở cuối thuật toán[^pm-bfs]. Muốn kiểm tra một điều kiện thì dùng `assert` thay vì tự đọc output[^pm-assert-check].
+- Khởi tạo không tất định: `variables v \in 1..N` cho ra nhiều trạng thái đầu. Manual dùng ví dụ `EuclidAlg` với `v \in 1..N`: đặt `N = 4` thì có 4 thực thi[^pm-bfs-n4]. TLC không chạy riêng từng thực thi mà tìm mọi trạng thái đạt tới bằng tìm kiếm theo chiều rộng[^pm-bfs-search].
+- `print` in giá trị của một biểu thức. Trong chế độ model-checking, vì TLC duyệt theo chiều rộng nên output của `print` lẫn lộn, và manual khuyên chỉ để một `print` ở cuối thuật toán[^pm-bfs]. Muốn kiểm tra một điều kiện thì dùng `assert` thay vì tự đọc output[^pm-assert-check].
 
 </details>
 
-**Quay lại Q5:** `await` chặn cả bước tới khi điều kiện đúng, `either` và `with` là hai cách chọn không tất định mà TLC thử hết, và khi mọi process đều bị chặn mà chưa kết thúc thì đó là deadlock mà TLC báo.
+**Quay lại Q5:** `await` chặn cả bước tới khi điều kiện đúng, `either` và `with` là hai cách chọn không tất định mà TLC thử hết, và khi mọi process đều bị chặn mà chưa kết thúc thì đó là deadlock mà TLC báo. Với `mailer`, đó là worker chờ job, SMTP nhận hoặc làm rơi mail, và worker lấy một job bất kỳ.
 
 ## 6. `macro` và `procedure`: tái sử dụng code (Q6)
 
-> **Trả lời ngắn.** `macro` giống procedure nhưng được *thay thế văn bản* tại thời điểm dịch: nó chạy bên trong bước của chỗ gọi, nên không được chứa label, `while`, `call`, `return`, `goto`[^pm-macro][^pm-macro-body]. `procedure` là hàm thật: có label (nhiều bước), tham số, biến local, được gọi bằng `call` và trả về bằng `return`; translator thêm biến `stack` để mô hình hóa call stack[^pm-stack-add][^pm-stack-model]. Procedure không trả giá trị — kết quả đi qua biến chung[^pm-proc-noreturn].
+> **Trả lời ngắn.** `macro` giống procedure nhưng được *thay thế văn bản* ngay lúc dịch, nên nó chạy bên trong bước của chỗ gọi[^pm-macro]. Vì vậy thân macro không được chứa label, `while`, `call`, `return` hay `goto`[^pm-macro-body]. `procedure` là hàm thật: có label (nhiều bước), tham số, biến local, gọi bằng `call` và trả về bằng `return`. Translator thêm biến `stack` để giữ call stack[^pm-stack-add]. Bản dịch mô hình hóa một cách cài đặt call stack chuẩn[^pm-stack-model]. Procedure không trả giá trị trực tiếp, kết quả đi qua biến chung[^pm-proc-noreturn].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `macro` giống `#define` hoặc hàm `#[inline(always)]` mà nội dung được dán thẳng vào chỗ gọi, nên nó nằm trọn trong một bước; `procedure` giống hàm bình thường: chỗ gọi và thân hàm có thể bị chen giữa bởi thread khác, và nơi trả về được ghi trên stack.
+*Với service `mailer`.* Trong `mailer` có hai kiểu thao tác lặp lại. Thao tác ngắn như "lấy khóa của hàng đợi" luôn là một bước liền, và bạn muốn viết một lần rồi dùng ở nhiều chỗ: đó là việc của `macro`. Còn thao tác như "gửi một mail" gồm nhiều bước (mở kết nối, ghi nội dung, chờ ack) mà worker khác có thể chen vào giữa: đó là việc của `procedure` (nhận xét của người soạn). Mục này nói hai thứ khác nhau chỗ nào, và `procedure` được dịch ra sao.
 
-*Macro.* Ví dụ của manual (P-syntax):
+### 6.1 Macro
+
+Ví dụ của manual (P-syntax):
 
 ```tla
 macro P(s, i) begin await s >= i;
@@ -397,16 +461,22 @@ macro P(s, i) begin await s >= i;
 end macro;
 ```
 
-Lời gọi `P(sem, y + 17);` được thay bằng thân macro với tham số thay bằng đối số, tức là `await sem >= (y + 17); sem := sem - (y + 17);`[^pm-macro-expand]. Macro được định nghĩa ngay sau khai báo biến toàn cục và khối `define`, và có thể gọi một macro đã định nghĩa trước đó[^pm-macro-pos]. Macro dùng `self` được: Learn TLA+ cho ví dụ macro `write()` gọi `Append(queue, self)` bên trong[^lt-macro-self] — hợp lý vì phép thay thế là *văn bản* tại chỗ gọi, nên ý nghĩa của mọi ký hiệu không phải tham số là ý nghĩa ở ngữ cảnh chỗ gọi[^pm-macro-syntactic]. Ví dụ thật: spec `Lock` trong `tlaplus/Examples` định nghĩa
+Lời gọi `P(sem, y + 17);` được thay bằng thân macro với tham số thay bằng đối số, tức là `await sem >= (y + 17); sem := sem - (y + 17);`[^pm-macro-expand]. Macro được định nghĩa ngay sau khai báo biến toàn cục và khối `define`, và có thể gọi một macro đã định nghĩa trước đó[^pm-macro-pos]. Macro dùng được `self`: Learn TLA+ có ví dụ macro `write()` gọi `Append(queue, self)` bên trong[^lt-macro-self]. Điều này hợp lý vì phép thay thế là *văn bản* tại chỗ gọi, nên ý nghĩa của mọi ký hiệu không phải tham số là ý nghĩa ở ngữ cảnh chỗ gọi[^pm-macro-syntactic].
+
+Ví dụ thật: spec `Lock` trong `tlaplus/Examples` định nghĩa hai macro[^ex-lock-macro], và đó cũng là cặp macro mà `mailer` cần để bao quanh hàng đợi (nhận xét của người soạn):
 
 ```tla
 macro Lock(l){ await l = 1; l := 0; }
 macro Unlock(l){ l := 1; }
 ```
 
-và label `l1: Lock(lock);` được dịch thành một action có đúng điều kiện `lock = 1` và hiệu ứng `lock' = 0`: `l1(self) == /\ pc[self] = "l1" /\ lock = 1 /\ lock' = 0 /\ pc' = [pc EXCEPT ![self] = "cs"]`[^ex-lock-macro][^ex-lock-l1]. Đó chính là minh họa "macro chạy bên trong bước của chỗ gọi"[^pm-macro].
+Label `l1: Lock(lock);` được dịch thành một action có đúng điều kiện `lock = 1` và hiệu ứng `lock' = 0`: `l1(self) == /\ pc[self] = "l1" /\ lock = 1 /\ lock' = 0 /\ pc' = [pc EXCEPT ![self] = "cs"]`[^ex-lock-l1]. Đó chính là minh họa "macro chạy bên trong bước của chỗ gọi"[^pm-macro].
 
-*Procedure.* Cú pháp: `procedure Name(p1, p2) variables v = 0; begin L: ...; return; end procedure;`. Procedure nằm sau khối `define`/macro và trước `begin` của thuật toán hoặc process đầu tiên[^pm-proc-pos]; Learn TLA+ nhắc: procedure phải định nghĩa sau macro và trước process[^lt-proc-order]. Thân phải bắt đầu bằng câu có label[^pm-lab-first]. Các tham số được xử lý như biến và gán được; biến local của procedure khởi tạo lại mỗi lần vào procedure[^pm-proc-params]. Ví dụ đệ quy giai thừa lấy từ file test của translator (đã bỏ các comment):
+### 6.2 Procedure
+
+Cú pháp: `procedure Name(p1, p2) variables v = 0; begin L: ...; return; end procedure;`. Procedure nằm sau khối `define`/macro và trước `begin` của thuật toán hoặc process đầu tiên[^pm-proc-pos]. Learn TLA+ nhắc lại thứ tự này: procedure phải định nghĩa sau macro và trước process[^lt-proc-order]. Thân procedure phải bắt đầu bằng câu có label[^pm-lab-first]. Tham số được xử lý như biến và gán được, còn biến local của procedure khởi tạo lại mỗi lần vào procedure[^pm-proc-params].
+
+Ví dụ đệ quy giai thừa dưới đây lấy từ file test của translator (đã bỏ các comment):
 
 ```tla
 --algorithm Factorial
@@ -426,9 +496,11 @@ và label `l1: Lock(lock);` được dịch thành một action có đúng đi�
   end algorithm
 ```
 
-Nguồn: `test-model/pcal/Factorial.tla` ghim SHA `94d0c50…`[^tt-fact-src1][^tt-fact-src2]. Lưu ý nhánh `else` của `p1` kết thúc bằng `call FactProc(arg1 - 1); return;`. Manual nói khi một `call` đứng ngay trước `return` thì hai lần trả về được thực hiện trong cùng một bước, tức là tối ưu hóa gọi đuôi (thay đệ quy đuôi bằng vòng lặp)[^pm-tailcall]; đúng như vậy, trong bản dịch bên dưới nhánh `ELSE` của `p1` không đẩy bản ghi nào lên `stack` mà đặt `pc' = "p1"` và `stack' = stack`[^tt-fact-else].
+Nguồn là `test-model/pcal/Factorial.tla` ghim SHA `94d0c50…`[^tt-fact-src1]. Phần `else` của `p1` cũng lấy từ file đó[^tt-fact-src2]. Nhánh `else` kết thúc bằng `call FactProc(arg1 - 1); return;`. Khi một `call` đứng ngay trước `return`, manual nói hai lần trả về được thực hiện trong cùng một bước, tức là tối ưu hóa gọi đuôi, thay đệ quy đuôi bằng vòng lặp[^pm-tailcall]. Đúng như vậy: trong bản dịch ở dưới, nhánh `ELSE` của `p1` không đẩy bản ghi nào lên `stack` mà đặt `pc' = "p1"` và `stack' = stack`[^tt-fact-else].
 
-*Dịch procedure.* Biến `stack` chứa call stack; với thuật toán nhiều process, `stack` là mảng các stack theo định danh process[^pm-stack-model]. Với `FactProc`, bản dịch trong file test (đã bỏ phần tiêu đề comment) có hai chỗ then chốt (đọc ký hiệu: `\o` nối hai sequence, `Head`/`Tail` là phần tử đầu / phần còn lại, `[ procedure |-> ... ]` là record; xem [chương 02](02-toan-nen-tang.md), mục 4):
+### 6.3 Procedure được dịch thế nào
+
+Biến `stack` chứa call stack. Với thuật toán nhiều process, `stack` là mảng các stack theo định danh process[^pm-stack-model]. Với `FactProc`, bản dịch trong file test (đã bỏ phần tiêu đề comment) có hai chỗ then chốt. Cách đọc ký hiệu: `\o` nối hai sequence, `Head`/`Tail` là phần tử đầu / phần còn lại, `[ procedure |-> ... ]` là record; xem [chương 02](02-toan-nen-tang.md), mục 4.
 
 ```tla
 \* a1: call FactProc(5) → đẩy một bản ghi lên stack, đặt tham số, nhảy vào p1
@@ -458,7 +530,9 @@ p1 == /\ pc = "p1"
                  /\ stack' = stack
 ```
 
-Các dòng trên rút gọn từ bản dịch của `Factorial.tla`[^tt-fact-call][^tt-fact-ret]. Ý nghĩa khớp với manual: một `call` gán đối số cho tham số, khởi tạo biến local và đặt điều khiển ở đầu thân procedure; `return` gán lại cho tham số và biến local *giá trị trước lần gọi* rồi trả điều khiển về câu ngay sau `call`[^pm-proc-return].
+Hai action trên rút gọn từ bản dịch của `Factorial.tla`[^tt-fact-call]. Phần `return` cũng lấy từ đó[^tt-fact-ret]. Ý nghĩa khớp với manual: một `call` gán đối số cho tham số, khởi tạo biến local và đặt điều khiển ở đầu thân procedure; `return` gán lại cho tham số và biến local *giá trị trước lần gọi*, rồi trả điều khiển về câu ngay sau `call`[^pm-proc-return].
+
+### 6.4 So sánh
 
 | | `macro` | `procedure` |
 |---|---|---|
@@ -471,24 +545,24 @@ Các dòng trên rút gọn từ bản dịch của `Factorial.tla`[^tt-fact-cal
 
 <details><summary>Đi sâu: đọc <code>stack</code>, label ngầm <code>Error</code>, giá trị trả về qua biến chung, bẫy của macro</summary>
 
-- Manual dùng thuật toán `Procedures` (hình 4) để giải thích cách đọc `stack`: `stack` là một *chuỗi các bản ghi*, mỗi bản ghi tương ứng một lần gọi procedure đang thực thi; bản ghi của lần gọi trong cùng ở đầu chuỗi[^pm-stack-rec][^pm-stack-innermost]. Mỗi bản ghi có trường `procedure` (tên procedure), `pc` (nhãn sẽ quay lại) và các tham số/biến local lúc *gọi*, là những giá trị sẽ được khôi phục khi `return` từ procedure đó[^pm-stack-restore].
-- Label ngầm `Error` nằm ngay sau thân procedure: nếu điều khiển rơi tới đó (procedure chạy hết mà chưa `return`), process hay cả thuật toán dừng lại[^pm-proc-error]. Manual nói cách dễ gây deadlock nhất của thuật toán một process chính là "rơi khỏi cuối" procedure không `return`[^pm-deadlock-error].
+- Manual dùng thuật toán `Procedures` (hình 4) để giải thích cách đọc `stack`. `stack` là một *chuỗi các bản ghi*, mỗi bản ghi ứng với một lần gọi procedure đang thực thi[^pm-stack-rec]. Bản ghi của lần gọi trong cùng nằm ở đầu chuỗi[^pm-stack-innermost]. Mỗi bản ghi có trường `procedure` (tên procedure), `pc` (nhãn sẽ quay lại) và các tham số/biến local lúc *gọi*, là những giá trị sẽ được khôi phục khi `return` từ procedure đó[^pm-stack-restore].
+- Label ngầm `Error` nằm ngay sau thân procedure. Nếu điều khiển rơi tới đó, tức procedure chạy hết mà chưa `return`, process hay cả thuật toán dừng lại[^pm-proc-error]. Manual nói cách dễ gây deadlock nhất của thuật toán một process chính là "rơi khỏi cuối" procedure mà không `return`[^pm-deadlock-error].
 - Trả giá trị: để một procedure `P` trả giá trị, cho nó gán một biến toàn cục (ví dụ `rVal[self] := ...;`) trước khi `return`, và chỗ gọi đọc biến đó ở câu có label ngay sau `call`[^pm-proc-rval]. Một `call` phải được theo sau bởi một label, trừ khi nó đứng ngay trước một `return`[^pm-call-label].
-- Cũng vì `call` và `return` là phép gán vào tham số và biến local, trong cùng một step, một `call` đệ quy không thể đồng thời gán biến local của procedure đó[^pm-callret-assign].
-- Bẫy macro: phép thay thế là *văn bản*; nếu tham số macro dùng làm biến buộc trong một biểu thức như `[id \in 1..N |-> FALSE]`, việc thay `id` bằng một biểu thức như `y + 17` gây lỗi khó hiểu lúc parse[^pm-macro-boundvar]. Tuân theo quy tắc TLA+: đừng dùng lại định danh đã có nghĩa[^pm-reuse].
-- `define` khác `macro`: `define` định nghĩa *toán tử TLA+* dùng được biến toàn cục (không gán được), còn `macro` chứa câu lệnh. Định nghĩa trong `define` không được mở rộng trong bản dịch mà xuất hiện nguyên xi[^pm-define-notexpanded]; ví dụ thật: bản dịch spec Dining Philosophers có đoạn `(* define statement *)` giữa hai khai báo `VARIABLES`[^ex-dp-define].
+- Vì `call` và `return` là phép gán vào tham số và biến local, trong cùng một step, một `call` đệ quy không thể đồng thời gán biến local của procedure đó[^pm-callret-assign].
+- Bẫy macro: phép thay thế là *văn bản*. Nếu tham số macro dùng làm biến buộc trong một biểu thức như `[id \in 1..N |-> FALSE]`, việc thay `id` bằng một biểu thức như `y + 17` gây lỗi khó hiểu lúc parse[^pm-macro-boundvar]. Cách tránh theo quy tắc TLA+: đừng dùng lại định danh đã có nghĩa[^pm-reuse].
+- `define` khác `macro`: `define` định nghĩa *toán tử TLA+* dùng được biến toàn cục (không gán được), còn `macro` chứa câu lệnh. Định nghĩa trong `define` không được mở rộng trong bản dịch mà xuất hiện nguyên xi[^pm-define-notexpanded]. Ví dụ thật: bản dịch spec Dining Philosophers có đoạn `(* define statement *)` giữa hai khai báo `VARIABLES`[^ex-dp-define].
 
 </details>
 
-**Quay lại Q6:** macro là phép thay văn bản chạy trong một bước của chỗ gọi; procedure là hàm nhiều bước có `call`/`return`, và translator mô hình hóa call stack bằng biến `stack` (chuỗi bản ghi chứa nơi quay lại và giá trị biến cần khôi phục).
+**Quay lại Q6:** macro là phép thay văn bản chạy trong một bước của chỗ gọi; procedure là hàm nhiều bước có `call`/`return`, và translator mô hình hóa call stack bằng biến `stack` (chuỗi bản ghi chứa nơi quay lại và giá trị biến cần khôi phục). Với `mailer`, "lấy khóa" là macro còn "gửi một mail" là procedure.
 
 ## 7. Bản dịch sang TLA+ (Q7)
 
-> **Trả lời ngắn.** Translator thêm biến `pc` (điều khiển) — và `stack` nếu có procedure[^pm-stack-add] — rồi định nghĩa `vars`, `Init`, một action cho mỗi label, `Next` và `Spec`[^pm-trans-ids]; với thuật toán nhiều process thì `Next` là tuyển các action tổng của từng process, lượng tử hóa `\E self \in ...` (ví dụ `Simple.tla` bên dưới)[^pm-next]. Action của label `L` có dạng "`pc[self] = "L"` và hiệu ứng của các câu lệnh trong bước, và `pc'` trỏ tới label kế, và `UNCHANGED` phần còn lại". Biến local thành hàm theo `self`[^pm-localvar].
+> **Trả lời ngắn.** Translator thêm biến `pc` để theo dõi điều khiển, và thêm `stack` nếu có procedure[^pm-stack-add]. Nó cũng định nghĩa `vars`, `Init`, một action cho mỗi label, `Next` và `Spec`[^pm-trans-ids]. Với thuật toán nhiều process, `Next` là tuyển các action tổng của từng process, lượng tử hóa bằng `\E self \in ...` (ví dụ `Simple.tla` bên dưới)[^pm-next]. Action của label `L` có dạng: "`pc[self] = "L"`, và hiệu ứng của các câu lệnh trong bước, và `pc'` trỏ tới label kế, và `UNCHANGED` phần còn lại". Biến local thành hàm theo `self`[^pm-localvar].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bản dịch là *máy trạng thái viết tường minh*: `pc` là program counter của từng process; mỗi label thành một "lệnh máy" kiểu `if pc == L { làm gì đó; pc = kế }`. TLC chỉ làm việc với máy trạng thái đó; PlusCal chỉ là cách viết thân thiện.
+*Với service `mailer`.* TLC không biết `while`, `await` hay `either` là gì. Thứ nó nhận được là một máy trạng thái viết tường minh: trạng thái của `mailer` gồm hàng đợi, `sent`, `pc` của từng worker và biến local của từng worker. `pc` cho biết mỗi worker đang đứng ở label nào, và mỗi label thành một action nói "nếu worker đang ở đây thì được chuyển sang đó và đổi những biến này" (nhận xét của người soạn). Mục này cho thấy máy trạng thái đó trông thế nào, từng phần một.
 
 ```mermaid
 flowchart LR
@@ -497,7 +571,9 @@ flowchart LR
   D["Invariant, property viết tay<br/>(sau END TRANSLATION)"] --> C
 ```
 
-*Ví dụ thật, C-syntax.* File `Simple.tla` trong `tlaplus/Examples` (ghim SHA `6a7b26a…`) có một thuật toán nhỏ, N process xếp vòng tròn:
+### 7.1 Ví dụ thật bằng C-syntax
+
+File `Simple.tla` trong `tlaplus/Examples` (ghim SHA `6a7b26a…`) có một thuật toán nhỏ, N process xếp vòng tròn[^ex-simple-src]. Phần PlusCal của nó như sau:
 
 ```tla
 --algorithm Simple {
@@ -509,7 +585,7 @@ flowchart LR
 }
 ```
 
-[^ex-simple-src] và bản dịch (đã bỏ comment tiêu đề của file):
+Bản dịch của nó (đã bỏ comment tiêu đề của file) là:
 
 ```tla
 VARIABLES x, y, pc
@@ -547,42 +623,54 @@ Spec == Init /\ [][Next]_vars
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 ```
 
-Các đoạn Init, `a(self)`, và `Next`/`Spec` đối chiếu với file gốc[^ex-simple-init][^ex-simple-a][^ex-simple-next]. Đọc từng mảnh, theo mô tả của manual:
+Đoạn `Init` khớp với file gốc[^ex-simple-init]. Action `a(self)` cũng khớp[^ex-simple-a]. `Next` và `Spec` cũng vậy[^ex-simple-next]. Ta đọc từng mảnh, theo mô tả của manual.
 
-1. **`VARIABLES`, `vars`, `ProcSet`.** `pc` được thêm để mô tả trạng thái điều khiển; `vars` là tuple mọi biến[^pm-trans-pc]; với thuật toán nhiều process, `ProcSet` là tập mọi định danh process[^pm-trans-ids].
-2. **`Init`.** Có một conjunct cho mỗi biến; conjunct của biến toàn cục đứng trước biến local của process/procedure, và các biến khai báo trong cùng một câu `variables` xuất hiện theo thứ tự khai báo[^pm-trans-init]. Biến local của process và `pc` là hàm có miền là tập định danh[^pm-init-fn]; ở đây `pc` ban đầu là `"a"` cho mọi process — label đầu của process. Với thuật toán nhiều process, `pc` là hàm từ định danh sang chuỗi label[^pm-pc-fn]; với thuật toán một process, `pc` là một chuỗi đơn[^pm-pc-uni].
-3. **Một action mỗi label.** Translator định nghĩa một action cho mỗi thao tác nguyên tử của thuật toán, được đặt tên theo label bắt đầu thao tác[^pm-action-per-label]; action là `Lab(self)` khi câu nằm trong process set hoặc procedure, ngược lại là `Lab`[^pm-action-lab]. Mỗi action là hội của: điều kiện bật (*enabling condition*, ở đây `pc[self] = "a"`, và với `await` thì thêm biểu thức của `await`)[^pm-enable][^pm-await-enable]; hiệu ứng lên biến (`x' = [x EXCEPT ![self] = 1]`: gán phần tử `self` của hàm `x`, đó là cách dịch phép gán thành phần)[^pm-except]; `pc'` trỏ tới label kế; và `UNCHANGED` hoặc `y' = y` cho các biến không đổi[^pm-unchanged].
-4. **Action tổng của process.** `proc(self) == a(self) \/ b(self)` là tuyển các action của một process; `proc` là *tên* process set, chỉ dùng để đặt tên như vậy[^pm-proc-next][^pm-proc-name].
-5. **`Terminating` và `Next`.** `Next` là tuyển của các action tổng của mọi process[^pm-next]; translator thêm một nhánh cho phép thuật toán đã kết thúc làm một bước không làm gì, vì TLC không phân biệt được deadlock với kết thúc (kết thúc chỉ là một dạng deadlock mong muốn)[^pm-done-disj]; nhánh này biến "kết thúc" thành vòng lặp vô hạn không làm gì nên không bị báo deadlock[^pm-done-loop]. Tùy chọn `-noDoneDisjunct` bỏ nhánh này đi[^pm-nodone].
-6. **`Spec`.** Khi không chọn tùy chọn liveness hay termination, `Spec` là `Init /\ [][Next]_vars`[^pm-spec-default] — "điều kiện đầu, rồi mỗi bước hoặc là một bước của `Next` hoặc không đổi `vars`" (chương 03). Khi dùng `fair process` hoặc `-wf`, `Spec` có thêm `\A self \in 1..N : WF_vars(Proc(self))`[^pm-spec-fair]. Hình thức này khớp bản dịch thật của spec Dining Philosophers ở mục 4[^ex-dp-spec].
-7. **`Termination`.** Bản dịch còn định nghĩa `Termination == <>(\A self \in ProcSet: pc[self] = "Done")`, tức là "cuối cùng mọi process đều ở `Done`"[^pm-termination]. Muốn TLC kiểm tra nó, dùng `-termination`; Toolbox sẽ thêm `Termination` vào danh sách property[^pm-termination-toolbox].
+### 7.2 Đọc bản dịch từng mảnh
 
-Từ đây bạn viết invariant và property bằng cách dùng `pc`: process `i` đang ở label `L` khi và chỉ khi `pc[i] = "L"`[^pm-pc-label]. Ví dụ mutual exclusion của manual: không có hai process cùng ở câu `cs`, tức invariant `\A i, k \in 1..N : i /= k => ~(pc[i] = "cs" /\ pc[k] = "cs")`[^pm-mutex-def]. Quy tắc vị trí: định nghĩa dùng biến do bản dịch khai báo phải nằm *sau* `END TRANSLATION`[^pm-defs-after]; muốn đặt chúng trong module trước đó thì viết vào khối `define`, nơi `pc` được phép xuất hiện[^pm-define-vars].
+**`VARIABLES`, `vars`, `ProcSet`.** `pc` được thêm để mô tả trạng thái điều khiển, còn `vars` là tuple mọi biến[^pm-trans-pc]. Với thuật toán nhiều process, `ProcSet` là tập mọi định danh process[^pm-trans-ids].
+
+**`Init`.** Có một conjunct cho mỗi biến. Conjunct của biến toàn cục đứng trước biến local của process/procedure, và các biến khai báo trong cùng một câu `variables` xuất hiện theo thứ tự khai báo[^pm-trans-init]. Biến local của process và `pc` là hàm có miền là tập định danh[^pm-init-fn], nên ở đây `pc` ban đầu là `"a"` cho mọi process, đúng label đầu của process. Với thuật toán nhiều process, `pc` là hàm từ định danh sang chuỗi label[^pm-pc-fn]. Với thuật toán một process, `pc` là một chuỗi đơn[^pm-pc-uni].
+
+**Một action mỗi label.** Translator định nghĩa một action cho mỗi thao tác nguyên tử của thuật toán[^pm-action-per-label]. Action đặt tên theo label bắt đầu thao tác, và là `Lab(self)` khi câu nằm trong process set hoặc procedure, ngược lại là `Lab`[^pm-action-lab]. Mỗi action là hội của bốn thứ. Thứ nhất là điều kiện bật (*enabling condition*), ở đây là `pc[self] = "a"`[^pm-enable]. Nếu có `await` thì biểu thức của `await` cũng nằm trong điều kiện bật[^pm-await-enable]. Thứ hai là hiệu ứng lên biến: `x' = [x EXCEPT ![self] = 1]` gán phần tử `self` của hàm `x`, và đó là cách dịch phép gán thành phần[^pm-except]. Thứ ba là `pc'` trỏ tới label kế. Thứ tư là `UNCHANGED` hoặc `y' = y` cho các biến không đổi[^pm-unchanged].
+
+**Action tổng của process.** `proc(self) == a(self) \/ b(self)` là tuyển các action của một process[^pm-proc-next]. `proc` là *tên* process set và chỉ dùng để đặt tên như vậy[^pm-proc-name].
+
+**`Terminating` và `Next`.** `Next` là tuyển của các action tổng của mọi process[^pm-next]. Translator còn thêm một nhánh cho phép thuật toán đã kết thúc làm một bước không làm gì, vì TLC không phân biệt được deadlock với kết thúc (kết thúc chỉ là một dạng deadlock mong muốn)[^pm-done-disj]. Nhánh này biến "kết thúc" thành vòng lặp vô hạn không làm gì, nên TLC không báo deadlock[^pm-done-loop]. Tùy chọn `-noDoneDisjunct` bỏ nhánh này đi[^pm-nodone].
+
+**`Spec`.** Khi không chọn tùy chọn liveness hay termination, `Spec` là `Init /\ [][Next]_vars`[^pm-spec-default], tức là "điều kiện đầu, rồi mỗi bước hoặc là một bước của `Next` hoặc không đổi `vars`" (chương 03). Khi dùng `fair process` hoặc `-wf`, `Spec` có thêm `\A self \in 1..N : WF_vars(Proc(self))`[^pm-spec-fair]. Hình thức này khớp bản dịch thật của spec Dining Philosophers ở mục 4[^ex-dp-spec].
+
+**`Termination`.** Bản dịch còn định nghĩa `Termination == <>(\A self \in ProcSet: pc[self] = "Done")`, tức là "cuối cùng mọi process đều ở `Done`"[^pm-termination]. Muốn TLC kiểm tra nó thì dùng `-termination`, và Toolbox sẽ thêm `Termination` vào danh sách property[^pm-termination-toolbox].
+
+### 7.3 Viết invariant bằng `pc`
+
+Từ đây bạn viết invariant và property bằng cách dùng `pc`: process `i` đang ở label `L` khi và chỉ khi `pc[i] = "L"`[^pm-pc-label]. Ví dụ mutual exclusion của manual nói rằng không có hai process cùng ở critical section[^pm-mutex-def]. Viết bằng `pc` thì đó là invariant `\A i, k \in 1..N : i /= k => ~(pc[i] = "cs" /\ pc[k] = "cs")`.
+
+Về vị trí, định nghĩa dùng biến do bản dịch khai báo phải nằm *sau* `END TRANSLATION`[^pm-defs-after]. Muốn đặt chúng trong module trước đó thì viết vào khối `define`, nơi `pc` được phép xuất hiện[^pm-define-vars].
 
 <details><summary>Đi sâu: <code>define</code> và hai khai báo <code>VARIABLES</code>, <code>defaultInitValue</code>, dạng của fairness, <code>if</code>/<code>while</code> trong bản dịch</summary>
 
-- Nếu thuật toán có `define`, bản dịch có *hai* câu `VARIABLES`: câu đầu khai báo biến toàn cục và `pc`; các định nghĩa của `define` nằm giữa; câu sau khai báo biến local của process[^pm-define-twovars]. Spec Dining Philosophers thật cho thấy đúng bố cục: `VARIABLES forks, pc`, rồi `(* define statement *)` với các định nghĩa, rồi `VARIABLE hungry`[^ex-dp-define].
-- Bản dịch bắt đầu bằng `CONSTANT defaultInitValue` nếu có biến không có giá trị khởi đầu (câu khai báo này bị bỏ nếu mọi biến đều có giá trị khởi đầu)[^pm-defaultinit-decl].
-- Dạng đầy đủ của fairness theo manual B.1 với tập process `Proc`: `fair process` cho conjunct `\A self \in 1..N : WF_vars(Proc(self))`; thêm `-` sau label `ncs:` và `cs:` đổi nó thành `WF_vars((pc[self] \notin {"ncs","cs"}) /\ Proc(self))`[^pm-spec-minus]; `fair+` thay `WF` bằng `SF`[^pm-spec-sf]; nếu có procedure `P` thì thêm `\A self \in 1..N : WF_vars(P(self))` cho action của procedure đó[^pm-spec-proc].
-- `if` được dịch thành `IF … THEN … ELSE` trong action; manual cho ví dụ action `l2` dùng `IF y # 0 THEN pc' = ... "l3" ELSE pc' = ... "l5"`[^pm-if-trans]. `while` có phép thử không đồng nhất đúng: manual cho ví dụ action `l8`, một `IF` trong action của label đầu vòng lặp; nhánh `THEN` chạy thân vòng lặp rồi đặt `pc'` về chính `l8`, nhánh `ELSE` đặt `pc'` sang `l9`, label sau vòng lặp[^pm-while-trans] (thân vòng lặp của `l8` không chứa label khác). `goto` dịch thành việc đặt `pc'`[^pm-goto-trans].
-- Kiểm tra bản dịch: manual nói lệnh Toolbox "Goto PCal Source" nhảy tới vùng PlusCal tương ứng với vùng bản dịch đang chọn[^pm-goto-jump] và gợi ý bạn có thể thử nó trên bất kỳ vùng nào của bản dịch[^pm-goto-pcal]. Manual cũng nói bản dịch sao chép biểu thức của bạn gần như nguyên xi, trừ một số thay đổi (bốn gạch đầu dòng ngay sau câu đó: thêm dấu `'` vào một số biến; biến local của process thành hàm, ví dụ `j[self]`; phép gán vào thành phần viết bằng `EXCEPT`; biến có thể bị đổi tên)[^pm-translation-copies].
-- Ví dụ `Peterson` thật trong `tlaplus/Examples`: `await ~c[Other(self)] \/ turn = self` được dịch thành một conjunct trong điều kiện bật của action `a3`[^ex-peterson-await]. Bản dịch thật cũng có một conjunct `TRUE` cho `skip` ở label `a0` (`while(TRUE)`, `skip`)[^ex-peterson-a0]. Manual cho biết bản dịch FastMutex trình bày ở Phụ lục B đã được "simplified a bit to make it easier to read" mà không đổi nghĩa[^pm-simplified]; nên bản do translator sinh ra có thể dài hơn bản trong manual (nhận xét của người soạn, từ so sánh hai nguồn trên).
+- Nếu thuật toán có `define`, bản dịch có *hai* câu `VARIABLES`: câu đầu khai báo biến toàn cục và `pc`, các định nghĩa của `define` nằm giữa, câu sau khai báo biến local của process[^pm-define-twovars]. Spec Dining Philosophers thật cho thấy đúng bố cục này: `VARIABLES forks, pc`, rồi `(* define statement *)` với các định nghĩa, rồi `VARIABLE hungry`[^ex-dp-define].
+- Bản dịch bắt đầu bằng `CONSTANT defaultInitValue` nếu có biến không có giá trị khởi đầu. Câu khai báo này bị bỏ nếu mọi biến đều có giá trị khởi đầu[^pm-defaultinit-decl].
+- Dạng đầy đủ của fairness theo manual B.1, với tập process `Proc`: `fair process` cho conjunct `\A self \in 1..N : WF_vars(Proc(self))`. Thêm `-` sau label `ncs:` và `cs:` đổi nó thành `WF_vars((pc[self] \notin {"ncs","cs"}) /\ Proc(self))`[^pm-spec-minus]. `fair+` thay `WF` bằng `SF`[^pm-spec-sf]. Nếu có procedure `P` thì thêm `\A self \in 1..N : WF_vars(P(self))` cho action của procedure đó[^pm-spec-proc].
+- `if` được dịch thành `IF … THEN … ELSE` trong action. Manual cho ví dụ action `l2` dùng `IF y # 0 THEN pc' = ... "l3" ELSE pc' = ... "l5"`[^pm-if-trans]. `while` có phép thử không đồng nhất đúng cũng có ví dụ: action `l8`, một `IF` trong action của label đầu vòng lặp[^pm-while-trans]. Nhánh `THEN` chạy thân vòng lặp rồi đặt `pc'` về chính `l8`, nhánh `ELSE` đặt `pc'` sang `l9`, label sau vòng lặp (thân vòng lặp của `l8` không chứa label khác). `goto` dịch thành việc đặt `pc'`[^pm-goto-trans].
+- Để kiểm tra bản dịch, manual nói lệnh Toolbox "Goto PCal Source" nhảy tới vùng PlusCal tương ứng với vùng bản dịch đang chọn[^pm-goto-jump]. Manual gợi ý bạn thử nó trên bất kỳ vùng nào của bản dịch[^pm-goto-pcal]. Manual cũng nói bản dịch sao chép biểu thức của bạn gần như nguyên xi, trừ một số thay đổi[^pm-translation-copies]. Bốn gạch đầu dòng ngay sau câu đó nêu việc thêm dấu `'` vào một số biến, biến local của process thành hàm (ví dụ `j[self]`), phép gán vào thành phần viết bằng `EXCEPT`, và biến có thể bị đổi tên.
+- Ví dụ `Peterson` thật trong `tlaplus/Examples`: `await ~c[Other(self)] \/ turn = self` được dịch thành một conjunct trong điều kiện bật của action `a3`[^ex-peterson-await]. Bản dịch thật cũng có một conjunct `TRUE` cho `skip` ở label `a0` (`while(TRUE)`, `skip`)[^ex-peterson-a0]. Manual cho biết bản dịch FastMutex ở Phụ lục B đã được "simplified a bit to make it easier to read" mà không đổi nghĩa[^pm-simplified]. Vì vậy bản do translator sinh ra có thể dài hơn bản trong manual (nhận xét của người soạn, từ so sánh hai nguồn trên).
 
 </details>
 
-**Quay lại Q7:** bản dịch là một máy trạng thái TLA+ chuẩn: `pc` ghi label mỗi process đang ở, mỗi label thành một action `pc[self] = "L" /\ hiệu ứng /\ pc' = ...`, `Next` là tuyển các action (cộng nhánh đứng im khi kết thúc), `Spec == Init /\ [][Next]_vars` (thêm `WF` khi `fair`), và `stack` là chuỗi bản ghi cho `call`/`return`.
+**Quay lại Q7:** bản dịch là một máy trạng thái TLA+ chuẩn: `pc` ghi label mỗi process đang ở, mỗi label thành một action `pc[self] = "L" /\ hiệu ứng /\ pc' = ...`, `Next` là tuyển các action (cộng nhánh đứng im khi kết thúc), `Spec == Init /\ [][Next]_vars` (thêm `WF` khi `fair`), và `stack` là chuỗi bản ghi cho `call`/`return`. Với `mailer`, đó là thứ TLC thật sự duyệt.
 
 ## 8. Ví dụ: hai thread tăng counter — lost update và cách sửa bằng lock (Q8)
 
-> **Trả lời ngắn.** Nếu mô hình hóa `counter += 1` thành hai bước (đọc vào biến local `tmp`, rồi ghi `tmp + 1`), TLC có thể thử thứ tự "cả hai đọc 0, rồi cả hai ghi 1": cả hai thread xong nhưng `counter = 1` thay vì 2 — lost update. Thêm biến `lock` cùng một label `Acquire` (`await lock = 0; lock := self`) trước đoạn đọc–ghi và một label `Release` (`lock := 0`) sau nó thì hai thread không thể cùng ở giữa đoạn đọc–ghi, và tính chất `Correct` được giữ (lập luận ở bước 2; chưa chạy TLC).
+> **Trả lời ngắn.** Nếu mô hình hóa `counter += 1` thành hai bước (đọc vào biến local `tmp`, rồi ghi `tmp + 1`), TLC có thể thử thứ tự "cả hai đọc 0, rồi cả hai ghi 1": cả hai thread xong nhưng `counter = 1` thay vì 2, tức lost update. Thêm biến `lock` cùng một label `Acquire` (`await lock = 0; lock := self`) trước đoạn đọc–ghi và một label `Release` (`lock := 0`) sau nó thì hai thread không thể cùng ở giữa đoạn đọc–ghi, và tính chất `Correct` được giữ (lập luận ở bước 2; chưa chạy TLC).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai nhân viên cùng sửa một con số trên bảng — đọc ra giấy nháp, tính, chép lại. Ca tệ là cả hai đọc cùng một giá trị rồi chép đè nhau. P4·03 mục 1 mô tả kịch bản này ở mức máy (nạp–cộng–ghi); ở đây ta mô hình hóa nó bằng label.
+*Với service `mailer`.* Đây là bài toán `sent` mà ta để dành từ mục 1: hai worker của `mailer` cùng gửi xong một mail và cùng tăng `sent`. Ca tệ là cả hai đọc cùng một giá trị rồi ghi đè lên nhau, khiến `/metrics` báo thiếu một mail. P4·03 mục 1 mô tả kịch bản này ở mức máy (nạp–cộng–ghi). Ở đây ta mô hình hóa nó bằng label, và để cho ngắn, đặt `NumThreads = 2` thành hai worker, `counter` đóng vai `sent`.
 
-Learn TLA+ trình bày đúng bài này: hai thread cùng tăng một counter; ban đầu cho cập nhật nguyên tử và thấy kết quả đúng, rồi làm cập nhật không nguyên tử và cho thấy có race condition, rồi thêm lock[^lt-threads-intro]. Dưới đây là phiên bản viết riêng cho chương (người soạn tự viết, lấy ý tưởng cấu trúc từ Learn TLA+; chưa chạy TLC).
+Learn TLA+ trình bày đúng bài này: hai thread cùng tăng một counter, ban đầu cho cập nhật nguyên tử và thấy kết quả đúng, rồi làm cập nhật không nguyên tử để thấy race condition, rồi thêm lock[^lt-threads-intro]. Phiên bản dưới đây do người soạn tự viết, lấy ý tưởng cấu trúc từ Learn TLA+, và chưa chạy TLC.
 
-**Bước 1 — spec có lost update.**
+### 8.1 Bước 1: spec có lost update
 
 ```tla
 ---------------------------- MODULE Counter ----------------------------
@@ -616,9 +704,9 @@ TypeOK == /\ counter \in 0..NumThreads
 =============================================================================
 ```
 
-Cả hai thread dùng chung `counter` (biến toàn cục) và có `tmp` riêng (biến local). `Correct` nói: *khi mọi thread đã Done*, `counter` phải bằng `NumThreads`. Với model đặt `NumThreads = 2` và `Correct` là invariant, TLC sẽ duyệt mọi thứ tự xen kẽ các bước `Load`/`Store` của hai thread.
+Cả hai thread dùng chung `counter` (biến toàn cục) và có `tmp` riêng (biến local). `Correct` nói rằng *khi mọi thread đã Done*, `counter` phải bằng `NumThreads`. Với model đặt `NumThreads = 2` và `Correct` là invariant, TLC sẽ duyệt mọi thứ tự xen kẽ các bước `Load`/`Store` của hai thread.
 
-Learn TLA+ kể kết quả của spec tương tự: cả hai thread đọc `counter` khi nó bằng 0, nên đều đặt `tmp` bằng 0, nên đều gán `counter := 0 + 1`[^lt-threads-fail]. Ta tự dẫn ra đúng thứ tự đó từ ngữ nghĩa ở mục 2 (suy luận của người soạn; không phải output TLC): bắt đầu `counter = 0`, `tmp = [1 |-> 0, 2 |-> 0]`, `pc = [1 |-> "Load", 2 |-> "Load"]`:
+Learn TLA+ kể kết quả của spec tương tự: cả hai thread đọc `counter` khi nó bằng 0, nên đều đặt `tmp` bằng 0, nên đều gán `counter := 0 + 1`[^lt-threads-fail]. Ta tự dẫn ra đúng thứ tự đó từ ngữ nghĩa ở mục 2 (suy luận của người soạn, không phải output TLC). Bắt đầu với `counter = 0`, `tmp = [1 |-> 0, 2 |-> 0]`, `pc = [1 |-> "Load", 2 |-> "Load"]`:
 
 | # | Bước | `tmp` | `counter` | `pc` | `Correct` |
 |---|---|---|---|---|---|
@@ -645,7 +733,9 @@ sequenceDiagram
 
 Đây là cùng kịch bản của P4·03 mục 1: hai lần tăng, kết quả chỉ tăng một.
 
-*Bản dịch (viết tay theo manual B.1 và mẫu `Simple.tla` ở mục 7; không phải output của translator).* Vì có `define` nên bản dịch tách hai câu `VARIABLES`:
+### 8.2 Bản dịch của bước 1
+
+Bản dịch dưới đây do người soạn viết tay theo manual B.1 và mẫu `Simple.tla` ở mục 7, không phải output của translator. Vì có `define` nên bản dịch tách hai câu `VARIABLES`:
 
 ```tla
 VARIABLES counter, pc
@@ -690,11 +780,11 @@ Spec == Init /\ [][Next]_vars
 Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 ```
 
-Điều đáng nhìn: `Load(self)` đọc `counter` *ở trạng thái trước* và ghi vào `tmp[self]`; `Store(self)` dùng `tmp[self]` (đã cũ) chứ không đọc lại `counter`. Lost update nằm trong chính sự tách này: giữa `Load(1)` và `Store(1)`, `Next` có quyền chọn `Load(2)` (và sau đó cả `Store(2)`), nên `Store(1)` ghi đè bằng giá trị tính từ `counter` đã cũ.
+Điều đáng nhìn là `Load(self)` đọc `counter` *ở trạng thái trước* rồi ghi vào `tmp[self]`, còn `Store(self)` dùng `tmp[self]` (đã cũ) chứ không đọc lại `counter`. Lost update nằm ngay trong sự tách này. Giữa `Load(1)` và `Store(1)`, `Next` có quyền chọn `Load(2)` (và sau đó cả `Store(2)`), nên `Store(1)` ghi đè bằng giá trị tính từ `counter` đã cũ.
 
-Vì `TypeOK` dùng `tmp` — biến local mà `define` không dùng được[^pm-define-vars] — nó phải viết sau `END TRANSLATION`; Learn TLA+ cũng nêu đúng điểm này khi nói về TypeInvariant của ví dụ threads[^lt-typeinv-placement].
+`TypeOK` dùng `tmp`, mà đó là biến local và `define` không dùng được biến local[^pm-define-vars], nên nó phải viết sau `END TRANSLATION`. Learn TLA+ cũng nêu đúng điểm này khi nói về TypeInvariant của ví dụ threads[^lt-typeinv-placement].
 
-**Bước 2 — sửa bằng lock.**
+### 8.3 Bước 2: sửa bằng lock
 
 ```tla
 (* --algorithm CounterLock
@@ -721,7 +811,7 @@ end process;
 end algorithm; *)
 ```
 
-Điều thay đổi: `Acquire` chỉ chạy được khi `lock = 0` (enabling condition, mục 5/7), và khi chạy nó đặt `lock` bằng `self` trong *cùng một bước nguyên tử* — kiểm tra và chiếm là một thể, như một lệnh compare-and-swap (nhận xét của người soạn). `Load` và `Store` vẫn là hai bước tách, nên thread khác vẫn có thể được lên lịch giữa chúng, nhưng thread khác không thể *qua Acquire* nữa. Bản dịch của `Acquire` có cùng hình dạng với `l1(self)` của `Lock.tla` (mục 6):
+Điều thay đổi là `Acquire` chỉ chạy được khi `lock = 0` (enabling condition, mục 5 và 7), và khi chạy nó đặt `lock` bằng `self` trong *cùng một bước nguyên tử*. Kiểm tra và chiếm là một thể, giống một lệnh compare-and-swap (nhận xét của người soạn). `Load` và `Store` vẫn là hai bước tách, nên thread khác vẫn có thể được lên lịch giữa chúng, nhưng thread khác không thể *qua `Acquire`* nữa. Bản dịch của `Acquire` có cùng hình dạng với `l1(self)` của `Lock.tla` (mục 6):
 
 ```tla
 Acquire(self) == /\ pc[self] = "Acquire"
@@ -731,11 +821,15 @@ Acquire(self) == /\ pc[self] = "Acquire"
                  /\ UNCHANGED << counter, tmp >>
 ```
 
-(Minh họa viết tay.) Lập luận (suy luận của người soạn): người giữ lock là thread có `pc` ở một trong `Load`, `Store`, `Release` — từ lúc `Acquire` chạy xong đến lúc `Release` chạy xong. `Acquire` của thread khác bị chặn cho đến khi `Release` đặt `lock` về 0. Do đó không bao giờ có hai thread cùng ở `{Load, Store, Release}` — đó là `MutualExclusion` — và mỗi thread tăng `counter` đúng một lần trong đoạn đó, không ai chen vào, nên khi cả hai Done thì `counter = NumThreads`. Learn TLA+ báo rằng spec có lock của họ vượt qua kiểm tra sau khi thêm lock[^lt-threads-pass]; spec của chương này chưa được TLC chạy, nên kết luận ở đây là lập luận, chưa phải kết quả đo.
+(Minh họa viết tay.) Lập luận dưới đây là suy luận của người soạn. Người giữ lock là thread có `pc` ở một trong `Load`, `Store`, `Release`, tức từ lúc `Acquire` chạy xong đến lúc `Release` chạy xong. `Acquire` của thread khác bị chặn cho đến khi `Release` đặt `lock` về 0. Do đó không bao giờ có hai thread cùng ở `{Load, Store, Release}`, đó là `MutualExclusion`. Mỗi thread tăng `counter` đúng một lần trong đoạn đó mà không ai chen vào, nên khi cả hai Done thì `counter = NumThreads`.
 
-`MutualExclusion` ở dạng này trực tiếp là "không có hai process cùng ở một nhóm label", cùng cách manual biểu diễn mutual exclusion của FastMutex bằng `pc`[^pm-mutex-def]. Spec `Lock.tla` trong `tlaplus/Examples` (mục 6) cũng gom các label giữ lock vào một định nghĩa — `lockcs(i) == pc[i] \in {"cs", "l2"}`, trong đó `l2` là label nhả lock[^ex-lock-inv] — rồi đòi `\A i, j \in ProcSet: (i # j) => ~(lockcs(i) /\ lockcs(j))`[^ex-lock-inv2]; `InCS` ở trên gồm `Release` vì cùng lý do. Learn TLA+ còn gợi ý thêm `assert lock = self` ở `Release` để chắc rằng thread đang nhả lock thật sự giữ nó[^lt-assert-release] (cần `EXTENDS TLC`, đã có ở trên[^pm-assert-ext]).
+Learn TLA+ báo rằng spec có lock của họ vượt qua kiểm tra sau khi thêm lock[^lt-threads-pass]. Spec của chương này chưa được TLC chạy, nên kết luận ở đây là lập luận, chưa phải kết quả đo.
 
-**Hai điều spec này *không* chứng minh.** Một: `Correct` chỉ nói *nếu* mọi thread kết thúc thì kết quả đúng; Learn TLA+ lưu ý điều này — nếu spec cho một thread lặp vô ích mãi thì invariant được thỏa tầm thường[^lt-alldone-weak]. Muốn nói "cuối cùng chắc chắn đúng" cần `Termination` và fairness (`fair process`, mục 4; chương 05). Hai: lock ở đây chỉ bảo đảm loại trừ lẫn nhau, không bảo đảm công bằng giữa các thread — đó cũng là chuyện của liveness.
+`MutualExclusion` ở dạng này trực tiếp là "không có hai process cùng ở một nhóm label", cùng cách manual biểu diễn mutual exclusion của FastMutex bằng `pc`[^pm-mutex-def]. Spec `Lock.tla` trong `tlaplus/Examples` (mục 6) cũng gom các label giữ lock vào một định nghĩa, `lockcs(i) == pc[i] \in {"cs", "l2"}`, trong đó `l2` là label nhả lock[^ex-lock-inv]. Sau đó nó đòi `\A i, j \in ProcSet: (i # j) => ~(lockcs(i) /\ lockcs(j))`[^ex-lock-inv2]. `InCS` ở trên gồm `Release` vì cùng lý do. Learn TLA+ còn gợi ý thêm `assert lock = self` ở `Release` để chắc rằng thread đang nhả lock thật sự giữ nó[^lt-assert-release]. Việc này cần `EXTENDS TLC`, và module ở trên đã có[^pm-assert-ext].
+
+### 8.4 Hai điều spec này *không* chứng minh
+
+Một: `Correct` chỉ nói *nếu* mọi thread kết thúc thì kết quả đúng. Learn TLA+ lưu ý điều này: nếu spec cho một thread lặp vô ích mãi thì invariant được thỏa tầm thường[^lt-alldone-weak]. Muốn nói "cuối cùng chắc chắn đúng" thì cần `Termination` và fairness (`fair process`, mục 4; chương 05). Hai: lock ở đây chỉ bảo đảm loại trừ lẫn nhau, không bảo đảm công bằng giữa các thread, và đó cũng là chuyện của liveness.
 
 <details><summary>Đi sâu: cùng thuật toán bằng C-syntax; lock sai phạm vi; symmetry; kết quả TLC ở các nguồn</summary>
 
@@ -765,7 +859,7 @@ variable tmp = 0;
 } *)
 ```
 
-Ngữ pháp C-syntax: `define { defs }`[^pm-c-grammar-defs] và `process ( Name \in Expr ) VarDecls CompoundStmt`, dấu chấm phẩy cuối là tùy chọn[^pm-c-grammar-define]. Phần dịch của process giống hệt bản P-syntax vì cú pháp chỉ là bề ngoài (suy luận của người soạn: cùng ngữ nghĩa theo hai manual).
+Ngữ pháp C-syntax cho `define { defs }`[^pm-c-grammar-defs]. Process có dạng `process ( Name \in Expr ) VarDecls CompoundStmt`, trong đó dấu chấm phẩy cuối là tùy chọn[^pm-c-grammar-define]. Phần dịch của process giống hệt bản P-syntax vì cú pháp chỉ là bề ngoài (suy luận của người soạn: cùng ngữ nghĩa theo hai manual).
 
 *Lock sai phạm vi: lost update dù có lock.* Biến thể này giữ lock riêng quanh `Load` và quanh `Store`:
 
@@ -784,21 +878,21 @@ begin
 end process;
 ```
 
-Từng thao tác `Load`/`Store` vẫn được bảo vệ, nhưng khoảng giữa `ReleaseR` và `AcquireW` để lại đúng cửa sổ như bước 1: `Load(1)`, `Load(2)` (mỗi thread lần lượt acquire–load–release), rồi `Store(1)`, `Store(2)` (mỗi thread acquire–store–release) cho `counter = 1` khi cả hai Done (suy luận của người soạn từ ngữ nghĩa bước). Mỗi đoạn có lock riêng lẻ vẫn loại trừ lẫn nhau, nhưng `Correct` sai. Bài học (nhận xét của người soạn): tính "không có hai thread cùng trong một critical section" không đồng nghĩa với tính đúng đắn của *cả thao tác đọc–sửa–ghi*; invariant bạn chọn phải là tính chất bạn thực sự cần (ở đây là `Correct`).
+Từng thao tác `Load`/`Store` vẫn được bảo vệ, nhưng khoảng giữa `ReleaseR` và `AcquireW` để lại đúng cửa sổ như bước 1. Chuỗi `Load(1)`, `Load(2)` (mỗi thread lần lượt acquire–load–release), rồi `Store(1)`, `Store(2)` (mỗi thread acquire–store–release) cho `counter = 1` khi cả hai Done (suy luận của người soạn từ ngữ nghĩa bước). Mỗi đoạn có lock riêng lẻ vẫn loại trừ lẫn nhau, nhưng `Correct` sai. Bài học (nhận xét của người soạn): tính "không có hai thread cùng trong một critical section" không đồng nghĩa với tính đúng đắn của *cả thao tác đọc–sửa–ghi*. Invariant bạn chọn phải là tính chất bạn thực sự cần, ở đây là `Correct`.
 
-*Symmetry.* Manual nói TLC chỉ dùng được symmetry cho một tập *model value*; để tận dụng symmetry của FastMutex cần viết lại thuật toán dùng tập định danh tùy ý thay cho `1..N`[^pm-symmetry]. `Threads == 1..NumThreads` ở trên là tập số, nên không dùng symmetry được như hiện tại (suy luận của người soạn từ câu trên). Manual cũng dặn không bật symmetry cùng lúc với kiểm tra liveness[^pm-symmetry-liveness].
+*Symmetry.* Manual nói TLC chỉ dùng được symmetry cho một tập *model value*. Để tận dụng symmetry của FastMutex, cần viết lại thuật toán dùng tập định danh tùy ý thay cho `1..N`[^pm-symmetry]. `Threads == 1..NumThreads` ở trên là tập số, nên chưa dùng symmetry được như hiện tại (suy luận của người soạn từ câu trên). Manual cũng dặn không bật symmetry cùng lúc với kiểm tra liveness[^pm-symmetry-liveness].
 
 </details>
 
-**Quay lại Q8:** khi tách `counter += 1` thành hai label (`Load`, `Store`), TLC được quyền xen bước của thread kia vào giữa nên có thứ tự cả hai đọc 0 và cùng ghi 1 (lost update); thêm `await lock = 0; lock := self` ở bước `Acquire` và `lock := 0` ở `Release` ngăn hai thread cùng ở đoạn đọc–ghi.
+**Quay lại Q8:** khi tách `counter += 1` thành hai label (`Load`, `Store`), TLC được quyền xen bước của thread kia vào giữa, nên có thứ tự cả hai đọc 0 và cùng ghi 1 (lost update). Thêm `await lock = 0; lock := self` ở bước `Acquire` và `lock := 0` ở `Release` ngăn hai thread cùng ở đoạn đọc–ghi. Với `mailer`, đó là lý do `sent` phải được tăng trong một critical section duy nhất.
 
 ## 9. Liên hệ với Rust và backend
 
-PlusCal không sinh code Rust; nó giúp bạn nghĩ về *thiết kế* trước khi viết code. Mối liên hệ cụ thể:
+PlusCal không sinh code Rust. Nó giúp bạn nghĩ về *thiết kế* của `mailer` trước khi viết code, và mối liên hệ với Rust khá cụ thể.
 
-**Process ↔ thread/task; label ↔ độ hạt nguyên tử.** `process thread \in Threads` ứng với `N` lần `std::thread::spawn` (hoặc `tokio::spawn`) chạy cùng hàm; `self` là chỉ số worker; biến local ứng với biến trên stack; biến toàn cục ứng với dữ liệu dùng chung. Label là câu hỏi quan trọng nhất: trong code thật, đoạn nào *thật sự* không thể bị chen? Một lệnh `AtomicUsize::fetch_add` là một thao tác "cộng vào giá trị hiện tại và trả về giá trị trước"[^rust-fetch-add], nên mô hình hóa bằng *một* label (bước (a) ở mục 2). Còn `load` rồi `store` là *hai* thao tác atomic riêng — hai label — và có thể mất cập nhật *dù cả hai đều atomic*. Nomicon nói chính điều này: Safe Rust bảo đảm không có data race, nhưng Rust không ngăn được race condition nói chung[^rust-race]. PlusCal bắt đúng loại lỗi đó, loại mà borrow checker không bắt.
+**Process ↔ thread/task; label ↔ độ hạt nguyên tử.** `process worker \in Workers` ứng với N lần `std::thread::spawn` (hoặc `tokio::spawn`) chạy cùng hàm, `self` là chỉ số worker, biến local ứng với biến trên stack, còn biến toàn cục ứng với dữ liệu dùng chung. Label là câu hỏi quan trọng nhất: trong code thật, đoạn nào *thật sự* không thể bị chen? `AtomicUsize::fetch_add` là một thao tác "cộng vào giá trị hiện tại và trả về giá trị trước"[^rust-fetch-add], nên mô hình hóa nó bằng *một* label (bước (a) ở mục 2). Còn `load` rồi `store` là *hai* thao tác atomic riêng, tức hai label, và có thể mất cập nhật *dù cả hai đều atomic*. Safe Rust bảo đảm không có data race[^rust-safe-race]. Nhưng Rust không ngăn được race condition nói chung[^rust-race]. PlusCal bắt đúng loại lỗi đó, loại mà borrow checker không bắt.
 
-**`await lock = 0; lock := self` ↔ `Mutex::lock`.** `Mutex::lock` chặn thread hiện tại cho đến khi lấy được mutex[^rust-mutex-lock], tương ứng với việc `await` làm bước không chạy được cho đến khi `lock = 0`. Lock thả khi guard ra khỏi scope[^rust-mutex-drop], tương ứng với label `Release`. Ví dụ lock sai phạm vi ở mục 8 có hình dạng thật trong Rust (minh họa của người soạn, không chạy):
+**`await lock = 0; lock := self` ↔ `Mutex::lock`.** `Mutex::lock` chặn thread hiện tại cho đến khi lấy được mutex[^rust-mutex-lock]. Điều này tương ứng với việc `await` làm bước không chạy được cho đến khi `lock = 0`. Lock được thả khi guard ra khỏi scope[^rust-mutex-drop], tương ứng với label `Release`. Ví dụ lock sai phạm vi ở mục 8 có hình dạng thật trong Rust (minh họa của người soạn, không chạy):
 
 ```rust
 use std::sync::{Arc, Mutex};
@@ -828,24 +922,24 @@ fn main() {
 }
 ```
 
-Mỗi truy cập vào `counter` đều qua mutex, nên không có data race — Safe Rust bảo đảm không có data race[^rust-safe-race]. Nhưng đọc và ghi nằm ở hai critical section riêng — cùng cấu trúc bốn bước như biến thể sai phạm vi ở mục 8; theo suy luận ở bước đó, có interleaving cho kết quả 1. Cách sửa trong Rust: giữ một guard qua cả đọc và ghi (`let mut g = c.lock().unwrap(); *g += 1;`), tức một critical section duy nhất, ứng với phiên bản đúng ở bước 2 mục 8.
+Mỗi truy cập vào `counter` đều qua mutex, nên không có data race, vì Safe Rust bảo đảm điều đó[^rust-safe-race]. Nhưng đọc và ghi nằm ở hai critical section riêng, cùng cấu trúc bốn bước như biến thể sai phạm vi ở mục 8, và theo suy luận ở đó thì có interleaving cho kết quả 1. Cách sửa trong Rust là giữ một guard qua cả đọc và ghi (`let mut g = c.lock().unwrap(); *g += 1;`), tức một critical section duy nhất, ứng với phiên bản đúng ở bước 2 mục 8.
 
-**`.await` ↔ ranh giới label (suy luận của người soạn).** Với async Rust, `poll` cố giải quyết future thành giá trị cuối cùng và không chặn nếu giá trị chưa sẵn sàng; thay vào đó task được lên lịch đánh thức lại khi có thể tiến tiếp[^rust-poll]. Điểm có thể bị đổi sang task khác là chỗ `poll` trả về chưa xong (nơi bạn viết `.await`); đoạn code giữa hai `.await` chạy liền mạch trên một task. Nên khi mô hình hóa một hệ async, đặt label ở các `.await` — mỗi đoạn giữa hai `.await` là một bước nguyên tử *đối với các task khác trên cùng executor đơn luồng*; với executor đa luồng, các đoạn trên thread khác vẫn song song, nên phải đặt label chặt hơn. Đây là mô hình hóa của người soạn, không phải lời của tài liệu.
+**`.await` ↔ ranh giới label (suy luận của người soạn).** Với async Rust, `poll` cố giải quyết future thành giá trị cuối cùng và không chặn nếu giá trị chưa sẵn sàng[^rust-poll]. Thay vào đó task được lên lịch đánh thức lại khi có thể tiến tiếp. Điểm có thể bị đổi sang task khác là chỗ `poll` trả về chưa xong, nơi bạn viết `.await`, còn đoạn code giữa hai `.await` chạy liền mạch trên một task. Vì vậy khi mô hình hóa một hệ async, đặt label ở các `.await`: mỗi đoạn giữa hai `.await` là một bước nguyên tử *đối với các task khác trên cùng executor đơn luồng*. Với executor đa luồng, các đoạn trên thread khác vẫn song song, nên phải đặt label chặt hơn. Đây là mô hình hóa của người soạn, không phải lời của tài liệu.
 
-**Backend.** (Nhận xét của người soạn.) Các cấu trúc PlusCal khớp thẳng với thiết kế backend: `await` ↔ chờ lock/semaphore/queue; `either` ↔ môi trường có thể làm nhiều việc (mạng mất gói, replica chết); `with m \in inbox` ↔ nhận một message bất kỳ trong hàng đợi không có thứ tự; `process \in Workers` ↔ thread pool, consumer group, replica. Chương 08 và 09 áp dụng cấu trúc này cho giao thức phân tán và hệ backend; chương 10 (từ đặc tả đến code Rust) nói tiếp việc nối spec với code.
+**Backend.** Các cấu trúc PlusCal khớp thẳng với thiết kế backend (nhận xét của người soạn): `await` ↔ chờ lock/semaphore/queue; `either` ↔ môi trường có thể làm nhiều việc (mạng mất gói, replica chết); `with m \in inbox` ↔ nhận một message bất kỳ trong hàng đợi không có thứ tự; `process \in Workers` ↔ thread pool, consumer group, replica. Chương 08 và 09 áp dụng cấu trúc này cho giao thức phân tán và hệ backend, còn chương 10 (từ đặc tả đến code Rust) nói tiếp việc nối spec với code.
 
 ## Tóm tắt
 
-- PlusCal là ngôn ngữ thuật toán viết trong comment của module TLA+; translator dịch nó thành TLA+ giữa `BEGIN/END TRANSLATION`, và TLC kiểm tra bản dịch; biểu thức bên trong là TLA+.
+- PlusCal là ngôn ngữ thuật toán viết trong comment của module TLA+. Translator dịch nó thành TLA+ giữa `BEGIN/END TRANSLATION`, TLC kiểm tra bản dịch, và biểu thức bên trong là TLA+.
 - Hai cú pháp (P-syntax dài, C-syntax gọn) cùng ngữ nghĩa, khác ở dấu ngoặc nhọn thay cho `begin … end`.
 - **Bước nguyên tử = đoạn thực thi từ một label đến label kế**; process khác chỉ chen được giữa hai bước. Vị trí label là độ hạt nguyên tử của mô hình.
-- Label bắt buộc ở đầu process/procedure/thuật toán, ở `while`, sau `goto`/`call`/`return`, sau `if`/`either` có label bên trong; cấm trong `macro` và `do` của `with`; giữa hai phép gán cùng biến phải có label.
-- `process P \in S` tạo một tập process với `self`; biến local thành hàm theo `self`; mặc định process không fair, `fair process` thêm weak fairness, `fair+` thêm strong fairness.
-- `await`/`when` chặn bước; `either` và `with` là hai cách chọn không tất định; không process nào chạy được mà chưa kết thúc là deadlock (TLC báo).
-- `macro` là thay văn bản trong bước của chỗ gọi; `procedure` là hàm nhiều bước có `call`/`return`, dịch bằng biến `stack`; procedure không trả giá trị trực tiếp.
-- Bản dịch: `pc` (hàm theo process khi nhiều process), `vars`, `Init`, một action mỗi label (`pc[self] = "L" /\ … /\ pc' = …`), `Next` (cộng nhánh đứng im khi kết thúc), `Spec`, `Termination`.
-- Lost update với hai thread không khóa: tách `counter += 1` thành hai label (`Load`, `Store`) rồi kiểm tra `AllDone => counter = NumThreads`; sửa bằng `lock` với `await lock = 0` ở một label riêng; invariant viết sau `END TRANSLATION` hoặc trong `define`.
-- Invariant chỉ chứng minh tính đúng *nếu* kết thúc; muốn "cuối cùng chắc chắn đúng" cần liveness và fairness (chương 05).
+- Label bắt buộc ở đầu process/procedure/thuật toán, ở `while`, sau `goto`/`call`/`return`, sau `if`/`either` có label bên trong, và giữa hai phép gán cùng biến. Label bị cấm trong `macro` và `do` của `with`.
+- `process P \in S` tạo một tập process với `self`; biến local thành hàm theo `self`. Mặc định process không fair, `fair process` thêm weak fairness, `fair+` thêm strong fairness.
+- `await`/`when` chặn bước; `either` và `with` là hai cách chọn không tất định. Không process nào chạy được mà chưa kết thúc là deadlock (TLC báo).
+- `macro` là thay văn bản trong bước của chỗ gọi; `procedure` là hàm nhiều bước có `call`/`return`, dịch bằng biến `stack`, và không trả giá trị trực tiếp.
+- Bản dịch gồm `pc` (hàm theo process khi nhiều process), `vars`, `Init`, một action mỗi label (`pc[self] = "L" /\ … /\ pc' = …`), `Next` (cộng nhánh đứng im khi kết thúc), `Spec`, `Termination`.
+- Lost update với hai thread không khóa: tách `counter += 1` thành hai label (`Load`, `Store`) rồi kiểm tra `AllDone => counter = NumThreads`. Sửa bằng `lock` với `await lock = 0` ở một label riêng; invariant viết sau `END TRANSLATION` hoặc trong `define`.
+- Invariant chỉ chứng minh tính đúng *nếu* kết thúc. Muốn "cuối cùng chắc chắn đúng" thì cần liveness và fairness (chương 05).
 
 ## Câu hỏi tự kiểm tra
 
@@ -864,18 +958,18 @@ Mỗi truy cập vào `counter` đều qua mutex, nên không có data race — 
 
 <details><summary>Đáp án</summary>
 
-1. Thuật toán thao tác trên đối tượng toán học tùy ý; một thuật toán có thể mô tả một lớp phép tính; và phải xác định cái gì là một bước nguyên tử, điều chương trình thiếu[^pm-steps]. Biểu thức là TLA+[^pm-expr]. (Mục 1.)
-2. Không: translator xóa mọi thứ giữa hai dòng đó và thay bằng bản dịch mới[^pm-begin-trans]. Sửa thuật toán trong comment rồi dịch lại; định nghĩa thêm của bạn đặt sau `END TRANSLATION` hoặc trong `define`[^pm-defs-after]. (Mục 1, 7.)
-3. Một bước là control path bắt đầu ở một label, kết thúc ở một label và không qua label nào khác[^pm-step-cp]. Mỗi lần thực thi cả thân vòng lặp từ label đầu về lại label đầu là một bước[^pm-while-exit]; muốn nhiều bước mỗi vòng thì đặt label trong thân. (Mục 2.)
-4. Hai phép gán vào `x` trong cùng đường đi từ label không có label giữa vi phạm quy tắc[^pm-lab-assign]. Sửa: `a: x := x + 1; b: x := x * 2;` (hai bước) hoặc `a: x := (x + 1) * 2;` (một bước). (Mục 3.)
-5. Bắt buộc: câu đầu của process, của procedure, của thuật toán một process; mỗi `while`; câu sau `goto`/`return`, và câu sau `call` (trừ khi câu kế là `return` hoặc `goto`); câu sau `if`/`either` chứa label/`goto`/`call`/`return` bên trong[^pm-lab-first][^pm-lab-while][^pm-lab-after][^pm-lab-if]. Cấm: thân `macro` và phần `do` của `with`[^pm-lab-macro]. (Mục 3.)
-6. `\in 1..3` tạo ba process có định danh 1, 2, 3, mỗi process dùng `self` để biết mình là ai; `= 1` tạo đúng một process có định danh 1[^pm-proc-set]. Manual nói `self` bằng định danh của process hiện hành *trong thân của process set*[^pm-proc-self]. Vì vậy nếu cần `self` (hoặc macro dùng `self`) mà chỉ có một process, viết `process P \in {val}` (suy luận của người soạn từ câu trên của manual). (Mục 4.)
-7. Thêm conjunct weak fairness `\A self \in S : WF_vars(P(self))` vào `Spec`[^pm-spec-fair][^ex-dp-spec]. Bỏ `fair`, process được phép dừng mãi ở bất kỳ bước nào[^ex-dp-fair-comment], nên tính chất liveness kiểu "cuối cùng sẽ xảy ra" có thể sai trên hành vi đứng im. (Mục 4, 7.)
-8. Bước không chạy được, không gì thay đổi, process thử lại sau[^pm-await-fail]. Nếu không process nào đi tiếp được mà còn process chưa kết thúc thì đó là deadlock, TLC báo[^pm-deadlock]. (Mục 5.)
-9. `either` chọn một *nhánh* chạy được trong số các nhánh[^pm-either]; `with` chọn một *phần tử* của tập rồi chạy thân với phần tử đó; `with x \in {}` không chạy được[^pm-with]. (Mục 5.)
-10. Macro: thay văn bản lúc dịch, nằm trong bước của chỗ gọi, không label/`while`/`call`/`return`/`goto`[^pm-macro][^pm-macro-body], và (suy luận từ việc mở rộng lúc dịch) không có biến riêng trong bản dịch. Procedure: nhiều bước, có label, `call`/`return`, thêm `stack` cùng tham số và biến local vào bản dịch, module cần `EXTENDS Sequences`[^pm-stack-add][^pm-proc-seq]. (Mục 6.)
+1. Thuật toán thao tác trên đối tượng toán học tùy ý, một thuật toán có thể mô tả một lớp phép tính, và phải xác định cái gì là một bước nguyên tử, điều mà chương trình không có[^pm-steps]. Biểu thức là TLA+[^pm-expr]. (Mục 1.)
+2. Không. Translator xóa mọi thứ giữa hai dòng đó và thay bằng bản dịch mới[^pm-begin-trans]. Bạn sửa thuật toán trong comment rồi dịch lại, còn định nghĩa thêm của bạn đặt sau `END TRANSLATION` hoặc trong `define`[^pm-defs-after]. (Mục 1, 7.)
+3. Một bước là control path bắt đầu ở một label, kết thúc ở một label và không qua label nào khác[^pm-step-cp]. Mỗi lần chạy cả thân vòng lặp từ label đầu về lại label đầu là một bước[^pm-while-exit]. Muốn nhiều bước mỗi vòng thì đặt label trong thân. (Mục 2.)
+4. Hai phép gán vào `x` trong cùng đường đi mà không có label giữa là vi phạm quy tắc[^pm-lab-assign]. Sửa bằng `a: x := x + 1; b: x := x * 2;` (hai bước) hoặc `a: x := (x + 1) * 2;` (một bước). (Mục 3.)
+5. Bắt buộc: câu đầu của process, của procedure, của thuật toán một process[^pm-lab-first]. Mỗi `while` cũng vậy[^pm-lab-while]. Câu sau `goto`/`return` và câu sau `call` (trừ khi câu kế là `return` hoặc `goto`) cũng cần label[^pm-lab-after]. Câu sau `if`/`either` chứa label/`goto`/`call`/`return` bên trong cũng vậy[^pm-lab-if]. Cấm: thân `macro` và phần `do` của `with`[^pm-lab-macro]. (Mục 3.)
+6. `\in 1..3` tạo ba process có định danh 1, 2, 3, mỗi process dùng `self` để biết mình là ai. `= 1` tạo đúng một process có định danh 1[^pm-proc-set]. Manual nói `self` bằng định danh của process hiện hành *trong thân của process set*[^pm-proc-self]. Vì vậy nếu cần `self` (hoặc macro dùng `self`) mà chỉ có một process, viết `process P \in {val}` (suy luận của người soạn từ câu trên của manual). (Mục 4.)
+7. Thêm conjunct weak fairness `\A self \in S : WF_vars(P(self))` vào `Spec`[^pm-spec-fair]. Bỏ `fair` thì process được phép dừng mãi ở bất kỳ bước nào[^ex-dp-fair-comment], nên tính chất liveness kiểu "cuối cùng sẽ xảy ra" có thể sai trên hành vi đứng im. (Mục 4, 7.)
+8. Bước không chạy được, không gì thay đổi, và process thử lại sau[^pm-await-fail]. Nếu không process nào đi tiếp được mà còn process chưa kết thúc thì đó là deadlock, TLC báo[^pm-deadlock]. (Mục 5.)
+9. `either` chọn một *nhánh* chạy được trong số các nhánh[^pm-either]. `with` chọn một *phần tử* của tập rồi chạy thân với phần tử đó, và `with x \in {}` không chạy được[^pm-with]. (Mục 5.)
+10. Macro thay văn bản lúc dịch và nằm trong bước của chỗ gọi[^pm-macro]. Thân macro không chứa label/`while`/`call`/`return`/`goto`[^pm-macro-body]. Từ việc mở rộng lúc dịch, ta suy ra macro không thêm biến riêng vào bản dịch (suy luận của người soạn). Procedure có nhiều bước, có label, `call`/`return`, và thêm `stack` cùng tham số và biến local vào bản dịch[^pm-stack-add]. Module có procedure cũng cần `EXTENDS Sequences`[^pm-proc-seq]. (Mục 6.)
 11. `pc[self] = "Store"`; `counter' = tmp[self] + 1`; `pc' = [pc EXCEPT ![self] = "Done"]`; `tmp' = tmp` (người soạn viết tay theo mẫu `Simple.tla`)[^ex-simple-a]. (Mục 8.)
-12. Cả hai thread `Load` (đều đọc 0), rồi `Store(1)` ghi 1, rồi `Store(2)` ghi `tmp[2] + 1 = 1`; khi cả hai Done, `counter = 1 ≠ 2`[^lt-threads-fail]. Sửa: thêm biến `lock = 0`, bước `Acquire: await lock = 0; lock := self;` trước `Load`, và `Release: lock := 0;` sau `Store`. (Mục 8.)
+12. Cả hai thread `Load` (đều đọc 0), rồi `Store(1)` ghi 1, rồi `Store(2)` ghi `tmp[2] + 1 = 1`. Khi cả hai Done thì `counter = 1 ≠ 2`[^lt-threads-fail]. Sửa bằng cách thêm biến `lock = 0`, bước `Acquire: await lock = 0; lock := self;` trước `Load`, và `Release: lock := 0;` sau `Store`. (Mục 8.)
 
 </details>
 

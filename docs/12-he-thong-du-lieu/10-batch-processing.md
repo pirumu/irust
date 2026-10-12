@@ -15,58 +15,70 @@
 
 ## Kiến thức cần trước
 
-- [P1 · Chương 04, mục 8 — Pipe, FIFO, Unix domain socket](../01-linux/04-file-descriptor-va-vfs.md): pipe là kênh byte một chiều, EOF/`SIGPIPE`, dung lượng hữu hạn; chương này dùng pipe làm "tiền thân" của dataflow.
+- [P1 · Chương 04, mục 8 — Pipe, FIFO, Unix domain socket](../01-linux/04-file-descriptor-va-vfs.md): pipe là kênh byte một chiều, có EOF/`SIGPIPE`, dung lượng hữu hạn. Chương này coi pipe là tiền thân của dataflow.
 - [P5 · Chương 06 — Durability trong thực tế](../05-storage/06-durability-trong-thuc-te.md) và [P5 · Chương 08, mục 4 — Ghi nguyên tử bằng `rename`](../05-storage/08-rust-va-luu-tru.md): mẫu "ghi file tạm rồi `rename`" mà mục 3 và mục 6 dựa vào.
-- [P12 · Chương 03 — Storage engine](03-storage-engine.md) (SSTable/LSM, dùng ở mục 6), [P12 · Chương 04 — Encoding và tiến hóa schema](04-encoding-va-tien-hoa-schema.md) (định dạng file đầu vào/ra), [P12 · Chương 06 — Partitioning](06-partitioning.md) (hash partition, hot key — nền của shuffle và skew).
-- Chương P12·08 (sự cố hệ phân tán) và P12·12 (dung dưỡng, exactly-once, dữ liệu dẫn xuất) được nối ở mục 3 và mục 6; kiến trúc warehouse/lake, ETL, tách compute–storage nằm ở [P12 · Chương 13](13-kien-truc-he-du-lieu.md) — chương này chỉ nhắc 1–2 câu rồi chuyển link.
+- [P12 · Chương 03 — Storage engine](03-storage-engine.md) (SSTable/LSM, dùng ở mục 6), [P12 · Chương 04 — Encoding và tiến hóa schema](04-encoding-va-tien-hoa-schema.md) (định dạng file đầu vào/ra), [P12 · Chương 06 — Partitioning](06-partitioning.md) (hash partition, hot key: nền của shuffle và skew).
+- Chương P12·08 (sự cố hệ phân tán) và P12·12 (dung dưỡng, exactly-once, dữ liệu dẫn xuất) được nối ở mục 3 và mục 6. Kiến trúc warehouse/lake, ETL, tách compute–storage nằm ở [P12 · Chương 13](13-kien-truc-he-du-lieu.md); chương này chỉ nhắc 1–2 câu rồi chuyển link.
+
+**Ví dụ chạy xuyên chương.** Giả sử shop online của bạn có một service `shop-api`, mỗi ngày ghi ra một lượng access log rất lớn. Mỗi đêm bạn cần một báo cáo: URL nào được gọi nhiều nhất hôm qua, và người dùng nước nào bấm nhiều nhất. Job làm báo cáo đó tên là `daily-report`. Nó đọc hai thứ: file `clicks` (mỗi dòng là một lần bấm, có `user_id` và URL) và bảng `users` (`user_id`, quốc gia). Ví dụ này là giả định của người soạn, không phải code trong repo. Mỗi mục dưới đây mở đầu bằng câu hỏi "chuyện này có nghĩa gì với `daily-report`".
 
 ## 1. Từ pipe của Unix đến batch processing (Q1)
 
-> **Trả lời ngắn.** Một chuỗi lệnh như `sort | uniq -c` là một job batch thu nhỏ: đọc một đầu vào hữu hạn, biến đổi qua các bước nhỏ độc lập nối bằng pipe, ghi ra kết quả mới. Triết lý Unix là mỗi chương trình làm một việc và đầu ra của nó sẵn sàng làm đầu vào cho chương trình khác[^unix-phil][^unix-ii]. Cái thiếu khi dữ liệu vượt một máy là: chia việc ra nhiều máy, chịu được máy chết, và đặt dữ liệu ở đâu — đúng những thứ MapReduce thêm vào.
+> **Trả lời ngắn.** Một chuỗi lệnh như `sort | uniq -c` là một job batch thu nhỏ: đọc một đầu vào hữu hạn, biến đổi qua các bước nhỏ độc lập nối bằng pipe, ghi ra kết quả mới. Triết lý Unix là mỗi chương trình làm một việc và làm tốt[^unix-phil]. Đầu ra của chương trình này nên sẵn sàng làm đầu vào của chương trình khác[^unix-ii]. Khi dữ liệu vượt một máy, ta thiếu ba thứ: chia việc ra nhiều máy, chịu được máy chết, và đặt dữ liệu ở đâu. Đó đúng là những thứ MapReduce bổ sung.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một dây chuyền lắp ráp — mỗi trạm làm đúng một thao tác, băng chuyền chuyển bán thành phẩm sang trạm sau; muốn đổi quy trình thì thay một trạm, không dựng lại cả nhà máy.
+*Với `daily-report`.* Trước khi nghĩ đến cụm máy, hãy xem bài toán này giải thế nào khi log còn vừa một máy. Đầu vào của job là một tập dữ liệu hữu hạn, đã nằm sẵn đó và không đổi trong lúc job chạy; đầu ra là file kết quả mới. Đó là định nghĩa của batch. Câu hỏi của mục này: Unix giải bài đó ra sao, và lời giải ấy gãy ở đâu khi log lớn hơn một máy?
 
-Ví dụ kinh điển — đếm 5 URL được gọi nhiều nhất trong access log (minh họa, giả sử cột 7 của log là URL):
+### 1.1 `daily-report` trên một máy
+
+Muốn có 5 URL được gọi nhiều nhất, một dòng shell là đủ (minh họa, giả sử cột 7 của log là URL):
 
 ```sh
 awk '{print $7}' access.log | sort | uniq -c | sort -rn | head -n 5
 ```
 
-Đọc từng bước (nhận xét của người soạn): `awk` trích khóa (URL) từ mỗi dòng; `sort` đưa các dòng cùng khóa về cạnh nhau; `uniq -c` đếm các dòng kề nhau giống nhau; `sort -rn | head` lấy top. Bước `sort` không thể bỏ: `uniq` chỉ phát hiện dòng lặp nếu chúng *kề nhau*[^uniq-adj]. Đây chính là hình dáng "map → sort/gom theo khóa → reduce" của MapReduce (mục 2).
+Mỗi bước làm một việc nhỏ (nhận xét của người soạn). `awk` trích URL từ mỗi dòng làm khóa. `sort` đưa các dòng cùng khóa về cạnh nhau. `uniq -c` đếm các dòng giống nhau nằm kề nhau. `sort -rn | head` lấy top 5. Bước `sort` đầu tiên không bỏ được, vì `uniq` chỉ nhận ra dòng lặp khi chúng nằm kề nhau[^uniq-adj]. Hình dáng này (trích khóa, gom theo khóa, gộp) chính là "map → sort/gom theo khóa → reduce" mà mục 2 sẽ phân tán ra nhiều máy.
 
-Triết lý đứng sau chuỗi lệnh đó do Doug McIlroy — người phát minh Unix pipe[^mcilroy] — tóm tắt: viết chương trình làm một việc và làm tốt, viết chương trình để chạy cùng nhau, viết chương trình xử lý text stream vì đó là giao diện phổ quát[^unix-phil]. Một châm ngôn của ông nói rõ vì sao nối được: đầu ra của mọi chương trình nên sẵn sàng trở thành đầu vào của một chương trình khác mà ta chưa biết[^unix-ii].
+Triết lý đứng sau chuỗi lệnh đó do Doug McIlroy, người phát minh Unix pipe[^mcilroy], tóm tắt như sau. Viết chương trình làm một việc và làm tốt; viết chương trình để chạy cùng nhau; viết chương trình xử lý text stream vì đó là giao diện phổ quát[^unix-phil]. Một châm ngôn khác của ông giải thích vì sao các bước ghép được với nhau: đầu ra của mọi chương trình nên sẵn sàng thành đầu vào của một chương trình khác mà ta chưa biết[^unix-ii].
 
-Có ba tính chất của mô hình này mà batch processing phân tán thừa hưởng (nhận xét của người soạn):
+Mô hình này có ba tính chất mà batch phân tán thừa hưởng (nhận xét của người soạn):
 
-1. **Đầu vào chỉ đọc, đầu ra là thứ mới.** `awk` không sửa `access.log`; kết quả là dòng text mới. Chạy lại cùng lệnh trên cùng input cho cùng output — nền tảng để "lỗi thì chạy lại" ở mục 3.
-2. **Mỗi bước độc lập, giao tiếp qua giao diện đơn giản.** Thay `awk` bằng chương trình khác trích khóa mà không cần đụng `sort`.
-3. **Backpressure miễn phí.** Pipe có dung lượng hữu hạn: ghi vào pipe đầy thì `write` chặn cho tới khi bên đọc lấy bớt[^pipe-block]. Chi tiết ở [P1 · Chương 04, mục 8](../01-linux/04-file-descriptor-va-vfs.md); phiên bản async của ý này ở [P7 · Chương 09, mục 3](../07-io-async/09-async-trong-production.md).
+1. **Đầu vào chỉ đọc, đầu ra là dữ liệu mới.** `awk` không sửa `access.log`; kết quả là những dòng text mới. Chạy lại cùng lệnh trên cùng input cho cùng output, và đó là nền tảng của "lỗi thì chạy lại" ở mục 3.
+2. **Mỗi bước độc lập, nói chuyện với nhau qua giao diện đơn giản.** Bạn thay `awk` bằng chương trình khác trích khóa mà không phải đụng tới `sort`.
+3. **Backpressure có sẵn.** Pipe có dung lượng hữu hạn: ghi vào pipe đầy thì `write` chặn cho tới khi bên đọc lấy bớt[^pipe-block]. Chi tiết ở [P1 · Chương 04, mục 8](../01-linux/04-file-descriptor-va-vfs.md); phiên bản async của ý này ở [P7 · Chương 09, mục 3](../07-io-async/09-async-trong-production.md).
 
-`sort` còn là ví dụ về xử lý dữ liệu lớn hơn RAM trên một máy: GNU `sort` dùng một main-memory buffer có kích thước cấu hình được[^sort-buf], và khi phải gộp nhiều đầu vào hơn ngưỡng `nmerge` thì gộp theo nhóm, lưu kết quả trung gian vào file tạm rồi gộp tiếp[^sort-merge]. Đó là *external merge sort*; MapReduce dùng cùng kỹ thuật khi dữ liệu trung gian không vừa bộ nhớ (mục 2)[^mr-extsort].
+`sort` còn cho thấy cách xử lý dữ liệu lớn hơn RAM trên một máy. GNU `sort` dùng một main-memory buffer có kích thước cấu hình được[^sort-buf]. Khi phải gộp nhiều đầu vào hơn ngưỡng `nmerge`, nó gộp theo nhóm, lưu kết quả trung gian vào file tạm rồi gộp tiếp[^sort-merge]. Kỹ thuật này là *external merge sort*, và MapReduce dùng lại đúng nó khi dữ liệu trung gian không vừa bộ nhớ (mục 2)[^mr-extsort].
 
-**Thiếu gì khi vượt một máy?** Chuỗi lệnh Unix chạy trên một máy: một ổ đĩa, một bộ CPU, và máy chết là mất cả việc. MapReduce được dựng cho môi trường hoàn toàn khác — cụm hàng trăm hay hàng nghìn máy phổ thông, nơi lỗi máy là chuyện thường[^mr-env]. Thay đổi cốt lõi so với Unix (nhận xét của người soạn): "pipe giữa hai bước" trở thành *file trong hệ thống file phân tán*; paper nói output của một job thường được chuyển thẳng làm input cho một job MapReduce khác[^mr-outfiles]. Đổi lại ta mất tính streaming của pipe (nhận xét của người soạn: hai bước nối bằng pipe chạy đồng thời), còn pipeline định kỳ nhiều giai đoạn — theo SRE Google — thường chờ cả giai đoạn trước xong, thường vì có thể có bước sắp xếp, vốn cần toàn bộ dữ liệu[^sre-sort].
+### 1.2 Thiếu gì khi log vượt một máy
+
+Chuỗi lệnh Unix chạy trên một máy: một ổ đĩa, một bộ CPU, và máy chết là mất cả việc. MapReduce thì được dựng cho môi trường khác hẳn: cụm hàng trăm hay hàng nghìn máy phổ thông, nơi máy hỏng là chuyện thường[^mr-env]. Vì vậy mọi thứ Unix coi là hiển nhiên phải làm lại.
+
+Thay đổi cốt lõi (nhận xét của người soạn) là "pipe giữa hai bước" biến thành *file trong hệ thống file phân tán*. Paper MapReduce nói output của một job thường được đưa thẳng làm input cho một job MapReduce khác[^mr-outfiles]. Cái giá là mất tính streaming của pipe, nơi hai bước nối nhau chạy đồng thời (nhận xét của người soạn). Pipeline định kỳ nhiều giai đoạn ở Google cũng thường phải chờ giai đoạn trước xong hẳn mới sang giai đoạn sau, phần lớn vì có thể có bước sắp xếp, mà sắp xếp cần toàn bộ dữ liệu[^sre-sort].
 
 <details><summary>Đi sâu: "distributed grep", cron và pipeline định kỳ</summary>
 
-- Paper MapReduce liệt kê *Distributed Grep* như ví dụ đầu tiên: map phát ra dòng khớp mẫu, reduce là hàm đồng nhất chỉ chép dữ liệu trung gian ra output[^mr-grep] — tức `grep` chạy song song trên nhiều mảnh input.
-- Mẫu "chương trình đọc dữ liệu, biến đổi, ghi dữ liệu mới, chạy theo lịch của `cron`" được SRE Google gọi là *data pipeline*[^sre-def]; họ nói data pipeline có lịch sử từ co-routine, DTSS communication files, Unix pipe, rồi sau này là ETL pipeline[^sre-hist].
+- Paper MapReduce liệt kê *Distributed Grep* làm ví dụ đầu tiên: map phát ra dòng khớp mẫu, reduce là hàm đồng nhất chỉ chép dữ liệu trung gian ra output[^mr-grep]. Nói cách khác đó là `grep` chạy song song trên nhiều mảnh input.
+- Mẫu "chương trình đọc dữ liệu, biến đổi, ghi dữ liệu mới, chạy theo lịch của `cron`" được SRE Google gọi là *data pipeline*[^sre-def]. Họ nói data pipeline có lịch sử đi từ co-routine, DTSS communication files, Unix pipe, rồi sau này là ETL pipeline[^sre-hist].
 - Mọi thứ ở trên là *batch*: đầu vào hữu hạn, biết trước. Khi đầu vào không bao giờ kết thúc, xem [P12 · Chương 11 — Stream processing](11-stream-processing.md).
 
 </details>
 
-**Quay lại Q1:** Unix pipe cho ta khuôn "nhiều bước nhỏ, đầu vào bất biến, đầu ra mới"; MapReduce giữ khuôn đó nhưng thay RAM/đĩa của một máy bằng cả cụm.
+**Quay lại Q1:** Unix pipe cho `daily-report` cái khuôn "nhiều bước nhỏ, đầu vào bất biến, đầu ra mới"; MapReduce giữ khuôn đó nhưng thay RAM và đĩa của một máy bằng cả cụm.
 
 ## 2. MapReduce: map, shuffle, sort, reduce (Q2)
 
-> **Trả lời ngắn.** Người dùng chỉ viết hai hàm: `map` biến mỗi bản ghi đầu vào thành các cặp khóa/giá trị trung gian, `reduce` nhận một khóa cùng mọi giá trị của khóa đó và gộp chúng[^mr-model]. Framework lo phần còn lại: chia input thành M mảnh cho M map task, ghi output của map thành R phần theo hàm partition, để reduce task kéo (shuffle), sắp xếp theo khóa rồi gọi `reduce`[^mr-part][^mr-step5]. Combiner là bước gộp cục bộ ngay phía map để bớt dữ liệu phải gửi qua mạng[^mr-combiner].
+> **Trả lời ngắn.** Người dùng chỉ viết hai hàm: `map` biến mỗi bản ghi đầu vào thành các cặp khóa/giá trị trung gian, còn `reduce` nhận một khóa cùng mọi giá trị của khóa đó và gộp chúng lại[^mr-model]. Framework lo phần còn lại: chia input thành M mảnh cho M map task, ghi output của map thành R phần theo hàm partition, để reduce task kéo về (shuffle), sắp xếp theo khóa rồi mới gọi `reduce`[^mr-part]. Combiner là bước gộp cục bộ ngay phía map, để bớt dữ liệu phải gửi qua mạng[^mr-combiner].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bầu cử — mỗi điểm bỏ phiếu (map) kiểm phiếu của mình và bỏ phiếu theo từng ứng viên vào các thùng đánh số (partition); đại diện từng ứng viên (reduce) đến mọi điểm bỏ phiếu lấy thùng của mình (shuffle), xếp lại, cộng tổng.
+*Với `daily-report`.* Ở mục 1, đếm top URL cần ba việc: trích URL, gom các dòng cùng URL lại, rồi đếm. Trên cụm, ta không tự viết cả ba mà chỉ viết phần riêng của bài toán (trích và đếm), còn việc gom thì framework làm. Mục này đi theo đường dữ liệu của `daily-report` từ file log tới file kết quả.
 
-**Hai hàm của người dùng.** Cả phép tính nhận một tập cặp khóa/giá trị đầu vào và sinh một tập cặp khóa/giá trị đầu ra, biểu diễn bằng hai hàm `Map` và `Reduce`[^mr-model]. `Map` nhận một cặp đầu vào, sinh ra tập cặp trung gian; thư viện gom mọi giá trị trung gian cùng khóa rồi đưa cho `Reduce`[^mr-map]. `Reduce` nhận một khóa và tập giá trị của khóa đó, gộp chúng thành tập giá trị nhỏ hơn[^mr-reduce]. Giá trị được đưa vào `Reduce` qua một iterator để xử lý được danh sách quá lớn so với RAM[^mr-iter]. Ví dụ đếm từ trong paper: map phát `(từ, "1")` cho mỗi từ, reduce cộng các số đếm của một từ[^mr-wc].
+### 2.1 Hai hàm của người dùng
+
+Với `daily-report`, `Map` nhận một dòng log và phát ra cặp `(url, 1)`; `Reduce` nhận một URL cùng mọi số 1 của nó rồi cộng lại. Ví dụ này lấy theo bài đếm từ trong paper, chỉ đổi "từ" thành "URL" (nhận xét của người soạn).
+
+Tổng quát hơn, cả phép tính nhận một tập cặp khóa/giá trị đầu vào và sinh một tập cặp khóa/giá trị đầu ra, viết bằng hai hàm `Map` và `Reduce`[^mr-model]. `Map` nhận một cặp đầu vào và sinh ra tập cặp trung gian; thư viện gom mọi giá trị trung gian cùng khóa rồi đưa cho `Reduce`[^mr-map]. `Reduce` nhận một khóa cùng tập giá trị của nó và gộp chúng thành tập giá trị nhỏ hơn[^mr-reduce]. Giá trị đi vào `Reduce` qua một iterator, để xử lý được cả danh sách quá lớn so với RAM[^mr-iter]. Bài đếm từ trong paper làm đúng như vậy: map phát `(từ, "1")` cho mỗi từ, reduce cộng các số đếm của một từ[^mr-wc].
 
 ```mermaid
 flowchart LR
@@ -98,126 +110,156 @@ flowchart LR
   r1 --> o1
 ```
 
-(Sơ đồ rút gọn theo Figure 1 của paper: mỗi map task ghi R vùng, mỗi reduce task đọc *một* vùng từ *mọi* map task — vì vậy có mũi tên từ cả ba map tới cả hai reduce.)
+(Sơ đồ rút gọn theo Figure 1 của paper: mỗi map task ghi R vùng, mỗi reduce task đọc *một* vùng từ *mọi* map task, vì vậy có mũi tên từ cả ba map tới cả hai reduce.)
 
-**Các bước, theo paper (mục 3.1).**
+### 2.2 Đường đi của dữ liệu
 
-1. Thư viện cắt input thành M mảnh; mảnh thường lớn 16–64 MB (chỉnh được)[^mr-split], rồi khởi động nhiều bản sao chương trình trên cụm; một bản là *master*, còn lại là worker được master giao việc[^mr-step12]. Việc *chia input* và *chia không gian khóa trung gian thành R phần bằng hàm partition* (ví dụ `hash(key) mod R`) là hai chiều phân mảnh (cách gọi của người soạn); số R và hàm partition do người dùng chỉ định[^mr-part].
-2. Worker nhận map task đọc split của nó, parse cặp khóa/giá trị, đưa vào `Map`; kết quả trung gian được đệm trong RAM[^mr-step3].
-3. Định kỳ, dữ liệu đệm được ghi xuống **đĩa cục bộ**, chia thành R vùng theo hàm partition; vị trí các vùng được báo về master để chuyển tiếp cho reduce worker[^mr-step4].
-4. **Shuffle.** Reduce worker được báo vị trí thì dùng RPC đọc dữ liệu đệm từ đĩa cục bộ của các map worker[^mr-step5a]. (Bản Hadoop mô tả tương tự: framework lấy phần output tương ứng của mọi mapper qua HTTP[^hadoop-shuffle].)
-5. **Sort.** Khi đã đọc hết dữ liệu trung gian, reduce worker sắp xếp theo khóa để mọi lần xuất hiện của cùng một khóa nằm cạnh nhau; cần sắp xếp vì thường nhiều khóa khác nhau rơi vào cùng một reduce task, và nếu dữ liệu quá lớn thì dùng external sort[^mr-extsort]. Trong Hadoop, shuffle và sort chạy đồng thời — trong lúc lấy map output thì gộp (merge) luôn[^hadoop-shuf-sort].
-6. **Reduce.** Worker duyệt dữ liệu đã sắp xếp, với mỗi khóa duy nhất gọi `Reduce`; output được nối (append) vào file output của partition đó[^mr-step6].
-7. Khi mọi map và reduce task xong, `MapReduce` trả về cho chương trình gọi. Kết quả là R file (mỗi reduce task một file); người dùng thường không gộp lại mà đưa thẳng làm input cho job khác[^mr-outfiles].
+Các bước dưới đây theo mục 3.1 của paper:
 
-Ghi chú để không nhầm (nhận xét của người soạn): **shuffle = "chuyển dữ liệu theo khóa" tới đúng reducer** (mạng + đĩa), **sort = sắp xếp trong từng partition**. Ghép lại, đây là phiên bản phân tán của `sort | uniq -c` ở mục 1: `awk` ↔ map, `sort` ↔ shuffle+sort, `uniq -c` ↔ reduce.
+1. **Cắt input và khởi động.** Thư viện cắt input thành M mảnh, thường 16–64 MB mỗi mảnh và chỉnh được[^mr-split]. Sau đó nó chạy nhiều bản sao chương trình trên cụm: một bản là *master*, các bản còn lại là worker được master giao việc[^mr-step12]. Ở đây có hai chiều phân mảnh: chia *input* thành M mảnh, và chia *không gian khóa trung gian* thành R phần bằng hàm partition, ví dụ `hash(key) mod R` (cách gọi "hai chiều" là của người soạn). Số R và hàm partition do người dùng chỉ định[^mr-part].
+2. **Map.** Worker nhận map task thì đọc split của mình, parse thành cặp khóa/giá trị rồi đưa vào `Map`. Kết quả trung gian được đệm trong RAM[^mr-step3].
+3. **Ghi cục bộ.** Định kỳ, dữ liệu đệm được ghi xuống **đĩa cục bộ**, chia thành R vùng theo hàm partition. Vị trí các vùng được báo về master để chuyển cho reduce worker[^mr-step4].
+4. **Shuffle.** Khi master báo vị trí, reduce worker dùng RPC đọc dữ liệu đệm từ đĩa cục bộ của các map worker[^mr-step5a]. Hadoop làm tương tự: framework lấy phần output tương ứng của mọi mapper qua HTTP[^hadoop-shuffle].
+5. **Sort.** Đọc hết dữ liệu trung gian, reduce worker sắp xếp theo khóa để mọi lần xuất hiện của cùng một khóa nằm cạnh nhau[^mr-step5]. Cần sắp xếp vì thường nhiều khóa khác nhau rơi vào cùng một reduce task; nếu dữ liệu quá lớn thì dùng external sort[^mr-extsort]. Trong Hadoop, shuffle và sort chạy đồng thời: lấy map output tới đâu thì merge luôn tới đó[^hadoop-shuf-sort].
+6. **Reduce.** Worker duyệt dữ liệu đã sắp xếp và gọi `Reduce` cho từng khóa duy nhất. Output được nối (append) vào file output của partition đó[^mr-step6].
+7. **Kết thúc.** Khi mọi map và reduce task xong, `MapReduce` trả về cho chương trình gọi. Kết quả là R file, mỗi reduce task một file; người dùng thường không gộp lại mà đưa thẳng làm input cho job khác[^mr-outfiles].
 
-**Bảo đảm thứ tự.** Paper bảo đảm trong một partition, các cặp trung gian được xử lý theo thứ tự khóa tăng dần[^mr-order] — tiện để sinh file output đã sắp xếp theo từng partition[^mr-order-sorted]. Đây là bảo đảm do paper MapReduce nêu; Spark thì không (mục 7).
+Để khỏi nhầm (nhận xét của người soạn): **shuffle** là chuyển dữ liệu theo khóa tới đúng reducer (tốn mạng và đĩa), còn **sort** là sắp xếp trong từng partition. Ghép lại, ta có phiên bản phân tán của `sort | uniq -c` ở mục 1: `awk` ↔ map, `sort` ↔ shuffle + sort, `uniq -c` ↔ reduce.
 
-**Combiner.** Nếu hàm reduce có tính giao hoán và kết hợp (commutative, associative) — như cộng số trong đếm từ — thì có thể gộp một phần ngay trên máy chạy map; vì tần suất từ theo phân phối Zipf, mẫu từ phổ biến như `the` sinh hàng trăm hoặc hàng nghìn bản ghi `<the, 1>` mỗi map task, gửi hết qua mạng rồi mới cộng thì phí[^mr-comb-why][^mr-comb-the]. Paper cho phép người dùng khai báo hàm Combiner thực hiện việc gộp một phần này trước khi gửi qua mạng[^mr-combiner]; Hadoop mô tả combiner là bước gộp cục bộ giúp giảm lượng dữ liệu chuyển từ mapper sang reducer[^hadoop-comb]. Điều kiện kết hợp là bắt buộc vì combiner chạy trên một phần dữ liệu và reduce chạy tiếp trên kết quả (suy luận của người soạn từ định nghĩa); rayon có đúng ràng buộc này cho `reduce` (mục 9).
+Về thứ tự, paper bảo đảm trong một partition các cặp trung gian được xử lý theo khóa tăng dần[^mr-order]. Nhờ vậy sinh được file output đã sắp xếp theo từng partition[^mr-order-sorted]. Đây là bảo đảm riêng của MapReduce; Spark không có (mục 7).
+
+### 2.3 Combiner
+
+Trong `daily-report`, vài URL như trang chủ sẽ chiếm phần lớn log (nhận xét của người soạn). Paper gặp đúng tình huống đó ở bài đếm từ: tần suất từ theo phân phối Zipf, nên mỗi map task phát hàng trăm hoặc hàng nghìn bản ghi `<the, 1>`[^mr-comb-the]. Gửi hết qua mạng rồi mới cộng thì phí.
+
+Nếu hàm reduce có tính giao hoán và kết hợp (commutative, associative), như phép cộng trong bài đếm từ[^mr-comb-why], ta có thể cộng một phần ngay trên máy chạy map trước khi gửi đi. Paper cho người dùng khai báo hàm Combiner để làm việc đó[^mr-combiner]. Hadoop mô tả combiner là bước gộp cục bộ giúp giảm lượng dữ liệu chuyển từ mapper sang reducer[^hadoop-comb]. Điều kiện giao hoán và kết hợp là bắt buộc, vì combiner chỉ thấy một phần dữ liệu rồi reduce chạy tiếp trên kết quả của nó (suy luận của người soạn từ định nghĩa). Rayon có đúng ràng buộc này cho `reduce` (mục 9).
 
 <details><summary>Đi sâu: kích thước M và R, partition tùy biến, secondary sort, bản ghi hỏng</summary>
 
-- **M và R nên lớn hơn nhiều số máy.** Mỗi worker làm nhiều task nhỏ thì cân bằng tải động tốt hơn và khi một worker chết, các map task nó đã làm được rải ra mọi máy khác để chạy lại nhanh[^mr-granularity]. Giới hạn thực tế: master phải ra O(M + R) quyết định lập lịch và giữ O(M × R) trạng thái trong bộ nhớ[^mr-mr-state]. Paper cho ví dụ M = 200.000, R = 5.000 trên 2.000 worker[^mr-sizes].
-- **Partition tùy biến.** Mặc định là hash (cân bằng khá tốt), nhưng có thể thay: `hash(Hostname(urlkey)) mod R` đưa mọi URL cùng host vào cùng một file output[^mr-userpart].
-- **Hadoop: secondary sort.** Muốn nhóm khóa theo quy tắc khác quy tắc sắp xếp, Hadoop cho đặt hai comparator — một để sắp xếp (`setSortComparatorClass`), một để nhóm (`setGroupingComparatorClass`) — và tài liệu nói có thể dùng chúng cùng nhau để mô phỏng secondary sort theo giá trị[^hadoop-secsort]. Kỹ thuật này là nền của "improved repartition join" ở mục 5 (liên hệ của người soạn).
-- **Bỏ qua bản ghi hỏng.** Khi bug trong code người dùng làm map/reduce crash có tính xác định trên vài bản ghi, thư viện có chế độ tùy chọn phát hiện các bản ghi đó và bỏ qua để tiến triển tiếp[^mr-skip].
-- **Chạy cục bộ để debug.** Paper có bản cài đặt chạy tuần tự toàn bộ việc trên máy cục bộ để debug/profile/test nhỏ[^mr-local].
-- **Chi phí của shuffle.** Với mỗi N map và M reduce có N × M "vùng" trung gian; Pavlo et al. tính ví dụ N = 1000, M = 500 cho 500.000 file cục bộ[^pavlo-pull] và cho rằng nhiều reduce cùng kéo từ một map node gây nhiều lần seek[^pavlo-seek] (đây là lập luận của các tác giả đó về cách MapReduce truyền dữ liệu từ map sang reduce, trong một benchmark chạy Hadoop năm 2009).
+- **M và R nên lớn hơn nhiều số máy.** Mỗi worker làm nhiều task nhỏ thì cân bằng tải động tốt hơn. Khi một worker chết, các map task nó đã làm được rải ra mọi máy khác để chạy lại nhanh[^mr-granularity]. Giới hạn thực tế là master phải ra O(M + R) quyết định lập lịch và giữ O(M × R) trạng thái trong bộ nhớ[^mr-mr-state]. Paper cho ví dụ M = 200.000, R = 5.000 trên 2.000 worker[^mr-sizes].
+- **Partition tùy biến.** Mặc định là hash, cân bằng khá tốt, nhưng có thể thay. Ví dụ `hash(Hostname(urlkey)) mod R` đưa mọi URL cùng host vào cùng một file output[^mr-userpart].
+- **Hadoop: secondary sort.** Muốn nhóm khóa theo quy tắc khác quy tắc sắp xếp, Hadoop cho đặt hai comparator: một để sắp xếp (`setSortComparatorClass`), một để nhóm (`setGroupingComparatorClass`). Tài liệu nói có thể dùng chúng cùng nhau để mô phỏng secondary sort theo giá trị[^hadoop-secsort]. Kỹ thuật này là nền của "improved repartition join" ở mục 5 (liên hệ của người soạn).
+- **Bỏ qua bản ghi hỏng.** Bug trong code người dùng có thể làm map/reduce crash có tính xác định trên vài bản ghi. Thư viện có chế độ tùy chọn phát hiện các bản ghi đó và bỏ qua để job tiến triển tiếp[^mr-skip].
+- **Chạy cục bộ để debug.** Paper có bản cài đặt chạy tuần tự toàn bộ việc trên máy cục bộ, để debug, profile hoặc test nhỏ[^mr-local].
+- **Chi phí của shuffle.** Với N map và M reduce có N × M "vùng" trung gian; Pavlo et al. tính ví dụ N = 1000, M = 500 ra 500.000 file cục bộ[^pavlo-pull]. Họ còn cho rằng nhiều reduce cùng kéo từ một map node gây nhiều lần seek[^pavlo-seek]. Đây là lập luận của các tác giả đó về cách MapReduce truyền dữ liệu từ map sang reduce, trong một benchmark chạy Hadoop năm 2009.
 
 </details>
 
-**Quay lại Q2:** map phát cặp khóa/giá trị, shuffle chuyển mọi cặp cùng khóa về một reducer, sort đặt chúng kề nhau, reduce gộp; combiner chỉ là tối ưu gộp trước khi gửi.
+**Quay lại Q2:** map của `daily-report` phát `(url, 1)`, shuffle chuyển mọi cặp cùng URL về một reducer, sort đặt chúng kề nhau, reduce cộng lại; combiner chỉ là tối ưu gộp trước khi gửi.
 
 ## 3. Chịu lỗi bằng chạy lại: re-execution, commit nguyên tử, backup task (Q3)
 
-> **Trả lời ngắn.** MapReduce coi máy chết là chuyện thường và dùng *chạy lại* làm cơ chế chịu lỗi chính[^mr-abstract]. Master đánh dấu worker chết khi nó không trả lời, rồi đặt lại các task của máy đó — map task (đã xong hoặc đang chạy) và reduce task đang chạy — về trạng thái chờ để chạy ở nơi khác; map task đã xong cũng phải chạy lại vì output của nó nằm trên đĩa cục bộ của máy chết, còn reduce task đã xong thì không[^mr-master][^mr-inprogress][^mr-completed]. Kết quả vẫn đúng nhờ hai điều paper nêu — hàm map/reduce xác định và commit nguyên tử output của task[^mr-determ][^mr-atomic] — cộng một điều kiện ngầm (nhận xét của người soạn): input không bị sửa trong lúc chạy.
+> **Trả lời ngắn.** MapReduce coi máy chết là chuyện thường và dùng *chạy lại* (re-execution) làm cơ chế chịu lỗi chính[^mr-abstract]. Master đánh dấu worker chết khi nó không trả lời, rồi đặt các task của máy đó về trạng thái chờ để chạy ở nơi khác[^mr-master]. Map task đã xong cũng phải chạy lại vì output của nó nằm trên đĩa cục bộ của máy chết, còn reduce task đã xong thì không[^mr-completed]. Kết quả vẫn đúng nhờ hai điều. Một là hàm map/reduce xác định[^mr-determ]. Hai là output của task được commit nguyên tử[^mr-atomic]. Ngoài ra còn một điều kiện ngầm (nhận xét của người soạn): input không bị sửa trong lúc chạy.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thầy giáo phát đề cho 1000 học sinh chấm; một học sinh ốm giữa chừng — thầy đưa bài của em đó cho người khác chấm lại từ đầu, và chỉ nhận bài chấm xong đầu tiên cho mỗi bài. Việc chấm không làm hỏng đề gốc nên chấm lại là vô hại.
+*Với `daily-report`.* Job chạy trên cả cụm, và trong cụm cỡ đó máy hỏng là chuyện thường. Nếu mỗi lần một máy chết ta phải chạy lại cả job từ đầu thì báo cáo có khi chẳng bao giờ xong. Vậy khi một máy chết giữa đêm, `daily-report` chạy lại phần nào, và làm sao chạy lại mà báo cáo không sai?
 
-**Máy chết thì sao?** Master ping mọi worker định kỳ; worker không trả lời trong một khoảng thời gian thì bị đánh dấu hỏng. Mọi map task *đã xong* của worker đó bị đặt lại về idle, và map/reduce task *đang chạy* cũng vậy; chúng đủ điều kiện được lên lịch lại trên worker khác[^mr-master][^mr-inprogress]. Bảng dưới là hệ quả (map task xong phải làm lại, reduce task xong thì không):
+### 3.1 Máy chết thì chạy lại gì
 
-| Thứ nằm trên máy chết | Có phải chạy lại? | Lý do, theo paper |
+Master ping mọi worker định kỳ. Worker nào không trả lời trong một khoảng thời gian thì bị đánh dấu hỏng. Mọi map task *đã xong* của worker đó bị đặt lại về idle để lên lịch trên worker khác[^mr-master]. Map/reduce task *đang chạy* trên nó cũng vậy[^mr-inprogress]. Bảng dưới là hệ quả: map task xong phải làm lại, reduce task xong thì không.
+
+| Thứ nằm trên máy chết | Có phải chạy lại? | Lý do |
 |---|---|---|
 | Map/reduce task đang chạy | Có | Bị đặt lại về idle rồi lên lịch lại[^mr-inprogress] |
 | Map task đã xong | Có | Output nằm trên đĩa cục bộ của máy hỏng nên không truy cập được[^mr-completed] |
 | Reduce task đã xong | Không | Output nằm trong hệ thống file toàn cục (global file system)[^mr-completed] |
 
-Nếu map task chạy lại ở worker B vì worker A chết, mọi reduce worker được báo, và reduce task nào chưa đọc dữ liệu của A sẽ đọc từ B[^mr-rerun-notify]. Paper kể một job gặp bảo trì mạng khiến từng nhóm 80 máy mất kết nối vài phút; master chỉ việc chạy lại phần việc của các máy đó và job vẫn hoàn tất[^mr-80].
+Nếu map task chạy lại ở worker B vì worker A chết, mọi reduce worker được báo. Reduce task nào chưa đọc dữ liệu của A sẽ đọc từ B[^mr-rerun-notify]. Paper kể một job gặp lúc bảo trì mạng, khiến từng nhóm 80 máy mất kết nối vài phút. Master chỉ việc chạy lại phần việc của các máy đó và job vẫn hoàn tất[^mr-80].
 
-**Vì sao chạy lại không làm sai kết quả?** Khi toán tử map và reduce là hàm xác định của đầu vào, bản cài đặt phân tán cho đúng output như một lần chạy tuần tự không lỗi[^mr-determ]. Cơ chế giữ điều đó là *commit nguyên tử* output của task[^mr-atomic]:
+### 3.2 Vì sao chạy lại không làm sai kết quả
 
-- Mỗi task đang chạy ghi output vào file tạm riêng: map task tạo R file, reduce task tạo một file[^mr-atomic][^mr-tmpfiles]. Map task xong thì báo master tên R file tạm; nếu master đã nhận báo cáo xong cho map task đó thì bỏ qua bản báo cáo thứ hai[^mr-tmpfiles][^mr-dupmap].
-- Reduce task xong thì đổi tên (rename) nguyên tử file tạm thành file output cuối. Nếu cùng reduce task chạy trên nhiều máy, nhiều lời gọi rename cùng nhắm một tên cuối; paper dựa vào tính nguyên tử của `rename` của hệ thống file để bảo đảm trạng thái cuối chỉ chứa dữ liệu của *một* lần chạy[^mr-rename].
+Chạy lại chỉ vô hại khi lần chạy sau cho cùng kết quả như lần trước và không để lại dữ liệu nửa vời. Điều kiện thứ nhất là hàm xác định: khi map và reduce là hàm xác định của đầu vào, bản cài đặt phân tán cho đúng output như một lần chạy tuần tự không lỗi[^mr-determ]. Điều kiện thứ hai là *commit nguyên tử* output của task[^mr-atomic]:
 
-Mẫu "ghi file tạm → `rename`" này là chính mẫu ghi nguyên tử trên một máy ở [P5 · Chương 08, mục 4](../05-storage/08-rust-va-luu-tru.md), chỉ khác là `rename` ở đây do hệ thống file phân tán cung cấp. Khi toán tử *không* xác định, paper chỉ hứa ngữ nghĩa yếu hơn nhưng vẫn hợp lý: output của từng reduce task tương đương một lần chạy tuần tự nào đó, song các reduce task khác nhau có thể tương ứng với những lần chạy tuần tự khác nhau[^mr-nondet].
+- Mỗi task đang chạy ghi output vào file tạm riêng: map task tạo R file, reduce task tạo một file. Map task xong thì báo master tên R file tạm đó[^mr-tmpfiles]. Nếu master đã nhận báo cáo xong của map task ấy rồi thì bỏ qua bản báo cáo thứ hai[^mr-dupmap].
+- Reduce task xong thì đổi tên (rename) nguyên tử file tạm thành file output cuối. Nếu cùng một reduce task chạy trên nhiều máy, nhiều lời gọi rename cùng nhắm một tên cuối. Paper dựa vào tính nguyên tử của `rename` của hệ thống file để trạng thái cuối chỉ chứa dữ liệu của *một* lần chạy[^mr-rename].
 
-**Straggler và backup task.** *Straggler* là máy mất nhiều thời gian bất thường để xong một trong các task cuối của job[^mr-straggler]. Khi job gần xong, master lên lịch *chạy dự phòng* các task còn dở; task được tính xong ngay khi bản chính hoặc bản dự phòng xong trước[^mr-backup]. Với chương trình sort trong paper, tắt cơ chế này làm job lâu hơn 44% (số đo của tác giả trên cụm của họ)[^mr-44]. Backup task chỉ an toàn nhờ chính cơ chế commit nguyên tử ở trên (suy luận của người soạn: hai bản cùng ghi cùng một tên, chỉ một bản "thắng").
+Mẫu "ghi file tạm → `rename`" là chính mẫu ghi nguyên tử trên một máy ở [P5 · Chương 08, mục 4](../05-storage/08-rust-va-luu-tru.md), chỉ khác là `rename` ở đây do hệ thống file phân tán cung cấp. Khi toán tử *không* xác định, paper chỉ hứa ngữ nghĩa yếu hơn nhưng vẫn hợp lý: output của từng reduce task tương đương một lần chạy tuần tự nào đó, song các reduce task khác nhau có thể tương ứng với những lần chạy tuần tự khác nhau[^mr-nondet].
 
-**Điểm yếu còn lại.** Master chỉ có một: paper nói khả năng nó hỏng là thấp, nên bản cài đặt hiện tại hủy cả job nếu master chết và để client thử lại nếu muốn[^mr-masterfail]. Ngoài ra Google SRE ghi nhận pipeline định kỳ rất mong manh khi quy mô tăng; khi một chunk bị treo và job bị kill để chạy lại, vì pipeline thường không có checkpoint nên công việc trên mọi chunk bị làm lại từ đầu[^sre-fragile][^sre-restart].
+### 3.3 Straggler và backup task
+
+Trong `daily-report`, có thể một máy không chết mà chỉ chậm bất thường, và cả job phải chờ nó. Máy như vậy gọi là *straggler*: nó mất nhiều thời gian bất thường để xong một trong các task cuối của job[^mr-straggler]. Cách chữa là khi job gần xong, master lên lịch *chạy dự phòng* các task còn dở. Task được tính xong ngay khi bản chính hoặc bản dự phòng xong trước[^mr-backup]. Với chương trình sort trong paper, tắt cơ chế này làm job lâu hơn 44% (số đo của tác giả trên cụm của họ)[^mr-44]. Backup task chỉ an toàn nhờ chính cơ chế commit nguyên tử ở trên (suy luận của người soạn): hai bản cùng ghi một tên, chỉ một bản "thắng".
+
+### 3.4 Điểm yếu còn lại
+
+Master chỉ có một. Paper nói khả năng nó hỏng là thấp, nên bản cài đặt hiện tại hủy cả job nếu master chết và để client thử lại nếu muốn[^mr-masterfail]. Ngoài ra, Google SRE ghi nhận pipeline định kỳ rất mong manh khi quy mô tăng[^sre-fragile]. Khi một chunk bị treo và job bị kill để chạy lại, vì pipeline thường không có checkpoint nên công việc trên mọi chunk bị làm lại từ đầu[^sre-restart].
 
 <details><summary>Đi sâu: side-effect, counter, idempotent và liên hệ exactly-once</summary>
 
-- **Side-effect ngoài output chính.** Paper nói MapReduce dựa vào người viết ứng dụng để làm side-effect nguyên tử và idempotent (thường ghi file tạm rồi rename), không hỗ trợ two-phase commit nguyên tử cho nhiều file output của một task; vì vậy task có nhiều output đòi hỏi nhất quán chéo file nên là xác định[^mr-side][^mr-2pc].
+- **Side-effect ngoài output chính.** Paper nói MapReduce dựa vào người viết ứng dụng để làm side-effect nguyên tử và idempotent, thường bằng cách ghi file tạm rồi rename[^mr-side]. MapReduce không hỗ trợ two-phase commit nguyên tử cho nhiều file output của một task. Vì vậy task có nhiều output đòi hỏi nhất quán chéo file nên là xác định[^mr-2pc].
 - **Counter không đếm trùng.** Khi master cộng counter từ các worker, nó loại bỏ ảnh hưởng của các lần thực thi trùng (do backup task hay chạy lại sau lỗi) để tránh đếm đôi[^mr-counters]. Đối chiếu: accumulator của Spark *không* được bảo đảm như vậy khi task bị chạy lại bên trong transformation (mục 7)[^spark-acc].
-- **Idempotence là chìa khóa của retry an toàn.** Bài giảng Cambridge: cập nhật idempotent có thể thử lại an toàn vì làm nhiều lần có cùng hiệu quả như một lần[^cam-idem]. Re-execution của batch là "retry ở mức task" dựa trên đúng tính chất đó; bàn kỹ hơn ở [P12 · Chương 08](08-su-co-he-phan-tan.md) (lỗi từng phần, retry) và [P12 · Chương 12](12-dung-dan-va-tich-hop-du-lieu.md) (exactly-once end-to-end).
+- **Idempotence là chìa khóa của retry an toàn.** Bài giảng Cambridge nói cập nhật idempotent có thể thử lại an toàn vì làm nhiều lần có cùng hiệu quả như một lần[^cam-idem]. Re-execution của batch là "retry ở mức task" dựa trên đúng tính chất đó. Bàn kỹ hơn ở [P12 · Chương 08](08-su-co-he-phan-tan.md) (lỗi từng phần, retry) và [P12 · Chương 12](12-dung-dan-va-tich-hop-du-lieu.md) (exactly-once end-to-end).
 - **Bài học thiết kế.** Tác giả paper kết luận: hạn chế mô hình lập trình làm việc song song hóa và chịu lỗi trở nên dễ, và redundant execution giảm ảnh hưởng của máy chậm hoặc hỏng[^mr-lesson].
 
 </details>
 
-**Quay lại Q3:** batch chịu lỗi bằng chạy lại vì input bất biến, hàm xác định và output chỉ lộ ra khi commit nguyên tử; backup task chạy trùng việc được vì cũng nhờ commit đó.
+**Quay lại Q3:** `daily-report` sống sót qua máy chết nhờ input bất biến, hàm xác định và output chỉ lộ ra khi commit nguyên tử; backup task chạy trùng việc được cũng nhờ commit đó.
 
 ## 4. Distributed filesystem và locality (Q4)
 
-> **Trả lời ngắn.** MapReduce đọc input từ và ghi output vào một hệ thống file phân tán (GFS ở Google, HDFS trong Hadoop) được thiết kế cho file rất lớn, ghi một lần rồi chủ yếu đọc tuần tự và nối thêm[^gfs-assump][^hdfs-wom]. File bị cắt thành khối lớn (64 MB ở GFS, 128 MB là cỡ điển hình của HDFS) và mỗi khối được nhân bản trên nhiều máy[^gfs-chunk][^hdfs-block][^gfs-rep]. Nhờ biết khối nằm ở máy nào, scheduler đẩy *code* tới gần *dữ liệu* thay vì kéo dữ liệu qua mạng[^mr-locality].
+> **Trả lời ngắn.** MapReduce đọc input từ và ghi output vào một hệ thống file phân tán (GFS ở Google, HDFS trong Hadoop). Loại hệ thống file này được thiết kế cho file rất lớn, ghi một lần rồi chủ yếu đọc tuần tự và nối thêm[^gfs-assump]. File bị cắt thành khối lớn, 64 MB ở GFS[^gfs-chunk]. Mỗi khối được nhân bản trên nhiều máy[^gfs-rep]. Nhờ biết khối nằm ở máy nào, scheduler đẩy *code* tới gần *dữ liệu* thay vì kéo dữ liệu qua mạng[^mr-locality].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư viện có rất nhiều cuốn sách dày chia thành các chương; mỗi chương được phô-tô ba bản đặt ở ba kho khác nhau. Một thư ký biết "chương nào ở kho nào". Khi cần phân tích, bạn cử người đến kho đang giữ chương đó thay vì chở chương về một chỗ.
+*Với `daily-report`.* File `clicks` của một ngày nằm ở đâu để job đọc? Không thể là đĩa của một máy: dữ liệu quá lớn, và máy chết thì mất log. Nó nằm trong một DFS. Ở đó file bị cắt thành khối, mỗi khối nhân bản trên vài máy, và scheduler của job biết khối nào ở máy nào. Mục này giải thích DFS giả định gì về dữ liệu, và scheduler dùng thông tin vị trí ra sao để job đỡ tốn mạng.
 
-**Giả định thiết kế.** Paper GFS nêu: hệ thống chứa một lượng vừa phải file lớn (vài triệu file, thường từ 100 MB trở lên, file nhiều GB là chuyện thường)[^gfs-assump]; hầu hết file được thay đổi bằng cách nối thêm dữ liệu mới thay vì ghi đè, ghi ngẫu nhiên gần như không có[^gfs-append]; băng thông duy trì cao quan trọng hơn độ trễ thấp[^gfs-bw]. HDFS (bản mã nguồn mở cùng ý tưởng) nói tương tự: thiết kế cho xử lý batch hơn là tương tác, nhấn mạnh thông lượng cao hơn độ trễ thấp[^hdfs-batch], và cần mô hình truy cập write-once-read-many[^hdfs-wom]. Đó là lý do mô hình "đọc quét cả file → ghi file mới" của mục 2 khớp hệ thống file này (nhận xét của người soạn).
+### 4.1 Giả định thiết kế
 
-**Kiến trúc.** Một cụm GFS gồm một master duy nhất, nhiều chunkserver và nhiều client[^gfs-arch]. Client hỏi master để biết chunkserver nào giữ dữ liệu cần, nhưng mọi truyền dữ liệu đi thẳng tới chunkserver[^gfs-direct]. Mỗi file chia thành chunk 64 MB — lớn hơn nhiều so với block của file system thông thường[^gfs-chunk]. Để bền, mỗi chunk được nhân bản trên nhiều chunkserver, mặc định ba bản[^gfs-rep]. HDFS có cấu trúc tương ứng: NameNode giữ namespace và ghi mọi thay đổi vào EditLog[^hdfs-nn]; file là chuỗi block, block được nhân bản, cỡ block và số bản sao chỉnh được theo từng file[^hdfs-blk-rep]; NameNode liên tục theo dõi block nào thiếu bản và khởi động nhân bản khi cần[^hdfs-rerep]. Vì sao nhân bản nhiều bản? Vì paper GFS coi lỗi thành phần là chuyện thường trong cụm hàng trăm đến hàng nghìn máy làm từ linh kiện rẻ tiền[^gfs-fail] — chủ đề nhân bản được bàn ở [P12 · Chương 05](05-replication.md); việc chia file thành khối rải ra nhiều máy chính là *partitioning* ([P12 · Chương 06](06-partitioning.md)).
+Paper GFS xuất phát từ workload của Google. Hệ thống chứa một lượng vừa phải file lớn, vài triệu file, thường từ 100 MB trở lên, file nhiều GB là chuyện thường[^gfs-assump]. Hầu hết file được thay đổi bằng cách nối thêm dữ liệu mới thay vì ghi đè, và ghi ngẫu nhiên gần như không có[^gfs-append]. Băng thông duy trì cao quan trọng hơn độ trễ thấp[^gfs-bw]. HDFS, bản mã nguồn mở cùng ý tưởng, nói tương tự: nó thiết kế cho xử lý batch hơn là tương tác, nhấn mạnh thông lượng cao hơn độ trễ thấp[^hdfs-batch]. HDFS cũng cần mô hình truy cập write-once-read-many[^hdfs-wom]. Vì vậy mô hình "quét cả file rồi ghi file mới" của mục 2 khớp với hệ thống file này (nhận xét của người soạn).
 
-**Locality.** Băng thông mạng là tài nguyên khan hiếm trong môi trường của paper, nên master MapReduce dùng thông tin vị trí của file input và cố lên lịch map task trên máy đang giữ một bản sao của split tương ứng[^mr-locality]; nếu không được thì chọn máy gần bản sao (cùng switch)[^mr-near]. Khi chạy trên một phần đáng kể worker, phần lớn input được đọc cục bộ và không tốn băng thông mạng[^mr-local-read]. HDFS phát biểu cùng nguyên tắc: chuyển tính toán đến gần dữ liệu thường hiệu quả hơn chuyển dữ liệu đến chỗ chạy ứng dụng, đặc biệt khi dữ liệu rất lớn[^hdfs-move]. Paper Spark cũng đưa ý đó vào giao diện RDD: với RDD của file HDFS, `preferredLocations` trả về các node chứa block[^rdd-hdfs-pref].
+### 4.2 Kiến trúc
+
+Một cụm GFS gồm một master duy nhất, nhiều chunkserver và nhiều client[^gfs-arch]. Client hỏi master để biết chunkserver nào giữ dữ liệu cần, nhưng dữ liệu đi thẳng tới chunkserver chứ không qua master[^gfs-direct]. Mỗi file chia thành chunk 64 MB, lớn hơn nhiều so với block của file system thông thường[^gfs-chunk]. Để bền, mỗi chunk được nhân bản trên nhiều chunkserver, mặc định ba bản[^gfs-rep].
+
+HDFS có cấu trúc tương ứng. NameNode giữ namespace và ghi mọi thay đổi vào EditLog[^hdfs-nn]. File là chuỗi block, block được nhân bản, và cỡ block cùng số bản sao chỉnh được theo từng file[^hdfs-blk-rep]. Cỡ block điển hình là 128 MB[^hdfs-block]. NameNode liên tục theo dõi block nào thiếu bản và khởi động nhân bản khi cần[^hdfs-rerep].
+
+Vì sao phải nhân bản nhiều bản? Vì paper GFS coi lỗi thành phần là chuyện thường trong cụm hàng trăm đến hàng nghìn máy làm từ linh kiện rẻ tiền[^gfs-fail]. Chủ đề nhân bản được bàn ở [P12 · Chương 05](05-replication.md). Còn việc chia file thành khối rải ra nhiều máy chính là *partitioning* ([P12 · Chương 06](06-partitioning.md)).
+
+### 4.3 Locality
+
+Trong môi trường của paper, băng thông mạng là tài nguyên khan hiếm. Vì vậy master MapReduce dùng thông tin vị trí của file input và cố lên lịch map task trên máy đang giữ một bản sao của split tương ứng[^mr-locality]. Nếu không được thì nó chọn máy gần bản sao, cùng switch[^mr-near]. Kết quả là khi job chạy trên một phần đáng kể worker của cụm, phần lớn input được đọc cục bộ và không tốn băng thông mạng[^mr-local-read].
+
+Với `daily-report`, nghĩa là map task đọc block `clicks` ngay trên máy đang giữ block đó, chứ không kéo block qua mạng. HDFS phát biểu cùng nguyên tắc: chuyển tính toán đến gần dữ liệu thường hiệu quả hơn chuyển dữ liệu đến chỗ chạy ứng dụng, đặc biệt khi dữ liệu rất lớn[^hdfs-move]. Paper Spark đưa ý đó vào giao diện RDD: với RDD của file HDFS, `preferredLocations` trả về các node chứa block[^rdd-hdfs-pref].
 
 (Nhận xét của người soạn: ngày nay nhiều hệ thống tách storage khỏi compute và đọc dữ liệu từ object store thay vì đĩa cục bộ; khi đó locality theo nghĩa của paper không còn. Chủ đề tách compute–storage nằm ở [P12 · Chương 13](13-kien-truc-he-du-lieu.md).)
 
 <details><summary>Đi sâu: cách ứng dụng sống với GFS, record append, chọn vị trí bản sao</summary>
 
-- **Ba kỹ thuật của ứng dụng GFS.** Paper nói ứng dụng chịu được mô hình nhất quán nới lỏng bằng vài kỹ thuật đơn giản: nối thêm thay vì ghi đè, checkpoint, và ghi bản ghi tự xác thực/tự định danh[^gfs-apps]. Writer điển hình ghi file từ đầu đến cuối rồi đổi tên nguyên tử sang tên cố định sau khi ghi xong, hoặc định kỳ checkpoint phần đã ghi thành công[^gfs-rename] — cùng mẫu với commit của reduce task ở mục 3.
-- **Record append là at-least-once.** Nhiều writer cùng nối vào một file; ngữ nghĩa "append ít nhất một lần" giữ output của mỗi writer. Reader loại padding/mảnh vỡ bằng checksum trong bản ghi, và nếu không chịu được bản ghi trùng thì lọc bằng định danh duy nhất[^gfs-dups]. Đây là một ví dụ sớm của "at-least-once + dedup" ở [P12 · Chương 12](12-dung-dan-va-tich-hop-du-lieu.md).
-- **Đặt bản sao theo rack.** Với số bản sao là 3, chính sách mặc định của HDFS đặt một bản ở máy ghi (nếu máy đó là datanode) hoặc một datanode ngẫu nhiên cùng rack, một bản ở rack khác và bản cuối ở node khác trong rack xa đó; tài liệu nói chính sách này giảm lưu lượng ghi giữa các rack[^hdfs-place].
-- **Một master có bị nghẽn không?** Paper GFS lập luận một master giữ thiết kế đơn giản[^gfs-single], nhưng phải giảm tối thiểu vai trò của nó trong đọc/ghi để nó không thành nút cổ chai: client không đọc/ghi dữ liệu qua master mà hỏi nó chunkserver nào cần liên lạc rồi tương tác trực tiếp với chunkserver[^gfs-bottleneck][^gfs-direct].
-- **Hệ quả cho object store.** Nhiều pipeline hiện đại ghi ra S3 thay vì HDFS; tài liệu committer của Hadoop cảnh báo `rename` thư mục trên S3 không có tính chất như trên HDFS — xem mục 6.
+- **Ba kỹ thuật của ứng dụng GFS.** Paper nói ứng dụng chịu được mô hình nhất quán nới lỏng bằng vài kỹ thuật đơn giản: nối thêm thay vì ghi đè, checkpoint, và ghi bản ghi tự xác thực hoặc tự định danh[^gfs-apps]. Writer điển hình ghi file từ đầu đến cuối rồi đổi tên nguyên tử sang tên cố định sau khi ghi xong, hoặc định kỳ checkpoint phần đã ghi thành công[^gfs-rename]. Đó cùng mẫu với commit của reduce task ở mục 3.
+- **Record append là at-least-once.** Nhiều writer cùng nối vào một file, và ngữ nghĩa "append ít nhất một lần" giữ output của mỗi writer. Reader loại padding và mảnh vỡ bằng checksum trong bản ghi; nếu không chịu được bản ghi trùng thì lọc bằng định danh duy nhất[^gfs-dups]. Đây là một ví dụ sớm của "at-least-once + dedup" ở [P12 · Chương 12](12-dung-dan-va-tich-hop-du-lieu.md).
+- **Đặt bản sao theo rack.** Với số bản sao là 3, chính sách mặc định của HDFS đặt một bản ở máy ghi (nếu máy đó là datanode) hoặc một datanode ngẫu nhiên cùng rack, một bản ở rack khác, và bản cuối ở node khác trong rack xa đó. Tài liệu nói chính sách này giảm lưu lượng ghi giữa các rack[^hdfs-place].
+- **Một master có bị nghẽn không?** Paper GFS lập luận một master giữ thiết kế đơn giản[^gfs-single]. Nhưng vai trò của nó trong đọc/ghi phải tối thiểu để nó không thành nút cổ chai. Vì vậy client không đọc/ghi dữ liệu qua master mà hỏi nó chunkserver nào cần liên lạc, rồi tương tác trực tiếp với chunkserver[^gfs-bottleneck].
+- **Hệ quả cho object store.** Nhiều pipeline hiện đại ghi ra S3 thay vì HDFS. Tài liệu committer của Hadoop cảnh báo `rename` thư mục trên S3 không có tính chất như trên HDFS; xem mục 6.
 
 </details>
 
-**Quay lại Q4:** DFS cho batch là file khổng lồ ghi một lần, cắt thành khối và nhân bản; biết khối nằm đâu thì scheduler chạy map task tại đó (locality), tiết kiệm băng thông mạng.
+**Quay lại Q4:** DFS cho batch là file khổng lồ ghi một lần, cắt thành khối và nhân bản; biết khối nằm đâu thì scheduler chạy map task của `daily-report` tại đó (locality), tiết kiệm băng thông mạng.
 
 ## 5. Join trong batch: phía reduce, phía map và skew (Q5)
 
-> **Trả lời ngắn.** Join phía reduce (repartition/sort-merge) gắn thẻ nguồn lên mỗi bản ghi, dùng khóa join làm khóa shuffle để mọi bản ghi cùng khóa về một reducer, rồi ghép tại đó[^join-std]. Join phía map không shuffle: khi một bảng đủ nhỏ thì phát (broadcast) nó cho mọi map task dựng hash table trong RAM, hoặc khi hai bảng đã phân mảnh giống nhau thì join từng cặp phân mảnh[^join-bc][^join-pre]. Join thường là chỗ skew (một khóa quá nóng) làm chậm job hoặc tràn bộ nhớ, và engine hiện đại (Spark AQE) tự tách các task lệch trong sort-merge join[^join-skew][^spark-skew].
+> **Trả lời ngắn.** Join phía reduce (repartition/sort-merge) gắn thẻ nguồn lên mỗi bản ghi, dùng khóa join làm khóa shuffle để mọi bản ghi cùng khóa về một reducer, rồi ghép tại đó[^join-std]. Join phía map không shuffle: khi một bảng đủ nhỏ thì phát (broadcast) nó cho mọi map task dựng hash table trong RAM[^join-bc]. Khi hai bảng đã phân mảnh giống nhau từ trước thì join từng cặp phân mảnh[^join-pre]. Join cũng là chỗ skew (một khóa quá nóng) hay làm chậm job hoặc tràn bộ nhớ[^join-skew]. Engine hiện đại như Spark AQE tự tách các task lệch trong sort-merge join[^spark-skew].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn có file *click* (một dòng mỗi lần bấm, chỉ có `user_id`) và bảng *user* (có tên, quốc gia). Muốn đếm click theo quốc gia thì phải gắn `quốc gia` vào từng click — một phép join theo `user_id`.
+*Với `daily-report`.* Muốn đếm click theo quốc gia, mỗi dòng của `clicks` (chỉ có `user_id`) phải được gắn thêm quốc gia lấy từ `users`. Đó là một phép join theo `user_id`. Cả hai phía đều nằm rải trên nhiều máy, nên vấn đề của batch join là đưa những bản ghi cần ghép về cùng một chỗ bằng cách rẻ nhất.
 
-**Vì sao batch hay quét toàn bộ thay vì dùng index?** Blanas et al. nêu lý do khi phân tích log: mọi bản ghi trong một khoảng thời gian thường được phân tích cùng nhau nên quét đơn giản được ưa hơn quét index[^join-scan]; bảng tham chiếu (người dùng, địa điểm…) thường nhỏ hơn nhiều so với log[^join-ref]. Hệ quả: join trong batch là phép *quét cả hai phía*, vấn đề là đưa các bản ghi cần ghép về cùng nơi.
+Vì sao batch hay quét toàn bộ thay vì dùng index? Blanas et al. nêu lý do khi phân tích log: mọi bản ghi trong một khoảng thời gian thường được phân tích cùng nhau, nên quét đơn giản được ưa hơn quét index[^join-scan]. Bảng tham chiếu (người dùng, địa điểm…) cũng thường nhỏ hơn nhiều so với log[^join-ref]. Hệ quả là join trong batch quét cả hai phía.
 
 ### 5.1 Join phía reduce (repartition / sort-merge)
 
-Với hai input L (log) và R (bảng tham chiếu), *standard repartition join* viết được trong một job MapReduce[^join-std]: mỗi map task đọc split của L hoặc R, gắn thẻ bảng nguồn cho bản ghi và phát `(khóa join, bản ghi có thẻ)`; framework partition, sắp xếp, gộp; mọi bản ghi cùng khóa join được gom và đưa tới một reducer[^join-std]. Reducer tách và đệm các bản ghi theo thẻ thành hai tập rồi lấy tích Descartes giữa hai tập[^join-cross]. Paper ví đây giống partitioned sort-merge join của parallel RDBMS[^join-std-name]. (Đây chính xác là shuffle ở mục 2 với khóa join làm khóa.)
+Gọi L là log (`clicks`) và R là bảng tham chiếu (`users`). *Standard repartition join* viết được trong một job MapReduce[^join-std]. Mỗi map task đọc split của L hoặc của R, gắn thẻ bảng nguồn cho bản ghi, rồi phát `(khóa join, bản ghi có thẻ)`. Framework partition, sắp xếp và gộp như thường, nên mọi bản ghi cùng khóa join về cùng một reducer. Đó chính là shuffle ở mục 2 với khóa join làm khóa.
 
-Vấn đề: mọi bản ghi của một khóa join từ cả L lẫn R phải được đệm[^join-buf]; khi số khóa khác nhau ít hoặc dữ liệu lệch nhiều, chúng có thể không vừa bộ nhớ[^join-skew]. Trong thí nghiệm của paper, có trường hợp standard repartition join không chạy xong vì hết bộ nhớ[^join-oom]. *Improved repartition join* sửa bằng cách đổi khóa phát ra thành tổ hợp (khóa join, thẻ bảng) sao cho bản ghi của bảng nhỏ R đứng trước L, partition chỉ theo phần khóa join, và nhóm chỉ theo khóa join; nhờ vậy chỉ cần đệm R còn L được stream[^join-impr]. Cơ chế "khóa tổ hợp + comparator nhóm" chính là secondary sort ở mục 2 (liên hệ của người soạn).
+Reducer tách và đệm các bản ghi theo thẻ thành hai tập, rồi lấy tích Descartes giữa hai tập[^join-cross]. Paper ví cách này giống partitioned sort-merge join của parallel RDBMS[^join-std-name].
+
+Vấn đề là reducer phải đệm mọi bản ghi của một khóa join từ cả L lẫn R[^join-buf]. Khi số khóa khác nhau ít hoặc dữ liệu lệch nhiều, chúng có thể không vừa bộ nhớ[^join-skew]. Trong thí nghiệm của paper có trường hợp standard repartition join không chạy xong vì hết bộ nhớ[^join-oom].
+
+*Improved repartition join* sửa bằng cách đổi khóa phát ra thành tổ hợp (khóa join, thẻ bảng), sao cho bản ghi của bảng nhỏ R đứng trước L. Partition chỉ theo phần khóa join, và nhóm cũng chỉ theo khóa join. Nhờ vậy chỉ cần đệm R, còn L được stream[^join-impr]. Cơ chế "khóa tổ hợp + comparator nhóm" chính là secondary sort ở mục 2 (liên hệ của người soạn).
 
 ### 5.2 Join phía map (không shuffle)
 
-- **Broadcast hash join.** Khi R nhỏ hơn L nhiều, thay vì chuyển cả hai bảng qua mạng, ta phát R: nó tránh sắp xếp cả hai bảng và quan trọng hơn là tránh chuyển bảng lớn L qua mạng[^join-bc]. Job chạy dạng *map-only*: mỗi node lấy toàn bộ R từ DFS, mỗi map task dùng hash table trong bộ nhớ để join một split của L với R[^join-bc-job]. Job map-only bỏ qua pha sort và merge, và output mỗi map task được ghi thẳng thành file riêng trong DFS[^join-maponly]. Kết quả đo: khi R có khoảng 1 triệu bản ghi trở xuống, broadcast join luôn tốt hơn improved repartition join; nhưng khi R lớn dần thì hiệu năng tương đối giảm nhanh[^join-res].
-- **Partitioned (directed) join.** Nếu L và R đã được phân mảnh trước theo khóa join thì chi phí shuffle giảm đi[^join-pre]: lúc truy vấn, các phân mảnh tương ứng của L và R được ghép trực tiếp[^join-direct]. Khác parallel RDBMS, DFS tự quyết định đặt block ở đâu nên không bảo đảm hai phân mảnh tương ứng nằm cùng node; vì vậy phải dùng cách join có hướng: map task đọc phân mảnh Lᵢ và nạp Rᵢ (từ DFS nếu chưa có cục bộ) vào hash table[^join-dfs].
-- **Phía map với đầu vào đã sắp xếp.** Hadoop có map-side join đòi các phân mảnh đầu vào đã được sắp xếp chặt theo khóa join; paper lưu ý cách này đệm mọi bản ghi cùng khóa từ mọi bảng và có thể hết bộ nhớ khi L lệch, còn directed join chỉ đệm phân mảnh của bảng nhỏ[^join-mapside].
+- **Broadcast hash join.** `users` nhỏ hơn `clicks` rất nhiều, nên thay vì chuyển cả hai bảng qua mạng, ta phát `users` đi. Cách này tránh sắp xếp cả hai bảng và quan trọng hơn là tránh chuyển bảng lớn L qua mạng[^join-bc]. Job chạy dạng *map-only*: mỗi node lấy toàn bộ R từ DFS, và mỗi map task dùng một hash table trong bộ nhớ để join một split của L với R[^join-bc-job]. Job map-only bỏ qua pha sort và merge, và output mỗi map task được ghi thẳng thành file riêng trong DFS[^join-maponly]. Kết quả đo: khi R có khoảng 1 triệu bản ghi trở xuống, broadcast join luôn tốt hơn improved repartition join, nhưng khi R lớn dần thì hiệu năng tương đối giảm nhanh[^join-res].
+- **Partitioned (directed) join.** Nếu L và R đã được phân mảnh trước theo khóa join thì chi phí shuffle giảm đi[^join-pre]. Lúc truy vấn, các phân mảnh tương ứng của L và R được ghép trực tiếp[^join-direct]. Khác parallel RDBMS, DFS tự quyết định đặt block ở đâu nên không bảo đảm hai phân mảnh tương ứng nằm cùng node. Vì vậy phải dùng cách join có hướng: map task đọc phân mảnh Lᵢ và nạp Rᵢ (từ DFS nếu chưa có cục bộ) vào hash table[^join-dfs].
+- **Phía map với đầu vào đã sắp xếp.** Hadoop có map-side join đòi các phân mảnh đầu vào đã được sắp xếp chặt theo khóa join. Paper lưu ý cách này đệm mọi bản ghi cùng khóa từ mọi bảng và có thể hết bộ nhớ khi L lệch, còn directed join chỉ đệm phân mảnh của bảng nhỏ[^join-mapside].
 
 | Chiến lược | Shuffle? | Điều kiện | Rủi ro chính |
 |---|---|---|---|
@@ -228,61 +270,87 @@ Vấn đề: mọi bản ghi của một khóa join từ cả L lẫn R phải �
 
 ### 5.3 Skew
 
-Skew (lệch) là khi một số khóa (hot key) chiếm phần lớn dữ liệu. Với shuffle, mọi bản ghi cùng khóa đi về *một* reducer, nên reducer đó thành nút cổ chai (nhận xét của người soạn, hệ quả trực tiếp của cơ chế mục 2). SRE Google mô tả cùng hiện tượng ở mức pipeline: khi workload phân theo khách hàng thì chunk của vài khách có thể lớn hơn nhiều, và vì khách hàng là đơn vị không chia nhỏ được nên thời gian chạy tổng bị chặn bởi khách hàng lớn nhất[^sre-skew]. Về công cụ, Spark AQE (bật mặc định từ 3.2.0) dùng thống kê lúc chạy để chọn kế hoạch tốt hơn, trong đó có chuyển sort-merge join thành broadcast hash join và tối ưu skew join[^spark-aqe][^spark-aqe-bc]; với sort-merge join, skew join xử lý bằng cách tách (và nhân bản nếu cần) các task lệch thành các task cỡ gần bằng nhau[^spark-skew]. Spark còn cho gợi ý chiến lược join (`BROADCAST`, `MERGE`, `SHUFFLE_HASH`, `SHUFFLE_REPLICATE_NL`)[^spark-hint] và ngưỡng kích thước bảng được tự động broadcast[^spark-bc-thr]. Về gốc rễ phân mảnh theo khóa và hot key xem [P12 · Chương 06](06-partitioning.md).
+Skew (lệch) là khi một số khóa (hot key) chiếm phần lớn dữ liệu. Với shuffle, mọi bản ghi cùng khóa đi về *một* reducer, nên reducer đó thành nút cổ chai (nhận xét của người soạn, hệ quả trực tiếp của cơ chế ở mục 2). Trong `daily-report`, một người dùng bot sinh hàng triệu click sẽ đẩy cả khối việc về một reducer.
+
+SRE Google mô tả cùng hiện tượng ở mức pipeline. Khi workload phân theo khách hàng, chunk của vài khách có thể lớn hơn nhiều; vì khách hàng là đơn vị không chia nhỏ được nên thời gian chạy tổng bị chặn bởi khách hàng lớn nhất[^sre-skew].
+
+Về công cụ, Spark AQE (bật mặc định từ 3.2.0) dùng thống kê lúc chạy để chọn kế hoạch tốt hơn. Nó có thể chuyển sort-merge join thành broadcast hash join và tối ưu skew join[^spark-aqe]. Với sort-merge join, skew join xử lý bằng cách tách (và nhân bản nếu cần) các task lệch thành các task cỡ gần bằng nhau[^spark-skew]. Spark còn cho gợi ý chiến lược join (`BROADCAST`, `MERGE`, `SHUFFLE_HASH`, `SHUFFLE_REPLICATE_NL`)[^spark-hint]. Nó cũng có ngưỡng kích thước bảng được tự động broadcast[^spark-bc-thr]. Về gốc rễ phân mảnh theo khóa và hot key, xem [P12 · Chương 06](06-partitioning.md).
 
 <details><summary>Đi sâu: semi-join, so sánh Hadoop với Spark, giới hạn của thí nghiệm</summary>
 
-- Paper Blanas còn mô tả *semi-join* khi R lớn nhưng phần được tham chiếu bởi log thì nhỏ (ví dụ bảng user hàng trăm triệu dòng nhưng log một giờ chỉ chứa vài triệu user duy nhất) — mục đích là không chuyển và nạp những bản ghi R vô ích[^join-semi].
-- Tất cả số đo ở đây từ thí nghiệm trên **cụm Hadoop 100 node** năm 2010[^join-abs]; thứ tự tương đối giữa các thuật toán chịu ảnh hưởng của cài đặt Hadoop và phần cứng thời đó (nhận xét của người soạn).
-- Spark gọi cùng khái niệm bằng tên khác: tham số `spark.sql.autoBroadcastJoinThreshold` là kích thước tối đa của bảng được broadcast tới mọi worker khi join[^spark-bc-thr]; AQE có thể chuyển sort-merge join thành broadcast hash join khi thống kê thời gian chạy cho thấy một phía đủ nhỏ, tiết kiệm việc sắp xếp hai phía[^spark-aqe-bc].
+- Paper Blanas còn mô tả *semi-join* cho trường hợp R lớn nhưng phần được log tham chiếu thì nhỏ. Ví dụ bảng user hàng trăm triệu dòng nhưng log một giờ chỉ chứa vài triệu user duy nhất. Mục đích là không chuyển và nạp những bản ghi R vô ích[^join-semi].
+- Tất cả số đo ở đây từ thí nghiệm trên **cụm Hadoop 100 node** năm 2010[^join-abs]. Thứ tự tương đối giữa các thuật toán chịu ảnh hưởng của cài đặt Hadoop và phần cứng thời đó (nhận xét của người soạn).
+- Spark gọi cùng khái niệm bằng tên khác. Tham số `spark.sql.autoBroadcastJoinThreshold` là kích thước tối đa của bảng được broadcast tới mọi worker khi join[^spark-bc-thr]. AQE có thể chuyển sort-merge join thành broadcast hash join khi thống kê thời gian chạy cho thấy một phía đủ nhỏ, tiết kiệm việc sắp xếp hai phía[^spark-aqe-bc].
 
 </details>
 
-**Quay lại Q5:** reduce-side join dùng chính shuffle để đưa bản ghi cùng khóa về một chỗ (đắt, dễ lệch); map-side join tránh shuffle bằng broadcast hoặc dữ liệu đã phân mảnh sẵn (rẻ nhưng cần điều kiện); skew là kẻ thù chung.
+**Quay lại Q5:** để gắn quốc gia vào `clicks`, reduce-side join dùng chính shuffle để đưa bản ghi cùng `user_id` về một chỗ (đắt, dễ lệch); map-side join tránh shuffle bằng broadcast `users` hoặc dữ liệu đã phân mảnh sẵn (rẻ nhưng cần điều kiện); skew là kẻ thù chung.
 
 ## 6. Output của batch: ghi ở đâu, commit và chạy lại thế nào (Q6)
 
-> **Trả lời ngắn.** Output của một job batch là *file mới* trong DFS, không phải cập nhật từng dòng vào một database đang phục vụ — mỗi reduce task ghi một file output[^mr-step6][^mr-outfiles]. An toàn đến từ việc ghi vào chỗ tạm rồi commit bằng `rename` — cơ chế dùng với HDFS, vì rename thư mục ở đó nguyên tử; trên S3 thì *không* an toàn như vậy[^s3a-commit][^s3a-rename-def][^s3a-rename]. Vì input bất biến và output chỉ lộ ra sau commit, job lỗi thì chạy lại; muốn nạp kết quả vào kho khóa/giá trị thì dựng sẵn file SST offline rồi ingest nguyên khối[^sst-create][^sst-ingest].
+> **Trả lời ngắn.** Output của một job batch là *file mới* trong DFS, không phải cập nhật từng dòng vào một database đang phục vụ: mỗi reduce task ghi một file output[^mr-step6]. Việc ghi an toàn dựa vào ghi vào chỗ tạm rồi commit bằng `rename`. Cơ chế này dùng được với HDFS vì rename thư mục ở đó nguyên tử[^s3a-commit]. Trên S3 thì *không* an toàn như vậy[^s3a-rename]. Vì input bất biến và output chỉ lộ ra sau commit, job lỗi thì chạy lại. Muốn nạp kết quả vào một kho khóa/giá trị thì dựng sẵn file SST offline rồi ingest nguyên khối[^sst-create].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhà xuất bản không sửa từng trang của cuốn sách đang bán; họ in một ấn bản mới hoàn chỉnh ở xưởng, kiểm tra xong mới thay lên kệ. Nếu in hỏng, bỏ cả lô, in lại — kệ sách chưa bao giờ bị động đến.
+*Với `daily-report`.* Báo cáo xong thì phải tới tay người dùng: dashboard của shop đọc nó, và có thể `shop-api` tra nó theo khóa. Cám dỗ đầu tiên là để mỗi reduce task ghi thẳng từng dòng vào database đang phục vụ. Mục này giải thích vì sao batch không làm vậy, mà ghi file mới, commit cả cụm một lần và nạp nguyên khối.
 
-**Output là file mới.** Mỗi reduce task nối kết quả vào file output của partition mình[^mr-step6]; job kết thúc với R file, thường dùng làm input cho job kế tiếp[^mr-outfiles]. Vì reduce task có thể chạy lại hay chạy trùng (mục 3), việc "ghi trực tiếp ra hệ ngoài" từ trong task là nguy hiểm: paper nói thẳng rằng MapReduce dựa vào người viết ứng dụng để biến side-effect thành nguyên tử và idempotent, và không hỗ trợ commit nguyên tử nhiều file của một task[^mr-side][^mr-2pc]. Hệ quả thiết kế (nhận xét của người soạn): giữ task thuần túy, chỉ cho nó ghi file tạm của chính nó, và để *framework* thực hiện bước commit.
+### 6.1 Output là file mới
 
-**Commit bằng rename trên HDFS.** Tài liệu committer của Hadoop mô tả: với HDFS và các hệ thống file tương tự, `rename()` thư mục là cơ chế dùng để commit công việc của task và job[^s3a-commit]. Task ghi vào thư mục task-attempt dưới `_temporary` của thư mục đích[^s3a-tmp]. Tutorial MapReduce của Hadoop nói thêm: khi task-attempt thành công, nội dung được "nâng" lên thư mục output; còn thư mục của attempt thất bại bị framework bỏ, hoàn toàn trong suốt với ứng dụng[^hadoop-temp]. Sau khi commit job, mọi kết quả phải hiển thị, và có thể có file `_SUCCESS` được ghi vào thư mục output[^s3a-success] (nhận xét của người soạn: file marker này là cách để job sau biết "output đã trọn vẹn").
+Mỗi reduce task nối kết quả vào file output của partition mình[^mr-step6]. Job kết thúc với R file, thường dùng làm input cho job kế tiếp[^mr-outfiles]. Reduce task có thể chạy lại hay chạy trùng (mục 3), nên để task ghi thẳng ra hệ ngoài là nguy hiểm. Paper nói thẳng rằng MapReduce dựa vào người viết ứng dụng để biến side-effect thành nguyên tử và idempotent[^mr-side]. Nó cũng không hỗ trợ commit nguyên tử nhiều file của một task[^mr-2pc]. Hệ quả thiết kế (nhận xét của người soạn): giữ task thuần túy, chỉ cho nó ghi file tạm của chính nó, và để *framework* thực hiện bước commit.
 
-**Vì sao S3 khác?** Cách commit bằng rename đòi filesystem bên dưới thỏa vài yêu cầu, trong đó rename thư mục là giao dịch O(1) nguyên tử: nếu rename lỗi thì dữ liệu hoặc ở chỗ cũ hoặc ở chỗ mới, và không tiến trình nào khác trong cụm được rename vào cùng đường dẫn[^s3a-rename-def]; tài liệu mô tả đây là cơ chế dùng cho HDFS và các hệ thống tương tự[^s3a-commit]. Tài liệu nói S3A *không* thỏa các yêu cầu đó: dù S3 nay đã nhất quán, client S3A vẫn mô phỏng `rename` bằng sao chép file rồi xóa bản gốc, có thể hỏng giữa chừng và không có gì ngăn tiến trình khác rename cùng lúc[^s3a-rename]; do đó cần committer riêng cho S3[^s3a-need]. Đây là một ví dụ rõ về việc "bảo đảm nguyên tử của filesystem" là *điều kiện* của thiết kế commit, không phải thứ mặc định (nhận xét của người soạn).
+### 6.2 Commit bằng rename trên HDFS
 
-**Chạy lại và idempotent.** Bài giảng Cambridge: một cập nhật idempotent có thể thử lại an toàn vì kết quả của nhiều lần như một lần[^cam-idem]. Pipeline batch thường đạt điều này bằng cách *thay thế* cả output (ghi ra thư mục mới rồi commit) thay vì cộng dồn (nhận xét của người soạn). Điều này cũng giải thích vì sao khi bug được sửa trong code, ta chạy lại job trên input cũ để có output đúng (nhận xét của người soạn). Cái giá: SRE ghi nhận pipeline định kỳ không có checkpoint sẽ làm lại mọi việc từ đầu khi chunk bị treo rồi job bị kill[^sre-restart]; và nếu rút chu kỳ chạy xuống dưới giới hạn sàn của pipeline thì các lần chạy xếp chồng trên scheduler, hoặc lần chạy gần xong bị kill khi lần kế tiếp bắt đầu[^sre-interval].
+Tài liệu committer của Hadoop mô tả rằng với HDFS và các hệ thống file tương tự, `rename()` thư mục là cơ chế dùng để commit công việc của task và job[^s3a-commit]. Task ghi vào thư mục task-attempt dưới `_temporary` của thư mục đích[^s3a-tmp]. Tutorial MapReduce của Hadoop nói thêm: khi task-attempt thành công, nội dung được "nâng" lên thư mục output; thư mục của attempt thất bại bị framework bỏ, hoàn toàn trong suốt với ứng dụng[^hadoop-temp]. Sau khi commit job, mọi kết quả phải hiển thị, và có thể có file `_SUCCESS` được ghi vào thư mục output[^s3a-success]. File marker này là cách để job sau biết "output đã trọn vẹn" (nhận xét của người soạn).
 
-**Nạp kết quả vào kho khóa/giá trị.** Đẩy từng bản ghi qua mạng vào một database đang phục vụ là chậm và khiến output trộn lẫn nửa chừng (nhận xét của người soạn). Cách thay thế: dựng sẵn file dữ liệu theo định dạng của kho, rồi nạp nguyên khối. RocksDB cho phép tạo file SST offline và ingest sau — hữu ích khi cần nạp dữ liệu nhanh mà việc tạo dữ liệu có thể làm offline[^sst-create]; các khóa phải được chèn theo thứ tự tăng chặt[^sst-order]; `DB::IngestExternalFiles()` nạp file cho nhiều column family theo tính chất all-or-nothing[^sst-allornothing]. Cơ chế SST/LSM nằm ở [P12 · Chương 03](03-storage-engine.md).
+### 6.3 Vì sao S3 khác
+
+Cách commit bằng rename đòi filesystem bên dưới thỏa vài yêu cầu, trong đó rename thư mục phải là giao dịch O(1) nguyên tử. Nếu rename lỗi thì dữ liệu hoặc ở chỗ cũ hoặc ở chỗ mới, và không tiến trình nào khác trong cụm được rename vào cùng đường dẫn[^s3a-rename-def]. Tài liệu nói S3A *không* thỏa các yêu cầu đó. Dù S3 nay đã nhất quán, client S3A vẫn mô phỏng `rename` bằng sao chép file rồi xóa bản gốc, có thể hỏng giữa chừng, và không có gì ngăn tiến trình khác rename cùng lúc[^s3a-rename]. Do đó cần một committer riêng cho S3[^s3a-need]. Đây là ví dụ rõ rằng "bảo đảm nguyên tử của filesystem" là *điều kiện* của thiết kế commit, không phải thứ mặc định (nhận xét của người soạn). Nếu `daily-report` ghi ra S3, nó phải dùng committer đó chứ không dựa vào `rename`.
+
+### 6.4 Chạy lại và idempotent
+
+Bài giảng Cambridge nói một cập nhật idempotent có thể thử lại an toàn vì kết quả của nhiều lần như một lần[^cam-idem]. Pipeline batch thường đạt điều đó bằng cách *thay thế* cả output (ghi ra thư mục mới rồi commit) thay vì cộng dồn (nhận xét của người soạn). Cũng vì thế, khi sửa bug trong code, ta chạy lại job trên input cũ để có output đúng (nhận xét của người soạn).
+
+Cái giá cũng đã rõ. SRE ghi nhận pipeline định kỳ không có checkpoint sẽ làm lại mọi việc từ đầu khi chunk bị treo rồi job bị kill[^sre-restart]. Nếu rút chu kỳ chạy xuống dưới giới hạn sàn của pipeline thì các lần chạy xếp chồng trên scheduler, hoặc lần chạy gần xong bị kill khi lần kế tiếp bắt đầu[^sre-interval].
+
+### 6.5 Nạp kết quả vào kho khóa/giá trị
+
+Đẩy từng bản ghi qua mạng vào một database đang phục vụ là chậm, và khiến người đọc thấy output trộn lẫn nửa chừng (nhận xét của người soạn). Cách thay thế là dựng sẵn file dữ liệu theo định dạng của kho rồi nạp nguyên khối. RocksDB cho phép tạo file SST offline và ingest sau, hữu ích khi cần nạp dữ liệu nhanh mà việc tạo dữ liệu làm offline được[^sst-create]. Các khóa trong file phải được chèn theo thứ tự tăng chặt[^sst-order]. Việc nạp chỉ cần gọi `DB::IngestExternalFile()` với đường dẫn file[^sst-ingest]. Với nhiều column family, `DB::IngestExternalFiles()` nạp theo tính chất all-or-nothing[^sst-allornothing]. Cơ chế SST/LSM nằm ở [P12 · Chương 03](03-storage-engine.md).
 
 <details><summary>Đi sâu: committer v1/v2 của Hadoop, và chuyện định dạng file</summary>
 
-- **v1 và v2.** Khi task commit, file được rename sang thư mục đích (thuật toán v2) hoặc sang thư mục job-attempt dưới `_temporary` (v1); khi job commit, v2 chỉ tạo `_SUCCESS` và xóa `_temporary`, còn v1 rename mọi output của các task đã commit vào thư mục đích[^s3a-v1v2]. (Đó là mô tả cách hoạt động; tài liệu cũng cảnh báo thuật toán này không an toàn hay nhanh với S3[^s3a-nosafe].)
-- **Task bị cô lập.** Task/job đo khoảng thời gian giữa các liên lạc với Application Master/YARN và khi quá lâu phải kết luận mạng bị chia cắt và hủy công việc của mình[^s3a-partition] — cùng loại vấn đề "không biết đối phương còn sống không" ở [P12 · Chương 08](08-su-co-he-phan-tan.md).
-- **Định dạng file** đầu vào/đầu ra (Avro, Parquet…) và việc tiến hóa schema giữa các lần chạy: xem [P12 · Chương 04](04-encoding-va-tien-hoa-schema.md); kiến trúc warehouse/lake và ETL xem [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
+- **v1 và v2.** Khi task commit, file được rename sang thư mục đích (thuật toán v2) hoặc sang thư mục job-attempt dưới `_temporary` (v1). Khi job commit, v2 chỉ tạo `_SUCCESS` và xóa `_temporary`, còn v1 rename mọi output của các task đã commit vào thư mục đích[^s3a-v1v2]. Đó là mô tả cách hoạt động; tài liệu cũng cảnh báo thuật toán này không an toàn hay nhanh với S3[^s3a-nosafe].
+- **Task bị cô lập.** Task/job đo khoảng thời gian giữa các liên lạc với Application Master/YARN. Khi khoảng đó quá lâu, chúng phải kết luận mạng bị chia cắt và hủy công việc của mình[^s3a-partition]. Đây cùng loại vấn đề "không biết đối phương còn sống không" ở [P12 · Chương 08](08-su-co-he-phan-tan.md).
+- **Định dạng file** đầu vào/đầu ra (Avro, Parquet…) và việc tiến hóa schema giữa các lần chạy: xem [P12 · Chương 04](04-encoding-va-tien-hoa-schema.md). Kiến trúc warehouse/lake và ETL xem [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
 
 </details>
 
-**Quay lại Q6:** batch ghi output thành file mới ở chỗ tạm rồi commit bằng rename nguyên tử; vì input bất biến nên lỗi thì chạy lại, và kết quả muốn vào database thì nạp nguyên khối (ví dụ ingest SST) thay vì ghi từng dòng.
+**Quay lại Q6:** `daily-report` ghi báo cáo thành file mới ở chỗ tạm rồi commit bằng rename nguyên tử; vì input bất biến nên lỗi thì chạy lại, và kết quả muốn vào database thì nạp nguyên khối (ví dụ ingest SST) thay vì ghi từng dòng.
 
 ## 7. Dataflow engine: Spark RDD, lineage, narrow/wide, stage (Q7)
 
-> **Trả lời ngắn.** MapReduce buộc mỗi bước ghi kết quả ra DFS (nhân bản, I/O đĩa, tuần tự hóa) trước khi bước sau đọc — tốn nhất khi nhiều job nối nhau hoặc lặp[^rdd-motiv]. Dataflow engine như Spark coi cả chương trình là một đồ thị phép biến đổi; RDD là tập bản ghi chỉ-đọc được chia thành partition, chỉ tạo bằng phép biến đổi xác định từ dữ liệu bền hoặc từ RDD khác[^rdd-def]. Chịu lỗi nhờ ghi lại *lineage* (chuỗi phép biến đổi) thay vì ghi dữ liệu, mất partition nào thì tính lại partition đó[^rdd-lineage].
+> **Trả lời ngắn.** MapReduce buộc mỗi bước ghi kết quả ra DFS (nhân bản, I/O đĩa, tuần tự hóa) trước khi bước sau đọc, và chi phí đó nặng nhất khi nhiều job nối nhau hoặc lặp[^rdd-motiv]. Dataflow engine như Spark coi cả chương trình là một đồ thị phép biến đổi. RDD là tập bản ghi chỉ-đọc chia thành partition, chỉ tạo bằng phép biến đổi xác định từ dữ liệu bền hoặc từ RDD khác[^rdd-def]. Chịu lỗi nhờ ghi lại *lineage* (chuỗi phép biến đổi) thay vì ghi dữ liệu: mất partition nào thì tính lại partition đó[^rdd-lineage].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): MapReduce như dây chuyền mà sau *mỗi* trạm công nhân phải nhập bán thành phẩm vào kho trung tâm có ba bản sao rồi trạm sau mới đến lấy. Dataflow engine nối các trạm trực tiếp và chỉ ghi lại *công thức* — lỡ rơi mất một thùng thì làm lại thùng đó theo công thức.
+*Với `daily-report`.* Giả sử báo cáo lớn dần: lọc bot, join với `users`, đếm, rồi xếp hạng. Làm bằng MapReduce thì đó là một chuỗi job, và giữa hai job kết quả trung gian phải ghi ra DFS với đủ ba bản sao rồi job sau mới đọc lại. Dataflow engine hỏi một câu khác: nếu nối thẳng các bước, và chỉ nhớ *công thức* để tính lại khi mất dữ liệu thì sao?
 
-**Động cơ.** Paper Spark chỉ ra: trong các framework hiện hành, cách duy nhất để dùng lại dữ liệu giữa hai tính toán (ví dụ hai job MapReduce) là ghi nó ra hệ lưu trữ ngoài bền như DFS, kéo theo chi phí nhân bản dữ liệu và I/O đĩa lớn[^rdd-motiv]. Các ứng dụng dùng lại kết quả trung gian nhiều lần gồm thuật toán lặp (PageRank, K-means, hồi quy logistic) và khai phá dữ liệu tương tác[^rdd-reuse].
+### 7.1 Động cơ
 
-**RDD.** Một RDD là tập bản ghi chỉ-đọc, được chia partition; chỉ tạo được bằng phép biến đổi xác định từ dữ liệu trong stable storage hoặc từ RDD khác[^rdd-def]. Các thao tác như `map`, `filter`, `join` gọi là *transformation*; thao tác như `count`, `collect`, `save` là *action*[^rdd-actions]. Spark tính RDD **lười**: chỉ khi một action dùng đến, nhờ đó có thể pipeline các transformation[^rdd-lazy]. Người dùng có thể `persist` RDD cần dùng lại; mặc định Spark giữ trong bộ nhớ và có thể tràn ra đĩa nếu thiếu RAM[^rdd-persist].
+Paper Spark chỉ ra rằng trong các framework hiện hành, cách duy nhất để dùng lại dữ liệu giữa hai tính toán (ví dụ hai job MapReduce) là ghi nó ra hệ lưu trữ ngoài bền như DFS. Việc đó kéo theo chi phí nhân bản dữ liệu và I/O đĩa lớn[^rdd-motiv]. Các ứng dụng dùng lại kết quả trung gian nhiều lần gồm thuật toán lặp (PageRank, K-means, hồi quy logistic) và khai phá dữ liệu tương tác[^rdd-reuse].
 
-**Lineage thay cho nhân bản.** RDD cung cấp giao diện dựa trên transformation thô (coarse-grained) áp cùng một thao tác lên nhiều phần tử; nhờ đó chịu lỗi bằng cách ghi lại các transformation đã dùng (lineage) thay vì dữ liệu thật[^rdd-lineage]. Khi một node hỏng, chỉ phần partition bị mất cần tính lại, và có thể tính song song trên nhiều node, không phải rollback cả chương trình[^rdd-recompute-par]. Nhờ RDD bất biến, hệ thống còn chạy backup task cho node chậm như MapReduce[^rdd-straggler].
+### 7.2 RDD
 
-**Narrow và wide dependency; stage.** Paper phân loại phụ thuộc giữa RDD thành hai loại: *narrow* (mỗi partition cha dùng bởi nhiều nhất một partition con) và *wide* (nhiều partition con có thể phụ thuộc vào cùng partition cha)[^rdd-dep]. Narrow cho phép chạy pipeline trên một node: ví dụ `map` rồi `filter` theo từng phần tử[^rdd-narrow-pipe]. Wide đòi dữ liệu từ mọi partition cha và phải shuffle[^rdd-wide-shuffle]. Scheduler cắt chương trình thành các *stage*: mỗi stage chứa nhiều nhất có thể các transformation narrow được pipeline; ranh giới stage là các phép shuffle của wide dependency[^rdd-stage]. Cho shuffle, Spark vật chất hóa bản ghi trung gian trên node giữ partition cha để đơn giản hóa phục hồi — giống cách MapReduce vật chất hóa map output[^rdd-shuffle-mat].
+Một RDD là tập bản ghi chỉ-đọc, chia partition, và chỉ tạo được bằng phép biến đổi xác định từ dữ liệu trong stable storage hoặc từ RDD khác[^rdd-def]. Các thao tác như `map`, `filter`, `join` gọi là *transformation*; thao tác như `count`, `collect`, `save` là *action*[^rdd-actions]. Spark tính RDD **lười**: chỉ khi một action dùng đến mới tính, nhờ đó pipeline được các transformation[^rdd-lazy]. Người dùng có thể `persist` RDD cần dùng lại; mặc định Spark giữ trong bộ nhớ và có thể tràn ra đĩa nếu thiếu RAM[^rdd-persist].
+
+### 7.3 Lineage thay cho nhân bản
+
+RDD cung cấp giao diện dựa trên transformation thô (coarse-grained), áp cùng một thao tác lên nhiều phần tử. Nhờ vậy chịu lỗi được bằng cách ghi lại các transformation đã dùng (lineage) thay vì dữ liệu thật[^rdd-lineage]. Khi một node hỏng, chỉ phần partition bị mất cần tính lại, và có thể tính song song trên nhiều node, không phải rollback cả chương trình[^rdd-recompute-par]. RDD bất biến nên hệ thống còn chạy được backup task cho node chậm như MapReduce[^rdd-straggler].
+
+### 7.4 Narrow và wide dependency; stage
+
+Paper phân loại phụ thuộc giữa RDD thành hai loại: *narrow* (mỗi partition cha dùng bởi nhiều nhất một partition con) và *wide* (nhiều partition con có thể phụ thuộc vào cùng partition cha)[^rdd-dep]. Narrow cho phép chạy pipeline trên một node, ví dụ `map` rồi `filter` theo từng phần tử[^rdd-narrow-pipe]. Wide đòi dữ liệu từ mọi partition cha và phải shuffle[^rdd-wide-shuffle]. Trong `daily-report`, "lọc bot" là narrow, còn "đếm theo URL" là wide.
+
+Scheduler cắt chương trình thành các *stage*: mỗi stage chứa nhiều nhất có thể các transformation narrow được pipeline, và ranh giới stage là các phép shuffle của wide dependency[^rdd-stage]. Cho shuffle, Spark vật chất hóa bản ghi trung gian trên node giữ partition cha để đơn giản hóa phục hồi, giống cách MapReduce vật chất hóa map output[^rdd-shuffle-mat].
 
 ```mermaid
 flowchart LR
@@ -301,9 +369,15 @@ flowchart LR
 
 (Minh họa của người soạn theo định nghĩa trên: ranh giới stage nằm ở phép shuffle.)
 
-**Phục hồi: narrow rẻ, wide đắt.** Khi node hỏng, với narrow dependency chỉ phải tính lại các partition cha bị mất, song song trên nhiều node; với lineage chứa wide dependency, một node hỏng có thể làm mất một partition của *mọi* tổ tiên, buộc tính lại hoàn toàn[^rdd-wide-recovery]. Vì thế paper gợi ý checkpoint RDD có lineage dài với wide dependency[^rdd-ckpt]. Khi task thất bại, Spark chạy lại nó ở node khác miễn là các stage cha còn khả dụng; nếu output phía map của một shuffle bị mất thì nộp lại các task tính các partition thiếu, song song[^rdd-resubmit]. Docs Spark ghi thêm: Spark tự lưu một phần dữ liệu trung gian của shuffle để khỏi tính lại toàn bộ input nếu node hỏng giữa lúc shuffle[^spark-autopersist].
+### 7.5 Phục hồi: narrow rẻ, wide đắt
 
-**Shuffle trong Spark.** Docs: shuffle là cơ chế phân phối lại dữ liệu để nhóm khác đi giữa các partition, thường kéo theo sao chép dữ liệu qua các executor và máy, nên phức tạp và tốn kém[^spark-shuffle]. Tên "map task"/"reduce task" trong shuffle xuất phát từ MapReduce, không liên quan trực tiếp đến phép `map`/`reduce` của Spark[^spark-nomen]. Bên trong, kết quả của từng map task được giữ trong bộ nhớ đến khi hết chỗ, rồi sắp xếp theo partition đích và ghi vào một file; phía reduce đọc các block đã sắp xếp tương ứng[^spark-shuffle-impl]. Khác MapReduce, Spark *không* bảo đảm thứ tự phần tử trong partition sau shuffle (muốn có thì dùng `sortBy`, `repartitionAndSortWithinPartitions`, …)[^spark-order].
+Khi node hỏng, với narrow dependency chỉ phải tính lại các partition cha bị mất, song song trên nhiều node. Với lineage chứa wide dependency, một node hỏng có thể làm mất một partition của *mọi* tổ tiên, buộc tính lại hoàn toàn[^rdd-wide-recovery]. Vì thế paper gợi ý checkpoint RDD có lineage dài với wide dependency[^rdd-ckpt].
+
+Khi task thất bại, Spark chạy lại nó ở node khác miễn là các stage cha còn khả dụng. Nếu output phía map của một shuffle bị mất thì nó nộp lại các task tính các partition thiếu, song song[^rdd-resubmit]. Docs Spark ghi thêm rằng Spark tự lưu một phần dữ liệu trung gian của shuffle, để khỏi tính lại toàn bộ input nếu node hỏng giữa lúc shuffle[^spark-autopersist].
+
+### 7.6 Shuffle trong Spark
+
+Docs định nghĩa shuffle là cơ chế phân phối lại dữ liệu để nhóm khác đi giữa các partition. Nó thường kéo theo sao chép dữ liệu qua các executor và máy, nên phức tạp và tốn kém[^spark-shuffle]. Tên "map task"/"reduce task" trong shuffle xuất phát từ MapReduce, không liên quan trực tiếp đến phép `map`/`reduce` của Spark[^spark-nomen]. Bên trong, kết quả của từng map task được giữ trong bộ nhớ đến khi hết chỗ, rồi sắp xếp theo partition đích và ghi vào một file. Phía reduce đọc các block đã sắp xếp tương ứng[^spark-shuffle-impl]. Khác MapReduce, Spark *không* bảo đảm thứ tự phần tử trong partition sau shuffle; muốn có thì dùng `sortBy`, `repartitionAndSortWithinPartitions`, …[^spark-order]
 
 | | MapReduce (paper OSDI'04) | Spark RDD (paper NSDI'12) |
 |---|---|---|
@@ -316,27 +390,29 @@ flowchart LR
 
 <details><summary>Đi sâu: giao diện RDD, accumulator, và con số "nhanh gấp 20 lần"</summary>
 
-- **Năm thông tin của một RDD.** Giao diện chung gồm: tập partition, các dependency vào RDD cha, hàm tính dataset từ cha, và metadata về cách phân mảnh cùng vị trí đặt dữ liệu[^rdd-iface] (nhận xét của người soạn: paper nói "five pieces of information" nhưng chỉ liệt kê bốn mệnh đề, mệnh đề cuối gộp hai ý — cách phân mảnh và vị trí dữ liệu). Ví dụ RDD của file HDFS có một partition cho mỗi block và biết block nằm trên máy nào[^rdd-hdfs-pref]. Join hai RDD có thể là hai narrow dependency (nếu cùng partitioner), hai wide dependency hoặc lẫn lộn[^rdd-join].
+- **Năm thông tin của một RDD.** Giao diện chung gồm: tập partition, các dependency vào RDD cha, hàm tính dataset từ cha, và metadata về cách phân mảnh cùng vị trí đặt dữ liệu[^rdd-iface]. Paper nói "five pieces of information" nhưng chỉ liệt kê bốn mệnh đề, mệnh đề cuối gộp hai ý: cách phân mảnh và vị trí dữ liệu (nhận xét của người soạn). Ví dụ RDD của file HDFS có một partition cho mỗi block và biết block nằm trên máy nào[^rdd-hdfs-pref]. Join hai RDD có thể là hai narrow dependency (nếu cùng partitioner), hai wide dependency hoặc lẫn lộn[^rdd-join].
 - **Accumulator và chạy lại.** Docs Spark cảnh báo: trong transformation, cập nhật accumulator của mỗi task có thể bị áp dụng nhiều hơn một lần nếu task hay stage bị chạy lại[^spark-acc]. Trong MapReduce, master loại trùng counter (mục 3)[^mr-counters]. Cùng một vấn đề "retry làm đếm đôi", hai cách xử lý khác nhau (nhận xét của người soạn).
-- **Con số hiệu năng.** Các tác giả báo cáo Spark nhanh gấp tới 20 lần Hadoop trên ứng dụng lặp[^rdd-20x]; đây là số đo của họ năm 2012 trên workload lặp (nơi cùng một dữ liệu được dùng lại nhiều lần, như phần động cơ ở trên[^rdd-reuse]), không phải mức tăng chung cho mọi job.
-- **Tối ưu lúc chạy.** Spark SQL bật AQE mặc định từ 3.2.0 (gộp partition sau shuffle, chuyển join, xử lý skew)[^spark-aqe] — xem mục 5.
+- **Con số hiệu năng.** Các tác giả báo cáo Spark nhanh gấp tới 20 lần Hadoop trên ứng dụng lặp[^rdd-20x]. Đây là số đo của họ năm 2012 trên workload lặp, nơi cùng một dữ liệu được dùng lại nhiều lần như phần động cơ ở trên, không phải mức tăng chung cho mọi job.
+- **Tối ưu lúc chạy.** Spark SQL bật AQE mặc định từ 3.2.0 (gộp partition sau shuffle, chuyển join, xử lý skew)[^spark-aqe]; xem mục 5.
 - **Micro-batch / streaming** (không thuộc chương này): [P12 · Chương 11](11-stream-processing.md).
 
 </details>
 
-**Quay lại Q7:** dataflow engine bỏ việc ghi DFS giữa mọi bước, giữ chương trình dưới dạng đồ thị và chịu lỗi bằng lineage; stage bị cắt ở shuffle (wide dependency), nơi phục hồi đắt nhất.
+**Quay lại Q7:** dataflow engine bỏ việc ghi DFS giữa mọi bước của `daily-report`, giữ chương trình dưới dạng đồ thị và chịu lỗi bằng lineage; stage bị cắt ở shuffle (wide dependency), nơi phục hồi đắt nhất.
 
 ## 8. Batch (MapReduce) so với MPP database (Q8)
 
-> **Trả lời ngắn.** Pavlo et al. (SIGMOD 2009) chỉ ra hai họ hệ thống làm cùng việc: parallel DBMS (MPP) phân mảnh bảng qua các node và dịch SQL thành kế hoạch thực thi chia cho nhiều node, còn MapReduce để lập trình viên tự viết map/reduce trên file không có schema[^pavlo-par][^pavlo-schema]. Trong benchmark của họ, parallel DBMS nhanh hơn rõ rệt dù nạp dữ liệu và tinh chỉnh lâu hơn[^pavlo-perf]; đổi lại MapReduce chịu lỗi node tốt hơn vì chỉ chạy lại phần việc bị mất[^pavlo-ft1][^blanas-ft]. Đó là bức ảnh năm 2009 — ngày nay ranh giới mờ đi vì các engine batch chạy SQL và có optimizer (nhận xét của người soạn).
+> **Trả lời ngắn.** Pavlo et al. (SIGMOD 2009) chỉ ra hai họ hệ thống làm cùng việc. Parallel DBMS (MPP) phân mảnh bảng qua các node và dịch SQL thành kế hoạch thực thi chia cho nhiều node[^pavlo-par]; MapReduce thì để lập trình viên tự viết map/reduce trên file không có schema[^pavlo-schema]. Trong benchmark của họ, parallel DBMS nhanh hơn rõ rệt dù nạp dữ liệu và tinh chỉnh lâu hơn[^pavlo-perf]. Đổi lại MapReduce chịu lỗi node tốt hơn vì chỉ chạy lại phần việc bị mất[^pavlo-ft1]. Đó là bức ảnh năm 2009; ngày nay ranh giới mờ đi vì các engine batch chạy được SQL và có optimizer (nhận xét của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): MapReduce là bộ dụng cụ tổng quát — muốn đóng ghế hay làm bàn đều được nhưng bạn tự cắt, tự lắp; MPP database là máy CNC chuyên dụng — nạp bản vẽ (SQL) là máy lo mọi công đoạn, nhưng chỉ làm những gì bản vẽ mô tả được.
+*Với `daily-report`.* Bạn có thể hỏi: tại sao không nạp log vào một parallel database rồi viết `SELECT country, count(*) ... GROUP BY` thay vì viết map/reduce? Câu trả lời công bằng là cả hai đều làm được, và khác nhau ở những đánh đổi cụ thể. Mục này đặt hai cách cạnh nhau, theo số liệu của các paper đương thời.
 
-**Cùng một khung.** Theo Pavlo et al., hai yếu tố cho phép parallel DBMS chạy song song: hầu hết (hoặc mọi) bảng được phân mảnh trên các node, và optimizer dịch SQL thành kế hoạch truy vấn chia cho nhiều node[^pavlo-par]. Với truy vấn "lọc bảng T1, join với T2, tính aggregate", bước lọc chạy song song giống `Map`; khi cần hash lại cả hai bảng theo thuộc tính join để phân phối lại thì giống xử lý giữa `Map` và `Reduce`; cuối cùng cần bước "roll-up" gộp các aggregate từng phần[^pavlo-same]. Nói cách khác (nhận xét của người soạn): shuffle của mục 2 và bước phân phối lại dữ liệu theo khóa trong MPP đóng cùng một vai trò; Pavlo et al. chỉ nói hai bước này "tương tự" nhau.
+### 8.1 Cùng một khung
 
-**Khác nhau ở đâu — theo các tác giả.**
+Theo Pavlo et al., hai yếu tố cho phép parallel DBMS chạy song song: hầu hết (hoặc mọi) bảng được phân mảnh trên các node, và optimizer dịch SQL thành kế hoạch truy vấn chia cho nhiều node[^pavlo-par]. Với truy vấn "lọc bảng T1, join với T2, tính aggregate", bước lọc chạy song song giống `Map`. Khi cần hash lại cả hai bảng theo thuộc tính join để phân phối lại thì giống xử lý giữa `Map` và `Reduce`. Cuối cùng cần bước "roll-up" gộp các aggregate từng phần[^pavlo-same]. Nói cách khác (nhận xét của người soạn), shuffle của mục 2 và bước phân phối lại dữ liệu theo khóa trong MPP đóng cùng một vai trò. Pavlo et al. chỉ nói hai bước này "tương tự" nhau.
+
+### 8.2 Khác nhau ở đâu, theo các tác giả
 
 | Trục | MapReduce/Hadoop | Parallel DBMS (MPP) |
 |---|---|---|
@@ -346,31 +422,33 @@ Hình dung (nhận xét của người soạn): MapReduce là bộ dụng cụ t
 | Chịu lỗi node | Chạy lại task trên node khác[^pavlo-ft1]; output của map được vật chất hóa cục bộ[^pavlo-ft-mat] | Đơn vị việc lớn hơn (transaction); một node hỏng giữa truy vấn dài thì chạy lại cả truy vấn[^pavlo-ft2] |
 | Biểu đạt | Code tùy ý | SQL, mở rộng bằng UDF[^pavlo-udf] |
 
-Kết quả đo: nạp dữ liệu và tinh chỉnh parallel DBMS tốn thời gian hơn nhiều, nhưng hiệu năng đo được tốt hơn rõ rệt[^pavlo-perf]. Blanas et al. (cùng thời) bênh MapReduce cho phân tích log: lượng log khổng lồ khó định dạng và nạp kịp vào RDBMS song song[^blanas-load], schema log đổi liên tục[^blanas-schema], và query của RDBMS song song thường phải chạy lại từ đầu nếu một node hỏng, trong khi MapReduce chỉ làm lại phần bị mất[^blanas-ft]. Chính họ cũng đồng ý với phê bình rằng MapReduce thiếu schema, thiếu ngôn ngữ khai báo và thiếu index[^blanas-agree].
+Kết quả đo: nạp dữ liệu và tinh chỉnh parallel DBMS tốn thời gian hơn nhiều, nhưng hiệu năng đo được tốt hơn rõ rệt[^pavlo-perf]. Blanas et al., cùng thời, bênh MapReduce cho phân tích log. Lượng log khổng lồ khó định dạng và nạp kịp vào RDBMS song song[^blanas-load]. Schema log đổi liên tục[^blanas-schema]. Query của RDBMS song song thường phải chạy lại từ đầu nếu một node hỏng, trong khi MapReduce chỉ làm lại phần bị mất[^blanas-ft]. Chính họ cũng đồng ý với phê bình rằng MapReduce thiếu schema, thiếu ngôn ngữ khai báo và thiếu index[^blanas-agree].
 
-**Đừng đọc quá mức.** Đây là benchmark của một cụm 100 node với Hadoop và hai DBMS cụ thể ở năm 2009[^pavlo-abs]; paper không đề cập Spark, Parquet, vectorized execution hay object store (người soạn đã tìm các từ khóa này trong bản PDF). Các engine hiện đại hội tụ: Spark SQL có optimizer, join hint, AQE (mục 5, 7); trong Rust, DataFusion có planner, engine thực thi cột, đa luồng, vector hóa (mục 9)[^df-desc]. Phân loại warehouse/lake/lakehouse, ETL và tách compute–storage: [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
+### 8.3 Đừng đọc quá mức
+
+Đây là benchmark của một cụm 100 node với Hadoop và hai DBMS cụ thể ở năm 2009[^pavlo-abs]. Paper không đề cập Spark, Parquet, vectorized execution hay object store (người soạn đã tìm các từ khóa này trong bản PDF). Các engine hiện đại đang hội tụ: Spark SQL có optimizer, join hint, AQE (mục 5, 7). Trong Rust, DataFusion có planner, engine thực thi cột, đa luồng, vector hóa (mục 9)[^df-desc]. Phân loại warehouse/lake/lakehouse, ETL và tách compute–storage: [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
 
 <details><summary>Đi sâu: vì sao push/pull và vật chất hóa là một cặp đánh đổi</summary>
 
-- Pavlo et al. quy hiệu năng kém của MapReduce một phần vào việc map ghi N × M file cục bộ rồi reduce *kéo* (pull) bằng giao thức truyền file, gây nhiều seek khi nhiều reduce cùng kéo từ một node; parallel DBMS không vật chất hóa file chia mà dùng push[^pavlo-pull][^pavlo-seek][^pavlo-push].
-- Cũng chính việc vật chất hóa trung gian ra đĩa là thứ giúp MapReduce chạy lại *một task* thay vì cả truy vấn: tác giả nêu mối liên hệ này khi giải thích chịu lỗi[^pavlo-ft-mat]. Spark giữ lại tinh thần đó (vật chất hóa phía map của shuffle "như MapReduce"[^rdd-shuffle-mat]) nhưng bỏ ghi DFS giữa các stage.
-- Đây là phân tích của các tác giả 2009 về Hadoop thời đó; nhận định "hiện nay còn đúng đến đâu" cần đo lại trên hệ cụ thể (suy luận của người soạn).
+- Pavlo et al. quy hiệu năng kém của MapReduce một phần vào việc map ghi N × M file cục bộ rồi reduce *kéo* (pull) bằng giao thức truyền file[^pavlo-pull]. Việc đó gây nhiều seek khi nhiều reduce cùng kéo từ một node[^pavlo-seek]. Parallel DBMS không vật chất hóa file chia mà dùng push[^pavlo-push].
+- Cũng chính việc vật chất hóa trung gian ra đĩa là thứ giúp MapReduce chạy lại *một task* thay vì cả truy vấn; tác giả nêu mối liên hệ này khi giải thích chịu lỗi[^pavlo-ft-mat]. Spark giữ lại tinh thần đó (vật chất hóa phía map của shuffle "như MapReduce"[^rdd-shuffle-mat]) nhưng bỏ ghi DFS giữa các stage.
+- Đây là phân tích của các tác giả 2009 về Hadoop thời đó. Nhận định "hiện nay còn đúng đến đâu" cần đo lại trên hệ cụ thể (suy luận của người soạn).
 
 </details>
 
-**Quay lại Q8:** hai họ làm cùng phép biến đổi (lọc, shuffle theo khóa, gộp) nhưng khác ở schema, index, push/pull và cách chịu lỗi; benchmark 2009 cho MPP nhanh hơn, MapReduce chịu lỗi từng phần tốt hơn, và hôm nay các engine batch đã vay ý tưởng của nhau.
+**Quay lại Q8:** `daily-report` có thể viết bằng map/reduce hoặc SQL trên MPP; hai họ làm cùng phép biến đổi (lọc, shuffle theo khóa, gộp) nhưng khác ở schema, index, push/pull và cách chịu lỗi. Benchmark 2009 cho MPP nhanh hơn, MapReduce chịu lỗi từng phần tốt hơn, và hôm nay các engine batch đã vay ý tưởng của nhau.
 
 ## 9. Liên hệ với Rust
 
-Rust không có "Hadoop chuẩn", nhưng các mảnh của chương này đều có bản Rust chạy trên một máy hoặc dựng thành engine. Phiên bản được ghim: rayon 1.12.0, DataFusion 55.2.0, Polars 0.55.2 (docs.rs); `std` 1.95.0.
+Rust không có "Hadoop chuẩn", nhưng các mảnh của chương này đều có bản Rust, hoặc chạy trên một máy, hoặc dựng thành engine. Phiên bản được ghim: rayon 1.12.0, DataFusion 55.2.0, Polars 0.55.2 (docs.rs); `std` 1.95.0. Nếu viết `daily-report` bằng Rust cho log vừa một máy, bạn sẽ dùng các công cụ dưới đây, mỗi cái ứng với một mảnh ở trên.
 
-**Pipe giữa các process.** `std::process::Command` với `Stdio::piped()` sắp xếp một pipe nối cha và con[^rs-stdio]. Đây chính là cơ chế `a | b` ở mục 1; ánh xạ lên `dup2` và việc phải `wait` được giải thích ở [P1 · Chương 07, mục 4](../01-linux/07-rust-tren-giao-dien-he-thong.md).
+**Pipe giữa các process.** `std::process::Command` với `Stdio::piped()` dựng một pipe nối cha và con[^rs-stdio]. Đây chính là cơ chế `a | b` ở mục 1. Ánh xạ lên `dup2` và việc phải `wait` được giải thích ở [P1 · Chương 07, mục 4](../01-linux/07-rust-tren-giao-dien-he-thong.md).
 
-**Iterator: batch pipeline trong một process.** Iterator trong Rust lười: tạo iterator thì chưa làm gì cho tới khi gọi `next`[^rs-iter-lazy] ([P9 · Chương 06, mục 4](../09-rust-language/06-iterator-va-closure.md)). Chuỗi `lines.map(...).filter(...).fold(...)` là bản trong-process của `awk | grep | uniq` (nhận xét của người soạn): các adapter là "trạm", dữ liệu chảy từng phần tử, không vật chất hóa bước trung gian. Engine DataFusion dùng cùng tư tưởng pull: `execute` trả về `SendableRecordBatchStream` theo kiểu thực thi pull, mỗi lần `next().await` tính và trả `RecordBatch` kế tiếp[^df-pull].
+**Iterator: batch pipeline trong một process.** Iterator trong Rust lười: tạo iterator thì chưa làm gì cho tới khi gọi `next`[^rs-iter-lazy] ([P9 · Chương 06, mục 4](../09-rust-language/06-iterator-va-closure.md)). Chuỗi `lines.map(...).filter(...).fold(...)` là bản trong-process của `awk | grep | uniq` (nhận xét của người soạn): các adapter là các "trạm", dữ liệu chảy từng phần tử và không vật chất hóa bước trung gian. Engine DataFusion dùng cùng tư tưởng pull: `execute` trả về `SendableRecordBatchStream`, và mỗi lần `next().await` tính rồi trả `RecordBatch` kế tiếp[^df-pull].
 
-**rayon: data-parallel trên một máy.** Rayon là thư viện data-parallelism biến tính toán tuần tự thành song song, bảo đảm chạy không có data race và chỉ song song hóa khi hợp lý theo tải lúc chạy[^rayon-desc]. `par_iter()` biến iterator tuần tự thành iterator song song[^rayon-par]; `par_sort` sắp xếp song song slice/vec[^rayon-parsort]. Nền bên dưới là `join`: nó gần giống tạo hai thread nhưng rất rẻ nhờ *work stealing* với một pool worker cố định, chỉ song song khi còn CPU rảnh[^rayon-join].
+**rayon: data-parallel trên một máy.** Rayon là thư viện data-parallelism biến tính toán tuần tự thành song song, bảo đảm chạy không có data race và chỉ song song hóa khi hợp lý theo tải lúc chạy[^rayon-desc]. `par_iter()` biến iterator tuần tự thành iterator song song[^rayon-par]. `par_sort` sắp xếp song song slice/vec[^rayon-parsort]. Nền bên dưới là `join`: nó gần giống tạo hai thread nhưng rất rẻ nhờ *work stealing* với một pool worker cố định, và chỉ song song khi còn CPU rảnh[^rayon-join].
 
-Ánh xạ sang MapReduce (nhận xét của người soạn): `fold` ≈ map + combiner trên từng khối con; `reduce` ≈ pha reduce gộp các kết quả từng phần; còn shuffle thì không có vì mọi thread dùng chung bộ nhớ. Docs rayon cho thấy chính ràng buộc của combiner: thứ tự áp `op` trong `reduce` không được xác định đầy đủ, nên `op` phải có tính kết hợp, nếu không kết quả không xác định, và `identity()` phải là phần tử đơn vị thật[^rayon-reduce-assoc]. `fold` song song chia dãy thành các đoạn con nên sinh *nhiều* kết quả từng phần, số lượng cũng không xác định[^rayon-fold][^rayon-fold-n].
+Ánh xạ sang MapReduce (nhận xét của người soạn): `fold` ≈ map + combiner trên từng khối con; `reduce` ≈ pha reduce gộp các kết quả từng phần; còn shuffle thì không có vì mọi thread dùng chung bộ nhớ. Docs rayon cho thấy chính ràng buộc của combiner: thứ tự áp `op` trong `reduce` không được xác định đầy đủ, nên `op` phải có tính kết hợp, nếu không kết quả không xác định, và `identity()` phải là phần tử đơn vị thật[^rayon-reduce-assoc]. `fold` song song chia dãy thành các đoạn con nên sinh *nhiều* kết quả từng phần[^rayon-fold]. Số lượng các kết quả đó cũng không xác định[^rayon-fold-n].
 
 ```rust
 // Minh họa (chưa biên dịch/chạy): đếm từ song song trên một máy.
@@ -397,9 +475,11 @@ fn word_count(lines: &[String]) -> HashMap<&str, u64> {
 }
 ```
 
-Giới hạn cần biết: docs `join` nói giả định rằng closure là tác vụ CPU-bound không làm I/O hay thao tác chặn; nếu chặn chờ nhau (ví dụ qua channel) có thể deadlock[^rayon-block]. Trong code async, đừng chạy rayon trực tiếp trên worker của runtime (nhận xét của người soạn; xem [P7 · Chương 09, mục 5](../07-io-async/09-async-trong-production.md)). Rayon cũng không có phần chịu lỗi kiểu mục 3: nó chạy trong một process (suy luận của người soạn từ phạm vi "data-parallelism" mà docs mô tả).
+Giới hạn cần biết: docs của `join` giả định closure là tác vụ CPU-bound, không làm I/O hay thao tác chặn; nếu các closure chặn chờ nhau (ví dụ qua channel) thì có thể deadlock[^rayon-block]. Trong code async, đừng chạy rayon trực tiếp trên worker của runtime (nhận xét của người soạn; xem [P7 · Chương 09, mục 5](../07-io-async/09-async-trong-production.md)). Rayon cũng không có phần chịu lỗi kiểu mục 3: nó chạy trong một process (suy luận của người soạn từ phạm vi "data-parallelism" mà docs mô tả).
 
-**DataFusion và Polars: engine truy vấn dạng thư viện.** DataFusion là query engine mở rộng được, viết bằng Rust, dùng Apache Arrow làm định dạng trong bộ nhớ; có query planner đầy đủ, execution engine dạng cột, streaming, đa luồng, vector hóa và nguồn dữ liệu có partition[^df-desc]. Nó phân biệt *LogicalPlan* (độc lập với cách thực thi) và *ExecutionPlan* (có thêm thông tin cụ thể như hash hay merge join, partitioning và sortedness)[^df-plan] — tương ứng với "kế hoạch từ SQL" của MPP ở mục 8 (đối chiếu của người soạn). Song song cân bằng đạt được bằng các phép "Exchange" kiểu Volcano do `RepartitionExec` cài[^df-exchange] — đây là shuffle *trong một máy* (nhận xét của người soạn). `ListingTable` đọc Parquet/JSON/CSV/AVRO từ một hoặc nhiều thư mục cục bộ hoặc từ xa, hỗ trợ partition kiểu Hive[^df-listing]. Polars là thư viện DataFrame cho Rust dựa trên mô hình bộ nhớ Arrow[^pl-desc]; docs khuyên dựng truy vấn bằng API lazy, nơi các biểu thức được tính song song và truy vấn được tối ưu "just in time"[^pl-lazy]. Vì cả hai API của Polars không phải async, docs dặn bọc chúng trong `spawn_blocking` khi dùng trong ngữ cảnh async[^pl-async] — cùng lý do với cảnh báo của rayon ở trên (nhận xét của người soạn). So với Spark, khi dùng như thư viện trong một process thì các thư viện này là phương án *single-node* (nhận xét của người soạn); khi nào một máy là đủ và khi nào cần phân tán — xem [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
+**DataFusion và Polars: engine truy vấn dạng thư viện.** DataFusion là query engine mở rộng được, viết bằng Rust, dùng Apache Arrow làm định dạng trong bộ nhớ. Nó có query planner đầy đủ, execution engine dạng cột, streaming, đa luồng, vector hóa và nguồn dữ liệu có partition[^df-desc]. Nó phân biệt *LogicalPlan* (độc lập với cách thực thi) và *ExecutionPlan* (có thêm thông tin cụ thể như hash hay merge join, partitioning và sortedness)[^df-plan], tương ứng với "kế hoạch từ SQL" của MPP ở mục 8 (đối chiếu của người soạn). Song song cân bằng đạt được bằng các phép "Exchange" kiểu Volcano do `RepartitionExec` cài[^df-exchange]; đây là shuffle *trong một máy* (nhận xét của người soạn). `ListingTable` đọc Parquet/JSON/CSV/AVRO từ một hoặc nhiều thư mục cục bộ hoặc từ xa, hỗ trợ partition kiểu Hive[^df-listing].
+
+Polars là thư viện DataFrame cho Rust dựa trên mô hình bộ nhớ Arrow[^pl-desc]. Docs khuyên dựng truy vấn bằng API lazy, nơi các biểu thức được tính song song và truy vấn được tối ưu "just in time"[^pl-lazy]. Vì cả hai API của Polars không phải async, docs dặn bọc chúng trong `spawn_blocking` khi dùng trong ngữ cảnh async[^pl-async]. Lý do này giống cảnh báo của rayon ở trên (nhận xét của người soạn). So với Spark, khi dùng như thư viện trong một process thì các thư viện này là phương án *single-node* (nhận xét của người soạn). Khi nào một máy là đủ và khi nào cần phân tán: xem [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
 
 ## Tóm tắt
 
@@ -418,56 +498,56 @@ Giới hạn cần biết: docs `join` nói giả định rằng closure là tá
 1. Vì sao `sort | uniq -c` phải có `sort`? Nó tương ứng với bước nào của MapReduce?
 <details><summary>Đáp án</summary>
 
-`uniq` chỉ phát hiện dòng lặp khi chúng kề nhau[^uniq-adj], nên `sort` đưa cùng khóa về cạnh nhau — tương ứng shuffle + sort, sau đó reduce gộp các khóa kề nhau[^mr-step5].
+`uniq` chỉ phát hiện dòng lặp khi chúng kề nhau[^uniq-adj], nên `sort` đưa cùng khóa về cạnh nhau. Bước đó tương ứng shuffle + sort; sau đó reduce gộp các khóa kề nhau[^mr-step5].
 
 </details>
 
 2. Output của map task nằm ở đâu, và vì sao điều đó buộc map task đã xong phải chạy lại khi máy chết còn reduce task đã xong thì không?
 <details><summary>Đáp án</summary>
 
-Map ghi xuống đĩa cục bộ của máy chạy nó[^mr-step4]; máy hỏng thì output không truy cập được nên phải chạy lại; reduce task ghi output vào hệ thống file toàn cục nên không cần[^mr-completed].
+Map ghi xuống đĩa cục bộ của máy chạy nó[^mr-step4]. Máy hỏng thì output không truy cập được nên phải chạy lại; reduce task ghi output vào hệ thống file toàn cục nên không cần[^mr-completed].
 
 </details>
 
 3. Hai reduce task cùng chạy (do backup task) và cùng ghi output; làm sao kết quả cuối không bị trộn?
 <details><summary>Đáp án</summary>
 
-Mỗi task ghi file tạm riêng rồi `rename` nguyên tử sang tên cuối; paper dựa vào tính nguyên tử của rename để trạng thái cuối chỉ chứa dữ liệu của một lần chạy[^mr-rename].
+Mỗi task ghi file tạm riêng rồi `rename` nguyên tử sang tên cuối. Paper dựa vào tính nguyên tử của rename để trạng thái cuối chỉ chứa dữ liệu của một lần chạy[^mr-rename].
 
 </details>
 
 4. Combiner dùng được khi nào? Rayon có ràng buộc tương tự ở đâu?
 <details><summary>Đáp án</summary>
 
-Khi hàm reduce có tính giao hoán và kết hợp như đếm từ[^mr-comb-why]. Rayon: `reduce` phải dùng `op` có tính kết hợp, nếu không kết quả không xác định[^rayon-reduce-assoc].
+Khi hàm reduce có tính giao hoán và kết hợp như đếm từ[^mr-comb-why]. Với rayon, `reduce` phải dùng `op` có tính kết hợp, nếu không kết quả không xác định[^rayon-reduce-assoc].
 
 </details>
 
 5. Nêu hai đặc điểm workload khiến GFS/HDFS được thiết kế quanh file rất lớn, ghi một lần, và hệ quả cho scheduler.
 <details><summary>Đáp án</summary>
 
-Workload là file rất lớn, quét tuần tự và nối thêm, quan tâm thông lượng hơn độ trễ[^gfs-assump][^gfs-append][^hdfs-batch]; vì biết block ở máy nào, scheduler đặt map task trên máy có bản sao (locality)[^mr-locality].
+Workload là file rất lớn, quét tuần tự và nối thêm[^gfs-assump]. Ghi ngẫu nhiên gần như không có[^gfs-append]. Hệ thống quan tâm thông lượng hơn độ trễ[^hdfs-batch]. Vì biết block ở máy nào, scheduler đặt map task trên máy có bản sao (locality)[^mr-locality].
 
 </details>
 
 6. Khi nào chọn broadcast join thay vì repartition join, và rủi ro gì?
 <details><summary>Đáp án</summary>
 
-Khi bảng tham chiếu R nhỏ để vừa RAM mỗi node: tránh sắp xếp và chuyển bảng lớn qua mạng[^join-bc]; trong thí nghiệm, tốt hơn khi R cỡ 1 triệu bản ghi trở xuống nhưng kém dần khi R lớn[^join-res].
+Khi bảng tham chiếu R nhỏ để vừa RAM mỗi node: cách này tránh sắp xếp và chuyển bảng lớn qua mạng[^join-bc]. Trong thí nghiệm, nó tốt hơn khi R cỡ 1 triệu bản ghi trở xuống nhưng kém dần khi R lớn[^join-res].
 
 </details>
 
 7. Skew gây hại gì ở reduce-side join, và Spark xử lý ra sao?
 <details><summary>Đáp án</summary>
 
-Mọi bản ghi cùng khóa về một reducer; khi lệch, các bản ghi của khóa đó có thể không vừa bộ nhớ[^join-skew], và thời gian job bị chặn bởi phần lớn nhất[^sre-skew]. Spark AQE tách (và nhân bản nếu cần) các task lệch thành task cỡ gần đều[^spark-skew].
+Mọi bản ghi cùng khóa về một reducer; khi lệch, các bản ghi của khóa đó có thể không vừa bộ nhớ[^join-skew]. Thời gian job còn bị chặn bởi phần lớn nhất[^sre-skew]. Spark AQE tách (và nhân bản nếu cần) các task lệch thành task cỡ gần đều[^spark-skew].
 
 </details>
 
 8. Vì sao commit bằng `rename` thư mục an toàn trên HDFS nhưng không trên S3 (qua S3A)?
 <details><summary>Đáp án</summary>
 
-Cách commit bằng rename đòi rename thư mục là giao dịch O(1) nguyên tử, cơ chế mà tài liệu mô tả cho HDFS và các hệ thống tương tự[^s3a-rename-def][^s3a-commit]; S3A mô phỏng rename bằng sao chép rồi xóa, có thể hỏng giữa chừng và không có gì ngăn rename đồng thời[^s3a-rename], nên cần committer riêng[^s3a-need].
+Cách commit bằng rename đòi rename thư mục là giao dịch O(1) nguyên tử, cơ chế mà tài liệu mô tả cho HDFS và các hệ thống tương tự[^s3a-rename-def]. S3A mô phỏng rename bằng sao chép rồi xóa, có thể hỏng giữa chừng và không có gì ngăn rename đồng thời[^s3a-rename]. Vì vậy cần committer riêng[^s3a-need].
 
 </details>
 
@@ -481,27 +561,27 @@ Narrow: mỗi partition cha dùng bởi tối đa một partition con; wide: nhi
 10. Spark khác MapReduce thế nào về thứ tự phần tử sau shuffle?
 <details><summary>Đáp án</summary>
 
-MapReduce bảo đảm xử lý theo khóa tăng dần trong một partition[^mr-order]; Spark thì thứ tự phần tử trong partition mới shuffle không được bảo đảm, muốn có phải sắp xếp tường minh[^spark-order].
+MapReduce bảo đảm xử lý theo khóa tăng dần trong một partition[^mr-order]. Spark thì không bảo đảm thứ tự phần tử trong partition mới shuffle; muốn có phải sắp xếp tường minh[^spark-order].
 
 </details>
 
 11. Theo Pavlo et al., MPP khác MapReduce ở đâu về truyền dữ liệu và chịu lỗi? Vì sao không nên suy rộng kết luận đó?
 <details><summary>Đáp án</summary>
 
-MapReduce reduce kéo file từ map node, MPP đẩy và không vật chất hóa[^pavlo-seek][^pavlo-push]; MapReduce chạy lại từng task, MPP phải chạy lại cả truy vấn nếu một node hỏng[^pavlo-ft1][^pavlo-ft2]. Đó là benchmark năm 2009 trên cụm 100 node với Hadoop cụ thể[^pavlo-abs].
+MapReduce: reduce kéo file từ map node[^pavlo-seek]. MPP: đẩy và không vật chất hóa[^pavlo-push]. MapReduce chạy lại từng task[^pavlo-ft1]. MPP phải chạy lại cả truy vấn nếu một node hỏng[^pavlo-ft2]. Đó là benchmark năm 2009 trên cụm 100 node với Hadoop cụ thể[^pavlo-abs].
 
 </details>
 
 12. Vì sao `rayon` không thay được Spark cho dữ liệu vài TB?
 <details><summary>Đáp án</summary>
 
-Rayon là data-parallelism trong một process với bộ nhớ chung[^rayon-desc]; nó không có phân mảnh dữ liệu qua máy, shuffle qua mạng hay chạy lại task khi máy chết (suy luận của người soạn từ phạm vi docs). Một máy có đủ không: [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
+Rayon là data-parallelism trong một process với bộ nhớ chung[^rayon-desc]. Nó không có phân mảnh dữ liệu qua máy, shuffle qua mạng hay chạy lại task khi máy chết (suy luận của người soạn từ phạm vi docs). Một máy có đủ không: [P12 · Chương 13](13-kien-truc-he-du-lieu.md).
 
 </details>
 
 ## Đọc thêm
 
-- DDIA (ấn bản 1) — Phần III "Derived Data", chương 10 "Batch Processing"; tên Phần và chương lấy từ mục lục do ETH Library lưu[^ddia-toc10]. Mục lục cũng liệt kê các mục "MapReduce and Distributed Filesystems", "Reduce-Side Joins and Grouping", "Map-Side Joins", "The Output of Batch Workflows", "Comparing Hadoop to Distributed Databases", "Beyond MapReduce"[^ddia-toc10-sec] — tương ứng gần với mục 2–8 của chương này (đối chiếu của người soạn, không khớp một–một). Sách dùng làm khung chủ đề và bản đồ; chương này dựa vào các paper bên dưới. Trang sách: [dataintensive.net](https://dataintensive.net/).
+- DDIA (ấn bản 1) — Phần III "Derived Data", chương 10 "Batch Processing"; tên Phần và chương lấy từ mục lục do ETH Library lưu[^ddia-toc10]. Mục lục cũng liệt kê các mục "MapReduce and Distributed Filesystems", "Reduce-Side Joins and Grouping", "Map-Side Joins", "The Output of Batch Workflows", "Comparing Hadoop to Distributed Databases", "Beyond MapReduce"[^ddia-toc10-sec]. Chúng tương ứng gần với mục 2–8 của chương này (đối chiếu của người soạn, không khớp một–một). Sách dùng làm khung chủ đề và bản đồ; chương này dựa vào các paper bên dưới. Trang sách: [dataintensive.net](https://dataintensive.net/).
 - [MapReduce: Simplified Data Processing on Large Clusters (OSDI'04)](https://static.googleusercontent.com/media/research.google.com/en//archive/mapreduce-osdi04.pdf): mục 3 (cài đặt, fault tolerance, locality, backup task) và mục 4 (partition, combiner, side-effect).
 - [The Google File System (SOSP'03)](https://static.googleusercontent.com/media/research.google.com/en//archive/gfs-sosp2003.pdf): mục 2 (giả định, kiến trúc, chunk) và mục 2.7 (ứng dụng sống với mô hình nhất quán nới lỏng).
 - [Resilient Distributed Datasets (NSDI'12)](https://www.usenix.org/system/files/conference/nsdi12/nsdi12-final138.pdf): mục 2 (RDD, so với shared memory), mục 4 (narrow/wide), mục 5.1 (stage, scheduler).

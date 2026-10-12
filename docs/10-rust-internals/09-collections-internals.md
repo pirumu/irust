@@ -21,13 +21,27 @@
 
 ## 1. `Vec<T>`: ba từ máy và một vùng heap (Q1)
 
-> **Trả lời ngắn.** `Vec<T>` là một struct gồm đúng ba thứ: con trỏ tới vùng nhớ, capacity (số phần tử vùng đó chứa được) và len (số phần tử đang dùng)[^vec-triplet]. Phần tử nằm liền nhau trên heap; `len` phần tử đầu đã khởi tạo, phần còn lại của capacity chưa[^vec-heap]. Vec rỗng với capacity 0 không cấp phát gì[^vec-noalloc].
+> **Trả lời ngắn.** `Vec<T>` là một struct nhỏ gồm đúng ba thứ: con trỏ tới vùng nhớ, capacity (số phần tử vùng đó chứa được) và len (số phần tử đang dùng)[^vec-triplet]. Các phần tử nằm liền nhau trên heap; `len` phần tử đầu đã khởi tạo, phần còn lại của capacity thì chưa[^vec-heap]. `Vec` rỗng với capacity 0 không cấp phát gì[^vec-noalloc].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Vec` giống tấm vé nhận hàng ở một kho. Tấm vé chỉ ghi ba thông tin: địa chỉ kệ, kệ rộng bao nhiêu ô (capacity), và đã xếp bao nhiêu ô (len). Hàng nằm ở kho (heap), không nằm trên tấm vé (stack). Chuyển tấm vé cho người khác (move) rẻ như sao chép ba con số; hàng không phải khuân đi đâu.
+*Với service `ingest`.* Giả sử bạn viết `ingest`, một service Rust nhận event qua HTTP rồi ghi xuống đĩa. Mỗi request mang một token session trong header và một body JSON. `ingest` tra session theo token, gom event vào batch, đưa batch vào chỉ mục theo thời gian, và cuối cùng giao batch cho một thread ghi đĩa. Mỗi việc đó dùng một collection của chương này, nên ta sẽ bám theo `ingest` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo):
 
-*Cấu trúc.* Docs `Vec` nói: `Vec` "is and always will be" một bộ ba (pointer, capacity, length); thứ tự các field không được đặc tả, nên phải dùng method chứ không dựa vào thứ tự[^vec-triplet]. Con trỏ không bao giờ null, nên `Vec` được tối ưu null-pointer (niche, xem [Chương 02](02-type-layout.md))[^vec-nonnull]. Source 1.95.0 khai báo `Vec` là hai field: `buf: RawVec<T, A>` và `len: usize`[^vec-src] — con trỏ và capacity nằm *bên trong* `RawVec`.
+| Việc của `ingest` | Collection | Mục |
+|---|---|---|
+| Gom event của một batch trước khi ghi | `Vec<Event>` | 1, 2 |
+| Giữ tên hiển thị của người dùng | `String` | 3 |
+| Tra session theo token trong header | `HashMap<String, Session>` | 4, 5 |
+| Trả event theo khoảng thời gian | `BTreeMap<u64, Event>` | 6 |
+| Hàng đợi batch chờ thread ghi đĩa | `VecDeque<Batch>` | 7 |
+
+Mục này bắt đầu từ việc đầu tiên: batch `Vec<Event>` nằm trong bộ nhớ thế nào, và vì sao đưa nó cho thread khác lại rẻ.
+
+### 1.1 Ba trường trên stack, dữ liệu trên heap
+
+Docs của `Vec` khẳng định nó "luôn là" một bộ ba (con trỏ, capacity, length), không hơn không kém. Thứ tự các field không được đặc tả, nên bạn chỉ đụng tới chúng qua method[^vec-triplet]. Với batch của `ingest`, điều này có nghĩa là dù batch chứa 10.000 event, bản thân `Vec<Event>` vẫn chỉ là ba từ máy nằm trên stack (hoặc trong struct chứa nó), còn 10.000 event nằm liền nhau trên heap[^vec-heap]. Vì vậy chuyển batch cho thread ghi đĩa (move) chỉ chép ba từ đó chứ không chép event (suy luận của người soạn).
+
+Source 1.95.0 khai báo `Vec` có hai field: `buf: RawVec<T, A>` và `len: usize`[^vec-src]. Con trỏ và capacity vì thế nằm *bên trong* `RawVec`. Con trỏ này không bao giờ null, nên `Vec` được tối ưu null-pointer (niche, xem [Chương 02](02-type-layout.md))[^vec-nonnull].
 
 ```mermaid
 flowchart LR
@@ -47,108 +61,148 @@ flowchart LR
 
 (Minh họa: `len = 2`, `cap = 4`, giống hình ASCII trong docs `Vec`[^vec-heap].)
 
-*RawVec.* `RawVec` là lớp lo phần "buffer": theo comment trong source, nó là tiện ích cấp thấp để cấp phát, cấp phát lại và giải phóng một vùng nhớ trên heap mà người dùng khỏi phải lo các trường hợp góc[^rawvec-doc]; con trỏ nằm trong field `ptr`[^rawvec-fields] và capacity trong field `cap`[^rawvec-zst-cap] của `RawVecInner`. Điểm quan trọng: nó **không** nhìn vào nội dung; khi bị drop nó giải phóng vùng nhớ nhưng không drop các phần tử[^rawvec-nodrop]. Việc drop phần tử là của `Vec`, vì chỉ `Vec` biết `len`.
+### 1.2 `RawVec` lo phần buffer
 
-*Không cấp phát khi rỗng.* `Vec::new`, `vec![]`, `Vec::with_capacity(0)` và `shrink_to_fit` trên Vec rỗng đều không cấp phát[^vec-noalloc]. Docs phát biểu điều kiện cấp phát như sau: `Vec` cấp phát khi và chỉ khi `size_of::<T>() * capacity() > 0`[^vec-zst] (suy ra: với ZST, `size_of::<T>()` bằng 0 nên không bao giờ cấp phát — suy luận của người soạn). Hệ quả cho backend (nhận xét của người soạn): tạo hàng triệu `Vec` rỗng (mỗi struct một `Vec<Tag>` mặc định) tốn đúng 3 từ máy mỗi cái, chưa gọi allocator lần nào.
+`RawVec` là lớp lo việc quản lý vùng nhớ: theo comment trong source, nó là tiện ích cấp thấp để cấp phát, cấp phát lại và giải phóng một buffer trên heap, giúp người dùng khỏi phải xử lý các trường hợp góc[^rawvec-doc]. Con trỏ nằm trong field `ptr` của `RawVecInner`[^rawvec-fields]; capacity nằm trong field `cap`, và field này không dùng cho ZST[^rawvec-zst-cap].
 
-*Không có small-buffer optimization.* Docs nói `Vec` sẽ không bao giờ lưu phần tử trên stack kiểu "small optimization", với hai lý do: làm code `unsafe` khó thao tác đúng (nội dung `Vec` sẽ không có địa chỉ ổn định nếu chỉ bị move, và khó biết `Vec` đã cấp phát hay chưa)[^vec-nosso-unsafe], và làm mọi truy cập thêm một nhánh rẽ[^vec-nosso]. Vì vậy `Vec` không rỗng vẫn cần một lần cấp phát (suy luận của người soạn); muốn tránh phải dùng kiểu khác ngoài `Vec`, ví dụ crate bên thứ ba (nhận xét của người soạn).
+Điểm cần nhớ là `RawVec` **không** nhìn vào nội dung. Khi bị drop, nó giải phóng vùng nhớ nhưng không drop các phần tử[^rawvec-nodrop]. Việc drop phần tử vì vậy thuộc về `Vec`, vì chỉ `Vec` biết `len` (suy luận của người soạn).
+
+### 1.3 `Vec` rỗng không cấp phát
+
+`Vec::new`, `vec![]`, `Vec::with_capacity(0)` và `shrink_to_fit` trên `Vec` rỗng đều không cấp phát[^vec-noalloc]. Docs phát biểu điều kiện cấp phát như sau: `Vec` cấp phát khi và chỉ khi `size_of::<T>() * capacity() > 0`[^vec-zst]. Suy ra với ZST, `size_of::<T>()` bằng 0 nên không bao giờ cấp phát (suy luận của người soạn).
+
+Hệ quả cho `ingest` (nhận xét của người soạn): nếu mỗi event mang một `Vec<Tag>` mặc định và đa số event không có tag nào, hàng triệu `Vec` rỗng đó chỉ tốn đúng ba từ máy mỗi cái, chưa gọi allocator lần nào.
+
+### 1.4 Không có small-buffer optimization
+
+Docs nói `Vec` sẽ không bao giờ lưu phần tử trên stack kiểu "small optimization", và đưa ra hai lý do. Lý do thứ nhất: làm vậy khiến code `unsafe` khó thao tác đúng, vì nội dung `Vec` sẽ không có địa chỉ ổn định nếu chỉ bị move, và khó biết `Vec` đã cấp phát hay chưa[^vec-nosso-unsafe]. Lý do thứ hai: nó làm mọi truy cập thêm một nhánh rẽ[^vec-nosso]. Vậy `Vec` không rỗng vẫn cần một lần cấp phát (suy luận của người soạn). Nếu `ingest` cần tránh lần cấp phát đó, bạn phải dùng kiểu khác ngoài `Vec`, chẳng hạn crate bên thứ ba (nhận xét của người soạn).
 
 <details><summary>Đi sâu: <code>RawVecInner</code>, ZST, bộ nhớ không ổn định layout</summary>
 
-- `RawVec<T, A>` trong source 1.95.0 bọc một `RawVecInner<A>` không generic theo `T`; tác giả ghi lý do: tách như vậy giảm lượng code phải monomorphize vì phần lớn thao tác chỉ cần layout của phần tử chứ không cần kiểu thật[^rawvec-inner]. (Monomorphization: [Chương 04](04-monomorphization.md).)
-- Với ZST, `RawVec` không dùng field `cap`; hàm `capacity()` trả `usize::MAX`[^rawvec-zst-cap]. Docs `Vec` cũng cảnh báo `Vec<ZST>` có thể không báo capacity 0[^vec-zst]; hai điều này khớp nhau (suy luận của người soạn).
+- `RawVec<T, A>` trong source 1.95.0 bọc một `RawVecInner<A>` không generic theo `T`. Tác giả ghi lý do: tách như vậy giảm lượng code phải monomorphize, vì phần lớn thao tác chỉ cần layout của phần tử chứ không cần kiểu thật[^rawvec-inner]. (Monomorphization: [Chương 04](04-monomorphization.md).)
+- Với ZST, `RawVec` không dùng field `cap`; hàm `capacity()` trả `usize::MAX`[^rawvec-zst-cap]. Docs `Vec` cũng cảnh báo `Vec<ZST>` có thể không báo capacity 0[^vec-zst]. Hai điều này khớp nhau (suy luận của người soạn).
 - `RawVec::new` tạo capacity 0 nếu `T` có kích thước dương, và `usize::MAX` nếu `T` là ZST[^rawvec-new].
-- Docs `Vec` cũng nói rõ ABI không ổn định và layout bộ nhớ (kể cả thứ tự field) không được bảo đảm[^vec-abi]. (Nhận xét của người soạn: vì vậy đừng truyền `Vec<T>` nguyên khối qua ranh giới FFI; tách thành `ptr`/`len`/`cap` bằng `into_raw_parts` rồi dựng lại bằng `from_raw_parts` có điều kiện an toàn riêng, xem docs `Vec` — chương này không phủ chi tiết đó. Chuyện ABI và kiểu đi qua FFI nói chung: [Chương 08](08-panic-abi-ffi.md).)
-- Source ghi rằng allocator hiện trả `NonNull<[u8]>` có độ dài đúng bằng kích thước yêu cầu, và nếu điều đó đổi thì capacity ở đây phải đổi theo `ptr.len() / size_of::<T>()`[^rawvec-excess]. Phù hợp với docs `Vec`: allocator được phép trả nhiều hơn yêu cầu, và `capacity()` trả giá trị không nhỏ hơn mức yêu cầu và không lớn hơn mức thực cấp[^vec-cap-guarantee].
-- Vec bảo đảm không bao giờ cấp phát quá `isize::MAX` byte[^vec-isize].
+- Docs `Vec` nói rõ ABI không ổn định và layout bộ nhớ (kể cả thứ tự field) không được bảo đảm[^vec-abi]. (Nhận xét của người soạn: vì vậy đừng truyền `Vec<T>` nguyên khối qua ranh giới FFI; tách thành `ptr`/`len`/`cap` bằng `into_raw_parts` rồi dựng lại bằng `from_raw_parts` có điều kiện an toàn riêng, xem docs `Vec` — chương này không phủ chi tiết đó. Chuyện ABI và kiểu đi qua FFI nói chung: [Chương 08](08-panic-abi-ffi.md).)
+- Source ghi rằng allocator hiện trả `NonNull<[u8]>` có độ dài đúng bằng kích thước yêu cầu, và nếu điều đó đổi thì capacity ở đây phải đổi theo `ptr.len() / size_of::<T>()`[^rawvec-excess]. Điều này phù hợp với docs `Vec`: allocator được phép trả nhiều hơn yêu cầu, và `capacity()` trả giá trị không nhỏ hơn mức yêu cầu và không lớn hơn mức thực cấp[^vec-cap-guarantee].
+- `Vec` bảo đảm không bao giờ cấp phát quá `isize::MAX` byte[^vec-isize].
 
 </details>
 
-**Quay lại Q1:** `Vec` = (ptr, cap, len) trỏ vào một khối heap liền mạch; `RawVec` giữ ptr+cap, `Vec` giữ thêm len; capacity 0 hoặc ZST thì không cấp phát.
+**Quay lại Q1:** batch `Vec<Event>` của `ingest` là ba từ (ptr, cap, len) trỏ vào một khối heap liền mạch, nên move nó rẻ; `RawVec` giữ ptr và cap, `Vec` giữ thêm len; capacity 0 hoặc ZST thì không cấp phát.
 
 ## 2. Capacity tăng thế nào, và `with_capacity`/`reserve`/`shrink_to_fit` (Q2)
 
-> **Trả lời ngắn.** Khi `push` gặp `len == capacity`, `Vec` xin allocator một khối lớn hơn: allocator có thể mở rộng khối tại chỗ[^alloc-grow-extend], còn nếu không đủ chỗ liền kề thì phải cấp vùng mới và chép phần tử cũ sang[^book-realloc]. Docs chỉ hứa `push` là amortized O(1), **không** hứa hệ số nhân[^vec-growth-doc]. Source 1.95.0 hiện nhân đôi, với mức sàn nhỏ tùy kích thước phần tử[^growth-exp][^growth-min] — đó là chi tiết cài đặt. Muốn tránh tái cấp phát: `with_capacity`/`reserve`; muốn trả bộ nhớ: `shrink_to_fit` (collection không bao giờ tự co lại)[^vec-noshrink].
+> **Trả lời ngắn.** Khi `push` gặp `len == capacity`, `Vec` xin allocator một khối lớn hơn. Allocator có thể mở rộng khối tại chỗ[^alloc-grow-extend]; nếu không đủ chỗ liền kề thì phải cấp vùng mới rồi chép phần tử cũ sang[^book-realloc]. Docs chỉ hứa `push` là amortized O(1) (chi phí trung bình trên một chuỗi thao tác), **không** hứa hệ số nhân nào[^vec-growth-doc]. Source 1.95.0 hiện nhân đôi capacity[^growth-exp], với mức sàn nhỏ tùy kích thước phần tử[^growth-min]; đó là chi tiết cài đặt. Muốn tránh cấp phát lại thì dùng `with_capacity`/`reserve`; muốn trả bộ nhớ thì gọi `shrink_to_fit`, vì collection không bao giờ tự co lại[^vec-noshrink].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bạn dọn vào căn hộ và chưa biết sẽ có bao nhiêu đồ. Mỗi lần hết chỗ mà chỉ thuê thêm đúng một ô, bạn phải chuyển *toàn bộ* đồ sang nhà mới mỗi lần — rất tốn. Thuê gấp đôi mỗi lần hết chỗ thì số lần chuyển nhà giảm theo lôgarit, và chi phí chuyển trung bình mỗi món đồ là hằng số.
+*Với service `ingest`.* Batch không biết trước sẽ nhận bao nhiêu event: có lúc 3, có lúc 30.000. Nếu mỗi lần hết chỗ `Vec` chỉ xin thêm đúng một ô thì mỗi `push` phải chép lại cả batch, và `ingest` sẽ chậm dần theo cỡ batch. Mục này cho thấy `Vec` tránh chuyện đó bằng cách nào, và `ingest` nên giúp `Vec` thế nào khi đã biết trước cỡ batch.
 
-*Bước 1 — Điều kiện kích hoạt.* Docs bảo đảm: `push` và `insert` không bao giờ cấp phát lại nếu capacity báo cáo còn đủ, và sẽ cấp phát lại khi `len == capacity`; vì vậy capacity báo cáo là chính xác và có thể tin cậy[^vec-push-guarantee]. Ở source 1.95.0, `push` chỉ gọi `push_mut`, và `push_mut` kiểm đúng điều đó: `if len == self.buf.capacity() { self.buf.grow_one(); }`[^vec-push-src].
+### 2.1 `push` đầy: điều kiện kích hoạt
 
-*Bước 2 — Tính capacity mới.* `grow_one` gọi `grow_amortized` với `additional = 1`[^growth-grow-one]. Trong `grow_amortized`, capacity mới là lớn hơn của (2 × capacity cũ) và (len + additional), rồi lại lấy lớn hơn của mức sàn `min_non_zero_cap` và giá trị đó; comment trong source ghi đây là cách bảo đảm tăng trưởng mũ[^growth-exp]. Mức sàn: 8 nếu phần tử 1 byte (vì allocator thường làm tròn yêu cầu dưới 8 byte lên ít nhất 8), 4 nếu phần tử ≤ 1 KiB, và 1 nếu lớn hơn (để khỏi lãng phí chỗ cho `Vec` rất ngắn)[^growth-min].
+Docs bảo đảm rằng `push` và `insert` không bao giờ cấp phát lại nếu capacity báo cáo còn đủ, và sẽ cấp phát lại khi `len == capacity`. Nói cách khác, capacity mà `Vec` báo là chính xác và tin được[^vec-push-guarantee]. Trong source 1.95.0, `push` chỉ gọi `push_mut`, và `push_mut` kiểm đúng điều kiện đó: `if len == self.buf.capacity() { self.buf.grow_one(); }`[^vec-push-src].
 
-*Bước 3 — Xin allocator.* `finish_grow` gọi `allocator.grow(ptr, old_layout, new_layout)` nếu đã có vùng nhớ, hoặc `allocate(new_layout)` nếu chưa[^growth-finish]. Docs `Allocator::grow` mô tả rằng allocator *có thể* mở rộng khối tại chỗ, còn nếu thành công thì con trỏ cũ không còn dùng được, kể cả khi mở rộng tại chỗ[^alloc-grow-invalid]. Nghĩa là: sau `push`, địa chỉ phần tử có thể đổi — nên sách Rust giải thích rằng thêm phần tử có thể phải cấp phát vùng mới và sao chép, và đó là lý do borrow checker cấm giữ tham chiếu tới phần tử trong lúc `push`[^book-realloc].
+### 2.2 Capacity mới là bao nhiêu
 
-*Amortized O(1) nghĩa là gì.* Docs `push`: mỗi lần vượt capacity tốn O(capacity) để sao chép sang khối lớn hơn, nhưng chi phí đó được "bù" bởi `capacity` lần chèn O(1) mà khối mới cho phép[^vec-push-doc]. Docs module `collections` định nghĩa chi phí amortized là chi phí tính trên một chuỗi đủ dài các thao tác, một thao tác riêng lẻ có thể chậm hơn hoặc nhanh hơn[^coll-amortized-def]. Phép tính (suy luận của người soạn, toán thuần): với nhân đôi, gọi `c` là capacity lớn nhất từng bị đầy trước khi đẩy được phần tử thứ `n` (nên `c < n`); tổng số phần tử bị sao chép là không quá `c + c/2 + c/4 + … < 2c < 2n`, tức dưới 2 lần sao chép mỗi phần tử — một hằng số (đây là cận trên, vì allocator có thể mở rộng tại chỗ mà không chép).
+`grow_one` gọi `grow_amortized` với `additional = 1`[^growth-grow-one]. Trong `grow_amortized`, capacity mới là số lớn hơn giữa `2 × capacity cũ` và `len + additional`, rồi lại lấy số lớn hơn giữa mức sàn `min_non_zero_cap` và giá trị đó. Comment trong source ghi rằng đây là cách bảo đảm tăng trưởng mũ[^growth-exp]. Mức sàn có ba bậc: 8 nếu phần tử 1 byte (vì allocator thường làm tròn yêu cầu dưới 8 byte lên ít nhất 8), 4 nếu phần tử ≤ 1 KiB, và 1 nếu lớn hơn (để khỏi lãng phí chỗ cho `Vec` rất ngắn)[^growth-min].
 
-*Capacity cụ thể (suy từ source ở đây, không chạy ở chương này).* Với `Vec<u8>` rỗng: lần `push` đầu: `max(0×2, 1) = 1`, rồi `max(8, 1) = 8`; kế tiếp 16, 32, … Với phần tử 4 byte: 4, 8, 16, … Với phần tử > 1 KiB: 1, 2, 4, … (áp dụng công thức ở bước 2). Docs không bảo đảm các số này. Số đo thật (push 40 phần tử: `Vec<u64>` ra `4 8 16 32 64`, `Vec<u8>` ra `8 16 32 64`, khớp công thức trên) nằm ở [P3·08, mục 4](../03-memory/08-rust-va-bo-nho.md), phần Đi sâu.
+### 2.3 Xin allocator, và vì sao địa chỉ phần tử đổi
 
-*Điều docs hứa quanh capacity:*
+`finish_grow` gọi `allocator.grow(ptr, old_layout, new_layout)` nếu đã có vùng nhớ, hoặc `allocate(new_layout)` nếu chưa[^growth-finish]. Allocator *có thể* mở rộng khối tại chỗ, nhưng khi `grow` thành công thì con trỏ cũ không còn dùng được, kể cả khi mở rộng tại chỗ[^alloc-grow-invalid]. Nghĩa là sau một lần `push`, địa chỉ của các event trong batch có thể đã đổi. Sách Rust giải thích đúng điểm này: thêm phần tử có thể phải cấp phát vùng mới và sao chép, và đó là lý do borrow checker cấm giữ tham chiếu tới phần tử trong lúc `push`[^book-realloc].
 
-- `Vec::with_capacity(n)` (và `vec![x; n]`, `vec![a, b, …]`) yêu cầu allocator **đúng** kích thước cho `n` phần tử, không làm tròn lên lũy thừa của 2 hay gì khác[^vec-exact]. `with_capacity(0)` không cấp phát[^vec-with-cap].
+### 2.4 Amortized O(1) nghĩa là gì
+
+Mỗi lần `push` vượt capacity tốn O(capacity) để chép sang khối lớn hơn. Docs `push` nói chi phí đó được "bù" bởi `capacity` lần chèn O(1) mà khối mới cho phép[^vec-push-doc]. Docs module `collections` định nghĩa chi phí amortized là chi phí tính trên một chuỗi đủ dài các thao tác, nên một thao tác riêng lẻ có thể chậm hơn hoặc nhanh hơn[^coll-amortized-def].
+
+Phép tính sau là toán thuần, suy luận của người soạn. Với nhân đôi, gọi `c` là capacity lớn nhất từng bị đầy trước khi đẩy được phần tử thứ `n` (nên `c < n`). Tổng số phần tử bị sao chép là không quá `c + c/2 + c/4 + … < 2c < 2n`, tức dưới 2 lần sao chép cho mỗi phần tử, một hằng số. Đây là cận trên, vì allocator có thể mở rộng tại chỗ mà không chép. Với `ingest`: số lần batch bị chép giảm theo lôgarit của cỡ batch, và chi phí chép trung bình mỗi event là hằng số.
+
+### 2.5 Capacity cụ thể
+
+Phần này suy từ source ở trên, chương không chạy thử. Với `Vec<u8>` rỗng, lần `push` đầu cho `max(0×2, 1) = 1`, rồi `max(8, 1) = 8`; các lần sau là 16, 32, … Với phần tử 4 byte: 4, 8, 16, … Với phần tử > 1 KiB: 1, 2, 4, … (áp dụng công thức ở 2.2). Docs không bảo đảm các số này. Số đo thật (push 40 phần tử: `Vec<u64>` ra `4 8 16 32 64`, `Vec<u8>` ra `8 16 32 64`, khớp công thức trên) nằm ở [P3·08, mục 4](../03-memory/08-rust-va-bo-nho.md), phần Đi sâu.
+
+### 2.6 Điều docs hứa quanh capacity
+
+Khi `ingest` đã biết cỡ batch (chẳng hạn mỗi lần flush luôn là 1.000 event), nó nên nói trước cho `Vec`. Docs hứa những điều sau:
+
+- `Vec::with_capacity(n)` (và `vec![x; n]`, `vec![a, b, …]`) yêu cầu allocator **đúng** kích thước cho `n` phần tử, không làm tròn lên lũy thừa của 2 hay kích thước nào khác[^vec-exact]. `with_capacity(0)` không cấp phát[^vec-with-cap].
 - `reserve(additional)` bảo đảm sau khi gọi, capacity ≥ `len + additional`, và có thể xin dư để tránh cấp phát lặp[^vec-reserve]. `reserve_exact` không cố ý xin dư, nhưng allocator vẫn có thể cho nhiều hơn, nên capacity không dùng làm cận dưới chính xác[^vec-reserve-exact]. Docs khuyên dùng `reserve` nếu còn chèn tiếp.
 - `shrink_to_fit` cố bỏ phần capacity dư; kết quả phụ thuộc allocator và vẫn có thể còn dư[^vec-shrink]. `shrink_to(min)` co về không dưới `max(len, min)`[^vec-shrink-to].
-- `Vec` không bao giờ tự co, kể cả khi rỗng: rỗng rồi đổ đầy lại về cùng `len` không gọi allocator[^vec-noshrink]. Cả module `collections` dùng cùng nguyên tắc: tránh tự co để có hiệu năng, và vì thế thao tác xóa không được tính amortized[^coll-shrink][^coll-never-shrink].
+- `Vec` không bao giờ tự co, kể cả khi rỗng: rỗng rồi đổ đầy lại về cùng `len` thì không gọi allocator[^vec-noshrink]. Cả module `collections` theo cùng nguyên tắc: tránh tự co để có hiệu năng[^coll-shrink]. Vì vậy thao tác xóa không được tính amortized[^coll-never-shrink].
 
-(Nhận xét của người soạn: một service đọc batch lớn vào `Vec` rồi dùng lại buffer cho batch sau sẽ giữ nguyên capacity đỉnh; nếu có batch đột biến một lần mà RSS không giảm, đó là hành vi theo thiết kế chứ không phải rò rỉ. Chương [heap allocator](../03-memory/06-heap-allocator.md) giải thích vì sao ngay cả `free` cũng chưa chắc trả RSS cho hệ điều hành.)
+Một hệ quả (nhận xét của người soạn): nếu `ingest` đọc batch lớn vào `Vec` rồi dùng lại buffer cho batch sau, buffer giữ nguyên capacity đỉnh. Một batch đột biến duy nhất mà RSS không giảm là hành vi theo thiết kế, không phải rò rỉ. Chương [heap allocator](../03-memory/06-heap-allocator.md) giải thích vì sao ngay cả `free` cũng chưa chắc trả RSS cho hệ điều hành.
 
 <details><summary>Đi sâu: các nhánh trong source, <code>reserve</code> khác gì <code>push</code>, docs module về capacity</summary>
 
-- `Vec::reserve` gọi `self.buf.reserve(self.len, additional)`[^vec-reserve-src]. `RawVecInner::reserve` chỉ gọi phần chậm `do_reserve_and_handle` → `grow_amortized` khi `needs_to_grow`; comment giải thích muốn hàm này rẻ khi đã đủ chỗ, thành "một phép so sánh và một lời gọi"[^rawvec-reserve-cheap]. Vì `reserve` cũng đi qua `grow_amortized`, nó hưởng cùng công thức `max(2×cap, len+additional)` — tức `reserve(1)` lặp lại vẫn tăng theo mũ, còn `reserve_exact` thì không (nó đi nhánh `grow_exact`[^rawvec-grow-exact]) — suy luận của người soạn từ source, và docs không hứa công thức.
+- `Vec::reserve` gọi `self.buf.reserve(self.len, additional)`[^vec-reserve-src]. `RawVecInner::reserve` chỉ gọi phần chậm `do_reserve_and_handle` → `grow_amortized` khi `needs_to_grow`. Comment giải thích muốn hàm này rẻ khi đã đủ chỗ, thành "một phép so sánh và một lời gọi"[^rawvec-reserve-cheap].
+- Vì `reserve` cũng đi qua `grow_amortized`, nó hưởng cùng công thức `max(2×cap, len+additional)`. Tức `reserve(1)` lặp lại vẫn tăng theo mũ. `reserve_exact` thì không, vì nó đi nhánh `grow_exact`[^rawvec-grow-exact]. Đây là suy luận của người soạn từ source; docs không hứa công thức.
 - `Vec::shrink_to_fit` chỉ gọi xuống `RawVec` khi `capacity() > len`, để tránh panic "co lên capacity lớn hơn"[^vec-shrink-src].
-- `try_allocate_in` không cấp phát khi layout có kích thước 0 vì `Drop` không giải phóng khi capacity 0[^rawvec-nodealloc].
-- Docs module `collections` giải thích vì sao có kiểu tăng "có dư": nếu mảng nền luôn vừa khít, mỗi lần chèn phải cấp phát mảng mới và chép lại toàn bộ — "không hiệu quả"[^coll-why-array]. Collection tự không biết trước mình sẽ nhận bao nhiêu phần tử, nên lập trình viên được kỳ vọng "gợi ý" qua `with_capacity`/`reserve`[^coll-with-cap][^coll-reserve].
-- `Allocator::grow` hiện là API nightly (`allocator_api`)[^alloc-nightly]; `Vec` dùng nó nội bộ qua trait (`finish_grow` ở trên). Với allocator mặc định (`Global`), source 1.95.0 cài `grow` bằng lời gọi `realloc` khi khối cũ khác 0 byte và căn lề không đổi[^glob-grow-realloc]. Hợp đồng của `GlobalAlloc::realloc`: ownership chuyển cho allocator, mọi truy cập con trỏ cũ là UB kể cả khi block ở nguyên chỗ, và vùng `0..min(old, new)` giữ nguyên giá trị[^ga-realloc]. (Phần `realloc` của glibc làm gì: [Phase 3](../03-memory/06-heap-allocator.md).)
+- `try_allocate_in` không cấp phát khi layout có kích thước 0, vì `Drop` không giải phóng khi capacity 0[^rawvec-nodealloc].
+- Docs module `collections` giải thích vì sao có kiểu tăng "có dư": nếu mảng nền luôn vừa khít, mỗi lần chèn phải cấp phát mảng mới và chép lại toàn bộ, điều docs gọi là "không hiệu quả"[^coll-why-array]. Collection không biết trước mình sẽ nhận bao nhiêu phần tử, nên lập trình viên được kỳ vọng "gợi ý" qua `with_capacity`[^coll-with-cap]. Họ `reserve` làm cùng việc đó khi sắp có một đợt phần tử lớn[^coll-reserve].
+- `Allocator::grow` hiện là API nightly (`allocator_api`)[^alloc-nightly]; `Vec` dùng nó nội bộ qua trait (`finish_grow` ở trên). Với allocator mặc định (`Global`), source 1.95.0 cài `grow` bằng lời gọi `realloc` khi khối cũ khác 0 byte và căn lề không đổi[^glob-grow-realloc].
+- Hợp đồng của `GlobalAlloc::realloc`: ownership chuyển cho allocator, mọi truy cập con trỏ cũ là UB kể cả khi block ở nguyên chỗ, và vùng `0..min(old, new)` giữ nguyên giá trị[^ga-realloc]. (Phần `realloc` của glibc làm gì: [Phase 3](../03-memory/06-heap-allocator.md).)
 
 </details>
 
-**Quay lại Q2:** capacity tăng khi `len == capacity`, docs chỉ hứa amortized O(1) chứ không hứa hệ số; source 1.95.0 hiện nhân đôi với mức sàn 8/4/1; dùng `with_capacity`/`reserve` khi biết trước cỡ và `shrink_to_fit` khi muốn nhả bộ nhớ.
+**Quay lại Q2:** capacity tăng khi `len == capacity`; docs chỉ hứa amortized O(1) chứ không hứa hệ số; source 1.95.0 hiện nhân đôi với mức sàn 8/4/1; với batch của `ingest`, dùng `with_capacity`/`reserve` khi biết trước cỡ và `shrink_to_fit` khi muốn nhả bộ nhớ.
 
 ## 3. `String`: `Vec<u8>` đảm bảo UTF-8, và vì sao index theo byte (Q3)
 
-> **Trả lời ngắn.** `String` là một `Vec<u8>` có thêm bất biến "nội dung luôn là UTF-8 hợp lệ"[^str-utf8][^str-src]. Vì một ký tự có thể chiếm 1–4 byte, "ký tự thứ i" không tìm được trong O(1), nên Rust không cho `s[0]`; thay vào đó cắt theo **byte offset** `&s[a..b]`, và panic nếu a hoặc b không rơi vào ranh giới ký tự[^str-slice-src].
+> **Trả lời ngắn.** `String` là một `Vec<u8>` có thêm bất biến "nội dung luôn là UTF-8 hợp lệ"[^str-utf8]. Một ký tự UTF-8 có thể chiếm nhiều byte nên "ký tự thứ i" không tìm được trong O(1), và Rust không cho viết `s[0]`. Thay vào đó bạn cắt theo **byte offset** `&s[a..b]`, và lệnh này panic nếu a hoặc b không rơi vào ranh giới ký tự[^str-slice-src].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một cuộn băng ghi sẵn bằng nhiều đoạn dài ngắn khác nhau, mỗi đoạn là một "chữ". Bạn muốn nghe "chữ thứ 5" nhưng không có mục lục — phải tua từ đầu để đếm. Nhưng nếu chỉ bảo "cắt từ giây thứ 10 đến giây thứ 20" thì làm được ngay; chỉ cần đảm bảo điểm cắt không rơi giữa một chữ.
+*Với service `ingest`.* Mỗi event mang tên hiển thị của người dùng, và tên tiếng Việt đầy chữ có dấu. Giả sử `ingest` muốn cắt tên cho vừa một cột log rộng 10. Viết `&name[..10]` thì gọn, nhưng nếu vị trí cắt rơi giữa một ký tự nhiều byte thì handler panic (nhận xét của người soạn). Mục này giải thích `String` lưu gì bên trong, và vì sao Rust đòi bạn cắt theo byte thay vì theo ký tự.
 
-*Biểu diễn.* Docs `String`: ba thành phần là con trỏ tới byte, length và capacity; length tính bằng **byte**; buffer luôn ở heap[^str-repr][^str-heap]. Source 1.95.0: `pub struct String { vec: Vec<u8>, }`[^str-src]. Sách Rust diễn đạt gọn: "`String` là một wrapper quanh `Vec<u8>`"[^book-wrapper]. Mọi điều ở mục 1 và mục 2 (capacity, tăng trưởng, `reserve`) áp dụng nguyên cho `String` vì nó chứa một `Vec<u8>`; chuyển ngược về byte rẻ: `String::into_bytes` trả chính `Vec<u8>`[^str-into-bytes].
+### 3.1 Biểu diễn
 
-*`len` là số byte.* `String::len` trả độ dài tính bằng byte, không phải số ký tự hay grapheme, nên có thể không khớp với cảm nhận "độ dài" của con người[^str-len].
+Docs `String` nói nó gồm ba thành phần: con trỏ tới các byte, length và capacity, và length tính bằng **byte**[^str-repr]. Buffer này luôn nằm trên heap[^str-heap]. Source 1.95.0 xác nhận: `pub struct String { vec: Vec<u8>, }`[^str-src]. Sách Rust diễn đạt gọn hơn: `String` là một wrapper quanh `Vec<u8>`[^book-wrapper]. Vì vậy mọi điều ở mục 1 và mục 2 (capacity, tăng trưởng, `reserve`) áp dụng nguyên cho `String`. Chiều ngược lại cũng rẻ: `String::into_bytes` trả chính `Vec<u8>` bên trong[^str-into-bytes].
 
-*Vì sao không có `s[i]`.* Sách Rust nêu nhiều lý do; lý do mà người làm hệ thống quan tâm là: toán tử index được kỳ vọng luôn mất O(1), nhưng với `String` Rust phải đi từ đầu tới vị trí để đếm xem có bao nhiêu ký tự hợp lệ[^book-index-o1]. Doc comment trên `String` trong source cũng ghi rằng kiểu index được hỗ trợ là khoảng byte: nó chấp nhận chỉ số byte (để hằng thời gian) và trả `&str` UTF-8[^str-slice-src2].
+`String::len` trả độ dài tính bằng byte, không phải số ký tự hay grapheme, nên có thể không khớp với cảm nhận "độ dài" của con người[^str-len].
 
-*Cắt chuỗi.* `&s[i..j]` panic nếu chỉ số không phải ranh giới ký tự[^str-slice-src]; sách Rust cho ví dụ cắt giữa một ký tự 2 byte → panic lúc chạy với thông báo "byte index 1 is not a char boundary"[^book-slice-panic]. `str::is_char_boundary(i)` cho biết byte thứ `i` có phải byte đầu của một chuỗi UTF-8 hay là cuối chuỗi[^str-boundary]; `str::get(a..b)` là phiên bản không panic[^str-get].
+### 3.2 Vì sao không có `s[i]`
 
-*Deref.* `String` triển khai `Deref<Target = str>` nên thừa hưởng mọi method của `str`, và `&String` tự chuyển thành `&str`[^str-deref].
+Sách Rust nêu nhiều lý do; lý do mà người làm hệ thống quan tâm là toán tử index được kỳ vọng luôn mất O(1). Với `String` thì Rust phải đi từ đầu tới vị trí đó để đếm xem có bao nhiêu ký tự hợp lệ, nên không thể bảo đảm O(1)[^book-index-o1]. Doc comment trên `String` trong source cũng ghi rằng kiểu index được hỗ trợ là khoảng byte: nó chấp nhận chỉ số byte (để hằng thời gian) và trả `&str` UTF-8[^str-slice-src2].
 
-(Nhận xét của người soạn: hệ quả cho backend — đừng cắt response/log theo "N ký tự" bằng index byte; dùng `chars()`/`char_indices()` hoặc kiểm tra boundary, nếu không một request có chữ có dấu ở đúng vị trí cắt sẽ làm handler panic.)
+### 3.3 Cắt chuỗi
+
+`&s[i..j]` panic nếu chỉ số không phải ranh giới ký tự[^str-slice-src]. Sách Rust cho ví dụ cắt giữa một ký tự 2 byte, và chương trình panic lúc chạy với thông báo "byte index 1 is not a char boundary"[^book-slice-panic]. Để tránh panic, bạn có hai công cụ. `str::is_char_boundary(i)` cho biết byte thứ `i` có phải byte đầu của một chuỗi UTF-8, hoặc là cuối chuỗi[^str-boundary]. `str::get(a..b)` là phiên bản không panic của phép cắt[^str-get].
+
+Hệ quả cho `ingest` (nhận xét của người soạn): đừng cắt tên hay log theo "N ký tự" bằng index byte. Hãy dùng `chars()`/`char_indices()` hoặc kiểm tra boundary, nếu không một request có chữ có dấu ở đúng vị trí cắt sẽ làm handler panic.
+
+### 3.4 Deref
+
+`String` triển khai `Deref<Target = str>`, nên thừa hưởng mọi method của `str`, và `&String` tự chuyển thành `&str`[^str-deref]. Hàm của `ingest` nhận `&str` vì thế gọi được với cả `String` lẫn chuỗi literal.
 
 <details><summary>Đi sâu: các method buộc phải ở ranh giới, UTF-8 chiếm bao nhiêu byte</summary>
 
 - Nhiều method sửa chuỗi `assert!` ranh giới ký tự trước khi thao tác trên `Vec<u8>` nền, ví dụ `insert`: `assert!(self.is_char_boundary(idx));`[^str-insert-src]. Tức là bất biến UTF-8 được giữ bằng kiểm tra lúc chạy chứ không phải bằng kiểu.
-- Docs `String` chỉ ra UTF-8 là mã hóa độ dài biến thiên nên `String` thường nhỏ hơn mảng `char` tương ứng (mỗi `char` 4 byte)[^str-utf8-width]; chương [type layout](02-type-layout.md) nói về `char`.
+- Docs `String` chỉ ra UTF-8 là mã hóa độ dài biến thiên nên `String` thường nhỏ hơn mảng `char` tương ứng (mỗi `char` 4 byte)[^str-utf8-width]. Chương [type layout](02-type-layout.md) nói về `char`.
 - Docs `str::is_char_boundary` coi đầu và cuối chuỗi (`index == len`) là ranh giới, và trả `false` nếu `index > len`[^str-boundary].
 
 </details>
 
-**Quay lại Q3:** `String` = `Vec<u8>` + bất biến UTF-8; `len` và mọi chỉ số là byte; không index từng ký tự vì không O(1); cắt phải đúng ranh giới ký tự hoặc panic.
+**Quay lại Q3:** `String` = `Vec<u8>` + bất biến UTF-8; `len` và mọi chỉ số là byte; không index từng ký tự vì không O(1); `ingest` muốn cắt tên phải cắt đúng ranh giới ký tự, nếu không sẽ panic.
 
 ## 4. `HashMap`: hashbrown, SwissTable và load factor (Q4)
 
-> **Trả lời ngắn.** `HashMap` của std được mô tả là bảng băm dùng quadratic probing và tra cứu bằng SIMD, và là bản port Rust của SwissTable của Google[^hm-desc][^hm-swiss]. Ở 1.95.0 phần bảng là crate `hashbrown` 0.16.1[^hm-lock]. Mỗi bucket có một byte điều khiển; tra cứu so khớp byte điều khiển của cả một nhóm bucket cùng lúc, và chỉ so khóa thật ở những bucket khớp[^hb-find]. Theo source, bảng không chứa quá 7/8 số bucket[^hb-load].
+> **Trả lời ngắn.** Docs mô tả `HashMap` của std là bảng băm dùng quadratic probing và tra cứu bằng SIMD[^hm-desc], và là bản port Rust của SwissTable của Google[^hm-swiss]. Ở 1.95.0 phần bảng là crate `hashbrown` 0.16.1[^hm-lock]. Mỗi bucket có một byte điều khiển; tra cứu so khớp byte điều khiển của cả một nhóm bucket cùng lúc, và chỉ so khóa thật ở những bucket khớp[^hb-find]. Theo source, bảng không chứa quá 7/8 số bucket[^hb-load].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư viện lớn có một tấm bảng mục lục nhỏ gắn ở cửa mỗi dãy kệ, mỗi sách một "vân tay" 7 bit. Muốn tìm sách, bạn băm tên sách ra số, đi tới dãy kệ tương ứng, nhìn lướt cả tấm bảng vân tay *một lần* (SIMD) thay vì mở từng sách. Chỉ những ô trùng vân tay mới mở sách ra so tên thật. Nếu cả dãy đã có ô "trống" mà không thấy sách, kết luận không có.
+*Với service `ingest`.* Mỗi request vào đều bắt đầu bằng một lần `sessions.get(token)`: `sessions` là `HashMap<String, Session>` còn `token` lấy từ header. Đây là đường nóng của `ingest`, nên ta cần biết một lần tra cứu thực sự chạm vào những gì trong bộ nhớ, và bảng đầy tới mức nào thì phải nở ra.
 
-*Nguồn gốc.* `std::collections::HashMap` chứa một field `base: base::HashMap<K, V, S, A>` với `use hashbrown::hash_map as base;`[^hm-base]. `Cargo.lock` của workspace library tag 1.95.0 ghim `hashbrown` phiên bản 0.16.1[^hm-lock]. Docs hashbrown tự mô tả: bản port của SwissTable, làm sao cho thay thế trực tiếp `HashMap`/`HashSet` của std[^hb-doc]. Docs std chỉ nói "bản port của SwissTable" và dẫn bài nói CppCon[^hm-swiss] — cấu trúc chi tiết dưới đây là từ **source hashbrown 0.16.1**, tức chi tiết cài đặt.
+### 4.1 Nguồn gốc: hashbrown
 
-*Cấu trúc.* Bảng là một mảng bucket có số bucket là lũy thừa của 2, kèm một mảng *control byte* (một byte mỗi bucket):
+`std::collections::HashMap` chứa một field `base: base::HashMap<K, V, S, A>` với `use hashbrown::hash_map as base;`[^hm-base]. `Cargo.lock` của workspace library ở tag 1.95.0 ghim `hashbrown` phiên bản 0.16.1[^hm-lock]. Docs hashbrown tự mô tả: bản port của SwissTable, làm sao để thay thế trực tiếp `HashMap`/`HashSet` của std[^hb-doc]. Docs std chỉ nói "bản port của SwissTable" và dẫn bài nói CppCon[^hm-swiss]. Vì vậy cấu trúc chi tiết dưới đây là từ **source hashbrown 0.16.1**, tức chi tiết cài đặt.
 
-- Byte điều khiển bằng `0b1111_1111` là bucket **trống**, `0b1000_0000` là bucket **đã xóa** (tombstone), còn bucket đầy thì top bit là 0[^hb-tag-consts][^hb-tag-full]. Với bucket đầy, 7 bit thấp của byte là **7 bit cao của hash**[^hb-top7] (gọi là tag/h2).
-- Vị trí bắt đầu lấy từ các bit thấp của hash: `pos = h1(hash) & bucket_mask`, trong đó `h1` chỉ là ép hash 64 bit về `usize`[^hb-h1]; việc `&` với `bucket_mask` tương đương `hash % buckets` vì số bucket là lũy thừa của 2[^hb-pos].
+### 4.2 Cấu trúc: bucket và control byte
+
+Bảng là một mảng bucket với số bucket là lũy thừa của 2, kèm một mảng *control byte* (một byte mỗi bucket):
+
+- Byte điều khiển bằng `0b1111_1111` là bucket **trống**, `0b1000_0000` là bucket **đã xóa** (tombstone)[^hb-tag-consts], còn bucket đầy thì top bit là 0[^hb-tag-full]. Với bucket đầy, 7 bit thấp của byte là **7 bit cao của hash**[^hb-top7] (gọi là tag, hay h2).
+- Vị trí bắt đầu lấy từ các bit thấp của hash: `pos = h1(hash) & bucket_mask`, trong đó `h1` chỉ là ép hash 64 bit về `usize`[^hb-h1]. Phép `&` với `bucket_mask` tương đương `hash % buckets` vì số bucket là lũy thừa của 2[^hb-pos].
+
+### 4.3 Một lần tra cứu
 
 ```mermaid
 flowchart TB
@@ -166,99 +220,140 @@ flowchart TB
   EM -->|không| NX["nhóm kế theo triangular probe"] --> G
 ```
 
-*Một lần tra cứu (`find_inner`).* Tính `tag_hash` từ hash và `probe_seq` từ hash; lặp: nạp một `Group` byte điều khiển tại `probe_seq.pos`; với mỗi bit khớp tag trong nhóm, tính `index = (pos + bit) & bucket_mask` và gọi hàm so khóa `eq(index)`; nếu nhóm có byte `EMPTY` thì trả `None`, nếu không thì sang nhóm tiếp[^hb-find]. Lý do dừng khi gặp `EMPTY`: một chuỗi probe không bao giờ "vượt" qua bucket trống của mình (suy luận của người soạn từ cấu trúc, phù hợp với việc source yêu cầu luôn có ít nhất một bucket trống: xem dưới).
+Khi `ingest` gọi `sessions.get(token)`, hàm `find_inner` làm như sau. Nó tính `tag_hash` và `probe_seq` từ hash của token, rồi lặp: nạp một `Group` byte điều khiển tại `probe_seq.pos`; với mỗi bit khớp tag trong nhóm, tính `index = (pos + bit) & bucket_mask` và gọi hàm so khóa `eq(index)`; nếu nhóm có byte `EMPTY` thì trả `None`, nếu không thì sang nhóm tiếp[^hb-find]. Lý do dừng khi gặp `EMPTY` là một chuỗi probe không bao giờ "vượt" qua bucket trống của mình. Đây là suy luận của người soạn từ cấu trúc, phù hợp với việc source yêu cầu luôn có ít nhất một bucket trống (xem 4.5).
 
-*SIMD là gì ở đây.* Với x86/x86_64 có SSE2, `Group` quét 16 bucket một lần[^hb-sse2-doc]: hàm `match_tag` dùng `_mm_cmpeq_epi8` (so sánh từng byte) rồi `_mm_movemask_epi8` (gom thành mặt nạ bit)[^hb-sse2-cmp]. Trên aarch64 little-endian có NEON, source chọn module `neon`[^hb-neon-cfg] — máy Apple Silicon thuộc nhóm này (nhận xét của người soạn). Cùng khối cấu hình còn một comment của tác giả nói đã thử NEON nhưng đa số lệnh NEON có độ trễ nhiều chu kỳ, triệt tiêu lợi ích so với bản generic[^hb-neon-comment]; comment đó nằm cạnh một nhánh `neon` đang tồn tại nên có thể đã cũ (suy luận của người soạn), vì vậy đừng giả định NEON luôn nhanh hơn bản generic. Nếu không có SIMD phù hợp thì dùng bản `generic`[^hb-generic-cfg].
+Điểm đáng giá của thiết kế này: phần lớn lần tra cứu chỉ đọc một nhóm byte điều khiển nằm liền nhau, rồi so khóa thật ở rất ít bucket, thay vì so khóa ở từng bucket một (nhận xét của người soạn).
 
-*Probe.* Dãy probe dựa trên số tam giác: nhảy 1 nhóm, rồi 2, rồi 3…; vì số bucket là lũy thừa 2 nên probe ghé thăm mọi nhóm đúng một lần[^hb-probe]. Docs std gọi cách này là "quadratic probing"[^hm-desc] (suy luận của người soạn: số tam giác là một dạng thăm dò bậc hai).
+### 4.4 SIMD và probe
 
-*Load factor — chỉ theo source.* Docs std không nêu con số. Source hashbrown 0.16.1: với bảng đủ lớn, bắt buộc 1/8 số bucket phải trống, tức tải tối đa 87,5%[^hb-load]; hàm `bucket_mask_to_capacity` (số phần tử tối đa bảng chứa được) trả `bucket_mask` cho bảng ≤ 8 bucket, luôn chừa một ô trống[^hb-cap-small], và `(buckets / 8) * 7` cho bảng lớn hơn[^hb-cap-large]. Bảng nhỏ vẫn phải có ít nhất một bucket trống để tra cứu chắc chắn kết thúc khi khóa không có[^hb-small-empty]. Khi đổi từ capacity yêu cầu sang số bucket: nếu capacity ≥ 15 thì lấy `cap * 8 / 7` rồi làm tròn lên lũy thừa của 2[^hb-roundup]; nếu < 15 thì đi nhánh riêng chỉ chọn 4, 8 hoặc 16 bucket (xem phần đi sâu). (Suy luận của người soạn, phép tính trên giấy từ `reserve_rehash_inner` và `capacity_to_buckets`, không chạy thử: với bảng `B ≥ 16` bucket lớn lên nhờ `insert` liên tục, bảng đầy ở `7B/8` phần tử; phần tử kế tiếp gọi `reserve_rehash_inner` với `new_items = 7B/8 + 1`, nên capacity yêu cầu là `max(new_items, full_capacity + 1) = 7B/8 + 1`, và `(7B/8 + 1) * 8 / 7 = B + 1` theo phép chia nguyên; làm tròn lên lũy thừa 2 cho `2B` bucket. Ngay sau lần tăng, tải là `(7B/8 + 1) / 2B`, xấp xỉ 43,75% — ví dụ 15 phần tử trong 32 bucket là khoảng 46,9% — rồi tăng dần tới 87,5% ngay trước lần tăng kế. Vậy với bảng lớn lên bằng `insert`, tải thực tế dao động xấp xỉ giữa 43,75% và 87,5%; bảng rất nhỏ hoặc bảng tạo bằng `with_capacity` có thể khác, ví dụ bảng 4 bucket chứa tối đa 3 phần tử, tức 75%.)
+Với x86/x86_64 có SSE2, `Group` quét 16 bucket một lần[^hb-sse2-doc]. Nếu máy không có SIMD phù hợp thì hashbrown dùng bản `generic`[^hb-generic-cfg]. Chi tiết lệnh SSE2 và trường hợp aarch64/NEON nằm ở phần Đi sâu.
 
-*Tăng trưởng.* `reserve` chỉ làm việc nặng khi `additional > growth_left` (số ô còn chèn được trước khi chạm ngưỡng tải tối đa)[^hb-reserve]; phần chậm `reserve_rehash_inner` tính `new_items = items + additional` và `full_capacity`: nếu `new_items <= full_capacity / 2` thì băm lại **tại chỗ** (vì nhiều chỗ bị tombstone chiếm), còn không thì cấp bảng mới với capacity `max(new_items, full_capacity + 1)`[^hb-rehash-inplace][^hb-resize-cap] bằng `resize_inner`, hàm cùng họ với `RawTable::resize` mà doc mô tả là "cấp bảng mới có kích thước khác và chuyển nội dung bảng cũ vào"[^hb-resize-doc]. Mỗi lần tăng, `resize_inner` băm lại từng phần tử đang có (gọi `hasher`) rồi đặt vào bảng mới[^hb-resize-hash] — nên một lần `insert` có thể tốn O(n) (cùng lý do amortized như `Vec`, xem mục 2; suy luận của người soạn).
+Khi nhóm đầu tiên không có khóa cần tìm và cũng không có ô trống, hashbrown sang nhóm khác. Dãy probe dựa trên số tam giác: nhảy 1 nhóm, rồi 2, rồi 3…; vì số bucket là lũy thừa của 2 nên probe ghé thăm mọi nhóm đúng một lần[^hb-probe]. Docs std gọi cách này là "quadratic probing"[^hm-desc] (suy luận của người soạn: số tam giác là một dạng thăm dò bậc hai).
 
-*Docs std về capacity của `HashMap`.* Map mới tạo có capacity 0 và không cấp phát tới lần chèn đầu[^hm-cap-zero]; `with_capacity(n)` giữ chỗ cho *ít nhất* `n` phần tử và được phép cấp nhiều hơn[^hm-with-cap]; `reserve` tương tự `Vec::reserve`[^hm-reserve]; `shrink_to_fit` co "theo luật nội bộ" và có thể chừa chỗ theo chính sách resize[^hm-shrink].
+### 4.5 Load factor và tăng trưởng
 
-*Thứ tự duyệt và chi phí duyệt.* Thứ tự duyệt là tùy ý ("arbitrary order")[^hm-arbitrary], và theo docs hiện tại duyệt tốn O(capacity) chứ không phải O(len) vì cũng ghé các bucket trống[^hm-iter-cap]. (Nhận xét của người soạn: một map từng phình rất lớn rồi xóa gần hết vẫn duyệt chậm cho tới khi `shrink_to_fit`.)
+Docs std không nêu con số tải tối đa; nó chỉ có ở source hashbrown 0.16.1. Với bảng đủ lớn, source bắt buộc 1/8 số bucket phải trống, tức tải tối đa 87,5%[^hb-load]. Số phần tử tối đa của bảng lớn là `(buckets / 8) * 7`[^hb-cap-large]. Bảng nhỏ (≤ 8 bucket) luôn chừa một ô trống[^hb-cap-small], vì cần ít nhất một bucket trống để tra cứu khóa vắng mặt chắc chắn dừng được[^hb-small-empty].
 
-<details><summary>Đi sâu: byte điều khiển, nhóm trải dài, <code>EMPTY</code>/<code>DELETED</code>, tombstone</summary>
+Khi bảng chạm ngưỡng đó, hashbrown phải tăng. `reserve` chỉ làm việc nặng khi `additional > growth_left`, với `growth_left` là số ô còn chèn được trước khi chạm ngưỡng tải tối đa[^hb-reserve]. Khi đó nó cấp một bảng mới lớn hơn bằng `resize_inner`[^hb-resize-doc], và `resize_inner` băm lại từng phần tử đang có (gọi `hasher`) rồi đặt vào bảng mới[^hb-resize-hash]. Vì vậy một lần `insert` của `ingest` thỉnh thoảng tốn O(n), cùng lý do amortized như `Vec` ở mục 2 (suy luận của người soạn). Con số thực tế: với bảng lớn lên bằng `insert` liên tục, tải dao động xấp xỉ giữa 43,75% và 87,5% (phép tính trên giấy ở phần Đi sâu, không chạy thử).
 
-- Hằng và hàm byte điều khiển: `EMPTY = 0b1111_1111`, `DELETED = 0b1000_0000`[^hb-tag-consts]; "đầy" ⇔ top bit xóa[^hb-tag-full]; "đặc biệt" (EMPTY hoặc DELETED) ⇔ top bit đặt[^hb-tag-special]; phân biệt EMPTY với DELETED chỉ cần kiểm 1 bit[^hb-tag-special-empty] (là bit thấp nhất, suy ra từ hai hằng số — suy luận của người soạn).
-- Vì sao có `DELETED`: comment trong hàm `erase` của source giải thích rằng không thể đơn giản đặt byte vừa xóa thành `EMPTY`, vì `find_inner` có thể gặp byte `EMPTY` đó trước khi tìm thấy phần tử cần tìm và dừng tìm[^hb-erase]. Nếu bucket nằm trong một dải liền ít nhất `Group::WIDTH` byte đầy hoặc đã xóa thì phải đặt `DELETED` để `find_inner` đi tiếp[^hb-erase-rule]; còn nếu nhóm quanh nó đã có byte `EMPTY` thì đặt `EMPTY` là an toàn[^hb-erase-empty]. Chính vì vậy `reserve_rehash_inner` có nhánh băm lại tại chỗ "khi có nhiều chỗ trống bị khóa bởi các entry DELETED"[^hb-rehash-inplace].
-- `match_empty_or_deleted` đọc thẳng top bit từng byte: một tag là EMPTY hoặc DELETED khi và chỉ khi bit cao đặt[^hb-sse2-high].
-- Bảng nhỏ (capacity yêu cầu < 15) được xử lý riêng: source nâng mức capacity tối thiểu tùy kích thước phần tử để không lãng phí byte đệm theo căn lề của mảng control[^hb-small-table]; mức nâng chọn theo cặp (độ rộng `Group`, kích thước phần tử) — comment lấy ví dụ `Group` 16 byte như x86_64 SSE2, và mã có cả nhánh cho `Group` 8 byte[^hb-min-cap] — rồi bỏ qua bảng 2 bucket (chỉ chứa được 1 phần tử) để nhảy thẳng tới bảng 4 bucket chứa được 3 phần tử[^hb-small-4].
-- Source hashbrown cũng ghi nguyên nhân chọn SSE2 mà không chọn AVX: không cần dispatch lúc chạy, và xác suất khớp giảm mạnh sau vài bucket đầu[^hb-sse2-doc].
-- Điều kiện logic: nếu khóa mutate khiến hash/eq đổi khi đang nằm trong map, hoặc cài đặt `Hash`/`Eq` sai, đó là *logic error*: hành vi không đặc tả nhưng được bao bọc trong `HashMap` đó và không gây UB — có thể gồm panic, kết quả sai, abort, rò bộ nhớ, và vòng lặp vô hạn[^hm-logic].
+### 4.6 Capacity và thứ tự duyệt
+
+Docs std về capacity của `HashMap`: map mới tạo có capacity 0 và không cấp phát cho tới lần chèn đầu[^hm-cap-zero]. `with_capacity(n)` giữ chỗ cho *ít nhất* `n` phần tử và được phép cấp nhiều hơn[^hm-with-cap]. `reserve` tương tự `Vec::reserve`[^hm-reserve]. `shrink_to_fit` co "theo luật nội bộ" và có thể chừa chỗ theo chính sách resize[^hm-shrink].
+
+Thứ tự duyệt là tùy ý ("arbitrary order")[^hm-arbitrary], nên đừng dựa vào nó để trả event theo thứ tự nào. Theo docs hiện tại, duyệt tốn O(capacity) chứ không phải O(len), vì iterator cũng ghé các bucket trống[^hm-iter-cap]. Hệ quả (nhận xét của người soạn): `sessions` từng phình rất lớn rồi xóa gần hết vẫn duyệt chậm cho tới khi `shrink_to_fit`.
+
+<details><summary>Đi sâu: SIMD theo kiến trúc, tombstone, tính tải thực tế, bảng nhỏ</summary>
+
+- **Lệnh SSE2.** Hàm `match_tag` dùng `_mm_cmpeq_epi8` (so sánh từng byte) rồi `_mm_movemask_epi8` (gom thành mặt nạ bit)[^hb-sse2-cmp]. Source hashbrown cũng ghi nguyên nhân chọn SSE2 mà không chọn AVX: không cần dispatch lúc chạy, và xác suất khớp giảm mạnh sau vài bucket đầu[^hb-sse2-doc].
+- **aarch64.** Trên aarch64 little-endian có NEON, source chọn module `neon`[^hb-neon-cfg]. Máy Apple Silicon thuộc nhóm này (nhận xét của người soạn). Cùng khối cấu hình còn một comment của tác giả nói đã thử NEON nhưng đa số lệnh NEON có độ trễ nhiều chu kỳ, triệt tiêu lợi ích so với bản generic[^hb-neon-comment]. Comment đó nằm cạnh một nhánh `neon` đang tồn tại nên có thể đã cũ (suy luận của người soạn); vì vậy đừng giả định NEON luôn nhanh hơn bản generic.
+- **Hằng và hàm byte điều khiển.** `EMPTY = 0b1111_1111`, `DELETED = 0b1000_0000`[^hb-tag-consts]. "Đầy" khi top bit xóa[^hb-tag-full]; "đặc biệt" (EMPTY hoặc DELETED) khi top bit đặt[^hb-tag-special]. Phân biệt EMPTY với DELETED chỉ cần kiểm 1 bit[^hb-tag-special-empty], là bit thấp nhất (suy ra từ hai hằng số, suy luận của người soạn). `match_empty_or_deleted` đọc thẳng top bit từng byte[^hb-sse2-high].
+- **Vì sao có `DELETED`.** Comment trong hàm `erase` giải thích rằng không thể đơn giản đặt byte vừa xóa thành `EMPTY`, vì `find_inner` có thể gặp byte `EMPTY` đó trước khi tìm thấy phần tử cần tìm và dừng tìm[^hb-erase]. Nếu bucket nằm trong một dải liền ít nhất `Group::WIDTH` byte đầy hoặc đã xóa thì phải đặt `DELETED` để `find_inner` đi tiếp[^hb-erase-rule]. Còn nếu nhóm quanh nó đã có byte `EMPTY` thì đặt `EMPTY` là an toàn[^hb-erase-empty]. Chính vì vậy `reserve_rehash_inner` có nhánh băm lại tại chỗ "khi có nhiều chỗ trống bị khóa bởi các entry DELETED"[^hb-rehash-inplace].
+- **Chi tiết tăng trưởng.** `reserve_rehash_inner` tính `new_items = items + additional` và `full_capacity`. Nếu `new_items <= full_capacity / 2` thì băm lại **tại chỗ** (vì nhiều chỗ bị tombstone chiếm)[^hb-rehash-inplace]. Còn không thì cấp bảng mới với capacity `max(new_items, full_capacity + 1)`[^hb-resize-cap].
+- **Từ capacity sang số bucket.** Nếu capacity yêu cầu ≥ 15 thì lấy `cap * 8 / 7` rồi làm tròn lên lũy thừa của 2[^hb-roundup]. Nếu < 15 thì đi nhánh riêng chỉ chọn 4, 8 hoặc 16 bucket (xem bullet về bảng nhỏ bên dưới).
+- **Tính tải thực tế (suy luận của người soạn, phép tính trên giấy từ `reserve_rehash_inner` và `capacity_to_buckets`, không chạy thử).** Với bảng `B ≥ 16` bucket lớn lên nhờ `insert` liên tục, bảng đầy ở `7B/8` phần tử. Phần tử kế tiếp gọi `reserve_rehash_inner` với `new_items = 7B/8 + 1`, nên capacity yêu cầu là `max(new_items, full_capacity + 1) = 7B/8 + 1`, và `(7B/8 + 1) * 8 / 7 = B + 1` theo phép chia nguyên; làm tròn lên lũy thừa 2 cho `2B` bucket. Ngay sau lần tăng, tải là `(7B/8 + 1) / 2B`, xấp xỉ 43,75% (ví dụ 15 phần tử trong 32 bucket là khoảng 46,9%), rồi tăng dần tới 87,5% ngay trước lần tăng kế. Vậy với bảng lớn lên bằng `insert`, tải thực tế dao động xấp xỉ giữa 43,75% và 87,5%. Bảng rất nhỏ hoặc bảng tạo bằng `with_capacity` có thể khác, ví dụ bảng 4 bucket chứa tối đa 3 phần tử, tức 75%.
+- **Bảng nhỏ** (capacity yêu cầu < 15) được xử lý riêng: source nâng mức capacity tối thiểu tùy kích thước phần tử để không lãng phí byte đệm theo căn lề của mảng control[^hb-small-table]. Mức nâng chọn theo cặp (độ rộng `Group`, kích thước phần tử): comment lấy ví dụ `Group` 16 byte như x86_64 SSE2, và mã có cả nhánh cho `Group` 8 byte[^hb-min-cap]. Sau đó source bỏ qua bảng 2 bucket (chỉ chứa được 1 phần tử) để nhảy thẳng tới bảng 4 bucket chứa được 3 phần tử[^hb-small-4].
+- **Logic error.** Nếu khóa mutate khiến hash/eq đổi khi đang nằm trong map, hoặc cài đặt `Hash`/`Eq` sai, đó là *logic error*: hành vi không đặc tả nhưng được bao bọc trong `HashMap` đó và không gây UB. Hậu quả có thể gồm panic, kết quả sai, abort, rò bộ nhớ, và vòng lặp vô hạn[^hm-logic].
 
 </details>
 
-**Quay lại Q4:** `HashMap` = hashbrown (SwissTable): bảng 2^k bucket + một byte điều khiển mỗi bucket (7 bit hash cao), tra cứu so một nhóm byte bằng SIMD rồi mới so khóa; theo source, tải tối đa 7/8 và khi đầy thì băm lại sang bảng lớn hơn.
+**Quay lại Q4:** `sessions` của `ingest` là hashbrown (SwissTable): bảng 2^k bucket kèm một byte điều khiển mỗi bucket (7 bit hash cao). Tra cứu so một nhóm byte bằng SIMD rồi mới so khóa; theo source, tải tối đa 7/8, và khi đầy thì băm lại sang bảng lớn hơn.
 
 ## 5. SipHash, HashDoS và `RandomState` (Q5)
 
-> **Trả lời ngắn.** Hash mặc định của `HashMap` được chọn để chống tấn công HashDoS, nên có seed ngẫu nhiên lấy từ nguồn ngẫu nhiên của hệ thống; thuật toán hiện là SipHash 1-3 nhưng docs cho phép đổi bất cứ lúc nào[^hm-hashdos][^hm-sip]. Mỗi `RandomState` mang cặp khóa riêng nên hai map khác nhau băm cùng một khóa ra kết quả khác nhau[^rs-doc]. Đổi lại, SipHash không phải nhanh nhất cho khóa nhỏ; docs cho phép thay hasher[^hm-sip-perf][^hm-replace].
+> **Trả lời ngắn.** Hash mặc định của `HashMap` được chọn để chống tấn công HashDoS, nên có seed ngẫu nhiên lấy từ nguồn ngẫu nhiên của hệ thống[^hm-hashdos]. Thuật toán hiện là SipHash 1-3, nhưng docs cho phép đổi bất cứ lúc nào[^hm-sip]. Mỗi `RandomState` mang cặp khóa riêng, nên hai map khác nhau băm cùng một khóa ra kết quả khác nhau[^rs-doc]. Đổi lại, SipHash không phải nhanh nhất cho khóa nhỏ[^hm-sip-perf], nên docs cho phép thay hasher[^hm-replace].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bảng băm giống quầy gửi áo khoác với 1000 móc, số móc tính từ tên khách. Nếu kẻ xấu biết cách tính, hắn dựng 10.000 cái tên cùng ra "móc 7"; mọi lượt gửi/lấy sau đó phải đi qua cả hàng dài — quầy tê liệt. Cách phòng: dùng công thức tính móc mà kẻ xấu *không biết* vì có chìa khóa bí mật ngẫu nhiên mỗi lần dựng quầy.
+*Với service `ingest`.* Token trong header `X-Session` do client gửi lên, tức là người ngoài kiểm soát khóa của `sessions`. Đó chính là loại khóa mà một kẻ tấn công có thể chọn sao cho nhiều khóa rơi vào cùng chỗ. Mục này giải thích vì sao `HashMap` mặc định có SipHash và seed ngẫu nhiên, và khi nào `ingest` có thể đổi sang hasher nhanh hơn.
 
-*Vấn đề.* Docs module `collections` nêu: `HashMap` dùng chi phí kỳ vọng; về lý thuyết, dù rất khó xảy ra, có thể có hiệu năng tệ hơn kỳ vọng nhiều, vì có thể tạo ra hash trùng với một số khóa đầu vào và việc xử lý trùng cần thêm tính toán[^coll-expected][^coll-expected2]. Nếu khóa do bên ngoài kiểm soát (header, tham số query, JSON key trong request) và hash đoán được, kẻ tấn công có thể cố ý làm nhiều khóa trùng — đó là ý "HashDoS" (suy luận của người soạn từ tên gọi; docs chỉ viết "HashDoS attacks" mà không định nghĩa chi tiết).
+### 5.1 Vấn đề: HashDoS
 
-*Giải pháp mặc định.* Docs `HashMap`: thuật toán băm mặc định được chọn để chống HashDoS, được seed ngẫu nhiên; seed được tạo "best-effort" từ nguồn ngẫu nhiên mạnh của host mà không chặn chương trình[^hm-hashdos]; vì vậy chất lượng seed phụ thuộc chất lượng nguồn entropy của hệ thống lúc tạo, nên lúc khởi động khi entropy thấp seed có thể kém hơn[^hm-seed-quality]. Thuật toán mặc định là SipHash 1-3 "hiện tại", và có thể đổi bất cứ lúc nào[^hm-sip]. Docs `DefaultHasher` nhắc cùng ý: thuật toán bên trong không được đặc tả, đừng dựa vào hash giữa các bản phát hành[^dh-unspec]. Source 1.95.0 đúng như vậy: `DefaultHasher` bọc `SipHasher13`[^rs-dh-src], và `RandomState::build_hasher` tạo nó từ cặp khóa `k0`, `k1` của `RandomState`[^rs-build-src].
+Docs module `collections` nêu rằng `HashMap` dùng chi phí kỳ vọng. Về lý thuyết, dù rất khó xảy ra, `HashMap` có thể có hiệu năng tệ hơn kỳ vọng nhiều[^coll-expected]. Nguyên nhân là tính xác suất của hashing: có thể tạo ra hash trùng với một số khóa đầu vào, và xử lý trùng cần thêm tính toán[^coll-expected2].
 
-*`RandomState`.* Một instance sinh ra các hasher giống nhau; hai instance khác nhau "khó có khả năng" cho cùng kết quả với cùng giá trị[^rs-doc]. `HashMap::new()` dùng `RandomState` mặc định; có thể thay trên từng map bằng `with_hasher`/`with_capacity_and_hasher`[^hm-replace]. Docs `DefaultHasher::new` còn nói: các `DefaultHasher` tạo bằng `new`/`default` giống nhau, nhưng không bảo đảm giống mọi `DefaultHasher` khác[^dh-new] — tức đó không phải hash ổn định để lưu đĩa hay chia shard giữa các tiến trình/phiên bản.
+Nếu khóa do bên ngoài kiểm soát (header, tham số query, JSON key trong request) và hash đoán được, kẻ tấn công có thể cố ý làm nhiều khóa trùng nhau. Đó là ý của "HashDoS" (suy luận của người soạn từ tên gọi; docs chỉ viết "HashDoS attacks" mà không định nghĩa chi tiết).
 
-*Đổi lại cái gì.* Docs: SipHash khá cạnh tranh với khóa cỡ vừa; nhưng thuật toán khác sẽ nhanh hơn với khóa nhỏ như số nguyên và khóa lớn như chuỗi dài, tuy chúng thường không chống HashDoS[^hm-sip-perf]. (Nhận xét của người soạn: với `HashMap<u64, _>` nội bộ mà khóa không do người ngoài kiểm soát, đổi hasher là tối ưu phổ biến; với khóa lấy từ request thì đừng đổi nếu chưa hiểu rủi ro.)
+### 5.2 Giải pháp mặc định
 
-*Hợp đồng `Hash`/`Eq`.* Khóa phải cài `Eq` và `Hash`; nếu cài tay thì phải giữ `k1 == k2 → hash(k1) == hash(k2)`; vi phạm là logic error[^hm-eq-hash]. Hậu quả của logic error không đặc tả, nhưng được bao bọc trong map đó và không gây UB[^hm-logic].
+Docs `HashMap` nói thuật toán băm mặc định được chọn để chống HashDoS và có seed ngẫu nhiên. Seed được tạo "best-effort" từ nguồn ngẫu nhiên mạnh của host, mà không chặn chương trình[^hm-hashdos]. Vì vậy chất lượng seed phụ thuộc chất lượng nguồn entropy của hệ thống lúc tạo, và lúc khởi động khi entropy thấp, seed có thể kém hơn[^hm-seed-quality].
+
+Thuật toán mặc định "hiện tại" là SipHash 1-3, và có thể đổi bất cứ lúc nào[^hm-sip]. Docs `DefaultHasher` nhắc cùng ý: thuật toán bên trong không được đặc tả, đừng dựa vào hash giữa các bản phát hành[^dh-unspec]. Source 1.95.0 đúng như vậy: `DefaultHasher` bọc `SipHasher13`[^rs-dh-src], và `RandomState::build_hasher` tạo nó từ cặp khóa `k0`, `k1` của `RandomState`[^rs-build-src].
+
+### 5.3 `RandomState`
+
+Một instance `RandomState` sinh ra các hasher giống nhau, còn hai instance khác nhau "khó có khả năng" cho cùng kết quả với cùng giá trị[^rs-doc]. `HashMap::new()` dùng `RandomState` mặc định, và bạn có thể thay trên từng map bằng `with_hasher`/`with_capacity_and_hasher`[^hm-replace].
+
+Docs `DefaultHasher::new` còn nói các `DefaultHasher` tạo bằng `new`/`default` giống nhau, nhưng không bảo đảm giống mọi `DefaultHasher` khác[^dh-new]. Vậy đó không phải hash ổn định để lưu đĩa hay chia shard giữa các tiến trình hoặc phiên bản (suy luận của người soạn).
+
+### 5.4 Đổi lại cái gì
+
+Docs nói SipHash khá cạnh tranh với khóa cỡ vừa. Nhưng với khóa nhỏ như số nguyên và khóa lớn như chuỗi dài, thuật toán khác sẽ nhanh hơn, dù chúng thường không chống HashDoS[^hm-sip-perf]. Nhận xét của người soạn: nếu `ingest` có một `HashMap<u64, _>` nội bộ mà khóa không do người ngoài kiểm soát, đổi hasher là tối ưu phổ biến. Với `sessions`, khóa lấy từ request, thì đừng đổi nếu chưa hiểu rủi ro.
+
+### 5.5 Hợp đồng `Hash`/`Eq`
+
+Khóa phải cài `Eq` và `Hash`. Nếu cài tay thì phải giữ `k1 == k2 → hash(k1) == hash(k2)`, vi phạm là logic error[^hm-eq-hash]. Hậu quả của logic error là không đặc tả, nhưng được bao bọc trong map đó và không gây UB[^hm-logic].
 
 <details><summary>Đi sâu: vì sao <code>RandomState::new</code> cộng 1 vào khóa, cache theo thread</summary>
 
 - Source `RandomState::new` ghi lịch sử: ban đầu mỗi lần tạo gọi sinh số ngẫu nhiên hai lần; sau khi thấy chậm khi tạo nhiều map trên một thread, nó **cache bộ khóa đầu tiên theo từng thread**[^rs-cache]. Sau đó phát hiện rằng nếu thứ tự duyệt xác định thì cho phép một dạng DoS, nên mỗi lần tạo `RandomState` tăng một trong hai seed thêm 1, để mỗi `HashMap` có thứ tự duyệt khác nhau[^rs-incr].
-- Hệ quả (suy luận của người soạn từ hai đoạn trên): các `RandomState` cùng thread chỉ khác nhau ở một khóa tăng dần; tính "ngẫu nhiên" giữa các map phần lớn đến từ việc đổi seed, còn bộ khóa gốc lấy từ OS một lần mỗi thread.
+- Hệ quả (suy luận của người soạn từ hai đoạn trên): các `RandomState` cùng thread chỉ khác nhau ở một khóa tăng dần. Tính "ngẫu nhiên" giữa các map phần lớn đến từ việc đổi seed, còn bộ khóa gốc lấy từ OS một lần mỗi thread.
 - Docs `HashMap` cảnh báo ở `with_hasher`/`with_capacity_and_hasher`: hasher thường được sinh ngẫu nhiên để map chống lại các tấn công gây nhiều va chạm và hiệu năng rất tệ; đặt tay có thể mở ra vector tấn công DoS[^hm-with-hasher-warn].
 
 </details>
 
-**Quay lại Q5:** hash mặc định chống HashDoS bằng seed ngẫu nhiên (SipHash 1-3 hiện nay, không bảo đảm); chi phí là chậm hơn hash đơn giản cho khóa nhỏ, và có thể thay hasher trên từng map.
+**Quay lại Q5:** `sessions` của `ingest` có khóa do người ngoài gửi, nên hash mặc định chống HashDoS bằng seed ngẫu nhiên (SipHash 1-3 hiện nay, không bảo đảm); chi phí là chậm hơn hash đơn giản cho khóa nhỏ, và có thể thay hasher trên từng map.
 
 ## 6. `BTreeMap`: B-tree và cache (Q6)
 
-> **Trả lời ngắn.** `BTreeMap` là map có thứ tự dựa trên B-tree: mỗi node chứa nguyên một mảng phần tử thay vì một phần tử[^bt-bg1]. Docs nói rõ lý do: cây nhị phân cân bằng cần ít so sánh nhất về lý thuyết, nhưng mỗi phần tử một node heap riêng làm mỗi lần chèn là một lần cấp phát và mỗi so sánh có thể là một cache miss; B-tree gom B-1 đến 2B-1 phần tử vào một mảng liền để giảm cấp phát và tăng hiệu quả cache, đổi lại phải so sánh nhiều hơn[^bt-bst][^bt-b].
+> **Trả lời ngắn.** `BTreeMap` là map có thứ tự dựa trên B-tree: mỗi node chứa nguyên một mảng phần tử thay vì một phần tử[^bt-bg1]. Docs nói rõ lý do: cây nhị phân cân bằng cần ít so sánh nhất về lý thuyết, nhưng mỗi phần tử một node heap riêng khiến mỗi lần chèn là một lần cấp phát và mỗi so sánh có thể là một cache miss[^bt-bst]. B-tree gom B-1 đến 2B-1 phần tử vào một mảng liền để giảm cấp phát và tăng hiệu quả cache, đổi lại phải so sánh nhiều hơn[^bt-b].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tra từ điển giấy. Nếu mỗi *từ* nằm trên một tờ giấy rời rải khắp phòng (cây nhị phân), mỗi lần "so sánh" là đi sang một tờ khác. Từ điển thật xếp hàng chục từ trên một trang; bạn lật tới trang đúng rồi lướt mắt dọc trang — vài trang là đủ.
+*Với service `ingest`.* Ngoài `sessions`, `ingest` còn phải trả lời `GET /events?from=…&to=…`: lấy mọi event trong một khoảng thời gian. Nó giữ `by_ts: BTreeMap<u64, Event>` khóa theo timestamp, và truy vấn khoảng chạy bằng `range`. Mục này giải thích vì sao cấu trúc cây ấy xếp nhiều phần tử vào một node, thay vì dùng cây nhị phân như giáo trình thuật toán hay dạy.
 
-*Docs nói gì.* `BTreeMap` là bản đồ có thứ tự dựa trên B-Tree, khóa cần `Ord` (so sánh toàn phần)[^bt-desc][^bt-ord]; iterator trả mục theo thứ tự khóa, mỗi mục tốn worst-case lôgarit và amortized hằng số[^bt-iter]. Phần "Background" trong docs giải thích B-tree là gì: giống BST nhưng thích ứng với "độ hạt tự nhiên" mà máy hiện đại tiêu thụ dữ liệu — mỗi node chứa cả một mảng[^bt-bg1].
+### 6.1 Docs nói gì
 
-*Vì sao nhanh hơn BST trong thực tế.* Docs: B-Tree là sự đánh đổi cơ bản giữa hiệu quả cache và việc giảm tối đa công sức tìm kiếm[^bt-compromise]. BST cân bằng hoàn hảo cần số so sánh tối thiểu `log2 n`, nhưng mỗi phần tử ở một node heap riêng → mỗi chèn là một lần cấp phát heap, mỗi so sánh có thể là cache miss do gián tiếp (indirection)[^bt-bst]. B-Tree để mỗi node chứa B-1 đến 2B-1 phần tử trong mảng liền: số lần cấp phát giảm B lần và tìm kiếm thân thiện cache hơn, nhưng số so sánh trung bình tăng[^bt-b]. (Cache line và vì sao truy cập liền mạch rẻ: [Chương cache](../02-cpu/06-cache-va-numa.md).)
+`BTreeMap` là bản đồ có thứ tự dựa trên B-Tree[^bt-desc]. Khóa cần `Ord`, nghĩa là hai khóa luôn so sánh được với nhau[^bt-ord]. Iterator trả mục theo thứ tự khóa, mỗi mục tốn worst-case lôgarit và amortized hằng số[^bt-iter]. Phần "Background" trong docs giải thích B-tree giống BST nhưng thích ứng với "độ hạt tự nhiên" mà máy hiện đại tiêu thụ dữ liệu: mỗi node chứa cả một mảng[^bt-bg1].
 
-*Tìm trong node.* Docs: tìm tuần tự hiệu quả cache nhất, tìm nhị phân tối ưu số so sánh; hiện cài đặt dùng tìm tuần tự "ngây thơ" vì hiệu quả với node nhỏ chứa phần tử rẻ so sánh, và nhóm tác giả muốn xem xét chiến lược theo B sau này[^bt-linear]. Với tìm tuần tự, tìm một phần tử ngẫu nhiên kỳ vọng tốn `B * log(n)` so sánh — thường tệ hơn BST về số so sánh, nhưng "trên thực tế hiệu năng rất tốt"[^bt-comp].
+### 6.2 Vì sao nhanh hơn BST trong thực tế
 
-*Cái giá và cái được.* Theo bảng `collections`, `BTreeMap` có `get`/`insert`/`remove` và `range` đều O(log n), `append` O(n+m); `HashMap` thì O(1) kỳ vọng nhưng không có `range`[^coll-row-bt][^coll-row-hm]. Docs gợi ý dùng `BTreeMap` khi cần map sắp theo khóa, lấy một dải mục theo yêu cầu, hoặc quan tâm khóa nhỏ nhất/lớn nhất[^coll-use-bt]. (Nhận xét của người soạn: bảng giá trị theo thời gian, "timeline" sự kiện, phân trang theo khóa — các việc kiểu `WHERE ts BETWEEN a AND b` — là nơi `BTreeMap::range` hợp.)
+Docs gọi B-Tree là một sự đánh đổi cơ bản giữa hiệu quả cache và việc giảm tối đa công sức tìm kiếm[^bt-compromise]. BST cân bằng hoàn hảo cần số so sánh tối thiểu `log2 n`. Nhưng mỗi phần tử nằm ở một node heap riêng, nên mỗi lần chèn là một lần cấp phát heap, và mỗi so sánh có thể là cache miss do gián tiếp (indirection)[^bt-bst]. B-Tree để mỗi node chứa B-1 đến 2B-1 phần tử trong một mảng liền. Số lần cấp phát giảm B lần và tìm kiếm thân thiện cache hơn, nhưng số so sánh trung bình tăng[^bt-b]. (Cache line và vì sao truy cập liền mạch rẻ: [Chương cache](../02-cpu/06-cache-va-numa.md).)
+
+### 6.3 Tìm trong node
+
+Docs nói tìm tuần tự hiệu quả cache nhất, còn tìm nhị phân tối ưu số so sánh. Hiện cài đặt dùng tìm tuần tự "ngây thơ", vì nó hiệu quả với node nhỏ chứa phần tử rẻ so sánh, và nhóm tác giả muốn xem xét chiến lược theo B sau này[^bt-linear]. Với tìm tuần tự, tìm một phần tử ngẫu nhiên kỳ vọng tốn `B * log(n)` so sánh, thường tệ hơn BST về số so sánh, nhưng "trên thực tế hiệu năng rất tốt"[^bt-comp].
+
+### 6.4 Cái giá và cái được
+
+Theo bảng `collections`, `BTreeMap` có `get`/`insert`/`remove` và `range` đều O(log n), `append` O(n+m)[^coll-row-bt]. `HashMap` thì O(1) kỳ vọng nhưng không có `range`[^coll-row-hm]. Docs gợi ý dùng `BTreeMap` khi cần map sắp theo khóa, lấy một dải mục theo yêu cầu, hoặc quan tâm khóa nhỏ nhất/lớn nhất[^coll-use-bt].
+
+Với `ingest` (nhận xét của người soạn): `by_ts` là đúng chỗ cho `BTreeMap::range`, vì truy vấn khoảng thời gian kiểu `WHERE ts BETWEEN a AND b` là việc `HashMap` không làm được. Tương tự với "timeline" sự kiện hay phân trang theo khóa.
 
 <details><summary>Đi sâu: kích thước node trong source 1.95.0</summary>
 
 - Source `node.rs` hiện đặt `B = 6` và `CAPACITY = 2 * B - 1` (= 11); số phần tử tối thiểu sau khi tách node là `B - 1`[^bt-node-const]. Các số này là chi tiết cài đặt.
-- Một `LeafNode<K, V>` chứa con trỏ cha, chỉ số trong cha[^bt-leaf-parent], `len: u16`[^bt-leaf-len-field] và hai mảng riêng: `keys: [MaybeUninit<K>; CAPACITY]` và `vals: [MaybeUninit<V>; CAPACITY]`[^bt-leaf]; chỉ `len` phần tử đầu của mỗi mảng đã khởi tạo[^bt-leaf-len]. (Suy luận của người soạn: khóa nằm liền nhau và tách khỏi giá trị nên quét khóa trong node không kéo giá trị vào cache.)
+- Một `LeafNode<K, V>` chứa con trỏ cha và chỉ số trong cha[^bt-leaf-parent], `len: u16`[^bt-leaf-len-field], và hai mảng riêng: `keys: [MaybeUninit<K>; CAPACITY]` và `vals: [MaybeUninit<V>; CAPACITY]`[^bt-leaf]. Chỉ `len` phần tử đầu của mỗi mảng đã khởi tạo[^bt-leaf-len]. (Suy luận của người soạn: khóa nằm liền nhau và tách khỏi giá trị nên quét khóa trong node không kéo giá trị vào cache.)
 - `InternalNode` thêm mảng `edges` có `2 * B` con trỏ tới node con[^bt-edges]; `len + 1` con trỏ hợp lệ[^bt-internal].
-- Sửa khóa làm thứ tự `Ord` đổi khi đang ở trong map là logic error, hành vi không đặc tả nhưng không UB[^bt-logic] — cùng lớp lỗi với `HashMap`.
+- Sửa khóa làm thứ tự `Ord` đổi khi đang ở trong map là logic error, hành vi không đặc tả nhưng không UB[^bt-logic]. Đây là cùng lớp lỗi với `HashMap`.
 
 </details>
 
-**Quay lại Q6:** B-tree xếp nhiều phần tử trong một node liền để giảm số cấp phát và cache miss so với cây nhị phân, trả giá bằng nhiều so sánh hơn; docs gọi đó là sự đánh đổi giữa cache-efficiency và số so sánh.
+**Quay lại Q6:** B-tree xếp nhiều phần tử trong một node liền để giảm số cấp phát và cache miss so với cây nhị phân, trả giá bằng nhiều so sánh hơn; docs gọi đó là sự đánh đổi giữa cache-efficiency và số so sánh, và `by_ts` của `ingest` hưởng thêm `range`.
 
 ## 7. `VecDeque`: ring buffer (Q7)
 
-> **Trả lời ngắn.** `VecDeque` là hàng đợi hai đầu cài bằng ring buffer có thể tăng kích thước[^vd-desc], tức một mảng liền trong đó phần tử đầu nằm ở vị trí `head` và dãy phần tử "quấn vòng" khi hết mảng[^vd-struct][^vd-struct-src]. Vì thế thêm/bớt ở cả hai đầu chỉ là dịch `head` hoặc `len`, không phải dời cả dãy như `Vec::insert(0, _)`; đổi lại các phần tử không nhất thiết liền nhau trong bộ nhớ[^vd-contig].
+> **Trả lời ngắn.** `VecDeque` là hàng đợi hai đầu cài bằng ring buffer có thể tăng kích thước[^vd-desc]. Nó là một mảng liền, trong đó phần tử đầu nằm ở vị trí `head` và dãy phần tử "quấn vòng" khi hết mảng[^vd-struct]. Vì thế thêm/bớt ở cả hai đầu chỉ là dịch `head` hoặc `len`, không phải dời cả dãy như `Vec::insert(0, _)`. Đổi lại các phần tử không nhất thiết liền nhau trong bộ nhớ[^vd-contig].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): bàn xoay sushi hoặc hàng ghế quay tròn trong rạp chiếu phim: người đầu hàng đứng ở ghế số `head`; người mới vào cuối hàng ngồi ngay sau người cuối; khi tới ghế cuối cùng của dãy, ghế kế tiếp là ghế số 0. Người đầu hàng rời đi thì chỉ cần nói "đầu hàng giờ là ghế kế tiếp" — không ai phải đứng dậy dời chỗ.
+*Với service `ingest`.* Thread nhận request đẩy batch đã đầy vào một hàng đợi, và thread ghi đĩa lấy batch cũ nhất ra trước (FIFO). Bạn có thể dùng `Vec`: `push` để thêm, `remove(0)` để lấy. Nhưng bảng chi phí của docs cho `Vec::remove(i)` là O(n−i)[^coll-row-vec], nên với `i = 0` mọi phần tử còn lại bị dịch, và hàng đợi càng dài lấy càng chậm. `VecDeque` giải quyết đúng điểm này.
 
-*Biểu diễn.* Source 1.95.0: `VecDeque` có ba field: `head`, `len`, `buf: RawVec<T, A>`[^vd-struct-src]. Comment ghi: `self[0]`, nếu tồn tại, là `buf[head]`; `head < buf.capacity()` (trừ khi capacity 0 thì `head == 0`)[^vd-struct]; còn `len` là số phần tử đã khởi tạo bắt đầu từ `head` và có thể quấn vòng[^vd-struct-src]. Nó dùng cùng `RawVec` như `Vec` (xem mục 1), nên capacity, `with_capacity` và tăng trưởng dùng chung cơ chế; docs `with_capacity` hứa "ít nhất" `capacity` phần tử[^vd-cap].
+### 7.1 Biểu diễn
 
-*Đổi chỉ số logic sang vị trí vật lý.* Source: vị trí vật lý của phần tử logic `idx` là `wrap_add(head, idx)`[^vd-physical], và `wrap_index(logical, capacity)` trừ `capacity` nếu `logical >= capacity`, ngược lại giữ nguyên[^vd-wrap]. Tức là capacity **không** bị ép là lũy thừa của 2 và quấn vòng dùng phép trừ có điều kiện (suy luận của người soạn từ code; docs không nêu).
+Source 1.95.0: `VecDeque` có ba field: `head`, `len`, `buf: RawVec<T, A>`[^vd-struct-src]. Comment ghi `self[0]`, nếu tồn tại, là `buf[head]`, và `head < buf.capacity()` (trừ khi capacity 0 thì `head == 0`)[^vd-struct]. Còn `len` là số phần tử đã khởi tạo bắt đầu từ `head` và có thể quấn vòng[^vd-struct-src]. `VecDeque` dùng cùng `RawVec` như `Vec` (xem mục 1), nên capacity, `with_capacity` và tăng trưởng dùng chung cơ chế. Docs `with_capacity` hứa "ít nhất" `capacity` phần tử[^vd-cap].
+
+### 7.2 Đổi chỉ số logic sang vị trí vật lý
+
+Vị trí vật lý của phần tử logic `idx` là `wrap_add(head, idx)`[^vd-physical]. Hàm `wrap_index(logical, capacity)` trừ `capacity` nếu `logical >= capacity`, ngược lại giữ nguyên[^vd-wrap]. Tức là capacity **không** bị ép là lũy thừa của 2, và quấn vòng dùng phép trừ có điều kiện (suy luận của người soạn từ code; docs không nêu).
 
 ```mermaid
 flowchart LR
@@ -272,15 +367,23 @@ flowchart LR
 
 (Minh họa của người soạn: 6 phần tử logic `a b c d e f` bắt đầu ở `head = 4`, chạy tới hết mảng rồi quấn về 0.)
 
-*`push_back` / `push_front`.* Ở 1.95.0, hai hàm này chỉ gọi `push_back_mut`/`push_front_mut`[^vd-push-wrapper]. Hai hàm sau cùng kiểm đầy: `if self.is_full() { self.grow(); }`[^vd-push-back-src]. `push_front_mut` rồi lùi `head` một bước: `self.head = self.wrap_sub(self.head, 1);`[^vd-push-front-src], còn `push_back_mut` ghi tại vị trí vật lý của chỉ số `len` cũ[^vd-push-back-src2]. Do đó cả hai là O(1) khi không phải tăng (suy luận của người soạn từ code) — hơn hẳn `Vec::insert(0, x)` vốn dịch toàn bộ phần tử sau vị trí chèn sang phải[^vec-insert].
+### 7.3 `push_back` và `push_front`
 
-*Chi phí chèn/xóa ở giữa.* Bảng `collections`: `VecDeque` có `insert(i)`/`remove(i)`/`split_off(i)` là O(min(i, n−i)), còn `Vec` là O(n−i)[^coll-row-vd][^coll-row-vec] — tức xóa ở đầu cũng rẻ. (Suy luận của người soạn: với `i = 0` thì `min(0, n) = 0`, nên đầu trước là O(1) — khớp với việc dùng làm queue.) Docs `VecDeque` nêu cách dùng "mặc định" của kiểu này làm queue: `push_back` để thêm, `pop_front` để lấy ra[^vd-default].
+Ở 1.95.0, `push_back` và `push_front` chỉ gọi `push_back_mut`/`push_front_mut`[^vd-push-wrapper]. `push_back_mut` kiểm đầy: `if self.is_full() { self.grow(); }`[^vd-push-back-src], rồi ghi tại vị trí vật lý của chỉ số `len` cũ[^vd-push-back-src2]. `push_front_mut` cũng kiểm đầy, rồi lùi `head` một bước: `self.head = self.wrap_sub(self.head, 1);`[^vd-push-front-src]. Do đó cả hai là O(1) khi không phải tăng (suy luận của người soạn từ code). Hơn hẳn `Vec::insert(0, x)`, vốn dịch toàn bộ phần tử sau vị trí chèn sang phải[^vec-insert].
 
-*Khi tăng trưởng.* `grow` ghi chú "nhân đôi buffer", gọi `self.buf.grow_one()` rồi `handle_capacity_increase`[^vd-grow]. Nhiệm vụ của hàm sau: sau khi cấp lại, phần đầu và phần đuôi quấn vòng có thể đang nằm sai chỗ; nó chọn dời *đoạn liền nhỏ hơn* trong ba trường hợp A/B/C[^vd-capinc] (xem đi sâu).
+### 7.4 Chèn/xóa ở giữa
 
-*Truy cập như slice.* Vì có thể quấn vòng, docs đưa `as_slices` (trả hai slice theo thứ tự)[^vd-as-slices] và `make_contiguous` (xoay lại thành một slice, không cấp phát, giữ nguyên thứ tự, hữu ích để sắp xếp)[^vd-make-contiguous]. Nếu từng gọi `make_contiguous` thì slice thứ hai của `as_slices` rỗng[^vd-as-slices].
+Bảng `collections`: `VecDeque` có `insert(i)`/`remove(i)`/`split_off(i)` là O(min(i, n−i))[^coll-row-vd], còn `Vec` là O(n−i)[^coll-row-vec]. Tức xóa ở đầu cũng rẻ. Suy luận của người soạn: với `i = 0` thì `min(0, n) = 0`, nên đầu trước là O(1), khớp với việc dùng làm queue. Docs `VecDeque` nêu cách dùng "mặc định" của kiểu này làm queue: `push_back` để thêm, `pop_front` để lấy ra[^vd-default]. Đó chính là hàng đợi batch của `ingest`.
 
-(Nhận xét của người soạn: về cache, ring buffer vẫn là một vùng liền mạch nên quét tuần tự thân thiện cache gần như `Vec`; docs `collections` nói khi hòa nhau, `Vec` thường nhanh hơn `VecDeque`, và `VecDeque` thường nhanh hơn `LinkedList`[^coll-tie].)
+### 7.5 Khi tăng trưởng
+
+`grow` ghi chú "nhân đôi buffer", gọi `self.buf.grow_one()` rồi `handle_capacity_increase`[^vd-grow]. Nhiệm vụ của hàm sau: sau khi cấp lại, phần đầu và phần đuôi quấn vòng có thể đang nằm sai chỗ, nên nó chọn dời *đoạn liền nhỏ hơn* trong ba trường hợp A/B/C[^vd-capinc] (xem phần Đi sâu).
+
+### 7.6 Truy cập như slice
+
+Vì có thể quấn vòng, docs đưa `as_slices`, trả hai slice theo thứ tự[^vd-as-slices]. Docs cũng có `make_contiguous`: xoay lại thành một slice, không cấp phát, giữ nguyên thứ tự, hữu ích để sắp xếp[^vd-make-contiguous]. Nếu từng gọi `make_contiguous` thì slice thứ hai của `as_slices` rỗng[^vd-as-slices].
+
+Về cache (nhận xét của người soạn): ring buffer vẫn là một vùng liền mạch nên quét tuần tự thân thiện cache gần như `Vec`. Docs `collections` nói khi hòa nhau, `Vec` thường nhanh hơn `VecDeque`, và `VecDeque` thường nhanh hơn `LinkedList`[^coll-tie].
 
 <details><summary>Đi sâu: <code>handle_capacity_increase</code> — A, B, C</summary>
 
@@ -294,17 +397,19 @@ Ngoài lề code: ở C, source ghi chú không dùng được `copy_nonoverlapp
 
 </details>
 
-**Quay lại Q7:** `VecDeque` = một mảng liền + `head` + `len` với chỉ số quấn vòng; thêm/bớt ở hai đầu O(1) mà không dời phần tử, đổi lại dữ liệu có thể nằm ở hai đoạn.
+**Quay lại Q7:** `VecDeque` = một mảng liền + `head` + `len` với chỉ số quấn vòng; hàng đợi batch của `ingest` thêm ở cuối và lấy ở đầu đều O(1) mà không dời phần tử, đổi lại dữ liệu có thể nằm ở hai đoạn.
 
 ## 8. Chọn collection nào (Q8)
 
-> **Trả lời ngắn.** Docs `std::collections` khuyên: cứ dùng `Vec` hoặc `HashMap` trước; các collection khác tối ưu cho những trường hợp riêng, khá hẹp[^coll-vec-or-hashmap]. Bảng độ phức tạp trong docs dùng `n` là kích thước, `i` là chỉ số, `*` là chi phí amortized, `~` là chi phí kỳ vọng[^coll-notation]; xóa không amortized vì collection không tự co[^coll-never-shrink].
+> **Trả lời ngắn.** Docs `std::collections` khuyên: cứ dùng `Vec` hoặc `HashMap` trước; các collection khác tối ưu cho những trường hợp riêng, khá hẹp[^coll-vec-or-hashmap]. Bảng độ phức tạp trong docs dùng `n` là kích thước, `i` là chỉ số, `*` là chi phí amortized, `~` là chi phí kỳ vọng[^coll-notation]. Xóa không được tính amortized vì collection không tự co[^coll-never-shrink].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): chọn collection giống chọn kiểu index trong database: không có index "tốt nhất", chỉ có index hợp với truy vấn. Mặc định là heap file/bảng băm; B-tree khi cần thứ tự; hàng đợi khi cần FIFO.
+*Với service `ingest`.* Sau bảy mục, `ingest` đã dùng cả năm collection, và mỗi chỗ ta chọn theo việc cần làm chứ không theo cảm giác: batch là `Vec`, hàng đợi batch là `VecDeque`, `sessions` là `HashMap`, `by_ts` là `BTreeMap`. Mục này tổng hợp cách chọn đó thành quy tắc, và cách đọc bảng chi phí của docs mà không đọc sai.
 
-*Quy tắc đọc docs.* Mỗi collection có danh sách "dùng khi":
+### 8.1 Danh sách "dùng khi" của docs
+
+Mỗi collection có một danh sách tình huống nên dùng:
 
 - `Vec`: thu thập phần tử để xử lý sau, chuỗi có thứ tự và chỉ thêm ở (hoặc gần) cuối, stack, mảng co giãn[^coll-use-vec].
 - `VecDeque`: một `Vec` hỗ trợ chèn hiệu quả ở cả hai đầu, hàng đợi, deque[^coll-use-vd].
@@ -312,7 +417,9 @@ Hình dung (nhận xét của người soạn): chọn collection giống chọn
 - `BTreeMap`: map sắp theo khóa, lấy dải theo yêu cầu, nhỏ/lớn nhất, tìm khóa liền trước/liền sau[^coll-use-bt].
 - `LinkedList`: chỉ khi cần `Vec`/`VecDeque` kích thước không biết trước mà **không chịu được amortization**, hoặc cần tách/nối danh sách hiệu quả, hoặc "bạn chắc chắn thật sự muốn" danh sách liên kết đôi[^coll-use-ll].
 
-*Bảng chi phí.* Ký hiệu: `n` kích thước, `m` kích thước collection thứ hai, `i` chỉ số[^coll-notation]. Hàng dưới đây chép lại bảng docs 1.95.0 (các cột `get(i)`, `insert(i)`, `remove(i)`, `append(Vec(m))`, `split_off(i)`, `range`, `append`[^coll-table-head]):
+### 8.2 Bảng chi phí
+
+Ký hiệu: `n` kích thước, `m` kích thước collection thứ hai, `i` chỉ số[^coll-notation]. Bảng dưới chép lại bảng docs 1.95.0, với các cột `get(i)`, `insert(i)`, `remove(i)`, `append(Vec(m))`, `split_off(i)`, `range`, `append`[^coll-table-head]:
 
 | Collection | get(i) | insert(i) | remove(i) | append(Vec(m)) | split_off(i) | range | append |
 |---|---|---|---|---|---|---|---|
@@ -322,14 +429,18 @@ Hình dung (nhận xét của người soạn): chọn collection giống chọn
 | `HashMap`[^coll-row-hm] | O(1)~ | O(1)~* | O(1)~ | N/A | N/A | N/A | N/A |
 | `BTreeMap`[^coll-row-bt] | O(log(n)) | O(log(n)) | O(log(n)) | N/A | N/A | O(log(n)) | O(n+m) |
 
-Ghi chú của docs: khi hòa, `Vec` thường nhanh hơn `VecDeque`, và `VecDeque` thường nhanh hơn `LinkedList`; với `Set`, mọi thao tác có chi phí của thao tác tương đương trên `Map`[^coll-tie][^coll-set]. Docs cũng giải thích rằng thao tác thêm đôi khi cần resize O(n); chi phí amortized chia khoản đó cho một chuỗi dài thao tác, còn từng thao tác lẻ có thể chậm hoặc nhanh hơn[^coll-resize-note][^coll-amortized-def]. `HashMap` dùng chi phí kỳ vọng vì tính xác suất của hashing[^coll-expected].
+Docs ghi chú thêm rằng khi hòa, `Vec` thường nhanh hơn `VecDeque`, và `VecDeque` thường nhanh hơn `LinkedList`[^coll-tie]. Với `Set`, mọi thao tác có chi phí của thao tác tương đương trên `Map`[^coll-set]. Docs cũng giải thích rằng thao tác thêm đôi khi cần resize O(n)[^coll-resize-note]. Chi phí amortized chia khoản đó cho một chuỗi dài thao tác, còn từng thao tác lẻ có thể chậm hoặc nhanh hơn[^coll-amortized-def]. `HashMap` dùng chi phí kỳ vọng vì tính xác suất của hashing[^coll-expected].
 
-*Hai chỗ bảng dễ đọc sai (suy luận của người soạn từ bảng và docs):*
+### 8.3 Hai chỗ bảng dễ đọc sai
 
-- "O(1)~" của `HashMap` là *kỳ vọng*, và với `insert` còn có `*` vì đôi khi phải băm lại toàn bộ bảng (Q4). Bảng không nói gì về hằng số: một lần tra cứu hash-map chạm một nhóm control byte rồi bucket; `BTreeMap` chạm vài node. Quyết định "cái nào nhanh hơn" cho dữ liệu thật không rút ra được từ ký hiệu O.
-- "O(n−i)" của `Vec::insert` là chi phí dịch các phần tử sau `i`; thêm vào cuối (`i = n`) là hằng số amortized — đó là lý do `push` nhanh.
+Đây là suy luận của người soạn từ bảng và docs.
 
-*Một cây quyết định ngắn (nhận xét của người soạn, dựa trên danh sách "dùng khi" của docs):*
+- "O(1)~" của `HashMap` là *kỳ vọng*, và với `insert` còn có `*` vì đôi khi phải băm lại toàn bộ bảng (Q4). Bảng không nói gì về hằng số: một lần tra cứu hash-map chạm một nhóm control byte rồi bucket, còn `BTreeMap` chạm vài node. Vì vậy quyết định "cái nào nhanh hơn" cho dữ liệu thật của `ingest` không rút ra được từ ký hiệu O.
+- "O(n−i)" của `Vec::insert` là chi phí dịch các phần tử sau `i`. Thêm vào cuối (`i = n`) là hằng số amortized, và đó là lý do `push` nhanh.
+
+### 8.4 Cây quyết định ngắn
+
+Cây dưới là nhận xét của người soạn, dựa trên danh sách "dùng khi" của docs:
 
 ```mermaid
 flowchart TD
@@ -345,7 +456,7 @@ flowchart TD
 <details><summary>Đi sâu: mục "Performance" và "Capacity Management" của docs <code>collections</code></summary>
 
 - Docs lưu ý tên method thực tế có thể khác tên trong bảng ở một số collection[^coll-table-names].
-- "Capacity Management": nhiều collection có constructor/method nhắc tới capacity vì chúng thường xây trên một mảng[^coll-why-array]; `with_capacity` nên dùng khi biết chính xác (hoặc ít nhất có cận trên hợp lý) số phần tử sẽ chèn[^coll-with-cap]; họ `reserve` là gợi ý khi dự đoán một đợt phần tử lớn[^coll-reserve]; `shrink_to_fit` thu mảng nền về mức nhỏ nhất đủ chứa phần tử[^coll-shrink]; `capacity` dùng để gỡ lỗi hoặc đi kèm `reserve`[^coll-capacity-method].
+- "Capacity Management": nhiều collection có constructor/method nhắc tới capacity vì chúng thường xây trên một mảng[^coll-why-array]. `with_capacity` nên dùng khi biết chính xác (hoặc ít nhất có cận trên hợp lý) số phần tử sẽ chèn[^coll-with-cap]. Họ `reserve` là gợi ý khi dự đoán một đợt phần tử lớn[^coll-reserve]. `shrink_to_fit` thu mảng nền về mức nhỏ nhất đủ chứa phần tử[^coll-shrink]. `capacity` dùng để gỡ lỗi hoặc đi kèm `reserve`[^coll-capacity-method].
 - Cụ thể từng lớp: `Vec::with_capacity` yêu cầu đúng kích thước[^vec-exact]; `HashMap::with_capacity` được phép cấp nhiều hơn[^hm-with-cap]; `VecDeque::with_capacity` hứa "ít nhất"[^vd-cap].
 
 </details>
@@ -354,26 +465,28 @@ flowchart TD
 
 ## Liên hệ với Rust
 
-- **Borrow checker và realloc.** Vì `push` có thể di chuyển vùng nhớ[^alloc-grow-invalid], Rust cấm giữ tham chiếu tới phần tử trong lúc `push`; sách Rust dùng chính lý do này[^book-realloc]. Sách nói quy tắc mượn (borrowing rules) ngăn chương trình rơi vào tình huống đó[^book-borrow]; tức là việc compiler từ chối code giữ tham chiếu qua `push` là hệ quả trực tiếp của cấu trúc `Vec` chương này mô tả. Cơ chế borrow checker: [Chương 06](06-borrow-checker.md).
-- **`unsafe` và bảo đảm.** Docs `Vec` tuyên bố nhiều bảo đảm; nhờ đó code `unsafe` có chỗ dựa (nhận xét của người soạn). Ví dụ `Vec<T>` có thể chuyển qua lại với `Box<[T]>` không cấp phát/không dời khi `len == capacity`[^vec-boxed]; phần capacity dư là các phần tử "chưa khởi tạo về mặt logic" nằm liền sau `len` phần tử đã khởi tạo[^vec-heap], nên ghi vào đó rồi gọi `set_len` là hợp lệ với điều kiện `new_len <= capacity()` và các phần tử `old_len..new_len` đã được khởi tạo[^vec-set-len]. Phân biệt "bảo đảm" (đáng dựa vào) với "hiện tại" (không đáng): hệ số nhân capacity, giá trị `min_non_zero_cap`, `B = 6` của `BTreeMap`, SipHash 1-3, tải 7/8 của hashbrown — tất cả là chi tiết cài đặt (với SipHash 1-3 thì chính docs ghi là "hiện tại" và có thể đổi[^hm-sip]). Chương [UB và Miri](07-unsafe-ub-miri.md) nói vì sao dựa vào chúng là rủi ro.
-- **Kiểu layout.** `Vec`/`String` là ba từ máy trên stack; niche của con trỏ không-null cho `Option<Vec<T>>` không tốn thêm chỗ — xem [Chương 02](02-type-layout.md).
-- **Hasher là tham số kiểu.** `HashMap<K, V, S = RandomState>` có `S` là tham số kiểu[^hm-replace]; thay hasher là đổi kiểu, và monomorphization (xem [Chương 04](04-monomorphization.md)) sinh code riêng cho từng cặp.
+Với `ingest`, chương này không bắt bạn đổi dòng code nào. Nó chỉ cho thấy vì sao các quy tắc của Rust về `Vec`, `String` và `HashMap` lại có hình dạng như vậy (nhận xét của người soạn).
+
+- **Borrow checker và realloc.** `push` có thể di chuyển vùng nhớ[^alloc-grow-invalid], nên Rust cấm giữ tham chiếu tới phần tử trong lúc `push`. Sách Rust dùng chính lý do này[^book-realloc]: quy tắc mượn (borrowing rules) ngăn chương trình rơi vào tình huống đó[^book-borrow]. Tức là việc compiler từ chối code `ingest` giữ tham chiếu tới event trong batch qua một lần `push` là hệ quả trực tiếp của cấu trúc `Vec` chương này mô tả. Cơ chế borrow checker: [Chương 06](06-borrow-checker.md).
+- **`unsafe` và bảo đảm.** Docs `Vec` tuyên bố nhiều bảo đảm, nhờ đó code `unsafe` có chỗ dựa (nhận xét của người soạn). Ví dụ `Vec<T>` có thể chuyển qua lại với `Box<[T]>` không cấp phát/không dời khi `len == capacity`[^vec-boxed]. Phần capacity dư là các phần tử "chưa khởi tạo về mặt logic" nằm liền sau `len` phần tử đã khởi tạo[^vec-heap]. Vì vậy ghi vào đó rồi gọi `set_len` là hợp lệ, với điều kiện `new_len <= capacity()` và các phần tử `old_len..new_len` đã được khởi tạo[^vec-set-len]. Cần phân biệt "bảo đảm" (đáng dựa vào) với "hiện tại" (không đáng): hệ số nhân capacity, giá trị `min_non_zero_cap`, `B = 6` của `BTreeMap`, SipHash 1-3, tải 7/8 của hashbrown đều là chi tiết cài đặt. Với SipHash 1-3, chính docs ghi là "hiện tại" và có thể đổi[^hm-sip]. Chương [UB và Miri](07-unsafe-ub-miri.md) nói vì sao dựa vào chúng là rủi ro.
+- **Kiểu layout.** `Vec`/`String` là ba từ máy trên stack; niche của con trỏ không-null cho `Option<Vec<T>>` không tốn thêm chỗ, xem [Chương 02](02-type-layout.md).
+- **Hasher là tham số kiểu.** `HashMap<K, V, S = RandomState>` có `S` là tham số kiểu[^hm-replace]. Thay hasher là đổi kiểu, và monomorphization (xem [Chương 04](04-monomorphization.md)) sinh code riêng cho từng cặp.
 
 ## Tóm tắt
 
-- `Vec<T>` là bộ ba (ptr, cap, len); source thực hiện bằng `RawVec` (ptr+cap) và `len`; capacity 0 hoặc ZST không cấp phát.
-- Docs chỉ hứa `push` amortized O(1), không hứa hệ số tăng; source 1.95.0 hiện nhân đôi với mức sàn 8/4/1 phần tử tùy kích thước phần tử (1 byte / ≤ 1 KiB / lớn hơn).
-- `with_capacity(n)` yêu cầu đúng `n` phần tử; `reserve` có thể xin dư; `reserve_exact` không cố ý dư; không collection nào tự co lại; `shrink_to_fit` là cách trả bộ nhớ.
-- `String` = `Vec<u8>` + UTF-8 hợp lệ; `len` và chỉ số cắt là byte; cắt sai ranh giới ký tự thì panic; không có `s[i]` vì không O(1).
+- `Vec<T>` là bộ ba (ptr, cap, len). Source thực hiện bằng `RawVec` (ptr+cap) và `len`; capacity 0 hoặc ZST không cấp phát.
+- Docs chỉ hứa `push` amortized O(1), không hứa hệ số tăng. Source 1.95.0 hiện nhân đôi với mức sàn 8/4/1 phần tử tùy kích thước phần tử (1 byte / ≤ 1 KiB / lớn hơn).
+- `with_capacity(n)` yêu cầu đúng `n` phần tử; `reserve` có thể xin dư; `reserve_exact` không cố ý dư. Không collection nào tự co lại, và `shrink_to_fit` là cách trả bộ nhớ.
+- `String` = `Vec<u8>` + UTF-8 hợp lệ. `len` và chỉ số cắt là byte; cắt sai ranh giới ký tự thì panic; không có `s[i]` vì không O(1).
 - `HashMap` = hashbrown 0.16.1 (SwissTable): bảng 2^k bucket, byte điều khiển với 7 bit hash, so khớp cả nhóm bằng SIMD, probe tam giác, tải tối đa 7/8, tăng trưởng bằng băm lại.
-- Hash mặc định có seed ngẫu nhiên (SipHash 1-3 hiện nay, docs cho phép đổi) để chống HashDoS; `RandomState` mang cặp khóa riêng; thay hasher được bằng `with_hasher`.
-- `BTreeMap` = B-tree: mỗi node chứa B-1…2B-1 phần tử trong mảng liền; docs giải thích vì sao đó là sự đánh đổi cache-efficiency và số so sánh; source hiện `B = 6`, tìm tuần tự trong node.
+- Hash mặc định có seed ngẫu nhiên (SipHash 1-3 hiện nay, docs cho phép đổi) để chống HashDoS. `RandomState` mang cặp khóa riêng, và thay hasher được bằng `with_hasher`.
+- `BTreeMap` = B-tree: mỗi node chứa B-1…2B-1 phần tử trong mảng liền. Docs giải thích vì sao đó là sự đánh đổi cache-efficiency và số so sánh; source hiện `B = 6`, tìm tuần tự trong node.
 - `VecDeque` = ring buffer (`head`, `len`, `RawVec`); hai đầu O(1); có thể cần `make_contiguous` để có một slice.
 - Bảng `collections`: `*` amortized, `~` kỳ vọng; mặc định `Vec`/`HashMap`.
 
 ## Câu hỏi tự kiểm tra
 
-1. `Vec<T>` gồm những thành phần nào, và docs hứa gì về thứ tự các field? 
+1. `Vec<T>` gồm những thành phần nào, và docs hứa gì về thứ tự các field?
 2. Khi nào `Vec` không cấp phát bộ nhớ?
 3. `push` vào `Vec` đầy: docs hứa gì về chi phí và hệ số tăng? Source 1.95.0 hiện làm gì?
 4. `Vec::with_capacity(10)` và `Vec::new()` + 10 lần `push` khác nhau chỗ nào về số lần gọi allocator (theo docs và source)?
@@ -388,18 +501,18 @@ flowchart TD
 
 <details><summary>Đáp án</summary>
 
-1. Con trỏ, capacity, length — "bộ ba, không hơn không kém"; thứ tự field hoàn toàn không đặc tả[^vec-triplet]. Source: `buf: RawVec` (ptr+cap) và `len`[^vec-src].
-2. Khi capacity 0 (qua `Vec::new`, `vec![]`, `with_capacity(0)`, `shrink_to_fit` trên Vec rỗng), và với ZST: cấp phát khi và chỉ khi `size_of::<T>() * capacity() > 0`[^vec-noalloc][^vec-zst].
-3. Docs: amortized O(1), không bảo đảm chiến lược/hệ số[^vec-growth-doc][^vec-push-doc]. Source: `max(2×cap, len+additional)` rồi `max(min_non_zero_cap, …)`[^growth-exp][^growth-min] — chi tiết cài đặt.
-4. `with_capacity(10)` yêu cầu đúng 10 phần tử một lần[^vec-exact]; `new` + `push` thì chạy `grow_amortized` mỗi khi `len == capacity`[^vec-push-src][^growth-exp] (số lần cụ thể phụ thuộc kích thước phần tử qua `min_non_zero_cap`[^growth-min]).
-5. Docs: allocator có thể cho nhiều hơn nên capacity không đáng tin là tối thiểu, và khuyên dùng `reserve` nếu còn chèn[^vec-reserve-exact]; `reserve_exact` không cố ý xin dư nên các `push` tiếp theo dễ gây cấp phát lại (suy luận của người soạn).
-6. Index theo `usize` phải O(1) nhưng tìm ký tự thứ i phải đi từ đầu[^book-index-o1]; `&s[a..b]` dùng byte và panic nếu không ở ranh giới ký tự[^str-slice-src][^book-slice-panic].
-7. Mỗi bucket một byte: EMPTY (`0b1111_1111`), DELETED (`0b1000_0000`) hoặc 7 bit hash cao khi đầy[^hb-tag-consts][^hb-top7]. Dừng khi tìm thấy khóa bằng nhau ở bucket có tag khớp, hoặc khi nhóm hiện tại có EMPTY mà không thấy khóa[^hb-find].
-8. Docs std không nêu con số; theo source hashbrown 0.16.1: yêu cầu 1/8 bucket trống, tức tải tối đa 87,5%[^hb-load]; bảng ≤ 8 bucket chừa ít nhất một ô trống[^hb-cap-small]. Với bảng lớn lên bằng `insert`, tải thực tế dao động xấp xỉ giữa 43,75% và 87,5% (phép tính của người soạn ở mục 4). Đó là chi tiết cài đặt.
-9. Docs: tấn công khai thác khả năng tạo hash trùng để buộc thêm tính toán[^coll-expected2]; `HashMap` mặc định dùng thuật toán chống HashDoS với seed ngẫu nhiên[^hm-hashdos]; `RandomState` mang cặp khóa riêng nên hai instance khó cho cùng hash[^rs-doc].
-10. Giảm số cấp phát (B lần) và tăng hiệu quả cache nhờ mảng liền trong node; trả giá bằng nhiều so sánh hơn[^bt-b][^bt-bst].
-11. `push_front` đầy thì `grow`, rồi lùi `head` một bước (`wrap_sub`) và ghi vào đó[^vd-push-front-src]; `Vec::insert(0, x)` phải dịch mọi phần tử sang phải[^vec-insert].
-12. `*` amortized (chi phí trung bình khi có resize), `~` kỳ vọng (xác suất do băm)[^coll-notation]; `HashMap::insert` là `O(1)~*` vì cả băm xác suất lẫn băm lại khi tăng bảng[^coll-row-hm][^coll-expected].
+1. Con trỏ, capacity, length: docs gọi là "bộ ba, không hơn không kém", và thứ tự field hoàn toàn không đặc tả[^vec-triplet]. Source: `buf: RawVec` (ptr+cap) và `len`[^vec-src].
+2. Khi capacity 0 (qua `Vec::new`, `vec![]`, `with_capacity(0)`, `shrink_to_fit` trên Vec rỗng)[^vec-noalloc]. Với ZST cũng vậy: `Vec` cấp phát khi và chỉ khi `size_of::<T>() * capacity() > 0`[^vec-zst].
+3. Docs: amortized O(1), không bảo đảm chiến lược hay hệ số[^vec-growth-doc]. Chi phí O(capacity) mỗi lần chép được bù bởi `capacity` lần chèn O(1)[^vec-push-doc]. Source 1.95.0: `max(2×cap, len+additional)` rồi `max(min_non_zero_cap, …)`[^growth-exp], với mức sàn tùy kích thước phần tử[^growth-min]. Đó là chi tiết cài đặt.
+4. `with_capacity(10)` yêu cầu đúng 10 phần tử một lần[^vec-exact]. `new` + `push` thì chạy `grow_amortized` mỗi khi `len == capacity`[^vec-push-src], theo công thức nhân đôi[^growth-exp]. Số lần cụ thể phụ thuộc kích thước phần tử qua `min_non_zero_cap`[^growth-min].
+5. Docs: allocator có thể cho nhiều hơn nên capacity không đáng tin là tối thiểu, và khuyên dùng `reserve` nếu còn chèn[^vec-reserve-exact]. `reserve_exact` không cố ý xin dư nên các `push` tiếp theo dễ gây cấp phát lại (suy luận của người soạn).
+6. Index theo `usize` phải O(1) nhưng tìm ký tự thứ i phải đi từ đầu[^book-index-o1]. `&s[a..b]` dùng byte và panic nếu không ở ranh giới ký tự[^str-slice-src]. Sách Rust cho ví dụ panic khi cắt giữa ký tự[^book-slice-panic].
+7. Mỗi bucket một byte: EMPTY (`0b1111_1111`) hoặc DELETED (`0b1000_0000`)[^hb-tag-consts], hay 7 bit hash cao khi bucket đầy[^hb-top7]. Tra cứu dừng khi tìm thấy khóa bằng nhau ở bucket có tag khớp, hoặc khi nhóm hiện tại có EMPTY mà không thấy khóa[^hb-find].
+8. Docs std không nêu con số; theo source hashbrown 0.16.1, yêu cầu 1/8 bucket trống, tức tải tối đa 87,5%[^hb-load]. Bảng ≤ 8 bucket chừa ít nhất một ô trống[^hb-cap-small]. Với bảng lớn lên bằng `insert`, tải thực tế dao động xấp xỉ giữa 43,75% và 87,5% (phép tính của người soạn ở phần Đi sâu mục 4). Đó là chi tiết cài đặt.
+9. Docs: tấn công khai thác khả năng tạo hash trùng để buộc thêm tính toán[^coll-expected2]. `HashMap` mặc định dùng thuật toán chống HashDoS với seed ngẫu nhiên[^hm-hashdos]. `RandomState` mang cặp khóa riêng nên hai instance khó cho cùng hash[^rs-doc].
+10. Giảm số cấp phát (B lần) và tăng hiệu quả cache nhờ mảng liền trong node[^bt-b]; trả giá bằng nhiều so sánh hơn. Cây nhị phân thì mỗi phần tử một node heap riêng[^bt-bst].
+11. `push_front` đầy thì `grow`, rồi lùi `head` một bước (`wrap_sub`) và ghi vào đó[^vd-push-front-src]. `Vec::insert(0, x)` phải dịch mọi phần tử sang phải[^vec-insert].
+12. `*` là amortized (chi phí trung bình khi có resize), `~` là kỳ vọng (xác suất do băm)[^coll-notation]. `HashMap::insert` là `O(1)~*`[^coll-row-hm], vì cả băm xác suất lẫn băm lại khi tăng bảng[^coll-expected].
 
 </details>
 
