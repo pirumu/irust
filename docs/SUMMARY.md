@@ -171,6 +171,30 @@
   - [09. Mô hình hóa hệ backend thực tế](13-tla-plus/09-mo-hinh-hoa-he-backend.md)
   - [10. Từ đặc tả đến code Rust](13-tla-plus/10-tu-dac-ta-den-code-rust.md)
 
+# P14 — Toán và lý thuyết nền cho hệ thống
+
+- [Tổng quan P14](14-toan-va-ly-thuyet/00-tong-quan.md)
+  - [01. Logic và chứng minh](14-toan-va-ly-thuyet/01-logic-va-chung-minh.md)
+  - [02. Toán rời rạc: quan hệ, thứ tự bộ phận, lattice, đồ thị](14-toan-va-ly-thuyet/02-toan-roi-rac.md)
+  - [03. Xác suất cho hệ thống](14-toan-va-ly-thuyet/03-xac-suat.md)
+  - [04. Thuật toán và độ phức tạp](14-toan-va-ly-thuyet/04-thuat-toan-va-do-phuc-tap.md)
+  - [05. Queueing theory cho backend](14-toan-va-ly-thuyet/05-queueing-theory.md)
+  - [06. Thống kê cho benchmark](14-toan-va-ly-thuyet/06-thong-ke-cho-benchmark.md)
+
+# P15 — Thuật toán phân tán
+
+- [Tổng quan P15](15-thuat-toan-phan-tan/00-tong-quan.md)
+  - [01. FLP và các chặn dưới](15-thuat-toan-phan-tan/01-flp-va-cac-chan-duoi.md)
+  - [02. Họ broadcast: từ best-effort đến total order](15-thuat-toan-phan-tan/02-ho-broadcast.md)
+  - [03. Phân cấp các mô hình consistency](15-thuat-toan-phan-tan/03-phan-cap-consistency.md)
+  - [04. CRDT: kiểu dữ liệu nhân bản tự hội tụ](15-thuat-toan-phan-tan/04-crdt.md)
+  - [05. Loại trừ tương hỗ phân tán và bầu leader cổ điển](15-thuat-toan-phan-tan/05-loai-tru-tuong-ho-va-bau-leader.md)
+  - [06. Snapshot toàn cục: Chandy–Lamport và consistent cut](15-thuat-toan-phan-tan/06-snapshot-toan-cuc.md)
+  - [07. Membership và gossip](15-thuat-toan-phan-tan/07-membership-va-gossip.md)
+  - [08. Chain replication và CRAQ](15-thuat-toan-phan-tan/08-chain-replication-va-craq.md)
+  - [09. Giao dịch phân tán ngoài 2PC](15-thuat-toan-phan-tan/09-giao-dich-phan-tan.md)
+  - [10. BFT hiện đại: PBFT view change, Tendermint, HotStuff](15-thuat-toan-phan-tan/10-bft-hien-dai.md)
+
 # Thực hành
 
 - [Lab P1 — Linux và system call interface](labs/01-linux-lab.md)

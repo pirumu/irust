@@ -14,7 +14,8 @@ command = "mdbook-mermaid"
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"
-additional-js = ["book-assets/mermaid.min.js", "book-assets/mermaid-init.js"]
+additional-js = ["book-assets/mermaid.min.js", "book-assets/mermaid-init.js", "book-assets/mathjax-dollar.js"]
+mathjax-support = true
 no-section-label = true
 git-repository-url = "https://github.com/pirumu/irust"
 edit-url-template = "https://github.com/pirumu/irust/edit/main/{path}"

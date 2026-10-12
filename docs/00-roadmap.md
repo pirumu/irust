@@ -1,4 +1,4 @@
-# 00 — Lộ trình: nền tảng hệ thống để hiểu Rust internals (13 phase)
+# 00 — Lộ trình: nền tảng hệ thống để hiểu Rust internals (15 phase)
 
 > Mọi khẳng định về sự thật trong bộ tài liệu này đều có chú thích. Chú thích ghi URL và **câu trích nguyên văn** từ nguồn. Chạy `python3 tools/verify_citations.py` để máy tự tải lại nguồn và kiểm tra từng câu trích. Những gì không có chú thích là **lời khuyên hoặc giả định của người soạn**, và được ghi rõ như vậy.
 
@@ -25,7 +25,7 @@ Kết luận cho cách học (lời khuyên của người soạn): học nền 
 Các giả định dưới đây là của người soạn, không phải sự thật có nguồn. Hãy sửa nếu không đúng với bạn:
 
 - Bạn là backend engineer đã đi làm nhiều năm, hổng nền tảng OS, Linux, networking và kiến trúc máy, và đang vướng ở Rust internals.
-- Bạn muốn **học lý thuyết trước, làm lab sau**. Với khoảng **8–10 giờ/tuần**, đọc đủ 13 phase mất khoảng **40 tuần** theo bảng ở mục 4 (thời lượng là **gợi ý của người soạn**, chưa đo trên người học thật). Đường lõi (mục 5) ngắn hơn nhiều.
+- Bạn muốn **học lý thuyết trước, làm lab sau**. Với khoảng **8–10 giờ/tuần**, đọc đủ 13 phase đầu mất khoảng **40 tuần** theo bảng ở mục 4, P14 và P15 thêm khoảng 10 tuần nữa (thời lượng là **gợi ý của người soạn**, chưa đo trên người học thật). Đường lõi (mục 5) ngắn hơn nhiều.
 - Bạn đã đọc qua Rust Book đến chương generics/traits/lifetimes. Nếu chưa, đọc Rust Book song song với P1.
 - Máy chính là macOS. Lab dành riêng cho Linux (`strace`, `/proc`, `epoll`) chạy trong container qua `./labs/linux.sh`.
 - Toolchain được ghim ở **Rust 1.95.0**. Mọi link docs Rust đều trỏ vào bản 1.95.0, để nội dung trích dẫn không đổi theo thời gian.
@@ -58,11 +58,13 @@ flowchart LR
   P7 --> P12
   P4 --> P13[P13 Đặc tả hình thức TLA+]
   P12 --> P13
+  P14[P14 Toán và lý thuyết nền] --> P15[P15 Thuật toán phân tán]
+  P12 --> P15
 ```
 
 Mũi tên là thứ tự học do người soạn đề xuất, không phải ràng buộc cứng. P9 không có tiên quyết trong sơ đồ vì nó là ngôn ngữ thuần; đọc song song với bất kỳ phase nào bạn đang vướng. P11 (đo đạc và gỡ lỗi) dựa vào P1, P2 và P3; các chương của nó cũng dẫn tới P7 (Tokio) và P8 (container) khi cần, nhưng đó là liên kết đọc thêm chứ không vẽ thành tiên quyết. P12 (hệ thống dữ liệu) dựa vào P4 (lock, memory model), P5 (WAL, `fsync`, journaling), P6 (TCP, timeout) và P7 (async, hủy và `timeout` trong Tokio); các chương của nó còn dẫn lẻ tới P1, P2, P3 và P10, nhưng đó là liên kết đọc thêm chứ không vẽ thành tiên quyết. P13 (đặc tả hình thức với TLA+) dựa vào P4 (race condition, deadlock, memory model: lỗi "kiểm tra rồi mới làm" mà phase mô hình hóa ở mức thiết kế) và P12 (replication, transaction, lease và fencing, consensus, outbox: các hệ thống mà spec mô tả); chương 09 của P13 còn dẫn lẻ tới P7·09 (`timeout` không hủy việc phía xa) như liên kết đọc thêm.
 
-## 4. Mười ba phase
+## 4. Mười lăm phase
 
 Mỗi phase có một trang tổng quan `00-tong-quan.md` (mục tiêu, bản đồ chương, thứ tự đọc, sách gốc, câu hỏi tổng hợp) và 6–18 chương. Cột "Thời lượng" là gợi ý của người soạn cho 8–10 giờ/tuần.
 
@@ -81,11 +83,13 @@ Mỗi phase có một trang tổng quan `00-tong-quan.md` (mục tiêu, bản đ
 | P11 | 3 tuần | `perf`/flame graph, eBPF/ftrace/uprobe, đo và cải thiện hiệu năng service Rust, debugger và DWARF, core dump/backtrace, ELF/linker/loader | [11-do-dac-va-go-loi](11-do-dac-va-go-loi/00-tong-quan.md) | — |
 | P12 | 6 tuần | Độ tin cậy và hiệu năng của hệ thống dữ liệu, mô hình dữ liệu, storage engine, encoding, replication, partitioning, transaction/isolation, sự cố hệ phân tán, consistency/consensus, batch và stream, đúng đắn và tích hợp dữ liệu, kiến trúc hệ dữ liệu, trách nhiệm với dữ liệu, ba case study: PostgreSQL bên trong (process, VACUUM, lock, planner), Redis bên trong (event loop, persistence, replication, cluster) và Redis trong thực chiến (pattern cache, rate limiter, lock, queue), rồi chương chuyên sâu về thuật toán đồng thuận (Paxos, Raft, VR, Zab, EPaxos, PBFT) | [12-he-thong-du-lieu](12-he-thong-du-lieu/00-tong-quan.md) | — |
 | P13 | 4 tuần | Vì sao đặc tả hình thức; toán nền tảng; state, behavior, action; invariant và model checker TLC; liveness và fairness; PlusCal; refinement; đặc tả 2PC, Paxos, Raft; mô hình hóa lock có lease, hàng đợi, cache-aside, outbox, retry; nối spec với code Rust (trace validation, Stateright, loom, shuttle, proptest) | [13-tla-plus](13-tla-plus/00-tong-quan.md) | — |
+| P14 | 4 tuần | Logic và chứng minh, invariant quy nạp; quan hệ, thứ tự bộ phận, lattice, đồ thị; xác suất (Chernoff, balls-into-bins, Bloom filter, tách phiếu Raft); độ phức tạp, amortized, P/NP; queueing theory; thống kê cho benchmark | [14-toan-va-ly-thuyet](14-toan-va-ly-thuyet/00-tong-quan.md) | — |
+| P15 | 6 tuần | FLP và các chặn dưới; họ broadcast; phân cấp consistency; CRDT; loại trừ tương hỗ và bầu leader; snapshot toàn cục; membership và gossip; chain replication và CRAQ; 3PC, Percolator, Calvin, Spanner; PBFT view change, Tendermint, HotStuff | [15-thuat-toan-phan-tan](15-thuat-toan-phan-tan/00-tong-quan.md) | — |
 | Capstone | sau lý thuyết | HTTP server trên epoll, rồi mini async runtime | — | [capstone](labs/capstone.md) |
 
-**Thứ tự gợi ý:** P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10 → P11 → P12 → P13, rồi lab và capstone. Nếu bạn đang vướng một chủ đề cụ thể, đi theo bản đồ ở mục 3 thay vì theo số.
+**Thứ tự gợi ý:** P1 → P2 → P3 → P4 → P5 → P6 → P7 → P8 → P9 → P10 → P11 → P12 → P13, rồi lab và capstone. P14 không có tiên quyết: đọc chương nào khi một phase khác viện dẫn kết quả toán của nó. P15 đọc sau P12 và P14·01–02. Nếu bạn đang vướng một chủ đề cụ thể, đi theo bản đồ ở mục 3 thay vì theo số.
 
-**Lab làm sau lý thuyết.** Lab nằm ở thư mục `docs/labs/` (trong sách là phần "Thực hành" ở cuối mục lục, bắt đầu từ [lab P1](labs/01-linux-lab.md)) và code nằm ở các crate `labs/crates/lab-*`. Mỗi lab giả định bạn đã đọc phase lý thuyết tương ứng, không cần đã đọc hết mọi phase. Mọi phase đều có lab, riêng P12 có hai lab:
+**Lab làm sau lý thuyết.** Lab nằm ở thư mục `docs/labs/` (trong sách là phần "Thực hành" ở cuối mục lục, bắt đầu từ [lab P1](labs/01-linux-lab.md)) và code nằm ở các crate `labs/crates/lab-*`. Mỗi lab giả định bạn đã đọc phase lý thuyết tương ứng, không cần đã đọc hết mọi phase. Mọi phase từ P1 đến P13 đều có lab (P14 và P15 chưa có), riêng P12 có hai lab:
 
 - [P12a — một node](labs/12a-du-lieu-mot-node-lab.md): storage engine, encoding, MVCC, batch và PostgreSQL.
 - [P12b — phân tán](labs/12b-du-lieu-phan-tan-lab.md): replication, quorum, partitioning, fencing, consensus, stream và Redis.

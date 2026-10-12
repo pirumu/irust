@@ -12,6 +12,7 @@
 - **Q6.** Định nghĩa `==`, tham số, `LET`/`IN`, `IF`, `CASE` hoạt động ra sao (kể cả phạm vi tên)? → mục 6
 - **Q7.** Vì sao phải viết `EXTENDS Naturals`/`Integers`/`Sequences`, và số trong TLA+ khác số nguyên của máy ở đâu? → mục 7
 - **Q8.** TLA+ không có kiểu thì "biểu thức ngớ ngẩn" là gì, và TLC đánh giá biểu thức theo luật nào? → mục 8
+- **Q9.** Làm sao chứng minh *bằng tay* rằng một invariant của spec luôn đúng (ba nghĩa vụ `Init => Inv`, `Inv /\ [Next]_vars => Inv'`, `Inv => P`), chẻ `Next` thành từng trường hợp ra sao, và khi invariant không quy nạp thì đọc phản ví dụ rồi thêm vế phụ thế nào? TLC kiểm invariant khác kiểm tính quy nạp ở đâu, và chứng minh tay ứng với khung TLAPS nào? → mục 9b
 
 ## Kiến thức cần trước
 
@@ -597,6 +598,490 @@ Quota(L) == \A n \in Node : Cardinality(Held(L, n)) <= 2
 
 Khi chạy TLC có một lưu ý: `NoOwner == CHOOSE v : v \notin Node` là `CHOOSE` không chặn, mà TLC không đánh giá được[^tlc-unbounded]. Cách xử lý thường là ghi đè `NoOwner` bằng một giá trị mô hình trong file cấu hình, như sách làm với `NotAnS`[^tlc-notans] (chương 04).
 
+## 9b. Chứng minh invariant quy nạp bằng tay: ba nghĩa vụ, phản ví dụ và vế phụ (Q9)
+
+> **Trả lời ngắn.** Để chứng minh một vị từ `P` luôn đúng, ta tìm một vị từ `Inv` mạnh hơn rồi chứng minh ba điều mà mỗi điều chỉ nói về *một* bước: `Init => Inv`, `Inv /\ [Next]_vars => Inv'` và `Inv => P`[^ind-three]. Điều thứ hai chiếm hầu hết công sức: ta chẻ `Next` thành từng action (cộng thêm trường hợp đứng yên) rồi kiểm từng vế của `Inv'` trong từng trường hợp[^ind-tri-disj]. Chỗ nào kẹt sẽ cho ta một *phản ví dụ cho quy nạp*, tức một state thỏa `Inv` cùng một bước làm `Inv` sai[^ind-cti-def]; nếu state đó không tới được từ `Init` thì ta thêm vào `Inv` một vế phụ để loại nó, còn nếu tới được thì spec có lỗi thật. TLC chỉ đánh giá invariant ở các state tới được[^ind-tlc-reach], nên muốn nó kiểm tính quy nạp thì phải cho nó xuất phát từ `Inv` chứ không từ `Init`.
+
+**Giải thích.**
+
+*Với service `orders`.* Pool kết nối của `orders` (spec `ConnPool` ở [Chương 04](04-invariant-va-tlc.md) mục 2) có hai thao tác: một client lấy kết nối khi pool còn, và trả lại kết nối nó đang giữ. Ta muốn chứng minh điều nghe hiển nhiên là không bao giờ có nhiều hơn `MaxConn` client giữ kết nối cùng lúc. TLC kiểm được điều đó trên một cấu hình nhỏ, chẳng hạn ba client và `MaxConn = 2`; còn "đúng với mọi số client và mọi `MaxConn`" thì phải chứng minh. Một lập luận theo diễn biến như "pool khởi đầu đầy, mỗi lần lấy thì giảm một, mỗi lần trả thì tăng một" nghe rất thuyết phục, nhưng người ta cũng viết được những lập luận thuyết phục như vậy cho cả thuật toán sai[^ind-behavioral]. Vì thế ta chuyển sang chứng minh quy nạp trên từng bước, và mục này dạy cách viết một chứng minh như thế (nhận xét của người soạn).
+
+Mục này dùng `Init`, `Next`, ký hiệu `x'` và `UNCHANGED` của [Chương 03](03-trang-thai-hanh-vi-action.md), cùng khái niệm invariant của [Chương 04](04-invariant-va-tlc.md); chưa đọc hai chương đó thì nhớ ba điều sau là đủ theo dõi. Một *state* là phép gán giá trị cho các biến. `Init` mô tả các state đầu, còn `Next` là công thức nói về một cặp (state cũ, state mới), trong đó `x'` là giá trị của `x` ở state mới. Và `Spec == Init /\ [][Next]_vars` cho phép mỗi bước hoặc là một bước `Next`, hoặc không đổi biến nào. Phần quy nạp tổng quát, không riêng TLA+, nằm ở [P14·01 — Logic và chứng minh](../14-toan-va-ly-thuyet/01-logic-va-chung-minh.md).
+
+Về độ tin cậy: mọi chứng minh dưới đây do người soạn tự viết tay và đánh dấu "(chứng minh của người soạn)"; chúng chưa qua TLAPS. Các khối `tla` là minh họa chưa chạy qua SANY, TLC hay TLAPS, giống quy ước của cả chương. Thứ duy nhất đã chạy thật là chương trình Rust vét cạn ở phần Đi sâu.
+
+### 9b.1 Spec và điều cần chứng minh
+
+Ta dùng lại `ConnPool` của Chương 04 (bỏ `Symmetry` và module `TLC` vì mục này không cần), thêm hai định nghĩa phụ `Holders`, `NoOverAlloc` và một giả thiết `IsFiniteSet(Clients)`. Giả thiết đó cần vì các định lý về `Cardinality` trong thư viện của TLAPS đều đặt điều kiện tập hữu hạn[^ind-fs-type]. Khi chạy TLC, `Clients` luôn hữu hạn nên giả thiết bị che đi; còn chứng minh tay thì phải ghi nó ra.
+
+```tla
+---- MODULE ConnPool ----
+EXTENDS Naturals, FiniteSets
+
+CONSTANTS Clients, MaxConn
+ASSUME MaxConn \in Nat /\ MaxConn > 0
+ASSUME IsFiniteSet(Clients)      \* thêm: chỉ cần cho chứng minh, để Cardinality có nghĩa
+
+VARIABLES free, held             \* free: số kết nối rảnh; held[c]: client c đang giữ?
+vars == <<free, held>>
+
+TypeOK ==
+  /\ free \in 0..MaxConn
+  /\ held \in [Clients -> BOOLEAN]
+
+Init ==
+  /\ free = MaxConn
+  /\ held = [c \in Clients |-> FALSE]
+
+Acquire(c) ==
+  /\ ~held[c]
+  /\ free > 0
+  /\ free' = free - 1
+  /\ held' = [held EXCEPT ![c] = TRUE]
+
+Release(c) ==
+  /\ held[c]
+  /\ free' = free + 1
+  /\ held' = [held EXCEPT ![c] = FALSE]
+
+Next == \E c \in Clients : Acquire(c) \/ Release(c)
+
+Spec == Init /\ [][Next]_vars
+
+Holders == {c \in Clients : held[c]}              \* thêm: tập client đang giữ kết nối
+Conservation == free + Cardinality(Holders) = MaxConn
+NoOverAlloc  == Cardinality(Holders) <= MaxConn   \* thêm: điều ta muốn chứng minh
+====
+```
+
+Điều cần chứng minh là `THEOREM Spec => []NoOverAlloc`: `NoOverAlloc` đúng ở mọi state của mọi behavior thỏa `Spec`, tức `NoOverAlloc` là *invariant của `Spec`*[^ind-spec-inv]. Để ý rằng guard của `Acquire` (`free > 0`) nói về `free`, còn điều cần chứng minh nói về `held`; khoảng cách đó sẽ gây rắc rối ở mục 9b.4.
+
+### 9b.2 Ba nghĩa vụ chứng minh
+
+Chứng minh quy nạp trên từng bước quy việc đó về ba nghĩa vụ. Ta phải tìm một vị từ trạng thái `Inv` rồi chứng minh `Init => Inv`, `Inv /\ [Next]_vars => Inv'` và `Inv => P`, trong đó `P` là điều ta thật sự cần[^ind-three]. Ở ví dụ này `P` là `NoOverAlloc`. Một `Inv` thỏa hai nghĩa vụ đầu được gọi là *inductive invariant* (invariant quy nạp)[^ind-name].
+
+- **Nghĩa vụ 1, `Init => Inv`.** Mọi state đầu thỏa `Inv`.
+- **Nghĩa vụ 2, `Inv /\ [Next]_vars => Inv'`.** Từ *bất kỳ* state nào thỏa `Inv`, mọi bước `[Next]_vars` đều dẫn tới một state thỏa `Inv`. Ở đây `Inv'` là `Inv` với mọi biến thay bằng biến có prime, tức `Inv` đánh giá ở state sau.
+- **Nghĩa vụ 3, `Inv => P`.** `Inv` đủ mạnh để kéo theo điều ta cần.
+
+Vì sao ba điều đó đủ? Câu trả lời là mệnh đề sau. Nó là phép quy nạp theo vị trí trong behavior, và ta chỉ phải làm nó một lần cho mọi spec thay vì lặp lại mỗi lần.
+
+**Mệnh đề 1 (quy tắc invariant quy nạp).** Nếu `Inv` và `P` là vị từ trạng thái thỏa ba nghĩa vụ trên thì `Spec => []P`: `P` đúng ở mọi state của mọi behavior thỏa `Spec`.
+
+*Chứng minh (chứng minh của người soạn, theo ý của quy tắc trong nguồn[^ind-induction]).* Lấy một behavior bất kỳ `σ = s₀, s₁, s₂, …` thỏa `Spec`. Theo nghĩa của `Spec`, `s₀` thỏa `Init`, và mỗi cặp liền nhau `(sᵢ, sᵢ₊₁)` là một bước `[Next]_vars`. Ta chứng minh bằng quy nạp theo `i` mệnh đề `H(i)`: "`sᵢ` thỏa `Inv`".
+
+1. *Cơ sở, `i = 0`.* `s₀` thỏa `Init`, nên theo nghĩa vụ 1 nó thỏa `Inv`. Vậy `H(0)` đúng.
+2. *Bước quy nạp.* Giả sử `H(i)`, tức `sᵢ` thỏa `Inv`. Cặp `(sᵢ, sᵢ₊₁)` là một bước `[Next]_vars`. Áp nghĩa vụ 2 cho cặp này: vì `sᵢ` thỏa `Inv` và `(sᵢ, sᵢ₊₁)` là bước `[Next]_vars`, `sᵢ₊₁` thỏa `Inv`. Đó chính là `H(i + 1)`.
+3. *Kết luận.* Theo nguyên lý quy nạp, `H(i)` đúng với mọi `i ∈ ℕ`. Với mỗi `i`, `sᵢ` thỏa `Inv`, nên theo nghĩa vụ 3 nó thỏa `P`. Vậy mọi state của `σ` thỏa `P`. Vì `σ` là behavior bất kỳ thỏa `Spec`, ta có `Spec => []P`. ∎
+
+Hãy nhìn kỹ bước 2. Nghĩa vụ 2 lấy `Inv` làm *giả thiết duy nhất* về state cũ; nó không biết, và không được phép biết, state cũ có tới được từ `Init` hay không. Chính điều đó làm nghĩa vụ 2 kiểm được từng bước một mà không phải lần theo các behavior. Cũng chính nó làm nghĩa vụ 2 có thể sai ở những state không bao giờ xuất hiện, như mục 9b.4 sẽ cho thấy.
+
+### 9b.3 Chẻ `Next` thành các trường hợp
+
+Nghĩa vụ 1 và 3 chỉ nói về một state nên thường dễ. Nghĩa vụ 2 là phần khó nhất của cả chứng minh[^ind-hardest], và hình dạng của `Next` quyết định hình dạng của nó. Ta mở `Inv /\ [Next]_vars => Inv'` bằng ba quy tắc logic thông thường (nhận xét của người soạn):
+
+1. `[Next]_vars` là phép hợp của `Next` và `UNCHANGED vars`[^ind-safety-disj], nên ngoài các action ta có thêm một trường hợp *đứng yên*.
+2. `Next == \E c \in Clients : ...` có `\E` nằm ở giả thiết. Ta xử lý nó bằng cách lấy một `c` bất kỳ thuộc `Clients`, giữ cố định rồi chứng minh cho riêng `c` đó[^ind-safety-exists]. Chứng minh được cho `c` bất kỳ thì đúng cho mọi bước.
+3. `Acquire(c) \/ Release(c)` có `\/` ở giả thiết, nên mỗi nhánh là một trường hợp riêng, trong đó công thức của nhánh (guard cùng các phương trình có prime) trở thành giả thiết bổ sung[^ind-safety-case].
+
+Với `ConnPool` ta được ba trường hợp: `Acquire(c)`, `Release(c)` (với `c` là phần tử bất kỳ của `Clients`) và đứng yên. TLAPS ghi lại đúng cấu trúc này: tài liệu của nó lập luận theo từng trường hợp, mỗi trường hợp là một action của `Next` được thực hiện[^ind-tlaps-cases]. Nếu `Inv` có `k` vế (conjunct) thì mỗi trường hợp lại tách thành `k` ô, mỗi ô là một vế của `Inv'`, nên bảng chứng minh có `3 × k` ô. Phần lớn ô tầm thường vì action không đụng tới biến của vế đó; việc thật nằm ở vài ô còn lại.
+
+**Cách đọc một ô.** Trong ô (trường hợp, vế) ta có sẵn ba thứ: toàn bộ `Inv` (mọi vế, không riêng vế đang chứng minh), toàn bộ công thức của trường hợp, và các `ASSUME` của spec. Đích là vế tương ứng của `Inv'`. Ta coi `free`, `held`, `free'`, `held'` là bốn đại lượng toán học độc lập, chỉ bị ràng buộc bởi các giả thiết vừa kể; đó là cách quy về toán thông thường mà Lamport mô tả[^ind-safety-ordinary]. TLAPS làm tương tự: nó thay biến có prime bằng biến mới, không liên quan gì tới biến không prime[^ind-tri-primed]. Hệ quả là một biến mà công thức của trường hợp không nhắc tới (không gán, cũng không `UNCHANGED`) là biến tự do, và mọi ô đụng tới nó đều không chứng minh được. Gặp tình huống đó thì lỗi thường nằm ở spec (quên `UNCHANGED`), không phải ở `Inv` (nhận xét của người soạn).
+
+### 9b.4 Lần thử đầu: `Inv0` không quy nạp, và phản ví dụ
+
+Cách tự nhiên nhất là lấy luôn điều cần chứng minh làm `Inv`, cộng `TypeOK`, vì một invariant quy nạp hầu như luôn phải khẳng định kiểu của các biến[^ind-typeok]:
+
+```tla
+Inv0 == TypeOK /\ NoOverAlloc
+```
+
+Nghĩa vụ 1 đúng ngay: ở `Init`, `free = MaxConn` và `held` toàn `FALSE` nên `Holders = {}`, mà `Cardinality({}) = 0 <= MaxConn`. Nghĩa vụ 3 hiển nhiên vì `NoOverAlloc` là một vế của `Inv0`. Ta thử nghĩa vụ 2, trường hợp `Acquire(c)`, vế `NoOverAlloc'`. Giả thiết trong tay là `Cardinality(Holders) <= MaxConn` (từ `Inv0`), `free \in 0..MaxConn`, `~held[c]`, `free > 0` và `held' = [held EXCEPT ![c] = TRUE]`. Action chỉ thêm đúng `c` vào `Holders`, nên `Cardinality(Holders')` bằng `Cardinality(Holders) + 1` (mệnh đề 2 ở mục 9b.5). Để kết luận `<= MaxConn` ta cần `Cardinality(Holders) < MaxConn`, nhưng giả thiết chỉ cho `<=`. Guard `free > 0` có vẻ phải giúp được, song không giả thiết nào nối `free` với `Holders`, nên nó vô dụng. Chứng minh kẹt ở đây.
+
+Chỗ kẹt chỉ ra cách dựng phản ví dụ: chọn một state làm mọi giả thiết đúng mà kết luận sai. Lấy `Clients = {c1, c2, c3}`, `MaxConn = 2`, cho hai client đã giữ kết nối (pool đã đủ hạn mức) nhưng vẫn để `free = 1`:
+
+| | `free` | `held` (client đang giữ) | `TypeOK` | `NoOverAlloc` |
+|---|---|---|---|---|
+| `s`: state xuất phát | 1 | c1, c2 | đúng | đúng (`2 <= 2`) |
+| `t`: sau `Acquire(c3)` | 0 | c1, c2, c3 | đúng | **sai** (`3 > 2`) |
+
+State `s` thỏa `Inv0`, `Acquire(c3)` enabled ở `s` (`c3` chưa giữ và `free = 1 > 0`), và state sau `t` vi phạm `NoOverAlloc`. Cặp `(s, t)` là một *phản ví dụ cho quy nạp* (counterexample to induction, viết tắt CTI): bước `(s, t)` thỏa `Inv0 /\ [Next]_vars` nhưng không thỏa `Inv0'`[^ind-cti-def]. Chỗ kẹt thứ hai nằm ở `Release`: lấy `free = MaxConn = 2` và `c1` đang giữ thì `TypeOK` và `NoOverAlloc` đều đúng, nhưng `Release(c1)` cho `free' = 3`, ra ngoài `0..MaxConn`. Hai CTI khác nhau, cùng một căn bệnh.
+
+**CTI là lỗi của spec hay `Inv0` quá yếu?** Muốn biết, ta hỏi `s` có tới được từ `Init` không. Nếu tới được thì `NoOverAlloc` thật sự bị vi phạm: spec có lỗi, và thêm vế phụ chỉ che mắt. Nếu không tới được thì spec đúng, còn `Inv0` chưa đủ mạnh để loại `s`. Lamport gặp đúng tình huống này ở một giao thức loại trừ tương hỗ: ông dựng được một state thỏa invariant định dùng cùng một bước làm nó sai, rồi nhận xét state ấy không tới được[^ind-cti-unreach]. Nhưng ông cũng kể một chuyện cảnh tỉnh. Một nhà khoa học máy tính từng gạt phản ví dụ của ông bằng một lập luận theo diễn biến rằng state đó không tới được; khi hai người thử tìm một invariant thật sự quy nạp, họ phát hiện state "không tới được" ấy hóa ra tới được, và invariant của người kia sai[^ind-anecdote]. Bài học là đừng gạt CTI đi bằng lập luận theo diễn biến; hãy biến lập luận đó thành một vế của `Inv` rồi chứng minh vế ấy.
+
+Với `s` ở trên, câu trả lời là *không tới được*: `s` có `free = 1` trong khi cả hai kết nối đã có người giữ. Lý do theo diễn biến là mỗi `Acquire` và mỗi `Release` đổi `free` và số client đang giữ ngược chiều nhau đúng một đơn vị, còn `Init` có tổng bằng `MaxConn`; vậy tổng đó luôn bằng `MaxConn` ở mọi state tới được, trong khi `s` có tổng 3 (suy luận của người soạn). Đây mới chỉ là lập luận theo diễn biến. Ta sẽ biến nó thành vế phụ `Conservation` và chứng minh quy nạp ở mục 9b.5.
+
+Từ đó rút ra quy trình sau (nhận xét của người soạn, dựa trên các bước trên):
+
+1. Bắt đầu với `Inv` là `TypeOK` cộng điều cần chứng minh.
+2. Thử chứng minh nghĩa vụ 2, từng ô. Ô nào kẹt thì dựng CTI từ chính các giả thiết của ô đó.
+3. Hỏi CTI có tới được không. Nếu tới được thì sửa spec hoặc sửa điều cần chứng minh, vì nó sai thật.
+4. Nếu không tới được, tìm quan hệ giữa các biến mà `s` vi phạm còn mọi state tới được đều thỏa, rồi thêm làm vế phụ. Lamport làm đúng vậy trong ví dụ của ông: thay vì cố tìm xem chính xác sự thật nào là quan trọng, cứ phát biểu thẳng quan hệ giữa các biến[^ind-relation].
+5. Lặp lại từ bước 2. Vế phụ nằm trong `Inv` nên cũng phải được chứng minh quy nạp trong cùng phép chứng minh; không được coi nó là hiển nhiên.
+
+```mermaid
+flowchart TD
+  A["Chọn Inv = TypeOK cộng điều cần chứng minh"] --> B["Thử chứng minh nghĩa vụ 2, từng ô"]
+  B -->|"mọi ô qua"| E["Inv quy nạp: kiểm nghĩa vụ 1 và 3"]
+  B -->|"một ô kẹt"| C["Dựng CTI từ giả thiết của ô"]
+  C --> D{"State xuất phát<br/>tới được từ Init?"}
+  D -->|"có"| F["Điều cần chứng minh hoặc spec sai: sửa"]
+  D -->|"không"| G["Tìm quan hệ state đó vi phạm,<br/>thêm làm vế phụ của Inv"]
+  G --> B
+```
+
+### 9b.5 Chứng minh đầy đủ cho `Inv1 = TypeOK /\ Conservation`
+
+Thêm `Conservation` làm vế phụ:
+
+```tla
+Inv1 == TypeOK /\ Conservation
+```
+
+Viết `Inv1` thành ba vế để tiện tham chiếu: **(I1)** `free \in 0..MaxConn`, **(I2)** `held \in [Clients -> BOOLEAN]`, **(I3)** `free + Cardinality(Holders) = MaxConn`. Hai vế đầu là `TypeOK`, vế thứ ba là `Conservation`. Chứng minh dưới đây chỉ dùng `MaxConn \in Nat` và `Clients` hữu hạn, nên áp dụng cho mọi cấu hình, không riêng ba client với `MaxConn = 2`.
+
+**Sự thật về tập hữu hạn.** Với mọi tập hữu hạn `S`, ta dùng năm sự thật có trong thư viện của TLAPS mà không chứng minh lại:
+
+- (C1) `Cardinality(S) \in Nat`[^ind-fs-type].
+- (C2) `Cardinality({}) = 0`[^ind-fs-empty].
+- (C3) Nếu `x \notin S` thì `Cardinality(S \cup {x}) = Cardinality(S) + 1`[^ind-fs-add].
+- (C4) Nếu `x \in S` thì `Cardinality(S \ {x}) = Cardinality(S) - 1`[^ind-fs-rem].
+- (C5) Tập con của một tập hữu hạn cũng hữu hạn[^ind-fs-sub].
+
+Hai khẳng định về `EXCEPT` và `Holders` được dùng ở cả hai trường hợp `Acquire` lẫn `Release`, nên ta chứng minh chúng một lần.
+
+**Mệnh đề 2.** Cho `h \in [Clients -> BOOLEAN]`, `c \in Clients`, `b \in BOOLEAN` và `h2 == [h EXCEPT ![c] = b]`. Viết `H(f)` cho `{x \in Clients : f[x]}`, vậy `Holders = H(held)` và `Holders' = H(held')`. Khi đó:
+
+- (a) `h2 \in [Clients -> BOOLEAN]`.
+- (b) Nếu `b = TRUE` và `h[c] = FALSE` thì `Cardinality(H(h2)) = Cardinality(H(h)) + 1`.
+- (c) Nếu `b = FALSE` và `h[c] = TRUE` thì `Cardinality(H(h2)) = Cardinality(H(h)) - 1` và `Cardinality(H(h)) >= 1`.
+
+*Chứng minh (chứng minh của người soạn).* `[h EXCEPT ![c] = b]` là hàm giống `h` ngoại trừ tại `c`, nơi nó nhận giá trị `b`[^bk-except-array]. Nói cách khác, `h2` có cùng miền `Clients` với `h`, `h2[c] = b`, và `h2[x] = h[x]` với mọi `x \in Clients` khác `c`.
+
+(a) Miền của `h2` là `Clients`, và giá trị tại mỗi `x` hoặc là `b` hoặc là `h[x]`, cả hai đều thuộc `BOOLEAN`. Vậy `h2` thuộc tập các hàm có miền bằng `Clients` và giá trị trong `BOOLEAN`[^bk-fn-set].
+
+(b) Đặt `S = H(h)` và `S2 = H(h2)`. Ta chứng minh `S2 = S \cup {c}` bằng cách so từng phần tử, vì hai tập bằng nhau khi có cùng phần tử[^bk-set-same]. Lấy `x` bất kỳ. Nếu `x \notin Clients` thì `x` không thuộc `S2` lẫn `S \cup {c}`, vì cả `S` lẫn `c` đều nằm trong `Clients`. Nếu `x = c` thì `h2[c] = TRUE` nên `x \in S2`, và dĩ nhiên `x \in S \cup {c}`. Nếu `x \in Clients` và `x # c` thì `x \in S2 <=> h2[x] <=> h[x] <=> x \in S <=> x \in S \cup {c}`, trong đó đẳng thức cuối đúng vì `x # c`. Vậy `S2 = S \cup {c}`. Vì `h[c] = FALSE` nên `c \notin S`; còn `S` hữu hạn vì là tập con của `Clients` hữu hạn (C5). Theo (C3), `Cardinality(S \cup {c}) = Cardinality(S) + 1`. ∎
+
+(c) Cũng đặt `S = H(h)`, `S2 = H(h2)`; lần này ta chứng minh `S2 = S \ {c}`. Nếu `x = c` thì `h2[c] = FALSE` nên `x \notin S2`, và `x \notin S \ {c}`. Nếu `x # c` thì `x \in S2 <=> h[x] <=> x \in S <=> x \in S \ {c}`. (Với `x \notin Clients` cả hai vế đều sai như ở (b).) Vì `h[c] = TRUE` nên `c \in S`, và theo (C4), `Cardinality(S \ {c}) = Cardinality(S) - 1`. Cuối cùng `S \ {c}` hữu hạn nên `Cardinality(S \ {c}) \in Nat` (C1), suy ra `Cardinality(S) = Cardinality(S \ {c}) + 1 >= 1`. ∎
+
+**Định lý (chứng minh của người soạn).** Với `Clients` hữu hạn và `MaxConn \in Nat`: (1) `Init => Inv1`; (2) `Inv1 /\ [Next]_vars => Inv1'`; (3) `Inv1 => NoOverAlloc`. Do đó, theo mệnh đề 1, `Spec => []NoOverAlloc`.
+
+**Nghĩa vụ 1.** Giả sử `Init`, tức `free = MaxConn` và `held = [c \in Clients |-> FALSE]`.
+
+- (I1) `MaxConn \in Nat` theo `ASSUME`, nên `0 <= MaxConn <= MaxConn`, tức `free \in 0..MaxConn`.
+- (I2) `held` là hàm có miền `Clients` và nhận giá trị `FALSE \in BOOLEAN` tại mọi điểm, nên thuộc `[Clients -> BOOLEAN]`.
+- (I3) `Holders = {c \in Clients : FALSE} = {}`, mà `Cardinality({}) = 0` (C2). Vậy `free + Cardinality(Holders) = MaxConn + 0 = MaxConn`. ∎
+
+**Nghĩa vụ 2.** Giả sử `Inv1` và `[Next]_vars`. Gọi ba vế của `Inv1` ở state cũ là (H1), (H2), (H3). Theo (H2), `Holders` là tập con của `Clients` hữu hạn nên hữu hạn (C5), và `k == Cardinality(Holders)` thuộc `Nat` (C1). Ta phải chứng minh (I1'), (I2'), (I3'): ba vế đó với `free`, `held` thay bằng `free'`, `held'`. Theo mục 9b.3, ta xét ba trường hợp.
+
+*Trường hợp A(c): `Acquire(c)` với `c \in Clients`.* Giả thiết thêm: (a1) `~held[c]`; (a2) `free > 0`; (a3) `free' = free - 1`; (a4) `held' = [held EXCEPT ![c] = TRUE]`.
+
+- **(I1').** Theo (H1), `free <= MaxConn`. Theo (a2), `free >= 1` vì `free` là số nguyên. Vậy theo (a3), `free' = free - 1 >= 0` và `free' < free <= MaxConn`, tức `free' \in 0..MaxConn`. *Dùng: H1 và guard `free > 0`.*
+- **(I2').** Theo (H2), (a4), `c \in Clients` và `TRUE \in BOOLEAN`, mệnh đề 2(a) cho `held' \in [Clients -> BOOLEAN]`. *Dùng: H2.*
+- **(I3').** Theo (H2), `held[c] \in BOOLEAN`, cùng (a1) suy ra `held[c] = FALSE`. Mệnh đề 2(b) cho `Cardinality(Holders') = k + 1`. Theo (a3) và (H3): `free' + Cardinality(Holders') = (free - 1) + (k + 1) = free + k = MaxConn`. *Dùng: H2, H3 và guard `~held[c]`.*
+
+*Trường hợp R(c): `Release(c)` với `c \in Clients`.* Giả thiết thêm: (r1) `held[c]`; (r2) `free' = free + 1`; (r3) `held' = [held EXCEPT ![c] = FALSE]`.
+
+- **(I1').** Cận dưới: `free' = free + 1 >= 1 >= 0`, vì `free >= 0` theo (H1). Cận trên: theo (H2) và (r1), `held[c] = TRUE`, nên mệnh đề 2(c) cho `k >= 1`. Theo (H3), `free = MaxConn - k <= MaxConn - 1`. Vậy `free' = free + 1 <= MaxConn`. *Dùng: H1, H2, **H3** và guard `held[c]`.*
+- **(I2').** Như trường hợp A, với mệnh đề 2(a) và `FALSE \in BOOLEAN`. *Dùng: H2.*
+- **(I3').** Mệnh đề 2(c) cho `Cardinality(Holders') = k - 1`. Theo (r2) và (H3): `free' + Cardinality(Holders') = (free + 1) + (k - 1) = free + k = MaxConn`. *Dùng: H2, H3 và guard `held[c]`.*
+
+*Trường hợp S: `UNCHANGED vars`.* Tức `free' = free` và `held' = held`. `Inv1` chỉ chứa biến `free`, `held` (và hằng), nên `Inv1'` là chính `Inv1` đánh giá với cùng giá trị, và đúng theo giả thiết `Inv1`. Đây là trường hợp tầm thường của mọi chứng minh dạng này[^ind-safety-stutter].
+
+Ba trường hợp phủ mọi bước `[Next]_vars`: `Next` là `\E c \in Clients : Acquire(c) \/ Release(c)`, và `[Next]_vars` thêm bước đứng yên. ∎
+
+**Nghĩa vụ 3.** Theo (H3), `Cardinality(Holders) = MaxConn - free`; theo (H1), `free >= 0`. Vậy `Cardinality(Holders) <= MaxConn`, tức `NoOverAlloc`. ∎
+
+**Kết luận.** Theo mệnh đề 1, `Spec => []NoOverAlloc`. Chứng minh không đặt giả thiết nào về số client hay giá trị `MaxConn` ngoài hai điều kiện ở đầu, nên nó phủ mọi cấu hình, trong khi TLC chỉ kiểm được từng cấu hình một.
+
+**Bảng "ô nào dùng gì".** Chữ đậm là chỗ vế phụ làm việc.
+
+| Trường hợp | (I1) `free \in 0..MaxConn` | (I2) `held \in [Clients -> BOOLEAN]` | (I3) `free + Cardinality(Holders) = MaxConn` |
+|---|---|---|---|
+| `Acquire(c)` | H1 và guard `free > 0` | H2, mệnh đề 2(a) | H2, H3, guard `~held[c]`, mệnh đề 2(b) |
+| `Release(c)` | H1, H2, **H3**, guard `held[c]`, mệnh đề 2(c) | H2, mệnh đề 2(a) | H2, H3, guard `held[c]`, mệnh đề 2(c) |
+| đứng yên | biến không đổi | biến không đổi | biến không đổi |
+
+Bảng cho thấy hai điều (nhận xét của người soạn). Thứ nhất, ô (`Release`, I1) cần (I3), nên ngay cả `TypeOK` một mình cũng *không* quy nạp: lấy `free = MaxConn` và một client đang giữ, `Release` đẩy `free` lên `MaxConn + 1`. Vế phụ không chỉ phục vụ `NoOverAlloc` mà còn đỡ lưng cho chính `TypeOK`. Thứ hai, mỗi guard xuất hiện đúng ở những ô cần nó: `free > 0` ở (`Acquire`, I1), `~held[c]` ở (`Acquire`, I3), `held[c]` ở (`Release`, I1) và (`Release`, I3). Bỏ một guard là rút một giả thiết khỏi các ô đó; bài tập 1 thử với `free > 0`.
+
+### 9b.6 Từ chứng minh tay sang khung TLAPS
+
+Chứng minh vừa viết đã có cấu trúc phân cấp mà TLAPS đòi. Tài liệu của TLAPS mô tả một chứng minh TLA+ là một tập các khẳng định xếp thành cây phân cấp, mỗi khẳng định hoặc chưa có chứng minh hoặc được chứng minh bằng cách viện dẫn các sự thật đã biết[^ind-tlaps-hier]. Ở cấp cao nhất, một chứng minh invariant gồm ba bước ứng với ba nghĩa vụ và một bước `QED` kết luận định lý[^ind-safety-struct]. Khung dưới đây là phép dịch gần từng dòng của mục 9b.5 (khung, chưa chạy qua `tlapm`; các bước lá để trống, nội dung của chúng chính là các ô ở 9b.5):
+
+```tla
+\* Module cần: EXTENDS Naturals, FiniteSets, FiniteSetTheorems, TLAPS
+Inv1 == TypeOK /\ Conservation
+
+THEOREM Safety == Spec => []NoOverAlloc
+<1>1. Init => Inv1                                      \* nghĩa vụ 1
+<1>2. Inv1 /\ [Next]_vars => Inv1'                      \* nghĩa vụ 2
+  <2> SUFFICES ASSUME Inv1, [Next]_vars PROVE Inv1'
+    OBVIOUS
+  <2>1. ASSUME NEW c \in Clients, Acquire(c) PROVE Inv1'   \* trường hợp A(c)
+  <2>2. ASSUME NEW c \in Clients, Release(c) PROVE Inv1'   \* trường hợp R(c)
+  <2>3. CASE UNCHANGED vars                                \* trường hợp S
+  <2>4. QED  BY <2>1, <2>2, <2>3 DEF Next
+<1>3. Inv1 => NoOverAlloc                               \* nghĩa vụ 3
+<1>4. QED  BY <1>1, <1>2, <1>3, PTL DEF Spec            \* mệnh đề 1
+```
+
+Phép ứng từng phần của khung với chứng minh tay như sau.
+
+- `<1>1`, `<1>2`, `<1>3` là ba nghĩa vụ. Hai bước đầu khẳng định điều kiện đầu kéo theo invariant và invariant được bảo toàn qua mọi bước `[Next]_vars`[^ind-tri-three].
+- `<1>4` là mệnh đề 1. Phép quy nạp theo vị trí trong behavior mà ta làm tay ở 9b.2 được giao cho back-end `PTL` (propositional temporal logic), vì các back-end mặc định không xử lý được logic thời gian[^ind-tlaps-ptl]. Để dùng `PTL` phải nạp module `TLAPS` bằng `EXTENDS` hoặc `INSTANCE`[^ind-safety-ptl].
+- `SUFFICES ASSUME Inv1, [Next]_vars PROVE Inv1'` là câu "giả sử `Inv1` và một bước `[Next]_vars`, ta cần chứng minh `Inv1'`"[^ind-tlaps-suff].
+- `ASSUME NEW c \in Clients, Acquire(c) PROVE Inv1'` là trường hợp A(c) với `c` bất kỳ; `CASE UNCHANGED vars` là trường hợp đứng yên. `CASE P` chỉ là cách viết tắt của `ASSUME P PROVE` mục tiêu hiện tại[^ind-safety-case].
+- Mỗi ô của bảng ở 9b.5 là một bước lá bên dưới trường hợp tương ứng, chẳng hạn `<3>1. I1'`, `<3>2. I2'`, `<3>3. I3'`. Cột "dùng gì" của bảng chính là mệnh đề `BY` của bước lá: TLAPS chỉ đưa cho back-end những sự thật được nêu tường minh (hoặc nằm trong bước không đặt tên)[^ind-tlaps-usable]. Các định lý (C1)–(C5) trở thành `FS_CardinalityType`, `FS_EmptySet`, `FS_AddElement`, `FS_RemoveElement`, `FS_Subset` của thư viện.
+
+Khi một bước lá không qua được, TLAPS hiện đúng công thức mà nó đã thất bại khi chứng minh[^ind-tlaps-fail]. Đọc công thức đó như đọc một ô kẹt, ta dựng được CTI như ở 9b.4 (nhận xét của người soạn).
+
+Về độ tin cậy, chứng minh có cấu trúc phân cấp đáng tin hơn văn xuôi tự do vì nó buộc ta xét đủ mọi chi tiết[^ind-hier]. Nhưng chứng minh viết tay vẫn kém chứng minh được máy kiểm. Lamport nói thẳng cả hai phía: văn xuôi dễ bỏ sót trường hợp biên, còn chứng minh máy kiểm rất đáng tin nhưng độ tin cậy đó có thể không đáng công viết[^ind-prose]. Chứng minh ở mục này thuộc loại tay, và người soạn chưa chạy TLAPS.
+
+### 9b.7 TLC: kiểm invariant và kiểm tính quy nạp
+
+TLC trả lời một câu hỏi khác với chứng minh. Nó duyệt các state tới được từ `Init` và đánh giá invariant ở từng state đó[^ind-tlc-reach]. Vì vậy `INVARIANT Inv0` và `INVARIANT Inv1` trên model ba client, `MaxConn = 2` đều xanh như nhau, và TLC không bao giờ ghé state `s` của phản ví dụ ở 9b.4 vì không có đường nào từ `Init` tới đó (suy luận của người soạn từ cách TLC duyệt, xem [Chương 04](04-invariant-va-tlc.md) mục 3). Nói cách khác, TLC không phân biệt invariant quy nạp với invariant chỉ đúng ở các state tới được.
+
+Sách có đúng ví dụ này. `Coherence` của spec bộ nhớ đệm không phải invariant của action `Next`[^ind-coh-next]. Nó vẫn là invariant của `Spec`, vì các state vi phạm không xuất hiện trong behavior nào thỏa `Spec`[^ind-coh]. Một invariant của `Spec` mà đồng thời là invariant của action `Next` thì đôi khi được gọi là inductive invariant[^ind-ss-name]; TLC chỉ kiểm vế thứ nhất, còn vế thứ hai ta phải kiểm riêng.
+
+Muốn TLC kiểm nghĩa vụ 2, ta cho nó xuất phát từ *mọi* state thỏa `Inv` thay vì chỉ từ `Init`. Lý do là nghĩa vụ 2 đúng khi và chỉ khi `Inv` là invariant của spec `Inv /\ [][Next]_vars`[^ind-tlc-step2]. Dùng `Inv` làm điều kiện đầu cũng là cách để TLC chạm tới state ở độ sâu tùy ý[^ind-tri-tlc]. Với `ConnPool`, ta thêm một module và một file cấu hình (minh họa, chưa chạy TLC):
+
+```tla
+---- MODULE MCConnPoolInd ----
+EXTENDS ConnPool
+
+Inv0 == TypeOK /\ NoOverAlloc     \* TypeOK đứng trước để TLC liệt kê được state đầu (xem Đi sâu)
+Inv1 == TypeOK /\ Conservation
+
+Ind0 == Inv0 /\ [][Next]_vars     \* xuất phát từ MỌI state thỏa Inv0, không chỉ từ Init
+Ind1 == Inv1 /\ [][Next]_vars
+====
+```
+
+```text
+\* MCConnPoolInd.cfg  (minh họa, chưa chạy; lần chạy thứ hai: đổi Ind0 thành Ind1, Inv0 thành Inv1)
+SPECIFICATION Ind0
+CONSTANTS
+  Clients = {c1, c2, c3}
+  MaxConn = 2
+INVARIANTS Inv0
+```
+
+Kết quả dự kiến, suy ra từ định nghĩa (người soạn chưa chạy TLC): với `Ind0`, TLC báo `Inv0` bị vi phạm bằng một trace hai state, chính là CTI `(s, t)` ở 9b.4; với `Ind1` không có lỗi. Chương trình Rust ở phần Đi sâu làm lại đúng phép tính đó trên model này, và cho kết quả khớp: 9 CTI của `Inv0`, không CTI nào của `Inv1`. Bảng dưới tóm tắt ba việc kiểm; cột `Inv0`, `Inv1` là dự kiến của người soạn.
+
+| Việc cần kiểm | Spec cho TLC và invariant cần khai | `Inv0` | `Inv1` |
+|---|---|---|---|
+| `Inv` đúng ở mọi state tới được (gồm cả nghĩa vụ 1) | `Spec`, `INVARIANT Inv` | xanh | xanh |
+| Nghĩa vụ 2 | `Ind`, `INVARIANT Inv` | **đỏ**: trace hai state chính là CTI | xanh |
+| Nghĩa vụ 3 | vị từ đầu `Inv`, `Next` là `UNCHANGED vars`, `INVARIANT P` | xanh | xanh |
+
+Dòng đầu kiểm luôn nghĩa vụ 1, vì một invariant của `Spec` thì đúng ở mọi state đầu[^ind-tlc-step1]. Dòng cuối là cách kiểm nghĩa vụ 3[^ind-tlc-step3].
+
+Có ba điều cần nhớ khi dùng cách kiểm này. Một, nên làm trước khi viết chứng minh: model rất nhỏ cũng bắt lỗi tốt, nhất là ở nghĩa vụ 2[^ind-tlc-before]. Hai, số state đúng kiểu thường khổng lồ nên cách này chỉ thực tế cho model tí hon[^ind-tlc-small]. Nếu tập state của `Inv` quá lớn, TLC có thể chọn ngẫu nhiên một tập con của nó[^ind-tri-sample]; Apalache thì kiểm cùng ba nghĩa vụ bằng SMT (xem [Chương 09](09-mo-hinh-hoa-he-backend.md) mục 8). Ba, kết quả chỉ cho đúng một cấu hình, còn muốn đúng với mọi `Clients` hữu hạn và mọi `MaxConn` thì cần chứng minh ở 9b.5.
+
+### 9b.8 Bài tập
+
+**Bài 1 (CTI thật hay giả).** Xóa guard `free > 0` khỏi `Acquire` rồi chạy lại nghĩa vụ 2 cho `Inv1`. Ô nào kẹt? Dựng CTI, rồi quyết định: spec có lỗi, hay `Inv1` quá yếu?
+
+**Bài 2 (viết trọn một chứng minh).** Trong module `LeaseMath` ở mục 9, thêm biến `leases` (khai báo sau các định nghĩa ở đó), giả sử `Key` hữu hạn, và thêm:
+
+```tla
+VARIABLE leases
+
+Init == leases = InitLeases
+
+Grant(k, n) ==
+    /\ leases[k].owner = NoOwner
+    /\ Cardinality(Held(leases, n)) < 2
+    /\ leases' = Acquire(leases, k, n)
+
+Drop(k) ==
+    /\ leases[k].owner # NoOwner
+    /\ leases' = Release(leases, k)
+
+Next == (\E k \in Key, n \in Node : Grant(k, n)) \/ (\E k \in Key : Drop(k))
+```
+
+Chứng minh `(leases \in Leases) /\ Quota(leases)` là invariant quy nạp. Gợi ý: trong trường hợp `Grant`, lấy `m \in Node` bất kỳ cho vế `\A` của `Quota`, rồi xét `m = n` và `m # n`.
+
+<details><summary>Đáp án</summary>
+
+**Bài 1.** Ô kẹt là (`Acquire`, I1): thiếu `free > 0` thì từ `free >= 0` ta không suy ra `free - 1 >= 0`. CTI: `MaxConn = 2`, `held = {c1, c2}`, `free = 0`, bước `Acquire(c3)`. State xuất phát thỏa `Inv1` (`0 \in 0..2`, `held` là hàm, `0 + 2 = 2`). State sau có `free' = -1` và ba client đang giữ, nên `TypeOK` và `NoOverAlloc` đều sai (riêng (I3') vẫn đúng: `-1 + 3 = 2`). State xuất phát *tới được* (lần lượt cho `c1` rồi `c2` lấy kết nối), nên đây là CTI thật: spec có lỗi, thêm vế phụ không cứu được, phải trả guard lại. Chương trình Rust ở phần Đi sâu xác nhận: bỏ guard thì `Inv1` có 3 CTI, cả ba tới được từ `Init`.
+
+**Bài 2.** Đặt `Inv == (leases \in Leases) /\ Quota(leases)` và nhớ `NoOwner \notin Node` theo định nghĩa ở mục 9.
+
+- *Init.* Mọi key của `InitLeases` có `owner = NoOwner`, nên `Held(InitLeases, m) = {}` với mọi `m \in Node` và `Cardinality({}) = 0 <= 2` (C2); còn `InitLeases \in Leases` hiển nhiên.
+- *Trường hợp `Grant(k, n)`.* Vì `leases[k].owner = NoOwner`, `Acquire` rẽ nhánh `THEN`: `leases'` giống `leases` ngoại trừ `leases'[k] = [owner |-> n, epoch |-> leases[k].epoch + 1]`, nên `leases' \in Leases`. Với `m \in Node` bất kỳ, `k \notin Held(leases, m)` vì `leases[k].owner = NoOwner # m`. Nếu `m # n` thì `Held(leases', m) = Held(leases, m)`, nên `Cardinality <= 2` theo `Quota` ở state cũ. Nếu `m = n` thì `Held(leases', n) = Held(leases, n) \cup {k}` với `k` chưa thuộc, nên `Cardinality(Held(leases', n)) = Cardinality(Held(leases, n)) + 1 <= 2` nhờ guard `< 2` (C3).
+- *Trường hợp `Drop(k)`.* `leases'` giống `leases` ngoại trừ `leases'[k].owner = NoOwner`, nên `leases' \in Leases`, và với mọi `m \in Node`, `Held(leases', m) = Held(leases, m) \ {k}`. Theo (C4), `Cardinality(Held(leases, m) \ {k})` bằng `Cardinality(Held(leases, m)) - 1` hoặc bằng chính `Cardinality(Held(leases, m))`, tùy `k` có thuộc tập hay không; cả hai đều `<= 2`.
+- *Đứng yên.* Hiển nhiên.
+
+Bài này *không cần vế phụ*: guard của `Grant` nói thẳng về đại lượng có mặt trong invariant (`Cardinality(Held(leases, n))`). Còn guard của `Acquire` ở pool nói về `free`, một biến khác với `held`, nên phải có vế phụ nối hai biến lại với nhau (nhận xét của người soạn).
+
+</details>
+
+<details><summary>Đi sâu: invariant quy nạp mạnh nhất, vét cạn bằng Rust, các lỗi hay gặp khi chứng minh tay, và ví dụ trong repo</summary>
+
+- **Invariant quy nạp mạnh nhất chính là tập các state tới được (chứng minh của người soạn).** Gọi `Reach` là vị từ "state này tới được từ `Init` qua các bước `[Next]_vars`". Một, `Reach` thỏa nghĩa vụ 1 và 2: state đầu thì tới được, và từ state tới được, mọi bước dẫn tới state tới được (nối thêm bước vào đường đi). Hai, mọi `Inv` thỏa nghĩa vụ 1 và 2 đều chứa `Reach`: đó chính là phép quy nạp ở mệnh đề 1 (mọi state trên đường đi từ `Init` thỏa `Inv`). Vậy `Reach` là inductive invariant mạnh nhất, và về nguyên tắc CTI nào cũng loại được bằng cách thêm vế phụ. Khó khăn thực tế là `Reach` thường không viết gọn được; việc cần làm là tìm một vị từ ngắn, đọc hiểu được, nằm giữa `P` và `Reach`. Với `ConnPool` ta may mắn vì `Inv1` đúng bằng `Reach`. Chiều `Reach => Inv1` là chứng minh ở 9b.5. Chiều ngược lại: lấy `s` thỏa `Inv1`, gọi `H` là `Holders` của `s` và `k = Cardinality(H)`. Theo (I3) và (I1), `free = MaxConn - k` và `k <= MaxConn`. Từ `Init`, cho lần lượt từng `h \in H` thực hiện `Acquire(h)`: trước bước thứ `j`, `free = MaxConn - (j - 1) >= MaxConn - k + 1 >= 1` và `h` chưa giữ, nên guard đúng; sau `k` bước ta đứng đúng ở `s`. Vậy `s` tới được. Một invariant quy nạp yếu hơn vẫn có thể đủ dùng: thay `=` bằng `<=` trong `Conservation` vẫn cho một invariant quy nạp (người soạn tự kiểm theo các bước ở 9b.5, chương trình bên dưới xác nhận trên model nhỏ), nhưng ta chọn `=` vì nó là luật thiết kế của pool.
+- **Chương trình vét cạn (đã chạy thật).** Chương trình dưới không phải TLC. Nó làm lại, trên đúng model ba client với `MaxConn = 2`, hai phép tính mà TLC sẽ làm: duyệt các state tới được từ `Init`, và duyệt mọi state đúng kiểu thỏa `Inv` để tìm một bước làm `Inv` sai.
+
+```rust
+// Vét cạn spec ConnPool với MaxConn = 2, Clients = {c1, c2, c3}.
+// Trạng thái = (free, held[c1..c3]). "Vũ trụ đúng kiểu" U gồm mọi trạng thái thỏa TypeOK.
+use std::collections::{HashSet, VecDeque};
+
+const MAX_CONN: i32 = 2;
+const N: usize = 3;
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+struct State {
+    free: i32,
+    held: [bool; N],
+}
+
+fn holders(s: &State) -> i32 {
+    s.held.iter().filter(|&&h| h).count() as i32
+}
+fn type_ok(s: &State) -> bool {
+    (0..=MAX_CONN).contains(&s.free)
+}
+fn no_over_alloc(s: &State) -> bool {
+    holders(s) <= MAX_CONN
+}
+fn conservation(s: &State) -> bool {
+    s.free + holders(s) == MAX_CONN
+}
+fn inv0(s: &State) -> bool {
+    type_ok(s) && no_over_alloc(s)
+}
+fn inv1(s: &State) -> bool {
+    type_ok(s) && conservation(s)
+}
+fn inv2(s: &State) -> bool {
+    type_ok(s) && s.free + holders(s) <= MAX_CONN
+}
+
+// Next = \E c : Acquire(c) \/ Release(c); guard_free = có giữ `free > 0` trong Acquire hay không.
+fn successors(s: &State, guard_free: bool) -> Vec<State> {
+    let mut out = Vec::new();
+    for c in 0..N {
+        if !s.held[c] && (!guard_free || s.free > 0) {
+            let mut t = *s;
+            t.free -= 1;
+            t.held[c] = true;
+            out.push(t);
+        }
+        if s.held[c] {
+            let mut t = *s;
+            t.free += 1;
+            t.held[c] = false;
+            out.push(t);
+        }
+    }
+    out
+}
+
+fn universe() -> Vec<State> {
+    let mut u = Vec::new();
+    for free in 0..=MAX_CONN {
+        for mask in 0..(1u32 << N) {
+            let mut held = [false; N];
+            for c in 0..N {
+                held[c] = mask & (1 << c) != 0;
+            }
+            u.push(State { free, held });
+        }
+    }
+    u
+}
+
+fn reachable(guard_free: bool) -> HashSet<State> {
+    let init = State { free: MAX_CONN, held: [false; N] };
+    let mut seen = HashSet::new();
+    let mut q = VecDeque::new();
+    seen.insert(init);
+    q.push_back(init);
+    while let Some(s) = q.pop_front() {
+        for t in successors(&s, guard_free) {
+            if seen.insert(t) {
+                q.push_back(t);
+            }
+        }
+    }
+    seen
+}
+
+// CTI: s thỏa inv và có bước tới t làm inv sai.
+fn ctis(inv: fn(&State) -> bool, u: &[State], guard_free: bool) -> Vec<(State, State)> {
+    let mut out = Vec::new();
+    for s in u.iter().filter(|s| inv(s)) {
+        if let Some(t) = successors(s, guard_free).into_iter().find(|t| !inv(t)) {
+            out.push((*s, t));
+        }
+    }
+    out
+}
+
+fn main() {
+    let u = universe();
+    let reach = reachable(true);
+    println!("|U| (trạng thái đúng kiểu)      = {}", u.len());
+    println!("|Reach| (tới được từ Init)      = {}", reach.len());
+
+    let n0 = u.iter().filter(|s| inv0(s)).count();
+    let c0 = ctis(inv0, &u, true);
+    println!("Inv0 = TypeOK /\\ NoOverAlloc: {} trạng thái thỏa, {} CTI, trong đó tới được: {}",
+        n0, c0.len(), c0.iter().filter(|(s, _)| reach.contains(s)).count());
+    if let Some((s, t)) = c0.iter().find(|(s, _)| s.free == 1) {
+        println!("  ví dụ CTI: {:?}  ->  {:?}", s, t);
+    }
+
+    let n1 = u.iter().filter(|s| inv1(s)).count();
+    let c1 = ctis(inv1, &u, true);
+    let inv1_set: HashSet<State> = u.iter().copied().filter(inv1).collect();
+    println!("Inv1 = TypeOK /\\ Conservation: {} trạng thái thỏa, {} CTI, trùng đúng với Reach: {}",
+        n1, c1.len(), inv1_set == reach);
+
+    let n2 = u.iter().filter(|s| inv2(s)).count();
+    let c2 = ctis(inv2, &u, true);
+    println!("Inv2 = TypeOK /\\ (free + |Holders| <= MaxConn): {} trạng thái thỏa, {} CTI", n2, c2.len());
+
+    // Bài tập: bỏ guard `free > 0` trong Acquire.
+    let reach_b = reachable(false);
+    let cb = ctis(inv1, &u, false);
+    println!("Bỏ guard free > 0: {} CTI của Inv1, trong đó tới được từ Init: {}",
+        cb.len(), cb.iter().filter(|(s, _)| reach_b.contains(s)).count());
+    if let Some((s, t)) = cb.first() {
+        println!("  ví dụ CTI: {:?}  ->  {:?}", s, t);
+    }
+}
+```
+
+  Quan sát (biên dịch bằng `rustc 1.95.0 --edition 2021 -O`, chạy trên macOS arm64):
+
+```text
+|U| (trạng thái đúng kiểu)      = 24
+|Reach| (tới được từ Init)      = 7
+Inv0 = TypeOK /\ NoOverAlloc: 21 trạng thái thỏa, 9 CTI, trong đó tới được: 0
+  ví dụ CTI: State { free: 1, held: [true, true, false] }  ->  State { free: 0, held: [true, true, true] }
+Inv1 = TypeOK /\ Conservation: 7 trạng thái thỏa, 0 CTI, trùng đúng với Reach: true
+Inv2 = TypeOK /\ (free + |Holders| <= MaxConn): 12 trạng thái thỏa, 0 CTI
+Bỏ guard free > 0: 3 CTI của Inv1, trong đó tới được từ Init: 3
+  ví dụ CTI: State { free: 0, held: [true, true, false] }  ->  State { free: -1, held: [true, true, true] }
+```
+
+  Đọc kết quả: trong 24 state đúng kiểu có 21 state thỏa `Inv0`, và 9 trong số đó là CTI (state xuất phát của một bước làm `Inv0` sai), không cái nào tới được từ `Init`. Ví dụ CTI in ra khớp đúng cặp `(s, t)` ở 9b.4. `Inv1` có 7 state, không CTI nào, và trùng đúng với 7 state tới được. Nếu bỏ guard `free > 0` thì `Inv1` có 3 CTI và cả ba đều tới được: đó là CTI thật, như bài tập 1.
+- **Lỗi hay gặp khi chứng minh tay** (nhận xét của người soạn, kèm nguồn khi có):
+  - *Dùng "state này tới được" làm giả thiết trong nghĩa vụ 2.* Giả thiết duy nhất về state cũ là `Inv`; chuyện ở 9b.4 là lý do.
+  - *Quên giả thiết kiểu.* Ở trường hợp `Release`, muốn kết luận `held'[x] = held[x]` với `x # c` ta cần `held` là hàm và `x` thuộc miền của nó, tức (I2). Chính Lamport gặp điều này: một bước tưởng hiển nhiên như `pc[i] = pc'[i]` chỉ chứng minh được khi `TypeOK` nằm trong giả thiết[^ind-safety-typeok-need]. Đây cũng là chuyện "biểu thức ngớ ngẩn" ở mục 8: ngoài miền, `f[x]` không có giá trị xác định.
+  - *Quên `UNCHANGED`.* Biến thành tự do, ô nào đụng tới nó đều kẹt (mục 9b.3).
+  - *Quên `ASSUME`.* `Clients` hữu hạn và `MaxConn \in Nat` bị TLC che đi, nhưng chứng minh thì phải ghi ra.
+  - *Nhồi mọi thứ vào một `Inv` khổng lồ.* Ta có thể dùng invariant đã chứng minh để chứng minh invariant khác, khỏi lặp lại từ đầu[^ind-other-inv].
+- **Ví dụ thật trong repo `tlaplus/Examples`.** `MCPaxos.tla` đặt tên đúng thủ thuật ở 9b.7: `MCISpec == IInv /\ [][Next]_vars`, kèm lời ghi rằng `Inv` là inductive invariant của `Spec` khi và chỉ khi nó là invariant của spec đó[^ind-mc-ind]. Vì TLC sinh state đầu từ vị từ đầu, mỗi biến phải xuất hiện lần đầu trong một vế dạng `x = e` hoặc `x \in e`; spec đó phải viết lại một vế `msgs \subseteq Message` thành `msgs \in SUBSET Message` cho `IInv` dùng làm vị từ đầu[^ind-mc-init]. Ở `ConnPool`, `TypeOK` toàn vế dạng `x \in S` nên không cần viết lại, miễn là nó đứng trước `Conservation`.
+- **Các chương khác của phase này có ví dụ cùng loại.** [Chương 08](08-dac-ta-giao-thuc-phan-tan.md) mục 6.4 nói về inductive invariant 10 vế của `TwoPhase_proof.tla` (`TCConsistent` không quy nạp trực tiếp); [Chương 07](07-refinement.md) mục 6 dùng `Coherence` của bộ nhớ đệm; [Chương 09](09-mo-hinh-hoa-he-backend.md) mục 8 cho Apalache kiểm đúng ba nghĩa vụ ở 9b.2 bằng ba lệnh.
+
+</details>
+
+**Quay lại Q9:** chứng minh invariant bằng tay là ba nghĩa vụ `Init => Inv`, `Inv /\ [Next]_vars => Inv'`, `Inv => P`, trong đó nghĩa vụ 2 chẻ theo từng action của `Next` và từng vế của `Inv'`. Ô nào kẹt cho một CTI; nếu state của CTI không tới được thì thêm vế phụ, như `Conservation` cho pool của `orders`. TLC chỉ kiểm tính quy nạp khi được cho xuất phát từ `Inv`, và TLAPS đòi đúng cấu trúc `<1>1`–`<1>4` của chứng minh tay.
+
 ## 10. Liên hệ với Rust và backend
 
 Đây là nơi bạn sẽ nối đặc tả với code Rust sau này ([chương 10](10-tu-dac-ta-den-code-rust.md)). Bảng dưới là *gần đúng có chủ đích*; cột cuối ghi chỗ sai lệch.
@@ -639,6 +1124,8 @@ Ngoài ra, filter và map của tập tương ứng iterator adapter ([P9·06 �
 - TLA+ không có kiểu: `TypeOK` là invariant; biểu thức ngớ ngẩn chỉ lộ khi TLC đánh giá, nên đặt guard lên trước.
 - TLC đánh giá trái sang phải và chỉ duyệt được tập hữu hạn; các dạng `\E x : p`, `CHOOSE x : p` không chặn không đánh giá được.
 - Rust: `HashSet`/`HashMap`/`struct`/`Vec` là bản "có vùng nhớ" của tập/hàm/record/sequence; khác biệt chính là cập nhật tại chỗ, khóa thiếu, chỉ số 0/1 và tràn số.
+- Chứng minh invariant bằng tay quy về ba nghĩa vụ: `Init => Inv`, `Inv /\ [Next]_vars => Inv'`, `Inv => P`. Nghĩa vụ 2 chẻ theo từng action của `Next` (cộng trường hợp đứng yên) và từng vế của `Inv'`; nó phải đúng từ *mọi* state thỏa `Inv`, không riêng state tới được (mục 9b).
+- Khi nghĩa vụ 2 kẹt, ô kẹt cho một phản ví dụ cho quy nạp: state thỏa `Inv` và một bước làm `Inv` sai. Tới được thì spec hoặc điều cần chứng minh sai; không tới được thì thêm vế phụ, như `free + Cardinality(Holders) = MaxConn` cho pool của `orders`. TLC chỉ kiểm invariant trên state tới được nên muốn kiểm tính quy nạp phải cho TLC xuất phát từ `Inv`; TLAPS ghi cùng cấu trúc đó bằng các bước `<1>1`–`<1>4` (mục 9b).
 
 ## Câu hỏi tự kiểm tra
 
@@ -654,6 +1141,8 @@ Ngoài ra, filter và map của tập tương ứng iterator adapter ([P9·06 �
 10. Cho `CASE score >= 90 -> "A" [] score >= 80 -> "B" [] OTHER -> "C"`, với `score = 95` kết quả thế nào, và vì sao?
 11. Vì sao `(x # <<>>) /\ (x[1] = 0)` chạy được trong TLC nhưng chiều ngược lại thì không?
 12. Vì sao TLC không đánh giá được `{i \in Nat : i < 4}`, và sửa thế nào?
+13. Ba nghĩa vụ chứng minh một invariant bằng quy nạp là gì? Vì sao nghĩa vụ 2 phải đúng với *mọi* state thỏa `Inv`, kể cả state không tới được từ `Init`? Với `Next == \E c \in Clients : Acquire(c) \/ Release(c)`, chứng minh nghĩa vụ 2 chẻ thành mấy trường hợp?
+14. `INVARIANT Inv0` xanh trên TLC có nghĩa `Inv0` quy nạp không? Làm sao cho TLC kiểm tính quy nạp, và phản ví dụ hiện ra ở dạng nào? Khi có phản ví dụ, làm sao biết nên sửa spec hay thêm vế phụ?
 
 <details><summary>Đáp án</summary>
 
@@ -669,6 +1158,8 @@ Ngoài ra, filter và map của tập tương ứng iterator adapter ([P9·06 �
 10. Nhánh 1 và 2 cùng đúng, nên kết quả là `"A"` hoặc `"B"` mà ngữ nghĩa không nói là cái nào[^bk-case-disjoint]. Muốn xác định, các nhánh phải rời nhau (ví dụ nhánh thứ hai thêm `score < 90`).
 11. TLC đánh giá `/\` từ trái sang phải, chỉ tính vế phải nếu vế trái đúng[^tlc-left-right]. Chiều ngược lại tính `<<>>[1]`, một biểu thức ngớ ngẩn, trước[^bk-seq-silly].
 12. Vì `Nat` vô hạn: TLC đánh giá `{x \in S : p}` bằng cách duyệt `S` trước, nên không duyệt được `Nat`[^tlc-enum]. Sửa: dùng tập hữu hạn như `0..5` (`{i \in 0..5 : i < 4}`).
+13. `Init => Inv`, `Inv /\ [Next]_vars => Inv'` và `Inv => P`[^ind-three]. Nghĩa vụ 2 phải đúng với mọi state thỏa `Inv` vì phép quy nạp ở mục 9b.2 chỉ biết `sᵢ` thỏa `Inv`, không biết gì thêm về nó; có người từng tưởng một state không tới được, rồi thấy nó tới được[^ind-anecdote]. Có ba trường hợp: `Acquire(c)`, `Release(c)` với `c` bất kỳ, và đứng yên, vì `[Next]_vars` là phép hợp của `Next` và `UNCHANGED vars`[^ind-safety-disj].
+14. Không: TLC chỉ đánh giá invariant ở các state tới được[^ind-tlc-reach], còn `Inv0` đúng ở mọi state tới được mà vẫn không quy nạp (phản ví dụ ở mục 9b.4). Muốn kiểm tính quy nạp, cho TLC xuất phát từ `Inv`: kiểm `Inv` là invariant của `Inv /\ [][Next]_vars`[^ind-tlc-step2]. Phản ví dụ hiện ra là một trace hai state, state xuất phát thỏa `Inv` và state sau vi phạm (suy luận của người soạn). Nếu state xuất phát tới được từ `Init` thì spec hoặc điều cần chứng minh sai thật; nếu không tới được thì thêm một vế phụ nêu quan hệ giữa các biến mà state đó vi phạm[^ind-relation].
 
 </details>
 
@@ -683,6 +1174,12 @@ Ngoài ra, filter và map của tập tương ứng iterator adapter ([P9·06 �
 - [Learn TLA+ — Operators and Values](https://learntla.com/core/operators.html) và [Structured Data](https://learntla.com/core/functions.html) (trang sống): giải thích thân thiện, ví dụ chạy được trong "scratchfile"; dùng cho cú pháp, nhưng đối chiếu với sách khi cần độ chính xác.
 - [`tlaplus/tlaplus`, thư mục `StandardModules`](https://github.com/tlaplus/tlaplus/tree/94d0c5070852b37b801bb8998c436383ab7ee37b/tlatools/org.lamport.tlatools/src/tla2sany/StandardModules) (ghim commit): định nghĩa module chuẩn hiện hành, đặc biệt `Sequences.tla`.
 - Chương kế: [Chương 03 — Trạng thái, hành vi, action](03-trang-thai-hanh-vi-action.md) (dùng hàm và record làm trạng thái); [Chương 04 — Invariant và TLC](04-invariant-va-tlc.md) (kiểm `TypeOK`, giới hạn tập khi chạy TLC); [Chương 06 — PlusCal](06-pluscal.md).
+- Lamport, [*Proving Safety Properties*](https://lamport.azurewebsites.net/tla/proving-safety.pdf), **mục 4–6**: cấu trúc một chứng minh invariant, tìm invariant quy nạp bằng TLC, và cách chẻ chứng minh theo `Next` ngay trên ví dụ loại trừ tương hỗ; mục 7 có bài tập (Peterson, các bài về vòng lặp). Đọc để thấy cùng quy trình của mục 9b trên một thuật toán khác.
+- *Specifying Systems*, **mục 5.7** ("Invariance"): ba nghĩa vụ và ví dụ `Coherence` không quy nạp.
+- [TLAPS — Hierarchical proofs](https://proofs.tlapl.us/doc/web/content/Documentation/Tutorial/Hierarchical_proofs.html): chứng minh một invariant quy nạp trong TLAPS từng bước, kèm `SUFFICES`, `USE` và bước `QED`.
+- Konnov, Kuppe, Merz, [*Specification and Verification with the TLA+ Trifecta*](https://arxiv.org/pdf/2211.07216), **mục 3**: một spec được kiểm bằng TLC, được kiểm inductive invariant bằng Apalache và được chứng minh bằng TLAPS; đọc để thấy ba công cụ ứng với ba cách làm ở 9b.7 và 9b.6.
+- [`FiniteSetTheorems.tla`](https://raw.githubusercontent.com/tlaplus/tlapm/d8b9747a1dce9b4816bcc1ff130ccf7a3af2ce37/library/FiniteSetTheorems.tla) (thư viện TLAPS, ghim commit): các định lý `FS_AddElement`, `FS_RemoveElement`, `FS_Subset` dùng ở mục 9b.5.
+- [P14·01 — Logic và chứng minh](../14-toan-va-ly-thuyet/01-logic-va-chung-minh.md): phần quy nạp và invariant quy nạp tổng quát, không riêng TLA+.
 
 [^aws-math]: Newcombe et al., Use of Formal Methods at Amazon Web Services (2014), phần "Precise Designs" — <https://lamport.azurewebsites.net/tla/formal-methods-amazon.pdf> — "TLA+ is based on simple discrete math, i.e. basic set theory and predicates, with which all engineers are familiar."
 [^tla-home]: Lamport, The TLA+ Home Page — <https://lamport.azurewebsites.net/tla/tla.html> — "It's based on the idea that the best way to describe things precisely is with simple mathematics."
@@ -914,3 +1411,52 @@ Ngoài ra, filter và map của tập tương ứng iterator adapter ([P9·06 �
 [^bk-tnat]: Lamport, Specifying Systems, mục 16.1.3 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "equals true in the liberal interpretation, but not in the conservative interpretation."
 [^bk-tnat-mod]: Lamport, Specifying Systems, mục 16.1.3 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "In the moderate interpretation, (16.3) equals true, but the value of h5i ∧ 2 is still completely unspecified."
 [^bk-tnat-safe]: Lamport, Specifying Systems, mục 16.1.3 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "If we are using the conservative interpretation, instead of (16.3), we should write"
+[^ind-three]: Lamport, Specifying Systems, mục 5.7 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "This is done by finding an appropriate state predicate Inv and proving Init ⇒ Inv , Inv ∧ [Next]v ⇒ Inv 0 , Inv ⇒ P"
+[^ind-spec-inv]: Lamport, Proving Safety Properties, mục 1 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "The most common type of property one checks that a specification Spec satisfies is invariance—the assertion that some state formula I is true of all states in every behavior satisfying Spec ."
+[^ind-behavioral]: Lamport, Proving Safety Properties, mục 3 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "I and others have found that behavioral proofs don’t work well for more complicated algorithms. It’s easy to write convincing behavioral proofs of incorrect algorithms."
+[^ind-induction]: Lamport, Proving Safety Properties, mục 4.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "To prove that a state formula Inv is true in all states of a behavior, by induction it suffices to prove: 1. Inv is true in the initial state. 2. If Inv is true in any state of the behavior, then it is true in the next state of the behavior."
+[^ind-name]: Lamport, Proving Safety Properties, mục 4.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "A formula Inv satisfying the hypotheses of this rule is called an inductive invariant of Spec ."
+[^ind-ss-name]: Lamport, Specifying Systems, mục 5.7 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "An invariant of a specification S that is also an invariant of its next-state action is sometimes called an inductive invariant of S ."
+[^ind-hardest]: Lamport, Proving Safety Properties, mục 6.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Let’s now consider step <1>2 , which is always the hardest to check."
+[^ind-safety-disj]: Lamport, Proving Safety Properties, mục 6.2.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "we can further decompose the proof by using the fact that [Next]_vars is a disjunction—namely, it’s the disjunction of Next and UNCHANGED vars"
+[^ind-safety-exists]: Lamport, Proving Safety Properties, mục 6.2.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "An assumption of that form is used by simply assuming that the formula “ ... ” is true for some value of i in S ."
+[^ind-safety-case]: Lamport, Proving Safety Properties, mục 6.2.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "<2>1. CASE Next <2>2. CASE UNCHANGED vars <2>3. QED BY <2>1, <2>2 A statement CASE P is an abbreviation for ASSUME P PROVE G where G is the current goal."
+[^ind-safety-ordinary]: Lamport, Proving Safety Properties, mục 6.2.1 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Hence, it is true if it can be proved with ordinary mathematical reasoning when these four symbols are considered to be four different, completely unrelated mathematical variables (TLA+ constants)."
+[^ind-tri-primed]: Konnov, Kuppe, Merz, Specification and Verification with the TLA+ Trifecta, mục 3.3 — <https://arxiv.org/pdf/2211.07216> — "tlaps replaces primed variables occurring in action formulas by fresh variables, unrelated to their unprimed counterparts."
+[^ind-tri-disj]: Konnov, Kuppe, Merz, Specification and Verification with the TLA+ Trifecta, mục 3.3 — <https://arxiv.org/pdf/2211.07216> — "The second step requires some more interaction and is decomposed into one sub-proof per disjunct in the definition of Next."
+[^ind-tlaps-cases]: TLAPS Tutorial, Hierarchical proofs — <https://proofs.tlapl.us/doc/web/content/Documentation/Tutorial/Hierarchical_proofs.html> — "To prove the theorem NextProperty, we have to reason by cases, and prove that InductiveInvariant' is true when one of the actions of Next is performed"
+[^ind-typeok]: Lamport, Proving Safety Properties, mục 5 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "An inductive invariant almost always needs to assert type correctness of the variables."
+[^ind-cti-def]: Lamport, Proving Safety Properties, mục 4.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "The formula Mutex /\ [Next]_vars is true on the step hs, t i because Mutex is true in state s and Next is true on the step, but Mutex’ is not true on the step because Mutex is false in state t."
+[^ind-cti-unreach]: Lamport, Proving Safety Properties, mục 4.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Of course this state s is not a reachable state of the algorithm, since process 0 cannot be at cs with flag[0] equal to FALSE ."
+[^ind-anecdote]: Lamport, Proving Safety Properties, mục 4.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "I explained to him that for a formula Inv to be an inductive invariant, a step of the algorithm from any state satisfying Inv had to leave Inv true. We then tried to find an inductive invariant for his algorithm. This led us to discover that the “unreachable” state I had found was indeed reachable, and his claimed invariant was incorrect."
+[^ind-relation]: Lamport, Proving Safety Properties, mục 5 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Instead of trying to figure out exactly what the important facts are about the relation between the values of flag[i] and pc[i] , we can just state what that relation is."
+[^ind-fs-type]: tlaplus/tlapm @ d8b9747, library/FiniteSetTheorems.tla — <https://raw.githubusercontent.com/tlaplus/tlapm/d8b9747a1dce9b4816bcc1ff130ccf7a3af2ce37/library/FiniteSetTheorems.tla> — "THEOREM FS_CardinalityType == ASSUME NEW S, IsFiniteSet(S) PROVE /\ Cardinality(S) \in Nat /\ ExistsBijection(1..Cardinality(S), S)"
+[^ind-fs-empty]: tlaplus/tlapm @ d8b9747, library/FiniteSetTheorems.tla — <https://raw.githubusercontent.com/tlaplus/tlapm/d8b9747a1dce9b4816bcc1ff130ccf7a3af2ce37/library/FiniteSetTheorems.tla> — "THEOREM FS_EmptySet == /\ IsFiniteSet({}) /\ Cardinality({}) = 0 /\ \A S : IsFiniteSet(S) => (Cardinality(S) = 0 <=> S = {})"
+[^ind-fs-add]: tlaplus/tlapm @ d8b9747, library/FiniteSetTheorems.tla — <https://raw.githubusercontent.com/tlaplus/tlapm/d8b9747a1dce9b4816bcc1ff130ccf7a3af2ce37/library/FiniteSetTheorems.tla> — "THEOREM FS_AddElement == ASSUME NEW S, NEW x, IsFiniteSet(S) PROVE /\ IsFiniteSet(S \cup {x}) /\ Cardinality(S \cup {x}) = IF x \in S THEN Cardinality(S) ELSE Cardinality(S)+1"
+[^ind-fs-rem]: tlaplus/tlapm @ d8b9747, library/FiniteSetTheorems.tla — <https://raw.githubusercontent.com/tlaplus/tlapm/d8b9747a1dce9b4816bcc1ff130ccf7a3af2ce37/library/FiniteSetTheorems.tla> — "THEOREM FS_RemoveElement == ASSUME NEW S, NEW x, IsFiniteSet(S) PROVE /\ IsFiniteSet(S \ {x}) /\ Cardinality(S \ {x}) = IF x \in S THEN Cardinality(S)-1 ELSE Cardinality(S)"
+[^ind-fs-sub]: tlaplus/tlapm @ d8b9747, library/FiniteSetTheorems.tla — <https://raw.githubusercontent.com/tlaplus/tlapm/d8b9747a1dce9b4816bcc1ff130ccf7a3af2ce37/library/FiniteSetTheorems.tla> — "THEOREM FS_Subset == ASSUME NEW S, IsFiniteSet(S), NEW T \in SUBSET S PROVE /\ IsFiniteSet(T) /\ Cardinality(T) <= Cardinality(S) /\ Cardinality(S) = Cardinality(T) => S = T"
+[^ind-safety-stutter]: Lamport, Proving Safety Properties, mục 6.2.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "The proof of <2>5 is trivial, since the truth of Inv’ (the current goal) follows trivially from the truth of Inv (assumed in the SUFFICES statement) and the assumption UNCHANGED vars , which asserts that all the variables that appear in Inv are unchanged."
+[^ind-tlaps-hier]: TLAPS Tutorial, The example — <https://proofs.tlapl.us/doc/web/content/Documentation/Tutorial/The_example.html> — "Broadly speaking, a TLA+ proof is a collection of claims, arranged in a hierarchical structure which we describe below, where each claim has an assertion that is either unjustified or justified by a collection of cited facts."
+[^ind-safety-struct]: Lamport, Proving Safety Properties, mục 4.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Every non-leaf proof ends with a QED step that asserts the goal we are trying to prove, in this case Spec => []Mutex . This goal follows from the three steps <1>1 – <1>3 and the fact that Spec is defined to equal Init /\ [][Next]_vars ."
+[^ind-tri-three]: Konnov, Kuppe, Merz, Specification and Verification with the TLA+ Trifecta, mục 3.3 — <https://arxiv.org/pdf/2211.07216> — "The first two steps assert that the initial condition implies the invariant, and that the invariant is preserved by any transition allowed by [Next]vars ."
+[^ind-tlaps-ptl]: TLAPS Tutorial, Hierarchical proofs — <https://proofs.tlapl.us/doc/web/content/Documentation/Tutorial/Hierarchical_proofs.html> — "none of the default back-end provers (SMT, Zenon, and Isabelle) can deal with temporal logic. But TLAPS includes an interface to a propositional temporal logic prover (LS4), which can be invoked by adding PTL to the set of usable facts."
+[^ind-safety-ptl]: Lamport, Proving Safety Properties, mục 4.2 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "We also have to import the special TLAPS module in which the symbol PTL is defined, which we can do either by putting it in an EXTENDS statement at the beginning of the module or by adding the statement INSTANCE TLAPS anywhere before the theorem."
+[^ind-tlaps-suff]: TLAPS Tutorial, Hierarchical proofs — <https://proofs.tlapl.us/doc/web/content/Documentation/Tutorial/Hierarchical_proofs.html> — "This step asserts that it is sufficient to prove InductiveInvariant' while assuming InductiveInvariant and Next."
+[^ind-tlaps-usable]: TLAPS Tutorial, Hierarchical proofs — <https://proofs.tlapl.us/doc/web/content/Documentation/Tutorial/Hierarchical_proofs.html> — "you have to explicitly USE or cite a fact in order for it to be included in the context of the obligation sent to backends."
+[^ind-tlaps-fail]: Lamport, Proving Safety Properties, mục 6.1 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "TLAPS fails to prove it, so the Toolbox colors the step red and raises a window showing exactly what formula TLAPS was trying unsuccessfully to prove."
+[^ind-hier]: Lamport, Proving Safety Properties, mục 4.1 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Hierarchical structure is the only way to make sure we check all the details."
+[^ind-prose]: Lamport, Proving Safety Properties, mục 4.1 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Prose proofs are unreliable and can easily overlook the corner cases that often cause errors in algorithms, so they don’t provide much confidence. A machine-checked proof is extremely reliable, but the high degree of confidence it provides may not be worth the effort required to write it."
+[^ind-tlc-reach]: Lamport, Specifying Systems, mục 14.2.2 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "TLC does invariance checking by evaluating the invariant in each reachable state—that is, computing its TLC value, which should be true."
+[^ind-coh-next]: Lamport, Specifying Systems, mục 5.7 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "Predicate Coherence is not an invariant of the next-state action Next."
+[^ind-coh]: Lamport, Specifying Systems, mục 5.7 — <https://lamport.azurewebsites.net/tla/book-02-08-08.pdf> — "Coherence is an invariant of formula Spec because states like s cannot occur in a behavior satisfying Spec."
+[^ind-tlc-step1]: Lamport, Proving Safety Properties, mục 5 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "TLC has already checked that <1>1 is true, because invariance of Inv implies that Inv is true in every possible initial state."
+[^ind-tlc-step2]: Lamport, Proving Safety Properties, mục 5 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "This is true if and only if Inv is an invariant of the spec Inv /\ [][Next]_vars . To check that it is, create in the Toolbox a TLC model with a behavior specification having Inv as its initial predicate and Next as its next-state relation."
+[^ind-tlc-step3]: Lamport, Proving Safety Properties, mục 5 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "We can similarly get TLC to check <1>3 by checking that Mutex is an invariant of a spec whose initial formula is Inv ."
+[^ind-tlc-before]: Lamport, Proving Safety Properties, mục 5 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "However, even very tiny models are good at catching errors—especially when checking step <1>2 . You should always do this checking before trying to write a proof."
+[^ind-tlc-small]: Lamport, Proving Safety Properties, mục 5 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Usually, checking <1>2 and <1>3 this way is practical only for the tiniest of models—models that are too small to provide much confidence that the steps are correct."
+[^ind-tri-tlc]: Konnov, Kuppe, Merz, Specification and Verification with the TLA+ Trifecta, mục 5 — <https://arxiv.org/pdf/2211.07216> — "If a candidate inductive invariant IndInv is known, using it as the initial condition makes tlc explore states that are located at arbitrary depths in the state space."
+[^ind-tri-sample]: Konnov, Kuppe, Merz, Specification and Verification with the TLA+ Trifecta, mục 5 — <https://arxiv.org/pdf/2211.07216> — "Should the set of all states defined by IndInv be too large or even infinite, tlc can randomly select a subset from that set with the help of operators defined in the standard Randomization module."
+[^ind-mc-ind]: tlaplus/Examples @ 6a7b26a, Paxos/MCPaxos.tla — <https://raw.githubusercontent.com/tlaplus/Examples/6a7b26a31c1a6aeec789b455e9bbfa3b3ad2728f/specifications/Paxos/MCPaxos.tla> — "Inv is an inductive invariant of Spec iff it is an invariant of the following specification."
+[^ind-mc-init]: tlaplus/Examples @ 6a7b26a, Paxos/MCPaxos.tla — <https://raw.githubusercontent.com/tlaplus/Examples/6a7b26a31c1a6aeec789b455e9bbfa3b3ad2728f/specifications/Paxos/MCPaxos.tla> — "In an initial predicate, a variable x must appear for the first time in a conjunct of the form x = exp' or x \in exp'. We must therefore rewrite the inductive invariant Inv for use as an initial predicate to"
+[^ind-safety-typeok-need]: Lamport, Proving Safety Properties, mục 6.3 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "However, it implies this only if pc is a function and i is in its domain. To deduce that, we need to assume that TypeOK is true, which is implied by our assumption that Inv is true."
+[^ind-other-inv]: Lamport, Proving Safety Properties, mục 6.4 — <https://lamport.azurewebsites.net/tla/proving-safety.pdf> — "Sometimes we want to prove more than one invariant. The first invariant has to be proved as explained above, using an inductive invariant. But that’s not necessary for the rest, because we can use invariants we’ve already proved to prove others."
