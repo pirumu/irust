@@ -1,6 +1,6 @@
 # P13 · Chương 04 — Invariant, safety và model checker TLC
 
-> Chương này **không chạy TLC** và không chạy code. Các spec TLA+ trong khối ```` ```tla ```` là minh họa viết tay (hoặc trích từ nguồn, có ghi rõ); mọi con số về số trạng thái hoặc trace đều thuộc một trong ba loại, luôn được gắn nhãn: (a) trích từ nguồn (sách *Specifying Systems*, repo `tlaplus/Examples` ghim commit `6a7b26a`, tài liệu `tlaplus/tlaplus` ghim commit `94d0c50`); (b) "tính tay" — suy luận của người soạn từ định nghĩa spec, chưa được TLC xác nhận; (c) nhận xét của người soạn. Sách *Specifying Systems* mô tả TLC "Version 2" (bản in 2002–2003); tên cờ và định dạng thông báo của bản TLC hiện nay có thể khác, nên mọi chỗ cần độ chính xác về tên cờ đều đối chiếu thêm với mã nguồn `tlaplus/tlaplus`. Hai trang Learn TLA+ (`learntla.com`) và Apalache (`apalache-mc.org`) là **trang sống**, đọc ngày 2026-10-12.
+> Chương này **không chạy TLC** và không chạy code. Các spec TLA+ trong khối ```` ```tla ```` là minh họa viết tay hoặc trích từ nguồn (có ghi rõ). Mọi con số về số trạng thái hay trace đều mang một trong ba nhãn: (a) trích từ nguồn, gồm sách *Specifying Systems*, repo `tlaplus/Examples` ghim commit `6a7b26a` và tài liệu `tlaplus/tlaplus` ghim commit `94d0c50`; (b) "tính tay", tức suy luận của người soạn từ định nghĩa spec, chưa được TLC xác nhận; (c) nhận xét của người soạn. Sách *Specifying Systems* mô tả TLC "Version 2" (bản in 2002–2003), nên tên cờ và định dạng thông báo của bản TLC hiện nay có thể khác; chỗ nào cần chính xác về tên cờ, hãy đối chiếu thêm với mã nguồn `tlaplus/tlaplus`. Hai trang Learn TLA+ (`learntla.com`) và Apalache (`apalache-mc.org`) là **trang sống**, đọc ngày 2026-10-12.
 
 ## Bạn sẽ hiểu được gì
 
@@ -23,23 +23,31 @@
 
 ## 1. Safety, invariant và `[]P` (Q1)
 
-> **Trả lời ngắn.** *Safety property* là loại yêu cầu "điều xấu không bao giờ xảy ra": nếu bị vi phạm thì vi phạm xảy ra ở một thời điểm cụ thể của hành vi, bằng một bước cụ thể[^safety-def]. *Invariant* là dạng phổ biến nhất của nó: một *vị từ trạng thái* (state predicate) `P` đúng ở **mọi** trạng thái của mọi hành vi thỏa spec; viết `[]P`, đọc "luôn luôn P"[^inv-def][^box-def]. Mọi invariant đều là safety property, nhưng không phải safety property nào cũng là invariant[^inv-vs-safety]. Vì một vi phạm safety luôn có một hành vi hữu hạn làm chứng, nên về nguyên tắc một model checker hữu hạn như TLC có thể phát hiện nó[^tlc-safety-finite].
+> **Trả lời ngắn.** *Safety property* là loại yêu cầu "điều xấu không bao giờ xảy ra": nếu bị vi phạm thì vi phạm đó nằm ở một bước cụ thể của hành vi[^safety-def]. *Invariant* là dạng phổ biến nhất của nó: một *vị từ trạng thái* (state predicate) `P` đúng ở **mọi** trạng thái của mọi hành vi thỏa spec, viết `[]P` và đọc là "luôn luôn P"[^inv-def]. Mọi invariant đều là safety property, nhưng không phải safety property nào cũng là invariant[^inv-vs-safety]. Vì một vi phạm safety luôn có một đoạn hành vi hữu hạn làm chứng, model checker hữu hạn như TLC về nguyên tắc phát hiện được nó[^tlc-safety-finite].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ràng buộc `CHECK (balance >= 0)` trong database kiểm từng hàng tại từng lần ghi. Invariant giống ràng buộc đó, nhưng áp lên *ảnh chụp toàn hệ thống* — mọi node, mọi hàng đợi, mọi message đang bay — tại *mọi* thời điểm mà hệ thống có thể rơi vào, kể cả khoảnh khắc giữa hai bước mà không log nào ghi lại.
+*Với service `orders`.* Giả sử `orders` giữ một connection pool tới database với tối đa `MaxConn` kết nối, và mỗi handler thread mượn một kết nối rồi trả lại. Ta sẽ bám theo pool này suốt chương; spec của nó nằm ở mục 2 (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Pool có một luật hiển nhiên: số kết nối rảnh cộng số kết nối đang có người giữ luôn bằng `MaxConn`. Một `debug_assert!` hay một unit test chỉ kiểm luật đó ở những điểm bạn nghĩ tới (nhận xét của người soạn). Invariant của TLA+ đòi luật đúng ở *mọi* trạng thái pool có thể rơi vào, kể cả khoảnh khắc giữa hai bước mà log không ghi lại. Mục này nói "luôn đúng" nghĩa chính xác là gì và vì sao TLC kiểm được.
 
-*Vị từ trạng thái.* Trong TLA+, vị từ trạng thái là biểu thức Boolean chỉ chứa biến và hằng, không có biến prime (`x'`) và không có toán tử thời gian[^state-pred][^state-level]. Ví dụ `free >= 0` hay `\A rm \in RM : rmState[rm] # "committed"`. Nó được đánh giá trên *một* trạng thái duy nhất.
+### 1.1 Invariant là vị từ trạng thái luôn đúng
 
-*`[]P`.* Một *hành vi* (behavior) là chuỗi trạng thái vô hạn (chương 03). `[]P` nghĩa là `P` đúng ở mọi trạng thái của chuỗi đó[^box-def]. Sách định nghĩa: `Inv` là invariant của `Spec` nếu `Spec => []Inv` là một định lý[^inv-def]. Khi bạn đưa `P` vào `INVARIANT` của file cấu hình, TLC kiểm đúng điều này trên các hành vi mà nó sinh ra (mục 3).
+Trong TLA+, một *trạng thái* là một phép gán giá trị cho mọi biến của spec; với pool, đó là cặp `(free, held)` ở mục 2. *Vị từ trạng thái* là biểu thức Boolean chỉ chứa biến và hằng, không có biến prime (`x'`) và không có toán tử thời gian[^state-pred]. Vì chỉ nhìn một trạng thái nên nó đánh giá được trên *một* trạng thái duy nhất, như `free >= 0`. Luật bảo toàn của pool (`Conservation` ở mục 2) cũng thuộc loại này.
 
-*Vì sao safety kiểm được bằng duyệt hữu hạn.* Vi phạm safety xảy ra tại một điểm cụ thể trong hành vi — ví dụ bởi một bước đẩy đồng hồ từ 11 sang 9, hay một lần đọc sai giá trị từ bộ nhớ[^safety-def]. Nên chỉ cần một đoạn hữu hạn đầu hành vi là đủ làm chứng cứ; sách viết rõ rằng đoạn hữu hạn đó có thể sinh bằng một model hữu hạn, do đó TLC *về nguyên tắc* phát hiện được[^tlc-safety-finite]. Ngược lại, liveness ("điều tốt rồi sẽ xảy ra") không thể bị vi phạm tại một thời điểm cụ thể[^liveness-instant]; chương 05 nói riêng về nó.
+Một *hành vi* (behavior) là chuỗi trạng thái vô hạn (chương 03), và `[]P` nghĩa là `P` đúng ở mọi trạng thái của chuỗi đó[^box-def]. Nói chặt hơn, `Inv` là invariant của `Spec` khi `Spec => []Inv` là một định lý[^inv-def]. Khi bạn đưa `P` vào `INVARIANT` của file cấu hình, TLC kiểm đúng điều này trên các hành vi mà nó sinh ra (mục 3).
 
-*Safety nói "không thể", không nói "phải".* Sách tóm tắt: safety khẳng định điều gì đó là *bất khả*; liveness khẳng định điều gì đó *phải* xảy ra[^safety-impossible]. Hệ quả cần nhớ: rất dễ thỏa một safety property bằng cách không làm gì cả[^safety-nothing] — lý do mục 5 dành riêng một phần cho việc nghi ngờ kết quả xanh.
+### 1.2 Vì sao duyệt hữu hạn là đủ
 
-*Stuttering không phá invariant.* Một bước stutter không đổi giá trị nào nên không thể làm vi phạm một invariant[^stutter] — nên bạn chỉ cần lo các bước thật của `Next`.
+Pool của `orders` bị vi phạm `Conservation` ở một bước cụ thể: một lần `Release` làm tổng nhảy lên `MaxConn + 1`. Safety nào cũng vậy, vì vi phạm xảy ra tại một điểm cụ thể trong hành vi[^safety-def]. Nên chỉ cần một đoạn hữu hạn đầu hành vi là đủ làm chứng. Đoạn hữu hạn đó sinh được bằng một model hữu hạn, nên TLC về nguyên tắc phát hiện được vi phạm[^tlc-safety-finite]. Liveness ("điều tốt rồi sẽ xảy ra") thì không thể bị vi phạm tại một thời điểm cụ thể[^liveness-instant], và chương 05 nói riêng về nó.
 
-*Safety không phải lúc nào cũng là invariant.* Ví dụ trong Learn TLA+: "luôn có ít nhất một server online" có hai nghĩa: (1) tại mọi thời điểm có ít nhất một server online — đó là invariant; (2) có một server *cố định* online suốt hành vi — đó vẫn là safety property nhưng không phải invariant, vì không có trạng thái đơn lẻ nào tự nó vi phạm điều (2)[^safety-non-inv]. Dạng thứ hai thường gặp là *property theo bước*, nói ở mục 2.
+### 1.3 Safety nói "không thể", không nói "phải"
+
+Safety khẳng định điều gì đó là *bất khả*; liveness khẳng định điều gì đó *phải* xảy ra[^safety-impossible]. Hệ quả cần nhớ là rất dễ thỏa một safety property bằng cách không làm gì cả[^safety-nothing]. Chẳng hạn một pool từ chối mọi `Acquire` vẫn thỏa `Conservation` (nhận xét của người soạn). Đó là lý do mục 5 dành riêng một phần cho việc nghi ngờ kết quả xanh.
+
+Còn một chi tiết giúp bạn bớt lo: bước stutter không đổi giá trị nào nên không thể làm vi phạm một invariant[^stutter], vậy bạn chỉ cần để ý các bước thật của `Next`.
+
+### 1.4 Safety không phải lúc nào cũng là invariant
+
+Learn TLA+ có một ví dụ: "luôn có ít nhất một server online" có hai nghĩa. Nghĩa thứ nhất: tại mọi thời điểm có ít nhất một server online, và đó là invariant. Nghĩa thứ hai: có một server *cố định* online suốt hành vi. Nghĩa này vẫn là safety property nhưng không phải invariant, vì không có trạng thái đơn lẻ nào tự nó vi phạm điều đó[^safety-non-inv]. Dạng thứ hai thường là *property theo bước*, nói ở mục 2.
 
 ```mermaid
 flowchart TB
@@ -54,39 +62,35 @@ flowchart TB
 
 <details><summary>Đi sâu: invariant của Spec và invariant của Next (inductive invariant)</summary>
 
-Sách *Specifying Systems* §5.7 phân biệt hai thứ dễ lẫn:
+Sách *Specifying Systems* §5.7 phân biệt hai thứ dễ lẫn.
 
-- Khi `P /\ N => P'` đúng (từ một trạng thái thỏa `P`, mọi bước `N` đều dẫn tới trạng thái thỏa `P`), sách gọi `P` là *invariant của action `N`*[^inv-of-action]. Một invariant của spec mà đồng thời là invariant của action kế tiếp đôi khi được gọi là *inductive invariant*[^inductive].
-- `TypeInvariant` của spec bộ nhớ đệm trong sách có tính chất đó: nó là invariant của `Spec` vì là invariant của `Next` và được `Init` kéo theo[^typeinv-next]. Nhưng `Coherence` thì **không** là invariant của `Next`[^coherence-not]. Có những trạng thái thỏa `Coherence` mà một bước `Next` đưa tới trạng thái vi phạm; chúng chỉ không xuất hiện vì *không với tới được* từ `Init`, và sách viết rằng `Coherence` là invariant của `Spec` vì các trạng thái như vậy không thể xuất hiện trong hành vi thỏa `Spec`[^coherence].
+- Khi `P /\ N => P'` đúng, tức từ một trạng thái thỏa `P` mọi bước `N` đều dẫn tới trạng thái thỏa `P`, sách gọi `P` là *invariant của action `N`*[^inv-of-action]. Một invariant của spec mà đồng thời là invariant của action kế tiếp đôi khi được gọi là *inductive invariant*[^inductive].
+- `TypeInvariant` của spec bộ nhớ đệm trong sách có tính chất đó: nó là invariant của `Spec` vì là invariant của `Next` và được `Init` kéo theo[^typeinv-next]. Nhưng `Coherence` thì **không** là invariant của `Next`[^coherence-not]. Có những trạng thái thỏa `Coherence` mà một bước `Next` đưa tới trạng thái vi phạm; chúng chỉ không xuất hiện vì *không với tới được* từ `Init`. Sách viết rằng `Coherence` là invariant của `Spec` chính vì các trạng thái như vậy không thể xuất hiện trong hành vi thỏa `Spec`[^coherence].
 - Muốn *chứng minh* một `P` là invariant của `Spec`, người ta tìm một `Inv` mạnh hơn, là invariant của `Next`, rồi chứng minh ba điều: `Init => Inv`, `Inv /\ [Next]_v => Inv'`, `Inv => P`[^inv-proof].
 
-Điểm cần rút ra cho TLC (suy luận của người soạn từ thuật toán ở mục 3): TLC chỉ đánh giá invariant trên các trạng thái *với tới được* từ `Init` trong model, nên nó **không** đòi `P` phải là inductive. Đó là lý do viết và kiểm các invariant "thật" như `Coherence` bằng TLC dễ hơn nhiều so với chứng minh chúng — nhưng cũng là lý do một TLC xanh trên model nhỏ không phải là chứng minh (mục 5).
+Điểm cần rút ra cho TLC (suy luận của người soạn từ thuật toán ở mục 3): TLC chỉ đánh giá invariant trên các trạng thái *với tới được* từ `Init` trong model, nên nó **không** đòi `P` phải là inductive. Vì thế viết và kiểm các invariant "thật" như `Coherence` bằng TLC dễ hơn nhiều so với chứng minh chúng. Nhưng cũng vì thế, một TLC xanh trên model nhỏ không phải là chứng minh (mục 5).
 
 </details>
 
-**Quay lại Q1:** safety = "điều xấu không xảy ra", invariant = safety viết được dưới dạng `[]P` với `P` là vị từ trạng thái; vi phạm có chứng cứ hữu hạn nên TLC tìm được.
+**Quay lại Q1:** safety là "điều xấu không xảy ra", invariant là safety viết được dưới dạng `[]P` với `P` là vị từ trạng thái; vi phạm có chứng cứ hữu hạn nên TLC tìm được.
 
 ## 2. `TypeOK`, invariant nghiệp vụ và property theo bước (Q2)
 
-> **Trả lời ngắn.** `TypeOK` (type invariant) khai báo mỗi biến có thể nhận những giá trị nào; TLA+ không có hệ kiểu nên nó chỉ là một invariant bình thường được đặt tên[^typeinv]. *Invariant nghiệp vụ* là tính chất thật của thuật toán, ví dụ "hai resource manager không bao giờ quyết định mâu thuẫn"[^tcc]. Những ràng buộc *giữa hai trạng thái liên tiếp* ("term không bao giờ giảm") không phải vị từ trạng thái nên viết dạng `[][A]_v` và khai báo bằng `PROPERTY`, không phải `INVARIANT`[^inv-state-pred][^implied-action].
+> **Trả lời ngắn.** `TypeOK` (type invariant) khai báo mỗi biến có thể nhận những giá trị nào. TLA+ không có hệ kiểu nên nó chỉ là một invariant bình thường được đặt tên[^typeinv]. *Invariant nghiệp vụ* là tính chất thật của thuật toán, ví dụ "hai resource manager không bao giờ quyết định mâu thuẫn"[^tcc]. Những ràng buộc *giữa hai trạng thái liên tiếp* ("term không bao giờ giảm") không phải vị từ trạng thái nên không đưa vào `INVARIANT` được[^inv-state-pred]; chúng viết dạng `[][A]_v` và khai báo bằng `PROPERTY`[^implied-action].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `TypeOK` giống *schema* của bảng (cột nào kiểu gì, nullable hay không); invariant nghiệp vụ giống *ràng buộc/ trigger* nối nhiều cột, nhiều bảng ("tổng số dư không đổi", "mỗi đơn hàng thuộc đúng một kho"); property theo bước giống *audit rule* so sánh bản ghi trước và sau khi sửa ("version chỉ tăng").
+*Với service `orders`.* Pool của `orders` có ba loại luật cần kiểm, và chúng khác nhau ở chỗ lỗi nào mỗi loại bắt được. Loại một: mỗi biến chỉ nhận giá trị trong miền cho trước, ví dụ `free` luôn nằm trong `0..MaxConn`. Loại hai: luật của thiết kế, ví dụ số kết nối rảnh cộng số kết nối đang giữ bằng `MaxConn`. Loại ba: luật nói về hai trạng thái liên tiếp, ví dụ trong một hệ nhân bản thì term của mỗi node không bao giờ giảm (pool không có luật loại này, nên ví dụ lấy từ Raft). Mỗi loại có một cách khai báo riêng với TLC.
 
-*TypeOK để làm gì.* Chú thích trong spec DieHard của Lamport nói: type invariant không phải một phần của spec, nhưng nên có vì giúp người đọc hiểu spec, và vì bắt TLC kiểm nó sẽ bắt những lỗi mà ở ngôn ngữ có kiểu thì trình biên dịch bắt[^typeok-doc]. Vì sao TLA+ không có kiểu mà vẫn có `TypeOK` đã nói ở [Chương 03 mục 6](03-trang-thai-hanh-vi-action.md); điểm cần nhớ ở đây: sách viết "type correctness" chỉ là tên của một tính chất bất biến, và đặt tên `TypeInvariant` không cho công thức nào vị thế đặc biệt[^typeinv].
+### 2.1 `TypeOK` để làm gì
 
-*TypeOK chỉ nên chứa giá trị *có thể*, không chứa giá trị *hợp lệ*.* Hillel Wayne (tác giả Learn TLA+) viết: ông muốn `TypeInvariant` chỉ bao phủ tập giá trị có thể của biến, không phải giá trị hợp lệ; ví dụ hai tập phải rời nhau thì tách thành invariant riêng, vì đó là tính chất đúng-sai của hệ thống chứ không chỉ là kiểm cận[^typeinv-principle]. Hệ quả thực dụng (nhận xét của người soạn): khi `TypeOK` vi phạm, bạn biết spec *viết sai* (action sinh giá trị ngoài miền); khi invariant nghiệp vụ vi phạm trong khi `TypeOK` xanh, bạn biết *thiết kế* có lỗi. Hai loại lỗi đó cần hai cách phản ứng khác nhau, nên đừng gộp.
+Chú thích trong spec DieHard của Lamport nói type invariant không phải một phần của spec, nhưng nên có: nó giúp người đọc hiểu spec, và vì TLC bị bắt kiểm nó nên nó bắt những lỗi mà ở ngôn ngữ có kiểu thì compiler bắt[^typeok-doc]. Vì sao TLA+ không có kiểu mà vẫn có `TypeOK` đã nói ở [Chương 03 mục 6](03-trang-thai-hanh-vi-action.md). Ở đây chỉ cần nhớ rằng "type correctness" chỉ là tên của một tính chất bất biến, và đặt tên `TypeInvariant` không cho công thức nào vị thế đặc biệt[^typeinv].
 
-*Ví dụ thật từ `tlaplus/Examples`.* Spec `TCommit` (transaction commit của Gray & Lamport) có đủ cả ba phần:
+`TypeOK` chỉ nên chứa giá trị *có thể*, không chứa giá trị *hợp lệ*. Hillel Wayne, tác giả Learn TLA+, muốn `TypeInvariant` chỉ bao phủ tập giá trị có thể của biến. Ví dụ hai tập phải rời nhau thì nên tách thành invariant riêng, vì đó là tính chất đúng-sai của hệ thống chứ không chỉ là kiểm cận[^typeinv-principle]. Hệ quả thực dụng (nhận xét của người soạn): khi `TypeOK` vi phạm, bạn biết spec *viết sai* vì action sinh giá trị ngoài miền. Khi invariant nghiệp vụ vi phạm trong lúc `TypeOK` xanh, bạn biết *thiết kế* có lỗi. Hai loại lỗi cần hai cách phản ứng khác nhau, nên đừng gộp.
 
-- `TCTypeOK == rmState \in [RM -> {"working", "prepared", "committed", "aborted"}]`[^tc-typeok];
-- invariant nghiệp vụ `TCConsistent`: không có hai RM mà một cái `aborted`, một cái `committed`[^tcc];
-- một `THEOREM` ghi lại cả hai là invariant của spec[^tc-theorem], và file cấu hình liệt kê *cả hai* làm `INVARIANTS`[^tc-cfg].
+### 2.2 Spec của pool và invariant nghiệp vụ
 
-Sách khuyên đặt tên riêng cho từng conjunct của invariant rồi liệt kê riêng trong `INVARIANT`: khi vi phạm, TLC báo cho biết conjunct nào sai[^separate-conj].
-
-*Ví dụ tự viết: connection pool.* Spec minh họa dưới đây (người soạn viết, chưa chạy) mô hình một pool với `MaxConn` kết nối; mỗi client giữ tối đa một. Invariant nghiệp vụ `Conservation`: số kết nối rảnh cộng số client đang giữ luôn bằng `MaxConn`.
+Spec dưới đây (người soạn viết, chưa chạy) mô hình pool với `MaxConn` kết nối; mỗi client giữ tối đa một. Invariant nghiệp vụ `Conservation`: số kết nối rảnh cộng số client đang giữ luôn bằng `MaxConn`.
 
 ```tla
 ---- MODULE ConnPool ----
@@ -130,9 +134,17 @@ Symmetry == Permutations(Clients)
 ====
 ```
 
-Đọc nhanh spec trên (ký hiệu đã giải thích ở [chương 02](02-toan-nen-tang.md) và [chương 03](03-trang-thai-hanh-vi-action.md)): `free'` là giá trị của `free` ở trạng thái *kế tiếp*; `[Clients -> BOOLEAN]` là tập mọi hàm từ `Clients` sang `{TRUE, FALSE}`; `[held EXCEPT ![c] = TRUE]` là hàm giống `held` trừ tại `c`; `\E c \in Clients : ...` nghĩa là "có một client `c` sao cho ...", nên `Next` cho TLC thử lần lượt từng client; `Cardinality` (module `FiniteSets`) đếm phần tử của tập hữu hạn; `ASSUME` kiểm hằng số trước khi TLC chạy (xem cuối mục này); `Permutations` (module `TLC`) dùng ở mục 8.
+Ký hiệu đã giải thích ở [chương 02](02-toan-nen-tang.md) và [chương 03](03-trang-thai-hanh-vi-action.md); đọc nhanh như sau:
 
-Bây giờ thử một bản *lỗi* mà lập trình viên hay viết khi "phòng thủ": bỏ guard `held[c]` và chặn trên để `free` không vượt `MaxConn`:
+- `free'` là giá trị của `free` ở trạng thái *kế tiếp*.
+- `[Clients -> BOOLEAN]` là tập mọi hàm từ `Clients` sang `{TRUE, FALSE}`, và `[held EXCEPT ![c] = TRUE]` là hàm giống `held` trừ tại `c`.
+- `\E c \in Clients : ...` nghĩa là "có một client `c` sao cho ...", nên `Next` cho TLC thử lần lượt từng client.
+- `Cardinality` (module `FiniteSets`) đếm phần tử của tập hữu hạn.
+- `ASSUME` kiểm hằng số trước khi TLC chạy (xem cuối mục này), và `Permutations` (module `TLC`) dùng ở mục 8.
+
+### 2.3 `TypeOK` xanh mà pool vẫn hỏng
+
+Giờ thử một bản *lỗi* mà lập trình viên hay viết khi "phòng thủ": bỏ guard `held[c]` và chặn trên để `free` không vượt `MaxConn`.
 
 ```tla
 Release(c) ==                              \* BẢN LỖI (minh họa)
@@ -140,7 +152,7 @@ Release(c) ==                              \* BẢN LỖI (minh họa)
   /\ held' = [held EXCEPT ![c] = FALSE]
 ```
 
-`TypeOK` **vẫn đúng** ở mọi trạng thái (vì `free` luôn trong `0..MaxConn`) — phép chặn trên "giấu" lỗi khỏi type invariant. Nhưng `Conservation` bị vi phạm. Hành vi ngắn nhất vi phạm (tính tay, suy luận của người soạn, chưa chạy TLC; giả sử `Clients` có ít nhất hai phần tử):
+`TypeOK` **vẫn đúng** ở mọi trạng thái, vì `free` luôn nằm trong `0..MaxConn`; phép chặn trên "giấu" lỗi khỏi type invariant. Nhưng `Conservation` bị vi phạm. Hành vi ngắn nhất vi phạm, tính tay (suy luận của người soạn, chưa chạy TLC, giả sử `Clients` có ít nhất hai phần tử):
 
 | # | Bước | `free` | `held` (client đang giữ) | `TypeOK` | `Conservation` |
 |---|------|--------|--------------------------|----------|----------------|
@@ -148,25 +160,41 @@ Release(c) ==                              \* BẢN LỖI (minh họa)
 | 2 | `Acquire(c1)` | `MaxConn − 1` | {c1} | đúng | đúng |
 | 3 | `Release(c2)` — c2 *không* giữ kết nối | `MaxConn` | {c1} | đúng | **sai**: `MaxConn + 1 ≠ MaxConn` |
 
-Nếu nhớ lại ví dụ `saturating_add` trong Rust (mục "Liên hệ" cuối chương): một phép toán "không bao giờ tràn" làm type-level check xanh nhưng nuốt mất sự kiện bất thường — invariant nghiệp vụ là thứ bắt được nó (nhận xét của người soạn).
+Trong `orders`, đây là tình huống một handler gọi trả kết nối hai lần, hoặc trả kết nối của handler khác, mà pool âm thầm nuốt lỗi (nhận xét của người soạn). Mục "Liên hệ" cuối chương nối chuyện này với `saturating_add` trong Rust.
 
-*Property theo bước.* Có tính chất không thể diễn đạt bằng một trạng thái: "term của mọi node không bao giờ giảm" (Raft, xem [P12·09 mục 7](../12-he-thong-du-lieu/09-consistency-va-consensus.md)). Nó nói về *cặp* trạng thái liên tiếp, viết dạng `[][A]_v`. Giả sử module có biến hàm `term` trên tập `Nodes`:
+### 2.4 Cùng bộ ba trong `tlaplus/Examples`
+
+Spec `TCommit` (transaction commit của Gray và Lamport) có đủ cả ba phần:
+
+- `TCTypeOK == rmState \in [RM -> {"working", "prepared", "committed", "aborted"}]`[^tc-typeok];
+- invariant nghiệp vụ `TCConsistent`: không có hai RM mà một cái `aborted`, một cái `committed`[^tcc];
+- một `THEOREM` ghi lại cả hai là invariant của spec[^tc-theorem], và file cấu hình liệt kê *cả hai* làm `INVARIANTS`[^tc-cfg].
+
+Sách khuyên đặt tên riêng cho từng conjunct của invariant rồi liệt kê riêng trong `INVARIANT`: khi vi phạm, TLC báo cho biết conjunct nào sai[^separate-conj].
+
+### 2.5 Property theo bước
+
+Có tính chất không thể diễn đạt bằng một trạng thái: "term của mọi node không bao giờ giảm" (Raft, xem [P12·09 mục 7](../12-he-thong-du-lieu/09-consistency-va-consensus.md)). Nó nói về *cặp* trạng thái liên tiếp, nên viết dạng `[][A]_v`. Giả sử module có biến hàm `term` trên tập `Nodes`:
 
 ```tla
 TermNeverDecreases ==
   [][\A n \in Nodes : term'[n] >= term[n]]_term
 ```
 
-TLC xử lý loại này: nó kiểm `ImpliedAction` — hội của mọi `[A]_v` mà một conjunct của property có dạng `[][A]_v`[^implied-action] — trên *từng bước* `s → t`[^step-check]. Khai báo trong cfg bằng `PROPERTY TermNeverDecreases`, không phải `INVARIANT` (vì `INVARIANT` phải là vị từ trạng thái[^inv-state-pred]).
+TLC xử lý loại này bằng cách kiểm `ImpliedAction`, tức hội của mọi `[A]_v` mà một conjunct của property có dạng `[][A]_v`[^implied-action]. Nó kiểm trên *từng bước* `s → t` mà nó sinh ra[^step-check]. Bạn khai báo trong cfg bằng `PROPERTY TermNeverDecreases`, không phải `INVARIANT`, vì `INVARIANT` phải là vị từ trạng thái[^inv-state-pred].
 
-*`INVARIANT` hay `PROPERTY`?* Tài liệu `tlaplus/tlaplus` giải thích: `INVARIANT` dành cho công thức mức trạng thái (level 1), tức điều kiện phải đúng ở mọi trạng thái khả đạt; cùng điều kiện đó viết dạng `[]I` thì khai báo bằng `PROPERTY []I`[^state-level]. **Cạm bẫy:** đổi `INVARIANT I` thành `PROPERTY I` mà không thêm `[]` thì TLC chỉ kiểm `I` ở các trạng thái *đầu* chứ không phải mọi trạng thái khả đạt[^prop-init]; sách nói cùng ý — một vị từ trạng thái trong `PROPERTY` nghĩa là `P` đúng ở trạng thái đầu của mọi hành vi[^prop-state-pred]. Và `ASSUME` là loại khác nữa: nó kiểm *hằng số*, được đánh giá trước khi TLC bắt đầu khám phá, không phải tính chất của trạng thái[^assume].
+### 2.6 `INVARIANT` hay `PROPERTY`
+
+`INVARIANT` dành cho công thức mức trạng thái (level 1), tức điều kiện phải đúng ở mọi trạng thái khả đạt. Cùng điều kiện đó viết dạng `[]I` thì khai báo bằng `PROPERTY []I`[^state-level]. **Cạm bẫy:** đổi `INVARIANT I` thành `PROPERTY I` mà không thêm `[]` thì TLC chỉ kiểm `I` ở các trạng thái *đầu*, không phải mọi trạng thái khả đạt[^prop-init]. Sách nói cùng ý: một vị từ trạng thái trong `PROPERTY` nghĩa là `P` đúng ở trạng thái đầu của mọi hành vi[^prop-state-pred]. Với pool của `orders`, viết nhầm `PROPERTY Conservation` nghĩa là chỉ kiểm lúc pool còn nguyên, chưa ai mượn gì.
+
+Còn `ASSUME` là loại khác nữa: nó kiểm *hằng số*, được đánh giá trước khi TLC bắt đầu khám phá, và không phải tính chất của trạng thái[^assume].
 
 <details><summary>Đi sâu: viết invariant cho TLC đánh giá được, và gợi ý invariant nghiệp vụ cho backend</summary>
 
-- **Thứ tự đánh giá.** TLC đánh giá `p /\ q` bằng cách đánh giá `p` trước, chỉ khi `p` đúng mới đánh giá `q`[^eval-order]; vì vậy `(x # <<>>) /\ (x[1] = 0)` đánh giá được còn đảo vế thì TLC báo lỗi — ví dụ và giải thích về biểu thức "ngớ ngẩn" nằm ở [Chương 02 mục 8](02-toan-nen-tang.md). Quy tắc thực dụng: *guard đứng trước*.
-- **`=>` làm tiền điều kiện.** Learn TLA+: `=>` là công cụ rất mạnh khi viết invariant, ví dụ chỉ kiểm tính đúng đắn khi thuật toán đã xong: `pc = "Done" => ...`[^impl-guard].
-- **Đừng dùng `=>` với `\E`.** Ví dụ của Learn TLA+: nếu chọn `i = j = 1` thì vế trái sai nên cả biểu thức đúng, và cả lượng từ `\E` đúng bất kể vế phải[^impl-exists] — dùng `/\` thay cho `=>` bên trong `\E`.
-- **Ý tưởng invariant nghiệp vụ cho backend** (nhận xét của người soạn, mang tính gợi ý): "không có hai leader trong cùng một term"; "offset đã commit ≤ offset cuối của log"; "tổng số dư các tài khoản không đổi sau chuyển tiền (kể cả khi retry/lặp message)"; "tại mọi thời điểm tối đa một holder giữ lease còn hiệu lực"; "mọi message đã ack đều có trong log bền". Mỗi câu phải đọc được thành `P(state)` — nếu bạn phải nhắc đến "trước đó" hoặc "sau đó" thì nó là property theo bước hoặc liveness.
+- **Thứ tự đánh giá.** TLC đánh giá `p /\ q` bằng cách đánh giá `p` trước, chỉ khi `p` đúng mới đánh giá `q`[^eval-order]. Vì vậy `(x # <<>>) /\ (x[1] = 0)` đánh giá được còn đảo vế thì TLC báo lỗi; ví dụ và giải thích về biểu thức "ngớ ngẩn" nằm ở [Chương 02 mục 8](02-toan-nen-tang.md). Quy tắc thực dụng: *guard đứng trước*.
+- **`=>` làm tiền điều kiện.** `=>` là công cụ rất mạnh khi viết invariant, ví dụ chỉ kiểm tính đúng đắn khi thuật toán đã xong: `pc = "Done" => ...`[^impl-guard].
+- **Đừng dùng `=>` với `\E`.** Ví dụ của Learn TLA+: nếu chọn `i = j = 1` thì vế trái sai nên cả biểu thức đúng, và cả lượng từ `\E` đúng bất kể vế phải[^impl-exists]. Hãy dùng `/\` thay cho `=>` bên trong `\E`.
+- **Ý tưởng invariant nghiệp vụ cho backend** (nhận xét của người soạn, mang tính gợi ý): "không có hai leader trong cùng một term"; "offset đã commit ≤ offset cuối của log"; "tổng số dư các tài khoản không đổi sau chuyển tiền (kể cả khi retry hay lặp message)"; "tại mọi thời điểm tối đa một holder giữ lease còn hiệu lực"; "mọi message đã ack đều có trong log bền". Mỗi câu phải đọc được thành `P(state)`; nếu bạn phải nhắc đến "trước đó" hoặc "sau đó" thì nó là property theo bước hoặc liveness.
 
 </details>
 
@@ -174,13 +202,15 @@ TLC xử lý loại này: nó kiểm `ImpliedAction` — hội của mọi `[A]_
 
 ## 3. TLC khám phá không gian trạng thái (Q3)
 
-> **Trả lời ngắn.** TLC duyệt đồ thị trạng thái theo chiều rộng (BFS): một hàng đợi các trạng thái chưa mở rộng và một đồ thị các trạng thái đã thấy[^tlc-ds][^tlc-g-u]. Mỗi lần lấy một trạng thái, nó tính mọi trạng thái kế tiếp bằng cách đánh giá `Next`, kiểm invariant trên từng cái, rồi đưa cái mới vào hàng đợi[^step-add]. Để nhận ra trạng thái "đã thấy", TLC lưu *fingerprint* 64-bit thay vì cả trạng thái[^fp]. Thông báo tiến độ phân biệt số trạng thái *sinh ra* (có trùng) với số trạng thái *phân biệt*[^progress].
+> **Trả lời ngắn.** TLC duyệt đồ thị trạng thái theo chiều rộng (BFS), với một hàng đợi các trạng thái chưa mở rộng và một đồ thị các trạng thái đã thấy[^tlc-ds]. Mỗi lần lấy một trạng thái ra, nó đánh giá `Next` để tính mọi trạng thái kế tiếp, kiểm invariant trên từng cái, rồi đưa cái mới vào hàng đợi[^step-add]. Để nhận ra trạng thái "đã thấy", TLC lưu *fingerprint* 64-bit thay vì cả trạng thái[^fp]. Thông báo tiến độ phân biệt số trạng thái *sinh ra* (có trùng) với số trạng thái *phân biệt*[^progress].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): crawler web duyệt BFS từ một URL gốc. Hàng đợi chứa các trang chưa tải; tập "đã thăm" lưu hash của URL thay vì cả URL; mỗi trang tải về sinh ra các link, link đã thăm thì bỏ. Ở TLC, "trang" là một trạng thái (một phép gán giá trị cho mọi biến), "link" là một bước `Next`, và "trang lỗi" là trạng thái vi phạm invariant.
+*Với service `orders`.* TLC không chạy `orders` và không biết gì về thread; nó chỉ có spec `ConnPool` và cfg. Từ trạng thái đầu (pool rảnh, chưa ai giữ), nó thử mọi action `Acquire` và `Release` có thể, ghi lại mọi trạng thái mới, rồi lặp lại cho tới khi hết trạng thái mới. Với ba client và `MaxConn = 2`, quá trình đó chỉ đi qua 7 trạng thái. Mục này cho thấy TLC làm việc đó thế nào và các con số nó in ra có nghĩa gì.
 
-**Thuật toán** (theo mô tả trong sách §14.3.1; tài liệu Toolbox trong repo `tlaplus/tlaplus` ở commit đã ghim cũng nói BFS là cách duyệt mặc định của TLC[^bfs-default]):
+### 3.1 Vòng lặp BFS
+
+Thuật toán dưới đây theo mô tả trong sách §14.3.1. Tài liệu Toolbox trong repo `tlaplus/tlaplus` ở commit đã ghim cũng nói BFS là cách duyệt mặc định của TLC[^bfs-default].
 
 ```mermaid
 flowchart TD
@@ -202,22 +232,30 @@ flowchart TD
   K --> E
 ```
 
-Từng bước, bám sách:
+Trong sơ đồ, `G` là phần đồ thị khả đạt mà TLC đã tìm được, còn `U` chứa các trạng thái trong `G` mà TLC chưa tính successor[^tlc-g-u]. Từng bước, bám sách:
 
-1. **Kiểm `ASSUME`.** Sách: bước đầu tiên là kiểm mọi `assume` trong spec có thỏa với các hằng số đã gán hay không[^assume-step].
-2. **Trạng thái đầu.** TLC tính chúng bằng cách đánh giá `Init`, nhưng thay vì cho trước các biến không prime rồi gán biến prime, nó *gán* giá trị cho các biến không prime[^init-gen]. Với mỗi trạng thái đầu, TLC đánh giá invariant và báo lỗi nếu sai[^init-inv]; nếu trạng thái thỏa `CONSTRAINT` thì đưa vào hàng đợi `U` và đồ thị `G`[^init-constraint].
-3. **Trạng thái kế tiếp.** Với trạng thái `s` lấy từ đầu hàng đợi, TLC đặt các biến không prime bằng giá trị trong `s`, để trống các biến prime rồi đánh giá `Next`[^next-succ]; khi gặp biểu thức dạng `x' = e` mà `x'` chưa có giá trị, nó coi biểu thức là đúng và gán `x'` bằng giá trị của `e`[^next-eval]. Tuyển `A1 \/ ... \/ An` được *tách* thành `n` lần đánh giá riêng, mỗi lần một nhánh; `\E x \in S` tách theo từng phần tử của `S`[^disj-split]. Hệ quả: **thứ tự các conjunct trong action quan trọng** — nếu dùng `x'` trước khi nó được gán, TLC báo lỗi[^next-order].
+1. **Kiểm `ASSUME`.** Bước đầu tiên là kiểm mọi `assume` trong spec có thỏa với các hằng số đã gán hay không[^assume-step].
+2. **Trạng thái đầu.** TLC tính chúng bằng cách đánh giá `Init`, nhưng thay vì cho trước các biến không prime rồi gán biến prime, nó *gán* giá trị cho các biến không prime[^init-gen]. Với mỗi trạng thái đầu, TLC đánh giá invariant và báo lỗi nếu sai[^init-inv]. Nếu trạng thái thỏa `CONSTRAINT` thì nó được đưa vào hàng đợi `U` và đồ thị `G`[^init-constraint].
+3. **Trạng thái kế tiếp.** Với trạng thái `s` lấy từ đầu hàng đợi, TLC đặt các biến không prime bằng giá trị trong `s`, để trống các biến prime rồi đánh giá `Next`[^next-succ]. Khi gặp biểu thức dạng `x' = e` mà `x'` chưa có giá trị, nó coi biểu thức là đúng và gán `x'` bằng giá trị của `e`[^next-eval]. Tuyển `A1 \/ ... \/ An` được *tách* thành `n` lần đánh giá riêng, mỗi lần một nhánh; `\E x \in S` tách theo từng phần tử của `S`[^disj-split]. Hệ quả: **thứ tự các conjunct trong action quan trọng**, vì nếu dùng `x'` trước khi nó được gán, TLC báo lỗi[^next-order].
 4. **Deadlock.** Nếu tập `T` rỗng và không chọn tùy chọn `-deadlock` (tức TLC vẫn đang kiểm deadlock), TLC báo lỗi deadlock và dừng[^step-deadlock] (mục 6).
-5. **Kiểm từng trạng thái kế tiếp.** Với mỗi `t` trong `T`: nếu invariant sai ở `t` hoặc property theo bước sai ở bước `s → t`, báo lỗi và dừng[^step-check]. Nếu không, và `t` thỏa constraint (mục 7), chưa có trong `G` thì thêm vào cuối hàng đợi và vào đồ thị[^step-constraint][^step-add].
-6. **Kết thúc.** Khi hàng đợi rỗng, TLC xong. Nó chỉ kết thúc nếu tập trạng thái khả đạt hữu hạn[^terminates]; nếu không, nó chạy mãi cho tới khi hết tài nguyên hoặc bị dừng[^forever] — nên mọi model phải được *bound* (mục 7).
+5. **Kiểm từng trạng thái kế tiếp.** Với mỗi `t` trong `T`: nếu invariant sai ở `t` hoặc property theo bước sai ở bước `s → t`, TLC báo lỗi và dừng[^step-check]. Nếu không, và `t` thỏa constraint (mục 7) mà chưa có trong `G`, thì `t` được thêm vào cuối hàng đợi và vào đồ thị[^step-add].
+6. **Kết thúc.** Khi hàng đợi rỗng, TLC xong. Nó chỉ kết thúc nếu tập trạng thái khả đạt hữu hạn[^terminates]; nếu không, nó chạy mãi cho tới khi hết tài nguyên hoặc bị dừng[^forever]. Vì vậy mọi model phải được *bound* (mục 7).
 
-**BFS cho trace ngắn nhất.** Vì duyệt theo chiều rộng, nếu TLC tìm thấy vi phạm safety thì nó tạo ra một hành vi ngắn nhất dẫn tới vi phạm[^bfs-shortest]. Với nhiều worker, sách thừa nhận về lý thuyết có thể tồn tại hành vi ngắn hơn (hiếm gặp)[^workers-shorter]. Spec DieHard của Lamport tận dụng chính tính chất này (mục 5).
+### 3.2 BFS cho trace ngắn nhất
 
-**Fingerprint.** Nút của đồ thị trong cài đặt thật không phải trạng thái mà là *fingerprint*: một số 64-bit sinh bởi hàm băm[^fp]. Tài liệu Toolbox nói cùng ý: TLC chỉ lưu fingerprint 64-bit của các trạng thái khả đạt, không lưu trạng thái đầy đủ[^fp-toolbox]. Hai trạng thái khác nhau có thể trùng fingerprint ("collision"), khi đó TLC tưởng chúng là một và bỏ sót phần không gian phía sau[^fp-collision]; trong thực tế xác suất này rất nhỏ trừ khi số trạng thái phân biệt lên tới hàng tỷ[^fp-prob].
+Vì duyệt theo chiều rộng, nếu TLC tìm thấy vi phạm safety thì nó tạo ra một hành vi ngắn nhất dẫn tới vi phạm[^bfs-shortest]. Với nhiều worker, sách thừa nhận về lý thuyết có thể tồn tại hành vi ngắn hơn, tuy hiếm gặp[^workers-shorter]. Mục 5 dùng tính chất này để đọc error trace.
 
-**Đọc số liệu của TLC.** Sách trích thông báo tiến độ dạng: TLC đã sinh và xét 2846 trạng thái, trong đó có 984 phân biệt, và hàng đợi còn 856 trạng thái chưa mở rộng[^progress]; và thông báo ở bước trạng thái đầu: sinh 4 trạng thái, 2 phân biệt[^init-progress]. "Diameter" là số nhỏ nhất `d` sao cho mọi trạng thái trong `G` đi tới được từ một trạng thái đầu qua đường đi chứa tối đa `d` trạng thái — chính là độ sâu BFS hiện tại[^diameter]. Nhận xét của người soạn: "số sinh ra − số phân biệt" đo mức *trùng lặp* — các đường khác nhau dẫn tới cùng một trạng thái; số phân biệt mới là kích thước không gian.
+### 3.3 Fingerprint
 
-**Ví dụ tính tay: `ConnPool`.** Lấy spec ở mục 2 (bản đúng, có guard `held[c]`) với `Clients = {c1, c2, c3}`, `MaxConn = 2`. Trạng thái được xác định hoàn toàn bởi tập client đang giữ (vì `free = MaxConn − |held|`), và không thể có hơn `MaxConn` client giữ cùng lúc, nên có `1 + 3 + 3 = 7` trạng thái khả đạt: tập rỗng, 3 tập một phần tử, 3 tập hai phần tử. BFS đi qua ba tầng:
+Nút của đồ thị trong cài đặt thật không phải trạng thái mà là *fingerprint*: một số 64-bit sinh bởi hàm băm[^fp]. Tài liệu Toolbox nói cùng ý: TLC chỉ lưu fingerprint 64-bit của các trạng thái khả đạt, không lưu trạng thái đầy đủ[^fp-toolbox]. Hai trạng thái khác nhau có thể trùng fingerprint ("collision"), khi đó TLC tưởng chúng là một và bỏ sót phần không gian phía sau[^fp-collision]. Trong thực tế xác suất này rất nhỏ trừ khi số trạng thái phân biệt lên tới hàng tỷ[^fp-prob].
+
+### 3.4 Đọc số liệu TLC in ra
+
+Sách trích một thông báo tiến độ: TLC đã sinh và xét 2846 trạng thái, trong đó 984 phân biệt, và hàng đợi còn 856 trạng thái chưa mở rộng[^progress]. Thông báo ở bước trạng thái đầu thì cho biết TLC sinh 4 trạng thái, 2 phân biệt[^init-progress]. *Diameter* là số nhỏ nhất `d` sao cho mọi trạng thái trong `G` đi tới được từ một trạng thái đầu qua đường đi chứa tối đa `d` trạng thái; nó chính là độ sâu BFS hiện tại[^diameter]. Nhận xét của người soạn: "số sinh ra − số phân biệt" đo mức *trùng lặp*, tức các đường khác nhau dẫn tới cùng một trạng thái; số phân biệt mới là kích thước không gian.
+
+### 3.5 Chạy tay TLC trên pool của `orders`
+
+Lấy spec ở mục 2 (bản đúng, có guard `held[c]`) với `Clients = {c1, c2, c3}`, `MaxConn = 2`. Trạng thái được xác định hoàn toàn bởi tập client đang giữ, vì `free = MaxConn − |held|`; và không thể có hơn `MaxConn` client giữ cùng lúc. Vậy có `1 + 3 + 3 = 7` trạng thái khả đạt: tập rỗng, 3 tập một phần tử, 3 tập hai phần tử. BFS đi qua ba tầng:
 
 ```mermaid
 flowchart LR
@@ -233,39 +271,39 @@ flowchart LR
   A3 -->|Acquire c2| B23
 ```
 
-(Chỉ vẽ các cạnh `Acquire`; mỗi cạnh có một cạnh `Release` ngược chiều.) Đếm số trạng thái *sinh ra* như sau — trạng thái đầu cộng mọi trạng thái kế tiếp, kể cả trùng (quy ước đếm này sẽ được kiểm lại ở mục đi sâu bên dưới bằng con số `TCommit` của repo `Examples`): từ `∅` có 3; từ mỗi trong 3 trạng thái tầng 1 có 2 `Acquire` + 1 `Release` = 3, tổng 9; từ mỗi trong 3 trạng thái tầng 2 chỉ có 2 `Release` (vì `free = 0`), tổng 6. Cộng `1 + 3 + 9 + 6 = 19` sinh ra, `7` phân biệt, độ sâu 3 (tính tay, suy luận của người soạn, chưa chạy TLC).
+(Chỉ vẽ các cạnh `Acquire`; mỗi cạnh có một cạnh `Release` ngược chiều.) Số trạng thái *sinh ra* là trạng thái đầu cộng mọi trạng thái kế tiếp, kể cả trùng. Quy ước đếm này được kiểm lại bằng con số `TCommit` ở phần Đi sâu bên dưới. Từ `∅` có 3. Từ mỗi trong 3 trạng thái tầng 1 có 2 `Acquire` và 1 `Release`, tổng 9. Từ mỗi trong 3 trạng thái tầng 2 chỉ có 2 `Release` (vì `free = 0`), tổng 6. Cộng lại: `1 + 3 + 9 + 6 = 19` sinh ra, `7` phân biệt, độ sâu 3 (tính tay, suy luận của người soạn, chưa chạy TLC).
 
-Cách đếm này khớp với số liệu mà repo `tlaplus/Examples` ghi cho `TCommit` với `RM = {r1, r2, r3}` — `34` trạng thái phân biệt, `94` trạng thái sinh ra, độ sâu `7`[^manifest-tcommit] (xem đi sâu bên dưới để tự đối chiếu bằng tay).
+Cách đếm này khớp với số liệu repo `tlaplus/Examples` ghi cho `TCommit` với `RM = {r1, r2, r3}`: `34` trạng thái phân biệt, `94` trạng thái sinh ra, độ sâu `7`[^manifest-tcommit]. Phần Đi sâu bên dưới đếm lại bằng tay để bạn tự đối chiếu.
 
 <details><summary>Đi sâu: tự đếm lại 34 / 94 / 7 của TCommit; rủi ro fingerprint; các chế độ khác của TLC</summary>
 
-**Tự đếm `TCommit` với 3 RM (tính tay, suy luận của người soạn; đối chiếu với manifest).** Mỗi RM ở một trong 4 trạng thái nên không gian kiểu `TCTypeOK` có `4³ = 64` phần tử, nhưng khả đạt chỉ một phần. Spec: `Prepare(rm)` đổi `working → prepared`; `Decide(rm)` hoặc commit (cần `canCommit`: mọi RM đều `prepared`/`committed`) hoặc abort (cần `notCommitted`: chưa RM nào commit)[^tc-actions].
+**Tự đếm `TCommit` với 3 RM (tính tay, suy luận của người soạn; đối chiếu với manifest).** Mỗi RM ở một trong 4 trạng thái nên không gian kiểu `TCTypeOK` có `4³ = 64` phần tử, nhưng khả đạt chỉ một phần. Spec: `Prepare(rm)` đổi `working → prepared`; `Decide(rm)` hoặc commit (cần `canCommit`: mọi RM đều `prepared` hay `committed`) hoặc abort (cần `notCommitted`: chưa RM nào commit)[^tc-actions].
 
 - *Chưa ai commit:* mỗi RM ∈ {working, prepared, aborted}, mọi tổ hợp đều khả đạt: `3³ = 27`.
-- *Đã có commit:* khi commit, mọi RM đều `prepared`/`committed` (không RM nào aborted), và sau đó không ai abort được nữa, nên mỗi RM ∈ {prepared, committed} với ít nhất một committed: `2³ − 1 = 7`.
-- Tổng `27 + 7 = 34` — khớp manifest[^manifest-tcommit].
-- *Số bước sinh ra:* tổng số trạng thái kế tiếp trên mọi trạng thái khả đạt, cộng 1 trạng thái đầu. Nhóm 27 trạng thái chưa commit: một RM `working` đóng góp 2 bước (`Prepare`, abort), một RM `prepared` đóng góp 1 bước abort, một RM `aborted` đóng góp 0. Trong 27 trạng thái, mỗi RM ở mỗi giá trị {working, prepared, aborted} đúng 9 lần, nên tổng số RM `working` là 27 và tổng số RM `prepared` là 27: `2·27 + 1·27 = 81`; cộng 3 bước commit từ trạng thái *tất cả* `prepared` (mỗi RM một bước) thành `84`. Nhóm 7 trạng thái đã commit: chỉ RM `prepared` mới còn bước (commit, vì `canCommit` đúng; abort bị `notCommitted` chặn): `3·2 + 3·1 + 1·0 = 9` (3 trạng thái có 1 RM committed và 2 prepared, 3 trạng thái có 2 committed và 1 prepared, 1 trạng thái cả ba committed). `84 + 9 + 1 = 94` — khớp manifest[^manifest-tcommit].
-- *Độ sâu:* đường dài nhất trong các đường ngắn nhất là `Prepare ×3` rồi `Decide(commit) ×3` = 6 bước = 7 trạng thái — khớp `stateDepth = 7` của manifest[^manifest-tcommit].
+- *Đã có commit:* khi commit, mọi RM đều `prepared` hay `committed` (không RM nào aborted), và sau đó không ai abort được nữa, nên mỗi RM ∈ {prepared, committed} với ít nhất một committed: `2³ − 1 = 7`.
+- Tổng `27 + 7 = 34`, khớp manifest[^manifest-tcommit].
+- *Số bước sinh ra:* tổng số trạng thái kế tiếp trên mọi trạng thái khả đạt, cộng 1 trạng thái đầu. Ở nhóm 27 trạng thái chưa commit, một RM `working` đóng góp 2 bước (`Prepare`, abort), một RM `prepared` đóng góp 1 bước abort, một RM `aborted` đóng góp 0. Trong 27 trạng thái, mỗi RM ở mỗi giá trị {working, prepared, aborted} đúng 9 lần, nên tổng số RM `working` là 27 và tổng số RM `prepared` là 27: `2·27 + 1·27 = 81`. Cộng 3 bước commit từ trạng thái *tất cả* `prepared` (mỗi RM một bước) thành `84`. Nhóm 7 trạng thái đã commit: chỉ RM `prepared` mới còn bước (commit, vì `canCommit` đúng; abort bị `notCommitted` chặn), nên `3·2 + 3·1 + 1·0 = 9` (3 trạng thái có 1 RM committed và 2 prepared, 3 trạng thái có 2 committed và 1 prepared, 1 trạng thái cả ba committed). `84 + 9 + 1 = 94`, khớp manifest[^manifest-tcommit].
+- *Độ sâu:* đường dài nhất trong các đường ngắn nhất là `Prepare ×3` rồi `Decide(commit) ×3`, tức 6 bước = 7 trạng thái, khớp `stateDepth = 7` của manifest[^manifest-tcommit].
 
-Trạng thái "tất cả RM đã commit" và trạng thái "tất cả RM đã abort" không có trạng thái kế tiếp (tính tay, suy ra từ `Prepare`/`Decide`). Nhiều khả năng đó là lý do `TCommit.cfg` đặt `CHECK_DEADLOCK FALSE` (mục 6) — nhận xét của người soạn: cfg chỉ có dòng cấu hình, không ghi lý do[^tc-cfg].
+Trạng thái "tất cả RM đã commit" và trạng thái "tất cả RM đã abort" không có trạng thái kế tiếp (tính tay, suy ra từ `Prepare`/`Decide`). Nhiều khả năng đó là lý do `TCommit.cfg` đặt `CHECK_DEADLOCK FALSE` (mục 6). Đây là nhận xét của người soạn: cfg chỉ có dòng cấu hình, không ghi lý do[^tc-cfg].
 
-**Rủi ro fingerprint.** Cuối mỗi lần chạy, TLC in hai ước lượng xác suất collision: một ước lượng lý thuyết dựa trên giả định xác suất `2⁻⁶⁴`, một ước lượng thực nghiệm dựa trên "suýt trùng" giữa các cặp fingerprint[^fp-estimate]. Nếu nghi ngờ, Toolbox cho chọn *fingerprint seed index* — một trong 64 hàm fingerprint[^fp-toolbox2]; chạy lại bằng hàm khác, nếu số trạng thái khả đạt khác nhau thì ít nhất một lần chạy đã có collision[^fp-diff]. Hậu quả đáng sợ nhất: nếu có collision, với view mặc định TLC vẫn báo đã kiểm hết mọi trạng thái khả đạt trong khi thực ra chưa[^fp-silent] (không phải là báo lỗi giả mà là bỏ sót im lặng).
+**Rủi ro fingerprint.** Cuối mỗi lần chạy, TLC in hai ước lượng xác suất collision: một ước lượng lý thuyết dựa trên giả định xác suất `2⁻⁶⁴`, một ước lượng thực nghiệm dựa trên "suýt trùng" giữa các cặp fingerprint[^fp-estimate]. Nếu nghi ngờ, Toolbox cho chọn *fingerprint seed index*, một trong 64 hàm fingerprint[^fp-toolbox2]. Chạy lại bằng hàm khác, nếu số trạng thái khả đạt khác nhau thì ít nhất một lần chạy đã có collision[^fp-diff]. Hậu quả đáng sợ nhất: nếu có collision, với view mặc định TLC vẫn báo đã kiểm hết mọi trạng thái khả đạt trong khi thực ra chưa[^fp-silent]. Đó không phải báo lỗi giả mà là bỏ sót im lặng.
 
-**Chế độ khác.** TLC mặc định ở *model-checking mode* (tìm mọi trạng thái khả đạt); còn *simulation mode* sinh ngẫu nhiên các hành vi, không cố duyệt hết[^sim-mode] (mục 8). Toolbox còn có tùy chọn DFID (duyệt sâu lặp) — nhưng khi đó TLC thường không cho trace ngắn nhất[^dfid], và (theo tài liệu Toolbox ở commit đã ghim) hiện chưa hỗ trợ nhiều worker[^dfid-workers]. Với model có hàng tỷ trạng thái, TLC có thể giữ tập trạng thái trên đĩa, nên số trạng thái nhiều không làm hết bộ nhớ, nhưng chạy chậm hơn nhiều so với khi giữ trong RAM[^disk]; bước 3 của thuật toán có thể chạy song song trên nhiều thread (`-workers`)[^workers-par].
+**Chế độ khác.** TLC mặc định ở *model-checking mode* (tìm mọi trạng thái khả đạt), còn *simulation mode* sinh ngẫu nhiên các hành vi và không cố duyệt hết[^sim-mode] (mục 8). Toolbox còn có tùy chọn DFID (duyệt sâu lặp), nhưng khi đó TLC thường không cho trace ngắn nhất[^dfid], và theo tài liệu Toolbox ở commit đã ghim thì DFID hiện chưa hỗ trợ nhiều worker[^dfid-workers]. Với model có hàng tỷ trạng thái, TLC có thể giữ tập trạng thái trên đĩa, nên số trạng thái nhiều không làm hết bộ nhớ, nhưng chạy chậm hơn nhiều so với khi giữ trong RAM[^disk]. Bước 3 của thuật toán có thể chạy song song trên nhiều thread (`-workers`)[^workers-par].
 
 </details>
 
-**Quay lại Q3:** TLC làm BFS trên đồ thị trạng thái với hàng đợi + tập fingerprint, mở rộng từng trạng thái bằng `Next`, kiểm invariant trên mỗi trạng thái mới; "distinct" là kích thước không gian, "generated" tính cả lần sinh trùng.
+**Quay lại Q3:** TLC làm BFS trên đồ thị trạng thái với hàng đợi và tập fingerprint, mở rộng từng trạng thái bằng `Next`, kiểm invariant trên mỗi trạng thái mới; "distinct" là kích thước không gian, "generated" tính cả lần sinh trùng.
 
 ## 4. File `.cfg` và cách chạy TLC (Q4)
 
-> **Trả lời ngắn.** File cấu hình cho TLC biết: spec nào (`SPECIFICATION`, hoặc cặp `INIT` + `NEXT`)[^cfg-spec][^cfg-init-next]; tính chất nào (`INVARIANT` cho vị từ trạng thái, `PROPERTY` cho công thức temporal/theo bước)[^inv-state-pred][^prop-state-pred]; giá trị cho mọi hằng số của spec (`CONSTANT`), kể cả *model value*[^cfg-all-const]; và các công cụ thu nhỏ không gian (`CONSTRAINT`, `SYMMETRY`, `VIEW`). Giá trị gán cho các hằng số tạo thành một *model*[^model-def]; `CONSTRAINT` (nếu có) thu hẹp thêm model cho hữu hạn.
+> **Trả lời ngắn.** File cấu hình cho TLC biết: spec nào (`SPECIFICATION`, hoặc cặp `INIT` + `NEXT`)[^cfg-spec]; tính chất nào (`INVARIANT` cho vị từ trạng thái, `PROPERTY` cho công thức temporal hay theo bước)[^inv-state-pred]; giá trị cho mọi hằng số của spec (`CONSTANT`), kể cả *model value*[^cfg-all-const]; và các công cụ thu nhỏ không gian (`CONSTRAINT`, `SYMMETRY`, `VIEW`). Giá trị gán cho các hằng số tạo thành một *model*[^model-def], và `CONSTRAINT` (nếu có) thu hẹp thêm để model hữu hạn.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): spec là *code*, file `.cfg` là *file cấu hình chạy test* — nó chọn tham số (`Clients`, `MaxConn`), liệt kê các assertion (`INVARIANT`), và đặt cận chạy (`CONSTRAINT`). Một spec có thể có nhiều cfg: một cfg nhỏ để lặp nhanh, một cfg lớn để kiểm cuối.
+*Với service `orders`.* Spec `ConnPool` chỉ nói pool *hoạt động thế nào*. Kiểm với bao nhiêu client, `MaxConn` bằng mấy, và kiểm luật nào là việc của file cfg. Cùng một spec có thể có nhiều cfg: một cfg nhỏ để lặp nhanh khi đang viết, một cfg lớn để kiểm cuối (nhận xét của người soạn).
 
-Cfg cho `ConnPool` ở mục 2:
+### 4.1 Cfg cho pool
 
 ```text
 \* ConnPool.cfg  (minh họa, chưa chạy)
@@ -277,7 +315,35 @@ INVARIANTS TypeOK Conservation
 SYMMETRY Symmetry
 ```
 
-Cfg trong sách cho giao thức alternating bit (hình 14.3), có cả `CONSTRAINT`:
+Bốn khối này khớp bốn việc ở phần trả lời ngắn: chọn spec, gán hằng số, liệt kê tính chất, và bật một công cụ thu nhỏ (`SYMMETRY`, mục 8).
+
+### 4.2 Các từ khóa
+
+Bảng dưới tổng hợp từ sách (§14.1–14.3, 14.7.1) và mã nguồn `ModelConfig.java`, `TLAConstants.java` của repo `tlaplus/tlaplus` (commit `94d0c50`):
+
+| Từ khóa | Nhận gì | Ý nghĩa |
+|---------|---------|---------|
+| `SPECIFICATION` | một công thức (vd. `Spec`) | `Init /\ [][Next]_vars /\ fairness`; TLC lấy `Init`, `Next` và điều kiện liveness từ đây[^cfg-spec] |
+| `INIT`, `NEXT` | tên vị từ / action | dùng thay `SPECIFICATION` khi không có liveness[^cfg-init-next] |
+| `CONSTANT(S)` | `tên = giá trị` hoặc `tên <- định nghĩa` | gán hằng số; `<-` là *replacement*[^replacement] |
+| `INVARIANT(S)` | các vị từ trạng thái[^inv-state-pred] | kiểm `P` đúng ở mọi trạng thái khả đạt, tức `[]P` |
+| `PROPERTY`/`PROPERTIES` | công thức temporal | bất kỳ công thức nào TLC đánh giá được[^prop-any]: tính chất theo bước, invariant viết dạng `[]I`, liveness (chương 05). Vị từ trạng thái đặt thẳng vào đây chỉ được kiểm ở trạng thái đầu |
+| `CONSTRAINT(S)` | vị từ trạng thái | state constraint (mục 7)[^constraint-def] |
+| `ACTION_CONSTRAINT(S)` | action | action constraint (mục 7)[^action-constraint] |
+| `SYMMETRY` | tập hoán vị | symmetry set (mục 8)[^symm-def] |
+| `VIEW` | hàm trạng thái | đổi cái gì được coi là "một trạng thái" (mục 8)[^default-view] |
+| `ALIAS` | record | định nghĩa lại cách in trạng thái trong error trace (mục 5)[^alias] |
+| `CHECK_DEADLOCK` | `TRUE`/`FALSE` | bật/tắt kiểm deadlock (mục 6)[^kw-checkdeadlock] |
+
+### 4.3 Model value
+
+Trong `Clients = {c1, c2, c3}`, `c1` không phải chuỗi hay số mà là *model value*. Sách quy ước mọi chuỗi ký tự như `a1` hay `foo` mà không phải số, không phải chuỗi trong nháy kép và không phải `TRUE`/`FALSE` thì được hiểu là model value[^mv-syntax]. Model value chỉ so sánh được bằng `=`: nó chỉ bằng chính nó[^mv]. TLC coi nó là so sánh được với mọi giá trị khác, đồng thời khác mọi giá trị khác[^mv-book].
+
+Learn TLA+ nêu lợi ích của việc này: trong TLC, so sánh hai thứ không cùng kiểu (ví dụ chuỗi với số) là *lỗi*. Model value cho phép biểu diễn "null" hay "chưa có" mà không bị lỗi so sánh và không trùng với giá trị hợp lệ[^mv-why]. Ngoài ra, tập model value là điều kiện để dùng symmetry (mục 8).
+
+### 4.4 Phần dành riêng cho TLC: module `MC`
+
+Sách có một cfg cho giao thức alternating bit (hình 14.3), kèm `CONSTRAINT`:
 
 ```text
 CONSTANTS
@@ -289,7 +355,7 @@ INVARIANT     ABTypeInv
 CONSTRAINT    SeqConstraint
 ```
 
-Sách viết rằng `SeqConstraint` và hai hằng `msgQLen`, `ackQLen` được định nghĩa trong một module riêng `MCAlternatingBit` *mở rộng* `AlternatingBit`, vì không nên đưa vào spec chính những khai báo và định nghĩa chỉ phục vụ TLC[^mc-module]; module đó chỉ có các dòng sau:
+`SeqConstraint` và hai hằng `msgQLen`, `ackQLen` được định nghĩa trong một module riêng `MCAlternatingBit` *mở rộng* `AlternatingBit`, vì không nên đưa vào spec chính những khai báo và định nghĩa chỉ phục vụ TLC[^mc-module]. Module đó chỉ có các dòng sau:
 
 ```tla
 ---- MODULE MCAlternatingBit ----
@@ -300,61 +366,44 @@ SeqConstraint == /\ Len(msgQ) <= msgQLen
 ====
 ```
 
-Quy ước đặt tên `MC<Tên>` này là của sách; Toolbox cũng làm tương tự: khi bạn đặt một biểu thức làm invariant, Toolbox sinh một file `MC.tla` riêng, thêm biểu thức đó như một operator rồi model-check `MC.tla`[^toolbox-mc].
+Quy ước đặt tên `MC<Tên>` này là của sách. Toolbox cũng làm tương tự: khi bạn đặt một biểu thức làm invariant, Toolbox sinh một file `MC.tla` riêng, thêm biểu thức đó như một operator rồi model-check `MC.tla`[^toolbox-mc].
 
-**Các từ khóa.** Bảng dưới tổng hợp từ sách (§14.1–14.3, 14.7.1) và mã nguồn `ModelConfig.java`, `TLAConstants.java` của repo `tlaplus/tlaplus` (commit `94d0c50`):
+### 4.5 Chạy từ dòng lệnh
 
-| Từ khóa | Nhận gì | Ý nghĩa |
-|---------|---------|---------|
-| `SPECIFICATION` | một công thức (vd. `Spec`) | `Init /\ [][Next]_vars /\ fairness`; TLC lấy `Init`, `Next` và điều kiện liveness từ đây[^cfg-spec][^spec-one-box] |
-| `INIT`, `NEXT` | tên vị từ / action | dùng thay `SPECIFICATION` khi không có liveness[^cfg-init-next] |
-| `CONSTANT(S)` | `tên = giá trị` hoặc `tên <- định nghĩa` | gán hằng số; `<-` là *replacement*[^replacement] |
-| `INVARIANT(S)` | các vị từ trạng thái[^inv-state-pred] | kiểm `P` đúng ở mọi trạng thái khả đạt, tức `[]P`[^box-def] |
-| `PROPERTY`/`PROPERTIES` | công thức temporal | bất kỳ công thức nào TLC đánh giá được[^prop-any], vd. tính chất theo bước (`[][A]_v`)[^implied-action], invariant viết dạng `[]I`[^state-level], liveness (chương 05); vị từ trạng thái đặt thẳng vào đây chỉ được kiểm ở trạng thái đầu[^prop-state-pred] |
-| `CONSTRAINT(S)` | vị từ trạng thái | state constraint (mục 7)[^constraint-def] |
-| `ACTION_CONSTRAINT(S)` | action | action constraint (mục 7)[^action-constraint] |
-| `SYMMETRY` | tập hoán vị | symmetry set (mục 8)[^symm-def] |
-| `VIEW` | hàm trạng thái | đổi cái gì được coi là "một trạng thái" (mục 8)[^default-view] |
-| `ALIAS` | record | định nghĩa lại cách in trạng thái trong error trace (mục 5)[^alias] |
-| `CHECK_DEADLOCK` | `TRUE`/`FALSE` | bật/tắt kiểm deadlock (mục 6)[^kw-checkdeadlock] |
-
-Về tên từ khóa: sách (viết 2002) liệt kê dạng có gạch nối `ACTION-CONSTRAINT`[^kw-book], trong khi mã nguồn của bản ghim định nghĩa `ACTION_CONSTRAINT` (gạch dưới)[^kw-src-constraint]; `CHECK_DEADLOCK`, `ALIAS`, `VIEW`, `SYMMETRY` đều có trong danh sách từ khóa của `ModelConfig`[^kw-src-misc][^kw-src-alias]. Nhận xét của người soạn: khi sách và công cụ lệch nhau, tin công cụ bạn đang chạy; đối chiếu bằng phần trợ giúp của đúng bản `tla2tools.jar` đang dùng.
-
-**Ràng buộc cú pháp** (sách §14.7.1): tối đa một `INIT`, một `NEXT`, một `VIEW`, một `SYMMETRY`[^cfg-restrict]; `SPECIFICATION` chỉ được dùng nếu không có `INIT`/`NEXT`[^cfg-spec-only]; các câu lệnh khác lặp được và gộp lại — hai dòng `INVARIANT Inv1` và `INVARIANT Inv2 Inv3` tương đương việc kiểm cả ba[^cfg-multiple]. `CONSTANT`/`CONSTANTS`, `INVARIANT`/`INVARIANTS` là đồng nghĩa[^cfg-kw-equiv].
-
-**Model value.** Trong `Clients = {c1, c2, c3}`, `c1`... không phải chuỗi hay số mà là *model value*: sách quy ước mọi chuỗi ký tự như `a1` hay `foo` mà không phải số, không phải chuỗi trong nháy kép và không phải `TRUE`/`FALSE` thì được hiểu là model value[^mv-syntax]. Model value chỉ so sánh được bằng `=`: nó chỉ bằng chính nó[^mv], và TLC coi nó là so sánh được với mọi giá trị khác, đồng thời khác mọi giá trị khác[^mv-book]. Lợi ích (Learn TLA+): trong TLC, so sánh hai thứ không cùng kiểu (ví dụ chuỗi với số) là *lỗi*; model value cho phép biểu diễn "null"/"chưa có" mà không bị lỗi so sánh và không trùng với giá trị hợp lệ[^mv-why]. Ngoài ra, tập model value là điều kiện để dùng symmetry (mục 8).
-
-**Replacement `<-`.** Ngoài gán giá trị `c = v`, `c <- d` bảo TLC thay định nghĩa `c` bằng `d` khi tính toán[^replacement]. Sách dùng nó để thay một định nghĩa tao nhã nhưng chậm (vd. `Sort` dùng `CHOOSE` — toán tử "chọn một phần tử thỏa điều kiện", xem [chương 02 mục 5](02-toan-nen-tang.md)) bằng bản TLC tính nhanh (`FastSort`), hoặc để thay `Nat` bằng một tập hữu hạn (mục 7).
-
-**Chạy từ dòng lệnh.** Learn TLA+ mô tả (minh họa, không chạy trong chương này):
+Learn TLA+ mô tả cách chạy dưới đây (minh họa, không chạy trong chương này):
 
 ```bash
 java -jar tla2tools.jar -config ConnPool.cfg -workers auto ConnPool.tla
 ```
 
-Nếu không có `-config` thì TLC tìm `<tên spec>.cfg`[^cli-default-cfg]; không có `-workers` thì CLI dùng đúng một worker[^cli-workers]. `-continue` bảo TLC tiếp tục sau vi phạm đầu tiên; theo Learn TLA+, mọi vi phạm invariant sẽ được in ra[^cli-continue].
+Nếu không có `-config` thì TLC tìm `<tên spec>.cfg`[^cli-default-cfg]. Không có `-workers` thì CLI dùng đúng một worker[^cli-workers]. `-continue` bảo TLC tiếp tục sau vi phạm đầu tiên, và theo Learn TLA+ thì mọi vi phạm invariant sẽ được in ra[^cli-continue].
 
-<details><summary>Đi sâu: giới hạn của cfg, của <code>SPECIFICATION</code>, và những gì TLC thực sự kiểm với <code>PROPERTY</code></summary>
+<details><summary>Đi sâu: tên từ khóa, ràng buộc cú pháp, replacement và giới hạn của cfg</summary>
 
+- **Tên từ khóa lệch giữa sách và công cụ.** Sách (viết 2002) liệt kê dạng có gạch nối `ACTION-CONSTRAINT`[^kw-book], trong khi mã nguồn của bản ghim định nghĩa `ACTION_CONSTRAINT` (gạch dưới)[^kw-src-constraint]. `CHECK_DEADLOCK`, `VIEW` và `SYMMETRY` đều có trong danh sách từ khóa của `ModelConfig`[^kw-src-misc], và `ALIAS` cũng vậy[^kw-src-alias]. Nhận xét của người soạn: khi sách và công cụ lệch nhau, tin công cụ bạn đang chạy; hãy đối chiếu bằng phần trợ giúp của đúng bản `tla2tools.jar` đang dùng.
+- **Ràng buộc cú pháp** (sách §14.7.1). Tối đa một `INIT`, một `NEXT`, một `VIEW`, một `SYMMETRY`[^cfg-restrict]. `SPECIFICATION` chỉ được dùng nếu không có `INIT`/`NEXT`[^cfg-spec-only]. Các câu lệnh khác lặp được và gộp lại: hai dòng `INVARIANT Inv1` và `INVARIANT Inv2 Inv3` tương đương việc kiểm cả ba[^cfg-multiple]. `CONSTANT`/`CONSTANTS` và `INVARIANT`/`INVARIANTS` là đồng nghĩa[^cfg-kw-equiv].
+- **Replacement `<-`.** Ngoài gán giá trị `c = v`, `c <- d` bảo TLC thay định nghĩa `c` bằng `d` khi tính toán[^replacement]. Sách dùng nó để thay một định nghĩa tao nhã nhưng chậm (ví dụ `Sort` dùng `CHOOSE`, toán tử "chọn một phần tử thỏa điều kiện", xem [chương 02 mục 5](02-toan-nen-tang.md)) bằng bản TLC tính nhanh (`FastSort`), hoặc để thay `Nat` bằng một tập hữu hạn (mục 7).
 - **Invariant phải là operator có tên.** Ở dòng lệnh, bạn không thể viết biểu thức trực tiếp trong `INVARIANT`; phải định nghĩa operator trong spec rồi gọi tên (Toolbox che chuyện này bằng `MC.tla`)[^cli-ops-named].
 - **Hằng số âm.** Learn TLA+ nói cfg không có `import`, mà số âm về mặt kỹ thuật thuộc module `Integers`, nên không đặt được hằng số âm trực tiếp trong cfg[^cli-neg]. Nhận xét của người soạn: sách *Specifying Systems* (2002) lại có ví dụ giá trị `{1, -3, 2}` ở phần mô tả giá trị trong cfg, nên hãy thử trên đúng bản `tla2tools.jar` đang dùng; nếu lỗi thì bọc bằng operator trong module MC và dùng `<-`.
-- **`SPECIFICATION` phải có đúng một conjunct dạng box-action** `[][N]_v` — đó là cách TLC biết `Next` là gì[^spec-one-box].
-- **TLC không xử lý ẩn biến `\EE`.** Muốn kiểm spec có biến ẩn, kiểm spec *nội bộ* trong đó các biến đó hiện ra[^no-hiding]; việc kiểm "spec nội bộ kéo theo spec trừu tượng với biến ẩn" làm bằng refinement mapping (chương 07), cùng cách người ta chứng minh nó[^refmap].
-- **`PROPERTY` kiểm gì thật.** TLC không chứng minh "spec kéo theo property". Nó kiểm (i) phần safety của spec kéo theo phần safety của property, và (ii) spec kéo theo phần liveness của property[^tlc-checks-parts] — nên với spec không *machine-closed*, không dùng TLC kiểm safety được[^non-mc] (chương 05).
+- **`SPECIFICATION` phải có đúng một conjunct dạng box-action** `[][N]_v`, đó là cách TLC biết `Next` là gì[^spec-one-box].
+- **TLC không xử lý ẩn biến `\EE`.** Muốn kiểm spec có biến ẩn, hãy kiểm spec *nội bộ* trong đó các biến đó hiện ra[^no-hiding]. Việc kiểm "spec nội bộ kéo theo spec trừu tượng với biến ẩn" làm bằng refinement mapping (chương 07), cùng cách người ta chứng minh nó[^refmap].
+- **`PROPERTY` kiểm gì thật.** TLC không chứng minh "spec kéo theo property". Nó kiểm (i) phần safety của spec kéo theo phần safety của property, và (ii) spec kéo theo phần liveness của property[^tlc-checks-parts]. Vì vậy với spec không *machine-closed*, không dùng TLC kiểm safety được[^non-mc] (chương 05).
 
 </details>
 
-**Quay lại Q4:** `.cfg` là cầu nối giữa spec và TLC: chọn spec, liệt kê `INVARIANT`/`PROPERTY`, gán hằng số (kể cả model value), và chứa các cần gạt thu nhỏ không gian; spec giữ sạch, phần dành riêng cho TLC để ở module `MC...`.
+**Quay lại Q4:** `.cfg` là cầu nối giữa spec và TLC: nó chọn spec, liệt kê `INVARIANT`/`PROPERTY`, gán hằng số (kể cả model value) và chứa các cần gạt thu nhỏ không gian; spec giữ sạch, phần dành riêng cho TLC để ở module `MC...`.
 
 ## 5. Error trace, và khi TLC báo xanh (Q5)
 
-> **Trả lời ngắn.** Khi một invariant hoặc property bị vi phạm, TLC in *error trace*: chuỗi trạng thái từ `Init` tới trạng thái vi phạm, mỗi trạng thái kèm action dẫn tới nó[^err-sample][^trace-action]. Nhờ BFS, trace ấy là ngắn nhất (với một worker)[^bfs-shortest]; ví dụ AWS ghi nhận một lỗi mà trace ngắn nhất vẫn dài 35 bước cấp cao[^aws-35]. Ngược lại, TLC xanh chỉ có nghĩa là không thấy vi phạm trong model hữu hạn đã cấu hình; sách dặn phải nghi ngờ thành công, đặc biệt với safety vì dễ thỏa bằng cách không làm gì[^safety-nothing].
+> **Trả lời ngắn.** Khi một invariant hoặc property bị vi phạm, TLC in *error trace*: chuỗi trạng thái từ `Init` tới trạng thái vi phạm, mỗi trạng thái kèm action dẫn tới nó[^err-sample]. Vì TLC duyệt BFS nên trace này là ngắn nhất (khi chạy một worker)[^bfs-shortest]. Ngược lại, TLC báo xanh chỉ có nghĩa là không thấy vi phạm trong model hữu hạn bạn đã cấu hình. Safety lại rất dễ thỏa bằng cách không làm gì, nên kết quả xanh luôn cần được nghi ngờ[^safety-nothing].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): error trace là *bản tái hiện lỗi tối thiểu* — như một test case đã được shrink về số bước ít nhất, được sinh tự động, và đảm bảo tái hiện được (vì mỗi bước là một bước `Next` hợp lệ).
+*Với service `orders`.* Giả sử một đồng nghiệp "phòng thủ" sửa `Release` của pool như ở mục 2 rồi chạy TLC với cfg ở mục 4. TLC không chỉ báo `Conservation` sai: nó in cả đường đi từ trạng thái đầu tới chỗ sai, nên bạn thấy được chính lần `Release` nào làm hỏng pool. Mục này nói cách đọc đường đi đó, rồi nói khi TLC im lặng thì bạn thật sự biết được gì.
 
-**Định dạng trace.** Sách mô tả: khi `ABTypeInv` bị vi phạm (do tác giả cố ý sửa), TLC in dòng báo invariant bị vi phạm[^err-sample], rồi hành vi dẫn tới trạng thái xấu. Mỗi trạng thái được in như một vị từ TLA+ xác định nó[^trace-format]. Đoạn trích từ sách như sau.
+### 5.1 Một error trace trông thế nào
+
+Sách *Specifying Systems* có một ví dụ: tác giả cố ý sửa spec để `ABTypeInv` bị vi phạm, và TLC in dòng báo invariant nào sai[^err-sample]. Ngay sau đó là hành vi dẫn tới trạng thái xấu, mỗi trạng thái được in như một vị từ TLA+ xác định nó[^trace-format]. Đoạn dưới trích từ sách.
 
 ```text
 Invariant ABTypeInv is violated
@@ -377,16 +426,48 @@ STATE 2: <Action at line 66 in AlternatingBit>
 /\ msgQ = << << 1, d1 >> >>
 ```
 
-(Đây là đoạn *trích từ sách* §14.5.2, không phải output tôi chạy; sách ghi rằng thông báo của TLC có thể khác định dạng so với mô tả trong sách[^msg-differ] — sách mô tả TLC "Version 2", nên output ở bản bạn dùng có thể không giống. Dòng `<Action at line 66 ...>` cho biết vị trí trong `Next` đã sinh trạng thái đó[^trace-action].)
+Đây là đoạn trích từ sách §14.5.2, không phải output của lần chạy nào trong chương này. Sách ghi rằng thông báo của TLC có thể khác định dạng so với bản mô tả[^msg-differ], và sách mô tả TLC "Version 2", nên output ở bản bạn dùng có thể không giống. Dòng `<Action at line 66 ...>` cho biết action nào, ở vị trí nào trong `Next`, đã sinh ra trạng thái đó[^trace-action].
 
-**Cách đọc** (nhận xét của người soạn, tổng hợp từ các nguồn bên dưới):
+### 5.2 Cách đọc một trace
 
-1. Xem *invariant nào* bị vi phạm (nếu bạn đã tách conjunct thành các operator riêng thì TLC chỉ ra đúng cái sai[^separate-conj]).
-2. Xem *trạng thái cuối*: conjunct nào sai, biến nào có giá trị lạ. Learn TLA+ nhắc: khi invariant sai, bước cuối cùng của trace chính là bước làm nó sai[^last-step].
-3. Đi *ngược* lên: bước đầu tiên làm biến liên quan đổi giá trị là gì, vì sao action đó cho phép.
-4. Hỏi: đây là **lỗi trong thiết kế** (đặc tả đúng, hệ thống có lỗi) hay **lỗi trong spec** (mô hình sai, action cho phép điều thực tế không thể)? Sách nói thẳng: thử thách của gỡ lỗi là tìm lỗi trong spec đã gây ra lỗi mà TLC báo[^debug-challenge].
+Cách đọc dưới đây là của người soạn, tổng hợp từ các nguồn trích kèm theo:
 
-**Ví dụ tính tay: biến thể lỗi của `TCommit`.** Lấy spec `TCommit` thật (mục 2) và xóa conjunct `notCommitted` khỏi nhánh abort của `Decide` — một "sửa" mà người đọc hay mắc khi nghĩ "RM tự do hủy giao dịch được":
+1. Xem *invariant nào* bị vi phạm. Nếu bạn đã tách mỗi conjunct thành một operator riêng, TLC chỉ ra đúng cái sai[^separate-conj].
+2. Xem *trạng thái cuối*: conjunct nào sai, biến nào mang giá trị lạ. Khi invariant sai, bước cuối của trace chính là bước làm nó sai[^last-step].
+3. Đi *ngược* lên: bước đầu tiên làm biến liên quan đổi giá trị là bước nào, và vì sao action đó được phép chạy.
+4. Hỏi đây là lỗi thiết kế (spec đúng, hệ thống có lỗi) hay lỗi trong spec (mô hình sai, action cho phép điều thực tế không thể xảy ra). Sách nói thẳng rằng thử thách của việc gỡ lỗi là tìm lỗi trong spec đã gây ra lỗi mà TLC báo[^debug-challenge].
+
+### 5.3 Trace của pool lỗi
+
+Áp bốn bước đó vào `ConnPool` bản lỗi ở mục 2. TLC sẽ in một hành vi ba trạng thái giống bảng ở mục đó (tính tay, suy luận của người soạn, chưa chạy TLC). Trạng thái cuối có `held = {c1}` mà `free = MaxConn`, nên `Conservation` sai. Đi ngược lên, bước đầu tiên làm `free` đáng ngờ là `Release(c2)`, trong khi `c2` chưa hề giữ kết nối.
+
+Còn đây là lỗi thiết kế hay lỗi spec thì tùy pool thật của `orders`. Nếu code thật cũng cho trả kết nối mà không kiểm chủ, đó là lỗi thiết kế. Nếu code thật có kiểm mà spec quên guard `held[c]`, đó là lỗi spec (nhận xét của người soạn). BFS bảo đảm không có hành vi nào ngắn hơn ba trạng thái; TLC có thể in client khác `c1`, `c2` nhưng độ dài thì không ngắn hơn[^bfs-shortest].
+
+Lỗi trong hệ thật không phải lúc nào cũng ngắn như vậy. Nhóm AWS ghi nhận một lỗi mà trace ngắn nhất vẫn dài 35 bước ở mức trừu tượng cao[^aws-35].
+
+### 5.4 Làm trace dễ đọc và lặp nhanh hơn
+
+- *Chạy lại từ trạng thái lỗi.* Sách khuyên định nghĩa một vị từ `ErrorState` mô tả trạng thái cuối của trace, đặt nó làm `INIT` trong cfg, rồi thêm `Print` để xem chuyện gì xảy ra mà không phải chạy lại từ đầu[^errorstate].
+- *`ALIAS`* (trong cfg): bạn định nghĩa một record gồm các trường tự chọn (ví dụ `x`, `nextx`, `incx`), và TLC in các trường đó, chỉ các trường đó, thay cho giá trị biến trong error trace[^alias].
+- *`-difftrace`:* chỉ in phần thay đổi giữa các trạng thái, nên dễ thấy từng bước nhưng khó thấy trạng thái đầy đủ[^difftrace].
+- *Lỗi đánh giá không phải vi phạm.* TLC còn báo lỗi khi không đánh giá nổi một biểu thức (ví dụ `q[0]` với dãy `q`). Khi đó trạng thái cuối của trace là trạng thái mà TLC đang tính successor[^eval-err].
+
+### 5.5 Sửa xong thì chạy lại
+
+AWS kể rằng sau khi tìm thấy lỗi, nhóm đề xuất một bản sửa. Họ đưa bản sửa vào spec, và TLC cho thấy vấn đề vẫn xảy ra qua một execution trace khác; phải đến một bản sửa mạnh hơn thì TLC mới xác nhận[^aws-fix]. Điều này cho thấy model checker không chỉ để tìm lỗi mà còn để kiểm *bản sửa* trước khi viết code (nhận xét của người soạn).
+
+### 5.6 Khi TLC báo xanh
+
+Sách có hẳn một phần "hãy nghi ngờ thành công". Với pool của `orders`, một pool từ chối mọi `Acquire` vẫn thỏa `Conservation` (nhận xét của người soạn); sách minh họa cùng ý bằng giao thức alternating bit: nếu quên đưa action `SndNewValue` vào `Next` thì người gửi không bao giờ gửi gì, nhưng spec vẫn thỏa điều kiện đúng đắn[^safety-nothing]. Vì vậy cần kiểm tra thêm:
+
+- *Coverage.* Tùy chọn `-coverage` in số lần mỗi conjunct gán giá trị thực sự được dùng. Giá trị 0 là phần của `Next` chưa bao giờ chạy: có thể do lỗi spec, có thể do model quá nhỏ để chạm tới nó[^coverage].
+- *Kiểm một tính chất mà bạn biết là sai.* Sách khuyên bảo đảm TLC báo lỗi ở những tính chất đáng lẽ phải vi phạm[^should-violate]. Nếu TLC im lặng thì model không chạm tới vùng cần kiểm (suy luận của người soạn). Sách còn gợi ý kiểm các trạng thái chỉ đạt được sau nhiều thao tác[^sanity-reach].
+- *Nhớ mục tiêu của TLC.* Mục tiêu không phải chứng minh spec đúng mà là tìm lỗi[^find-errors].
+- *Collision fingerprint* có thể khiến TLC báo "đã kiểm hết" khi chưa (mục 3)[^fp-silent].
+
+<details><summary>Đi sâu: biến thể lỗi của TCommit, DieHard như một bộ giải, định dạng xuất và trace mô phỏng</summary>
+
+**Biến thể lỗi của `TCommit` (tính tay).** Lấy spec `TCommit` thật (mục 2) và xóa conjunct `notCommitted` khỏi nhánh abort của `Decide`. Đây là kiểu "sửa" người đọc hay mắc khi nghĩ rằng RM tự do hủy giao dịch được:
 
 ```tla
 Decide(rm)  == \/ /\ rmState[rm] = "prepared"
@@ -397,7 +478,7 @@ Decide(rm)  == \/ /\ rmState[rm] = "prepared"
                   /\ rmState' = [rmState EXCEPT ![rm] = "aborted"]
 ```
 
-`TCTypeOK` vẫn đúng ở mọi trạng thái; `TCConsistent` (không có RM nào aborted trong khi RM khác committed[^tcc]) bị vi phạm. Một hành vi ngắn nhất, tính tay (suy luận của người soạn, chưa chạy TLC): để có RM `committed` thì ba RM phải đã `prepared` (3 bước), rồi một RM commit; để RM khác `aborted` *sau đó* thì abort khi nó đang `prepared` — thứ tự ngược lại bị `canCommit` chặn vì một RM `aborted` làm `canCommit` sai. Do đó cần ít nhất 5 bước, tức 6 trạng thái:
+`TCTypeOK` vẫn đúng ở mọi trạng thái, còn `TCConsistent` (không có RM nào aborted trong khi RM khác committed[^tcc]) bị vi phạm. Một hành vi ngắn nhất, tính tay (suy luận của người soạn, chưa chạy TLC): muốn có RM `committed` thì ba RM phải `prepared` trước (3 bước), rồi một RM commit. Để RM khác `aborted` *sau đó*, nó phải abort khi đang `prepared`; thứ tự ngược lại bị `canCommit` chặn vì một RM `aborted` làm `canCommit` sai. Do đó cần ít nhất 5 bước, tức 6 trạng thái:
 
 | # | Bước | `r1` | `r2` | `r3` |
 |---|------|------|------|------|
@@ -408,51 +489,41 @@ Decide(rm)  == \/ /\ rmState[rm] = "prepared"
 | 5 | `Decide(r1)`, nhánh commit | **committed** | prepared | prepared |
 | 6 | `Decide(r2)`, nhánh abort (đã bỏ `notCommitted`) | **committed** | **aborted** | prepared |
 
-TLC có thể in một trace *cùng độ dài* nhưng khác thứ tự `Prepare` hoặc khác RM (không có thứ tự duy nhất); điều BFS bảo đảm là *độ dài* ngắn nhất, không phải trace duy nhất.
+TLC có thể in một trace *cùng độ dài* nhưng khác thứ tự `Prepare` hoặc khác RM, vì không có thứ tự duy nhất. BFS chỉ bảo đảm *độ dài* ngắn nhất, không bảo đảm trace duy nhất.
 
-**Dùng error trace như một bộ giải: DieHard.** Spec `DieHard` trong `tlaplus/Examples` mô hình bài toán trong phim *Die Hard 3*: đong đúng 4 gallon bằng bình 5 và bình 3 gallon. Bên cạnh `TypeOK`, Lamport viết thêm `NotSolved == big # 4` — không phải một tính chất đúng đắn của hệ thống — rồi nhờ TLC kiểm xem nó có phải invariant không: vi phạm chính là lời giải[^diehard-idea]; vì TLC dùng BFS nên lời giải tìm được là ngắn nhất[^diehard-bfs]. File cfg chỉ có hai dòng[^diehard-cfg], và manifest của repo ghi kết quả chạy `DieHard.cfg` là "safety failure"[^diehard-manifest]. Một nghiệm (tính tay theo định nghĩa các action, suy luận của người soạn; cặp là `(big, small)`): `(0,0) → FillBigJug (5,0) → BigToSmall (2,3) → EmptySmallJug (2,0) → BigToSmall (0,2) → FillBigJug (5,2) → BigToSmall (4,3)`. BFS tính tay cũng cho thấy trạng thái đầu tiên có `big = 4` nằm ở tầng thứ 6 (tầng 0 là trạng thái đầu). Bài học (nhận xét của người soạn): bất kỳ câu hỏi "có đạt được trạng thái X không?" đều chuyển được thành "kiểm `X` không phải trạng thái khả đạt" — một cách tìm kịch bản, không chỉ tìm lỗi.
+**Dùng error trace như một bộ giải: DieHard.** Spec `DieHard` trong `tlaplus/Examples` mô hình bài toán trong phim *Die Hard 3*: đong đúng 4 gallon bằng bình 5 và bình 3 gallon. Bên cạnh `TypeOK`, Lamport viết thêm `NotSolved == big # 4`, thứ không phải tính chất đúng đắn của hệ thống, rồi nhờ TLC kiểm xem nó có phải invariant không. Vi phạm chính là lời giải[^diehard-idea]. TLC dùng BFS nên lời giải tìm được là ngắn nhất[^diehard-bfs]. File cfg chỉ có hai dòng[^diehard-cfg], và manifest của repo ghi kết quả chạy `DieHard.cfg` là "safety failure"[^diehard-manifest]. Một nghiệm, tính tay theo định nghĩa các action (suy luận của người soạn; cặp là `(big, small)`): `(0,0) → FillBigJug (5,0) → BigToSmall (2,3) → EmptySmallJug (2,0) → BigToSmall (0,2) → FillBigJug (5,2) → BigToSmall (4,3)`. BFS tính tay cũng cho thấy trạng thái đầu tiên có `big = 4` nằm ở tầng thứ 6 (tầng 0 là trạng thái đầu). Bài học (nhận xét của người soạn): câu hỏi "có đạt được trạng thái X không?" nào cũng chuyển được thành "kiểm `X` không phải trạng thái khả đạt", nên TLC dùng để tìm kịch bản, không chỉ tìm lỗi.
 
-**Các cách làm trace dễ đọc / lặp nhanh hơn:**
+**Ghi trace ra file.** Tùy chọn `-dumpTrace` của TLC (bản ghim) cho phép ghi error trace ra file theo định dạng đã chọn khi có vi phạm property[^dumptrace]. Các bản TLC mới còn lưu một file lỗi mỗi khi tìm thấy vi phạm property, và cờ `-noGenerateSpecTE` tắt việc ghi file đó[^cli-noTE].
 
-- *Chạy lại từ trạng thái lỗi.* Sách khuyên: định nghĩa một vị từ `ErrorState` mô tả trạng thái cuối của trace, đặt nó làm `INIT` trong cfg, rồi thêm `Print` để xem chuyện gì xảy ra mà không phải chạy lại từ đầu[^errorstate].
-- *`ALIAS`* (cfg): định nghĩa một record gồm các trường tự chọn (ví dụ `x`, `nextx`, `incx`); TLC sẽ in các trường đó thay cho giá trị biến trong error trace[^alias] (và chỉ các trường đó).
-- *`-difftrace`:* chỉ in biến đổi giữa các trạng thái, dễ thấy từng bước nhưng khó thấy trạng thái đầy đủ[^difftrace].
-- *Lỗi đánh giá không phải vi phạm.* TLC còn báo lỗi khi không đánh giá nổi biểu thức (ví dụ `q[0]` với dãy `q`); khi đó trạng thái cuối của trace là trạng thái mà TLC đang tính successor[^eval-err].
-
-*Sửa rồi kiểm lại.* AWS kể: sau khi tìm thấy lỗi, nhóm đã đề xuất một bản sửa; khi đưa bản sửa vào spec, TLC cho thấy vấn đề vẫn xảy ra, qua một execution trace khác — một sửa mạnh hơn mới được TLC xác nhận[^aws-fix]. (Nhận xét của người soạn: giá trị của model checker không chỉ ở chỗ tìm lỗi mà ở chỗ kiểm *bản sửa* trước khi viết code.)
-
-**Khi TLC báo xanh.** Sách có hẳn một phần "hãy nghi ngờ thành công":
-
-- Safety dễ thỏa bằng cách không làm gì[^safety-nothing]: nếu quên đưa action `SndNewValue` vào `Next` thì người gửi không bao giờ gửi gì, nhưng spec vẫn thỏa điều kiện đúng đắn của giao thức.
-- *Coverage:* tùy chọn `-coverage` in số lần mỗi conjunct "gán giá trị" thực sự được dùng; giá trị 0 là phần của `Next` chưa bao giờ được thực thi — có thể là lỗi spec, hoặc model quá nhỏ để chạm tới nó[^coverage].
-- *Kiểm một tính chất mà bạn biết là sai:* sách khuyên bảo đảm TLC báo lỗi ở những tính chất đáng lẽ vi phạm[^should-violate]; nếu nó im lặng thì đó là dấu hiệu model không chạm tới vùng cần kiểm (suy luận của người soạn). Sách còn gợi ý kiểm các trạng thái chỉ đến được sau nhiều thao tác[^sanity-reach].
-- *Mục tiêu của TLC không phải chứng minh spec đúng mà là tìm lỗi*[^find-errors].
-- *Collision fingerprint* làm TLC báo "đã kiểm hết" khi chưa[^fp-silent] (mục 3).
-
-<details><summary>Đi sâu: các định dạng xuất, và vì sao trace mô phỏng khác trace BFS</summary>
-
-- Tùy chọn `-dumpTrace` của TLC (bản ghim) cho phép, khi có vi phạm property, ghi error trace ra file theo định dạng đã chọn[^dumptrace]. Learn TLA+ nói thêm rằng các bản TLC mới lưu một file lỗi mỗi khi tìm thấy vi phạm property và cờ `-noGenerateSpecTE` tắt việc ghi file đó[^cli-noTE].
-- Trong *simulation mode*, TLC chọn ngẫu nhiên một phần tử trong tập trạng thái kế tiếp ở mỗi bước[^sim-random]; vì vậy (suy luận của người soạn) trace tìm được không đảm bảo ngắn nhất như trace BFS. Sách mô tả: TLC dùng trình sinh số giả ngẫu nhiên với seed ngẫu nhiên; khi gặp lỗi nó in seed và một giá trị `aril` để tái tạo đúng hành vi đó[^sim-seed].
+**Trace trong simulation mode.** Ở mỗi bước, TLC chọn ngẫu nhiên một phần tử trong tập trạng thái kế tiếp[^sim-random]. Vì vậy trace tìm được không bảo đảm ngắn nhất như trace BFS (suy luận của người soạn). Khi gặp lỗi, TLC in seed của trình sinh số giả ngẫu nhiên và một giá trị `aril`, đủ để tái tạo đúng hành vi đó[^sim-seed].
 
 </details>
 
-**Quay lại Q5:** error trace là hành vi ngắn nhất từ `Init` tới điểm vi phạm — đọc từ trạng thái cuối ngược lên; còn TLC xanh chỉ có giá trị khi bạn đã chứng tỏ (coverage, vi phạm có chủ đích, kiểm trạng thái đạt được) rằng model thật sự chạm tới các hành vi quan trọng.
+**Quay lại Q5:** error trace là hành vi ngắn nhất từ `Init` tới điểm vi phạm, đọc từ trạng thái cuối ngược lên; còn TLC xanh chỉ có giá trị khi bạn đã chứng tỏ (coverage, vi phạm có chủ đích, kiểm trạng thái đạt được) rằng model thật sự chạm tới các hành vi quan trọng.
 
 ## 6. Deadlock check: "không còn bước nào" (Q6)
 
-> **Trả lời ngắn.** Với TLC, *deadlock* là một trạng thái khả đạt mà **không có trạng thái kế tiếp** — `Next` không còn enabled, không còn bước không-stutter nào[^deadlock-cex][^deadlock-opt]. Mặc định TLC coi đó là lỗi và dừng; nhưng ở nhiều hệ thống đó chỉ là kết thúc thành công, nên có thể tắt kiểm tra[^deadlock-term]. Định nghĩa này *rộng hơn* deadlock ở P4·05 (các thread giữ lock chờ nhau): nó gom cả "kẹt chờ nhau" lẫn "xong việc".
+> **Trả lời ngắn.** Với TLC, *deadlock* là một trạng thái khả đạt không có trạng thái kế tiếp: `Next` không còn enabled, không còn bước nào ngoài stutter[^deadlock-cex]. Mặc định TLC coi đó là lỗi và dừng. Nhưng ở nhiều hệ thống đó chỉ là kết thúc thành công, nên bạn có thể tắt kiểm tra này[^deadlock-term]. Định nghĩa này *rộng hơn* deadlock ở P4·05 (các thread giữ lock chờ nhau): nó gom cả "kẹt chờ nhau" lẫn "xong việc".
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): deadlock ở [P4·05](../04-concurrency/05-concurrency-bug-va-deadlock.md) là một *cơ chế cụ thể* — hai thread, mỗi bên giữ một lock và chờ lock kia (mục 3 của chương đó) — với các điều kiện để xảy ra (mục 4). TLC không biết gì về lock; nó chỉ thấy một *hậu quả quan sát được*: hệ thống không còn đi tiếp. Vì vậy "TLC báo deadlock" có thể là (a) deadlock theo nghĩa P4·05 mà bạn đã mô hình hóa bằng `await`/guard, hoặc (b) hệ thống đã kết thúc bình thường mà spec không có bước "kết thúc".
+*Với service `orders`.* Giả sử spec của `orders` chỉ có một số hữu hạn request: mỗi handler `Acquire`, `Release` rồi đánh dấu `done[c] = TRUE`. Khi mọi client đã xong thì không action nào còn enabled, TLC báo deadlock dù pool không có vấn đề gì. Còn nếu có handler kẹt chờ kết nối mãi (chẳng hạn mỗi handler cần hai kết nối cùng lúc mà pool đã cạn), TLC cũng in đúng thông báo ấy (ví dụ giả định, nhận xét của người soạn). TLC không phân biệt hai trường hợp, nên mục này nói cách tách chúng ra.
 
-Sách diễn đạt: không có deadlock là một tính chất bất biến, viết `[](ENABLED Next)`; phản ví dụ là hành vi tới được một trạng thái mà `Next` không enabled, nên không còn bước không-stutter nào[^deadlock-def][^deadlock-cex]. (`ENABLED A` đúng khi tồn tại ít nhất một trạng thái kế tiếp qua `A`[^enabled-eval]; ở đây chỉ cần hiểu là có ít nhất một successor.) Trong thuật toán ở mục 3, đó là bước báo lỗi khi `T` rỗng và kiểm deadlock đang bật[^step-deadlock]. Cờ `-deadlock` ở dòng lệnh *tắt* việc kiểm tra[^deadlock-opt]; trong cfg dùng `CHECK_DEADLOCK FALSE`[^cli-checkdeadlock].
+### 6.1 TLC hiểu "deadlock" thế nào
 
-*Ví dụ thật: `TCommit.cfg`.* File cfg của spec transaction commit đặt `CHECK_DEADLOCK FALSE`[^tc-cfg]. Lý do (tính tay, suy luận của người soạn, khớp với phép đếm 94 ở mục 3): khi mọi RM đã quyết định (mọi RM committed, hoặc mọi RM aborted), cả `Prepare` lẫn `Decide` đều không còn enabled — đúng là trạng thái kết thúc của giao thức, không phải lỗi.
+Deadlock ở [P4·05](../04-concurrency/05-concurrency-bug-va-deadlock.md) là một *cơ chế cụ thể*: hai thread, mỗi bên giữ một lock và chờ lock kia (mục 3 của chương đó), kèm các điều kiện để nó xảy ra (mục 4). TLC không biết gì về lock. Nó chỉ thấy một *hậu quả quan sát được*: hệ thống không đi tiếp được nữa. Vì vậy "TLC báo deadlock" có thể là (a) deadlock theo nghĩa P4·05 mà bạn đã mô hình hóa bằng `await` hoặc guard, hoặc (b) hệ thống đã kết thúc bình thường mà spec không có bước "kết thúc".
 
-*Ví dụ PlusCal.* Learn TLA+: nếu thêm `await queue # <<>>` cho reader thì khi mọi writer đã chạy xong, reader kẹt ở `ReadFromQueue` mãi, không tiến trình nào chạy được, nên TLC báo deadlock[^pluscal-dl]. Nhưng một tiến trình *kết thúc bình thường* thì không gây deadlock, vì PlusCal translator chèn thêm một action "mọi thứ xong và không có gì xảy ra"[^pluscal-term]; `await expr` chặn một nhãn khi `expr` sai, và nếu mọi nhãn bị chặn thì spec deadlock[^await-blocks]. Xem thêm chương 06.
+Nói chặt hơn, "không có deadlock" là một tính chất bất biến, viết `[](ENABLED Next)`[^deadlock-def]. Phản ví dụ là một hành vi tới được trạng thái mà `Next` không enabled, tức không còn bước không-stutter nào[^deadlock-cex]. (`ENABLED A` đúng khi tồn tại ít nhất một trạng thái kế tiếp qua `A`[^enabled-eval]; ở đây chỉ cần hiểu là có ít nhất một successor.) Trong thuật toán ở mục 3, đó là bước báo lỗi khi `T` rỗng và kiểm deadlock đang bật[^step-deadlock]. Cờ `-deadlock` ở dòng lệnh *tắt* việc kiểm tra[^deadlock-opt]; trong cfg bạn dùng `CHECK_DEADLOCK FALSE`[^cli-checkdeadlock].
 
-*Đừng tắt kiểm deadlock một cách mù quáng.* Nếu tắt toàn cục, bạn cũng mất khả năng bắt deadlock thật. Cách tinh hơn (nhận xét của người soạn, bắt chước chính điều PlusCal làm): thêm vào `Next` một action kết thúc *rõ ràng* chỉ enabled khi hệ thống thực sự xong, rồi giữ kiểm deadlock bật:
+### 6.2 Hai ví dụ trong nguồn
+
+*`TCommit.cfg`.* File cfg của spec transaction commit đặt `CHECK_DEADLOCK FALSE`[^tc-cfg]. Lý do, theo phép tính tay khớp với con số 94 ở mục 3 (suy luận của người soạn): khi mọi RM đã quyết định (mọi RM committed, hoặc mọi RM aborted), cả `Prepare` lẫn `Decide` đều không còn enabled. Đó đúng là trạng thái kết thúc của giao thức chứ không phải lỗi.
+
+*PlusCal.* Nếu thêm `await queue # <<>>` cho reader thì khi mọi writer đã chạy xong, reader kẹt ở `ReadFromQueue` mãi, không tiến trình nào chạy được, nên TLC báo deadlock[^pluscal-dl]. Nhưng một tiến trình *kết thúc bình thường* thì không gây deadlock, vì PlusCal translator chèn thêm một action "mọi thứ xong và không có gì xảy ra"[^pluscal-term]. Còn `await expr` chặn một nhãn khi `expr` sai, và nếu mọi nhãn bị chặn thì spec deadlock[^await-blocks]. Chương 06 nói thêm về chuyện này.
+
+### 6.3 Đừng tắt kiểm deadlock một cách mù quáng
+
+Tắt toàn cục thì bạn cũng mất khả năng bắt deadlock thật. Cách tinh hơn là bắt chước điều PlusCal làm (nhận xét của người soạn): thêm vào `Next` một action kết thúc *rõ ràng*, chỉ enabled khi hệ thống thực sự xong, rồi giữ kiểm deadlock bật. Với pool của `orders`:
 
 ```tla
 \* minh họa: giả sử có biến done[c] đánh dấu client c đã xong việc
@@ -463,68 +534,78 @@ Terminating ==
 Next == Step \/ Terminating
 ```
 
-Khi đó, kẹt ở một trạng thái *chưa* xong vẫn bị TLC báo là deadlock; còn trạng thái xong có một bước (lặp lại chính nó) nên tập successor không rỗng.
+Khi đó, trạng thái kẹt mà *chưa* xong vẫn bị TLC báo là deadlock. Trạng thái xong thì có một bước (lặp lại chính nó) nên tập successor không rỗng.
 
 <details><summary>Đi sâu: deadlock check không bắt gì ngoài "hết bước"</summary>
 
-- **Livelock và starvation không bị bắt.** Trong livelock các action vẫn enabled (hệ thống vẫn "chạy") nên TLC không báo deadlock (suy luận của người soạn từ định nghĩa "không có successor"); chúng thuộc về liveness và fairness — chương 05. P4·05 mô tả deadlock theo cơ chế vòng chờ; TLC chỉ cho bạn biết hệ quả.
-- **Kiểm deadlock là kiểm một tính chất, không phải một "loại phân tích" riêng.** Vì nó tương đương `[](ENABLED Next)`[^deadlock-def] và TLC đánh giá `ENABLED A` bằng cách tính successor như thể `A` là action kế tiếp[^enabled-eval], về nguyên tắc bạn có thể viết một invariant tùy biến dựa trên `ENABLED` để chỉ báo deadlock ở phạm vi hẹp hơn (suy luận của người soạn; các nguồn của chương không có ví dụ này, nên thử trên model nhỏ trước).
-- **Stuttering và kết thúc.** Trong TLA+ mọi hành vi đều được phép stutter — tạo ra trạng thái mới trong đó không có gì xảy ra[^stutter-allowed]; nên một trạng thái kết thúc *hợp lệ về mặt TLA+* (hành vi cứ stutter mãi). Việc nó bị TLC báo là lỗi chỉ xảy ra khi kiểm deadlock của công cụ được bật; vì vậy "deadlock" là khái niệm của *công cụ*, không phải của logic TLA+ (suy luận của người soạn từ hai nguồn trên).
+- **Livelock và starvation không bị bắt.** Trong livelock các action vẫn enabled, hệ thống vẫn "chạy", nên TLC không báo deadlock (suy luận của người soạn từ định nghĩa "không có successor"). Hai loại này thuộc về liveness và fairness, xem chương 05. P4·05 mô tả deadlock theo cơ chế vòng chờ; TLC chỉ cho bạn biết hệ quả.
+- **Kiểm deadlock là kiểm một tính chất, không phải một "loại phân tích" riêng.** Nó tương đương `[](ENABLED Next)`[^deadlock-def], và TLC đánh giá `ENABLED A` bằng cách tính successor như thể `A` là action kế tiếp[^enabled-eval]. Về nguyên tắc, bạn có thể viết một invariant tùy biến dựa trên `ENABLED` để chỉ báo deadlock ở phạm vi hẹp hơn. Đây là suy luận của người soạn; các nguồn của chương không có ví dụ này, nên hãy thử trên model nhỏ trước.
+- **Stuttering và kết thúc.** Trong TLA+, mọi hành vi đều được phép stutter, tức tạo ra trạng thái mới mà không có gì xảy ra[^stutter-allowed]. Vì vậy một trạng thái kết thúc là *hợp lệ về mặt TLA+*: hành vi cứ stutter mãi. Nó chỉ bị báo là lỗi khi chức năng kiểm deadlock của công cụ đang bật, nên "deadlock" là khái niệm của *công cụ* chứ không phải của logic TLA+ (suy luận của người soạn từ hai nguồn trên).
 
 </details>
 
-**Quay lại Q6:** TLC deadlock = trạng thái khả đạt không còn successor; mặc định là lỗi, nhưng với spec có kết thúc hợp lệ phải tắt (`CHECK_DEADLOCK FALSE`/`-deadlock`) hoặc mô hình hóa bước kết thúc; nó khác deadlock-lock ở P4·05 vì không phân biệt "kẹt" với "xong".
+**Quay lại Q6:** TLC deadlock là trạng thái khả đạt không còn successor; mặc định là lỗi, nhưng với spec có kết thúc hợp lệ thì phải tắt (`CHECK_DEADLOCK FALSE` hoặc `-deadlock`) hay mô hình hóa bước kết thúc; nó khác deadlock-lock ở P4·05 vì không phân biệt "kẹt" với "xong".
 
 ## 7. Bounded model và state constraint (Q7)
 
-> **Trả lời ngắn.** TLC chỉ kết thúc nếu tập trạng thái khả đạt hữu hạn[^terminates]; spec có bộ đếm tăng mãi hay hàng đợi dài tùy ý thì phải bị *bound*. Cách thô là chọn hằng số nhỏ; cách tinh là *state constraint* (`CONSTRAINT`) — vị từ mà TLC dùng để quyết định trạng thái nào được mở rộng — hoặc *action constraint* loại bỏ cả bước đi, hoặc giới hạn độ sâu bằng `TLCGet("level")`. Cái giá: kết quả chỉ đúng *trong phạm vi bound*, và constraint không nên dùng khi kiểm liveness.
+> **Trả lời ngắn.** TLC chỉ kết thúc khi tập trạng thái khả đạt hữu hạn[^terminates]. Spec có bộ đếm tăng mãi hay hàng đợi dài tùy ý thì phải được *bound* (chặn biên). Cách thô là chọn hằng số nhỏ. Cách tinh hơn là *state constraint* (`CONSTRAINT`), vị từ để TLC quyết định trạng thái nào được mở rộng; hoặc *action constraint* loại cả bước đi; hoặc giới hạn độ sâu bằng `TLCGet("level")`. Cái giá là kết quả chỉ đúng *trong phạm vi bound*, và không nên dùng constraint khi kiểm liveness.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một load test phải có điểm dừng — "chạy 1000 request" chứ không "chạy mãi". Model checking cũng vậy: model là một *phép thử có biên*, và thiết kế cận chạy là một phần của việc viết spec.
+*Với service `orders`.* Spec pool ở mục 2 hữu hạn vì `free` luôn nằm trong `0..MaxConn`. Giờ thêm vào mô hình một biến `reqs` đếm tổng số request đã phục vụ, mỗi `Acquire` tăng 1. Không trạng thái nào còn lặp lại, số trạng thái khả đạt thành vô hạn, và TLC chạy mãi cho tới khi hết tài nguyên (nhận xét của người soạn, theo thuật toán ở mục 3). Mục này nói các cách đặt biên cho model, và cái giá mỗi cách phải trả.
 
-*Vì sao phải bound.* Sách lấy ví dụ giao thức alternating bit: kiểm toàn bộ trạng thái khả đạt là không thể vì dãy message dài tùy ý nên có vô hạn trạng thái khả đạt; phải ràng buộc để model hữu hạn[^infinite-ex][^finite-model]. Cách làm: định nghĩa một vị từ trạng thái `constraint` đặt cận cho độ dài dãy, ví dụ hai hàng đợi dài tối đa 2[^constraint-ex]. Learn TLA+ mô tả hai nguồn "unbound" phổ biến: biến nguyên tăng mãi, và dãy bị nối thêm mãi[^unbound-sources]; và một dấu hiệu nhận biết: model có bound thường tăng độ sâu từ từ, còn model không bound sinh một chuỗi trạng thái mới rất nhanh[^unbound-sign].
+### 7.1 Vì sao phải bound
 
-*Các cần gạt* (đều ghi trong cfg):
+Sách lấy ví dụ giao thức alternating bit: dãy message dài tùy ý nên có vô hạn trạng thái khả đạt, và kiểm toàn bộ là không thể[^infinite-ex]. Vì vậy phải ràng buộc để model hữu hạn[^finite-model]. Cách làm là định nghĩa một vị từ trạng thái đặt cận cho độ dài dãy, chẳng hạn hai hàng đợi dài tối đa 2[^constraint-ex].
 
-1. **Hằng số nhỏ.** `MaxConn = 2`, `Clients` ba phần tử. Learn TLA+: phần lớn lỗi xuất hiện ở không gian trạng thái nhỏ, nên không có lợi gì nhiều khi dùng hằng số khổng lồ[^mostbugs-small].
-2. **State constraint** — `CONSTRAINT Name`: sách định nghĩa `Constraint` là hội của mọi vị từ trạng thái được nêu trong các câu `CONSTRAINT`[^constraint-def]; theo thuật toán, trạng thái không thỏa nó không được thêm vào hàng đợi và đồ thị, tức không được mở rộng[^step-constraint]. Cũng theo thuật toán, invariant được kiểm trên mọi trạng thái kế tiếp *trước* khi xét constraint[^step-check]: trạng thái ngay bên ngoài biên vẫn bị kiểm invariant nhưng không bị mở rộng (suy luận của người soạn từ thứ tự các bước 3(d)i–ii; không có thí nghiệm).
-3. **Action constraint** — `ACTION_CONSTRAINT Name`: loại bỏ các *bước* thay vì các trạng thái[^action-constraint]; sách nói một constraint thường `P` tương đương action constraint `P'`[^constraint-vs-action].
-4. **`TLCGet("level")`.** Operator trong module `TLC`, trả về độ sâu hiện tại của quá trình model checking[^tlcget-level]. Learn TLA+ chuộng cách này vì với nhiều biến thì khó đoán cận cho từng biến, trong khi chỉ cần nói "tối đa N bước"[^tlcget] (ví dụ dưới đây lấy từ trang đó):
+Learn TLA+ nêu hai nguồn "unbound" phổ biến: biến nguyên tăng mãi, và dãy bị nối thêm mãi[^unbound-sources]. Nó cũng nêu một dấu hiệu nhận biết: model có bound thường tăng độ sâu từ từ, còn model không bound sinh ra một chuỗi trạng thái mới rất nhanh[^unbound-sign].
+
+### 7.2 Các cần gạt
+
+Tất cả đều khai báo trong cfg.
+
+1. **Hằng số nhỏ.** Với pool: `MaxConn = 2`, `Clients` ba phần tử. Phần lớn lỗi xuất hiện ở không gian trạng thái nhỏ, nên dùng hằng số khổng lồ không có lợi gì nhiều[^mostbugs-small].
+2. **State constraint** (`CONSTRAINT Name`). `Constraint` là hội của mọi vị từ trạng thái nêu trong các câu `CONSTRAINT`[^constraint-def]. Trạng thái không thỏa nó không được thêm vào hàng đợi và đồ thị, tức không được mở rộng[^step-constraint]. Invariant lại được kiểm trên mọi trạng thái kế tiếp *trước* khi xét constraint[^step-check]. Từ thứ tự các bước ở mục 3 ta suy ra: trạng thái ngay bên ngoài biên vẫn bị kiểm invariant nhưng không bị mở rộng (suy luận của người soạn từ thuật toán, không có thí nghiệm).
+3. **Action constraint** (`ACTION_CONSTRAINT Name`). Nó loại bỏ các *bước* thay vì các trạng thái[^action-constraint]. Một constraint thường `P` tương đương action constraint `P'`[^constraint-vs-action].
+4. **`TLCGet("level")`.** Đây là operator trong module `TLC`, trả về độ sâu hiện tại của quá trình model checking[^tlcget-level]. Learn TLA+ chuộng cách này vì với nhiều biến thì khó đoán cận cho từng biến, trong khi chỉ cần nói "tối đa N bước"[^tlcget]. Ví dụ dưới đây lấy từ trang đó:
 
    ```tla
    ModelConstraint == TLCGet("level") < 9
    ```
-5. **Thay tập vô hạn bằng tập hữu hạn.** TLC không đánh giá được lượng từ không cận (`\E x : ...`, `CHOOSE x : ...`)[^unbounded-quant], và chỉ liệt kê được tập "hiển nhiên hữu hạn"[^nat-enum]. Sách gợi ý dùng `CONSTANT` trong cfg để *thay* `Nat` bằng `0..n` — làm đổi nghĩa spec một cách sâu sắc, nhưng vẫn có thể giúp TLC lộ ra lỗi[^be-creative].
-6. **Model invariant.** Một invariant chỉ để kiểm model có hữu hạn không: giống `TypeInvariant` nhưng kiểm các biến nằm trong tập hữu hạn nào đó[^model-inv]. Learn TLA+: model bound có thể vi phạm nó một cách giả, nhưng model không bound chắc chắn vi phạm[^model-inv2]. Nên chạy trước để phát hiện spec chưa bound; nếu vi phạm là *lỗi spec* (thiếu guard) thì sửa spec; chỉ khi không sửa được mà không thêm giả thiết mới vào spec thì mới dùng state constraint[^bounding]. Nhận xét của người soạn: đây là cách phân biệt "model vô hạn do tôi quên guard" với "model vô hạn vì hệ thống thật là vô hạn".
+5. **Thay tập vô hạn bằng tập hữu hạn.** TLC không đánh giá được lượng từ không cận (`\E x : ...`, `CHOOSE x : ...`)[^unbounded-quant], và chỉ liệt kê được tập "hiển nhiên hữu hạn"[^nat-enum]. Sách gợi ý dùng `CONSTANT` trong cfg để *thay* `Nat` bằng `0..n`. Cách này làm đổi nghĩa spec một cách sâu sắc, nhưng vẫn có thể giúp TLC lộ ra lỗi[^be-creative].
+6. **Model invariant.** Đây là một invariant chỉ để kiểm model có hữu hạn không: giống `TypeInvariant` nhưng kiểm các biến nằm trong một tập hữu hạn nào đó[^model-inv]. Model có bound có thể vi phạm nó một cách giả, nhưng model không bound chắc chắn vi phạm[^model-inv2]. Nên chạy nó trước để phát hiện spec chưa bound. Nếu vi phạm là *lỗi spec* (thiếu guard) thì sửa spec; chỉ khi không sửa được mà không thêm giả thiết mới vào spec thì mới dùng state constraint[^bounding]. Nhận xét của người soạn: cách này phân biệt được "model vô hạn do tôi quên guard" với "model vô hạn vì hệ thống thật là vô hạn".
 
-*Ví dụ constraint ngân sách lỗi (nhận xét của người soạn).* Một cách phổ biến để bound chaos: thêm biến đếm `crashes` mà mỗi action `Crash` tăng 1, rồi đặt `CrashBudget == crashes <= MaxCrashes` làm `CONSTRAINT`. Theo thuật toán ở mục 3, TLC chỉ mở rộng các trạng thái có tối đa `MaxCrashes` lần sập (trạng thái có `MaxCrashes + 1` lần sập vẫn bị kiểm invariant nhưng không được mở rộng, như đã nói ở trên) — một cận *có ý nghĩa nghiệp vụ* (thay vì cận kỹ thuật như độ dài hàng đợi).
+Với bộ đếm `reqs` của `orders`, cần gạt 1, 2 hoặc 4 đều dùng được; `CONSTRAINT reqs <= MaxReqs` là cách trực tiếp nhất.
 
-*Cạm bẫy của constraint.*
+Một constraint có ý nghĩa nghiệp vụ hơn là ngân sách lỗi (nhận xét của người soạn). Thêm biến đếm `crashes`, mỗi action `Crash` tăng 1, rồi đặt `CrashBudget == crashes <= MaxCrashes` làm `CONSTRAINT`. Theo thuật toán ở mục 3, TLC chỉ mở rộng các trạng thái có tối đa `MaxCrashes` lần sập; trạng thái có `MaxCrashes + 1` lần sập vẫn bị kiểm invariant nhưng không được mở rộng. Cận này mang nghĩa nghiệp vụ, khác với cận kỹ thuật như độ dài hàng đợi.
 
-- **Constraint chặt quá có thể giấu lỗi** (nhận xét của người soạn). Comment `(* Is this big enough? *)` và `\* Try 3 next.` trong cfg ví dụ của sách (mục 4) cho thấy tác giả tự hỏi cận 2 đã đủ lớn chưa và định thử 3[^fig143]; từ đó suy ra cận quá chặt có thể khiến TLC không chạm tới lỗi chỉ lộ ở hàng đợi dài hơn.
-- **Constraint và liveness.** Learn TLA+: đừng dùng constraint khi kiểm thuộc tính temporal — bạn đang "cắt" một phần hành vi nên model checker không còn đủ hành vi để đánh giá liveness[^constraint-liveness]. Sách có hẳn một ví dụ (spec `EvenSpec`, `x` tăng 2 mãi) cho thấy TLC im lặng trước một tính chất liveness sai khi model bị ép hữu hạn — trình bày đầy đủ ở [Chương 05 mục 8](05-liveness-va-fairness.md); quy tắc rút ra: khi kiểm temporal, phải bảo đảm model *cho phép* các hành vi vô hạn thỏa điều kiện liveness của spec[^evenspec].
-- **Giới hạn không đồng nghĩa với chứng minh.** Kết quả xanh trên model bound là bằng chứng *trong phạm vi bound* (mục 5).
+### 7.3 Cạm bẫy của constraint
+
+- **Constraint chặt quá có thể giấu lỗi** (nhận xét của người soạn). Cfg ví dụ của sách (mục 4) có hai comment `(* Is this big enough? *)` và `\* Try 3 next.`, cho thấy tác giả tự hỏi cận 2 đã đủ lớn chưa và định thử 3[^fig143]. Từ đó suy ra cận quá chặt có thể khiến TLC không chạm tới lỗi chỉ lộ ở hàng đợi dài hơn.
+- **Constraint và liveness.** Đừng dùng constraint khi kiểm thuộc tính temporal: bạn đang "cắt" một phần hành vi nên model checker không còn đủ hành vi để đánh giá liveness[^constraint-liveness]. Sách có hẳn một ví dụ (spec `EvenSpec`, `x` tăng 2 mãi) cho thấy TLC im lặng trước một tính chất liveness sai khi model bị ép hữu hạn; [Chương 05 mục 8](05-liveness-va-fairness.md) trình bày đầy đủ. Quy tắc rút ra: khi kiểm temporal, phải bảo đảm model *cho phép* các hành vi vô hạn thỏa điều kiện liveness của spec[^evenspec].
+- **Giới hạn không đồng nghĩa với chứng minh.** Kết quả xanh trên model bound chỉ là bằng chứng *trong phạm vi bound* (mục 5).
 
 <details><summary>Đi sâu: Apalache và "bounded model checking"; tính toán trên số lớn</summary>
 
-- **Apalache** là model checker *symbolic* cho TLA+, một lựa chọn thay cho TLC explicit-state: thay vì liệt kê từng trạng thái, nó dịch bài toán thành ràng buộc logic rồi giao cho SMT solver[^apalache-vs]. Nó cũng làm việc với giả định hữu hạn: tham số cố định và hữu hạn, cấu trúc dữ liệu hữu hạn, và chỉ phân tích các *thực thi hữu hạn có độ dài bị chặn*[^apalache-bounded]. Chương 09 và 10 sẽ quay lại với việc chọn công cụ.
-- **Số học.** Trong cài đặt của sách, các lớp Java ghi đè `Naturals`/`Integers` chỉ xử lý số trong khoảng `−2³¹ .. 2³¹ − 1`; ra ngoài đó TLC báo lỗi[^int-range]. (Phiên bản 2002; bản hiện tại có thể khác — nhận xét của người soạn: đừng dựa vào ngưỡng này khi spec dùng số lớn.)
-- **Kích thước tập liệt kê.** Toolbox có một tham số giới hạn kích thước tập lớn nhất mà TLC chịu liệt kê: TLC báo lỗi nếu thấy một tập lớn hơn ngưỡng khi liệt kê[^max-set].
+- **Apalache** là model checker *symbolic* cho TLA+, một lựa chọn thay cho TLC explicit-state. Thay vì liệt kê từng trạng thái, nó dịch bài toán thành ràng buộc logic rồi giao cho SMT solver[^apalache-vs]. Nó cũng làm việc với giả định hữu hạn: tham số cố định và hữu hạn, cấu trúc dữ liệu hữu hạn, và chỉ phân tích các *thực thi hữu hạn có độ dài bị chặn*[^apalache-bounded]. Chương 09 và 10 sẽ quay lại việc chọn công cụ.
+- **Số học.** Trong cài đặt của sách, các lớp Java ghi đè `Naturals` và `Integers` chỉ xử lý số trong khoảng `−2³¹ .. 2³¹ − 1`; ra ngoài đó TLC báo lỗi[^int-range]. Đó là bản 2002; bản hiện tại có thể khác, nên đừng dựa vào ngưỡng này khi spec dùng số lớn (nhận xét của người soạn).
+- **Kích thước tập liệt kê.** Toolbox có một tham số giới hạn kích thước tập lớn nhất mà TLC chịu liệt kê: TLC báo lỗi nếu khi liệt kê thấy một tập lớn hơn ngưỡng[^max-set].
 
 </details>
 
-**Quay lại Q7:** bound model bằng hằng số nhỏ, constraint (trạng thái hoặc bước), hoặc `TLCGet("level")`, và ghi nhớ hai cái giá: kết quả chỉ trong biên, và không thêm constraint khi kiểm liveness.
+**Quay lại Q7:** bound model bằng hằng số nhỏ, constraint (trạng thái hoặc bước) hay `TLCGet("level")`, và nhớ hai cái giá: kết quả chỉ đúng trong biên, và không thêm constraint khi kiểm liveness.
 
 ## 8. State-space explosion, symmetry và các cách thu nhỏ (Q8)
 
-> **Trả lời ngắn.** Số trạng thái khả đạt thường là hàm *mũ* của tham số model[^exp-growth], và tính đồng thời (concurrency) là một trong những nguồn bùng nổ chính vì số cách xen kẽ các bước tăng rất nhanh[^concurrency-explosion]. Cách đối phó: bắt đầu từ model tí hon rồi tăng dần[^start-small]; dùng *symmetry set* cho các tập model value hoán vị được; dùng *view* để bỏ biến phụ; giảm chi tiết và gộp bước; tách model safety khỏi model liveness; khi đã hết sức thì dùng simulation.
+> **Trả lời ngắn.** Số trạng thái khả đạt thường là hàm *mũ* của tham số model[^exp-growth], và tính đồng thời là một trong những nguồn bùng nổ chính vì số cách xen kẽ các bước tăng rất nhanh[^concurrency-explosion]. Cách đối phó: bắt đầu từ model tí hon rồi tăng dần[^start-small]; dùng *symmetry set* cho các tập model value hoán vị được; dùng *view* để bỏ biến phụ; giảm chi tiết và gộp bước; tách model safety khỏi model liveness; và khi đã hết cách thì dùng simulation.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ma trận kiểm thử — thêm một node, một client, một loại lỗi nữa thì số tổ hợp không cộng mà *nhân*. Model checker duyệt *mọi* tổ hợp, nên chi phí của nó là tích các lựa chọn.
+*Với service `orders`.* Pool ba client với `MaxConn = 2` chỉ có 7 trạng thái (mục 3). Nhưng thêm một client nữa, thêm một loại lỗi, thêm một biến theo dõi từng request thì số trạng thái không cộng thêm mà *nhân lên*. Model checker duyệt mọi tổ hợp, nên chi phí của nó là tích các lựa chọn (nhận xét của người soạn). Mục này bắt đầu bằng việc ước lượng cỡ model trước khi chạy, rồi tới các cách thu nhỏ, xếp theo mức rủi ro tăng dần.
 
-**Con số thật từ họ giao thức transaction commit** (repo `tlaplus/Examples`, ghi trong `manifest.json`; không phải kết quả chạy của chương này). Ba spec khác nhau cùng họ, với *tham số khác nhau*, nên so sánh chỉ nhằm cảm nhận độ lớn:
+### 8.1 Con số thật từ họ giao thức transaction commit
+
+Bảng dưới lấy từ `manifest.json` của repo `tlaplus/Examples`, không phải kết quả chạy của chương này. Ba spec khác nhau cùng họ, với *tham số khác nhau*, nên so sánh chỉ nhằm cảm nhận độ lớn:
 
 | Spec | Tham số trong cfg | Phân biệt | Sinh ra | Độ sâu |
 |------|-------------------|-----------|---------|--------|
@@ -532,43 +613,49 @@ Hình dung (nhận xét của người soạn): ma trận kiểm thử — thêm
 | `TwoPhase` (2PC có message) | `RM = {r1, r2, r3}`[^twophase-cfg] | 288 | 1146 | 11[^manifest-twophase] |
 | `PaxosCommit` | `RM = {r1, r2}`, 3 acceptor, `Ballot = {0,1}`[^paxos-cfg] | 1 321 761 | 16 959 159 | 28[^manifest-paxos] |
 
-Nhận xét của người soạn: ba dòng trên khác nhau cả về giao thức lẫn tham số nên không tách riêng được ảnh hưởng của từng yếu tố; điều thấy được chỉ là độ lớn tăng rất nhanh khi thêm chi tiết giao thức (message, acceptor, ballot). Learn TLA+ nêu đúng nguyên tắc: mô hình càng chi tiết thì càng nhiều trạng thái — đây là heuristic quan trọng nhất về tối ưu không gian trạng thái[^detail].
+Ba dòng này khác nhau cả về giao thức lẫn tham số nên không tách riêng được ảnh hưởng của từng yếu tố. Điều thấy được chỉ là độ lớn tăng rất nhanh khi thêm chi tiết giao thức (message, acceptor, ballot) (nhận xét của người soạn). Learn TLA+ nêu đúng nguyên tắc này: mô hình càng chi tiết thì càng nhiều trạng thái, và đó là heuristic quan trọng nhất về tối ưu không gian trạng thái[^detail].
 
-**Ước lượng trước khi chạy.** Học từ ví dụ của Learn TLA+: có `3⁷ = 2187` cách giao 7 số cho 3 worker; thêm một worker nhân số cách lên khoảng 8 lần (nguồn nói "octuple"; tính tay: `4⁷ / 3⁷ ≈ 7,5`), thêm một số chỉ nhân 3[^set-sizes]. Các kiểu dữ liệu "chồng" lên nhau — một biến dạng `[A \X B -> SUBSET C]` (hàm từ tích Descartes `A \X B` sang *tập con* của `C`; `SUBSET` giải thích ở [chương 02 mục 2](02-toan-nen-tang.md)) thường là nguồn của rắc rối[^estimate]. Với `ConnPool`, không gian kiểu của `TypeOK` có `(MaxConn + 1) · 2^|Clients| = 3 · 8 = 24` cặp `(free, held)`, trong khi khả đạt chỉ 7 (tính tay); với `TCommit`, `TCTypeOK` có `4³ = 64` trạng thái nhưng khả đạt chỉ 34 (manifest; tự đếm ở mục 3).
+### 8.2 Ước lượng trước khi chạy
 
-**Các công cụ thu nhỏ**, theo mức rủi ro tăng dần:
+Ví dụ của Learn TLA+: có `3⁷ = 2187` cách giao 7 số cho 3 worker. Thêm một worker thì số cách nhân lên khoảng 8 lần (nguồn nói "octuple"; tính tay: `4⁷ / 3⁷ ≈ 7,5`), còn thêm một số chỉ nhân 3[^set-sizes]. Các kiểu dữ liệu "chồng" lên nhau thường là nguồn rắc rối, chẳng hạn biến dạng `[A \X B -> SUBSET C]`, tức hàm từ tích Descartes `A \X B` sang *tập con* của `C` (`SUBSET` giải thích ở [chương 02 mục 2](02-toan-nen-tang.md))[^estimate].
 
-1. **Bắt đầu nhỏ.** Sách: luôn bắt đầu thử một spec với model tí hon — mỗi tập process, tập giá trị một phần tử, hàng đợi dài 1; một spec chưa được thử thì nhiều khả năng có rất nhiều lỗi, và model nhỏ sẽ nhanh chóng bắt được hầu hết các lỗi đơn giản[^start-small]. Khi model rất nhỏ không còn lỗi mới thì tăng dần[^start-small2]. Learn TLA+ cùng ý: dùng cfg nhỏ để lặp nhanh, chỉ kiểm cfg lớn khi cfg nhỏ đã qua[^small-first]. Nhận xét của người soạn: đây là nguyên tắc cho cả cfg liveness.
+Với `ConnPool`, không gian kiểu của `TypeOK` có `(MaxConn + 1) · 2^|Clients| = 3 · 8 = 24` cặp `(free, held)`, trong khi khả đạt chỉ 7 (tính tay). Với `TCommit`, `TCTypeOK` có `4³ = 64` trạng thái nhưng khả đạt chỉ 34 (manifest; tự đếm ở mục 3). Cả hai ví dụ cho thấy không gian kiểu lớn hơn nhiều không gian khả đạt, nên số trạng thái TLC thực sự duyệt nhỏ hơn con số ước lượng từ kiểu.
 
-2. **Gộp bước, giảm chi tiết.** Learn TLA+: gộp hai nhãn (hai bước) của worker thành một giảm ví dụ của họ từ 28,35 triệu xuống còn 2,4 triệu trạng thái sinh ra (khi áp riêng lên model gốc)[^lt-base][^lt-fuse], nhưng đừng làm mù quáng: chọn *độ hạt atomicity* quá thô thì giấu lỗi, quá mịn thì chạy quá lâu[^atomicity]. Đây là chỗ mô hình hóa gặp thực tế: bước nào thật sự có thể bị xen vào trong hệ thống thật thì phải là một bước riêng (nhận xét của người soạn).
+### 8.3 Các công cụ thu nhỏ, theo mức rủi ro tăng dần
 
-3. **Symmetry set.** Nếu spec không phân biệt các phần tử của một tập (các client giống nhau, các RM giống nhau), hoán vị chúng cho trạng thái "tương đương". Sách: nếu spec là *đối xứng* với một hoán vị π — hành vi σ thỏa spec khi và chỉ khi σ^π thỏa — thì TLC không cần kiểm σ nếu đã kiểm σ^π[^symm-def]. Bạn khai báo bằng `SYMMETRY Perms`, với `Perms == Permutations(Clients)` (toán tử của module `TLC`); với `n` phần tử, sách nói số trạng thái TLC xét giảm một hệ số `n!`[^symm-factor]; tài liệu Toolbox dùng cụm "tối đa" (*up to*) `3!`, tức 6[^symm-up-to] — nhận xét của người soạn: "tối đa", vì trạng thái bất động dưới hoán vị (như `∅`, hoặc mọi client cùng giữ) không gộp được.
+1. **Bắt đầu nhỏ.** Sách khuyên luôn thử một spec với model tí hon: mỗi tập process, tập giá trị một phần tử, hàng đợi dài 1. Một spec chưa được thử thì nhiều khả năng có rất nhiều lỗi, và model nhỏ sẽ nhanh chóng bắt được hầu hết các lỗi đơn giản[^start-small]. Khi model rất nhỏ không còn lỗi mới thì mới tăng dần[^start-small2]. Learn TLA+ cùng ý: dùng cfg nhỏ để lặp nhanh, chỉ kiểm cfg lớn khi cfg nhỏ đã qua[^small-first]. Nhận xét của người soạn: nguyên tắc này áp dụng cho cả cfg liveness.
 
-   Tính tay (suy luận của người soạn): với `ConnPool`, `Clients = {c1, c2, c3}`, `MaxConn = 2`, symmetry gộp 7 trạng thái khả đạt thành 3 (kích thước tập đang giữ: 0, 1, 2); với `TCommit` 3 RM, gộp 34 thành 13 (10 trạng thái chưa commit — mỗi trạng thái là một *đa tập* ba phần tử, tức bộ ba không phân biệt thứ tự nhưng cho phép lặp, lấy từ {working, prepared, aborted} — cộng 3 trạng thái đã commit: 1, 2 hoặc 3 RM `committed` còn lại `prepared`). `34/13 ≈ 2,6`, nhỏ hơn `3! = 6`, phù hợp lời "tối đa". Learn TLA+ báo trong ví dụ của họ rằng khai báo `Workers` là symmetry set rút không gian xuống 4,7 triệu trạng thái, giảm khoảng 6 lần[^symm-learntla].
+2. **Gộp bước, giảm chi tiết.** Learn TLA+ gộp hai nhãn (hai bước) của worker thành một và giảm ví dụ của họ từ 28,35 triệu xuống còn 2,4 triệu trạng thái sinh ra, khi áp riêng lên model gốc[^lt-fuse]. Đừng làm mù quáng: độ hạt atomicity chọn quá thô thì giấu lỗi, quá mịn thì chạy quá lâu[^atomicity]. Đây là chỗ mô hình hóa gặp thực tế: bước nào có thể bị xen vào trong hệ thật thì phải là một bước riêng (nhận xét của người soạn).
 
-   **Điều kiện đúng đắn.** TLC *không kiểm* rằng tập bạn khai báo thực sự đối xứng; nếu sai thì TLC có thể bỏ sót lỗi[^symm-nocheck]. Chỉ khai báo khi spec *và mọi property bạn kiểm* đều đối xứng (sau khi áp mọi phép thay hằng số và operator của model)[^symm-condition]; Toolbox lưu ý đừng khai báo `{v1, v2, v3}` là symmetry set nếu model đã thay `v1` cho một hằng nào đó (ví dụ `Leader = v1`)[^symm-leader], và toán tử duy nhất tạo ra biểu thức không đối xứng từ biểu thức đối xứng là `CHOOSE`[^symm-choose]. Nếu spec không đối xứng thật, TLC có thể không in nổi trace và in "Failed to recover the state from its fingerprint"[^symm-fail]. **Không dùng symmetry khi kiểm liveness**: Toolbox cảnh báo có thể làm TLC bỏ sót lỗi hoặc báo lỗi không tồn tại[^symm-live]; sách nói tương tự về `ImpliedTemporal`[^symm-live-book]. Symmetry còn có chi phí: với tập rất lớn, việc tìm các đối xứng có thể tốn hơn kiểm model[^symm-overhead] — một ví dụ trong Learn TLA+, đo trên máy của tác giả, mất thêm hai phút với tập tám phần tử[^symm-2min].
+3. **Symmetry set.** Nếu spec không phân biệt các phần tử của một tập (các client giống nhau, các RM giống nhau), ta hoán vị chúng cho ra trạng thái "tương đương". Nói chặt hơn, spec *đối xứng* với một hoán vị π nếu hành vi σ thỏa spec khi và chỉ khi σ^π thỏa; khi đó TLC không cần kiểm σ nếu đã kiểm σ^π[^symm-def]. Bạn khai báo bằng `SYMMETRY Perms`, với `Perms == Permutations(Clients)` (toán tử của module `TLC`). Với `n` phần tử, số trạng thái TLC xét giảm một hệ số `n!`[^symm-factor]; tài liệu Toolbox dùng cụm "tối đa" (*up to*) `3!`, tức 6[^symm-up-to]. Theo nhận xét của người soạn, "tối đa" vì trạng thái bất động dưới hoán vị (như `∅`, hoặc mọi client cùng giữ) không gộp được.
 
-4. **View.** Mặc định, "trạng thái" là bộ giá trị của mọi biến đã khai báo[^default-view]. `VIEW myview` đổi nó. Dùng hợp lý: thêm biến phụ để gỡ lỗi mà không làm tăng số trạng thái, bằng cách đặt view là bộ các biến gốc[^view-debug]. Sách cảnh báo: view không mặc định có thể khiến TLC không kiểm nhiều trạng thái[^view-risk], và có thể kiểm sai `ImpliedTemporal`[^view-liveness]. Learn TLA+: view có thể vô hiệu hóa tác động của biến phụ lên số trạng thái, nhưng rất dễ loại bỏ cả trạng thái hợp lệ nên phải dùng thận trọng[^view-hazard].
+   Với `ConnPool`, `Clients = {c1, c2, c3}`, `MaxConn = 2`, symmetry gộp 7 trạng thái khả đạt thành 3, ứng với kích thước tập đang giữ là 0, 1 hoặc 2 (tính tay, suy luận của người soạn). Learn TLA+ báo trong ví dụ của họ rằng khai báo `Workers` là symmetry set rút không gian xuống 4,7 triệu trạng thái, giảm khoảng 6 lần[^symm-learntla].
 
-5. **Tách model safety và liveness.** Kiểm liveness chậm hơn nhiều so với safety[^liveness-slower] và còn chặn tối ưu symmetry[^sep-sl]; nên có một cfg riêng cho liveness, hằng số nhỏ hơn.
+   **Điều kiện đúng đắn.** TLC *không kiểm* rằng tập bạn khai báo thực sự đối xứng, và nếu sai thì TLC có thể bỏ sót lỗi[^symm-nocheck]. Chỉ khai báo khi spec *và mọi property bạn kiểm* đều đối xứng, sau khi áp mọi phép thay hằng số và operator của model[^symm-condition]. Toolbox lưu ý đừng khai báo `{v1, v2, v3}` là symmetry set nếu model đã thay `v1` cho một hằng nào đó (ví dụ `Leader = v1`)[^symm-leader]. Toán tử duy nhất tạo ra biểu thức không đối xứng từ biểu thức đối xứng là `CHOOSE`[^symm-choose]. **Không dùng symmetry khi kiểm liveness**: Toolbox cảnh báo nó có thể làm TLC bỏ sót lỗi hoặc báo lỗi không tồn tại[^symm-live].
 
-6. **Simulation.** Với model quá lớn để duyệt hết, TLC có *simulation mode*: sinh ngẫu nhiên các hành vi có độ dài tối đa cố định, không cố duyệt hết[^sim-mode][^sim-depth]. Sách: mô phỏng ngẫu nhiên không phải cách hiệu quả bắt lỗi tinh vi, nhưng đáng thử vì có thể may mắn[^sim-lucky]; nên dùng sau khi model-check mô hình lớn nhất mà bạn kiên nhẫn chạy được[^large-sim].
+4. **View.** Mặc định, "trạng thái" là bộ giá trị của mọi biến đã khai báo[^default-view]. `VIEW myview` đổi cách TLC phân biệt hai trạng thái. Dùng hợp lý: thêm biến phụ để gỡ lỗi mà không làm tăng số trạng thái, bằng cách đặt view là bộ các biến gốc[^view-debug]. Cái giá: view không mặc định có thể khiến TLC không kiểm nhiều trạng thái[^view-risk], và view rất dễ loại bỏ cả trạng thái hợp lệ nên phải dùng thận trọng[^view-hazard].
 
-7. **Phần cứng và phân tán.** `-workers` cho nhiều thread, không có lý do dùng nhiều thread hơn số lõi[^workers-cores]. Nhóm AWS (Newcombe et al.) kể họ chạy phiên bản *phân tán* của TLC trên cụm mười máy EC2 cc1.4xlarge, mỗi máy 8 lõi và 23 GB RAM[^aws-cluster]; model checker kiểm được một phần nhỏ nhưng phức tạp của thuật toán trên một instance đủ lớn để cho độ tin cậy rất cao[^aws-small].
+5. **Tách model safety và liveness.** Kiểm liveness chậm hơn nhiều so với safety[^liveness-slower] và còn chặn tối ưu symmetry[^sep-sl]. Vì vậy nên có một cfg riêng cho liveness, với hằng số nhỏ hơn.
 
-<details><summary>Đi sâu: vì sao vẫn cần model checker khi test không thấy lỗi; những con số của Learn TLA+</summary>
+6. **Simulation.** Với model quá lớn để duyệt hết, TLC có *simulation mode*: sinh ngẫu nhiên các hành vi có độ dài tối đa cố định, không cố duyệt hết[^sim-depth]. Sách nhận xét mô phỏng ngẫu nhiên không phải cách hiệu quả để bắt lỗi tinh vi, nhưng đáng thử vì có thể may mắn[^sim-lucky]. Nên dùng nó sau khi đã model-check mô hình lớn nhất mà bạn kiên nhẫn chạy được[^large-sim].
 
-- **Vì sao không cứ test code.** AWS lý giải: test code không đủ để bắt lỗi tinh vi trong *thiết kế*, vì số trạng thái khả đạt của code là thiên văn[^aws-astro]. Ý của việc dùng một mô hình ở mức trừu tượng cao hơn (suy luận của người soạn) là đưa không gian về cỡ mà model checker duyệt hết được.
-- **Hai yếu tố của thời gian kiểm.** Learn TLA+ viết rằng thời gian kiểm phụ thuộc vào thời gian sinh mỗi trạng thái và số trạng thái cần sinh[^optimize-time], và theo kinh nghiệm của tác giả yếu tố thứ hai thường chi phối và đáng chú ý nhất[^optimize-dom]; đây là lý do mục này tập trung vào *thu nhỏ không gian* chứ không phải tối ưu phần cứng. Trước khi tối ưu, hãy kiểm model có thực sự bound không: vấn đề có thể không phải là spec quá lớn mà là spec không bao giờ kết thúc[^before-begin].
-- **Con số trong ví dụ của Learn TLA+.** Chạy ví dụ gốc (một writer, ba worker, `MaxNum = 7`, tắt kiểm deadlock) cho 28 351 303 trạng thái sinh ra[^lt-base]; mỗi tối ưu được tác giả áp *riêng* lên model gốc rồi hoàn tác trước khi thử tối ưu kế[^lt-base] — symmetry kéo về 4,7 triệu[^symm-learntla], gộp hai bước của worker kéo về 2,4 triệu[^lt-fuse] (không cộng dồn). Tác giả cảnh báo cách thay `with x \in set` bằng `CHOOSE` chỉ chấp nhận được khi thuật toán thật sự không phụ thuộc thứ tự, vì `CHOOSE` là tất định[^lt-choose].
+<details><summary>Đi sâu: cấu hình phần cứng, vì sao vẫn cần model checker, con số của Learn TLA+, và mặt trái của symmetry và view</summary>
+
+- **Phần cứng và phân tán.** `-workers` cho nhiều thread, và không có lý do dùng nhiều thread hơn số lõi[^workers-cores]. Nhóm AWS (Newcombe et al.) kể họ chạy phiên bản *phân tán* của TLC trên cụm mười máy EC2 cc1.4xlarge, mỗi máy 8 lõi và 23 GB RAM[^aws-cluster]. Model checker kiểm được một phần nhỏ nhưng phức tạp của thuật toán trên một instance đủ lớn để cho độ tin cậy rất cao[^aws-small].
+- **Vì sao không cứ test code.** AWS lý giải rằng test code không đủ để bắt lỗi tinh vi trong *thiết kế*, vì số trạng thái khả đạt của code là thiên văn[^aws-astro]. Dùng một mô hình ở mức trừu tượng cao hơn là cách đưa không gian về cỡ mà model checker duyệt hết được (suy luận của người soạn).
+- **Hai yếu tố của thời gian kiểm.** Thời gian kiểm phụ thuộc vào thời gian sinh mỗi trạng thái và số trạng thái cần sinh[^optimize-time]. Theo kinh nghiệm của tác giả Learn TLA+, yếu tố thứ hai thường chi phối và đáng chú ý nhất[^optimize-dom]; đó là lý do mục này tập trung vào *thu nhỏ không gian* chứ không phải tối ưu phần cứng. Trước khi tối ưu, hãy kiểm model có thực sự bound không: vấn đề có thể không phải spec quá lớn mà là spec không bao giờ kết thúc[^before-begin].
+- **Con số trong ví dụ của Learn TLA+.** Chạy ví dụ gốc (một writer, ba worker, `MaxNum = 7`, tắt kiểm deadlock) cho 28 351 303 trạng thái sinh ra[^lt-base]. Tác giả áp mỗi tối ưu *riêng* lên model gốc rồi hoàn tác trước khi thử tối ưu kế. Symmetry kéo con số về 4,7 triệu[^symm-learntla], gộp hai bước của worker kéo về 2,4 triệu[^lt-fuse], và hai con số này không cộng dồn. Tác giả cảnh báo cách thay `with x \in set` bằng `CHOOSE` chỉ chấp nhận được khi thuật toán thật sự không phụ thuộc thứ tự, vì `CHOOSE` là tất định[^lt-choose].
+- **Symmetry trên `TCommit`.** Với 3 RM, symmetry gộp 34 trạng thái thành 13 (tính tay, suy luận của người soạn). Có 10 trạng thái chưa commit, mỗi trạng thái là một *đa tập* ba phần tử lấy từ {working, prepared, aborted}, tức bộ ba không phân biệt thứ tự nhưng cho phép lặp. Thêm 3 trạng thái đã commit: 1, 2 hoặc 3 RM `committed`, phần còn lại `prepared`. Tỉ lệ `34/13 ≈ 2,6`, nhỏ hơn `3! = 6`, phù hợp với lời "tối đa" ở trên.
+- **Mặt trái của symmetry.** Nếu spec không đối xứng thật, TLC có thể không in nổi trace và in "Failed to recover the state from its fingerprint"[^symm-fail]. Sách nói tương tự như Toolbox về `ImpliedTemporal` khi dùng symmetry[^symm-live-book]. Symmetry còn có chi phí: với tập rất lớn, việc tìm các đối xứng có thể tốn hơn kiểm model[^symm-overhead]. Một ví dụ trong Learn TLA+, đo trên máy của tác giả, mất thêm hai phút với tập tám phần tử[^symm-2min].
+- **Mặt trái của view.** Sách cảnh báo view không mặc định cũng có thể làm TLC kiểm sai `ImpliedTemporal`[^view-liveness].
 
 </details>
 
-**Quay lại Q8:** không gian trạng thái tăng theo tích các lựa chọn nên bắt đầu nhỏ; symmetry, view, gộp bước, tách model liveness và simulation đều là cách cắt, mỗi cách có điều kiện đúng đắn riêng và không cách nào thay được việc kiểm lại độ tin cậy của model.
+**Quay lại Q8:** không gian trạng thái tăng theo tích các lựa chọn nên phải bắt đầu nhỏ; symmetry, view, gộp bước, tách model liveness và simulation đều là cách cắt, mỗi cách có điều kiện đúng đắn riêng và không cách nào thay được việc tự hỏi model đã đủ đáng tin chưa.
 
 ## Liên hệ với Rust và backend
 
-- **Invariant trong code.** Khái niệm `INVARIANT` có đối ứng trực tiếp trong Rust: macro `debug_assert!` kiểm một điều kiện lúc chạy và gọi `panic!` nếu sai[^debug-assert-panic], nhưng — khác `assert!` — mặc định chỉ bật ở bản build không tối ưu[^debug-assert]. Ví dụ minh họa (chưa biên dịch trong chương này), chuyển invariant `Conservation` của mục 2 thành code:
+- **Invariant trong code.** Khái niệm `INVARIANT` có đối ứng trực tiếp trong Rust: macro `debug_assert!` kiểm một điều kiện lúc chạy và gọi `panic!` nếu sai[^debug-assert-panic]. Khác `assert!`, nó mặc định chỉ bật ở bản build không tối ưu[^debug-assert]. Đoạn minh họa dưới đây (chưa biên dịch trong chương này) chuyển invariant `Conservation` của pool trong mục 2 thành code:
 
   ```rust
   use std::collections::HashSet;
@@ -594,23 +681,23 @@ Nhận xét của người soạn: ba dòng trên khác nhau cả về giao th�
   }
   ```
 
-  Nhận xét của người soạn: spec nói *điều gì phải đúng*; `debug_assert!` trong code là chốt chặn dò từng trạng thái *thực thi* gặp phải — còn TLC kiểm *mọi* trạng thái khả đạt của mô hình. Hai thứ bổ sung nhau; chương 10 nói cách nối spec với code.
-- **Chặn trên nuốt lỗi.** Lỗi `Release` ở mục 2 (chặn `free` ở `MaxConn`) là họ hàng của phép số học bão hòa: `saturating_add` tính `self + rhs` và bão hòa ở biên của kiểu thay vì tràn[^sat-add]. Nhận xét của người soạn: các phép như vậy làm kiểm tra kiểu hay biên xanh, nhưng một invariant nghiệp vụ như `Conservation` mới là thứ phát hiện sự bất thường.
-- **Model checker cho code Rust.** Crate `stateright` (bản 0.31.0 ở thời điểm viết) định nghĩa *always property* — còn gọi là safety property hay invariant — là property cho biết một kết cục có vấn đề không thể xảy ra, ví dụ dữ liệu không nhất quán[^stateright-always]; đó chính là khái niệm `INVARIANT` của chương này.
-- **Bound khi duyệt xen kẽ.** Crate `loom` (0.7.2) mặc định kiểm vét cạn mọi cách xen kẽ có thể của chương trình[^loom-exh]; với model lớn, ta đặt *preemption bound* để chỉ kiểm các thực thi có tối đa `n` lần thread bị buộc dừng[^loom-bound]. Đó là cùng một ý với state/action constraint ở mục 7: cắt biên để vẫn kiểm được, chấp nhận chỉ bảo đảm trong biên (suy luận của người soạn về sự tương đồng). Chi tiết ở [chương 10](10-tu-dac-ta-den-code-rust.md).
-- **Chuyển giao thức hệ thống thành invariant.** Với backend: [P12·09 mục 5](../12-he-thong-du-lieu/09-consistency-va-consensus.md) (two-phase commit) bàn họ giao thức mà `TCommit` ở trên là phiên bản trừu tượng — `TCConsistent` là tính chất không có hai participant quyết định mâu thuẫn; [P12·09 mục 7](../12-he-thong-du-lieu/09-consistency-va-consensus.md) (Raft) cho các invariant kiểu "tối đa một leader thắng trong mỗi term" và property theo bước "term không giảm"; [P12·07 mục 3](../12-he-thong-du-lieu/07-transaction.md) (anomaly) có write skew — vi phạm một invariant nghiệp vụ kiểu "luôn còn ít nhất một người trực" mà từng transaction riêng lẻ không vi phạm — đúng loại lỗi mà kiểm invariant trên *mọi xen kẽ* bắt được còn test đơn luồng thì không (nhận xét của người soạn). [P12·08](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md) (sự cố phân tán) là nguồn các action `Crash`/`Lose` bạn sẽ đặt dưới một `CONSTRAINT` ngân sách lỗi.
-- **Deadlock.** Khi mô hình hóa lock hay pool trong TLA+, deadlock kiểu [P4·05](../04-concurrency/05-concurrency-bug-va-deadlock.md) hiện ra dưới dạng trạng thái không còn action enabled — đúng thứ TLC báo (mục 6).
+  Spec nói *điều gì phải đúng*; `debug_assert!` là chốt chặn dò từng trạng thái *thực thi* mà chương trình gặp phải, còn TLC kiểm *mọi* trạng thái khả đạt của mô hình. Hai thứ bổ sung cho nhau (nhận xét của người soạn); [chương 10](10-tu-dac-ta-den-code-rust.md) nói cách nối spec với code.
+- **Chặn trên nuốt lỗi.** Lỗi `Release` ở mục 2, chặn `free` ở `MaxConn`, là họ hàng của phép số học bão hòa: `saturating_add` tính `self + rhs` và bão hòa ở biên của kiểu thay vì tràn[^sat-add]. Những phép như vậy làm kiểm tra kiểu hay biên xanh, và chỉ một invariant nghiệp vụ như `Conservation` mới phát hiện được sự bất thường (nhận xét của người soạn).
+- **Model checker cho code Rust.** Crate `stateright` (bản 0.31.0 lúc viết) định nghĩa *always property*, còn gọi là safety property hay invariant, là property cho biết một kết cục có vấn đề không thể xảy ra, ví dụ dữ liệu không nhất quán[^stateright-always]. Đó chính là khái niệm `INVARIANT` của chương này.
+- **Bound khi duyệt xen kẽ.** Crate `loom` (0.7.2) mặc định kiểm vét cạn mọi cách xen kẽ có thể của chương trình[^loom-exh]. Với model lớn, ta đặt *preemption bound* để chỉ kiểm các thực thi có tối đa `n` lần thread bị buộc dừng[^loom-bound]. Đó là cùng một ý với state/action constraint ở mục 7: cắt biên để vẫn kiểm được, và chấp nhận chỉ bảo đảm trong biên (suy luận của người soạn về sự tương đồng). Chi tiết ở [chương 10](10-tu-dac-ta-den-code-rust.md).
+- **Chuyển giao thức hệ thống thành invariant.** [P12·09 mục 5](../12-he-thong-du-lieu/09-consistency-va-consensus.md) (two-phase commit) bàn họ giao thức mà `TCommit` ở trên là phiên bản trừu tượng; `TCConsistent` là tính chất không có hai participant quyết định mâu thuẫn. [P12·09 mục 7](../12-he-thong-du-lieu/09-consistency-va-consensus.md) (Raft) cho các invariant kiểu "tối đa một leader thắng trong mỗi term" và property theo bước "term không giảm". [P12·07 mục 3](../12-he-thong-du-lieu/07-transaction.md) (anomaly) có write skew, vi phạm một invariant nghiệp vụ kiểu "luôn còn ít nhất một người trực" mà từng transaction riêng lẻ không vi phạm. Đó đúng là loại lỗi mà kiểm invariant trên *mọi xen kẽ* bắt được còn test đơn luồng thì không (nhận xét của người soạn). [P12·08](../12-he-thong-du-lieu/08-su-co-he-phan-tan.md) (sự cố phân tán) là nguồn các action `Crash`/`Lose` bạn sẽ đặt dưới một `CONSTRAINT` ngân sách lỗi.
+- **Deadlock.** Khi mô hình hóa lock hay pool trong TLA+, deadlock kiểu [P4·05](../04-concurrency/05-concurrency-bug-va-deadlock.md) hiện ra dưới dạng trạng thái không còn action enabled, đúng thứ TLC báo (mục 6).
 
 ## Tóm tắt
 
-- Safety = "điều xấu không bao giờ xảy ra", vi phạm tại một điểm hữu hạn của hành vi; invariant là safety viết `[]P` với `P` là vị từ trạng thái; `TypeOK` chỉ là một invariant được đặt tên.
-- Phân biệt `TypeOK` (giá trị có thể), invariant nghiệp vụ (giá trị đúng) và property theo bước `[][A]_v`; bên trong cfg, vị từ trạng thái vào `INVARIANT`, công thức temporal/theo bước vào `PROPERTY`; đổi `INVARIANT I` sang `PROPERTY I` mà quên `[]` chỉ kiểm trạng thái đầu.
-- TLC duyệt BFS: hàng đợi + đồ thị + tập fingerprint 64-bit; cho trace ngắn nhất tới vi phạm safety; "distinct states" là kích thước không gian, "states generated" tính cả lần sinh trùng; collision fingerprint hiếm nhưng làm TLC bỏ sót im lặng.
-- File `.cfg` chọn spec (`SPECIFICATION` hoặc `INIT`+`NEXT`), tính chất, hằng số (model value so sánh chỉ bằng chính nó), và các cần gạt `CONSTRAINT`/`SYMMETRY`/`VIEW`; phần chỉ dành cho TLC đặt trong module `MC...`.
-- Đọc error trace: invariant nào, trạng thái cuối, đi ngược lên bước làm đổi biến; phân biệt lỗi thiết kế và lỗi spec; nghi ngờ khi xanh: coverage, kiểm tính chất cố ý sai, đừng quên "không làm gì" thỏa safety.
-- TLC deadlock = không còn successor (`[](ENABLED Next)`); khác deadlock lock ở P4·05; tắt bằng `CHECK_DEADLOCK FALSE`/`-deadlock` khi kết thúc hợp lệ, hoặc mô hình hóa bước kết thúc rõ ràng.
-- Bound model bằng hằng số nhỏ, state/action constraint, `TLCGet("level")`; không dùng constraint khi kiểm liveness; model invariant giúp phát hiện spec chưa bound.
-- State-space explosion tăng theo tích các lựa chọn, đa luồng là nguồn chính; dùng model nhỏ trước, symmetry set (không dùng cho liveness, TLC không kiểm tính đối xứng), view, gộp bước, tách model liveness, simulation; mỗi công cụ có điều kiện đúng đắn riêng.
+- Safety là "điều xấu không bao giờ xảy ra", và vi phạm nằm ở một điểm hữu hạn của hành vi. Invariant là safety viết `[]P` với `P` là vị từ trạng thái; `TypeOK` chỉ là một invariant được đặt tên.
+- `TypeOK` kiểm giá trị *có thể*, invariant nghiệp vụ kiểm giá trị *đúng*, property theo bước `[][A]_v` kiểm bước đi hợp lệ. Trong cfg, vị từ trạng thái vào `INVARIANT`, công thức temporal hay theo bước vào `PROPERTY`; đổi `INVARIANT I` sang `PROPERTY I` mà quên `[]` thì chỉ kiểm trạng thái đầu.
+- TLC duyệt BFS với hàng đợi, đồ thị và tập fingerprint 64-bit. Nó cho trace ngắn nhất tới vi phạm safety; "distinct states" là kích thước không gian, "states generated" tính cả lần sinh trùng; collision fingerprint hiếm nhưng làm TLC bỏ sót im lặng.
+- File `.cfg` chọn spec (`SPECIFICATION` hoặc `INIT` + `NEXT`), tính chất, hằng số (model value chỉ so sánh bằng chính nó) và các cần gạt `CONSTRAINT`/`SYMMETRY`/`VIEW`; phần chỉ dành cho TLC đặt trong module `MC...`.
+- Đọc error trace: xem invariant nào sai, xem trạng thái cuối, đi ngược lên bước làm đổi biến, rồi phân biệt lỗi thiết kế với lỗi spec. Khi TLC xanh, nghi ngờ: coverage, kiểm tính chất cố ý sai, và nhớ rằng "không làm gì" thỏa safety.
+- TLC deadlock là không còn successor (`[](ENABLED Next)`), khác deadlock lock ở P4·05. Khi kết thúc hợp lệ thì tắt bằng `CHECK_DEADLOCK FALSE` hoặc `-deadlock`, hay mô hình hóa bước kết thúc rõ ràng.
+- Bound model bằng hằng số nhỏ, state/action constraint hay `TLCGet("level")`; không dùng constraint khi kiểm liveness; model invariant giúp phát hiện spec chưa bound.
+- State-space explosion tăng theo tích các lựa chọn, và tính đồng thời là nguồn chính. Hãy dùng model nhỏ trước, symmetry set (không dùng cho liveness, TLC không kiểm tính đối xứng), view, gộp bước, tách model liveness và simulation; mỗi công cụ có điều kiện đúng đắn riêng.
 
 ## Câu hỏi tự kiểm tra
 
@@ -628,17 +715,17 @@ Nhận xét của người soạn: ba dòng trên khác nhau cả về giao th�
 
 <details><summary>Đáp án</summary>
 
-1. Safety = vi phạm tại một điểm cụ thể trong hành vi[^safety-def]; liveness = điều gì đó phải xảy ra[^safety-impossible], nên không thể bị vi phạm tại một điểm cụ thể[^liveness-instant]; invariant `[]P` với `P` vị từ trạng thái là safety, nhưng không phải safety nào cũng là invariant[^inv-vs-safety]. Ví dụ: "có một server cố định luôn online"[^safety-non-inv], hoặc property theo bước như "term không giảm"[^implied-action].
-2. `Inv` là invariant của `Spec` nếu `Spec => []Inv` là định lý[^inv-def]. Không nhất thiết là invariant của `Next`: `Coherence` của spec cache là invariant của `Spec` nhưng không phải của `Next`, vì các trạng thái vi phạm không với tới được từ `Init`[^coherence]; invariant của cả `Spec` lẫn `Next` đôi khi được gọi là inductive[^inductive].
-3. `TypeOK` nên chỉ kiểm tập giá trị có thể (theo thói quen của tác giả Learn TLA+)[^typeinv-principle]; bản lỗi của `Release` chặn `free ≤ MaxConn` nên `TypeOK` vẫn đúng ở mọi trạng thái nhưng `Conservation` sai ở trạng thái thứ 3 của trace tính tay (mục 2).
-4. Không có `[]`, TLC chỉ kiểm `Conservation` ở các trạng thái *đầu*[^prop-init][^prop-state-pred]: bỏ sót mọi vi phạm ở các trạng thái sau.
-5. Hàng đợi `U` + đồ thị `G`, lấy trạng thái đầu hàng đợi, đánh giá `Next`, kiểm invariant, thêm trạng thái mới[^tlc-ds][^step-add]. Kết thúc khi hàng đợi rỗng, và chỉ khi tập trạng thái khả đạt hữu hạn[^terminates]. BFS cho trace ngắn nhất[^bfs-shortest]; với nhiều worker về lý thuyết có thể có trace ngắn hơn[^workers-shorter].
-6. "Generated" gồm cả lần sinh trùng; "distinct" là số trạng thái khác nhau[^progress]. Fingerprint 64-bit; xác suất collision rất nhỏ trừ khi có hàng tỷ trạng thái[^fp][^fp-prob]; collision làm TLC tưởng hai trạng thái là một và bỏ sót — với view mặc định TLC báo đã kiểm hết khi chưa[^fp-collision][^fp-silent].
-7. Ví dụ cfg ở mục 4: `SPECIFICATION Spec`, `CONSTANTS Clients = {c1, c2, c3}`, `MaxConn = 2`, `INVARIANTS TypeOK Conservation`, `SYMMETRY Symmetry`. Model value chỉ bằng chính nó[^mv] và TLC coi nó so sánh được, đồng thời khác mọi giá trị khác[^mv-book]; trong khi so sánh hai thứ không cùng kiểu như chuỗi với số là lỗi[^mv-why].
-8. (a) `CHECK_DEADLOCK FALSE` hoặc `-deadlock` — đơn giản nhưng mất khả năng bắt deadlock thật[^deadlock-term][^deadlock-opt][^cli-checkdeadlock]; (b) thêm action `Terminating` enabled chỉ khi thật sự xong (như PlusCal làm[^pluscal-term]) — giữ kiểm deadlock nhưng phải viết đúng điều kiện. Khác P4·05: TLC chỉ thấy "không còn successor", không phân biệt chờ-lock-vòng với kết thúc[^deadlock-cex].
-9. Hằng số nhỏ; `CONSTRAINT` (vd. `reqs <= MaxReqs`)[^constraint-def]; `TLCGet("level")`[^tlcget]; thay `Nat` bằng `0..n` trong cfg[^be-creative]. Rủi ro: bound chặt có thể không chạm tới lỗi cần model lớn hơn (nhận xét của người soạn; sách để lại lời nhắc kiểm xem model đã đủ lớn chưa[^fig143]); constraint cắt hành vi nên làm hỏng kiểm liveness[^constraint-liveness][^evenspec].
-10. Khi spec hoặc property *không* đối xứng với hoán vị (ví dụ gán `v1` cho một hằng, hoặc dùng `CHOOSE` trên tập)[^symm-condition][^symm-choose]; TLC không kiểm điều này[^symm-nocheck]; có thể bỏ sót lỗi hoặc in "Failed to recover the state from its fingerprint"[^symm-fail]; và không dùng khi kiểm liveness[^symm-live].
-11. (i) Chạy `-coverage` xem có action nào chưa bao giờ được thực thi[^coverage]; (ii) kiểm một tính chất đáng lẽ vi phạm và xác nhận TLC báo lỗi[^should-violate]; (iii) cân nhắc model đủ lớn (cfg thử bound lớn hơn); (iv) nhớ xác suất collision và có thể chạy lại bằng fingerprint seed khác[^fp-toolbox2]; và (v) nhắc lại: mục tiêu của TLC là tìm lỗi chứ không phải chứng minh[^find-errors].
+1. Safety là vi phạm xảy ra tại một điểm cụ thể trong hành vi[^safety-def]. Liveness là điều gì đó *phải* xảy ra[^safety-impossible], nên không thể bị vi phạm tại một điểm cụ thể[^liveness-instant]. Invariant `[]P` với `P` là vị từ trạng thái thì là safety, nhưng không phải safety nào cũng là invariant[^inv-vs-safety]. Ví dụ safety không phải invariant: "có một server cố định luôn online"[^safety-non-inv], hoặc property theo bước như "term không giảm"[^implied-action].
+2. `Inv` là invariant của `Spec` nếu `Spec => []Inv` là định lý[^inv-def]. Không nhất thiết nó là invariant của `Next`: `Coherence` của spec cache là invariant của `Spec` nhưng không phải của `Next`, vì các trạng thái vi phạm không với tới được từ `Init`[^coherence]. Invariant của cả `Spec` lẫn `Next` đôi khi được gọi là inductive[^inductive].
+3. `TypeOK` nên chỉ kiểm tập giá trị có thể, theo thói quen của tác giả Learn TLA+[^typeinv-principle]. Bản lỗi của `Release` chặn `free ≤ MaxConn`, nên `TypeOK` vẫn đúng ở mọi trạng thái nhưng `Conservation` sai ở trạng thái thứ 3 của trace tính tay (mục 2).
+4. Không có `[]`, TLC chỉ kiểm `Conservation` ở các trạng thái *đầu*[^prop-init]. Nó bỏ sót mọi vi phạm ở các trạng thái sau, và sách cũng nói một vị từ trạng thái trong `PROPERTY` nghĩa là `P` đúng ở trạng thái đầu của mọi hành vi[^prop-state-pred].
+5. TLC giữ hàng đợi `U` và đồ thị `G`, lấy trạng thái đầu hàng đợi, đánh giá `Next`, kiểm invariant rồi thêm trạng thái mới[^step-add]. Nó kết thúc khi hàng đợi rỗng, và chỉ khi tập trạng thái khả đạt hữu hạn[^terminates]. BFS cho trace ngắn nhất[^bfs-shortest]; với nhiều worker, về lý thuyết có thể có trace ngắn hơn[^workers-shorter].
+6. "Generated" gồm cả lần sinh trùng, còn "distinct" là số trạng thái khác nhau[^progress]. Fingerprint 64-bit có xác suất collision rất nhỏ trừ khi có hàng tỷ trạng thái[^fp-prob]. Một collision làm TLC tưởng hai trạng thái là một và bỏ sót phần phía sau[^fp-collision]; với view mặc định TLC vẫn báo đã kiểm hết khi chưa[^fp-silent].
+7. Ví dụ cfg ở mục 4: `SPECIFICATION Spec`, `CONSTANTS Clients = {c1, c2, c3}`, `MaxConn = 2`, `INVARIANTS TypeOK Conservation`, `SYMMETRY Symmetry`. Model value chỉ bằng chính nó[^mv], và TLC coi nó so sánh được với mọi giá trị khác nhưng khác mọi giá trị khác[^mv-book]. Trong khi đó, so sánh hai thứ không cùng kiểu như chuỗi với số là lỗi[^mv-why].
+8. (a) `CHECK_DEADLOCK FALSE` hoặc `-deadlock`: đơn giản nhưng mất khả năng bắt deadlock thật[^deadlock-opt]. (b) Thêm action `Terminating` chỉ enabled khi thật sự xong, như PlusCal làm[^pluscal-term]: giữ được kiểm deadlock nhưng phải viết đúng điều kiện. Khác P4·05: TLC chỉ thấy "không còn successor", không phân biệt chờ-lock-vòng với kết thúc[^deadlock-cex].
+9. Dùng hằng số nhỏ; `CONSTRAINT` (ví dụ `reqs <= MaxReqs`)[^constraint-def]; `TLCGet("level")`[^tlcget]; hoặc thay `Nat` bằng `0..n` trong cfg[^be-creative]. Rủi ro thứ nhất: bound chặt có thể không chạm tới lỗi cần model lớn hơn (nhận xét của người soạn; sách để lại lời nhắc kiểm xem model đã đủ lớn chưa[^fig143]). Rủi ro thứ hai: constraint cắt hành vi nên làm hỏng kiểm liveness[^constraint-liveness].
+10. Khi spec hoặc property *không* đối xứng với hoán vị, ví dụ gán `v1` cho một hằng, hoặc dùng `CHOOSE` trên tập[^symm-choose]. TLC không kiểm điều kiện này[^symm-nocheck], nên có thể bỏ sót lỗi hoặc in "Failed to recover the state from its fingerprint"[^symm-fail]. Cũng không dùng symmetry khi kiểm liveness[^symm-live]. Muốn dùng đúng, cả spec lẫn mọi property phải đối xứng[^symm-condition].
+11. (i) Chạy `-coverage` xem có action nào chưa bao giờ được thực thi[^coverage]. (ii) Kiểm một tính chất đáng lẽ vi phạm và xác nhận TLC báo lỗi[^should-violate]. (iii) Cân nhắc model đã đủ lớn chưa, thử bound lớn hơn trong cfg. (iv) Nhớ xác suất collision, và có thể chạy lại bằng fingerprint seed khác[^fp-toolbox2]. (v) Nhắc lại rằng mục tiêu của TLC là tìm lỗi chứ không phải chứng minh[^find-errors].
 
 </details>
 

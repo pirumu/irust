@@ -19,23 +19,29 @@ Mục 9 là mục phụ trợ: `io::Error`, `ErrorKind` và mẫu ánh xạ lỗ
 - `io::Error` và `errno`: [P1 · Chương 07](../01-linux/07-rust-tren-giao-dien-he-thong.md) (mục 3).
 - Thread và `Send`/`Sync` ở mức khái niệm: [P4 · Chương 08](../04-concurrency/08-rust-concurrency.md).
 
+Bạn đã viết backend đủ lâu để quen với exception, HTTP 4xx/5xx và log lỗi; chương này cho thấy Rust làm những việc đó bằng kiểu dữ liệu thay vì `throw`/`catch`. Ví dụ xuyên suốt là `orders`, một HTTP service viết bằng Rust: thread pool nhận request `POST /orders`, mỗi request đi qua handler `create_order` để đọc `qty` trong body, đọc cấu hình rồi ghi đơn vào database. Đây là ví dụ giả định của người soạn, không phải code trong repo.
+
 Mọi kết quả chạy trong chương được chạy bằng `rustc 1.95.0` / `cargo 1.95.0`, edition 2024, trên macOS aarch64; ví dụ có crate dùng `thiserror 2.0.21` và `anyhow 1.0.104` (đúng bản được trích docs.rs). Đó là *quan sát* một lần chạy, không phải bảo đảm của tài liệu.
 
 ---
 
 ## 1. Hai hệ thống lỗi: panic và Result (Q1)
 
-> **Trả lời ngắn.** `panic!` dành cho bug đã bị phát hiện trong chương trình: một giả định hay bất biến bị phá vỡ[^panic-bug][^book-badstate]. `Result` dành cho thất bại có thể lường trước của một phép tính, để code gọi tự quyết định xử lý[^result-anticipated][^book-expected]. Dữ liệu từ bên ngoài (request body, file người dùng) sai là thất bại lường trước, nên là `Result` (suy luận của người soạn từ ví dụ "parser được đưa dữ liệu sai dạng" của Book[^book-expected]).
+> **Trả lời ngắn.** `panic!` dành cho bug đã bị phát hiện trong chương trình: một giả định hay bất biến bị phá vỡ[^book-badstate]. `Result` dành cho thất bại có thể lường trước của một phép tính, để code gọi tự quyết định xử lý[^book-expected]. Dữ liệu từ bên ngoài (request body, file người dùng) sai là thất bại lường trước, nên là `Result` (suy luận của người soạn từ ví dụ "parser được đưa dữ liệu sai dạng" của Book).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhà bếp nhà hàng. Khách gọi món hết nguyên liệu là chuyện lường trước — phục vụ báo khách để khách chọn món khác (`Result`). Bình gas rò thì không ai "chọn món khác" được: đóng bếp, sơ tán (`panic!`). Ở ngôn ngữ có exception, cả hai đều đi cùng một cơ chế `throw`; Rust tách ra hai hệ thống bổ sung cho nhau, mỗi bên một vai.
+*Với service `orders`.* Trong `create_order`, hai chuyện có thể hỏng nhìn qua giống nhau nhưng bản chất khác hẳn. Chuyện thứ nhất: client gửi `qty = "abc"`. Việc này xảy ra hằng ngày và không phải lỗi của `orders`; handler chỉ cần trả 4xx. Chuyện thứ hai: code ở tầng dưới giả định danh sách `items` đã được kiểm tra là không rỗng, nhưng nhờ một bug nào đó nó lại rỗng. Lúc này chính chương trình đã sai, và tiếp tục chạy chỉ làm hỏng thêm. Ngôn ngữ có exception thường gộp cả hai vào `throw`; Rust tách thành hai hệ thống bổ sung cho nhau, mỗi bên một vai.
 
-Rust Book (ch09-03) đưa tiêu chí cụ thể:
+### 1.1 Tiêu chí của Book
 
-- **Nên panic** khi code có thể rơi vào "bad state" — một giả định, bảo đảm, hợp đồng hay bất biến bị phá vỡ[^book-badstate]. Từ điểm đó code phía sau dựa vào việc không ở trạng thái xấu, thay vì kiểm tra lại ở mọi bước.
-- **Nên trả `Result`** khi thất bại là điều có thể xảy ra: Book lấy ví dụ parser gặp dữ liệu sai dạng; trả `Result` cho biết thất bại là khả năng được dự kiến mà code gọi phải tự quyết định xử lý[^book-expected].
-- **Ví dụ, prototype, test**: `unwrap`/`expect` là phù hợp; trong test, `panic!` chính là cách đánh dấu test fail nên gọi `unwrap` hay `expect` là đúng điều cần xảy ra[^book-proto].
+Rust Book (ch09-03) trả lời câu "khi nào dùng cái nào" bằng ba tiêu chí:
+
+- **Nên panic** khi code có thể rơi vào "bad state", tức một giả định, bảo đảm, hợp đồng hay bất biến đã bị phá vỡ[^book-badstate]. Từ điểm đó code phía sau dựa vào việc nó không ở trạng thái xấu, thay vì kiểm tra lại ở mọi bước. Đây là trường hợp danh sách `items` rỗng ở trên.
+- **Nên trả `Result`** khi thất bại là điều có thể xảy ra. Book lấy ví dụ một parser nhận dữ liệu sai dạng; trả `Result` báo rằng thất bại là khả năng được dự kiến và code gọi phải tự quyết định xử lý[^book-expected]. Đây là trường hợp `qty = "abc"`.
+- **Ví dụ, prototype, test**: dùng `unwrap`/`expect` là phù hợp. Trong test, `panic!` chính là cách đánh dấu test fail, nên gọi `unwrap` hay `expect` là đúng điều cần xảy ra[^book-proto].
+
+Docs của macro `panic!` cũng nói cùng ý theo hướng khác: `panic!` dùng để tạo ra lỗi biểu diễn một bug đã bị phát hiện[^panic-bug], còn `Result` dành cho các kiểu lỗi biểu diễn một kiểu thất bại lường trước của phép tính đó[^result-anticipated].
 
 ```mermaid
 flowchart TD
@@ -46,7 +52,11 @@ flowchart TD
     D --> F[Unwind hoặc abort theo profile]
 ```
 
-(Sơ đồ là tóm tắt của người soạn từ các tiêu chí trên.) Với backend (nhận xét của người soạn): một handler panic vì dữ liệu xấu biến mọi request độc hại thành lỗi 500 làm mất worker/thread, còn `Result` cho phép trả 4xx có kiểm soát (mục 9).
+(Sơ đồ là tóm tắt của người soạn từ các tiêu chí trên.)
+
+### 1.2 Hệ quả cho `orders`
+
+Giả sử `create_order` parse `qty` bằng `unwrap` thay vì trả `Result`. Mỗi body sai dạng khi đó làm panic một thread trong pool, và client độc hại chỉ cần gửi đủ nhiều body như vậy là hạ gục dần worker (nhận xét của người soạn). Trả `Result` cho phép handler trả 4xx có kiểm soát, và thread vẫn sống để nhận request kế tiếp; phần ánh xạ lỗi sang status nằm ở mục 9.
 
 <details><summary>Đi sâu: unwrap/expect, combinator của Result/Option, collect, must_use</summary>
 
@@ -76,13 +86,15 @@ Bẫy hay gặp: bỏ quên `Result`. Chạy thật với `fn g() -> Result<i32,
 
 ## 2. Toán tử `?` (Q2)
 
-> **Trả lời ngắn.** `?` gặp `Err` thì trả lỗi ra khỏi cả hàm như một lệnh `return`[^book-q], và trước khi trả, lỗi đi qua `From::from` để đổi sang kiểu lỗi ở return type của hàm[^book-from]. Nó chỉ dùng được khi return type tương thích với giá trị bị `?`[^book-compat], nên `Option` và `Result` không trộn ngầm được. Phần desugar chính thức dựa trên trait `Try` mà hiện chưa stable[^ref-try-unstable].
+> **Trả lời ngắn.** `?` gặp `Err` thì trả lỗi ra khỏi cả hàm như một lệnh `return`[^book-q]. Trước khi trả, lỗi đi qua `From::from` để đổi sang kiểu lỗi ở return type của hàm[^book-from]. `?` chỉ dùng được khi return type tương thích với giá trị bị `?`[^book-compat], nên `Option` và `Result` không trộn ngầm được. Phần desugar chính thức dựa trên trait `Try`, mà hiện chưa stable[^ref-try-unstable].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `?` như tờ phiếu chuyển tiếp ở bệnh viện — gặp ca không xử lý được, nhân viên chuyển ca lên tuyến trên *kèm biểu mẫu đổi sang mẫu của tuyến trên*; mẫu đó chính là `From`.
+*Với service `orders`.* `create_order` có ba bước đều có thể thất bại: parse `qty`, đọc cấu hình, ghi đơn vào database. Mỗi bước trả một `Result` với kiểu lỗi riêng (`ParseIntError`, `io::Error`...), còn handler muốn trả ra ngoài một kiểu lỗi duy nhất. Nếu viết tay thì sau mỗi bước phải có một `match` rồi `return Err(e)` kèm đổi kiểu. `?` gói đúng đoạn lặp đó vào một ký tự.
 
-Không có `?`, propagate lỗi là một `match` với `return Err(e)`. `?` thay `match` đó, và điểm khác lớn nhất là bước chuyển kiểu qua `From::from`[^book-from]:
+### 2.1 `?` làm gì
+
+Không có `?`, propagate lỗi là một `match` với `return Err(e)`. `?` thay `match` đó: nhánh `Ok` lấy giá trị ra, nhánh `Err` trả lỗi sớm[^book-q]. Điểm khác lớn nhất so với `match` tay là bước chuyển kiểu: lỗi bị `?` đi qua hàm `from` của trait `From`, và đó là chỗ kiểu `ParseIntError` biến thành kiểu lỗi của hàm bạn[^book-from].
 
 ```rust
 fn f(s: &str) -> Result<i32, AppError> {
@@ -92,16 +104,20 @@ fn f(s: &str) -> Result<i32, AppError> {
 }
 ```
 
-Ba quy tắc bắt lỗi biên dịch hay gặp:
+(Ở đây `s` là trường `qty` lấy từ request của `orders`.)
 
-1. `?` chỉ dùng được trong hàm có return type tương thích với giá trị bị `?`[^book-compat]. Dùng trong `fn main()` trả `()`: `error[E0277]: the `?` operator can only be used in a function that returns `Result` or `Option``.
-2. Không trộn `Option` và `Result` ngầm: trong hàm trả `Result`, `v.first()?` cho `error[E0277]: the `?` operator can only be used on `Result`s, not `Option`s, in a function that returns `Result`` kèm gợi ý ``use `.ok_or(...)?` ``. Dùng `ok_or` / `ok_or_else` làm cầu nối (bảng ở mục 1).
-3. Thiếu `impl From<A> for B`: chạy thật với `fn f() -> Result<(), B> { g()?; ... }` (`g` trả `Result<_, A>`):
+### 2.2 Ba lỗi biên dịch hay gặp
+
+1. **`?` ngoài hàm trả `Result`/`Option`.** `?` chỉ dùng được trong hàm có return type tương thích với giá trị bị `?`[^book-compat]. Dùng trong `fn main()` trả `()` cho `error[E0277]: the `?` operator can only be used in a function that returns `Result` or `Option``.
+2. **Trộn `Option` và `Result`.** Hai kiểu này không đổi ngầm cho nhau. Trong hàm trả `Result`, `v.first()?` cho `error[E0277]: the `?` operator can only be used on `Result`s, not `Option`s, in a function that returns `Result`` kèm gợi ý ``use `.ok_or(...)?` ``. Nên dùng `ok_or` / `ok_or_else` làm cầu nối (bảng ở mục 1).
+3. **Thiếu `impl From<A> for B`.** Chạy thật với `fn f() -> Result<(), B> { g()?; ... }` (`g` trả `Result<_, A>`):
 
 ```
 error[E0277]: `?` couldn't convert the error to `B`
   = note: the question mark operation (`?`) implicitly performs a conversion on the error value using the `From` trait
 ```
+
+Trong `orders`, lỗi thứ ba là lỗi bạn sẽ gặp nhiều nhất: thêm một bước mới vào handler với kiểu lỗi mới, và compiler đòi bạn nói rõ lỗi đó trở thành gì trong `AppError` (nhận xét của người soạn).
 
 <details><summary>Đi sâu: định nghĩa hình thức theo Reference, và phần chưa stable</summary>
 
@@ -126,15 +142,21 @@ match core::ops::Try::branch(expr) {
 
 ## 3. Trait `std::error::Error` và chain lỗi (Q3)
 
-> **Trả lời ngắn.** Muốn implement `Error` chỉ cần có `Debug` và `Display`[^err-req]; mọi method khác có sẵn mặc định. Lỗi tầng cao bọc lỗi tầng thấp lộ nguyên nhân qua `Error::source()`[^err-source]. Lỗi con phải nằm **hoặc** ở `source()` **hoặc** trong `Display` của lỗi ngoài, không cả hai[^err-both].
+> **Trả lời ngắn.** Muốn implement `Error` chỉ cần có `Debug` và `Display`[^err-req]; mọi method khác có sẵn mặc định. Lỗi tầng cao bọc lỗi tầng thấp thì lộ nguyên nhân qua `Error::source()`[^err-source]. Lỗi con phải nằm **hoặc** ở `source()` **hoặc** trong `Display` của lỗi ngoài, không cả hai[^err-both].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hộp đựng hộp. Bên ngoài ghi "Lỗi nhập cấu hình"; mở ra là hộp "số không hợp lệ"; mở tiếp là hộp gốc. `source()` là thao tác "mở hộp kế tiếp".
+*Với service `orders`.* Khi `qty = "abc"`, lỗi sinh ra ở hai tầng. Tầng thấp là `ParseIntError` với thông điệp `invalid digit found in string`. Tầng cao là `AppError` của handler, báo "không đọc được request". Log của `orders` nên cho thấy cả hai, theo thứ tự từ ngoài vào trong, để người trực ca biết cả chuyện gì hỏng lẫn nó hỏng ở đâu. Trait `Error` cho cả hai tầng một giao diện chung để đi dọc từ lỗi ngoài vào lỗi gốc.
 
-Docs nêu quy ước: thông điệp lỗi thường là câu ngắn, viết thường, không dấu câu cuối[^err-style]; đó là lý do bạn thấy `invalid digit found in string` chứ không phải `Invalid digit.`.
+### 3.1 `Error` đòi gì, và quy ước thông điệp
 
-Lỗi tầng cao thường bọc lỗi tầng thấp. Docs nói: nếu một module phải báo lỗi gây ra bởi lỗi từ module cấp thấp hơn, nó có thể cho truy cập lỗi đó qua `Error::source()`[^err-source]. Quy tắc dễ bị vi phạm: với kiểu lỗi bọc lỗi con, lỗi con nên **hoặc** được trả bởi `source()`, **hoặc** được in trong `Display` của lỗi ngoài, nhưng không cả hai[^err-both]. Lý do thực tế (suy luận của người soạn): công cụ in chain (`anyhow`, logger) in từng mắt xích; nếu `Display` đã nhét lỗi con vào thì lỗi con xuất hiện hai lần.
+Để một kiểu là `Error` bạn chỉ cần cho nó `Debug` và `Display`; còn lại đã có mặc định[^err-req]. Docs nêu thêm quy ước: thông điệp lỗi thường là câu ngắn, viết thường, không có dấu câu ở cuối[^err-style]. Vì vậy bạn thấy `invalid digit found in string` chứ không phải `Invalid digit.`.
+
+### 3.2 `source()` và chain lỗi
+
+Khi một module phải báo lỗi gây ra bởi lỗi của module cấp thấp hơn, nó cho phép truy cập lỗi đó qua `Error::source()`[^err-source]. Gọi `source()` lặp đi lặp lại, bạn đi từ lỗi ngoài cùng tới lỗi gốc; đó là "chain lỗi". Với `orders`, `AppError::source()` trả `ParseIntError`, và `ParseIntError` không còn nguyên nhân nào dưới nó.
+
+Quy tắc dễ vi phạm nhất: với kiểu lỗi bọc một lỗi con, lỗi con nên **hoặc** được `source()` trả về, **hoặc** được in trong `Display` của lỗi ngoài, nhưng không cả hai[^err-both]. Lý do thực tế (suy luận của người soạn): công cụ in chain (`anyhow`, logger) in từng mắt xích, nên nếu `Display` của `AppError` đã nhét lỗi con vào thông điệp thì dòng log sẽ in lỗi con hai lần.
 
 <details><summary>Đi sâu: ví dụ đầy đủ (chạy thật), lỗi ngoài không in lỗi con</summary>
 
@@ -176,15 +198,21 @@ Kết quả: `chain: parse error` rồi `chain: invalid digit found in string`. 
 
 ## 4. `Box<dyn Error>` và vì sao cần `Send + Sync` (Q4)
 
-> **Trả lời ngắn.** `thread::spawn` đòi kiểu trả về `T: Send + 'static`[^spawn-bound]. `Box<dyn Error>` trần không đáp ứng (compiler báo E0277, xem phần đi sâu), nên phải ghi rõ `Box<dyn Error + Send + Sync>`, vốn được std cung cấp chuyển đổi từ mọi lỗi `Error + Send + Sync`[^box-from][^send]. Lý do `dyn Error` trần không bảo đảm `Send` — kiểu cụ thể bên trong có thể không `Send` — là suy luận của người soạn.
+> **Trả lời ngắn.** `thread::spawn` đòi kiểu trả về `T: Send + 'static`[^spawn-bound]. `Box<dyn Error>` trần không đáp ứng (compiler báo E0277, xem phần đi sâu), nên phải ghi rõ `Box<dyn Error + Send + Sync>`, kiểu mà std cung cấp sẵn phép chuyển từ mọi lỗi `Error + Send + Sync`[^box-from]. Vì sao `dyn Error` trần không bảo đảm `Send` — kiểu cụ thể bên trong có thể không `Send` — là suy luận của người soạn.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một thùng hàng không dán nhãn. Gửi sang kho khác (thread khác) thì kho đó cần biết bên trong có đồ dễ vỡ chỉ dùng được ở chỗ cũ hay không. Nhãn `Send + Sync` là lời cam kết "gửi đi được, dùng chung được".
+*Với service `orders`.* Sau khi ghi đơn, `orders` gửi mail xác nhận trong một thread nền: `thread::spawn` chạy hàm `send_confirmation() -> Result<(), Box<dyn Error>>`, rồi thread cha `join` để lấy kết quả. Code này không biên dịch, và lý do nằm ở hai chữ `Send` và `Sync` mà `Box<dyn Error>` không có.
 
-Book nói dùng `Box<dyn Error>` làm kiểu lỗi của `main` được phép vì nó cho trả sớm *bất kỳ* giá trị `Err` nào, và chữ ký vẫn đúng khi thêm code trả lỗi khác[^book-boxdyn]. Cơ sở kỹ thuật: std cung cấp `impl<'a, E: Error + 'a> From<E> for Box<dyn Error + 'a>` (và bản `Send + Sync`), docs nêu "chuyển một kiểu `Error + Send + Sync` thành box của `dyn Error + Send + Sync`"[^box-from]; cũng có `From<String>` cho các box này[^box-from-string] (và `From<&str>` tương tự trong danh sách impl của `Box`). Nhờ đó `?` đổi mọi lỗi thành `Box<dyn Error>`, và `Err("plain str")?` cũng được. Chạy thật: `fn h() -> Result<(), Box<dyn Error>> { Err("plain str")?; Ok(()) }` trả `Err("plain str")`.
+### 4.1 Vì sao `Box<dyn Error>` tiện
 
-Nhưng `dyn Error` trần **không** `Send` (quan sát từ compiler, xem phần đi sâu). `thread::spawn` đòi kiểu trả về `T: Send + 'static`[^spawn-bound]. `Send` là "các kiểu có thể chuyển qua ranh giới thread"[^send] và `Sync` là "các kiểu có thể chia sẻ tham chiếu giữa các thread một cách an toàn"[^sync]. Suy luận của người soạn: một `dyn Error` trần có thể đang chứa `Rc` hay thứ gì không-`Send`; compiler không thể biết, nên phải ghi rõ trong kiểu. Khuyến nghị của người soạn: hàm dùng được qua thread/async nên dùng `Box<dyn Error + Send + Sync>` hoặc `anyhow::Error`, vốn đã đòi `Send + Sync + 'static`[^anyhow-send].
+`Box<dyn Error>` tiện vì nó nhận được *bất kỳ* lỗi nào. Book nói dùng nó làm kiểu lỗi của `main` là được phép, vì nó cho trả sớm mọi giá trị `Err`, và chữ ký vẫn đúng khi sau này bạn thêm code trả một loại lỗi khác[^book-boxdyn]. Cơ sở kỹ thuật là std có `impl<'a, E: Error + 'a> From<E> for Box<dyn Error + 'a>` (và bản `Send + Sync`); docs mô tả phép chuyển một kiểu `Error + Send + Sync` thành box của `dyn Error + Send + Sync`[^box-from]. Std còn có `From<String>` cho các box này[^box-from-string], và `From<&str>` tương tự trong danh sách impl của `Box`. Nhờ đó `?` đổi mọi lỗi thành `Box<dyn Error>`, và `Err("plain str")?` cũng được. Chạy thật: `fn h() -> Result<(), Box<dyn Error>> { Err("plain str")?; Ok(()) }` trả `Err("plain str")`.
+
+### 4.2 Vì sao qua thread thì không được
+
+`dyn Error` trần **không** `Send` (quan sát từ compiler, xem phần đi sâu), trong khi `thread::spawn` đòi kiểu trả về `T: Send + 'static`[^spawn-bound]. `Send` là các kiểu có thể chuyển qua ranh giới thread[^send]; `Sync` là các kiểu cho phép chia sẻ tham chiếu giữa các thread một cách an toàn[^sync]. Suy luận của người soạn: một `dyn Error` trần có thể đang chứa `Rc` hay thứ gì khác không `Send`, mà compiler không thể nhìn xuyên qua trait object để biết, nên bạn phải ghi rõ cam kết đó trong kiểu.
+
+Khuyến nghị của người soạn: hàm nào có thể bị gọi qua thread hay async thì dùng `Box<dyn Error + Send + Sync>` hoặc `anyhow::Error`, vì `anyhow::Error` vốn đã đòi lỗi bên trong là `Send + Sync + 'static`[^anyhow-send].
 
 <details><summary>Đi sâu: thông báo lỗi thật, cách sửa và downcast</summary>
 
@@ -213,26 +241,36 @@ Sửa bằng `Box<dyn Error + Send + Sync>`: cùng chương trình in `Err("x")`
 
 ## 5. Thiết kế kiểu lỗi: `thiserror` cho thư viện, `anyhow` cho ứng dụng (Q5)
 
-> **Trả lời ngắn.** Thư viện cần enum lỗi có variant rõ ràng để caller phân biệt; `thiserror` sinh sẵn `Display`, `From`, `source()` cho enum đó[^te-intro][^te-display]. Ứng dụng thường chỉ cần báo lỗi kèm ngữ cảnh; `anyhow::Error` là kiểu lỗi trait object cho việc đó[^an-intro], và `context` thêm "đang làm gì" vào lỗi[^an-context]. Cách chia này là nhận xét của người soạn.
+> **Trả lời ngắn.** Thư viện cần enum lỗi có variant rõ ràng để caller phân biệt; `thiserror` sinh sẵn `Display`, `From`, `source()` cho enum đó[^te-display]. Ứng dụng thường chỉ cần báo lỗi kèm ngữ cảnh; `anyhow::Error` là kiểu lỗi trait object cho việc đó[^an-intro], và `context` thêm "đang làm gì" vào lỗi[^an-context]. Cách chia này là nhận xét của người soạn.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thư viện giống nhà sản xuất linh kiện — phải in mã lỗi rõ ràng để thợ sửa biết thay gì (enum variant). Ứng dụng giống tổng đài: khách chỉ cần nghe "không kết nối được vì đang đọc cấu hình X", chi tiết đi vào nhật ký.
+*Với service `orders`.* Giả sử `orders` tách thành hai lớp: crate `orders-store`, thư viện nội bộ truy cập database, và binary `orders-api` chứa handler và `main`. Hai lớp này cần hai kiểu lỗi khác nhau. `orders-api` phải phân biệt được "đơn không tồn tại" (trả 404) với "database hỏng" (trả 500, có thể retry), nên lỗi của `orders-store` phải là một enum có variant rõ ràng. Ngược lại ở `main`, khi không đọc được file cấu hình thì chỉ còn việc ghi log kèm lý do rồi thoát; ở đó không ai cần `match` theo variant (nhận xét của người soạn).
 
-Thư viện: caller cần phân biệt lỗi để phản ứng (retry khi timeout, trả 404 khi not found), nên kiểu lỗi là phần API công khai → một **enum**. Ứng dụng (binary, handler cấp cao): thường chỉ báo lỗi, ghi log, gắn ngữ cảnh rồi dừng hoặc trả 500.
+### 5.1 `thiserror`: enum lỗi cho thư viện
 
-**`thiserror 2.0.21`** cung cấp derive macro cho `std::error::Error`[^te-intro]. Docs khẳng định kết quả tương đương với tự viết impl bằng tay nên chuyển qua lại không phải breaking change[^te-equal]. Thuộc tính chính:
+`thiserror 2.0.21` cung cấp derive macro cho trait `std::error::Error`[^te-intro]. Docs khẳng định kết quả tương đương với tự viết impl bằng tay, nên chuyển qua lại giữa hai cách không phải breaking change[^te-equal]. Các thuộc tính chính:
 
 - `#[error("...")]` sinh `Display`[^te-display]; trong chuỗi dùng được tên field (`{id}`) hoặc chỉ số (`{0}`).
-- `#[from]` sinh `impl From` cho variant đó, variant không được có field nào khác ngoài lỗi nguồn (và có thể một backtrace)[^te-from]; `#[from]` ngầm có nghĩa field đó cũng là `#[source]`[^te-fromsource].
+- `#[from]` sinh `impl From` cho variant đó, nên `?` đổi được lỗi nguồn thành variant. Variant này không được có field nào khác ngoài lỗi nguồn (và có thể một backtrace)[^te-from]. `#[from]` ngầm có nghĩa field đó cũng là `#[source]`[^te-fromsource].
 - `#[source]` (hoặc field tên `source`) làm `source()` trả field đó[^te-source].
-- `#[error(transparent)]` chuyển tiếp `source` và `Display` thẳng tới lỗi bên trong, phù hợp cho variant "lỗi khác"[^te-transparent].
+- `#[error(transparent)]` chuyển tiếp `source` và `Display` thẳng tới lỗi bên trong, hợp cho variant "lỗi khác"[^te-transparent].
 
-**`anyhow 1.0.104`**: `anyhow::Error` là kiểu lỗi dạng trait object; hàm có thể fail dùng `anyhow::Result<T>` làm return type[^an-intro]. Trait `Context` thêm `context`/`with_context` lên `Result`: docs nói nên gắn ngữ cảnh để người điều tra hiểu bước cấp cao nào đang chạy, vì lỗi cấp thấp như "No such file or directory" khó debug nếu thiếu ngữ cảnh[^an-context]. `with_context` nhận closure chỉ được tính khi có lỗi[^an-lazy].
+### 5.2 `anyhow`: lỗi cho ứng dụng
 
-Khi hiển thị: `{}` chỉ in lớp ngoài cùng[^an-display]; selector `{:#}` in thêm các nguyên nhân[^an-alt]; `{:?}` in dạng "Caused by" (ví dụ đầu ra trong docs[^an-caused]) kèm backtrace nếu đã bắt[^an-debug-bt], và đây cũng là cách bạn nhận được khi **trả lỗi từ `fn main`** thay vì tự in[^an-debug].
+`anyhow::Error` (bản 1.0.104) là kiểu lỗi dạng trait object, và hàm có thể fail thì dùng `anyhow::Result<T>` làm return type[^an-intro]. Phần hay dùng nhất là trait `Context`, thêm `context` / `with_context` lên `Result`. Docs khuyên gắn ngữ cảnh để người điều tra hiểu bước cấp cao nào đang chạy, vì lỗi cấp thấp như "No such file or directory" rất khó debug khi thiếu ngữ cảnh[^an-context]. `with_context` nhận closure và chỉ chạy closure đó khi có lỗi[^an-lazy]; ở handler của `orders` nó rẻ hơn `context` trên đường thành công vì không phải dựng chuỗi ngữ cảnh trước (suy luận của người soạn).
 
-Mẫu phổ biến (nhận xét của người soạn): thư viện nội bộ dùng `thiserror` enum, tầng `main`/handler dùng `anyhow`. `anyhow` nhận mọi lỗi có impl `std::error::Error`; nó không đóng gói sẵn derive nên docs gợi ý tự viết impl hoặc dùng crate như `thiserror`[^an-thiserror]. Docs `thiserror` minh họa variant `#[error(transparent)] Other(#[from] anyhow::Error)` cho "lỗi khác"[^te-transparent].
+Khi hiển thị, `anyhow::Error` có ba dạng:
+
+- `{}` chỉ in lớp ngoài cùng[^an-display].
+- `{:#}` in thêm các nguyên nhân[^an-alt].
+- `{:?}` in dạng "Caused by" (ví dụ đầu ra trong docs[^an-caused]), kèm backtrace nếu đã bắt được[^an-debug-bt].
+
+Dạng `{:?}` cũng là thứ bạn nhận được khi **trả lỗi từ `fn main`** thay vì tự in[^an-debug].
+
+### 5.3 Ghép hai lớp
+
+Mẫu phổ biến (nhận xét của người soạn): thư viện nội bộ như `orders-store` dùng enum `thiserror`, còn tầng `main` và handler của `orders-api` dùng `anyhow`. `anyhow` nhận mọi lỗi có impl `std::error::Error`; nó không đóng gói sẵn derive nên docs gợi ý tự viết impl hoặc dùng crate như `thiserror`[^an-thiserror]. Docs `thiserror` còn minh họa variant `#[error(transparent)] Other(#[from] anyhow::Error)` cho nhóm "lỗi khác"[^te-transparent].
 
 <details><summary>Đi sâu: ví dụ chạy thật của thiserror, anyhow, kích thước, macro</summary>
 
@@ -304,17 +342,23 @@ và exit code là 1. `e.chain()` đi qua từng mắt xích, `e.root_cause()` tr
 
 ## 6. Backtrace: `RUST_BACKTRACE` và `RUST_LIB_BACKTRACE` (Q6)
 
-> **Trả lời ngắn.** `RUST_BACKTRACE` bật backtrace cho cả panic lẫn error; `RUST_LIB_BACKTRACE` chỉ bật cho error (`Backtrace::capture`, `anyhow`). Nếu `RUST_LIB_BACKTRACE` đã đặt thì nó thắng `RUST_BACKTRACE` khi `capture` quyết định có bắt hay không[^bt-env][^an-bt-cfg]. Không biến nào được đặt thì `Backtrace::capture()` không làm gì[^bt-capture].
+> **Trả lời ngắn.** `RUST_BACKTRACE` bật backtrace cho cả panic lẫn error; `RUST_LIB_BACKTRACE` chỉ bật cho error (`Backtrace::capture`, `anyhow`)[^an-bt-cfg]. Nếu `RUST_LIB_BACKTRACE` đã đặt thì nó thắng `RUST_BACKTRACE` khi `capture` quyết định có bắt hay không[^bt-env]. Không biến nào được đặt thì `Backtrace::capture()` không làm gì[^bt-capture].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ghi lại stack như camera an ninh — tốn bộ nhớ và chậm, nên mặc định tắt. Có một công tắc tổng (`RUST_BACKTRACE`) và một công tắc riêng cho error (`RUST_LIB_BACKTRACE`) ghi đè công tắc tổng.
+*Với service `orders`.* Một lỗi `orders` trả ra thường chỉ cho bạn biết *cái gì* hỏng ("No such file or directory"). Khi điều tra sự cố, bạn còn muốn biết *code nào* đã sinh ra lỗi đó, và đó là việc của backtrace, tức dấu vết các lời gọi hàm lúc lỗi xảy ra. Phần này trả lời hai câu hỏi thực tế: bật backtrace cho panic hay cho lỗi `Result`, và việc bật có làm chậm service không.
 
-`Backtrace::capture()` bắt stack backtrace của thread hiện tại. Docs: hàm này là **noop** nếu cả `RUST_BACKTRACE` lẫn `RUST_LIB_BACKTRACE` đều không được đặt; nếu một trong hai được bật thì mới bắt thật[^bt-capture]. Lý do: bắt backtrace có thể tốn bộ nhớ và chậm, các biến môi trường cho phép dùng `capture` tự do mà chỉ chịu chi phí khi bật[^bt-slow]. `Backtrace::force_capture` bỏ qua biến môi trường[^bt-force].
+### 6.1 `Backtrace::capture` và hai biến môi trường
 
-Luật ưu tiên: `RUST_LIB_BACKTRACE=0` thì `capture` không bao giờ bắt; giá trị khác bật; `RUST_BACKTRACE` chỉ được xét khi `RUST_LIB_BACKTRACE` không đặt[^bt-env]. Docs cảnh báo trạng thái biến được **cache** khi backtrace đầu tiên được tạo, nên đổi biến lúc chạy có thể không có tác dụng[^bt-cache].
+`Backtrace::capture()` bắt stack backtrace của thread hiện tại. Nó là **noop** (không làm gì) nếu cả `RUST_BACKTRACE` lẫn `RUST_LIB_BACKTRACE` đều không được đặt, và chỉ bắt thật khi một trong hai được bật[^bt-capture]. Lý do là việc bắt backtrace có thể tốn bộ nhớ và chậm; các biến môi trường cho phép bạn dùng `capture` thoải mái trong code và chỉ chịu chi phí khi bật biến[^bt-slow]. Muốn bỏ qua biến môi trường thì dùng `Backtrace::force_capture`[^bt-force].
 
-Với `anyhow` (Rust ≥ 1.65), backtrace được bắt và in kèm lỗi nếu lỗi gốc chưa có backtrace riêng[^an-bt]. Backtrace của **panic** (do hook mặc định in) được Book hướng dẫn bật bằng `RUST_BACKTRACE`, đặt giá trị bất kỳ trừ `0`[^book-bt]. Backend (nhận xét của người soạn): mỗi `anyhow::Error` tạo ra sẽ bắt backtrace khi bật biến, nên cân nhắc tắt ở production nếu lỗi xảy ra trên đường nóng.
+Luật ưu tiên: `RUST_LIB_BACKTRACE=0` thì `capture` không bao giờ bắt, giá trị khác bật; `RUST_BACKTRACE` chỉ được xét khi `RUST_LIB_BACKTRACE` không đặt[^bt-env]. Docs cảnh báo thêm rằng trạng thái biến được **cache** khi backtrace đầu tiên được tạo, nên đổi biến lúc chạy có thể không có tác dụng[^bt-cache].
+
+### 6.2 Panic và error
+
+Backtrace của **panic** (do hook mặc định in) được Book hướng dẫn bật bằng `RUST_BACKTRACE`, đặt giá trị bất kỳ trừ `0`[^book-bt]. Backtrace của **error** thì phụ thuộc thư viện: với `anyhow` (Rust ≥ 1.65), backtrace được bắt và in kèm lỗi nếu lỗi gốc chưa có backtrace riêng[^an-bt]. Tóm lại, `RUST_BACKTRACE` mở cả hai; muốn riêng error thì dùng `RUST_LIB_BACKTRACE=1`, muốn riêng panic thì `RUST_BACKTRACE=1` kèm `RUST_LIB_BACKTRACE=0` (bảng ở phần Đi sâu).
+
+Còn chuyện chi phí: mỗi `anyhow::Error` được tạo ra sẽ bắt backtrace khi biến được bật, nên nếu `orders` sinh lỗi liên tục trên đường nóng (ví dụ mỗi request sai dạng là một lỗi), hãy cân nhắc tắt ở production (nhận xét của người soạn).
 
 <details><summary>Đi sâu: bảng quan sát và ba cấu hình của anyhow</summary>
 
@@ -337,19 +381,29 @@ Kiểm chứng, theo ba cấu hình của docs `anyhow`[^an-bt-cfg]: `format!("{
 
 ## 7. Panic: unwind hay abort (Q7)
 
-> **Trả lời ngắn.** Mặc định cho phần lớn target là *unwind*: runtime đi ngược stack và gọi `drop` cho các đối tượng còn sống[^ref-default][^ref-drop]. Chọn `panic = "abort"` thì process bị abort và không phục hồi được[^ref-strategy]; `drop` không chạy (quan sát ở phần đi sâu). `catch_unwind` chỉ bắt được unwinding panic và không phải cơ chế try/catch tổng quát[^cu-abort][^cu-trycatch]; panic hook chạy trước cả hai giá trị `panic` của Cargo (`unwind` và `abort`)[^hook-intro].
+> **Trả lời ngắn.** Mặc định cho phần lớn target là *unwind*: runtime đi ngược stack và gọi `drop` cho các đối tượng còn sống[^ref-drop]. Chọn `panic = "abort"` thì process bị abort và không phục hồi được[^ref-strategy]; `drop` không chạy (quan sát ở phần đi sâu). `catch_unwind` chỉ bắt được unwinding panic[^cu-abort] và không phải cơ chế try/catch tổng quát[^cu-trycatch]. Panic hook chạy trước cả hai giá trị `panic` của Cargo (`unwind` và `abort`)[^hook-intro].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cháy trong tòa nhà. *Unwind* là lực lượng cứu hộ đi từng tầng từ trên xuống, tắt máy móc, khóa cửa (gọi `drop`) trước khi rời đi. *Abort* là cắt điện toàn tòa ngay — nhanh, gọn, nhưng không ai dọn gì cả.
+*Với service `orders`.* Một handler của `orders` panic giữa chừng, chẳng hạn vì `items` rỗng ở mục 1. Có ba câu hỏi nối nhau. Thread đó chết thế nào, và những thứ nó đang giữ (kết nối database, `Mutex` của cache) có được dọn không? Cả process có chết theo không? Và ta can thiệp được ở điểm nào? Mục này đi lần lượt qua *unwind* và *abort* (hai chiến lược chọn lúc build), `catch_unwind` và panic hook.
 
-Khi `panic!` xảy ra, hook được gọi, rồi runtime chọn một trong hai chiến lược. Reference: `unwind` giải phóng stack và có thể phục hồi; `abort` dừng process và không thể phục hồi[^ref-strategy]; chiến lược mặc định cho phần lớn target là unwind[^ref-default]. Book nói khi panic mà unwind, Rust đi ngược stack và dọn dữ liệu của từng hàm đi qua[^book-unwind]; Reference nói cụ thể là các đối tượng sống trong các frame đó mà implement `Drop` sẽ được gọi `drop`[^ref-drop].
+### 7.1 Unwind và abort
 
-Panic trong **một thread** chỉ làm thread đó unwind; `JoinHandle::join` trả `Err` với tham số đã đưa vào `panic!`[^join-err]. Mutex mà thread panic đang giữ bị **poisoned**[^mutex-poison] (chạy thật: `is_poisoned()` → `true`).
+Khi `panic!` xảy ra, hook được gọi trước, rồi runtime chọn một trong hai chiến lược. `unwind` giải phóng stack và có thể phục hồi; `abort` dừng cả process và không thể phục hồi[^ref-strategy]. Chiến lược mặc định cho phần lớn target là unwind[^ref-default].
 
-`catch_unwind` chạy closure và bắt nguyên nhân nếu có unwinding panic[^cu-intro]. Docs nói rõ: **không khuyến nghị** dùng làm cơ chế try/catch tổng quát; `Result` hợp hơn cho hàm thất bại thường xuyên[^cu-trycatch]. Hàm này cũng không bắt được panic trong build `abort`[^cu-abort]. Closure phải thoả `UnwindSafe`, để mã hoá khái niệm exception safety trong hệ kiểu[^cu-unwindsafe]; lý do, ví dụ không-unwind-safe và liên hệ với poisoning xem [P10 · Chương 08, mục 3](../10-rust-internals/08-panic-abi-ffi.md). Chỗ dùng hợp lý (nhận xét của người soạn): ranh giới FFI/thread pool/framework.
+Unwind nghĩa là Rust đi ngược lên stack và dọn dữ liệu của từng hàm nó đi qua[^book-unwind]. Cụ thể hơn, mọi đối tượng còn sống trong các frame đó mà implement `Drop` sẽ được gọi `drop`[^ref-drop]. Với `orders`, nhờ vậy guard của kết nối database hay của `Mutex` được trả lại trước khi thread chết. Còn `abort` dừng ngay, không dọn gì (quan sát ở phần Đi sâu).
 
-`panic::set_hook` đăng ký hook thay thế hook trước đó; hook được gọi khi thread panic, **trước** khi panic runtime chạy, nên chạy được với cả runtime abort lẫn unwind[^hook-intro]. Hook mặc định in thông điệp ra stderr kèm backtrace nếu được yêu cầu[^hook-default], và hook là tài nguyên toàn cục[^hook-global]. Chỗ dùng (nhận xét của người soạn): đổi định dạng log thành JSON trước khi process chết. `take_hook` và `resume_unwind`: [P10 · Chương 08, mục 3](../10-rust-internals/08-panic-abi-ffi.md).
+Panic trong **một thread** chỉ làm thread đó unwind, và `JoinHandle::join` trả `Err` với tham số đã đưa vào `panic!`[^join-err]. Một `Mutex` mà thread panic đang giữ bị **poisoned**[^mutex-poison] (chạy thật: `is_poisoned()` → `true`). Nếu `orders` có một cache bọc trong `Mutex`, cache đó sẽ mang dấu poisoned sau khi một handler panic lúc đang giữ khóa.
+
+### 7.2 `catch_unwind`
+
+`catch_unwind` chạy một closure và bắt nguyên nhân của unwinding panic nếu có[^cu-intro]. Docs nói rõ **không khuyến nghị** dùng nó làm cơ chế try/catch tổng quát; với hàm thất bại thường xuyên thì `Result` hợp hơn[^cu-trycatch]. Hàm này cũng không bắt được panic trong build `abort`[^cu-abort]. Closure phải thỏa `UnwindSafe`, ràng buộc dùng để mã hóa khái niệm exception safety vào hệ kiểu[^cu-unwindsafe]; lý do, ví dụ không-unwind-safe và mối liên hệ với poisoning xem [P10 · Chương 08, mục 3](../10-rust-internals/08-panic-abi-ffi.md). Chỗ dùng hợp lý (nhận xét của người soạn): ranh giới FFI, thread pool, framework, tức nơi bạn không muốn một panic lan ra ngoài lớp bao.
+
+### 7.3 Panic hook
+
+`panic::set_hook` đăng ký hook thay thế hook trước đó. Hook được gọi khi thread panic, **trước** khi panic runtime chạy, nên nó chạy được với cả runtime abort lẫn unwind[^hook-intro]. Hook mặc định in thông điệp ra stderr, kèm backtrace nếu được yêu cầu[^hook-default]. Hook là tài nguyên toàn cục[^hook-global], nên đặt một lần lúc khởi động. Chỗ dùng (nhận xét của người soạn): đổi thông điệp panic của `orders` thành một dòng JSON cho hệ thống log, trước khi thread hoặc process chết. Về `take_hook` và `resume_unwind`: [P10 · Chương 08, mục 3](../10-rust-internals/08-panic-abi-ffi.md).
+
+### 7.4 Chọn gì cho server
 
 Với server (nhận xét của người soạn): `abort` hợp mô hình "crash rồi để Kubernetes khởi động lại"; `unwind` hợp khi một thread worker panic không nên kéo cả process chết.
 
@@ -398,15 +452,23 @@ in `HOOK: custom at line 15`. Hook chạy cả trong build `abort`[^hook-intro].
 
 ## 8. `main` trả `Result` và `Termination` (Q8)
 
-> **Trả lời ngắn.** `main` có thể trả mọi kiểu implement `Termination`[^book-term]. Khi `main` trả `Err`, std in `Error: ` kèm giá trị lỗi dạng `Debug` ra stderr rồi trả `ExitCode::FAILURE`[^term-src]; docs gọi đó là mã "canonical" cho kết thúc không thành công trên nền tảng hiện tại[^exit-failure] (quan sát trên macOS: mã 1). Muốn mã khác dùng `ExitCode`[^exitcode].
+> **Trả lời ngắn.** `main` có thể trả mọi kiểu implement `Termination`[^book-term]. Khi `main` trả `Err`, std in `Error: ` kèm giá trị lỗi dạng `Debug` ra stderr rồi trả `ExitCode::FAILURE`[^term-src]. Docs gọi đó là mã "canonical" cho kết thúc không thành công trên nền tảng hiện tại[^exit-failure] (quan sát trên macOS: mã 1). Muốn mã khác thì dùng `ExitCode`[^exitcode].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `Termination` là người thông dịch giữa Rust và hệ điều hành — OS chỉ hiểu một con số, Rust có thể trả `Result`, `()`, `ExitCode`...; `Termination` dịch tất cả thành con số đó.
+*Với service `orders`.* Lúc khởi động, `main` của `orders` đọc cấu hình, kết nối database rồi mở cổng. Nếu file cấu hình thiếu, `main` phải kết thúc và báo cho môi trường chạy (systemd, Kubernetes) biết là thất bại, bằng exit code khác 0 chứ không bằng thông điệp văn bản. Câu hỏi của mục này: Rust biến một `Result` trả từ `main` thành exit code và dòng stderr như thế nào?
 
-Book: `main` có thể trả mọi kiểu implement `std::process::Termination`, trait có hàm `report` trả `ExitCode`[^book-term]. Docs `Termination`: C-main chỉ hỗ trợ trả số nguyên nên mọi kiểu phải được đổi thành số nguyên; mặc định trả `EXIT_SUCCESS` khi thành công và `EXIT_FAILURE` khi lỗi[^term-int]. Std có `impl<T: Termination, E: Debug> Termination for Result<T, E>`[^term-result]. Nhánh `Err` in lỗi bằng **`Debug`**, không phải `Display`[^term-src]. Vì vậy với `Box<dyn Error>` ra màn hình là dạng `Debug` thô, còn `anyhow::Result` cho bạn dạng "Caused by" đẹp (mục 5) vì `Debug` của `anyhow::Error` được thiết kế như vậy[^an-debug].
+### 8.1 `Termination`
 
-Docs: `ExitCode` được dự định chỉ để thư viện chuẩn tiêu thụ (qua `Termination::report()`); có sẵn `SUCCESS`, `FAILURE` và `From<u8>`[^exitcode].
+`main` có thể trả mọi kiểu implement `std::process::Termination`, một trait có hàm `report` trả `ExitCode`[^book-term]. Lý do cần trait này: C-main chỉ hỗ trợ trả số nguyên, nên mọi kiểu đều phải đổi thành số nguyên; mặc định trả `EXIT_SUCCESS` khi thành công và `EXIT_FAILURE` khi lỗi[^term-int]. Với `Result`, std có `impl<T: Termination, E: Debug> Termination for Result<T, E>`[^term-result].
+
+### 8.2 Nhánh `Err` in bằng `Debug`
+
+Nhánh `Err` in lỗi bằng **`Debug`**, không phải `Display`[^term-src]. Vì vậy với `Box<dyn Error>`, thứ bạn thấy trên stderr là dạng `Debug` thô. `anyhow::Result` cho dạng "Caused by" dễ đọc hơn nhiều (mục 5), vì `Debug` của `anyhow::Error` được thiết kế như vậy[^an-debug].
+
+### 8.3 Muốn exit code khác 1
+
+`ExitCode` được dự định chỉ để thư viện chuẩn tiêu thụ (qua `Termination::report()`). Std có sẵn `SUCCESS`, `FAILURE` và `From<u8>` để dựng mã tùy ý[^exitcode].
 
 <details><summary>Đi sâu: quan sát thật và source std 1.95.0</summary>
 
@@ -430,9 +492,15 @@ trên stderr, exit code 1. Trong source std 1.95.0, `report` in `"Error: {err:?}
 
 **Giải thích.**
 
-`io::Error` là kiểu lỗi cho các thao tác I/O (`Read`, `Write`, `Seek`...); phần lớn lỗi đến từ hệ điều hành, nhưng bạn cũng tự tạo được với thông điệp và một `ErrorKind`[^io-error]. `ErrorKind` là danh sách các nhóm lỗi I/O chung; docs cảnh báo danh sách này sẽ lớn thêm và **không** nên match đầy đủ[^ek-grow]; enum mang `#[non_exhaustive]` nên khi `match` buộc phải có nhánh `_`[^ek-nonexh]. `ErrorKind::Other` là "lỗi tuỳ biến không thuộc loại nào khác"[^ek-other]. Chi tiết `errno` → `ErrorKind`: [P1 · Chương 07, mục 3](../01-linux/07-rust-tren-giao-dien-he-thong.md).
+*Với service `orders`.* Lỗi của `orders` đi từ database và file hệ thống lên tới handler, và ở biên handler nó phải thành một HTTP status: đơn không có thì 404, không đủ quyền đọc file thì 403, dữ liệu sai thì 422, còn lại 500. Mục này nói hai nửa của việc đó: đọc đúng `io::Error` ở tầng I/O, rồi đổi lỗi miền sang status ở biên.
 
-Điểm thiết kế (nhận xét của người soạn): `Display` trả client phải an toàn, chi tiết đi theo `source()` vào log; `match` trong `status()` không có `_` nên thêm variant là compiler buộc chọn status.
+### 9.1 `io::Error` và `ErrorKind`
+
+`io::Error` là kiểu lỗi cho các thao tác I/O (`Read`, `Write`, `Seek`...). Phần lớn lỗi đến từ hệ điều hành, nhưng bạn cũng tự tạo được với một thông điệp và một `ErrorKind`[^io-error]. `ErrorKind` là danh sách các nhóm lỗi I/O chung. Docs cảnh báo danh sách này sẽ lớn thêm và **không** nên match đầy đủ[^ek-grow]. Vì enum có `#[non_exhaustive]`, khi `match` bạn buộc phải có nhánh `_`[^ek-nonexh]. `ErrorKind::Other` là "lỗi tùy biến không thuộc loại nào khác"[^ek-other]. Chi tiết `errno` → `ErrorKind`: [P1 · Chương 07, mục 3](../01-linux/07-rust-tren-giao-dien-he-thong.md).
+
+### 9.2 Enum lỗi miền và HTTP status
+
+Điểm thiết kế (nhận xét của người soạn): `Display` của lỗi trả cho client phải an toàn (không lộ chi tiết nội bộ), còn chi tiết đi theo `source()` vào log. Hàm `status()` trên enum lỗi miền không có nhánh `_`, nên khi thêm một variant mới compiler buộc bạn chọn status cho nó.
 
 <details><summary>Đi sâu: quan sát io::Error và mẫu ApiError</summary>
 
@@ -484,7 +552,7 @@ Output: `404 user 7 not found`, `422 invalid input: age`, `500 database error`.
 
 ## Câu hỏi tự kiểm tra
 
-1. Một hàm parse JSON từ request body gặp dữ liệu sai. Trả `Result` hay `panic!`? Tiêu chí nào của Book áp dụng?
+1. Một hàm parse JSON từ request body của `orders` gặp dữ liệu sai. Trả `Result` hay `panic!`? Tiêu chí nào của Book áp dụng?
 <details><summary>Đáp án</summary>
 
 Trả `Result`: lỗi dự kiến là khả năng thường xảy ra mà caller phải tự quyết định xử lý[^book-expected]. `panic!` dành cho bad state/bất biến bị phá[^book-badstate].
@@ -494,63 +562,63 @@ Trả `Result`: lỗi dự kiến là khả năng thường xảy ra mà caller 
 2. Vì sao tự implement `Try` cho kiểu của bạn để dùng với `?` trên stable là không được? Reference viết gì về desugar?
 <details><summary>Đáp án</summary>
 
-`Try` chưa stable, không implement được cho kiểu người dùng[^ref-try-unstable]; desugar chỉ là "roughly equivalent" đoạn `match` với `Try::branch`/`FromResidual`[^ref-try-equiv].
+`Try` chưa stable, không implement được cho kiểu người dùng[^ref-try-unstable]. Desugar chỉ là "roughly equivalent" đoạn `match` với `Try::branch`/`FromResidual`[^ref-try-equiv].
 
 </details>
 
 3. Một `AppError` bọc `ParseIntError` và `Display` in cả lỗi con, đồng thời `source()` trả lỗi con. Vi phạm gì?
 <details><summary>Đáp án</summary>
 
-Quy tắc của docs `Error`: lỗi con hoặc ở `source()` hoặc ở `Display`, không cả hai[^err-both]; kết quả là lỗi con xuất hiện hai lần khi in chain.
+Quy tắc của docs `Error`: lỗi con hoặc ở `source()` hoặc ở `Display`, không cả hai[^err-both]. Kết quả là lỗi con xuất hiện hai lần khi in chain.
 
 </details>
 
 4. Vì sao đoạn dùng `thread::spawn(|| work())` với `work() -> Result<(), Box<dyn Error>>` không biên dịch? Sửa?
 <details><summary>Đáp án</summary>
 
-`dyn Error` không `Send`, mà `spawn` yêu cầu `T: Send + 'static` (E0277 trong mục 4). Dùng `Box<dyn Error + Send + Sync>`[^box-from][^send].
+`dyn Error` không `Send`, mà `spawn` yêu cầu `T: Send + 'static` (E0277 trong mục 4). Dùng `Box<dyn Error + Send + Sync>`[^box-from].
 
 </details>
 
 5. `RUST_BACKTRACE=1 RUST_LIB_BACKTRACE=0`: panic có backtrace không? `anyhow::Error` có không?
 <details><summary>Đáp án</summary>
 
-Panic có, error không[^an-bt-cfg]; `capture().status()` là `Disabled` (bảng mục 6); luật ưu tiên: `RUST_BACKTRACE` chỉ được xét khi `RUST_LIB_BACKTRACE` không đặt[^bt-env].
+Panic có, error không[^an-bt-cfg]. `capture().status()` là `Disabled` (bảng mục 6), vì `RUST_BACKTRACE` chỉ được xét khi `RUST_LIB_BACKTRACE` không đặt[^bt-env].
 
 </details>
 
 6. Với `panic = "abort"`, `catch_unwind` và `Drop` ra sao? Lợi ích?
 <details><summary>Đáp án</summary>
 
-`catch_unwind` chỉ bắt unwinding panic[^cu-abort]; `drop` không chạy (quan sát mục 7); lợi ích: optimizer có thể giảm kích thước và tăng tốc độ[^ref-abort-opt].
+`catch_unwind` chỉ bắt unwinding panic[^cu-abort]. `drop` không chạy (quan sát mục 7). Lợi ích: optimizer có thể giảm kích thước và tăng tốc độ[^ref-abort-opt].
 
 </details>
 
 7. Vì sao `match` trên `ErrorKind` cần nhánh `_`, nhưng `match` trên enum lỗi miền của bạn thì nên liệt kê đầy đủ?
 <details><summary>Đáp án</summary>
 
-`ErrorKind` là `#[non_exhaustive]` nên bắt buộc nhánh wildcard[^ek-nonexh] và không nên match đầy đủ[^ek-grow]. Enum của bạn kiểm soát được variant, nên không dùng `_` để compiler nhắc khi thêm variant (nhận xét của người soạn).
+`ErrorKind` là `#[non_exhaustive]` nên bắt buộc nhánh wildcard[^ek-nonexh]. Danh sách của nó còn tăng nên không nên match đầy đủ[^ek-grow]. Enum của bạn kiểm soát được variant, nên không dùng `_` để compiler nhắc khi thêm variant (nhận xét của người soạn).
 
 </details>
 
 8. `?` làm hai việc gì khi gặp `Err`? Thiếu `impl From` thì sao?
 <details><summary>Đáp án</summary>
 
-Trả sớm cả hàm và đổi lỗi qua `From::from`[^book-q][^book-from]; thiếu `From`: E0277 "`?` couldn't convert the error to `B`" (mục 2).
+Trả sớm cả hàm[^book-q], và đổi lỗi qua `From::from`[^book-from]. Thiếu `From` thì gặp E0277 "`?` couldn't convert the error to `B`" (mục 2).
 
 </details>
 
 9. `fn main() -> Result<(), Box<dyn Error>>` trả `Err`: stderr in gì, exit code là gì, và in bằng `Debug` hay `Display`?
 <details><summary>Đáp án</summary>
 
-`Error: {err:?}` — `Debug`, rồi trả `ExitCode::FAILURE` (quan sát: mã 1)[^term-src]; với `anyhow::Error` thì `Debug` là dạng "Caused by"[^an-caused].
+`Error: {err:?}` — `Debug`, rồi trả `ExitCode::FAILURE` (quan sát: mã 1)[^term-src]. Với `anyhow::Error` thì `Debug` là dạng "Caused by"[^an-caused].
 
 </details>
 
 10. `with_context` khác `context` ở điểm nào và vì sao quan trọng ở đường nóng?
 <details><summary>Đáp án</summary>
 
-`with_context` nhận closure, được tính lười, chỉ khi có lỗi[^an-lazy]; nhờ đó không tốn công dựng chuỗi ngữ cảnh khi thành công (suy luận của người soạn).
+`with_context` nhận closure, được tính lười, chỉ khi có lỗi[^an-lazy]. Nhờ đó không tốn công dựng chuỗi ngữ cảnh khi thành công (suy luận của người soạn).
 
 </details>
 

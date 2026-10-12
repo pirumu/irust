@@ -2,7 +2,7 @@
 
 ## Bạn sẽ hiểu được gì
 
-1. **Q1.** Vì sao người ta cần thread (parallelism, che I/O chậm), và vì sao thứ tự chạy không đoán trước được? → mục 1
+1. **Q1.** Vì sao một service như `orders` cần nhiều thread (chạy song song, che I/O chậm), và vì sao không đoán được thread nào chạy trước? → mục 1
 2. **Q2.** Thread khác process ở đâu: cái gì chung, cái gì riêng, và "thread control block" lưu gì? → mục 2
 3. **Q3.** Trên Linux, thread thực chất là gì? `clone(2)` với những cờ nào biến một "process con" thành một thread? → mục 3
 4. **Q4.** PID, TGID, TID khác nhau thế nào; `getpid(2)` và `gettid(2)` trả về gì ở thread thứ hai? → mục 4
@@ -17,46 +17,67 @@
 - [Address space (P3·01)](../03-memory/01-address-space.md) và [dịch địa chỉ (P3·02)](../03-memory/02-address-translation.md): để hiểu vì sao "cùng address space" nghĩa là cùng page table.
 - [Cache và NUMA (P2·06)](../02-cpu/06-cache-va-numa.md): khi hai thread chạy song song trên hai core, dữ liệu chung đi qua cache coherence; chương này không lặp lại phần đó.
 
-Chương này là chương mở đầu của phase concurrency. Việc *lên lịch* thread nằm ở [chương 02 — scheduling](02-scheduling.md); *khóa* ở [chương 03 — lock](03-lock.md); phần Rust chi tiết (`Send`/`Sync`, `thread::scope`, `Mutex`…) ở [chương 08 — Rust concurrency](08-rust-concurrency.md). Ở đây Rust chỉ được nhắc ngắn ở cuối.
+Đây là chương mở đầu của phase concurrency. Việc *lên lịch* thread nằm ở [chương 02 — scheduling](02-scheduling.md); *khóa* ở [chương 03 — lock](03-lock.md); phần Rust chi tiết (`Send`/`Sync`, `thread::scope`, `Mutex`…) ở [chương 08 — Rust concurrency](08-rust-concurrency.md). Ở đây Rust chỉ được nhắc ngắn ở cuối.
 
 ---
 
 ## 1. Vì sao cần thread, và vì sao thứ tự chạy không đoán được (Q1)
 
-> **Trả lời ngắn.** Để chạy song song trên nhiều CPU[^ostep-why-par] và không đứng chờ I/O chậm[^ostep-why-io]. Đổi lại, thread nào chạy trước do OS scheduler quyết định, ta không được giả định thứ tự[^ostep-sched-order].
+> **Trả lời ngắn.** Thread cho một process nhiều dòng thực thi cùng lúc. Nhờ vậy chương trình chạy song song trên nhiều CPU[^ostep-why-par]. Nó cũng không đứng im khi một việc phải chờ I/O chậm[^ostep-why-io]. Đổi lại, thread nào chạy trước do scheduler của OS quyết định, nên code không được giả định thứ tự[^ostep-sched-order].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nhiều đầu bếp chung một bếp — xong nhanh hơn, nhưng không biết ai mở tủ lạnh trước.
+*Với service của bạn.* Hãy hình dung `orders`, một service viết bằng Rust, chạy trên Linux và nhận đơn hàng qua TCP. Mỗi request nó đọc dữ liệu từ socket, mở một file đơn hàng, tính toán rồi trả lời. Ta sẽ bám theo `orders` suốt chương (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Nếu `orders` chỉ có một dòng thực thi thì một request đang chờ đĩa sẽ giữ cả service đứng, trong khi máy vẫn còn core rảnh. Mục này trả lời hai câu: thread giải bài toán đó thế nào, và ta phải trả giá gì.
 
+### 1.1 Thread là gì
 
-Ở các chương trước, một process có một dòng thực thi: một program counter (PC) đi qua code. Một **thread** (luồng) là một dòng thực thi như vậy bên trong process; process có thể có nhiều thread. Có hai lý do chính để làm vậy. Theo OSTEP, lý do thứ nhất đơn giản là parallelism[^ostep-why-par] — ví dụ chia việc cộng hai mảng rất lớn cho nhiều CPU. Lý do thứ hai là để chương trình không bị chặn vì I/O chậm[^ostep-why-io]. Sách giải thích: khi một thread chờ I/O, CPU scheduler có thể chuyển sang thread khác sẵn sàng chạy, nhờ đó I/O được chồng lấp với việc khác trong cùng một chương trình; nhiều ứng dụng server (web server, DBMS) dùng thread vì lý do này[^ostep-io-overlap].
+Ở các chương trước, một process có một dòng thực thi: một program counter (PC, thanh ghi cho biết lệnh nào sắp chạy) đi dọc theo code. **Thread** (luồng) là một dòng thực thi như vậy bên trong process, và một process có thể có nhiều thread. Cách dựng `orders` đơn giản nhất là giao mỗi kết nối đến cho một *handler thread* riêng (nhận xét của người soạn).
 
-Tại sao không dùng nhiều process? OSTEP thừa nhận ở cả hai trường hợp ta *có thể* dùng nhiều process, nhưng thread chia sẻ address space nên chia sẻ dữ liệu dễ, vì thế là lựa chọn tự nhiên khi các tác vụ cần chia sẻ nhiều dữ liệu[^ostep-vs-proc]. (Nhận xét của người soạn: đổi lại, process tách biệt nhau hơn; đó là trade-off cốt lõi, xem mục 2.)
+### 1.2 Hai lý do dùng thread
 
-<details><summary>Đi sâu: thứ tự chạy sau khi tạo thread</summary>
+Lý do thứ nhất đơn giản là parallelism: chia việc cho nhiều CPU chạy cùng lúc[^ostep-why-par]. Ví dụ sách giáo khoa hay dùng là cộng hai mảng rất lớn. Với `orders`, đó là nhiều request đang parse và kiểm tra đơn hàng trên các core khác nhau.
 
-Một cảnh báo ngay từ đầu, cũng từ OSTEP: sau khi tạo thread, thread mới có thể chạy ngay hoặc chưa; thread nào chạy tiếp do OS scheduler quyết định[^ostep-sched-order]. Không có lý do để giả định thứ tự. Mọi bug ở các chương sau của phase này đều sinh ra từ đây.
+Lý do thứ hai là không để chương trình bị chặn vì I/O chậm[^ostep-why-io]. Khi một handler thread đang chờ `File::open` hay `read` trả về, scheduler chuyển CPU sang thread khác đang sẵn sàng chạy. Việc chờ I/O nhờ vậy chồng lên việc khác trong cùng một chương trình, và nhiều server (web server, DBMS) dùng thread chính vì lý do này[^ostep-io-overlap]. Với `orders`: request A chờ đĩa thì request B vẫn được xử lý tiếp (nhận xét của người soạn).
+
+### 1.3 Sao không dùng nhiều process
+
+Ở cả hai trường hợp trên ta *có thể* dùng nhiều process thay vì nhiều thread. Nhưng thread chung address space nên chia sẻ dữ liệu rất dễ, và đó là lựa chọn tự nhiên khi các tác vụ cần chia sẻ nhiều dữ liệu[^ostep-vs-proc]. Với `orders`, cache đơn hàng và bộ đếm request đã phục vụ nằm trong RAM của một process; các handler thread đọc ghi thẳng vào đó, còn nhiều process thì phải đi qua pipe, socket hoặc shared memory. Đổi lại, process tách biệt nhau hơn, và đó là trade-off cốt lõi của mục 2 (nhận xét của người soạn).
+
+### 1.4 Cái giá: không đoán được thứ tự
+
+Chia sẻ dữ liệu có mặt trái. Khi `orders` có hai handler thread cùng sẵn sàng chạy, ai chạy tiếp là do scheduler của OS quyết định. Scheduler có thể theo một thuật toán hợp lý, nhưng ở một thời điểm bất kỳ thì khó biết nó sẽ cho thread nào chạy[^ostep-sched-order]. Vì vậy đừng viết code chỉ đúng khi handler A xong trước handler B. Phần lớn bug concurrency ở các chương sau của phase này đều xuất phát từ chỗ đó (nhận xét của người soạn).
+
+<details><summary>Đi sâu: thứ tự chạy ngay sau khi tạo thread</summary>
+
+Cảnh báo trên áp dụng cả cho khoảnh khắc ngay sau khi `orders` tạo handler thread. Thread mới có thể chạy ngay hoặc chưa, và thread nào chạy tiếp vẫn do scheduler quyết định[^ostep-sched-order]. Nên hai dòng log "bắt đầu xử lý" của hai request liên tiếp có thể hiện ra theo thứ tự nào cũng được (suy luận của người soạn).
 
 </details>
 
-**Quay lại Q1:** thread để chạy song song và che I/O chậm; đổi lại, thứ tự chạy do scheduler quyết định.
+**Quay lại Q1:** thread để `orders` chạy song song và che I/O chậm; đổi lại, thứ tự chạy do scheduler quyết định nên code không được dựa vào thứ tự.
 
 ## 2. Thread so với process: chung gì, riêng gì (Q2)
 
-> **Trả lời ngắn.** Thread cùng process chung address space nên chuyển giữa chúng không đổi page table[^ostep-no-pt]. Riêng mỗi thread: PC, register[^ostep-thread] và stack[^ostep-stacks], lưu trong thread control block (TCB)[^ostep-tcb-def].
+> **Trả lời ngắn.** Các thread cùng process chung một address space, nên chuyển CPU giữa chúng không phải đổi page table[^ostep-no-pt]. Mỗi thread có riêng program counter và register[^ostep-thread]. Nó cũng có riêng một stack[^ostep-stacks]. Hệ điều hành cất những thứ riêng đó trong thread control block (TCB)[^ostep-tcb-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai nhân viên chung văn phòng và tủ hồ sơ, mỗi người một bàn riêng.
+*Với service `orders`.* Hai handler thread của `orders` cùng đọc một cache đơn hàng trong RAM, nhưng mỗi thread có `buf` riêng để đọc request của kết nối nó phụ trách. Cái gì chung, cái gì riêng? Câu trả lời quyết định chỗ nào trong code cần đồng bộ (chương 03) và chỗ nào không (nhận xét của người soạn).
 
-OSTEP định nghĩa thread bằng cách so với process: mỗi thread rất giống một process riêng, trừ một điểm khác — các thread chia sẻ cùng address space nên truy cập được cùng dữ liệu[^ostep-thread]. Trạng thái của một thread gần giống một process: có PC riêng theo dõi nơi nó đang nạp lệnh, và có bộ register riêng để tính toán.
+### 2.1 Thread giống process, trừ address space
 
-Hệ quả cho context switch: chuyển từ thread T1 sang T2 trên một CPU thì phải lưu register của T1 và khôi phục của T2, giống context switch giữa process[^ostep-tcb]. Như process có process control block (PCB), thread cần một hoặc nhiều thread control block (TCB) để lưu trạng thái của từng thread trong process[^ostep-tcb-def]. Address space giữ nguyên, tức không cần đổi page table đang dùng[^ostep-no-pt].
+Mỗi thread rất giống một process riêng, trừ một điểm: các thread chung address space nên truy cập được cùng dữ liệu[^ostep-thread]. Trạng thái của một thread cũng gần giống một process. Nó có PC riêng để theo dõi nơi nó đang nạp lệnh, và có bộ register riêng để tính toán (cùng nguồn).
 
-Điểm khác thứ hai là stack. Process cổ điển có một stack; process nhiều thread thì có một stack cho mỗi thread[^ostep-stacks]. Biến cục bộ, tham số, giá trị trả về nằm trên stack của thread tương ứng — OSTEP gọi chỗ này là thread-local storage theo nghĩa rộng, tức chính stack của thread đó[^ostep-tls]. (Suy luận của người soạn từ các định nghĩa trên: phần chung là mọi thứ còn lại trong address space — code, global, heap; phần riêng là register, PC và stack.)
+### 2.2 Chuyển thread rẻ hơn chuyển process
 
-Sơ đồ dưới là minh họa của người soạn, tổng hợp từ các định nghĩa OSTEP ở trên:
+Hệ quả hiện ra ở context switch. Khi CPU chuyển từ thread T1 sang T2, OS phải lưu register của T1 và khôi phục register của T2, y như khi chuyển giữa hai process[^ostep-tcb]. Process có process control block (PCB) để cất trạng thái; process nhiều thread thì cần một hoặc nhiều thread control block (TCB), cất trạng thái của từng thread[^ostep-tcb-def]. Chỗ khác nằm ở address space: nó giữ nguyên, nên OS không cần đổi page table đang dùng[^ostep-no-pt].
+
+### 2.3 Mỗi thread một stack
+
+Điểm khác thứ hai là stack. Process cổ điển có một stack; process nhiều thread thì có một stack cho mỗi thread[^ostep-stacks]. Biến cục bộ, tham số và giá trị trả về nằm trên stack của chính thread đó, nên `buf` của handler này không bao giờ lẫn với `buf` của handler kia. OSTEP gọi chỗ này là thread-local storage theo nghĩa rộng: chính stack của thread[^ostep-tls].
+
+Từ các định nghĩa trên ta suy ra phần chung là mọi thứ còn lại trong address space (code, global, heap), còn phần riêng là register, PC và stack (suy luận của người soạn). Cache đơn hàng của `orders` nằm trên heap nên mọi handler thread đều thấy, và chính chỗ đó cần đồng bộ.
+
+Sơ đồ dưới là minh họa của người soạn, tổng hợp từ các định nghĩa trên:
 
 ```mermaid
 flowchart TB
@@ -73,7 +94,7 @@ flowchart TB
   T2 -. "truy cập được" .-> HEAP
 ```
 
-**Bảng so sánh.**
+Bảng so sánh với process tạo bằng `fork`:
 
 | Khía cạnh | Process (sau `fork`) | Thread cùng process |
 |---|---|---|
@@ -87,24 +108,27 @@ Cột "Process (sau `fork`)" là tổng hợp của người soạn (không có 
 
 <details><summary>Đi sâu: "stack riêng" không có nghĩa là được bảo vệ</summary>
 
-Lưu ý: "stack riêng" là *một vùng stack riêng trong cùng address space*, không phải vùng được bảo vệ khỏi thread khác. Suy luận từ định nghĩa trên (và từ `CLONE_VM`: mọi bộ nhớ của hai bên nằm trong cùng một vùng nhớ[^clone-vm]) đã được chốt bằng thí nghiệm: một chương trình C (glibc 2.36, container Linux aarch64) cho thread phụ đưa địa chỉ biến cục bộ của nó cho thread chính; thread chính đọc được giá trị `1234` và ghi đè thành `99` thẳng vào stack của thread kia, không lỗi gì (một lần chạy, **quan sát**). Trong Rust, thứ chặn việc này là lifetime/borrow checker chứ không phải phần cứng hay kernel (chương 08).
+"Stack riêng" chỉ là *một vùng stack riêng trong cùng address space*, không phải vùng được bảo vệ khỏi thread khác. Điều này suy ra từ định nghĩa ở trên và từ `CLONE_VM`: ghi vào bộ nhớ ở bên này thì bên kia cũng thấy[^clone-vm]. Suy luận đó đã được chốt bằng thí nghiệm. Một chương trình C (glibc 2.36, container Linux aarch64) cho thread phụ đưa địa chỉ biến cục bộ của nó cho thread chính. Thread chính đọc được giá trị `1234`, rồi ghi đè thành `99` thẳng vào stack của thread kia mà không có lỗi gì (một lần chạy, **quan sát**).
+
+Trong Rust, thứ chặn việc này là lifetime/borrow checker chứ không phải phần cứng hay kernel (chương 08).
 
 </details>
 
-**Quay lại Q2:** chung address space; riêng PC, register và stack.
+**Quay lại Q2:** các handler thread của `orders` chung address space (code, global, heap) và riêng PC, register, stack.
 
 ## 3. Trên Linux: thread là một task tạo bằng `clone(2)` (Q3)
 
-> **Trả lời ngắn.** Thread Linux của pthreads được tạo bằng `clone(2)`[^pthreads-11], syscall cho chọn chia sẻ phần nào của execution context[^clone-fork]; để kernel chấp nhận `CLONE_THREAD` cần tối thiểu `CLONE_VM` + `CLONE_SIGHAND` + `CLONE_THREAD`[^clone-einval-thread][^clone-einval-sighand].
+> **Trả lời ngắn.** Thread của pthreads trên Linux được tạo bằng syscall `clone(2)`[^pthreads-11]. `clone` cho chọn chia sẻ phần nào của execution context với bên con; chia sẻ đủ nhiều thì bên con là một thread[^clone-fork]. Tối thiểu cần bộ ba `CLONE_VM` + `CLONE_SIGHAND` + `CLONE_THREAD`. Lý do: `CLONE_THREAD` đòi phải có `CLONE_SIGHAND`[^clone-einval-thread]. Đến lượt `CLONE_SIGHAND` lại đòi phải có `CLONE_VM`[^clone-einval-sighand].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `fork` như photocopy cả bộ hồ sơ; `clone` hỏi "tờ nào dùng chung" — dùng chung đủ nhiều thì bên con thành thread.
+*Với service `orders`.* Mỗi lần `orders` gọi `thread::spawn` cho một handler mới, bên dưới có một thread của OS ra đời. Trên Unix, `std::thread::spawn` gọi `pthread_create` (chi tiết cài đặt của Rust 1.95.0, có thể đổi giữa các bản)[^rust-pthread-create]. Còn trên Linux, cả hai cài đặt pthreads đều dùng `clone(2)`[^pthreads-11]. Mục này mở `clone` ra xem: cờ nào biến một "process con" thành handler thread của `orders`, và các cờ ràng buộc nhau ra sao.
 
+### 3.1 `clone` so với `fork`
 
-Cả hai cài đặt pthreads trên Linux (LinuxThreads và NPTL) đều dùng syscall `clone(2)`[^pthreads-11], nên ta đọc `clone` để hiểu thread. Theo man page, `clone` giống `fork(2)` nhưng cho kiểm soát chính xác hơn phần nào của execution context được chia sẻ giữa process gọi và process con[^clone-fork]. Chọn cờ nào thì chia sẻ cái đó. `fork` tương đương `clone` với cờ chỉ là `SIGCHLD`[^fork-clone-eq] (xem [P1·03](../01-linux/03-process.md)).
+`fork(2)` tương đương `clone` với cờ chỉ là `SIGCHLD`[^fork-clone-eq]: bên con là một process tách biệt (xem [P1·03](../01-linux/03-process.md)). `clone` thì cho kiểm soát chính xác hơn phần nào của execution context được chia sẻ giữa bên gọi và bên con[^clone-fork]. Chọn cờ nào thì chia sẻ cái đó. Nếu chia sẻ đủ nhiều thì bên con thấy cùng bộ nhớ, cùng bảng fd và cùng signal handler với bên gọi, tức hành xử như một handler thread của `orders` (suy luận của người soạn từ bảng cờ dưới).
 
-Các cờ liên quan đến thread:
+### 3.2 Các cờ làm nên thread
 
 | Cờ | Tác dụng (theo man page) |
 |---|---|
@@ -114,7 +138,7 @@ Các cờ liên quan đến thread:
 | `CLONE_SIGHAND` | chia sẻ bảng signal handler: `sigaction(2)` của một bên đổi hành vi cho cả hai; nhưng signal mask và tập pending signal vẫn riêng[^clone-sighand] |
 | `CLONE_THREAD` | bên con được đặt vào cùng thread group với bên gọi[^clone-thread] |
 
-Các cờ ràng buộc nhau: `CLONE_THREAD` mà thiếu `CLONE_SIGHAND` thì `EINVAL`[^clone-einval-thread]; `CLONE_SIGHAND` mà thiếu `CLONE_VM` cũng `EINVAL`[^clone-einval-sighand]. Vậy để kernel chấp nhận `CLONE_THREAD`, cần tối thiểu bộ ba `CLONE_VM` + `CLONE_SIGHAND` + `CLONE_THREAD` (đó là điều kiện của kernel; thư viện pthreads còn truyền thêm cờ, xem phần Đi sâu bên dưới).
+Các cờ ràng buộc nhau. `CLONE_THREAD` mà thiếu `CLONE_SIGHAND` thì `clone` trả `EINVAL`[^clone-einval-thread]. `CLONE_SIGHAND` mà thiếu `CLONE_VM` cũng `EINVAL`[^clone-einval-sighand]. Từ đó, để kernel chấp nhận `CLONE_THREAD`, cần tối thiểu bộ ba `CLONE_VM` + `CLONE_SIGHAND` + `CLONE_THREAD`. Đây là điều kiện của kernel; thư viện pthreads còn truyền thêm cờ, xem phần Đi sâu.
 
 Sơ đồ (minh họa của người soạn, dựa vào bảng cờ và ràng buộc ở trên):
 
@@ -126,9 +150,7 @@ flowchart LR
 
 <details><summary>Đi sâu: quan sát <code>strace</code> và bốn cờ còn lại của glibc</summary>
 
-**Quan sát thật: chương trình Rust tạo thread gọi `clone` với cờ gì?**
-
-Để khỏi đoán bộ cờ mà thư viện thực sự truyền, tôi chạy một chương trình Rust (rustc 1.95.0) tạo vài thread trong container Linux (kernel 6.8.0, aarch64) dưới `strace -f -e trace=clone,clone3`. Kết quả (một lần chạy, một nền tảng — **quan sát**, không phải bảo đảm của docs):
+**Quan sát: chương trình Rust tạo thread gọi `clone` với cờ gì?** Để khỏi đoán bộ cờ mà thư viện thực sự truyền, tôi chạy một chương trình Rust (rustc 1.95.0) tạo vài thread trong container Linux (kernel 6.8.0, aarch64) dưới `strace -f -e trace=clone,clone3`. Kết quả (một lần chạy, một nền tảng, **quan sát**, không phải bảo đảm của docs):
 
 ```text
 clone(child_stack=0xe29e2d74e9e0, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGHAND|CLONE_THREAD|CLONE_SYSVSEM|CLONE_SETTLS|CLONE_PARENT_SETTID|CLONE_CHILD_CLEARTID, parent_tid=[12], tls=0xe29e2d74f860, child_tidptr=0xe29e2d74f1f0) = 12
@@ -137,46 +159,55 @@ clone(child_stack=0xe29e2d74e9e0, flags=CLONE_VM|CLONE_FS|CLONE_FILES|CLONE_SIGH
 [pid 11] <... futex resumed>)        = 0
 ```
 
-Một chương trình C dùng `pthread_create` + `pthread_join` trần (gcc, glibc 2.36) cho đúng cùng bộ cờ — nên đây là hành vi của glibc/NPTL, không phải của Rust riêng. Lưu ý đây là `clone`, không phải `clone3`, ở glibc 2.36. Thread chính (pid 11) không gọi `wait(2)` mà gọi `futex(FUTEX_WAIT…)` trên **đúng địa chỉ** `0xe29e2d74f1f0` đã truyền làm `child_tidptr`, với giá trị chờ là 12, chính là TID của thread con (`parent_tid=[12]`, kết quả trả về của `clone`); futex đó trở về ngay sau khi thread 12 thoát.
+Một chương trình C dùng `pthread_create` + `pthread_join` trần (gcc, glibc 2.36) cho đúng cùng bộ cờ, nên đây là hành vi của glibc/NPTL chứ không phải của riêng Rust. Cũng lưu ý đây là `clone`, không phải `clone3`, ở glibc 2.36.
 
-Ngoài năm cờ ở bảng trên còn có bốn cờ nữa trong dòng `clone` thật (theo man page):
+Thread chính (pid 11) không gọi `wait(2)` mà gọi `futex(FUTEX_WAIT…)` trên **đúng địa chỉ** `0xe29e2d74f1f0` đã truyền làm `child_tidptr`. Giá trị nó chờ là 12, chính là TID của thread con (`parent_tid=[12]`, kết quả trả về của `clone`). Futex đó trở về ngay sau khi thread 12 thoát.
 
-- `CLONE_SETTLS`: đặt descriptor TLS của thread mới; trên x86-64 đó là giá trị mới của thanh ghi base `%fs`, trên kiến trúc có thanh ghi TLS riêng thì là giá trị của thanh ghi đó; man page cảnh báo nhìn chung không nên dùng cờ này ngoài các thư viện cài đặt threading[^clone-settls].
+Ngoài năm cờ ở bảng trên, dòng `clone` thật còn bốn cờ nữa (theo man page):
+
+- `CLONE_SETTLS`: đặt descriptor TLS của thread mới. Trên x86-64 đó là giá trị mới của thanh ghi base `%fs`; trên kiến trúc có thanh ghi TLS riêng thì là giá trị của thanh ghi đó. Man page cảnh báo nhìn chung không nên dùng cờ này ngoài các thư viện cài đặt threading[^clone-settls].
 - `CLONE_PARENT_SETTID`: lưu TID của thread con vào bộ nhớ của bên gọi, và việc lưu hoàn tất trước khi `clone` trả về user space[^clone-parent-settid].
-- `CLONE_CHILD_CLEARTID`: khi thread con thoát, xóa (ghi 0) TID tại địa chỉ đã cho và làm một thao tác wakeup trên futex tại địa chỉ đó — man page ghi cờ này được dùng bởi các thư viện threading[^clone-cleartid]. (Suy luận của người soạn: đây là cơ chế `pthread_join` dựa vào.) Man page `clone(2)` không nhắc `pthread_join` và nói rõ một thread `CLONE_THREAD` không thể được `wait(2)` (xem mục 4), nhưng `strace` ở trên cho thấy thread chính chờ trên futex tại đúng địa chỉ `child_tidptr` với giá trị chờ là TID của thread con, rồi được đánh thức khi thread con thoát (**quan sát** một lần chạy ở glibc 2.36, kết hợp mô tả của man page); điều này khớp với `pthreads(7)`: "thread joining" trong NPTL cài bằng futex[^pthreads-futex].
-- `CLONE_SYSVSEM`: các bên chia sẻ một danh sách giá trị điều chỉnh semaphore System V (`semadj`)[^clone-sysvsem]. Cờ này không liên quan trực tiếp đến TLS hay join; nó xuất hiện trong dòng `strace` vì glibc truyền nó (nguồn: quan sát).
+- `CLONE_CHILD_CLEARTID`: khi thread con thoát, xóa (ghi 0) TID tại địa chỉ đã cho và làm một thao tác wakeup trên futex tại địa chỉ đó. Man page ghi cờ này được dùng bởi các thư viện threading[^clone-cleartid]. Có vẻ đây là cơ chế `pthread_join` dựa vào (suy luận của người soạn). Man page `clone(2)` không nhắc `pthread_join`, và nói rõ một thread `CLONE_THREAD` không thể được `wait(2)` (xem mục 4). Nhưng `strace` ở trên cho thấy thread chính chờ trên futex tại đúng địa chỉ `child_tidptr` với giá trị chờ là TID của thread con, rồi được đánh thức khi thread con thoát (**quan sát** một lần chạy ở glibc 2.36, kết hợp mô tả của man page). Điều này khớp với `pthreads(7)`: "thread joining" trong NPTL cài bằng futex[^pthreads-futex].
+- `CLONE_SYSVSEM`: các bên chia sẻ một danh sách giá trị điều chỉnh semaphore System V (`semadj`)[^clone-sysvsem]. Cờ này không liên quan trực tiếp đến TLS hay join; nó có trong dòng `strace` vì glibc truyền nó (nguồn: quan sát).
 
-`pthreads(7)` xác nhận mô hình này từ phía thư viện: cả LinuxThreads (cũ) và NPTL là cài đặt 1:1, mỗi thread ứng với một kernel scheduling entity, và cả hai dùng syscall `clone(2)` của Linux[^pthreads-11]. Chuẩn bị cho các phần sau: trong NPTL, các primitive đồng bộ (mutex, join…) được cài bằng syscall `futex(2)` của Linux[^pthreads-futex] — chủ đề của [chương 03](03-lock.md).
+`pthreads(7)` xác nhận mô hình này từ phía thư viện: cả LinuxThreads (cũ) và NPTL là cài đặt 1:1, mỗi thread ứng với một kernel scheduling entity, và cả hai dùng syscall `clone(2)` của Linux[^pthreads-11]. Một điều cần nhớ cho chương sau: trong NPTL, các primitive đồng bộ (mutex, join…) cài bằng syscall `futex(2)` của Linux[^pthreads-futex]. Đó là chủ đề của [chương 03](03-lock.md).
 
 </details>
 
-**Quay lại Q3:** thread Linux là task do `clone(2)` tạo với cờ chia sẻ VM, signal handler và thread group.
+**Quay lại Q3:** handler thread của `orders` là một task Linux do `clone(2)` tạo, với cờ chia sẻ VM, signal handler và thread group.
 
 ## 4. PID, TGID và TID (Q4)
 
-> **Trả lời ngắn.** Mọi thread trong một process có chung "PID" — thực chất là thread group ID (TGID), và `getpid(2)` trả về TGID[^clone-tgroup]. Mỗi thread có một TID riêng, lấy bằng `gettid(2)`; thread chính có TID bằng PID[^gettid-def].
+> **Trả lời ngắn.** Mọi thread trong một process có chung một "PID", thực chất là thread group ID (TGID), và `getpid(2)` trả về TGID đó[^clone-tgroup]. Mỗi thread còn có một TID riêng, lấy bằng `gettid(2)`; thread chính có TID bằng PID[^gettid-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): PID là số nhà, TID là số phòng của từng người ở trong.
+*Với service `orders`.* Giả sử bạn muốn log kèm định danh của handler đang xử lý request, hoặc nhìn `orders` từ bên ngoài bằng các công cụ của OS. Bạn sẽ gặp nhiều con số: số nào của process, số nào của từng handler, và `ThreadId` trong Rust có phải số đó không? Mục này phân biệt các loại định danh.
 
+### 4.1 TGID và TID
 
-Khi nhiều thread chung một "process", cần phân biệt "định danh của process" và "định danh của từng thread". Man page `clone(2)` mô tả: thread group là tính năng thêm từ Linux 2.4 để hỗ trợ khái niệm của POSIX threads về một tập thread chung một PID; PID chung này nội bộ gọi là thread group identifier (TGID), và từ Linux 2.4 `getpid(2)` trả về TGID của bên gọi[^clone-tgroup]. Các thread trong nhóm được phân biệt bằng TID duy nhất toàn hệ thống; TID của thread mới có sẵn dưới dạng giá trị trả về của `clone`, và một thread tự lấy TID của mình bằng `gettid(2)`[^clone-tid].
+Khi nhiều thread chung một "process", phải tách "định danh của process" khỏi "định danh của từng thread". Linux giải quyết bằng thread group, một tính năng thêm từ Linux 2.4 để hỗ trợ khái niệm của POSIX threads về một tập thread chung một PID. PID chung này nội bộ gọi là thread group identifier (TGID), và từ Linux 2.4 `getpid(2)` trả về TGID của bên gọi[^clone-tgroup]. Trong nhóm, mỗi thread được phân biệt bằng TID duy nhất toàn hệ thống. TID của thread mới có sẵn dưới dạng giá trị trả về của `clone`, và một thread tự lấy TID của mình bằng `gettid(2)`[^clone-tid].
 
-`gettid(2)` nói gọn: ở process đơn luồng, thread ID bằng process ID (giá trị `getpid(2)` trả về); ở process đa luồng, mọi thread có cùng PID nhưng mỗi thread có một TID riêng[^gettid-def]. Nếu `clone` được gọi *không* có `CLONE_THREAD` thì tạo một thread group mới có TGID bằng TID của thread đó, thread này là leader của nhóm[^clone-leader].
+Với `orders`, điều này có nghĩa là mọi handler thread đều trả cùng một số khi gọi `getpid`, nhưng mỗi handler có một số `gettid` khác nhau (suy ra từ nguồn vừa nêu và nguồn ngay dưới).
+
+### 4.2 Thread chính là leader
+
+`gettid(2)` nói gọn: ở process đơn luồng, thread ID bằng process ID (giá trị `getpid(2)` trả về); ở process đa luồng, mọi thread có cùng PID nhưng mỗi thread có một TID riêng[^gettid-def]. Còn nếu `clone` được gọi *không* có `CLONE_THREAD` thì nó tạo một thread group mới có TGID bằng TID của thread đó, và thread này là leader của nhóm[^clone-leader]. Thread chính của `orders` chính là leader như vậy.
+
+### 4.3 Bốn cái tên
 
 | Tên | Lấy bằng | Giá trị với thread thứ hai |
 |---|---|---|
 | PID = TGID | `getpid(2)` | giống thread chính |
 | TID | `gettid(2)` | duy nhất cho từng thread |
-| `pthread_t` | `pthread_self(3)` | giá trị opaque của thư viện — không phải cùng một thứ với TID[^gettid-posix] |
+| `pthread_t` | `pthread_self(3)` | giá trị opaque của thư viện, không phải cùng một thứ với TID[^gettid-posix] |
 | `ThreadId` của Rust | `thread::current().id()` | ID opaque, duy nhất cho mỗi thread[^rust-threadid] |
+
+Vậy nếu muốn khớp dòng log của một handler với thứ bạn thấy từ phía OS (ví dụ thư mục `/proc/<pid>/task/<tid>`), thứ cần ghi là TID, không phải `ThreadId` của Rust (suy luận của người soạn từ hai dòng cuối bảng).
 
 <details><summary>Đi sâu: số đo <code>/proc/self/task</code>, vòng đời thread, LinuxThreads</summary>
 
-**Số đo thật.**
-
-Chương trình thử (rustc 1.95.0, container Linux aarch64, kernel 6.8.0) tạo một thread phụ rồi in PID/TID từ cả hai thread, và liệt kê `/proc/self/task`:
+**Số đo thật.** Chương trình thử (rustc 1.95.0, container Linux aarch64, kernel 6.8.0) tạo một thread phụ rồi in PID/TID từ cả hai thread, và liệt kê `/proc/self/task`:
 
 ```text
 main: pid=32 tid=32
@@ -185,40 +216,52 @@ w1: pid=32 tid=33 X=7
 main X=0
 ```
 
-Đọc kết quả: thread chính có TID bằng PID (nó là leader); thread phụ có cùng PID (32) nhưng TID khác (33); thư mục `/proc/self/task` có một mục cho mỗi thread. Điều này khớp với `proc(5)`: dưới `/proc/<pid>/task` có `task/tid` chứa thông tin của từng thread, với tid là kernel thread ID của thread đó[^proc-task]. (Dòng `X=7` / `main X=0` là chủ đề mục 6: mỗi thread một bản biến thread-local.)
+Đọc kết quả: thread chính có TID bằng PID vì nó là leader. Thread phụ có cùng PID (32) nhưng TID khác (33). Thư mục `/proc/self/task` có một mục cho mỗi thread, khớp với `proc(5)`: dưới `/proc/<pid>/task` có `task/tid` chứa thông tin của từng thread, với tid là kernel thread ID của thread đó[^proc-task]. (Dòng `X=7` / `main X=0` là chủ đề mục 6: mỗi thread một bản biến thread-local.)
 
-Hai chi tiết vòng đời cũng nằm trong man page `clone(2)`: thread tạo bằng `CLONE_THREAD` có cùng parent process với bên gọi (nên `getppid(2)` giống nhau trong nhóm); khi nó kết thúc, bên tạo không nhận `SIGCHLD` và không thể lấy trạng thái bằng `wait(2)` ("The thread is said to be detached"); chỉ khi *mọi* thread của nhóm đã kết thúc thì parent của nhóm mới nhận `SIGCHLD`[^clone-detached]. (Suy luận của người soạn: đây là lý do thư viện cần `CLONE_CHILD_CLEARTID` + futex để cài `join`.)
+**Vòng đời thread.** Man page `clone(2)` có hai chi tiết nữa. Thread tạo bằng `CLONE_THREAD` có cùng parent process với bên gọi, nên `getppid(2)` giống nhau trong nhóm. Khi nó kết thúc, bên tạo không nhận `SIGCHLD` và không thể lấy trạng thái bằng `wait(2)` ("The thread is said to be detached"). Chỉ khi *mọi* thread của nhóm đã kết thúc thì parent của nhóm mới nhận `SIGCHLD`[^clone-detached]. Đó là lý do thư viện cần `CLONE_CHILD_CLEARTID` cộng futex để cài `join` (suy luận của người soạn).
 
-**LinuxThreads: vì sao PID chung là một yêu cầu thật.**
-
-Trước NPTL, LinuxThreads cài thread như process *không chung process ID*, nên hiện ra như các process riêng trong `ps(1)`[^pthreads-lt-pid]. So với LinuxThreads, NPTL tuân thủ đặc tả POSIX.1 sát hơn và nhanh hơn khi tạo số lượng lớn thread[^pthreads-nptl]; nó có từ glibc 2.3.2 và cần tính năng của kernel Linux 2.6[^pthreads-nptl-ver]. Thread group (Linux 2.4) và `CLONE_THREAD` là phần kernel cho phép "nhiều thread, một PID".
+**LinuxThreads: vì sao PID chung là một yêu cầu thật.** Trước NPTL, LinuxThreads cài thread như process *không chung process ID*, nên chúng hiện ra như các process riêng trong `ps(1)`[^pthreads-lt-pid]. So với LinuxThreads, NPTL tuân thủ đặc tả POSIX.1 sát hơn và nhanh hơn khi tạo số lượng lớn thread[^pthreads-nptl]. NPTL có từ glibc 2.3.2 và cần tính năng của kernel Linux 2.6[^pthreads-nptl-ver]. Thread group (Linux 2.4) cùng `CLONE_THREAD` là phần kernel cho phép "nhiều thread, một PID".
 
 </details>
 
-**Quay lại Q4:** TGID chung, TID riêng; thread chính có TID bằng PID.
+**Quay lại Q4:** các handler thread của `orders` chung TGID, mỗi handler một TID riêng; thread chính có TID bằng PID.
 
 ## 5. `pthreads(7)`: thuộc tính chung và riêng (Q5)
 
-> **Trả lời ngắn.** Mọi thread chung bộ nhớ global (data, heap)[^pthreads-mem] và một loạt thuộc tính cấp process như fd đang mở, signal disposition, thư mục hiện hành[^pthreads-shared]. Mỗi thread có riêng stack, thread ID, signal mask, `errno`…[^pthreads-private].
+> **Trả lời ngắn.** Mọi thread chung bộ nhớ global (data, heap)[^pthreads-mem]. Chúng còn chung một loạt thuộc tính cấp process như fd đang mở, signal disposition, thư mục hiện hành[^pthreads-shared]. Mỗi thread có riêng stack, thread ID, signal mask, `errno`…[^pthreads-private]
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cả nhà chung ví và giấy tờ, mỗi người một bàn học riêng.
+*Với service `orders`.* Hai handler thread chạy cùng lúc: handler A gọi `close(fd)` trên một file, trong khi handler B vẫn đang ghi vào đúng fd đó. Chuyện gì xảy ra? Câu trả lời nằm ở chỗ chuẩn POSIX quy định thuộc tính nào là của cả process, thuộc tính nào là của riêng từng thread (nhận xét của người soạn).
 
+### 5.1 Chung cho cả process
 
-Chuẩn POSIX quy định thread nào chung gì, riêng gì. Man page `pthreads(7)`: một process có thể chứa nhiều thread cùng chạy một chương trình; các thread chung bộ nhớ global (data và heap segment) nhưng mỗi thread có stack riêng (biến automatic)[^pthreads-mem].
+Theo `pthreads(7)`, các thread của một process chung bộ nhớ global (data và heap segment), còn mỗi thread có stack riêng cho biến automatic[^pthreads-mem]. Ngoài bộ nhớ, POSIX.1 còn yêu cầu thread chia sẻ một loạt thuộc tính khác, tức là thuộc tính cấp process chứ không phải cấp thread[^pthreads-shared]. Với `orders`, đáng chú ý nhất là:
 
-Về thuộc tính khác, `pthreads(7)` viết rằng POSIX.1 còn yêu cầu các thread chia sẻ một loạt thuộc tính khác (tức là thuộc tính cấp process chứ không phải cấp thread)[^pthreads-shared] và liệt kê, trong số đó: process ID, parent process ID, process group ID và session ID, controlling terminal, user và group ID, **open file descriptors**, record lock, **signal dispositions**, umask, thư mục hiện hành và thư mục root, interval timer và POSIX timer, nice value, resource limit, và số đo CPU time / resource usage. Ngược lại, ngoài stack, POSIX.1 quy định nhiều thuộc tính khác là riêng cho từng thread[^pthreads-private], gồm: thread ID (`pthread_t`), signal mask, biến `errno`, alternate signal stack, và real-time scheduling policy/priority; Linux thêm capabilities cũng là per-thread (cùng đoạn man page).
+- **open file descriptor**: cả process dùng chung một bảng fd;
+- **signal disposition**: cách process xử lý mỗi signal;
+- thư mục hiện hành, thư mục root và umask;
+- process ID, user ID và group ID.
 
-Hệ quả (nhận xét của người soạn): vì fd table chung, một thread `close(fd)` làm fd đó mất hiệu lực với *mọi* thread; `chdir` trong một thread đổi thư mục hiện hành của cả process.
+Danh sách đầy đủ ở phần Đi sâu.
 
-<details><summary>Đi sâu: đối chiếu với các cờ <code>clone</code></summary>
+### 5.2 Riêng cho từng thread
 
-Ghép với bảng cờ `clone` ở mục 3, ta thấy sự tương ứng: *chung* ⇔ cờ chia sẻ (`CLONE_VM` ↔ bộ nhớ, `CLONE_FILES` ↔ fd, `CLONE_FS` ↔ cwd/umask, `CLONE_SIGHAND` ↔ signal disposition, `CLONE_THREAD` ↔ PID); *riêng* ⇔ thứ kernel luôn giữ theo task (register, stack, signal mask — `clone(2)` nói rõ sau `CLONE_SIGHAND` hai bên vẫn có signal mask và pending signal riêng[^clone-sighand]).
+Ngoài stack, POSIX.1 quy định nhiều thuộc tính khác là riêng cho từng thread[^pthreads-private]. Đó là thread ID (`pthread_t`), signal mask, biến `errno`, alternate signal stack, và real-time scheduling policy/priority. Linux thêm capabilities cũng là per-thread (cùng đoạn man page).
+
+### 5.3 Hệ quả cho `orders`
+
+Vì fd table chung, handler A gọi `close(fd)` là làm fd đó mất hiệu lực với *mọi* thread, kể cả handler B đang ghi dở. Tương tự, một `chdir` trong một thread đổi thư mục hiện hành của cả process (nhận xét của người soạn).
+
+<details><summary>Đi sâu: danh sách đầy đủ, và đối chiếu với các cờ <code>clone</code></summary>
+
+**Danh sách thuộc tính chung.** `pthreads(7)` liệt kê, trong số đó[^pthreads-shared]: process ID, parent process ID, process group ID và session ID, controlling terminal, user và group ID, **open file descriptors**, record lock, **signal dispositions**, umask, thư mục hiện hành và thư mục root, interval timer và POSIX timer, nice value, resource limit, và số đo CPU time / resource usage.
+
+**Đối chiếu với `clone`.** Ghép với bảng cờ ở mục 3, ta thấy sự tương ứng. Phần *chung* ứng với cờ chia sẻ: `CLONE_VM` ↔ bộ nhớ, `CLONE_FILES` ↔ fd, `CLONE_FS` ↔ cwd/umask, `CLONE_SIGHAND` ↔ signal disposition, `CLONE_THREAD` ↔ PID. Phần *riêng* ứng với thứ kernel luôn giữ theo task (register, stack, signal mask). `clone(2)` nói rõ sau `CLONE_SIGHAND` hai bên vẫn có signal mask và pending signal riêng[^clone-sighand].
 
 </details>
 
-**Quay lại Q5:** chung bộ nhớ và thuộc tính cấp process; riêng stack, register, signal mask, `errno`.
+**Quay lại Q5:** các handler thread chung bộ nhớ và thuộc tính cấp process (fd, signal disposition, cwd…); riêng stack, register, signal mask, `errno`.
 
 ## 6. Thread-local storage (TLS) (Q6)
 
@@ -226,25 +269,48 @@ Ghép với bảng cờ `clone` ở mục 3, ta thấy sự tương ứng: *chun
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì một biển "số hiện tại" chung, phát mỗi người một tờ giấy riêng cùng tên.
+*Với service `orders`.* Mỗi handler muốn gắn id của request đang xử lý vào mọi dòng log, mà không muốn truyền id qua từng hàm. Một biến global thông thường thì các handler ghi đè lên nhau. Một biến mà mỗi handler thread có bản riêng thì giải quyết đúng chỗ này, và đó là thread-local storage (nhận xét của người soạn).
 
+### 6.1 Vấn đề: một "biến toàn cục" mà mỗi thread cần bản riêng
 
-**Vấn đề.** Đôi khi mỗi thread cần một bản riêng của một biến "toàn cục" — `errno` là ví dụ điển hình (`pthreads(7)` liệt kê nó là thuộc tính riêng của từng thread[^pthreads-private]). (Suy luận của người soạn: nếu `errno` là một biến global thật sự chung, hai thread gọi syscall lỗi cùng lúc sẽ ghi đè nhau.)
+`errno` là ví dụ điển hình; `pthreads(7)` liệt kê nó là thuộc tính riêng của từng thread[^pthreads-private]. Nếu `errno` là một biến global thật sự chung, hai thread gọi syscall lỗi cùng lúc sẽ ghi đè nhau (suy luận của người soạn).
 
-Trong Rust: module `std::thread` viết rằng thread-local storage là cách lưu dữ liệu vào một biến global mà mỗi thread trong chương trình có bản sao riêng; các thread không chia sẻ dữ liệu này nên truy cập không cần đồng bộ[^rust-tls]. Khóa TLS được tạo bằng macro `thread_local!`, sở hữu giá trị bên trong và hủy nó khi thread thoát; chỉ cho truy cập chia sẻ (`with` trả về shared reference), nên muốn sửa thì dùng interior mutability như `Cell`/`RefCell`[^rust-tls-key]. Kết quả quan sát ở mục 4 (`X=7` trong thread phụ nhưng `X=0` ở thread chính) minh họa đúng điều này.
+### 6.2 Trong Rust
 
-Cơ chế cài đặt TLS (kernel, libc, Rust) được đào sâu ở [chương 09 — Thread-local storage](09-thread-local-storage.md).
+Module `std::thread` mô tả thread-local storage là cách lưu dữ liệu vào một biến global mà mỗi thread trong chương trình có bản sao riêng. Các thread không chia sẻ dữ liệu này nên truy cập không cần đồng bộ[^rust-tls]. Khóa TLS tạo bằng macro `thread_local!`, sở hữu giá trị bên trong và hủy nó khi thread thoát. Khóa chỉ cho truy cập chia sẻ (`with` trả về shared reference), nên muốn sửa thì dùng interior mutability như `Cell`/`RefCell`[^rust-tls-key].
+
+Ví dụ minh họa của người soạn cho nhu cầu của `orders` (không kèm kết quả chạy):
+
+```rust
+use std::cell::Cell;
+
+thread_local! {
+    static REQUEST_ID: Cell<u64> = Cell::new(0);
+}
+
+fn handle(id: u64) {
+    REQUEST_ID.with(|r| r.set(id)); // chỉ handler thread này thấy giá trị
+    log("bắt đầu xử lý");
+}
+
+fn log(msg: &str) {
+    let id = REQUEST_ID.with(|r| r.get());
+    println!("[req {id}] {msg}");
+}
+```
+
+Kết quả quan sát ở mục 4 (`X=7` trong thread phụ nhưng `X=0` ở thread chính) minh họa đúng điều này. Cơ chế cài đặt TLS (kernel, libc, Rust) được đào sâu ở [chương 09 — Thread-local storage](09-thread-local-storage.md).
 
 <details><summary>Đi sâu: hai nghĩa của "thread-local storage" và vai trò của <code>CLONE_SETTLS</code></summary>
 
-**Hai nghĩa của "thread-local storage".** Cần phân biệt (nhận xét của người soạn, dựa trên hai nguồn dưới):
+Cần phân biệt hai nghĩa (nhận xét của người soạn, dựa trên hai nguồn dưới):
 
 1. Nghĩa rộng của OSTEP: biến cục bộ trên stack của thread, vốn riêng cho thread[^ostep-tls].
-2. Nghĩa của thư viện/ngôn ngữ: một biến có tuổi thọ toàn thread, được khai báo như global nhưng mỗi thread có một bản. Ở phía kernel, `CLONE_SETTLS` là chỗ kernel nhận địa chỉ vùng TLS cho thread mới[^clone-settls]; trên x86-64 nó nạp vào base register `%fs`, và trên các kiến trúc có thanh ghi TLS riêng thì nạp vào thanh ghi đó. Phần còn lại (cấp phát vùng TLS, truy cập qua base register) do libc và compiler làm; chi tiết ABI của từng kiến trúc tôi không đào sâu ở đây vì chưa đọc nguồn ABI.
+2. Nghĩa của thư viện/ngôn ngữ: một biến có tuổi thọ toàn thread, khai báo như global nhưng mỗi thread có một bản. Ở phía kernel, `CLONE_SETTLS` là chỗ kernel nhận địa chỉ vùng TLS cho thread mới[^clone-settls]. Trên x86-64 nó nạp vào base register `%fs`, còn trên các kiến trúc có thanh ghi TLS riêng thì nạp vào thanh ghi đó. Phần còn lại (cấp phát vùng TLS, truy cập qua base register) do libc và compiler làm. Chi tiết ABI của từng kiến trúc không được đào sâu ở đây vì chưa đọc nguồn ABI.
 
 </details>
 
-**Quay lại Q6:** TLS cho mỗi thread một bản biến riêng; Rust dùng `thread_local!`.
+**Quay lại Q6:** TLS cho mỗi thread một bản biến riêng, ví dụ request id của từng handler; Rust dùng `thread_local!`.
 
 ## 7. Thread tốn gì, và thread pool giải quyết gì (Q7)
 
@@ -252,107 +318,122 @@ Cơ chế cài đặt TLS (kernel, libc, Rust) được đào sâu ở [chương
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): tuyển người mới cho từng đơn thì tốn thời gian; nuôi sẵn đội cố định rẻ hơn, nhưng đơn phải xếp hàng khi hết người.
+*Với service `orders`.* Cách dễ nhất là mỗi kết nối một thread. Cách đó chạy được, nhưng tải tăng thì số thread tăng theo, và mỗi thread tốn bộ nhớ lẫn thời gian tạo. Mục này đo cái giá đó rồi nói thread pool đổi nó lấy gì (nhận xét của người soạn).
 
-**Stack.**
+### 7.1 Stack
 
-Mỗi thread cần stack riêng (mục 2). Kích thước mặc định phụ thuộc cách tạo:
+Mỗi thread cần stack riêng (mục 2). Với thread do `std::thread` của Rust tạo, kích thước mặc định phụ thuộc nền tảng và có thể đổi; hiện là 2 MiB trên mọi nền tảng Tier-1. Bạn đổi được bằng `Builder::stack_size` hoặc biến môi trường `RUST_MIN_STACK`, còn stack của *main thread* thì không do Rust quyết định[^rust-stack].
 
-- **pthreads/NPTL**: nếu giới hạn mềm `RLIMIT_STACK` lúc chương trình khởi động có giá trị khác "unlimited" thì nó quyết định stack mặc định của thread mới; có thể đặt riêng bằng `pthread_attr_setstacksize(3)`[^pthread-create-stack]. Man page ví dụ với `ulimit -s` là 8192, tức giới hạn 8 MB[^pthread-create-8mb].
-- **Rust `std::thread`**: mặc định phụ thuộc nền tảng và có thể đổi; hiện là 2 MiB trên mọi nền tảng Tier-1, đổi được bằng `Builder::stack_size` hoặc biến môi trường `RUST_MIN_STACK`; stack của *main thread* không do Rust quyết định[^rust-stack]. Mã nguồn 1.95.0 đặt `DEFAULT_MIN_STACK_SIZE` là `2 * 1024 * 1024` cho cấu hình phổ biến (một số nền tảng khác như L4Re, VxWorks có giá trị khác)[^rust-stack-src], và `std::thread::spawn` trên Unix gọi `pthread_create`[^rust-pthread-create] — tức thread Rust trên Linux là thread của pthreads/NPTL (chi tiết cài đặt, có thể đổi giữa các bản). Đoạn code đó truyền kích thước stack tường minh qua `pthread_attr_setstacksize` trước `pthread_create`, nên với thread do Rust spawn, stack mặc định là 2 MiB chứ không phải 8 MiB của `RLIMIT_STACK` (suy luận của người soạn từ đoạn code, khớp với đo ở mục 7: mỗi stack là một vùng nhớ đúng 2 MiB).
+2 MiB đó là bộ nhớ **ảo** được cấp trước. Trang vật lý chỉ có khi thread chạm tới nó (demand paging, xem [P3·04](../03-memory/04-page-fault-va-swapping.md)), nên kích thước ảo và RSS (phần RAM thật mà process đang dùng) khác nhau xa. Phần Đi sâu có số đo cụ thể với 1000 thread.
 
-Stack là bộ nhớ **ảo** được cấp trước; trang vật lý chỉ có khi được chạm tới (demand paging, xem [P3·04](../03-memory/04-page-fault-va-swapping.md)). Vì vậy kích thước ảo và RSS khác nhau xa.
+### 7.2 Tạo và hủy
 
-**Tạo và hủy.**
-
-Cùng container, vòng lặp 10.000 lần `thread::spawn(|| {}).join()` (thread rỗng) đo trung bình khoảng **40–45 µs** mỗi vòng (chạy lại ở lần review: 45 µs và 43 µs, `-O`; số này gồm `clone`, cấp stack, lên lịch trên core khác, thoát và join). Con số thay đổi mạnh theo máy/kernel/tải, nên chỉ dùng để thấy bậc độ lớn (hàng chục micro giây). Vì vậy backend thường không tạo thread cho từng việc nhỏ (xem thread pool bên dưới, nhận xét của người soạn).
+Tạo thread cũng không miễn phí. Trong container lab (Linux aarch64, kernel 6.8.0), vòng lặp 10.000 lần `thread::spawn(|| {}).join()` với thread rỗng đo trung bình khoảng **40–45 µs** mỗi vòng. Chạy lại ở lần review cho 45 µs và 43 µs (`-O`). Con số này gồm `clone`, cấp stack, lên lịch trên core khác, thoát và join. Nó thay đổi mạnh theo máy, kernel và tải, nên chỉ dùng để thấy bậc độ lớn: hàng chục micro giây. Vì vậy backend thường không tạo thread cho từng việc nhỏ (nhận xét của người soạn).
 
 Chi phí khi *chạy* nhiều thread hơn số core (context switch) thuộc [chương 02](02-scheduling.md).
 
-**Thread pool.**
+### 7.3 Thread pool
 
-**Vấn đề.** Server có thể tạo một thread cho mỗi kết nối, nhưng số thread không bị chặn sẽ phình theo tải (mỗi thread tốn không gian ảo và thời gian tạo, như trên). Sách Rust (chương xây web server) nêu rõ vấn đề số thread không giới hạn và dùng thread pool làm cải tiến[^book-pool-unlimited].
+Với `orders`, tạo một thread cho mỗi kết nối nghĩa là số thread không bị chặn trên: nó phình theo tải, và mỗi thread tốn không gian ảo cùng thời gian tạo như trên. Sách Rust, ở chương xây web server, nêu rõ vấn đề số thread không giới hạn này và dùng thread pool làm cải tiến[^book-pool-unlimited].
 
-**Định nghĩa.** Theo sách Rust, thread pool là một nhóm thread đã được sinh ra, sẵn sàng chờ nhận việc; khi chương trình nhận tác vụ mới, nó giao tác vụ cho một thread trong pool và thread đó xử lý tác vụ[^book-pool]. Khi xong, thread trở về nhóm thread rảnh để nhận việc mới; pool cho phép xử lý kết nối đồng thời và tăng throughput[^book-pool-return].
+Thread pool là một nhóm thread đã được sinh ra sẵn, đang chờ nhận việc. Khi chương trình nhận tác vụ mới, nó giao tác vụ cho một thread trong pool và thread đó xử lý tác vụ[^book-pool]. Xong việc, thread trở về nhóm thread rảnh để nhận việc mới; pool nhờ vậy xử lý được các kết nối đồng thời và tăng throughput[^book-pool-return].
 
-**Nhận xét backend (của người soạn, không phải fact có nguồn).**
+Nhận xét backend của người soạn (không phải fact có nguồn):
 
 - Pool trả chi phí tạo thread (như trên) một lần lúc khởi động.
-- Pool *giới hạn* độ song song: kích thước pool là một tham số cần chọn (CPU-bound thì gần số core; I/O-bound thì lớn hơn, hoặc dùng async). Hàng đợi phía trước pool là nơi latency tích tụ khi quá tải.
-- Một handler giữ thread của pool trong lúc chờ I/O chậm thì trực tiếp giảm throughput — đúng vấn đề "request chậm chặn các request sau" mà sách Rust dùng để dẫn vào thread pool[^book-pool-slow].
+- Pool *giới hạn* độ song song, nên kích thước pool là một tham số phải chọn: CPU-bound thì gần số core, I/O-bound thì lớn hơn, hoặc chuyển sang async. Hàng đợi phía trước pool là nơi latency tích tụ khi quá tải.
+- Một handler giữ thread của pool trong lúc chờ I/O chậm thì trực tiếp làm giảm throughput. Đúng vấn đề "request chậm chặn các request sau" mà sách Rust dùng để dẫn vào thread pool[^book-pool-slow].
 
-<details><summary>Đi sâu: đo thật 1000 thread đang ngủ</summary>
+<details><summary>Đi sâu: stack mặc định theo nguồn, và đo thật 1000 thread đang ngủ</summary>
 
-**Đo thật: 1000 thread đang ngủ.**
+**Stack mặc định của pthreads và của Rust.**
 
-Thí nghiệm (rustc 1.95.0 `-O`, container Linux aarch64 kernel 6.8.0, 4 core; tạo 1000 thread cùng chờ trên một `Barrier`, đọc `/proc/self/status` khi tất cả đang chờ; một lần chạy, **quan sát**):
+- **pthreads/NPTL**: nếu giới hạn mềm `RLIMIT_STACK` lúc chương trình khởi động có giá trị khác "unlimited" thì nó quyết định stack mặc định của thread mới. Có thể đặt riêng bằng `pthread_attr_setstacksize(3)`[^pthread-create-stack]. Man page ví dụ với `ulimit -s` là 8192, tức giới hạn 8 MB[^pthread-create-8mb].
+- **Rust `std::thread`**: mã nguồn 1.95.0 đặt `DEFAULT_MIN_STACK_SIZE` là `2 * 1024 * 1024` cho cấu hình phổ biến (một số nền tảng khác như L4Re, VxWorks có giá trị khác)[^rust-stack-src]. Đoạn code đó truyền kích thước stack tường minh qua `pthread_attr_setstacksize` trước `pthread_create`, nên với thread do Rust spawn, stack mặc định là 2 MiB chứ không phải 8 MiB của `RLIMIT_STACK`. Đây là suy luận của người soạn từ đoạn code, khớp với số đo bên dưới: mỗi stack là một vùng nhớ đúng 2 MiB. Thread Rust trên Linux vì vậy là thread của pthreads/NPTL (chi tiết cài đặt, có thể đổi giữa các bản).
+
+**Đo thật: 1000 thread đang ngủ.** Thí nghiệm (rustc 1.95.0 `-O`, container Linux aarch64 kernel 6.8.0, 4 core) tạo 1000 thread cùng chờ trên một `Barrier`, rồi đọc `/proc/self/status` khi tất cả đang chờ. Một lần chạy, **quan sát**:
 
 | | `Threads` | `VmSize` | `VmRSS` |
 |---|---|---|---|
 | trước khi tạo | 1 | ≈ 2,7 MB | ≈ 1,7 MB |
 | 1000 thread đang chờ | 1001 | ≈ 4,17 GB | ≈ 11,4 MB |
 
-Tức khoảng 4,2 MB không gian địa chỉ ảo mỗi thread — gấp đôi 2 MiB stack mặc định của Rust — nhưng chỉ khoảng 10 KB RSS mỗi thread. Phần "gấp đôi" **không** do stack hay guard page. Tôi chạy lại và đọc `/proc/self/maps` khi 1000 thread đang chờ: có đúng 1000 vùng nhớ kích thước 2.097.152 byte (= 2 MiB, stack) và thêm 31 vùng lớn ≈ 64 MiB (66.973.696 byte) — tổng 31 vùng này ≈ 2,08 GB, đúng phần chênh. Đặt `MALLOC_ARENA_MAX=1` thì 31 vùng đó biến mất và `VmSize` chỉ còn ≈ 2,14 GB (≈ 2,14 MB/thread: 2 MiB stack cộng guard page và vùng TLS/descriptor), `VmRSS` gần như không đổi (≈ 11,2 MB). Vậy phần dư là các *arena* của `malloc` glibc (man page `mallopt(3)` mô tả arena là một vùng bộ nhớ mà `malloc(3)` dùng, cho phép nhiều thread cấp phát đồng thời, và số arena bị giới hạn bởi một mức thường tính bằng bội số của số CPU hiện có[^mallopt-arena]; suy luận của người soạn: vì thế máy 4 core dừng ở 31 arena phụ chứ không phải 1000, và các vùng ≈ 64 MiB đo được chính là các arena đó — tôi chưa đối chiếu với mã nguồn glibc). Kích thước ≈ 64 MiB mỗi arena là **quan sát** ở glibc 2.36 — không có nguồn trích dẫn cho con số này, và đó là chi tiết cài đặt của glibc, không phải bảo đảm. Hệ quả (nhận xét của người soạn): con số VmSize/thread phụ thuộc vào allocator, số core và việc thread có cấp phát hay không, không chỉ vào kích thước stack. Bài học: chi phí chính của thread *không chờ* nằm ở không gian địa chỉ ảo (đáng kể với process 32-bit hoặc khi có giới hạn `ulimit -v`/cgroup tính theo ảo — nhận xét của người soạn), còn bộ nhớ thật mỗi thread nhỏ nếu stack ít được dùng. Nếu thread gọi đệ quy sâu hoặc dùng mảng lớn trên stack, RSS tăng theo.
+Tức khoảng 4,2 MB không gian địa chỉ ảo mỗi thread, gấp đôi 2 MiB stack mặc định của Rust, nhưng chỉ khoảng 10 KB RSS mỗi thread. Phần "gấp đôi" **không** do stack hay guard page.
+
+Tôi chạy lại và đọc `/proc/self/maps` khi 1000 thread đang chờ. Có đúng 1000 vùng nhớ kích thước 2.097.152 byte (= 2 MiB, stack) và thêm 31 vùng lớn ≈ 64 MiB (66.973.696 byte). Tổng 31 vùng này ≈ 2,08 GB, đúng phần chênh. Đặt `MALLOC_ARENA_MAX=1` thì 31 vùng đó biến mất và `VmSize` chỉ còn ≈ 2,14 GB (≈ 2,14 MB/thread: 2 MiB stack cộng guard page và vùng TLS/descriptor), còn `VmRSS` gần như không đổi (≈ 11,2 MB).
+
+Vậy phần dư là các *arena* của `malloc` glibc. Man page `mallopt(3)` mô tả arena là một vùng bộ nhớ mà `malloc(3)` dùng, cho phép nhiều thread cấp phát đồng thời, và số arena bị giới hạn bởi một mức thường tính bằng bội số của số CPU hiện có[^mallopt-arena]. Từ đó suy ra máy 4 core dừng ở 31 arena phụ chứ không phải 1000, và các vùng ≈ 64 MiB đo được chính là các arena đó (suy luận của người soạn; tôi chưa đối chiếu với mã nguồn glibc). Kích thước ≈ 64 MiB mỗi arena là **quan sát** ở glibc 2.36: không có nguồn trích dẫn cho con số này, và đó là chi tiết cài đặt của glibc, không phải bảo đảm.
+
+Hệ quả (nhận xét của người soạn): con số VmSize/thread phụ thuộc vào allocator, số core và việc thread có cấp phát hay không, không chỉ vào kích thước stack. Chi phí chính của thread *không chờ* nằm ở không gian địa chỉ ảo, đáng kể với process 32-bit hoặc khi có giới hạn `ulimit -v`/cgroup tính theo ảo. Bộ nhớ thật mỗi thread thì nhỏ nếu stack ít được dùng; nếu thread gọi đệ quy sâu hoặc dùng mảng lớn trên stack, RSS tăng theo.
 
 </details>
 
-**Quay lại Q7:** thread tốn stack riêng và hàng chục µs để tạo; pool trả chi phí đó một lần và giới hạn số thread.
+**Quay lại Q7:** mỗi thread tốn một stack riêng và hàng chục µs để tạo; pool trả chi phí đó một lần và giới hạn số thread.
 
 ## 8. Kernel thread, user-level thread, green thread (Q8)
 
-> **Trả lời ngắn.** Mô hình 1:1: mỗi thread ứng với một thực thể do kernel lên lịch[^pthreads-11]. Mô hình M:N (user-level/green thread): scheduler ở user space ghép nhiều task lên vài worker thread[^rfc-mn]. Std của Rust hiện dùng 1:1[^book-11].
+> **Trả lời ngắn.** Mô hình 1:1: mỗi thread ứng với một thực thể do kernel lên lịch[^pthreads-11]. Mô hình M:N (user-level hay green thread): một scheduler ở user space ghép nhiều task lên vài worker thread[^rfc-mn]. `std` của Rust hiện dùng 1:1[^book-11].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): 1:1 là mỗi khách một nhân viên riêng; M:N là một quản lý nội bộ chia nhiều khách cho vài nhân viên.
+*Với service `orders`.* Từ đầu chương ta mặc định mỗi handler là một thread của OS, tức mô hình 1:1. Nhưng chữ "thread" còn nghĩa khác tùy tầng: goroutine của Go hay task của một runtime async không phải thread của OS. Khi ai đó nói service của họ "chạy 10.000 thread", bạn cần hỏi đó là loại thread nào, vì chi phí ở mục 7 chỉ áp dụng cho loại đầu.
 
-
-Từ "thread" nghĩa khác nhau tùy tầng. Mức khái niệm, mỗi thuật ngữ kèm nguồn:
+### 8.1 Ba loại "thread"
 
 | Loại | Ai lên lịch | Ghi chú có nguồn |
 |---|---|---|
 | **Thread nhân (kernel thread / kernel scheduling entity)** | kernel | Trong mô hình 1:1 của `pthreads(7)`, mỗi thread ứng với một kernel scheduling entity[^pthreads-11]; Rust std dùng mô hình này: mỗi thread của ngôn ngữ ứng với một thread của hệ điều hành[^book-11] |
-| **Kernel thread theo nghĩa "thread chạy bên trong kernel"** | kernel | Kernel có API `kthread_create`; tài liệu mô tả nó tạo một kthread trên node hiện tại[^kdoc-kthread]. Theo tên API, đây là thread chạy code của kernel; (nhận xét của người soạn) khác với thread của một process user — trang tài liệu trích dẫn không nói rõ điểm này |
+| **Kernel thread theo nghĩa "thread chạy bên trong kernel"** | kernel | Kernel có API `kthread_create`; tài liệu mô tả nó tạo một kthread trên node hiện tại[^kdoc-kthread]. Theo tên API, đây là thread chạy code của kernel; (nhận xét của người soạn) khác với thread của một process user, nhưng trang tài liệu trích dẫn không nói rõ điểm này |
 | **User-level / green thread (M:N)** | scheduler ở user space | RFC 230 của Rust định nghĩa: M:N là mô hình có một scheduler ở user space ghép các task lên các worker thread, đối lập 1:1 nơi một task ứng với một thread của OS[^rfc-mn] |
 
-Một ví dụ M:N: runtime của Go có ba thực thể G (goroutine), M (OS thread) và P (tài nguyên để chạy code Go); tài liệu nói việc của scheduler là ghép một G (code cần chạy) với một M (nơi chạy) và một P (quyền và tài nguyên để chạy)[^go-gmp]. Tài liệu định nghĩa G là một goroutine[^go-g] và M là một OS thread[^go-m]; scheduler ghép G lên M — nên (suy luận của người soạn từ các định nghĩa này) goroutine không đồng nhất với thread của OS.
+### 8.2 Một ví dụ M:N: Go
+
+Runtime của Go có ba thực thể: G (goroutine), M (OS thread) và P (tài nguyên để chạy code Go). Việc của scheduler là ghép một G (code cần chạy) với một M (nơi chạy) và một P (quyền và tài nguyên để chạy)[^go-gmp]. Tài liệu định nghĩa G là một goroutine[^go-g]. Còn M là một OS thread[^go-m]. Scheduler ghép G lên M, nên goroutine không đồng nhất với thread của OS (suy luận của người soạn từ các định nghĩa này).
 
 <details><summary>Đi sâu: green thread trong lịch sử Rust và trade-off M:N</summary>
 
-**Green thread trong lịch sử Rust.** RFC 230 kể: Rust đã dần chuyển từ mô hình threading "green" sang mô hình native[^rfc-migrated]; ở mô hình green, task được lên lịch M:N và có stack riêng[^rfc-green-stack], và vì stack được cấp trước nên green thread của Rust không "lightweight"[^rfc-nolight]; ở mô hình native, task 1:1 với thread OS[^rfc-history]. RFC 230 *đề xuất* bỏ runtime hỗ trợ cả hai mô hình khỏi thư viện chuẩn[^rfc-summary]; còn hiện trạng của Rust 1.95.0 thì sách Rust ghi: thư viện chuẩn dùng mô hình 1:1 và có crate cài mô hình khác[^book-11][^book-other].
+**Green thread trong lịch sử Rust.** RFC 230 kể rằng Rust đã dần chuyển từ mô hình threading "green" sang mô hình native[^rfc-migrated]. Ở mô hình green, task được lên lịch M:N và có stack riêng[^rfc-green-stack]. Vì stack được cấp trước nên green thread của Rust không "lightweight"[^rfc-nolight]. Ở mô hình native, task 1:1 với thread OS[^rfc-history]. RFC 230 *đề xuất* bỏ runtime hỗ trợ cả hai mô hình khỏi thư viện chuẩn[^rfc-summary]. Còn hiện trạng của Rust 1.95.0 thì sách Rust ghi: thư viện chuẩn dùng mô hình 1:1[^book-11]. Ngoài ra có crate cài các mô hình khác[^book-other].
 
-**Trade-off M:N (theo RFC 230).** Ở mô hình M:N, blocking theo nghĩa OS chặn cả worker thread (và cả page fault, vòng lặp dài tương tự)[^rfc-mn-block]; việc chọn số worker thread tối ưu là khó[^rfc-optimal]. Ở mô hình 1:1, một task chặn thoải mái mà không ảnh hưởng task khác vì mỗi task là một thread OS[^rfc-1to1-block]. (Nhận xét của người soạn: đây chính là lý do async/await và runtime như tokio quan trọng với server nhiều kết nối — ta quay lại ở chương async.)
+**Trade-off M:N (theo RFC 230).** Ở mô hình M:N, blocking theo nghĩa OS chặn cả worker thread, và page fault hay vòng lặp dài cũng vậy[^rfc-mn-block]. Việc chọn số worker thread tối ưu thì khó[^rfc-optimal]. Ở mô hình 1:1, một task chặn thoải mái mà không ảnh hưởng task khác, vì mỗi task là một thread OS[^rfc-1to1-block]. Với `orders`, đó là lý do một handler gọi `read` chặn trên socket vẫn chấp nhận được khi mỗi handler là thread OS, nhưng sẽ làm kẹt cả worker nếu `orders` chạy trên runtime M:N. Đây cũng là lý do async/await và runtime như tokio quan trọng với server nhiều kết nối; ta quay lại ở chương async (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q8:** "thread" là thực thể do kernel lên lịch (1:1) hay do scheduler user space ghép lên worker (M:N); Rust std chọn 1:1.
+**Quay lại Q8:** "thread" là thực thể do kernel lên lịch (1:1) hay task do scheduler user space ghép lên worker (M:N); handler thread của `orders` là 1:1 vì `std` của Rust chọn 1:1.
 
 ## 9. Liên hệ với Rust (ngắn; chi tiết ở chương 08)
 
-- `std::thread::spawn(f)` tạo thread mới và trả `JoinHandle<T>`. Closure phải `Send + 'static` — lý do của `'static` theo docs: thread có thể sống lâu hơn lifetime nơi nó được tạo[^rust-spawn-static]. `join()` chờ thread kết thúc và trả `Err` chứa giá trị panic nếu thread panic[^rust-spawn-join].
-- **Drop `JoinHandle` = detach**: thread tiếp tục chạy nhưng không còn cách `join`; chương trình phải tự `join` hoặc chấp nhận detach, nếu không là rò rỉ tài nguyên[^rust-spawn-detach]. Khi main thread kết thúc, toàn bộ chương trình tắt, kể cả khi các thread khác vẫn đang chạy[^rust-main-exit]. Không có quan hệ cha/con giữa thread tạo và thread được tạo[^rust-no-parent] — (suy luận của người soạn) điều này tương thích với việc ở mức kernel thread `CLONE_THREAD` không được `wait(2)` như mục 4, nhưng docs Rust không nêu liên hệ đó.
-- `thread::Builder` đặt tên và stack size trước khi spawn (`stack_size`, `name`); tên hiện chỉ dùng để nhận diện trong thông báo panic theo docs[^rust-builder-name]. Mặc định stack 2 MiB (mục 7).
-- `thread_local!` / `LocalKey::with`: TLS của Rust (mục 6).
-- Mô hình là 1:1[^book-11]; (suy luận của người soạn từ mục 3 và 7) mỗi `thread::spawn` ≈ một `pthread_create` ≈ một `clone`. Vì thế các chi phí ở mục 7 áp dụng nguyên vẹn.
-- Cái Rust *không* làm hộ: chọn số thread hợp lý, dựng thread pool (thư viện chuẩn không có pool; sách Rust tự cài một pool tối giản[^book-pool]), và tránh race condition mức logic. `Send`/`Sync`, `thread::scope` (mượn biến cục bộ an toàn trong thread con), `Mutex`, channel: [chương 08](08-rust-concurrency.md).
+Với `orders` viết bằng Rust, phần lớn những gì chương này nói đã nằm sẵn trong `std::thread`. Dưới đây là các điểm cần nhớ khi viết handler (nhận xét của người soạn).
+
+**Tạo và chờ thread.** `std::thread::spawn(f)` tạo thread mới và trả `JoinHandle<T>`. Closure phải `Send + 'static`, vì thread có thể sống lâu hơn lifetime nơi nó được tạo[^rust-spawn-static]. `join()` chờ thread kết thúc, và nếu thread panic thì trả `Err` chứa giá trị panic[^rust-spawn-join].
+
+**Drop `JoinHandle` là detach.** Nếu `orders` bỏ `JoinHandle` của một handler, thread đó tiếp tục chạy nhưng không còn cách `join`[^rust-spawn-detach]. Khi main thread kết thúc, toàn bộ chương trình tắt, kể cả khi các thread khác vẫn đang chạy[^rust-main-exit]. Docs cũng ghi rằng không có quan hệ cha/con giữa thread tạo và thread được tạo[^rust-no-parent]. Điều này tương thích với việc ở mức kernel một thread `CLONE_THREAD` không được `wait(2)` như mục 4, nhưng docs Rust không nêu liên hệ đó (suy luận của người soạn).
+
+**Đặt tên và stack.** `thread::Builder` cho đặt tên và stack size trước khi spawn (`stack_size`, `name`). Theo docs, tên hiện chỉ dùng để nhận diện trong thông báo panic[^rust-builder-name]. Mặc định stack là 2 MiB (mục 7).
+
+**Thread-local.** `thread_local!` và `LocalKey::with` là TLS của Rust (mục 6).
+
+**Mô hình 1:1.** `std` dùng 1:1[^book-11]. Từ mục 3 và 7, mỗi `thread::spawn` xấp xỉ một `pthread_create` rồi một `clone` (suy luận của người soạn), nên các chi phí ở mục 7 áp dụng nguyên vẹn.
+
+**Cái Rust không làm hộ.** Rust không chọn số thread hợp lý hộ bạn, không tránh race condition mức logic, và thư viện chuẩn không có thread pool; sách Rust tự cài một pool tối giản[^book-pool]. `Send`/`Sync`, `thread::scope` (mượn biến cục bộ an toàn trong thread con), `Mutex`, channel: [chương 08](08-rust-concurrency.md).
 
 ## Tóm tắt
 
-- Thread: chung address space, riêng PC, register, stack[^ostep-thread][^ostep-stacks]; chuyển cùng process không đổi page table[^ostep-no-pt].
-- Dùng thread để chạy song song và che I/O chậm[^ostep-why-par][^ostep-why-io]; thứ tự chạy do scheduler quyết định[^ostep-sched-order].
-- Trên Linux, thread là task tạo bằng `clone(2)` với cờ chia sẻ; `strace` thấy `CLONE_VM|FS|FILES|SIGHAND|THREAD` cộng cờ hỗ trợ TLS và join.
-- `getpid(2)` trả TGID, `gettid(2)` trả TID; `pthread_t` và `ThreadId` của Rust là giá trị khác, opaque[^clone-tgroup][^gettid-def][^gettid-posix].
-- `pthreads(7)` liệt kê thuộc tính chung (fd, signal disposition, cwd…) và riêng (stack, signal mask, errno…)[^pthreads-shared][^pthreads-private]; TLS trong Rust là `thread_local!`[^rust-tls].
+- Dùng thread để chạy song song và che I/O chậm[^ostep-why-par]. Thread nào chạy trước do scheduler quyết định, không giả định thứ tự[^ostep-sched-order].
+- Các thread cùng process chung address space và riêng PC, register, stack[^ostep-thread]. Chuyển giữa chúng không đổi page table[^ostep-no-pt].
+- Trên Linux, thread là task tạo bằng `clone(2)` với cờ chia sẻ[^pthreads-11]. `strace` (quan sát một lần chạy) thấy `CLONE_VM|FS|FILES|SIGHAND|THREAD` cộng cờ hỗ trợ TLS và join.
+- `getpid(2)` trả TGID, `gettid(2)` trả TID[^gettid-def]. `pthread_t` và `ThreadId` của Rust là giá trị khác, opaque[^gettid-posix].
+- `pthreads(7)` liệt kê thuộc tính chung (fd, signal disposition, cwd…)[^pthreads-shared]. Nó cũng liệt kê thuộc tính riêng (stack, signal mask, errno…)[^pthreads-private].
+- TLS trong Rust là `thread_local!`[^rust-tls].
 - Chi phí đo thật (aarch64, một lần chạy): ≈ 10 KB RSS mỗi thread đang chờ; spawn+join thread rỗng ≈ 40–45 µs; bộ nhớ ảo lớn phần nhiều do arena malloc.
-- 1:1 khác M:N; Rust từng có green thread rồi chuyển sang native (RFC 230)[^rfc-history]; pool tái dùng thread[^book-pool].
+- 1:1 khác M:N. Rust từng có green thread rồi chuyển sang native (RFC 230)[^rfc-history]. Pool tái dùng thread[^book-pool].
 
 ## Câu hỏi tự kiểm tra
 
-1. Kể ba thứ chung và ba thứ riêng giữa các thread cùng process.
+1. Kể ba thứ chung và ba thứ riêng giữa các handler thread của `orders`.
 
 <details><summary>Đáp án</summary>
 
-Chung: global memory, fd, signal disposition. Riêng: stack, register/PC, signal mask, `errno` ([^pthreads-mem], [^pthreads-shared], [^pthreads-private], [^ostep-thread]). Chuyển ngữ cảnh giữa thread cùng process không đổi page table ([^ostep-no-pt]).
+Chung: global memory và heap[^pthreads-mem]. Fd và signal disposition cũng chung[^pthreads-shared]. Riêng: stack, signal mask, `errno`[^pthreads-private]. Register và PC cũng riêng[^ostep-thread]. Chuyển ngữ cảnh giữa thread cùng process không đổi page table[^ostep-no-pt].
 
 </details>
 
@@ -360,7 +441,7 @@ Chung: global memory, fd, signal disposition. Riêng: stack, register/PC, signal
 
 <details><summary>Đáp án</summary>
 
-`clone(2)`; `CLONE_VM`, `CLONE_SIGHAND`, `CLONE_THREAD`, do ràng buộc `EINVAL` giữa chúng ([^clone-einval-thread], [^clone-einval-sighand]). Thực tế `strace` thấy thêm FS, FILES, SYSVSEM, SETTLS, PARENT_SETTID, CHILD_CLEARTID ([^clone-settls], [^clone-cleartid]).
+`clone(2)`; ba cờ là `CLONE_VM`, `CLONE_SIGHAND`, `CLONE_THREAD`, do ràng buộc `EINVAL` giữa chúng. `CLONE_THREAD` đòi `CLONE_SIGHAND`[^clone-einval-thread]. Còn `CLONE_SIGHAND` đòi `CLONE_VM`[^clone-einval-sighand]. Thực tế `strace` thấy thêm FS, FILES, SYSVSEM, SETTLS, PARENT_SETTID, CHILD_CLEARTID. Riêng `CLONE_SETTLS`, man page nói nhìn chung chỉ nên dùng trong các thư viện cài đặt threading[^clone-settls].
 
 </details>
 
@@ -368,15 +449,15 @@ Chung: global memory, fd, signal disposition. Riêng: stack, register/PC, signal
 
 <details><summary>Đáp án</summary>
 
-`getpid` giống nhau (TGID), `gettid` khác nhau; ở thread chính TID bằng PID vì nó là leader ([^clone-tgroup], [^gettid-def], [^clone-leader]). `pthread_self()` không phải TID ([^gettid-posix]).
+`getpid` giống nhau (TGID)[^clone-tgroup]. `gettid` khác nhau, và ở thread chính TID bằng PID[^gettid-def]. Lý do là thread chính là leader của nhóm[^clone-leader]. `pthread_self()` không phải TID[^gettid-posix].
 
 </details>
 
-4. Một thread gọi `close(fd)` trong lúc thread khác dùng fd đó — chuyện gì nằm sau hiện tượng này theo cờ `clone`?
+4. Một thread gọi `close(fd)` trong lúc thread khác dùng fd đó. Chuyện gì nằm sau hiện tượng này theo cờ `clone`?
 
 <details><summary>Đáp án</summary>
 
-`CLONE_FILES`: các thread chung một bảng fd, nên đóng ở một nơi có hiệu lực với tất cả ([^clone-files], [^pthreads-shared]).
+`CLONE_FILES`: các thread chung một bảng fd[^clone-files], nên đóng ở một nơi có hiệu lực với tất cả. Điều này khớp với việc POSIX xếp fd vào thuộc tính chung[^pthreads-shared].
 
 </details>
 
@@ -384,7 +465,7 @@ Chung: global memory, fd, signal disposition. Riêng: stack, register/PC, signal
 
 <details><summary>Đáp án</summary>
 
-Thread `CLONE_THREAD` là "detached" đối với `wait(2)` ([^clone-detached]); thư viện dùng `CLONE_CHILD_CLEARTID`: kernel xóa TID và wakeup futex khi thread thoát ([^clone-cleartid]). `strace` thấy thread chính `futex(FUTEX_WAIT)` trên địa chỉ `child_tidptr` (mục 3).
+Thread `CLONE_THREAD` là "detached" đối với `wait(2)`[^clone-detached]. Thư viện dùng `CLONE_CHILD_CLEARTID`: kernel xóa TID và wakeup futex khi thread thoát[^clone-cleartid]. `strace` thấy thread chính `futex(FUTEX_WAIT)` trên địa chỉ `child_tidptr` (mục 3).
 
 </details>
 
@@ -392,7 +473,7 @@ Thread `CLONE_THREAD` là "detached" đối với `wait(2)` ([^clone-detached]);
 
 <details><summary>Đáp án</summary>
 
-2 MiB trên các nền tảng Tier-1; `Builder::stack_size` hoặc `RUST_MIN_STACK`; main thread thì không ([^rust-stack]). Thí nghiệm 1000 thread: chi phí lớn là bộ nhớ ảo, một lần chạy, không phải bảo đảm (mục 7).
+2 MiB trên các nền tảng Tier-1; đổi bằng `Builder::stack_size` hoặc `RUST_MIN_STACK`; main thread thì không[^rust-stack]. Thí nghiệm 1000 thread: chi phí lớn là bộ nhớ ảo, một lần chạy, không phải bảo đảm (mục 7).
 
 </details>
 
@@ -400,7 +481,7 @@ Thread `CLONE_THREAD` là "detached" đối với `wait(2)` ([^clone-detached]);
 
 <details><summary>Đáp án</summary>
 
-M:N có scheduler user space ghép task lên một số worker thread; blocking theo nghĩa OS chặn cả worker thread. 1:1 thì mỗi task là một thread OS nên chặn không ảnh hưởng task khác ([^rfc-mn], [^rfc-mn-block], [^rfc-1to1-block]).
+M:N có scheduler user space ghép task lên một số worker thread[^rfc-mn]; blocking theo nghĩa OS chặn cả worker thread[^rfc-mn-block]. 1:1 thì mỗi task là một thread OS nên chặn không ảnh hưởng task khác[^rfc-1to1-block].
 
 </details>
 
@@ -408,7 +489,7 @@ M:N có scheduler user space ghép task lên một số worker thread; blocking 
 
 <details><summary>Đáp án</summary>
 
-Nhóm thread tạo sẵn chờ việc, tái dùng sau mỗi việc ([^book-pool], [^book-pool-return]). Drop `JoinHandle` = detach ([^rust-spawn-detach]); chương trình thoát cùng main thread ([^rust-main-exit]).
+Nhóm thread tạo sẵn chờ việc[^book-pool]. Sau mỗi việc, thread được tái dùng[^book-pool-return]. Drop `JoinHandle` là detach[^rust-spawn-detach]; chương trình thoát cùng main thread[^rust-main-exit].
 
 </details>
 

@@ -21,40 +21,42 @@
 
 ## 1. Hai trừu tượng: file và directory (Q1)
 
-> **Trả lời ngắn.** File là một mảng byte tuyến tính, và mỗi file có một tên cấp thấp gọi là inode number[^ostep-file][^ostep-inum]. Directory cũng có inode number, nhưng nội dung của nó là danh sách các cặp (tên đọc được, tên cấp thấp)[^ostep-dir]. Vì vậy directory là bảng ánh xạ tên → inode, còn tên không nằm trong inode.
+> **Trả lời ngắn.** File là một mảng byte tuyến tính[^ostep-file]. Mỗi file có một tên cấp thấp gọi là inode number[^ostep-inum]. Directory cũng có inode number, nhưng nội dung của nó là danh sách các cặp (tên đọc được, tên cấp thấp)[^ostep-dir]. Vì vậy directory là bảng ánh xạ tên → inode, còn tên không nằm trong inode.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): directory giống mục lục thư viện, mỗi dòng ghi "tên sách → số kệ"; cuốn sách (file) nằm ở kệ chứ không chứa mục lục. Hai dòng mục lục khác tên có thể cùng chỉ một kệ.
+*Với service của bạn.* Xuyên suốt chương này ta dùng một service giả định tên `billing` (nhận xét của người soạn: đây là ví dụ do người soạn nghĩ ra, không phải code trong repo). `billing` viết bằng Rust, chạy trên Linux, nhận request tạo hóa đơn và lưu mỗi hóa đơn thành một file `invoices/<id>.json`. Nó đọc cấu hình từ `billing.toml`, ghi log ra `billing.log`, và mỗi đêm một job export đọc lại toàn bộ thư mục `invoices/`. Mỗi mục sẽ lấy một việc cụ thể của `billing` làm câu hỏi dẫn. Câu hỏi của mục này: khi `billing` mở `invoices/42.json`, cái tên đó thực sự trỏ tới cái gì?
 
-**Vấn đề.** Ứng dụng cần lưu dữ liệu qua lần chạy sau (persistence) mà không biết đĩa chia khối ra sao. Hệ điều hành đưa ra hai trừu tượng. OSTEP mô tả: trừu tượng thứ nhất là file, tức một mảng byte tuyến tính[^ostep-file]. Mỗi file có một tên cấp thấp, thường gọi là **inode number** (i-number)[^ostep-inum]. Trừu tượng thứ hai là **directory**. OSTEP: directory cũng có một tên cấp thấp (inode number), nhưng nội dung rất đặc thù: là danh sách các cặp (tên người đọc được, tên cấp thấp)[^ostep-dir]. Nói cách khác, **directory là bảng ánh xạ tên → inode**; còn file không "có" tên — tên là mục (entry) trong directory trỏ tới file.
+Một ứng dụng cần dữ liệu còn nguyên sau lần chạy kế tiếp, nhưng nó không cần biết đĩa chia khối thế nào. Hệ điều hành che chuyện đó bằng hai trừu tượng. Trừu tượng thứ nhất là file: với `billing`, `42.json` chỉ là một dãy byte, đọc ghi theo vị trí. Mỗi file mang một tên cấp thấp, thường gọi là **inode number** (i-number).
+
+Trừu tượng thứ hai là **directory**, ví dụ `invoices/`. Directory cũng có inode number, nhưng nội dung của nó rất đặc thù: một danh sách cặp (tên người đọc được, inode number). Nói cách khác, **directory là bảng ánh xạ tên → inode**. File không "có" tên; tên chỉ là một mục (entry) trong directory trỏ tới file. Hệ quả: hai mục khác tên hoàn toàn có thể trỏ cùng một inode, như `42.json` và `latest.json` trong hình dưới (đây chính là hard link, mục 3).
 
 ```mermaid
 flowchart LR
   subgraph "directory / (inode 2)"
     e1["'etc' → 100"]
-    e2["'home' → 101"]
+    e2["'invoices' → 101"]
   end
-  subgraph "directory /home (inode 101)"
-    f1["'a.txt' → 205"]
-    f2["'b.txt' → 205"]
+  subgraph "directory invoices (inode 101)"
+    f1["'42.json' → 205"]
+    f2["'latest.json' → 205"]
   end
   e2 --> D101["inode 101: directory"]
   f1 --> I205["inode 205: regular file<br/>size, mode, uid, nlink=2, ..."]
   f2 --> I205
 ```
 
-*(Số inode minh họa.)* Hai tên cùng trỏ inode 205 chính là hard link (mục 3).
+*(Số inode minh họa của người soạn.)*
 
-**Inode chứa gì.** man `inode(7)`: mỗi file có một inode chứa metadata của file[^inode-meta]. Số inode chỉ được bảo đảm duy nhất trong phạm vi một filesystem[^inode-unique] — chi tiết này sẽ giải thích vì sao hard link không vượt filesystem. Metadata gồm loại file, quyền, uid/gid, kích thước, số hard link, timestamp… (xem phần Đi sâu bên dưới). Điều cần nhớ: **tên không nằm trong inode**.
+Còn inode thì chứa gì? Mỗi file có một inode giữ metadata của file[^inode-meta]. Số inode chỉ được bảo đảm duy nhất trong phạm vi một filesystem[^inode-unique], và chi tiết này sẽ giải thích vì sao hard link không vượt được filesystem. Metadata gồm loại file, quyền, uid/gid, kích thước, số hard link, timestamp… (bảng ở phần Đi sâu bên dưới). Điều cần nhớ là **tên không nằm trong inode**.
 
-**Directory không ghi trực tiếp được.** OSTEP: không bao giờ ghi trực tiếp vào directory được; filesystem coi định dạng directory là metadata của nó và tự chịu trách nhiệm toàn vẹn, nên bạn chỉ sửa directory gián tiếp bằng cách tạo file/directory/link bên trong[^ostep-nodirwrite]. Mỗi directory có hai mục đặc biệt `.` (chính nó) và `..` (cha)[^ostep-dotdot].
+Cuối cùng, `billing` không có cách nào "ghi thẳng vào directory". Bạn không bao giờ ghi trực tiếp vào directory được[^ostep-nodirwrite]. Filesystem coi định dạng directory là metadata của nó và tự chịu trách nhiệm toàn vẹn, nên directory chỉ đổi gián tiếp khi bạn tạo file, directory hoặc link bên trong. Mỗi directory luôn có hai mục đặc biệt: `.` trỏ về chính nó và `..` trỏ về cha[^ostep-dotdot].
 
 <details><summary>Đi sâu: <code>stat</code> và các trường metadata; <code>rmdir</code>, đọc directory</summary>
 
 **`stat(2)` và metadata.**
 
-`stat()` trả về thông tin file trong `struct stat`; không cần quyền trên chính file, nhưng với `stat`/`lstat` cần quyền *execute (search)* trên mọi directory trên đường dẫn[^stat-perm]. `lstat()` giống `stat()`, chỉ khác là nếu pathname là symbolic link thì nó trả thông tin về chính symlink[^lstat]; `fstat` lấy theo fd.
+`stat()` trả thông tin file trong `struct stat`. Nó không đòi quyền gì trên chính file, nhưng với `stat`/`lstat` thì cần quyền *execute (search)* trên mọi directory dọc đường dẫn[^stat-perm]. `lstat()` giống `stat()`, chỉ khác là nếu pathname là symbolic link thì nó trả thông tin về chính symlink[^lstat]. `fstat` thì lấy theo fd.
 
 Một số trường quan trọng của inode theo `inode(7)`:
 
@@ -66,54 +68,56 @@ Một số trường quan trọng của inode theo `inode(7)`:
 | `st_blocks` | số block đã cấp phát, đơn vị 512 byte; có thể nhỏ hơn `st_size/512` khi file có hole[^inode-blocks] |
 | `st_mode`, `st_uid`, `st_gid` | loại file + quyền, chủ sở hữu |
 
-Rust: `fs::metadata` ứng với `stat` (đi theo symlink)[^rust-stat], `fs::symlink_metadata` ứng với `lstat` (không đi theo)[^rust-metadata]. Trên Unix, `MetadataExt` cho thêm `ino()`, `nlink()`, `blocks()` (đơn vị 512 byte)[^rust-metadataext]. Metadata chỉ là ảnh chụp tại thời điểm gọi (xem TOCTTOU ở phần Đi sâu của mục 2).
+Trong Rust, `fs::metadata` ứng với `stat` (đi theo symlink)[^rust-stat], còn `fs::symlink_metadata` ứng với `lstat` (không đi theo)[^rust-metadata]. Trên Unix, `MetadataExt` cho thêm `ino()`, `nlink()` và `blocks()` (đơn vị 512 byte)[^rust-metadataext]. Metadata chỉ là ảnh chụp tại thời điểm gọi; phần Đi sâu của mục 2 sẽ nói vì sao điều này gây ra TOCTTOU.
 
 **Thao tác trên directory.**
 
-- `rmdir()` xóa directory và directory phải rỗng[^rmdir]. OSTEP giải thích vì sao: xóa directory nguy hiểm vì một lệnh có thể xóa nhiều dữ liệu, nên `rmdir()` chỉ chạy được trên directory rỗng[^ostep-rmdir]. (Errno `ENOTEMPTY`/`EISDIR` đã thấy ở thí nghiệm trong phần Đi sâu của mục 3.)
-- Đọc directory: kernel có `getdents` đọc nhiều `linux_dirent` từ fd của directory vào buffer; man page nói đó là giao diện kernel trần và ứng dụng nên dùng `readdir(3)`[^getdents][^getdents-readdir]. OSTEP minh họa vòng lặp `opendir`/`readdir`/`closedir`, mỗi mục là một `struct dirent` có tên và inode number[^ostep-readdir].
+- `rmdir()` xóa directory, và directory đó phải rỗng[^rmdir]. Lý do là xóa directory nguy hiểm hơn xóa file, vì một lệnh có thể xóa rất nhiều dữ liệu, nên `rmdir()` chỉ chạy được trên directory rỗng[^ostep-rmdir]. (Errno `ENOTEMPTY`/`EISDIR` đã thấy ở thí nghiệm trong phần Đi sâu của mục 3.)
+- Đọc directory: kernel có `getdents`, đọc nhiều `linux_dirent` từ fd của directory vào buffer. Man page nói đó là giao diện kernel trần[^getdents], và ứng dụng nên dùng `readdir(3)` thay vì gọi thẳng[^getdents-readdir]. OSTEP minh họa vòng lặp `opendir`/`readdir`/`closedir`, mỗi mục là một `struct dirent` có tên và inode number[^ostep-readdir].
 
-Rust: `fs::read_dir` trả iterator `io::Result<DirEntry>`; bỏ qua `.` và `..`; **thứ tự có thể thay đổi giữa các lần gọi**, cần sắp xếp nếu muốn tái lập; trên Unix ứng với `opendir`/`readdir`[^rust-readdir]. Thí nghiệm: `read_dir(".")` ra `y`, `s.txt`, `dir` — không theo thứ tự tên.
+Trong Rust, `fs::read_dir` trả iterator `io::Result<DirEntry>` và bỏ qua `.` với `..`. **Thứ tự các mục có thể thay đổi giữa các lần gọi**, nên cần sắp xếp nếu muốn kết quả tái lập; trên Unix hàm này ứng với `opendir`/`readdir`[^rust-readdir]. Trong thí nghiệm, `read_dir(".")` ra `y`, `s.txt`, `dir`, không theo thứ tự tên.
 
 </details>
 
-**Quay lại Q1:** directory là bảng (tên → inode number); file chỉ là mảng byte có inode number, và tên không nằm trong inode.
+**Quay lại Q1:** directory là bảng (tên → inode number); file chỉ là mảng byte có inode number, và tên không nằm trong inode. Với `billing`, `invoices/42.json` là một mục trong directory `invoices` trỏ tới một inode.
 
 ## 2. Offset, `pread`/`pwrite` và vì sao `write` chưa bền (Q2)
 
-> **Trả lời ngắn.** Offset là vị trí cho lần `read`/`write` kế tiếp và nằm ở open file description, không nằm ở file[^lseek-whence][^open-ofd-share]. `lseek` đổi offset đó, còn `pread`/`pwrite` nhận offset làm tham số và không đổi offset chung[^pread-nooff]. `write` thành công chỉ nghĩa là filesystem đã nhận dữ liệu và sẽ ghi xuống thiết bị vào một lúc nào đó[^ostep-buffer]; muốn ép xuống phải gọi `fsync`[^fsync-def].
+> **Trả lời ngắn.** Offset là vị trí cho lần `read`/`write` kế tiếp và nằm ở open file description, không nằm ở file[^lseek-whence]. `lseek` đổi offset đó, còn `pread`/`pwrite` nhận offset làm tham số và không đổi offset chung[^pread-nooff]. `write` thành công chỉ nghĩa là filesystem đã nhận dữ liệu và sẽ ghi xuống thiết bị vào một lúc nào đó[^ostep-buffer]. Muốn ép xuống ngay thì phải gọi `fsync`[^fsync-def].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): offset là cái kẹp trang trong cuốn sách đang đọc; `pread` là mở thẳng tới số trang bạn nói mà không đụng kẹp trang chung. Còn `write` giống bỏ thư vào hòm thư: thư đã rời tay bạn, nhưng chưa chắc đã tới người nhận.
+*Với service `billing`.* Hai chuyện cụ thể. Thứ nhất, vài handler thread của `billing` cùng đọc một file index qua một fd chung (giả định của người soạn); làm sao mỗi thread đọc đúng chỗ mình cần mà không giẫm lên thread kia? Thứ hai, handler ghi xong hóa đơn rồi trả `201 Created`; nếu máy mất điện ngay sau đó, hóa đơn còn không? Câu trả lời cho cả hai nằm ở chỗ offset sống ở đâu và `write` thực sự làm gì.
 
 ### 2.1 Từ đường dẫn tới fd
 
-`open(2)` trả về fd — một tham chiếu tới *open file description*; tham chiếu này không bị ảnh hưởng nếu pathname sau đó bị xóa hoặc bị sửa để trỏ tới file khác[^open-fd-ref]. Mỗi lần `open()` tạo một OFD mới, nên có thể có nhiều OFD cho cùng một inode[^open-ofd-new]. `dup`/`fork` thì sao chép *fd* nhưng dùng chung OFD, tức chung **offset** và status flag[^open-ofd-share]. (Chi tiết ba tầng fd → OFD → inode ở [P1 · Chương 04](../01-linux/04-file-descriptor-va-vfs.md).)
+`open(2)` trả về một fd, là tham chiếu tới một *open file description*. Tham chiếu này không bị ảnh hưởng nếu pathname sau đó bị xóa hoặc bị sửa để trỏ sang file khác[^open-fd-ref]. Mỗi lần `open()` tạo một OFD mới, nên có thể có nhiều OFD cho cùng một inode[^open-ofd-new]. `dup` và `fork` thì chỉ sao chép *fd*, còn OFD vẫn dùng chung, tức chung cả **offset** lẫn status flag[^open-ofd-share]. (Ba tầng fd → OFD → inode nằm ở [P1 · Chương 04](../01-linux/04-file-descriptor-va-vfs.md).)
 
-Offset là vị trí cho lần `read`/`write` kế. `lseek(2)` đặt lại offset của OFD theo `SEEK_SET`, `SEEK_CUR` hoặc `SEEK_END`[^lseek-whence]; theo OSTEP bản thân nó hoàn toàn không gây I/O đĩa nào[^ostep-lseek-noio].
+Với `billing`, các thread dùng chung một fd tức là dùng chung một OFD, và vì vậy dùng chung một offset. Offset là vị trí cho lần `read`/`write` kế. `lseek(2)` đặt lại offset của OFD theo `SEEK_SET`, `SEEK_CUR` hoặc `SEEK_END`[^lseek-whence]. Bản thân lệnh này hoàn toàn không gây I/O đĩa nào; nó chỉ ảnh hưởng tới lần `read` hoặc `write` sắp tới[^ostep-lseek-noio].
 
-`lseek` cho phép đặt offset **vượt cuối file** mà không đổi kích thước; nếu sau đó ghi vào đó, vùng trống ở giữa (một "hole") đọc ra toàn byte `\0`[^lseek-hole].
+`lseek` còn cho đặt offset **vượt cuối file** mà không đổi kích thước. Nếu sau đó ghi vào chỗ đó, vùng trống ở giữa (một "hole") đọc ra toàn byte `\0`[^lseek-hole].
 
 ### 2.2 `pread`/`pwrite`: offset truyền vào, không đụng offset chung
 
-`pread()` đọc `count` byte tại `offset` truyền vào và offset của file không đổi; `pwrite` tương tự[^pread-nooff]. Man page nói chúng đặc biệt hữu ích cho ứng dụng đa luồng: nhiều thread dùng chung một fd mà không bị ảnh hưởng bởi thay đổi offset của thread khác[^pread-mt]. Vì sao lại là vấn đề: `lseek` rồi `read` là **hai** syscall trên một offset *dùng chung*; xen kẽ giữa hai thread sẽ đọc nhầm chỗ. `pread` gộp "đặt vị trí + đọc" vào một syscall và không chạm offset chung.
+Giả sử thread A của `billing` gọi `lseek` tới offset 4096 rồi `read`, và thread B xen vào giữa hai lời gọi đó để `lseek` sang chỗ khác. A sẽ đọc nhầm chỗ, vì `lseek` rồi `read` là **hai** syscall trên một offset *dùng chung*.
 
-Cạm bẫy Linux: POSIX yêu cầu `O_APPEND` không ảnh hưởng vị trí `pwrite` ghi, nhưng trên Linux, nếu file mở với `O_APPEND` thì `pwrite()` luôn ghi nối vào cuối file, bất kể giá trị offset[^pwrite-append].
+`pread()` giải quyết đúng chỗ này: nó đọc `count` byte tại `offset` truyền vào và offset của file không đổi; `pwrite` tương tự[^pread-nooff]. Man page nói chúng đặc biệt hữu ích cho ứng dụng đa luồng, vì nhiều thread dùng chung một fd mà không bị ảnh hưởng bởi thay đổi offset của thread khác[^pread-mt]. Một syscall duy nhất vừa chỉ vị trí vừa đọc, nên không còn khoảng hở cho thread khác chen vào.
 
-Cả hai cũng như `read`/`write` có thể trả về **ít byte hơn yêu cầu** mà không phải lỗi[^pread-short]; code đúng phải lặp.
+Có một cạm bẫy riêng của Linux. POSIX yêu cầu `O_APPEND` không ảnh hưởng vị trí `pwrite` ghi, nhưng trên Linux, nếu file mở với `O_APPEND` thì `pwrite()` luôn ghi nối vào cuối file, bất kể giá trị offset[^pwrite-append].
+
+Còn một điều nữa: cả `pread`/`pwrite` lẫn `read`/`write` đều có thể trả về **ít byte hơn yêu cầu** mà không phải lỗi[^pread-short]. Code đúng phải lặp cho tới khi đủ.
 
 ### 2.3 Ghi xuống đĩa: `write` chưa phải bền vững
 
-OSTEP: phần lớn lần gọi `write()` chỉ bảo filesystem ghi dữ liệu này xuống nơi lưu trữ bền vào một lúc nào đó trong tương lai; filesystem buffer trong bộ nhớ một lúc (ví dụ 5 hay 30 giây) rồi mới đẩy xuống thiết bị[^ostep-buffer]. Với DBMS, giao thức recovery đúng cần ép dữ liệu xuống đĩa vào thời điểm xác định; Unix cung cấp `fsync(fd)`[^ostep-fsync].
+Quay lại câu hỏi mất điện sau khi `billing` trả `201`. Phần lớn lần gọi `write()` chỉ bảo filesystem ghi dữ liệu xuống nơi lưu trữ bền vào một lúc nào đó trong tương lai; filesystem buffer trong bộ nhớ một lúc (ví dụ 5 hay 30 giây) rồi mới đẩy xuống thiết bị[^ostep-buffer]. Nếu `billing` chỉ `write` rồi trả `201` thì hóa đơn có thể vẫn nằm trong bộ nhớ khi máy mất điện.
 
-`fsync(2)` chuyển ("flush") mọi dữ liệu in-core đã sửa của file mà fd tham chiếu xuống thiết bị đĩa (hoặc thiết bị lưu trữ bền khác), để mọi thay đổi vẫn đọc lại được kể cả khi hệ thống crash hoặc khởi động lại, gồm cả việc flush cache của đĩa nếu có, và gọi chặn tới khi thiết bị báo xong[^fsync-def]. Nó flush cả metadata của file, nhưng **không** đảm bảo mục directory chứa file đã xuống đĩa — muốn vậy cần `fsync` lên fd của chính directory[^fsync-dir].
+Với DBMS, giao thức recovery đúng cần ép dữ liệu xuống đĩa vào thời điểm xác định, và Unix cung cấp `fsync(fd)` cho việc đó[^ostep-fsync]. `fsync(2)` chuyển ("flush") mọi dữ liệu in-core đã sửa của file mà fd tham chiếu xuống thiết bị đĩa (hoặc thiết bị lưu trữ bền khác), để mọi thay đổi vẫn đọc lại được kể cả khi hệ thống crash hoặc khởi động lại. Nó gồm cả việc flush cache của đĩa nếu có, và gọi chặn tới khi thiết bị báo xong[^fsync-def]. `fsync` flush cả metadata của file, nhưng **không** đảm bảo mục directory chứa file đã xuống đĩa; muốn vậy cần `fsync` lên fd của chính directory[^fsync-dir]. Nói thẳng ra: `billing` có thể đã `fsync` đúng `42.json` mà tên `42.json` vẫn mất sau crash.
 
-`fdatasync()` giống `fsync()` nhưng không flush metadata trừ khi metadata đó cần để đọc lại dữ liệu đúng; đổi `st_mtime` không cần flush, còn đổi kích thước file thì cần[^fdatasync].
+`fdatasync()` giống `fsync()` nhưng không flush metadata, trừ khi metadata đó cần để đọc lại dữ liệu cho đúng. Đổi `st_mtime` thì không cần flush, còn đổi kích thước file thì cần[^fdatasync].
 
-Rust 1.95.0: `File::sync_all` cố gắng đồng bộ xuống đĩa mọi nội dung file và metadata do hệ điều hành giữ trong nội bộ[^rust-sync-all]; `sync_data` có thể không đồng bộ metadata của file và có nền tảng cài nó bằng `sync_all`[^rust-sync]. Quan sát bằng `strace` trên Linux: `sync_all()` thành `fsync(3)`.
+Trong Rust 1.95.0, `File::sync_all` cố gắng đồng bộ xuống đĩa mọi nội dung file và metadata do hệ điều hành giữ trong nội bộ[^rust-sync-all]. `sync_data` có thể không đồng bộ metadata của file, và có nền tảng cài nó bằng `sync_all`[^rust-sync]. Quan sát bằng `strace` trên Linux: `sync_all()` thành `fsync(3)`.
 
-Lỗi chỉ phát hiện lúc đóng bị nuốt khi drop `File`; `sync_all` thường đắt hơn đóng file vì drop không chặn chờ dữ liệu xuống[^rust-sync-drop].
+Còn một chuyện nhỏ về lỗi. Drop `File` bỏ qua mọi lỗi, nên lỗi chỉ phát hiện lúc đóng sẽ bị nuốt; `sync_all` cho phép bắt chúng, và thường đắt hơn đóng file vì drop không chặn chờ dữ liệu xuống[^rust-sync-drop].
 
 > Giữa `fsync` và vật lý còn write cache, barrier, lỗi writeback…: [chương 06](06-durability-trong-thuc-te.md). Nhớ: *`write` ≠ bền; `fsync` file ≠ bền tên file*.
 
@@ -134,40 +138,46 @@ size after write at 20 = 21        <- seek tới 20 rồi ghi 1 byte
 bytes = [... 68, 0,0,0,0,0,0,0,0,0, 88]   <- 9 byte \0 lấp khoảng trống
 ```
 
-**`O_APPEND` và `O_EXCL`: hai cờ nguyên tử đáng biết.**
+**`O_APPEND` và `O_EXCL`: hai cờ nguyên tử đáng biết.** Cả hai đều áp dụng được cho `billing`: một cờ cho log, một cờ cho việc tạo hóa đơn mới.
 
-- `O_APPEND`: trước mỗi `write`, offset được đặt về cuối file, và việc sửa offset cùng thao tác ghi được thực hiện như một bước nguyên tử duy nhất[^append-atomic]. Man page cảnh báo trên NFS nhiều process cùng append có thể hỏng file vì NFS không hỗ trợ append, kernel phải mô phỏng với race[^append-nfs]. Rust nói tương tự: `append(true)` đảm bảo ghi ở cuối file kể cả khi process/thread khác cũng append, khác với `seek(End(0))` rồi `write` có race[^rust-append]; nhưng không đảm bảo dữ liệu của các writer không xen kẽ nhau[^rust-append-interleave].
-- `O_CREAT|O_EXCL`: nếu file đã tồn tại thì `open` thất bại với `EEXIST`[^excl]. Rust: `OpenOptions::create_new(true)` — tùy chọn này hữu ích vì nó nguyên tử: kiểm tra rồi tạo bằng hai bước sẽ có khoảng hở cho process khác chen vào[^rust-create-new].
+- `O_APPEND`: trước mỗi `write`, offset được đặt về cuối file, và việc sửa offset cùng thao tác ghi được thực hiện như một bước nguyên tử duy nhất[^append-atomic]. Man page cảnh báo trên NFS, nhiều process cùng append có thể làm hỏng file, vì NFS không hỗ trợ append và kernel phải mô phỏng, nên có race[^append-nfs]. Rust nói tương tự: `append(true)` đảm bảo ghi ở cuối file kể cả khi process/thread khác cũng đang append, khác với `seek(End(0))` rồi `write` vốn có race[^rust-append]. Tuy vậy nó không đảm bảo dữ liệu của các writer không xen kẽ nhau[^rust-append-interleave].
+- `O_CREAT|O_EXCL`: nếu file đã tồn tại thì `open` thất bại với `EEXIST`[^excl]. Trong Rust đó là `OpenOptions::create_new(true)`, hữu ích vì nó nguyên tử: kiểm tra rồi tạo bằng hai bước sẽ để hở một khoảng cho process khác chen vào[^rust-create-new]. Với `billing`, đó là cách tạo `invoices/42.json` mà không đè nhầm hóa đơn đã có.
 
-Hai cờ này tồn tại vì **TOCTTOU** (Time Of Check To Time Of Use): giữa kiểm tra và sử dụng, trạng thái có thể bị đổi. OSTEP kể ví dụ dịch vụ mail chạy root gọi `lstat()` kiểm tra inbox rồi mới ghi, kẻ tấn công `rename()` hoán đổi inbox thành file nhạy cảm đúng giữa hai bước[^ostep-tocttou]. Bài học (nhận xét của người soạn): thay "kiểm tra rồi làm" bằng một thao tác nguyên tử (`create_new`, `O_APPEND`, `rename`).
+Hai cờ này tồn tại vì **TOCTTOU** (Time Of Check To Time Of Use): giữa lúc kiểm tra và lúc sử dụng, trạng thái có thể đã bị đổi. OSTEP kể ví dụ một dịch vụ mail chạy root gọi `lstat()` kiểm tra inbox rồi mới ghi; kẻ tấn công `rename()` hoán inbox thành file nhạy cảm đúng giữa hai bước[^ostep-tocttou]. Bài học (nhận xét của người soạn): thay "kiểm tra rồi làm" bằng một thao tác nguyên tử (`create_new`, `O_APPEND`, `rename`).
 
 </details>
 
-**Quay lại Q2:** offset nằm ở open file description (`pread`/`pwrite` không đụng tới nó), và `write` chỉ đưa dữ liệu vào bộ đệm của kernel nên cần `fsync` để ép xuống đĩa.
+**Quay lại Q2:** offset nằm ở open file description (`pread`/`pwrite` không đụng tới nó), và `write` chỉ đưa dữ liệu vào bộ đệm của kernel nên `billing` cần `fsync` trước khi báo cho client rằng hóa đơn đã lưu.
 
 ## 3. `unlink`, hard link, symlink và reference count (Q3)
 
-> **Trả lời ngắn.** Tên trong directory chỉ là một liên kết tới inode, nên "xóa file" thực chất là `unlink`: gỡ một liên kết và giảm link count; chỉ khi count về 0 filesystem mới giải phóng inode và block[^ostep-unlink]. Hard link là thêm một tên nữa cho cùng một file[^link-def]; symbolic link là một file riêng chứa đường dẫn tới tên khác[^symlink-def]. Nếu còn process giữ fd mở thì file chỉ bị xóa thật sau khi fd cuối đóng[^unlink-open].
+> **Trả lời ngắn.** Tên trong directory chỉ là một liên kết tới inode, nên "xóa file" thực chất là `unlink`: gỡ một liên kết và giảm link count. Chỉ khi count về 0 filesystem mới giải phóng inode và block[^ostep-unlink]. Hard link là thêm một tên nữa cho cùng một file[^link-def]. Symbolic link là một file riêng chứa đường dẫn tới tên khác[^symlink-def]. Nếu còn process giữ fd mở thì file chỉ bị xóa thật sau khi fd cuối đóng[^unlink-open].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một cuốn sách có thể dán nhiều nhãn tên; gỡ một nhãn chưa vứt sách. Chỉ khi hết nhãn và không ai còn cầm sách trên tay thì sách mới bị vứt; symlink là mẩu giấy ghi "xem nhãn X", nên có thể trỏ vào nhãn đã bị gỡ.
+*Với service `billing`.* Ops thấy `billing.log` đã lên 10 GB, bèn `rm billing.log` nhưng `df` vẫn không giảm chút nào, vì `billing` còn giữ fd mở trên file đó. Cùng một chuyện nhỏ này kéo theo cả loạt câu hỏi của mục: `rm` thực sự làm gì, hai tên cho một file nghĩa là gì, và `billing.toml` là symlink thì khác hard link ở đâu?
 
 ### 3.1 Vì sao xóa file gọi là `unlink`
 
-OSTEP đặt câu hỏi: tại sao lại là `unlink` mà không phải `remove`/`delete`? Vì tên trong directory chỉ là một *liên kết* (link) tới inode. Theo OSTEP, tạo file thực ra làm hai việc: tạo cấu trúc inode, rồi gắn một tên người đọc được vào đó bằng một mục trong directory[^ostep-twothings]. `unlink()` gỡ liên kết giữa tên và inode, giảm **reference count** (link count); chỉ khi count về 0 filesystem mới giải phóng inode và các data block[^ostep-unlink]. Man page `unlink(2)`: nó xóa một tên khỏi filesystem; nếu tên đó là link cuối cùng của file và không process nào đang mở file thì file bị xóa và không gian nó dùng được giải phóng để tái sử dụng[^unlink-def]; nếu vẫn còn process giữ fd mở, file tồn tại cho đến khi fd cuối cùng tham chiếu tới nó được đóng[^unlink-open].
+Sao không là `remove` hay `delete`? Vì tên trong directory chỉ là một *liên kết* (link) tới inode. Tạo file thực ra làm hai việc: tạo cấu trúc inode, rồi gắn một tên người đọc được vào đó bằng một mục trong directory[^ostep-twothings]. Xóa thì đảo ngược lại. `unlink()` gỡ liên kết giữa tên và inode và giảm **reference count** (link count); chỉ khi count về 0 filesystem mới giải phóng inode và các data block[^ostep-unlink].
 
-Rust docs của `remove_file` cũng cảnh báo không có bảo đảm file bị xóa ngay (tùy nền tảng, fd khác đang mở có thể cản)[^rust-remove].
+Man page `unlink(2)` nói sát hơn: nó xóa một tên khỏi filesystem, và nếu tên đó là link cuối cùng của file mà không process nào đang mở file thì file bị xóa và không gian nó dùng được giải phóng để tái sử dụng[^unlink-def]. Nếu vẫn còn process giữ fd mở, file tồn tại cho đến khi fd cuối cùng tham chiếu tới nó được đóng[^unlink-open]. Đó chính là chuyện của `billing.log`: tên đã mất nhưng inode và 10 GB vẫn còn cho tới khi `billing` đóng fd (hoặc restart).
+
+Rust cũng cảnh báo tương tự: docs của `remove_file` nói không có bảo đảm file bị xóa ngay, vì tùy nền tảng, fd khác đang mở có thể cản[^rust-remove].
 
 ### 3.2 Hard link: `link(2)`
 
-`link()` tạo hard link; tên mới dùng được y hệt tên cũ: hai tên cùng tham chiếu một file, cùng quyền, cùng chủ, và không thể biết tên nào là tên "gốc"[^link-def]. Hard link không vượt filesystem vì số inode chỉ duy nhất trong một filesystem, và không được trỏ vào directory (tránh vòng lặp trong cây)[^symlink-hard]. Rust: `std::fs::hard_link(original, link)`; docs ghi trên hầu hết Unix nó ứng với `linkat` không cờ[^rust-hardlink].
+`link()` tạo hard link. Tên mới dùng được y hệt tên cũ: hai tên cùng tham chiếu một file, cùng quyền, cùng chủ, và không thể biết tên nào là tên "gốc"[^link-def]. Với `billing`, đó là cách để `latest.json` và `42.json` trỏ cùng một hóa đơn mà không tốn thêm byte dữ liệu nào (ví dụ minh họa của người soạn).
+
+Hard link không vượt filesystem vì số inode chỉ duy nhất trong một filesystem, và không được trỏ vào directory để tránh vòng lặp trong cây[^symlink-hard]. Trong Rust, hàm là `std::fs::hard_link(original, link)`; docs ghi rằng trên hầu hết Unix nó ứng với `linkat` không cờ[^rust-hardlink].
 
 ### 3.3 Symbolic link: `symlink(7)`
 
-Symlink là một file *loại đặc biệt* mà nội dung là một chuỗi đường dẫn tới file khác (đọc bằng `readlink(2)`); nó là con trỏ tới một *tên* khác chứ không phải tới đối tượng bên dưới, nên có thể trỏ vào directory, vượt filesystem, và có thể **dangling** (trỏ tới nơi không tồn tại)[^symlink-def]. Trên Linux, quyền của symlink thường luôn là `0777` và không dùng trong kiểm tra quyền[^symlink-perm]. Một số syscall *không* đi theo symlink ở thành phần cuối mà tác động lên chính symlink (`lstat`, `readlink`, `rename`, `rmdir`, `unlink`…); số khác (`open`, `linkat`…) đi theo tùy cờ[^symlink-follow].
+Symlink khác hẳn: nó là một file *loại đặc biệt* mà nội dung là một chuỗi đường dẫn tới file khác (đọc bằng `readlink(2)`). Nó là con trỏ tới một *tên* khác chứ không phải tới đối tượng bên dưới, nên có thể trỏ vào directory, vượt filesystem, và có thể **dangling** (trỏ tới nơi không tồn tại)[^symlink-def]. Nếu `billing.toml` là symlink tới `config/prod.toml` thì xóa `config/prod.toml` sẽ để lại một `billing.toml` dangling (ví dụ minh họa của người soạn).
 
-Rust: `std::os::unix::fs::symlink(original, link)` — tạo một symbolic link mới trên filesystem; đường dẫn `link` sẽ là symlink trỏ tới đường dẫn `original`[^rust-symlink].
+Vài chi tiết cần biết. Một số syscall *không* đi theo symlink ở thành phần cuối mà tác động lên chính symlink (`lstat`, `readlink`, `rename`, `rmdir`, `unlink`…); số khác (`open`, `linkat`…) đi theo tùy cờ[^symlink-follow]. Còn quyền của symlink thì trên Linux thường luôn là `0777` và không dùng trong kiểm tra quyền[^symlink-perm].
+
+Trong Rust, `std::os::unix::fs::symlink(original, link)` tạo một symbolic link mới trên filesystem; đường dẫn `link` sẽ là symlink trỏ tới đường dẫn `original`[^rust-symlink].
 
 <details><summary>Đi sâu: thí nghiệm nlink, symlink, unlink khi file còn mở</summary>
 
@@ -188,30 +198,30 @@ remove_dir(dir) khi còn con: Err(Some(39))                     <- ENOTEMPTY
 
 </details>
 
-**Quay lại Q3:** `unlink` gỡ một tên và giảm link count; hard link là thêm tên cho cùng inode, symlink là file riêng chứa đường dẫn, và file chỉ mất khi count về 0 và không còn fd mở.
+**Quay lại Q3:** `unlink` gỡ một tên và giảm link count; hard link là thêm tên cho cùng inode, symlink là file riêng chứa đường dẫn, và file chỉ mất khi count về 0 và không còn fd mở. Vì thế `rm billing.log` chưa trả được dung lượng khi `billing` còn giữ fd.
 
 ## 4. `rename(2)`: nguyên tử và mẫu ghi file tạm (Q4)
 
-> **Trả lời ngắn.** `rename` thay `newpath` một cách nguyên tử: không có thời điểm nào process khác thấy `newpath` biến mất[^rename-atomic]. Mẫu thay file an toàn là ghi file tạm, `fsync` nó, rồi `rename` đè lên đích[^ostep-tmp-rename]. Phần *chưa* được bảo đảm: `fsync` file không bảo đảm mục trong directory đã xuống đĩa[^fsync-dir], và `rename` không đi qua ranh giới mount[^exdev].
+> **Trả lời ngắn.** `rename` thay `newpath` một cách nguyên tử: không có thời điểm nào process khác thấy `newpath` biến mất[^rename-atomic]. Mẫu thay file an toàn là ghi file tạm, `fsync` nó, rồi `rename` đè lên đích[^ostep-tmp-rename]. Có hai thứ `rename` *chưa* bảo đảm. Thứ nhất, `fsync` file không bảo đảm mục trong directory đã xuống đĩa[^fsync-dir]. Thứ hai, `rename` không đi qua ranh giới mount[^exdev].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay biển hiệu cửa hàng — dựng biển mới ở sân sau cho xong hẳn, rồi hoán vào chỗ biển cũ trong một động tác; khách đi qua chỉ thấy biển cũ hoặc biển mới, không bao giờ thấy cửa không biển.
+*Với service `billing`.* Giả sử `billing` cập nhật `invoices/42.json` bằng cách mở file lên, truncate rồi ghi nội dung mới vào. Nếu crash giữa chừng, file chỉ còn nửa vời, và job export ban đêm sẽ đọc phải một JSON cụt. Ta muốn: reader luôn thấy hoặc bản cũ đầy đủ, hoặc bản mới đầy đủ. `rename` là công cụ cho việc đó.
 
 ### 4.1 Bảo đảm của `rename`
 
-`rename()` đổi tên/di chuyển file; các hard link khác và fd đang mở của `oldpath` không bị ảnh hưởng[^rename-def]. Điều quan trọng nhất: nếu `newpath` đã tồn tại, nó bị thay thế **nguyên tử** — để không có thời điểm nào process khác truy cập `newpath` thấy nó biến mất; có thể có khoảng ngắn cả hai tên cùng trỏ file[^rename-atomic]. Nếu thất bại, `rename` bảo đảm vẫn còn một bản `newpath`[^rename-fail].
+`rename()` đổi tên hoặc di chuyển file; các hard link khác và fd đang mở của `oldpath` không bị ảnh hưởng[^rename-def]. Điều quan trọng nhất là: nếu `newpath` đã tồn tại thì nó bị thay thế **nguyên tử**, để không có thời điểm nào process khác truy cập `newpath` thấy nó biến mất. Có thể có một khoảng rất ngắn cả hai tên cùng trỏ vào file[^rename-atomic]. Nếu thao tác thất bại, `rename` bảo đảm vẫn còn một bản `newpath`[^rename-fail].
 
-Phân biệt hai nghĩa của "nguyên tử":
+Chữ "nguyên tử" ở đây có hai nghĩa khác nhau:
 
-1. **Với process khác đang chạy**: man page bảo đảm điều ở trên.
-2. **Với crash**: OSTEP nói rename (thường) được cài đặt như một lời gọi nguyên tử đối với crash hệ thống — sau crash, tên là tên cũ hoặc tên mới, không có trạng thái lơ lửng[^ostep-rename-crash]. Chú ý OSTEP chỉ nói "usually"; man page bookworm của `rename` không hứa điều này. Cái được hứa cho crash tùy filesystem và journaling — [chương 05](05-crash-consistency-va-journaling.md).
+1. **Với process khác đang chạy**: man page bảo đảm điều vừa nói ở trên. Job export của `billing` không bao giờ thấy `42.json` biến mất giữa chừng.
+2. **Với crash**: OSTEP nói rename (thường) được cài đặt như một lời gọi nguyên tử đối với crash hệ thống, nghĩa là sau crash, tên là tên cũ hoặc tên mới, không có trạng thái lơ lửng[^ostep-rename-crash]. Lưu ý OSTEP chỉ nói "usually", còn man page bookworm của `rename` không hứa điều này. Cái được hứa cho crash tùy filesystem và journaling; xem [chương 05](05-crash-consistency-va-journaling.md).
 
-Không qua được ranh giới mount: `rename` và `link` trả `EXDEV` khi `oldpath` và `newpath` không nằm trên cùng một mounted filesystem; man page nói thêm: kể cả khi cùng một filesystem được mount ở nhiều nơi, `rename()` vẫn không đi qua các mount point khác nhau[^exdev][^link-exdev]. Rust: docs ghi hàm sẽ không hoạt động nếu tên mới nằm ở mount point khác[^rust-rename]. Thử: `fs::rename("/tmp/…", "/dev/shm/…")` trả `CrossesDevices` (errno 18); `ln /tmp/f /dev/shm/f` báo "Invalid cross-device link". Hệ quả: file tạm phải nằm **cùng mount (tốt nhất cùng directory)** với file đích.
+Còn một giới hạn nữa. `rename` và `link` trả `EXDEV` khi `oldpath` và `newpath` không nằm trên cùng một mounted filesystem. Man page nói thêm rằng kể cả khi cùng một filesystem được mount ở nhiều nơi, `rename()` vẫn không đi qua các mount point khác nhau[^exdev]. `link()` cũng vậy[^link-exdev]. Rust docs ghi tương tự: hàm sẽ không hoạt động nếu tên mới nằm ở mount point khác[^rust-rename]. Thử trong lab: `fs::rename("/tmp/…", "/dev/shm/…")` trả `CrossesDevices` (errno 18), còn `ln /tmp/f /dev/shm/f` báo "Invalid cross-device link". Với `billing`, hệ quả thực tế là file tạm phải nằm **cùng mount (tốt nhất cùng directory)** với file đích. Đừng ghi bản tạm vào `/tmp` rồi `rename` sang volume dữ liệu.
 
 ### 4.2 Mẫu "tmp + rename"
 
-OSTEP mô tả trình soạn thảo cập nhật `foo.txt`: ghi bản mới ra `foo.txt.tmp`, `fsync()` nó, rồi `rename("foo.txt.tmp", "foo.txt")` — bước cuối hoán đổi nguyên tử file mới vào chỗ, đồng thời xóa phiên bản cũ[^ostep-tmp-rename].
+OSTEP mô tả một trình soạn thảo cập nhật `foo.txt` như sau: ghi bản mới ra `foo.txt.tmp`, `fsync()` nó, rồi `rename("foo.txt.tmp", "foo.txt")`. Bước cuối hoán đổi nguyên tử file mới vào chỗ và đồng thời xóa phiên bản cũ[^ostep-tmp-rename]. `billing` làm đúng như vậy với `invoices/42.json`:
 
 ```mermaid
 sequenceDiagram
@@ -241,52 +251,53 @@ fn atomic_write(path: &Path, data: &[u8]) -> io::Result<()> {
 }
 ```
 
-Gọi hai lần với `"v1"` rồi `"version-2"` đọc lại ra `"version-2"` và thư mục chỉ còn `config.toml` (không sót file tạm). Điều kiện: `tmp` cùng thư mục với `path` (tránh `EXDEV`).
+Gọi hai lần với `"v1"` rồi `"version-2"` đọc lại ra `"version-2"` và thư mục chỉ còn `config.toml` (không sót file tạm). Điều kiện là `tmp` cùng thư mục với `path` để tránh `EXDEV`.
 
-*Chưa xử lý* (nhận xét của người soạn): file tạm sót khi crash, tên tạm trùng giữa hai writer, giữ quyền/owner của file cũ. Về độ bền của mẫu này (`fsync` file và thư mục), xem [chương 06](06-durability-trong-thuc-te.md) mục 3–4; ba điểm vừa nêu không được bàn thêm ở đó.
+Hàm này *chưa xử lý* ba việc (nhận xét của người soạn): file tạm sót lại khi crash, tên tạm trùng nhau giữa hai writer, và giữ quyền/owner của file cũ. Về độ bền của mẫu này (`fsync` file và thư mục), xem [chương 06](06-durability-trong-thuc-te.md) mục 3–4; ba điểm vừa nêu không được bàn thêm ở đó.
 
 <details><summary>Đi sâu: ext4 và "ứng dụng quên fsync"</summary>
 
-Tài liệu mount option của ext4: nhiều ứng dụng hỏng không dùng `fsync()` khi thay file có sẵn theo các mẫu như ... rename — nếu bật `auto_da_alloc` (mặc định), ext4 phát hiện replace-via-rename/truncate và ép các block cấp phát trễ được cấp phát để ở lần journal commit kế (chế độ `data=ordered` mặc định) dữ liệu file mới xuống đĩa **trước** khi rename được commit, tránh lỗi file "zero-length"[^ext4-autodalloc]. Đây là hành vi của ext4, không phải bảo đảm của POSIX hay `rename(2)`. Vì thế mẫu có `fsync` tường minh (như trên) vẫn là cách đúng (nhận xét của người soạn).
+Tài liệu mount option của ext4 nói rằng nhiều ứng dụng hỏng không dùng `fsync()` khi thay file có sẵn theo các mẫu như ... rename. Nếu bật `auto_da_alloc` (mặc định), ext4 phát hiện mẫu replace-via-rename/truncate và ép các block cấp phát trễ được cấp phát, để ở lần journal commit kế (chế độ `data=ordered` mặc định) dữ liệu file mới xuống đĩa **trước** khi rename được commit, tránh lỗi file "zero-length"[^ext4-autodalloc]. Đó là hành vi của ext4, không phải bảo đảm của POSIX hay của `rename(2)`. Vì thế mẫu có `fsync` tường minh (như trên) vẫn là cách đúng (nhận xét của người soạn).
 
 </details>
 
-**Quay lại Q4:** `rename` đè đích nguyên tử (với process khác), nên ghi file tạm cùng mount, `fsync`, `rename`, rồi `fsync` thư mục là cách thay file an toàn.
+**Quay lại Q4:** `rename` đè đích nguyên tử (với process khác), nên `billing` ghi file tạm cùng mount, `fsync`, `rename`, rồi `fsync` thư mục để thay hóa đơn an toàn.
 
 ## 5. Mount và phân giải đường dẫn (Q5)
 
-> **Trả lời ngắn.** Path được duyệt từng thành phần, bắt đầu từ root directory hoặc thư mục làm việc hiện tại, mỗi thành phần được tra trong directory trước đó[^pathres-start][^pathres-walk]. `mount` gắn một filesystem vào một directory có sẵn, nên người dùng thấy một cây duy nhất dù có nhiều filesystem[^ostep-mount]. `rename` và `link` trả `EXDEV` khi hai đường dẫn không nằm trên cùng một mounted filesystem[^exdev][^link-exdev].
+> **Trả lời ngắn.** Path được duyệt từng thành phần, bắt đầu từ root directory hoặc thư mục làm việc hiện tại, và mỗi thành phần được tra trong directory trước đó[^pathres-start]. `mount` gắn một filesystem vào một directory có sẵn, nên người dùng thấy một cây duy nhất dù có nhiều filesystem[^ostep-mount]. `rename` và `link` trả `EXDEV` khi hai đường dẫn không nằm trên cùng một mounted filesystem[^exdev].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cây thư mục như tủ hồ sơ nhiều ngăn; mount là lắp thêm một ngăn kéo lấy từ tủ khác vào một chỗ trống. Chuyển hồ sơ giữa hai tủ khác nhau không còn là "đổi nhãn" nữa.
+*Với service `billing`.* Trên server thật, `/var/lib/billing` thường là một volume riêng, còn `/tmp` thì thuộc filesystem khác (giả định của người soạn). Với `billing`, cái tên `/var/lib/billing/invoices/42.json` vì thế đi qua một ranh giới mount mà code không hề thấy. Mục này trả lời hai câu: kernel đi từng bước thế nào từ chuỗi path đó tới inode, và ranh giới mount ảnh hưởng gì tới `rename`/`link` đã nói ở mục 3–4.
 
 ### 5.1 Mount
 
-Một máy có thể có nhiều filesystem (đĩa, USB, tmpfs, mạng…) mà người dùng chỉ thấy **một cây**. OSTEP: `mkfs` ghi một filesystem rỗng (bắt đầu từ root directory) lên một thiết bị/partition; `mount` lấy một directory có sẵn làm **mount point** và dán một file system mới vào cây thư mục tại điểm đó[^ostep-mount]. Syscall `mount()` gắn filesystem chỉ định bởi `source` vào vị trí do pathname `target` chỉ định[^mount-attach], cần quyền `CAP_SYS_ADMIN`[^mount-def]. Bind mount (`MS_BIND`) là một loại thao tác khác của cùng syscall[^mount-bind].
+Một máy có thể có nhiều filesystem (đĩa, USB, tmpfs, mạng…) mà người dùng chỉ thấy **một cây**. Cách làm: `mkfs` ghi một filesystem rỗng (bắt đầu từ root directory) lên một thiết bị hoặc partition, rồi `mount` lấy một directory có sẵn làm **mount point** và dán filesystem mới vào cây thư mục tại điểm đó[^ostep-mount]. Ở mức syscall, `mount()` gắn filesystem do `source` chỉ định vào vị trí mà pathname `target` chỉ tới[^mount-attach]. Gọi nó cần quyền `CAP_SYS_ADMIN`[^mount-def].
 
 Sau `mount dev path`, `path` trỏ tới gốc filesystem trên `dev`; nhưng `path/..` vẫn là cha của `path` bên ngoài filesystem đó[^pathres-mount].
 
-
 ### 5.2 Path resolution
 
-`path_resolution(7)` mô tả thuật toán:
+Thuật toán phân giải path mô tả trong `path_resolution(7)`. Ta đi qua với path `/var/lib/billing/invoices/42.json`:
 
-1. **Điểm bắt đầu**: nếu path bắt đầu bằng `/` thì từ root directory của process (kế thừa từ cha, đổi bằng `chroot`); nếu không thì từ thư mục làm việc hiện tại (hoặc `dfd` với họ `*at`)[^pathres-start].
-2. **Duyệt từng thành phần không phải cuối**: mỗi thành phần được tra trong thư mục hiện tại. Không có quyền search → `EACCES`; không thấy → `ENOENT`; thấy nhưng không phải directory hay symlink → `ENOTDIR`[^pathres-errors]; là directory → đi tiếp; là symlink → phân giải symlink rồi tiếp tục[^pathres-walk].
-3. **Giới hạn symlink**: Linux hiện theo tối đa 40 symlink cho cả đường dẫn; vượt thì `ELOOP`[^pathres-eloop].
-4. **Thành phần cuối** được tra tương tự, nhưng không nhất thiết phải tồn tại (có thể đang tạo mới) và hành vi cụ thể tùy syscall[^pathres-final].
-5. `.` và `..` được coi theo nghĩa quy ước dù có thật trong filesystem hay không; `/..` là `/`[^pathres-dots].
+1. **Điểm bắt đầu.** Path bắt đầu bằng `/` nên kernel đi từ root directory của process (kế thừa từ cha, đổi bằng `chroot`). Nếu không có `/` đầu thì đi từ thư mục làm việc hiện tại, hoặc từ `dfd` với họ syscall `*at`[^pathres-start].
+2. **Duyệt từng thành phần không phải cuối** (`var`, `lib`, `billing`, `invoices`). Mỗi thành phần được tra trong thư mục hiện tại. Không có quyền search thì trả `EACCES`; không thấy thì `ENOENT`; thấy nhưng không phải directory hay symlink thì `ENOTDIR`[^pathres-errors]. Nếu là directory, kernel đi tiếp vào đó; nếu là symlink, nó phân giải symlink rồi tiếp tục[^pathres-walk].
+3. **Giới hạn symlink.** Linux hiện theo tối đa 40 symlink cho cả đường dẫn; vượt thì `ELOOP`[^pathres-eloop].
+4. **Thành phần cuối** (`42.json`) được tra tương tự, nhưng không nhất thiết phải tồn tại, vì có thể ta đang tạo mới; hành vi cụ thể tùy syscall[^pathres-final].
+5. `.` và `..` được coi theo nghĩa quy ước dù có thật trong filesystem hay không, và `/..` vẫn là `/`[^pathres-dots].
+
+Khi bước 2 đi qua `/var/lib/billing` (mount point của volume), kernel chuyển sang filesystem của volume rồi tra `invoices` ở đó. Đó cũng là lý do `rename` từ `/tmp` sang đây trả `EXDEV`: hai bên không cùng một mounted filesystem (mục 4.1).
 
 <details><summary>Đi sâu: quyền khi duyệt path; vì sao <code>rename</code>/<code>link</code> không qua mount</summary>
 
-Quyền xuất hiện ở hai chỗ: quyền *search* (x) trên mọi directory dọc đường, và quyền của thao tác trên thành phần cuối — ví dụ `unlink` đòi quyền ghi trên *directory chứa* tên, không phải trên file[^unlink-eacces]. Mô hình rwx/uid/gid ở [P1 · Chương 06](../01-linux/06-user-quyen-proc-sys.md).
+Quyền xuất hiện ở hai chỗ: quyền *search* (x) trên mọi directory dọc đường, và quyền của thao tác trên thành phần cuối. Ví dụ `unlink` đòi quyền ghi trên *directory chứa* tên, không phải trên chính file[^unlink-eacces]. Mô hình rwx/uid/gid ở [P1 · Chương 06](../01-linux/06-user-quyen-proc-sys.md).
 
 - Hard link không vượt filesystem vì số inode chỉ duy nhất trong một filesystem[^symlink-hard]. Việc `rename`/`link` dừng ở ranh giới mount: xem mục 4.1.
 
 </details>
 
-**Quay lại Q5:** path được duyệt từng thành phần từ root hoặc thư mục hiện tại; mount ghép nhiều filesystem thành một cây, và `rename`/`link` dừng lại ở ranh giới mount với `EXDEV`.
+**Quay lại Q5:** path được duyệt từng thành phần từ root hoặc thư mục hiện tại; mount ghép nhiều filesystem thành một cây, và `rename`/`link` dừng lại ở ranh giới mount với `EXDEV`, nên file tạm của `billing` phải nằm cùng mount với file đích.
 
 ## 6. Sparse file và `st_size` so với dung lượng thật (Q6)
 
@@ -294,15 +305,23 @@ Quyền xuất hiện ở hai chỗ: quyền *search* (x) trên mọi directory 
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): cuốn sổ ghi "một triệu trang" nhưng chỉ in thật hai trang có chữ; phần còn lại chỉ là lời hứa "trắng".
+*Với service `billing`.* Giả sử `billing` tạo một file index bằng `set_len(1 << 30)`, rồi chỉ ghi vài byte ở đầu và ở cuối (giả định của người soạn). `ls -l` báo 1 GiB, nhưng `df` hầu như không nhúc nhích. Mục này giải thích hai con số đó lệch nhau thế nào và vì sao điều ấy quan trọng khi bạn backup file.
 
-**Sparse file** là file có hole: vùng không được cấp phát trên thiết bị nhưng đọc ra toàn `\0`. `lseek` hỗ trợ tìm: `SEEK_DATA` dịch offset tới vị trí kế (≥ offset) có dữ liệu; `SEEK_HOLE` dịch tới hole kế, hoặc cuối file nếu không có (cuối file là "implicit hole")[^seek-holedata]. Các phép này cho phép công cụ backup bỏ qua hole[^seek-backup]. Hai giá trị này không thuộc POSIX: Linux có từ 3.1[^seek-since31], Solaris/FreeBSD/DragonFly BSD cũng có[^seek-nonstd]; phải định nghĩa `_GNU_SOURCE`[^seek-gnu], và filesystem không bắt buộc báo hole[^seek-optional] — cài đặt đơn giản nhất cho `SEEK_HOLE` luôn trả cuối file[^seek-simplest]. ext4, XFS, Btrfs, tmpfs… nằm trong danh sách hỗ trợ của man page 6.03[^seek-fs]; overlayfs và virtiofs không có trong danh sách đó, nên kết quả dưới đây chỉ là quan sát.
+Cơ chế nằm ở hole đã gặp ở §2.1. Sparse file là file có hole: vùng không được cấp phát trên thiết bị nhưng đọc ra toàn `\0`. `lseek` có hai giá trị để dò: `SEEK_DATA` dịch offset tới vị trí kế (≥ offset) có dữ liệu, còn `SEEK_HOLE` dịch tới hole kế, hoặc tới cuối file nếu không có hole nào nữa (cuối file coi là một "implicit hole")[^seek-holedata]. Các phép dò này cho phép công cụ backup bỏ qua hole[^seek-backup].
 
-Với backend (nhận xét của người soạn): image VM, file DB thường là sparse; copy bằng công cụ không biết hole sẽ "phình" ra đủ `st_size`.
+Đừng dựa hoàn toàn vào chúng, vì filesystem không bắt buộc báo hole[^seek-optional]. Cài đặt đơn giản nhất cho `SEEK_HOLE` là luôn trả về cuối file[^seek-simplest].
 
-<details><summary>Đi sâu: thí nghiệm file 1 GiB trên overlay, tmpfs, virtiofs</summary>
+Với backend (nhận xét của người soạn): image VM và file DB thường là sparse. Copy bằng công cụ không biết hole sẽ làm file "phình" ra đủ `st_size`, còn `billing` có thể hết đĩa ở nơi backup dù file nguồn nhỏ.
 
-Thí nghiệm: tạo file 1 GiB bằng `set_len(1 << 30)`, ghi 4 byte `head` ở offset 0 và 4 byte `tail` ở `1 GiB − 12 288`, rồi `lseek(SEEK_DATA/SEEK_HOLE)` (khai báo `extern "C"` cho `lseek` vì thư viện chuẩn Rust không có `SEEK_DATA`):
+<details><summary>Đi sâu: điều kiện hỗ trợ của <code>SEEK_DATA</code>/<code>SEEK_HOLE</code>, và thí nghiệm file 1 GiB trên overlay, tmpfs, virtiofs</summary>
+
+**Điều kiện hỗ trợ.**
+
+- Hai giá trị này không thuộc POSIX. Linux có chúng từ 3.1[^seek-since31], và Solaris, FreeBSD, DragonFly BSD cũng có[^seek-nonstd].
+- Muốn dùng trong C phải định nghĩa `_GNU_SOURCE`[^seek-gnu].
+- ext4, XFS, Btrfs, tmpfs… nằm trong danh sách hỗ trợ của man page 6.03[^seek-fs]. overlayfs và virtiofs không có trong danh sách đó, nên kết quả dưới đây chỉ là quan sát.
+
+**Thí nghiệm.** Tạo file 1 GiB bằng `set_len(1 << 30)`, ghi 4 byte `head` ở offset 0 và 4 byte `tail` ở `1 GiB − 12 288`, rồi `lseek(SEEK_DATA/SEEK_HOLE)` (khai báo `extern "C"` cho `lseek` vì thư viện chuẩn Rust không có `SEEK_DATA`):
 
 ```
 [/tmp/w05sp] st_size=1073741824 st_blocks=16 (=> 8192 bytes allocated)
@@ -319,21 +338,21 @@ Thí nghiệm: tạo file 1 GiB bằng `set_len(1 << 30)`, ghi 4 byte `head` ở
 
 </details>
 
-**Quay lại Q6:** `st_size` đếm kích thước logic, `st_blocks` đếm phần thật sự được cấp phát, nên file có hole có `st_size` lớn hơn nhiều dung lượng chiếm trên đĩa.
+**Quay lại Q6:** `st_size` đếm kích thước logic, `st_blocks` đếm phần thật sự được cấp phát, nên file index sparse của `billing` có `st_size` lớn hơn nhiều dung lượng chiếm trên đĩa.
 
 ## 7. Khóa file: `flock` và `fcntl` (Q7)
 
-> **Trả lời ngắn.** `flock` khóa cả file, `fcntl` khóa theo dải byte, nhưng cả hai mặc định chỉ là advisory: process không kiểm tra khóa vẫn đọc ghi file bình thường[^flock-advisory][^fcntl-adv]. Điểm dễ nhầm là khóa gắn với process hay với open file description[^flock-ofd][^fcntl-posix].
+> **Trả lời ngắn.** `flock` khóa cả file, `fcntl` khóa theo dải byte, nhưng cả hai mặc định chỉ là advisory: process không kiểm tra khóa vẫn đọc ghi file bình thường[^flock-advisory]. Điểm dễ nhầm là khóa gắn với process hay với open file description[^flock-ofd].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): khóa advisory như tấm biển "đang có người dùng phòng" không kèm then cài: người lịch sự nhìn biển và chờ, người không để ý vẫn mở cửa đi vào.
+*Với service `billing`.* Khi rolling deploy, bản `billing` cũ và bản mới có thể chạy chồng nhau một lúc, và cả hai cùng mở file `billing.state` để ghi (giả định của người soạn). Muốn chỉ một bên ghi tại một thời điểm, `billing` xin một khóa trên file. Hai chuyện cần biết: khóa đó có thật sự chặn được bên kia không, và nó thuộc về ai khi process có nhiều fd.
 
-Linux có hai họ khóa:
+Linux có hai họ khóa, khác nhau ở phạm vi và ở chủ sở hữu khóa.
 
-**`flock(2)`** — đặt hoặc gỡ một advisory lock trên file đang mở do fd chỉ định: `LOCK_SH` (nhiều reader), `LOCK_EX` (một writer), `LOCK_UN`, và `LOCK_NB` để không chặn[^flock-def]; tên reader/writer chỉ là quy ước, vì khóa nào cũng đặt được bất kể file mở ở mode nào[^flock-anymode]. Khóa gắn với **open file description**: fd nhân bản bằng `dup`/`fork` dùng chung khóa; còn hai lần `open` cùng file được coi độc lập và có thể chặn nhau, kể cả trong cùng process[^flock-ofd]. Khóa được nhả khi `LOCK_UN` hoặc khi mọi fd nhân bản của OFD đóng[^flock-ofd]. Chuyển đổi khóa (shared↔exclusive) *không* đảm bảo nguyên tử[^flock-convert].
+**`flock(2)`** đặt hoặc gỡ một advisory lock trên file đang mở do fd chỉ định. Có `LOCK_SH` (nhiều reader), `LOCK_EX` (một writer), `LOCK_UN`, và `LOCK_NB` để không chặn[^flock-def]. Tên reader/writer chỉ là quy ước, vì khóa nào cũng đặt được bất kể file mở ở mode nào[^flock-anymode]. Khóa gắn với **open file description**. Fd nhân bản bằng `dup`/`fork` dùng chung khóa; còn hai lần `open` cùng file được coi là độc lập và có thể chặn nhau, kể cả trong cùng một process[^flock-ofd]. Khóa được nhả khi `LOCK_UN` hoặc khi mọi fd nhân bản của OFD đã đóng. Chuyển đổi khóa (shared↔exclusive) *không* đảm bảo nguyên tử[^flock-convert].
 
-**`fcntl(2)` record lock** — khóa theo dải byte. Loại "process-associated" truyền thống gắn với *process*: nếu process đóng *bất kỳ* fd nào của file, **mọi** khóa của nó trên file đó bị nhả — man page gọi là "bad", vì một hàm thư viện mở-đọc-đóng file như `/etc/passwd` cũng làm mất khóa[^fcntl-posix]. Khóa này không được thừa kế qua `fork` (nhưng giữ qua `execve`)[^fcntl-nofork], và các thread trong process chia sẻ khóa nên không dùng nó để loại trừ lẫn nhau giữa thread[^fcntl-threads]. Linux ≥ 3.15[^fcntl-since] có **open file description lock** (`F_OFD_SETLK`…) gắn với OFD như `flock`, được thừa kế qua `fork` và chỉ nhả ở lần `close` cuối của OFD[^fcntl-ofd].
+**`fcntl(2)` record lock** khóa theo dải byte. Loại "process-associated" truyền thống gắn với *process*. Nếu process đóng *bất kỳ* fd nào của file, **mọi** khóa của nó trên file đó bị nhả. Man page gọi hành vi này là "bad", vì một hàm thư viện mở-đọc-đóng file như `/etc/passwd` cũng làm mất khóa của bạn[^fcntl-posix]. Khóa này không được thừa kế qua `fork` (nhưng giữ qua `execve`)[^fcntl-nofork]. Các thread trong process chia sẻ khóa, nên không dùng nó để loại trừ lẫn nhau giữa thread[^fcntl-threads]. Từ Linux 3.15[^fcntl-since] có thêm **open file description lock** (`F_OFD_SETLK`…), gắn với OFD như `flock`, được thừa kế qua `fork` và chỉ nhả ở lần `close` cuối của OFD[^fcntl-ofd].
 
 | | `flock` | `fcntl` truyền thống | `fcntl` OFD |
 |---|---|---|---|
@@ -342,11 +361,13 @@ Linux có hai họ khóa:
 | khi `close` | nhả ở close cuối của OFD | đóng bất kỳ fd nào của file là nhả hết | nhả ở close cuối của OFD |
 | phạm vi | cả file | dải byte | dải byte |
 
-**Advisory, không phải bắt buộc.** `flock` chỉ là advisory: một process được tự do bỏ qua `flock()` và thực hiện I/O trên file[^flock-advisory]. Mặc định cả hai loại khóa `fcntl` cũng advisory — chỉ hữu ích giữa các process hợp tác[^fcntl-adv]. Linux có mandatory locking nhưng man page cảnh báo cài đặt không đáng tin và từ Linux 4.5 nó là tùy chọn cấu hình (`CONFIG_MANDATORY_FILE_LOCKING`), từ Linux 5.15 không còn được hỗ trợ[^fcntl-mand]. Trên NFS/CIFS có khác biệt (ví dụ `flock` được mô phỏng bằng byte-range lock trên toàn file)[^flock-nfs].
+**Còn câu hỏi "có chặn được không".** `flock` chỉ là advisory: một process được tự do bỏ qua `flock()` và thực hiện I/O trên file[^flock-advisory]. Mặc định cả hai loại khóa `fcntl` cũng advisory, nên chỉ hữu ích giữa các process hợp tác[^fcntl-adv]. Với `billing`, điều đó có nghĩa khóa chỉ bảo vệ được khi *mọi* bản `billing` đều xin khóa trước khi ghi; một công cụ ngoài mở file ra ghi thì khóa không ngăn được.
 
-<details><summary>Đi sâu: thí nghiệm <code>File::lock</code> trên Linux</summary>
+<details><summary>Đi sâu: mandatory locking, NFS và thí nghiệm <code>File::lock</code> trên Linux</summary>
 
-Thí nghiệm bằng Rust 1.95.0 (`File::lock`/`try_lock` ứng với `flock` trên Unix[^rust-lock]):
+**Mandatory locking và NFS.** Linux từng có mandatory locking, nhưng man page cảnh báo cài đặt không đáng tin; từ Linux 4.5 nó chỉ là tùy chọn cấu hình (`CONFIG_MANDATORY_FILE_LOCKING`), và từ Linux 5.15 không còn được hỗ trợ[^fcntl-mand]. Trên NFS/CIFS có khác biệt, ví dụ `flock` được mô phỏng bằng byte-range lock trên toàn file[^flock-nfs].
+
+**Thí nghiệm.** Bằng Rust 1.95.0 (`File::lock`/`try_lock` ứng với `flock` trên Unix[^rust-lock]):
 
 ```
 b.try_lock while a holds: Err(WouldBlock)         <- hai open() riêng: xung đột
@@ -355,11 +376,11 @@ after drop(a) b.try_lock (a2 still open): WouldBlock   <- OFD chưa đóng hết
 after drop(a2): Ok
 ```
 
-Khớp mô tả OFD trong man page. Rust docs: khóa được nhả khi file này (cùng mọi file descriptor/handle nhân bản hoặc thừa kế từ nó) bị đóng, hoặc khi gọi hàm unlock; gọi khóa lại trên handle đã giữ khóa (hoặc bản clone của nó) thì hành vi không xác định, kể cả deadlock[^rust-lock]. Vì vậy dòng `dup … Ok` ở trên chỉ là quan sát trên Linux (không phải bảo đảm của `std`). Docs còn nói khóa có thể là advisory hoặc mandatory[^rust-lock-advisory], tức `std` không hứa advisory.
+Khớp mô tả OFD trong man page. Rust docs nói khóa được nhả khi file này (cùng mọi file descriptor/handle nhân bản hoặc thừa kế từ nó) bị đóng, hoặc khi gọi hàm unlock. Gọi khóa lại trên handle đã giữ khóa (hoặc bản clone của nó) thì hành vi không xác định, kể cả deadlock[^rust-lock]. Vì vậy dòng `dup … Ok` ở trên chỉ là quan sát trên Linux (không phải bảo đảm của `std`). Docs còn nói khóa có thể là advisory hoặc mandatory[^rust-lock-advisory], tức `std` không hứa advisory.
 
 </details>
 
-**Quay lại Q7:** `flock`/`fcntl` chỉ là advisory, nên không ngăn process không hợp tác ghi; cần phân biệt khóa gắn process với khóa gắn open file description.
+**Quay lại Q7:** `flock`/`fcntl` chỉ là advisory, nên không ngăn process không hợp tác ghi; cần phân biệt khóa gắn process với khóa gắn open file description. Với `billing`, mọi bản của service phải cùng xin khóa thì khóa mới có tác dụng.
 
 ## 8. Liên hệ với Rust: `std::fs` và syscall (Q8)
 
@@ -367,9 +388,7 @@ Khớp mô tả OFD trong man page. Rust docs: khóa được nhả khi file nà
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `std::fs` như một lớp vỏ mỏng bọc quanh các syscall; hàm nào cũng cho bạn thấy gần đúng thao tác bên dưới, nên bảo đảm và cạm bẫy của syscall hiện nguyên ra.
-
-Ánh xạ `std::fs` (Rust 1.95.0) → syscall Linux:
+*Với service `billing`.* `billing` viết bằng Rust nên mọi việc ở các mục trên đều đi qua `std::fs`. Mỗi hàm gần như ứng một-một với một syscall, nên bảo đảm lẫn cạm bẫy của syscall hiện nguyên ra ở mức Rust. Bảng dưới là ánh xạ `std::fs` (Rust 1.95.0) → syscall Linux, theo đúng những việc `billing` cần làm:
 
 | Việc cần làm | API Rust | Ghi chú |
 |---|---|---|
@@ -377,28 +396,29 @@ Hình dung (nhận xét của người soạn): `std::fs` như một lớp vỏ 
 | đọc/ghi theo offset | `std::os::unix::fs::FileExt::{read_at, write_at, read_exact_at, write_all_at}` | offset truyền vào, con trỏ file không đổi; `read_at` có thể đọc ngắn[^rust-readat] |
 | đặt offset | `io::Seek::seek(SeekFrom::…)` | seek quá cuối được phép nhưng hành vi do cài đặt định nghĩa; offset âm là lỗi[^rust-seek] |
 | xuống đĩa | `File::sync_all`, `File::sync_data` | `sync_all`→`fsync` (quan sát)[^rust-sync] |
-| metadata | `fs::metadata` (stat), `fs::symlink_metadata` (lstat), `MetadataExt::{ino,nlink,blocks}` | [^rust-metadata][^rust-metadataext] |
+| metadata (stat/lstat) | `fs::metadata`, `fs::symlink_metadata` | `metadata` ứng với `stat`[^rust-stat]; `symlink_metadata` ứng với `lstat`[^rust-metadata] |
+| inode, nlink, blocks | `MetadataExt::{ino,nlink,blocks}` | `blocks` đơn vị 512 byte[^rust-metadataext] |
 | khóa | `File::lock/try_lock/lock_shared/unlock` | ↔ `flock`[^rust-lock] |
 
-(Suy luận của người soạn) `std` không tự `fsync` thư mục hay tạo file tạm cho bạn — tự viết `atomic_write` như mục 4.2.
+Có một điều bảng không nói: `std` không tự `fsync` thư mục hay tạo file tạm cho bạn, nên `billing` phải tự viết `atomic_write` như ở mục 4.2 (suy luận của người soạn).
 
 <details><summary>Đi sâu: các hàm <code>std::fs</code> đã gặp ở các mục trước</summary>
 
 - `fs::rename`: docs ghi hàm không hoạt động nếu tên mới ở mount point khác[^rust-rename].
-- `fs::hard_link`: trên hầu hết Unix ứng với `linkat` không cờ[^rust-hardlink]; `std::os::unix::fs::symlink` tạo symbolic link[^rust-symlink].
+- `fs::hard_link`: trên hầu hết Unix ứng với `linkat` không cờ[^rust-hardlink].
+- `std::os::unix::fs::symlink`: tạo symbolic link[^rust-symlink].
 - `fs::remove_file`: không có bảo đảm file bị xóa ngay[^rust-remove].
 - `fs::read_dir`: thứ tự có thể thay đổi giữa các lần gọi; trên Unix ứng với `opendir`/`readdir`[^rust-readdir].
-- `fs::metadata` ứng với `stat`[^rust-stat], `fs::symlink_metadata` ứng với `lstat`[^rust-metadata].
 
 </details>
 
-**Quay lại Q8:** `std::fs` là lớp mỏng gần một-một với syscall, nên `fsync` thư mục, file tạm và xử lý `EXDEV` vẫn là việc của bạn.
+**Quay lại Q8:** `std::fs` là lớp mỏng gần một-một với syscall, nên `fsync` thư mục, file tạm và xử lý `EXDEV` vẫn là việc của `billing`.
 
 ## Tóm tắt
 
 - Directory là bảng tên → inode; tên không nằm trong inode.
 - Offset nằm ở open file description: `dup`/`fork` chung, `open` hai lần riêng; `pread`/`pwrite` không đụng offset chung; `read`/`write` có thể ngắn.
-- `write` chưa bền: cần `fsync` file **và** `fsync` thư mục (chi tiết chương 06).
+- `write` chưa bền: `billing` cần `fsync` file **và** `fsync` thư mục (chi tiết chương 06).
 - Xóa là `unlink`: gỡ một tên, giảm link count; file chỉ mất khi count = 0 và không còn fd mở.
 - Hard link: cùng inode, cùng filesystem, không cho directory; symlink: file chứa đường dẫn, có thể dangling.
 - `rename` thay đích nguyên tử với process khác, không qua mount (`EXDEV`); tmp → `fsync` → `rename` → `fsync` thư mục là mẫu thay file an toàn.
@@ -410,14 +430,14 @@ Hình dung (nhận xét của người soạn): `std::fs` như một lớp vỏ 
 1. Directory lưu gì? Tên file nằm trong inode hay ở đâu?
 <details><summary>Đáp án</summary>
 
-Directory chứa danh sách cặp (tên đọc được, inode number)[^ostep-dir]; inode chứa metadata (loại, quyền, uid/gid, kích thước, link count…)[^inode-meta], không chứa tên.
+Directory chứa danh sách cặp (tên đọc được, inode number)[^ostep-dir]. Inode chứa metadata (loại, quyền, uid/gid, kích thước, link count…) và không chứa tên[^inode-meta].
 
 </details>
 
 2. Hai thread dùng chung một fd; vì sao `lseek` + `read` nguy hiểm còn `pread` thì không?
 <details><summary>Đáp án</summary>
 
-Offset nằm ở OFD dùng chung[^open-ofd-share]; hai syscall có thể bị thread khác chen vào. `pread` truyền offset và không đổi offset chung[^pread-nooff][^pread-mt].
+Offset nằm ở OFD dùng chung[^open-ofd-share], và hai syscall liên tiếp có thể bị thread khác chen vào giữa. `pread` truyền offset vào và không đổi offset chung[^pread-nooff]. Nhờ vậy nhiều thread dùng chung một fd mà không ảnh hưởng nhau[^pread-mt].
 
 </details>
 
@@ -431,28 +451,28 @@ Process vẫn giữ fd mở nên file tồn tại tới khi fd cuối đóng[^un
 4. Vì sao hard link không vượt filesystem và không trỏ directory?
 <details><summary>Đáp án</summary>
 
-Số inode chỉ duy nhất trong một filesystem[^inode-unique]; link tới directory có thể tạo vòng trong cây[^symlink-hard].
+Số inode chỉ duy nhất trong một filesystem[^inode-unique]. Còn link tới directory có thể tạo vòng trong cây[^symlink-hard].
 
 </details>
 
 5. Liệt kê các bước của mẫu thay file nguyên tử và vì sao file tạm phải cùng filesystem.
 <details><summary>Đáp án</summary>
 
-Ghi file tạm, `fsync`, `rename` đè lên đích, `fsync` thư mục[^ostep-tmp-rename][^fsync-dir]. `rename` không vượt mount: `EXDEV`[^exdev].
+Ghi file tạm, `fsync`, `rename` đè lên đích[^ostep-tmp-rename], rồi `fsync` thư mục chứa nó[^fsync-dir]. File tạm phải cùng mount vì `rename` không vượt mount: nếu khác mount, nó trả `EXDEV`[^exdev].
 
 </details>
 
 6. `rename` nguyên tử "với process khác" và "với crash" khác nhau thế nào?
 <details><summary>Đáp án</summary>
 
-Man page chỉ hứa reader không thấy đích biến mất[^rename-atomic]; OSTEP nói "usually" nguyên tử với crash[^ostep-rename-crash], cụ thể tùy filesystem (ext4 có `auto_da_alloc` ép dữ liệu file mới được cấp phát trước khi rename commit, cho mẫu replace-via-rename[^ext4-autodalloc]).
+Man page chỉ hứa reader không thấy đích biến mất[^rename-atomic]. OSTEP nói rename "usually" nguyên tử với crash[^ostep-rename-crash]. Cụ thể còn tùy filesystem: ext4 có `auto_da_alloc` ép dữ liệu file mới được cấp phát trước khi rename commit, cho mẫu replace-via-rename[^ext4-autodalloc].
 
 </details>
 
 7. File `st_size`=1 GiB mà `st_blocks`×512 = 8 KiB. Giải thích và nêu cách dò vùng có dữ liệu.
 <details><summary>Đáp án</summary>
 
-Sparse file: hole không cấp phát[^inode-blocks]; dùng `lseek` với `SEEK_DATA`/`SEEK_HOLE`[^seek-holedata], nhớ rằng filesystem không bắt buộc báo hole[^seek-optional].
+Đó là sparse file: hole không được cấp phát[^inode-blocks]. Dò vùng có dữ liệu bằng `lseek` với `SEEK_DATA`/`SEEK_HOLE`[^seek-holedata], nhớ rằng filesystem không bắt buộc báo hole[^seek-optional].
 
 </details>
 
@@ -535,7 +555,6 @@ Không; chỉ advisory, giữa các process hợp tác[^flock-advisory].
 [^rust-readdir]: Rust 1.95.0, fs::read_dir — <https://doc.rust-lang.org/1.95.0/std/fs/fn.read_dir.html> — "The order in which read_dir returns entries can change between calls."
 [^ostep-mount]: OSTEP, Chương 39, mục 39.17 Making And Mounting A File System — <https://pages.cs.wisc.edu/~remzi/OSTEP/file-intro.pdf> — "take an existing directory as a target mount point and essentially paste a new file system onto the directory tree at that point."
 [^mount-def]: mount(2), Debian bookworm — <https://manpages.debian.org/bookworm/manpages-dev/mount.2.en.html> — "Appropriate privilege (Linux: the CAP_SYS_ADMIN capability) is required to mount filesystems."
-[^mount-bind]: mount(2), Debian bookworm — <https://manpages.debian.org/bookworm/manpages-dev/mount.2.en.html> — "Create a bind mount: mountflags includes MS_BIND."
 [^pathres-mount]: path_resolution(7), mục Mount points — <https://manpages.debian.org/bookworm/manpages/path_resolution.7.en.html> — "One can walk out of a mounted filesystem: "path/.." refers to the parent directory of "path", outside of the filesystem hierarchy on "dev"."
 [^pathres-start]: path_resolution(7), Step 1 — <https://manpages.debian.org/bookworm/manpages/path_resolution.7.en.html> — "If the pathname starts with the '/' character, the starting lookup directory is the root directory of the calling process."
 [^pathres-walk]: path_resolution(7), Step 2 — <https://manpages.debian.org/bookworm/manpages/path_resolution.7.en.html> — "If the component is found and is a symbolic link, we first resolve this symbolic link (with the current lookup directory as starting lookup directory)."

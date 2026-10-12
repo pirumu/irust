@@ -17,36 +17,36 @@
 - [Chương 01 — Container là gì](01-container-la-gi.md): container là process thường của host, cô lập bằng namespace và giới hạn bằng cgroup.
 - File system, inode, page cache: [P5 · Chương 03](../05-storage/03-cai-dat-file-system.md) và [P5 · Chương 04](../05-storage/04-page-cache-va-direct-io.md). Phần tóm lược overlay của [P5 · Chương 07](../05-storage/07-raid-va-copy-on-write-fs.md) trỏ về chương này.
 
-**Bài toán.** Chương 02 cho process một cái nhìn riêng về PID, mount table, hostname, nhưng process vẫn cần **file**: `/bin/sh`, thư viện C, `/etc/passwd`. Ứng dụng Rust build cho Debian bookworm phải chạy với đúng bộ file của bookworm dù host là Alpine hay Ubuntu (nhận xét của người soạn). Bài toán có hai nửa: **cô lập** (làm process thấy một cây thư mục khác làm `/` và không với tới cây của host, Q1) và **đóng gói, chia sẻ** (phân phối cây đó như image, dùng chung phần giống nhau cho hàng trăm container mà vẫn cho mỗi container ghi riêng; Q2–Q5).
+**Bài toán, và service ta bám theo.** Chương 02 cho process một cái nhìn riêng về PID, mount table, hostname, nhưng process vẫn cần **file**: `/bin/sh`, thư viện C, `/etc/passwd`. Cả chương này bám theo `orders-api`, một service Rust giả định (nhận xét của người soạn: không phải code trong repo), build trên Debian bookworm, đóng gói thành image và chạy thành nhiều container trên các host khác nhau, host thì Alpine, host thì Ubuntu. Container nào cũng phải thấy đúng bộ file của bookworm, ghi được log và file upload, rồi bị thay bằng container mới ở lần deploy sau. Bài toán vì vậy có hai nửa. Nửa thứ nhất là **cô lập**: làm cho process thấy một cây thư mục khác làm `/` mà không với tới cây của host (Q1). Nửa thứ hai là **đóng gói và chia sẻ**: phân phối cây đó như một image, dùng chung phần giống nhau cho hàng trăm container mà vẫn cho mỗi container ghi riêng (Q2–Q5). Q6 gom tất cả thành quy tắc cho `orders-api`.
 
 ## 1. `chroot`, `pivot_root` và trình tự trong runtime (Q1)
 
-> **Trả lời ngắn.** `chroot` chỉ đổi điểm bắt đầu khi phân giải đường dẫn tuyệt đối của process và con cháu nó[^chroot-inherit]; man page nói thẳng nó không nhằm mục đích bảo mật nào[^chroot-purpose]. Runtime tham chiếu runc dùng `pivot_root`: đổi hẳn **root mount** của mount namespace và đặt root cũ vào chỗ gỡ (unmount) được[^pr-desc][^pr-unmount]; khi đã gỡ thì cây thư mục của host không còn trong mount table của container (suy luận của người soạn, thí nghiệm 2-C quan sát khớp).
+> **Trả lời ngắn.** `chroot` chỉ đổi điểm bắt đầu khi phân giải đường dẫn tuyệt đối, cho process và con cháu của nó[^chroot-inherit]. Man page cũng nói thẳng nó không nhằm mục đích bảo mật nào[^chroot-purpose]. Vì vậy runtime tham chiếu runc dùng `pivot_root`: đổi hẳn **root mount** của mount namespace rồi đặt root cũ vào chỗ gỡ (unmount) được[^pr-desc]. Khi root cũ đã gỡ, cây thư mục của host không còn trong mount table của container (suy luận của người soạn; thí nghiệm 2-C quan sát khớp).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): `chroot` giống việc dán lại biển "cửa chính" lên một cánh cửa khác của tòa nhà. Người đứng ở cửa mới tính đường đi từ đây, nhưng hành lang cũ, chìa khóa đang cầm (fd) và chỗ đang đứng (cwd) vẫn còn nguyên. `pivot_root` giống việc gỡ cả khu cũ khỏi bản đồ của tầng này.
+*Với `orders-api`.* Container của `orders-api` phải coi `/` là rootfs của image bookworm, chứ không phải `/` của host Alpine hay Ubuntu bên dưới. Cách đầu tiên người ta nghĩ tới là `chroot`. Nó đổi được gốc nhưng không cô lập được, và phần còn thiếu đó chính là lý do runtime dùng `pivot_root`.
 
-*`chroot`.* Gọi này đổi thư mục gốc của process; mọi đường dẫn bắt đầu bằng `/` được phân giải từ thư mục mới, và process con thừa kế root đó[^chroot-inherit]. Trên Linux cần capability `CAP_SYS_CHROOT` trong user namespace của process[^chroot-cap].
+*`chroot` đổi gì.* Lời gọi này đổi thư mục gốc của process: mọi đường dẫn bắt đầu bằng `/` từ nay được phân giải từ thư mục mới, và process con thừa kế root đó[^chroot-inherit]. Trên Linux, process cần capability `CAP_SYS_CHROOT` trong user namespace của nó mới gọi được[^chroot-cap].
 
-*Vì sao không phải cơ chế bảo mật.* Man page: lời gọi chỉ đổi một thành phần của quá trình phân giải đường dẫn và không làm gì khác; nó không dùng để sandbox hay hạn chế system call filesystem[^chroot-purpose]. Chính man page nêu các lối thoát:
+*Vì sao vẫn không phải cơ chế bảo mật.* Man page nói `chroot` chỉ đổi một thành phần của quá trình phân giải đường dẫn và không làm gì khác, nên không dùng được để sandbox một process hay hạn chế các system call filesystem[^chroot-purpose]. Một process nằm trong cây `chroot` của `orders-api` vẫn còn ba lối thoát, đều do chính man page nêu:
 
-- **Thư mục làm việc không đổi**: sau `chroot`, `.` có thể nằm ngoài cây gốc mới; superuser thoát "chroot jail" bằng `mkdir foo; chroot foo; cd ..`[^chroot-cwd].
+- **Thư mục làm việc không đổi**: sau `chroot`, `.` có thể nằm ngoài cây gốc mới, và superuser thoát "chroot jail" bằng `mkdir foo; chroot foo; cd ..`[^chroot-cwd].
 - **fd đã mở không bị đóng**: một fd trỏ ra ngoài cây có thể cho truy cập file ngoài cây[^chroot-fd].
 - **Thư mục bị di chuyển ra khỏi cây chroot**: kẻ tấn công `chdir` vào thư mục đó, chờ nó bị di chuyển ra, rồi mở `../../../etc/passwd`[^chroot-moved].
 
-Ngoài ra, mount(2) ghi nhận bind mount có thể băng qua chroot jail[^mount-bind-chroot]. Nói gọn: `chroot` chỉ thay **một con trỏ** (root directory) của process và "không làm gì khác"[^chroot-purpose], nên mount table của host vẫn nằm nguyên trong cùng mount namespace (suy luận của người soạn từ câu đó). Đó là điểm `pivot_root` sửa.
+Man page của mount(2) còn ghi nhận thêm một đường nữa: bind mount có thể băng qua chroot jail[^mount-bind-chroot]. Gom lại, `chroot` chỉ thay **một con trỏ** (root directory) của process và "không làm gì khác"[^chroot-purpose]. Mount table của host vì thế vẫn nằm nguyên trong cùng mount namespace (suy luận của người soạn từ câu đó). Đó đúng là chỗ `pivot_root` sửa.
 
-*`pivot_root`.* Nó làm việc ở mức **mount**: chuyển root mount vào thư mục `put_old` và đặt `new_root` làm root mount mới[^pr-desc]. Nó đổi root và cwd của **mọi** process/thread cùng mount namespace nếu chúng đang trỏ vào root cũ[^pr-allprocs]; root cũ nằm dưới `new_root` và sau đó gỡ (unmount) được[^pr-unmount]. Man page nêu một công dụng: dựng root filesystem lúc tạo container[^pr-modern]. Đổi lại, nó đòi `CAP_SYS_ADMIN` trong user namespace sở hữu mount namespace đó[^pr-cap]. Thí nghiệm 2-C dưới đây quan sát kết quả: sau khi gỡ root cũ, `/host-secret` không còn thấy từ namespace này.
+*`pivot_root` làm gì.* Nó làm việc ở mức **mount**, không phải mức đường dẫn: chuyển root mount vào thư mục `put_old` và đặt `new_root` làm root mount mới[^pr-desc]. Process hay thread nào cùng mount namespace mà root hoặc cwd đang trỏ vào root cũ thì bị đổi sang `new_root`[^pr-allprocs]. Root cũ giờ nằm dưới `new_root`, và từ đó gỡ (unmount) được[^pr-unmount]. Man page nêu một công dụng hiện đại của nó là dựng root filesystem lúc tạo container[^pr-modern]. Đổi lại, nó đòi `CAP_SYS_ADMIN` trong user namespace sở hữu mount namespace đó[^pr-cap]. Thí nghiệm 2-C ở phần Đi sâu quan sát kết quả: sau khi gỡ root cũ, `/host-secret` không còn thấy được từ namespace này.
 
-*Trình tự trong runc v1.2.5* (runtime tham chiếu; [chương 06](06-runtime-oci.md) nói kỹ hơn), chạy trong mount namespace mới của chương 02:
+*Trình tự khi container của `orders-api` khởi động.* Ta lấy runc v1.2.5 làm runtime tham chiếu ([chương 06](06-runtime-oci.md) nói kỹ hơn). Trình tự chạy trong mount namespace mới của chương 02:
 
-1. `prepareRoot` đặt propagation của `/` về `MS_SLAVE | MS_REC` (mặc định)[^runc-prep-slave], làm mount cha của rootfs thành private[^runc-parentpriv], rồi bind mount rootfs lên chính nó để rootfs thành một mount point[^runc-prep-bind].
-2. `pivotRoot` gọi `pivot_root(".", ".")`: man page xác nhận `new_root` và `put_old` được phép là cùng một thư mục, khỏi tạo/xóa thư mục tạm[^pr-same]. Lời gọi này "stack" root cũ lên trên root mới tại `/`[^pr-stack]; runc ghi chú kết quả là `/` là root mới nhưng `/proc/self/cwd` là root cũ[^runc-dotdot].
-3. runc chuyển root cũ sang `rslave` để việc unmount không lan ra host[^runc-rslave], rồi `umount2(".", MNT_DETACH)`[^runc-detach], rồi `chdir("/")`[^runc-chdir].
+1. `prepareRoot` đặt propagation của `/` về `MS_SLAVE | MS_REC` (mặc định)[^runc-prep-slave]. Sau đó runc làm mount cha của rootfs thành private[^runc-parentpriv]. Rồi nó bind mount rootfs lên chính nó để rootfs thành một mount point[^runc-prep-bind].
+2. `pivotRoot` gọi `pivot_root(".", ".")`. Man page xác nhận `new_root` và `put_old` được phép là cùng một thư mục, nên khỏi tạo rồi xóa thư mục tạm[^pr-same]. Lời gọi này "stack" root cũ lên trên root mới tại `/`[^pr-stack]. Kết quả theo ghi chú của runc: `/` là root mới nhưng `/proc/self/cwd` vẫn là root cũ[^runc-dotdot].
+3. Tiếp theo runc chuyển root cũ sang `rslave` để việc unmount không lan ra host[^runc-rslave]. Rồi nó gọi `umount2(".", MNT_DETACH)`[^runc-detach]. Cuối cùng nó `chdir("/")` về root mới[^runc-chdir].
 4. `finalizeRootfs` đặt các mount cần read-only[^runc-ro].
 
-> **Hiểu lầm hay gặp**: "container dùng `chroot`". Trong mã runc, `NoPivotRoot` thì gọi `msMoveRoot`[^runc-nopivot]; nếu không và config có mount namespace thì gọi `pivotRoot`; còn lại mới `chroot()`[^runc-newns]. Tác giả runc ghi chú người dùng không nên dùng `--no-pivot` trừ hoàn cảnh đặc biệt[^runc-nopivot-warn].
+> **Hiểu lầm hay gặp**: "container dùng `chroot`". Trong mã runc, nếu config đặt `NoPivotRoot` thì runc gọi `msMoveRoot`[^runc-nopivot]. Nếu không, và config có mount namespace, nó gọi `pivotRoot`; chỉ khi còn lại mới đến `chroot()`[^runc-newns]. Tác giả runc ghi chú người dùng không nên dùng `--no-pivot` trừ hoàn cảnh đặc biệt[^runc-nopivot-warn].
 
 <details><summary>Đi sâu: bảng ràng buộc của pivot_root, mã runc, thí nghiệm 1–2</summary>
 
@@ -55,10 +55,10 @@ Ngoài ra, mount(2) ghi nhận bind mount có thể băng qua chroot jail[^mount
 | Ràng buộc | Hệ quả thực tế |
 |---|---|
 | `new_root` phải là mount point; path chưa là mount point thì bind mount nó lên chính nó[^pr-mountpoint] | runc bind mount rootfs lên chính nó trong `prepareRoot` |
-| Mount cha của `new_root` và mount cha của root hiện tại không được `MS_SHARED`; các hạn chế này để `pivot_root` không lan thay đổi sang mount namespace khác[^pr-shared][^pr-nopropagate]. Vi phạm → `EINVAL`; mục ERRORS còn nêu cả chính mount tại `new_root` có propagation `MS_SHARED`[^pr-einval] | runc chuyển propagation sang slave/private trước |
+| Mount cha của `new_root` và của root hiện tại không được `MS_SHARED`[^pr-shared]. Các hạn chế này để `pivot_root` không lan thay đổi sang mount namespace khác[^pr-nopropagate]. Vi phạm → `EINVAL`; mục ERRORS còn nêu cả chính mount tại `new_root` có propagation `MS_SHARED`[^pr-einval] | runc chuyển propagation sang slave/private trước |
 | `new_root` và `put_old` không được nằm trên cùng mount với root hiện tại[^pr-notsame]. Vi phạm → `EBUSY`[^pr-ebusy] | Cần mount riêng cho rootfs |
 
-Mã runc cho thấy thêm hai chi tiết: `prepareRoot` lấy `config.RootPropagation` nếu khác 0[^runc-rootprop], và `rootfsParentMountPrivate` có comment rằng `pivot_root` sẽ lỗi nếu mount cha còn shared[^runc-parentpriv]. Sơ đồ dưới đối chiếu với hàm `pivotRoot` của runc[^runc-dotdot][^runc-rslave][^runc-detach][^runc-chdir] và đã lược các bước mount `/proc`, `/dev`… vào rootfs:
+Mã runc cho thấy thêm hai chi tiết. `prepareRoot` lấy `config.RootPropagation` nếu khác 0[^runc-rootprop]. `rootfsParentMountPrivate` có comment rằng `pivot_root` sẽ lỗi nếu mount cha còn shared[^runc-parentpriv]. Sơ đồ dưới đối chiếu với hàm `pivotRoot` của runc và đã lược các bước mount `/proc`, `/dev`… vào rootfs:
 
 ```mermaid
 sequenceDiagram
@@ -116,25 +116,25 @@ unshare -m /bin/sh -c '
 
 ## 2. Image ở mức byte: layer, config, manifest, digest (Q2)
 
-> **Trả lời ngắn.** Image không phải một khối mà là vài file nhỏ tham chiếu nhau. Mỗi **layer** là một blob theo định dạng dựa trên tar, ghi các thay đổi so với layer dưới[^config-nometa]; **config** là JSON mô tả cả image và liệt kê hash của các layer (`diff_ids`)[^config-diffids]; **manifest** trỏ tới config và danh sách layer[^manifest-single]. Digest của layer (ghi trong manifest) và `diff_id` (ghi trong config) có thể khác nhau, vì `diff_id` luôn tính trên tar *chưa nén*[^config-diffid][^config-notconfuse].
+> **Trả lời ngắn.** Image không phải một khối mà là vài file nhỏ tham chiếu nhau. Mỗi **layer** là một blob chứa các thay đổi so với layer dưới, đóng gói trong tar[^layer-types]. **Config** là JSON mô tả cả image và liệt kê hash của các layer (`diff_ids`)[^config-diffids]. **Manifest** trỏ tới config và danh sách layer[^manifest-single]. Digest của layer (ghi trong manifest) và `diff_id` (ghi trong config) có thể khác nhau, vì `diff_id` luôn tính trên tar *chưa nén*[^config-diffid].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): image như một lô hàng gửi bưu điện. Mỗi thùng carton là một layer, mỗi thùng có mã vạch riêng. Phiếu mục lục (manifest) ghi mã vạch từng thùng theo thứ tự xếp, kèm mã vạch của phiếu thông số (config). Phiếu thông số ghi cách chạy và mã vạch của từng thùng *sau khi mở ra*.
+*Với `orders-api`.* Khi CI build xong `orders-api`, nó đẩy image lên registry và mỗi node `docker pull` về. Thứ được kéo về không phải một file duy nhất mà là một nhóm file nhỏ tham chiếu nhau. Giả sử Dockerfile của `orders-api` có `FROM debian:bookworm`, một lệnh `COPY` binary và một `CMD` (nhận xét của người soạn: Dockerfile giả định). Lệnh nào đổi filesystem thì thành một layer; `CMD` không đổi filesystem nên không sinh layer, thí nghiệm 4 ở Đi sâu quan sát đúng điều đó. Ta lần lượt xem từng loại file.
 
-*Layer.* Đặc tả OCI image-spec (đọc tag `v1.1.0`) định nghĩa layer là blob serialize một filesystem và các thay đổi của nó như file bị xóa[^layer-intro], theo định dạng dựa trên tar[^config-nometa]. Layer chỉ ghi **thay đổi**: thêm và sửa biểu diễn y hệt nhau trong tar[^layer-types]; xóa biểu diễn bằng **whiteout**, một file rỗng tên `.wh.` + basename của path cần xóa[^layer-wh]. Layer *được áp dụng* (apply) lên nhau, không chỉ giải nén như tar thường (chi tiết ở Đi sâu).
+*Layer.* Layer là blob serialize một filesystem cùng các thay đổi của nó, chẳng hạn file bị xóa[^layer-intro]. Nó chỉ ghi **thay đổi**: thêm file và sửa file được biểu diễn y hệt nhau trong tar[^layer-types]. Xóa thì khác, nó được biểu diễn bằng một **whiteout**, entry có tên `.wh.` cộng basename của path cần xóa[^layer-wh]. Vì vậy layer được *áp dụng* (apply) lần lượt lên nhau chứ không chỉ giải nén như tar thường (chi tiết ở Đi sâu). Các đặc tả OCI trích ở đây là image-spec tag `v1.1.0`.
 
-*Config.* Là JSON mô tả image: layer không mang cấu hình như biến môi trường hay lệnh mặc định; đó là thuộc tính của cả image[^config-nometa]. Trường `rootfs.diff_ids` là mảng hash nội dung các layer theo thứ tự từ đầu tới cuối[^config-diffids]. Trường `history` có mục `empty_layer` cho lệnh không sinh thay đổi filesystem[^config-empty].
+*Config.* Config là JSON mô tả cả image. Layer không mang cấu hình như biến môi trường hay lệnh mặc định, vì đó là thuộc tính của cả image chứ không phải của layer nào[^config-nometa]. Với `orders-api`, `ENV` và `CMD` nằm ở đây. Trường `rootfs.diff_ids` là mảng hash nội dung các layer, theo thứ tự từ đầu tới cuối[^config-diffids]. Trường `history` có mục `empty_layer` cho lệnh không sinh thay đổi filesystem[^config-empty].
 
-*Manifest và descriptor.* Manifest cho một image với một kiến trúc/OS cụ thể: một `config` và danh sách `layers`[^manifest-single]. Cả hai là **descriptor** (con trỏ tới nội dung): config tham chiếu theo digest[^manifest-config-desc] và mỗi phần tử `layers` là một descriptor[^manifest-layers-desc], với các trường `mediaType`[^desc-mt], `digest` và `size`[^desc-size]. Layer nền nằm ở index 0 và các layer sau theo thứ tự stack[^manifest-order]. Với nhiều kiến trúc có image index ("fat manifest") trỏ tới các manifest riêng[^manifest-index].
+*Manifest và descriptor.* Manifest mô tả một image cho một kiến trúc và OS cụ thể: một `config` và danh sách `layers`[^manifest-single]. Cả hai đều là **descriptor**, tức con trỏ tới nội dung. Config được tham chiếu theo digest[^manifest-config-desc]. Mỗi phần tử của `layers` cũng là một descriptor[^manifest-layers-desc]. Mỗi descriptor có một `mediaType`[^desc-mt]. Nó còn có `digest` và `size`, số byte của nội dung[^desc-size]. Layer nền nằm ở index 0, các layer sau xếp theo thứ tự stack[^manifest-order]. Khi image hỗ trợ nhiều kiến trúc, có thêm image index ("fat manifest") trỏ tới các manifest riêng[^manifest-index].
 
-*Cái nào băm cái nào.* `diff_id` là digest của tar không nén của layer[^config-diffid]. Digest trong manifest là digest của blob layer như được lưu/truyền, spec nói nó tính trên nội dung nén hoặc không nén, và cảnh báo đừng nhầm hai thứ[^config-notconfuse]. Thí nghiệm 3 (dưới) cho thấy với `alpine:3` blob là gzip nên hai hash khác nhau.
+*Cái nào băm cái nào.* `diff_id` là digest của tar không nén của layer[^config-diffid]. Digest ghi trong manifest là digest của blob như được lưu và truyền đi. Spec nói nó tính trên nội dung nén hoặc không nén, và dặn đừng nhầm hai thứ này[^config-notconfuse]. Thí nghiệm 3 cho thấy với `alpine:3` blob là gzip nên hai hash khác nhau.
 
 <details><summary>Đi sâu: quy tắc whiteout trong tar, ChainID, thí nghiệm 3–4</summary>
 
 **Whiteout trong tar** (khác whiteout của overlayfs ở mục 4):
 
-- Whiteout chỉ áp lên tài nguyên ở layer thấp hơn, không áp lên chính layer chứa nó[^layer-wh-lower]; sau khi áp, bản thân whiteout cũng bị ẩn[^layer-wh-hidden].
+- Whiteout chỉ áp lên tài nguyên ở layer thấp hơn, không áp lên chính layer chứa nó[^layer-wh-lower]. Sau khi áp, bản thân whiteout cũng bị ẩn[^layer-wh-hidden].
 - **Opaque whiteout**: entry tên `.wh..wh..opq` nghĩa là mọi anh em của nó ở layer dưới bị ẩn[^layer-opq]. Spec yêu cầu implementation nên sinh explicit whiteout nhưng phải chấp nhận cả hai dạng[^layer-explicit].
 - Khi áp một entry lên path đã tồn tại: nếu cả hai là thư mục thì thuộc tính được thay bằng của entry; mọi trường hợp khác thì xóa path rồi tạo lại[^layer-over].
 
@@ -180,19 +180,21 @@ docker history rust-foundations-lab:1.95 --format '{{.Size}}|{{.CreatedBy}}'
 
 ## 3. Content-addressable: định danh bằng nội dung (Q3)
 
-> **Trả lời ngắn.** "Content-addressable" nghĩa là gọi một object bằng hash của chính nội dung nó[^desc-digest]. Nhờ vậy nội dung lấy từ nguồn không tin cậy vẫn kiểm tra được bằng cách băm lại[^desc-secure]; ID của image là hash của config, mà config chứa hash từng layer, nên đổi một layer là đổi ID image[^config-imageid]; và layer giống hệt nhau chỉ cần lưu một lần[^dk-shared-once].
+> **Trả lời ngắn.** "Content-addressable" nghĩa là gọi một object bằng hash của chính nội dung nó[^desc-digest]. Nhờ vậy ta kiểm chứng được nội dung lấy từ nguồn không tin cậy bằng cách băm lại[^desc-secure]. ID của image là hash của config, mà config chứa hash từng layer, nên đổi một layer là đổi ID image[^config-imageid]. Còn layer giống hệt nhau chỉ cần lưu một lần[^dk-shared-once].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): giống Git, nơi tên của commit là hash của nội dung. Không ai "đặt tên" cho layer; tên *là* dấu vân tay của nội dung, nên hai bên cùng băm sẽ cùng một tên, và đổi một byte là ra tên khác.
+*Với `orders-api`.* Mỗi lần CI build lại, image mới của `orders-api` thường chỉ khác bản trước ở layer chứa binary, còn các layer base Debian vẫn y nguyên (nhận xét của người soạn). Nếu layer chỉ được gọi bằng một cái tên do người đặt thì node và registry không có cách nào biết hai layer cùng tên có thật sự cùng bytes hay không. Content-addressable giải quyết đúng chỗ đó: tên của layer chính là hash của nội dung nó, nên hai bên băm cùng một nội dung sẽ ra cùng một tên, và đổi một byte là ra tên khác.
 
-1. Trường `digest` của descriptor là định danh nội dung, cho phép content addressability[^desc-digest]. Nội dung lấy từ nguồn không tin cậy nên được kiểm tra lại với digest trước khi dùng[^desc-verify]; nếu digest đến qua kênh an toàn, bạn kiểm chứng được nội dung từ nguồn không an toàn bằng cách băm lại[^desc-secure].
-2. Mục tiêu đầu tiên của manifest spec là image content-addressable: hash config cho ra ID duy nhất của image[^manifest-goal]. Image ID là SHA256 của config JSON[^config-imageid-sha]; config chứa hash từng layer nên ID này làm image content-addressable[^config-imageid]. Config được coi là bất biến vì đổi nó sẽ đổi ImageID[^config-immutable].
-3. Chia sẻ: Docker nói layer dùng chung giữa các image chỉ được lưu một lần và cũng được dùng chung khi push/pull lên registry (mô tả storage driver cổ điển, đường dẫn `/var/lib/docker/`)[^dk-shared-once]. Khi tạo image mới có chung các layer đầu, Docker đã có sẵn nên không pull lại[^dk-no-repull].
+*Kiểm chứng.* Trường `digest` của descriptor là định danh nội dung, và chính nó cho phép content addressability[^desc-digest]. Vì vậy nội dung lấy từ nguồn không tin cậy nên được kiểm tra lại với digest trước khi dùng[^desc-verify]. Nếu digest đến qua một kênh an toàn, bạn kiểm chứng được nội dung từ nguồn không an toàn bằng cách băm lại[^desc-secure].
+
+*ID của image.* Mục tiêu đầu tiên của manifest spec là image content-addressable: hash của config cho ra một ID duy nhất cho image[^manifest-goal]. Cụ thể, ID image là SHA256 của config JSON[^config-imageid-sha]. Config lại chứa hash từng layer, nên cách đặt ID này làm image content-addressable[^config-imageid]. Config vì thế được coi là bất biến: đổi nó là đổi ImageID[^config-immutable]. Với `orders-api`, build lại mà một layer khác đi thì ID image cũng khác.
+
+*Chia sẻ.* Docker nói layer dùng chung giữa các image chỉ được lưu một lần, và cũng được dùng chung khi push/pull lên registry (mô tả storage driver cổ điển, đường dẫn `/var/lib/docker/`)[^dk-shared-once]. Khi tạo image mới có chung các layer đầu, Docker đã có sẵn chúng nên không pull lại[^dk-no-repull]. Nếu các layer base của `orders-api` giữ nguyên, node đã chạy bản cũ chỉ cần kéo layer binary mới (nhận xét của người soạn).
 
 <details><summary>Đi sâu: giới hạn của "chung layer", <code>.Id</code> trên containerd store</summary>
 
-- Hai image chỉ chung một layer khi blob của chúng có cùng digest, tức cùng bytes, tính cả cách nén (suy luận của người soạn từ định nghĩa digest là hash của bytes[^desc-digest] và việc `diff_id` khác digest nén[^config-notconfuse]).
+- Hai image chỉ chung một layer khi blob của chúng có cùng digest, tức cùng bytes, tính cả cách nén (suy luận của người soạn). Điểm tựa thứ nhất: digest là hash của bytes[^desc-digest]. Điểm tựa thứ hai: `diff_id` khác digest của blob nén[^config-notconfuse].
 - Docker mô tả `docker ps` `virtual size` là dữ liệu read-only của image cộng writable layer, và hai container từ cùng image chia sẻ 100% dữ liệu read-only[^dk-ps-size]; vì vậy (suy luận của người soạn) không cộng dồn virtual size của nhiều container được.
 - Thí nghiệm 3 (mục 2): blob trong `blobs/sha256/` đặt tên đúng digest; `sha256sum` của blob nén ra đúng tên file. Cũng ở đó, `.Id` trên máy này là digest của index, không phải của config (hành vi containerd image store, chưa kiểm tra thêm) nên ví dụ "ID = hash config" của spec không tự thấy khi gõ `docker image inspect` ở đây.
 - (Nhận xét của người soạn) Pull image mới mà một layer 547 MB đổi digest thì phải tải lại cả layer; đó là suy luận từ việc digest định danh cả blob, spec không nói về pull.
@@ -203,30 +205,32 @@ Hình dung (nhận xét của người soạn): giống Git, nơi tên của com
 
 ## 4. overlayfs: ghép layer thành một cây (Q4)
 
-> **Trả lời ngắn.** overlayfs chồng một thư mục ghi được (`upperdir`) lên một hoặc nhiều thư mục `lowerdir` (không cần ghi được[^ov-lower-ro]) và cho ra một cây hợp nhất (`merged`). Tên có ở cả hai tầng thì tầng trên thắng, riêng thư mục thì được hợp nhất[^ov-hidden]. Sửa một file ở tầng dưới thì cả file được **copy-up** sang tầng trên trước[^ov-copyup]; xóa thì ghi một dấu **whiteout** ở tầng trên[^ov-whiteout]; thư mục được thay mới thì đánh dấu **opaque**[^ov-opaque].
+> **Trả lời ngắn.** overlayfs chồng một thư mục ghi được (`upperdir`) lên một hoặc nhiều thư mục `lowerdir`, những thư mục này không cần ghi được[^ov-lower-ro], và cho ra một cây hợp nhất gọi là `merged`. Tên có ở cả hai tầng thì tầng trên thắng, riêng thư mục thì được hợp nhất[^ov-hidden]. Sửa một file ở tầng dưới thì cả file được **copy-up** sang tầng trên trước[^ov-copyup]. Xóa thì ghi một dấu **whiteout** ở tầng trên[^ov-whiteout]. Thư mục được thay mới thì đánh dấu **opaque**[^ov-opaque].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): xếp các tờ giấy bóng kính lên một tập bản vẽ. Nhìn từ trên xuống thấy bản hợp nhất. Muốn sửa nét vẽ ở tờ dưới, bạn không đụng tờ dưới mà chép nét đó lên tờ trên cùng rồi sửa ở đó (copy-up). Muốn xóa, bạn dán một miếng che lên (whiteout).
+*Với `orders-api`.* Container `orders-api` chỉ thấy một cây `/` duy nhất, nhưng bên dưới là các layer chỉ-đọc của image cộng một chỗ ghi riêng của container. Khi `orders-api` ghi `/var/log/app.log`, hoặc sửa một file mà image đã có sẵn, byte đi về đâu, và image có bị đụng tới không? Đó là việc của overlayfs.
 
-*Mô hình.* Tài liệu kernel v6.8 nói overlay ghép một filesystem upper và một filesystem lower; thực ra là hai *cây thư mục*, có thể cùng một filesystem[^ov-trees]. Khi tên có ở cả hai, object ở upper hiển thị; object ở lower bị ẩn, hoặc với thư mục thì được *merge*[^ov-hidden]. Mount:
+*Mô hình.* Tài liệu kernel (v6.8) nói overlay ghép một filesystem upper với một filesystem lower. Nói cho đúng, đó là hai *cây thư mục*, và chúng có thể nằm cùng một filesystem[^ov-trees]. Khi một tên có ở cả hai cây, object ở upper hiển thị; object ở lower bị ẩn, hoặc nếu là thư mục thì được *merge*[^ov-hidden]. Lệnh mount có dạng:
 
 ```sh
 mount -t overlay overlay -olowerdir=/lower,upperdir=/upper,workdir=/work /merged
 ```
 
-- `lowerdir`: có thể nhiều tầng, ngăn cách bằng `:`, xếp từ **phải sang trái** (tầng phải cùng là đáy)[^ov-multi]. Lower không cần ghi được[^ov-lower-ro].
+Bốn tham số của lệnh này là bốn vai trò:
+
+- `lowerdir`: các tầng chỉ đọc. Có thể có nhiều tầng, ngăn cách bằng `:` và xếp từ **phải sang trái**, tức tầng ngoài cùng bên phải là đáy[^ov-multi]. Lower không cần ghi được[^ov-lower-ro].
 - `upperdir`: nơi mọi thay đổi được ghi. Upper thường ghi được, và khi đó filesystem chứa nó phải hỗ trợ xattr `trusted.*` và/hoặc `user.*` cùng `d_type` hợp lệ, nên NFS không phù hợp[^ov-upper-req].
 - `workdir`: thư mục rỗng, cùng filesystem với `upperdir`[^ov-workdir].
-- `merged`: điểm mount, cái process nhìn thấy.
+- `merged`: điểm mount, thứ mà process trong container nhìn thấy.
 
-Thư mục có ở cả hai tầng được merge; chỉ *danh sách tên* được hợp nhất, còn metadata và xattr lấy từ thư mục upper[^ov-dirs]. Docker dùng đúng từ vựng này (`lowerdir`, `upperdir`, `merged`)[^dk-ov-terms].
+Thư mục có ở cả hai tầng thì được merge, nhưng chỉ *danh sách tên* được hợp nhất; metadata và xattr lấy từ thư mục upper[^ov-dirs]. Docker dùng đúng bộ từ vựng này (`lowerdir`, `upperdir`, `merged`)[^dk-ov-terms].
 
-*Đọc.* File chỉ có ở lower được đọc thẳng, Docker nói overhead rất nhỏ[^dk-ov-read].
+*Đọc.* File chỉ có ở lower được đọc thẳng, và Docker nói overhead rất nhỏ[^dk-ov-read]. Nên việc `orders-api` đọc binary hay thư viện C của chính nó không tốn thêm gì đáng kể (nhận xét của người soạn).
 
-*Ghi và copy-up.* Khi file ở lower được truy cập theo cách cần quyền ghi (mở để ghi, đổi metadata…), nó được **copy_up** sang upper[^ov-copyup]. Quy trình: bảo đảm thư mục chứa nó (và cha) tồn tại ở upper, tạo object cùng metadata, copy data nếu là file, cuối cùng copy xattr[^ov-copyup-proc]. Sau copy-up, thao tác trên file đi thẳng vào upper[^ov-copyup-direct]. Điểm quyết định cho hiệu năng (Docker): overlay làm việc ở mức **file chứ không phải block**, nên copy-up copy cả file dù chỉ sửa một phần nhỏ[^dk-copyup-file]; chỉ xảy ra lần ghi đầu tiên[^dk-copyup-once].
+*Ghi và copy-up.* Giờ giả sử `orders-api` sửa một file nằm ở layer image. Khi file ở lower được truy cập theo cách cần quyền ghi (mở để ghi, đổi metadata…), nó được **copy_up** sang upper trước[^ov-copyup]. Quy trình: bảo đảm thư mục chứa nó (và các thư mục cha) tồn tại ở upper, tạo object cùng metadata, copy data nếu là file, cuối cùng copy xattr[^ov-copyup-proc]. Sau copy-up, mọi thao tác trên file đi thẳng vào upper[^ov-copyup-direct]. Điểm quyết định cho hiệu năng: overlay làm việc ở mức **file chứ không phải block**, nên copy-up copy cả file dù chỉ sửa một phần nhỏ[^dk-copyup-file]. Việc này chỉ xảy ra ở lần ghi đầu tiên vào file đó[^dk-copyup-once]. Thí nghiệm 5 ở Đi sâu cho thấy hệ quả: thêm 2 byte vào một file khoảng 4,5 MB thì upper có một bản copy khoảng 4,5 MB.
 
-*Xóa.* Để `rm`/`rmdir` không đụng lower, overlayfs ghi dấu xóa vào upper bằng whiteout và opaque directory[^ov-wh-why]. Whiteout là **character device 0/0** (hoặc file rỗng có xattr `trusted.overlay.whiteout`)[^ov-whiteout]; thấy nó ở upper thì tên tương ứng ở lower bị bỏ qua và chính whiteout cũng bị ẩn[^ov-whiteout-hide]. Thư mục opaque là thư mục có xattr `trusted.overlay.opaque = "y"`; thư mục cùng tên ở lower bị bỏ qua[^ov-opaque]. Docker mô tả cùng hành vi ở mức người dùng: xóa file → whiteout; xóa thư mục → opaque directory[^dk-wh][^dk-opq].
+*Xóa.* Để `rm` và `rmdir` không đụng tới lower, overlayfs ghi dấu xóa vào upper bằng whiteout và opaque directory[^ov-wh-why]. Whiteout là một **character device 0/0**, hoặc một file kích thước 0 có xattr `trusted.overlay.whiteout`[^ov-whiteout]. Thấy nó ở upper thì tên tương ứng ở lower bị bỏ qua, và chính whiteout cũng bị ẩn[^ov-whiteout-hide]. Thư mục opaque là thư mục có xattr `trusted.overlay.opaque = "y"`, và thư mục cùng tên ở lower bị bỏ qua[^ov-opaque]. Docker mô tả cùng hành vi ở mức người dùng. Xóa file thì có whiteout[^dk-wh]. Xóa thư mục thì có opaque directory[^dk-opq].
 
 <details><summary>Đi sâu: copy-up chi tiết, thí nghiệm 5–6, giới hạn overlay, Docker overlay2 và containerd</summary>
 
@@ -290,11 +294,11 @@ mount -t overlay overlay -o lowerdir=l2:l1,upperdir=u,workdir=w m
 **Giới hạn** (chỉ điều tài liệu nói):
 
 - **Inode number**: object không phải thư mục có thể báo `st_dev` của lower/upper; `st_ino` chỉ duy nhất khi kết hợp `st_dev`, và cả hai có thể đổi trong đời object[^ov-inode]. Khi mọi layer cùng filesystem, mọi object báo `st_dev` của overlay và `st_ino` của filesystem bên dưới[^ov-xino]. (Quan sát trên tmpfs: `stat` file lower `dev=50 ino=8`, cùng file qua merged `dev=52 ino=8`.)
-- **Đổi tên thư mục**: khi `redirect_dir` tắt, `rename(2)` trên thư mục ở lower hoặc merged trả `EXDEV`[^ov-rename]; bật `redirect_dir` thì thư mục được copy-up (không kèm nội dung) và ghi xattr `trusted.overlay.redirect`[^ov-redirect]. Doc kernel nêu `mv(1)` xử lý `EXDEV` bằng cách copy đệ quy[^ov-mv]; Docker dặn ứng dụng phải tự xử lý `EXDEV` và quay về chiến lược `copy and unlink`[^dk-rename]. Quan sát: `os.rename('m/dd','m/dd3')` của Python → `errno 18 Cross-device link`; `mv` chạy được; mount lại với `redirect_dir=on` thì `rename` thành công và upper có `trusted.overlay.redirect = b'dd'`. Tham số module `redirect_dir` trên kernel VM này đọc ra `N`.
+- **Đổi tên thư mục**: khi `redirect_dir` tắt, `rename(2)` trên thư mục ở lower hoặc merged trả `EXDEV`[^ov-rename]. Bật `redirect_dir` thì thư mục được copy-up (không kèm nội dung) và ghi xattr `trusted.overlay.redirect`[^ov-redirect]. Doc kernel nêu `mv(1)` xử lý `EXDEV` bằng cách copy đệ quy[^ov-mv]. Docker dặn ứng dụng phải tự xử lý `EXDEV` và quay về chiến lược `copy and unlink`[^dk-rename]. Quan sát: `os.rename('m/dd','m/dd3')` của Python → `errno 18 Cross-device link`; `mv` chạy được; mount lại với `redirect_dir=on` thì `rename` thành công và upper có `trusted.overlay.redirect = b'dd'`. Tham số module `redirect_dir` trên kernel VM này đọc ra `N`.
 - **Sửa lower khi đang mount**: không được phép; hành vi undefined (không crash hay deadlock)[^ov-underlying].
 - Các giới hạn POSIX khác trong mục "Non-standard behavior": `st_atime` không cập nhật cho file ở lower, `MAP_SHARED`, `ETXTBSY` (đã nói trên)[^ov-nonstd].
 
-**Docker: `overlay2` và containerd snapshotter.** Tài liệu Docker mô tả `overlay2`: tối đa 128 lower layer natively[^dk-128] và nhiều container truy cập cùng một file chia sẻ một entry page cache[^dk-pagecache]. Docker nói Engine 29.0 trở lên dùng **containerd image store** làm mặc định cho cài mới, dùng snapshotter thay storage driver cổ điển[^dk-29]; snapshotter mặc định là `overlayfs`[^dk-snap]. Khớp quan sát: `docker info --format '{{.Driver}} {{.DriverStatus}}'` in `overlayfs [[driver-type io.containerd.snapshotter.v1]]`, layer nằm dưới `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/…`, không dưới `/var/lib/docker/overlay2/` như tài liệu `overlay2`. Tài liệu Docker không ghim phiên bản (đọc bản đang online lúc viết); khái niệm layer/lower/upper giống nhau, đường dẫn và lệnh thì khác[^dk-29].
+**Docker: `overlay2` và containerd snapshotter.** Tài liệu Docker mô tả `overlay2` hỗ trợ natively tối đa 128 lower layer[^dk-128]. Nó còn nói nhiều container truy cập cùng một file thì chia sẻ một entry page cache[^dk-pagecache]. Docker Engine 29.0 trở lên dùng **containerd image store** làm mặc định cho cài mới, tức dùng snapshotter thay cho storage driver cổ điển[^dk-29]. Snapshotter mặc định là `overlayfs`[^dk-snap]. Quan sát khớp: `docker info --format '{{.Driver}} {{.DriverStatus}}'` in `overlayfs [[driver-type io.containerd.snapshotter.v1]]`, và layer nằm dưới `/var/lib/containerd/io.containerd.snapshotter.v1.overlayfs/snapshots/…`, không dưới `/var/lib/docker/overlay2/` như tài liệu `overlay2`. Tài liệu Docker không ghim phiên bản (tôi đọc bản đang online lúc viết). Khái niệm layer/lower/upper giống nhau, còn đường dẫn và lệnh thì khác[^dk-29].
 
 </details>
 
@@ -302,20 +306,22 @@ mount -t overlay overlay -o lowerdir=l2:l1,upperdir=u,workdir=w m
 
 ## 5. Writable layer, volume, bind mount, tmpfs, read-only (Q5)
 
-> **Trả lời ngắn.** Mọi thứ container ghi vào cây thư mục của image nằm trong *writable layer*, và nó bị xóa cùng container[^dk-container-layer]. Dữ liệu cần sống lâu hơn container phải ra ngoài: **volume** (do Docker quản lý, còn sau khi container bị hủy)[^dk-vol-life], **bind mount** (gắn thư mục của host vào, ghi được mặc định)[^dk-bind-write]. **tmpfs** nằm trong RAM của host và mất khi container dừng[^dk-tmpfs]. `--read-only` cấm ghi vào rootfs trừ các volume chỉ định[^dk-ro].
+> **Trả lời ngắn.** Mọi thứ container ghi vào cây thư mục của image nằm trong *writable layer*, và lớp này bị xóa cùng container[^dk-container-layer]. Dữ liệu cần sống lâu hơn container phải ra ngoài. **Volume** do Docker quản lý và còn sau khi container bị hủy[^dk-vol-life]. **Bind mount** gắn một thư mục của host vào container, và mặc định ghi được[^dk-bind-write]. **tmpfs** nằm trong RAM của host và mất khi container dừng[^dk-tmpfs]. `--read-only` cấm ghi vào rootfs, trừ các volume chỉ định[^dk-ro].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thuê một máy tính ở quán net. Ghi vào ổ của máy (writable layer) thì trả máy là mất. Cắm USB của bạn (volume/bind mount) thì dữ liệu về nhà cùng bạn. RAM-disk (tmpfs) mất khi tắt máy. Khóa ổ cứng chỉ-đọc (`--read-only`) thì chỉ ghi được vào USB hoặc RAM-disk.
+*Với `orders-api`.* Mỗi lần deploy, container cũ bị xóa và container mới được dựng từ cùng image. Vậy mỗi thứ `orders-api` ghi ra phải chọn đúng chỗ: log, file upload của người dùng, cache tạm sinh lại được, file config chỉ đọc. Bảng dưới liệt kê các chỗ ghi Docker cho ta chọn; cột cuối là cách ta xếp bốn loại dữ liệu đó vào (nhận xét của người soạn).
 
-| Nơi ghi | Sống bao lâu | Điểm cần nhớ |
-|---|---|---|
-| Writable layer (`upperdir`) | Đến khi container bị xóa[^dk-container-layer] | Hợp với dữ liệu tạm sinh lúc chạy[^dk-ephemeral] |
-| Volume | Ngoài vòng đời container; không tự xóa khi hết container dùng[^dk-vol-life][^dk-vol-keep] | Docker gọi là cơ chế được ưu tiên để persist dữ liệu[^dk-vol-pref] |
-| Bind mount | Chính là file/thư mục của host[^dk-bind] | Ghi được mặc định, dùng `ro` để chặn[^dk-bind-write] |
-| tmpfs | Mất khi container dừng[^dk-tmpfs] | Tính vào memory limit của container[^dk-tmpfs-mem] |
+| Nơi ghi | Sống bao lâu | Điểm cần nhớ | Hợp với dữ liệu nào của `orders-api` |
+|---|---|---|---|
+| Writable layer (`upperdir`) | Đến khi container bị xóa[^dk-container-layer] | Hợp với dữ liệu tạm sinh lúc chạy[^dk-ephemeral] | Chỉ file tạm không ai cần giữ |
+| Volume | Ngoài vòng đời container[^dk-vol-life] | Docker gọi là cơ chế được ưu tiên để persist dữ liệu[^dk-vol-pref] | File upload |
+| Bind mount | Chính là file/thư mục của host[^dk-bind] | Ghi được mặc định, dùng `ro` để chặn[^dk-bind-write] | File config chỉ đọc (mount `ro`) |
+| tmpfs | Mất khi container dừng[^dk-tmpfs] | Tính vào memory limit của container[^dk-tmpfs-mem] | Cache nhỏ, sinh lại được |
 
-Container = image + một writable layer. Trong overlay, Docker gọi `upperdir` là phần của container và `lowerdir` là phần của image[^dk-ov-read], nên writable layer chính là `upperdir` của mục 4. Khác biệt chính giữa container và image là lớp writable trên cùng; khi container bị xóa lớp đó cũng bị xóa, image bên dưới không đổi[^dk-container-layer]. Volume ghi thẳng vào filesystem của host, không qua storage driver nên tránh overhead của union filesystem[^dk-vol-perf]. `--read-only` mount root filesystem ở chế độ chỉ đọc, chỉ cho ghi vào các volume được chỉ định[^dk-ro].
+Container là image cộng một writable layer. Trong overlay, Docker gọi `upperdir` là phần của container và `lowerdir` là phần của image[^dk-ov-read], nên writable layer chính là `upperdir` của mục 4. Khác biệt chính giữa container và image là lớp writable trên cùng. Khi container bị xóa thì lớp đó bị xóa theo, còn image bên dưới không đổi[^dk-container-layer].
+
+Volume thì khác: nó ghi thẳng vào filesystem của host, không qua storage driver, nên tránh được overhead của union filesystem[^dk-vol-perf]. Còn `--read-only` mount root filesystem ở chế độ chỉ đọc, và chỉ cho ghi vào các volume được chỉ định[^dk-ro].
 
 <details><summary>Đi sâu: thí nghiệm 7, volume/bind/tmpfs chi tiết, read-only ở tầng runc</summary>
 
@@ -331,13 +337,13 @@ docker run --rm -v w-vol:/data alpine:3 sh -c 'ls /data; ls /layerfile'
 
 Chạy lại *cùng* container vẫn thấy `/layerfile` (writable layer sống qua stop/start); `docker diff` liệt kê `A /layerfile` và `A /data` (điểm mount); sau `docker rm`, container mới thấy `/data` còn `f`, còn `/layerfile` thì `No such file or directory`. Trong container `/data` là mount `ext4` với nguồn `/docker/volumes/w-vol/_data` trên `/dev/vdb1` của VM, không phải `overlay`.
 
-**Volume.** Docker còn nói writable layer không còn sau khi container bị xóa và chỉ hợp với dữ liệu tạm sinh lúc chạy[^dk-ephemeral]. Volume là lựa chọn cho dữ liệu write-intensive[^dk-write-heavy]. Điểm trừ: không hợp khi cần truy cập file từ host vì volume do Docker quản lý hoàn toàn[^dk-vol-nothost]. Anonymous volume cũng persist sau khi xóa container, trừ khi tạo container bằng `--rm`[^dk-anon].
+**Volume.** Docker còn nói writable layer không còn sau khi container bị xóa và chỉ hợp với dữ liệu tạm sinh lúc chạy[^dk-ephemeral]. Volume là lựa chọn cho dữ liệu write-intensive[^dk-write-heavy]. Khi không container nào đang dùng, volume vẫn còn đó và không bị xóa tự động[^dk-vol-keep]. Điểm trừ: volume không hợp khi cần truy cập file từ host, vì nó do Docker quản lý hoàn toàn[^dk-vol-nothost]. Anonymous volume cũng persist sau khi xóa container, trừ khi tạo container bằng `--rm`[^dk-anon].
 
-**Bind mount.** Có thể sửa/xóa file hệ thống quan trọng của host qua container[^dk-bind-write]. Một bẫy với dev trên macOS: bind mount được tạo trên **máy chạy daemon**, không phải máy chạy client[^dk-bind-daemon]; Docker nói Docker Desktop chạy daemon trong một Linux VM và có cơ chế riêng xử lý, còn thiết lập colima ở đây thì khác[^dk-desktop]. Quan sát: `docker run -v /tmp/w-p08-c04:/b:ro …` với `/tmp/w-p08-c04` là thư mục trên macOS: trong container `/b` là mount `ext4 /dev/root` và `touch /b/z` báo `Read-only file system`; trong VM colima xuất hiện thư mục `/tmp/w-p08-c04` rỗng, sở hữu bởi `root`: daemon (trong VM) tự tạo một thư mục cùng tên chứ không đọc thư mục macOS. (Với cấu hình colima này `$HOME` được chia sẻ vào VM nên `-v $PWD:/work` vẫn chạy; đường dẫn chia sẻ là cấu hình colima, ngoài phạm vi chương.)
+**Bind mount.** Qua bind mount, container có thể sửa hay xóa file hệ thống quan trọng của host[^dk-bind-write]. Một bẫy với dev trên macOS: bind mount được tạo trên **máy chạy daemon**, không phải máy chạy client[^dk-bind-daemon]. Docker nói Docker Desktop chạy daemon trong một Linux VM và có cơ chế riêng để xử lý chuyện này, còn thiết lập colima ở đây thì khác[^dk-desktop]. Quan sát: `docker run -v /tmp/w-p08-c04:/b:ro …` với `/tmp/w-p08-c04` là thư mục trên macOS: trong container `/b` là mount `ext4 /dev/root` và `touch /b/z` báo `Read-only file system`; trong VM colima xuất hiện thư mục `/tmp/w-p08-c04` rỗng, sở hữu bởi `root`: daemon (trong VM) tự tạo một thư mục cùng tên chứ không đọc thư mục macOS. (Với cấu hình colima này `$HOME` được chia sẻ vào VM nên `-v $PWD:/work` vẫn chạy; đường dẫn chia sẻ là cấu hình colima, ngoài phạm vi chương.)
 
-**tmpfs.** Dữ liệu tmpfs **tính vào giới hạn memory** của container[^dk-tmpfs-mem] và một giá trị `size` lớn không nâng giới hạn đó[^dk-tmpfs-size]; vì vậy tmpfs đầy có thể dẫn tới OOM (suy luận của người soạn). Dữ liệu tmpfs có thể bị ghi ra swap[^dk-tmpfs-swap]. Docker khuyên dùng tmpfs cho dữ liệu trạng thái không cần giữ, để khỏi ghi vào writable layer[^dk-vol-tmpfs].
+**tmpfs.** Dữ liệu tmpfs **tính vào giới hạn memory** của container[^dk-tmpfs-mem]. Một giá trị `size` lớn không nâng giới hạn đó[^dk-tmpfs-size]. Vì vậy tmpfs đầy có thể dẫn tới OOM (suy luận của người soạn). Dữ liệu tmpfs còn có thể bị ghi ra swap[^dk-tmpfs-swap]. Docker khuyên dùng tmpfs cho dữ liệu trạng thái không cần giữ, để khỏi ghi vào writable layer[^dk-vol-tmpfs].
 
-**Rootfs read-only.** Quan sát: `docker run --rm --read-only alpine:3 sh -c 'touch /x'` → `touch: /x: Read-only file system`; `mountinfo` cho root `ro,relatime - overlay overlay rw,lowerdir=…` (cờ per-mount là `ro`, option của superblock overlay vẫn `rw`). `/dev/shm` (tmpfs Docker gắn sẵn) vẫn ghi được; thêm `--tmpfs /tmp:rw,size=16m` thì `touch /tmp/x` thành công và `mountinfo` ghi `tmpfs … rw,nosuid,nodev,noexec,relatime … size=16384k`. Ở runtime, runc làm việc này trong `finalizeRootfs`: khi config bật `Readonlyfs` thì gọi `setReadonly`[^runc-readonlyfs], remount `/` với `MS_BIND|MS_REMOUNT|MS_RDONLY`[^runc-setro]; mount(2) cho phép dùng `MS_REMOUNT | MS_BIND | MS_RDONLY` để đổi cờ read-only của một mount mà không đổi filesystem bên dưới[^mount-remount].
+**Rootfs read-only.** Quan sát: `docker run --rm --read-only alpine:3 sh -c 'touch /x'` → `touch: /x: Read-only file system`; `mountinfo` cho root `ro,relatime - overlay overlay rw,lowerdir=…` (cờ per-mount là `ro`, option của superblock overlay vẫn `rw`). `/dev/shm` (tmpfs Docker gắn sẵn) vẫn ghi được; thêm `--tmpfs /tmp:rw,size=16m` thì `touch /tmp/x` thành công và `mountinfo` ghi `tmpfs … rw,nosuid,nodev,noexec,relatime … size=16384k`. Ở runtime, runc làm việc này trong `finalizeRootfs`: khi config bật `Readonlyfs` thì nó gọi `setReadonly`[^runc-readonlyfs]. Hàm này remount `/` với `MS_BIND|MS_REMOUNT|MS_RDONLY`[^runc-setro]. mount(2) cho phép dùng `MS_REMOUNT | MS_BIND | MS_RDONLY` để đổi cờ read-only của một mount mà không đổi filesystem bên dưới[^mount-remount].
 
 </details>
 
@@ -345,21 +351,21 @@ Chạy lại *cùng* container vẫn thấy `/layerfile` (writable layer sống 
 
 ## 6. Hệ quả cho backend engineer (Q6)
 
-> **Trả lời ngắn.** Đừng ghi dữ liệu bền vào writable layer: nó mất khi container bị xóa[^dk-ephemeral], ghi chậm hơn volume[^dk-vol-perf] và container ghi nhiều thì tốn thêm chỗ[^dk-write-space]; log cũng nên ra stdout hoặc volume (nhận xét của người soạn). Image lớn tốn đĩa và thời gian pull (nhận xét của người soạn); multi-stage build giúp tách phần build khỏi phần cần chạy[^dk-multistage]. Mỗi layer đổi thì mọi layer sau nó phải build lại[^dk-cache2], nên đặt lệnh ít đổi lên trước (nhận xét của người soạn).
+> **Trả lời ngắn.** Đừng ghi dữ liệu bền vào writable layer: nó mất khi container bị xóa[^dk-ephemeral]. Ghi vào đó cũng chậm hơn volume[^dk-vol-perf]. Container ghi nhiều còn tốn thêm chỗ[^dk-write-space]. Log nên ra stdout hoặc volume (nhận xét của người soạn). Image lớn tốn đĩa và thời gian pull (nhận xét của người soạn), và multi-stage build giúp tách phần build khỏi phần cần chạy[^dk-multistage]. Mỗi layer đổi thì mọi layer sau nó phải build lại[^dk-cache2], nên hãy đặt lệnh ít đổi lên trước (nhận xét của người soạn).
 
 **Giải thích.** Mục này suy ra từ cơ chế ở trên; trích dẫn chỉ cho phần Docker nói, còn lại là nhận xét của người soạn.
 
-Hình dung (nhận xét của người soạn): container như một instance stateless sau load balancer: bạn phải coi nó bị giết và dựng lại bất cứ lúc nào.
+*Với `orders-api`.* Hãy coi mỗi container của `orders-api` là thứ có thể bị xóa và dựng lại bất cứ lúc nào, ví dụ ở mỗi lần deploy. Từ đó ra năm quy tắc, mỗi quy tắc đứng trên một cơ chế của các mục trước.
 
-1. **Log và dữ liệu bền không vào writable layer.** Docker nói image nên sinh ra container "phù du" tối đa, tức dừng, hủy, dựng lại với thiết lập tối thiểu[^dk-bp-ephemeral] và writable layer mất khi container bị xóa (mục 5). Với service 12-factor, log ra stdout/stderr (nhận xét của người soạn; Docker dẫn Twelve-Factor ở cùng mục nhưng tôi không trích nguyên tắc log của nó); dữ liệu bền ra volume hoặc dịch vụ ngoài.
-2. **Database trong container**: Docker nói ứng dụng write-intensive như database storage chịu overhead hiệu năng, nhất là khi dữ liệu có sẵn ở layer chỉ đọc[^dk-db-overhead]; khuyến nghị volume[^dk-write-heavy].
-3. **Copy-up là chi phí ẩn của sửa file lớn**: ghi 2 byte vào file 4,5 MB tạo bản copy 4,5 MB (thí nghiệm 5). Docker nói file lớn, nhiều layer, cây thư mục sâu làm tác động rõ hơn[^dk-copyup-cost]. Trong dịch vụ thật, đó là một lần tăng latency ở lần ghi đầu (nhận xét của người soạn).
-4. **Image lớn** tốn cả đĩa lẫn thời gian pull (nhận xét của người soạn). Docker gợi ý multi-stage build để chỉ giữ file cần chạy[^dk-multistage]. Xóa file ở layer sau chỉ thêm whiteout còn byte của layer dưới vẫn nằm trong image (suy luận của người soạn từ mục 2 và 4: layer là changeset, whiteout chỉ che), nên `rm -rf` trong một `RUN` riêng không thu nhỏ image.
-5. **Layer cache khi build.** Docker: mỗi lệnh trong Dockerfile ví dụ của họ thành một layer[^dk-cache]; khi một layer đổi, mọi layer sau nó phải chạy lại, kể cả khi sẽ cho kết quả y hệt[^dk-cache2]. Hệ quả (nhận xét của người soạn): đặt lệnh ít đổi (cài package, tải dependency) lên trước, `COPY` mã nguồn xuống sau. Docker khuyên thêm `.dockerignore` để loại file không liên quan khỏi build[^dk-dockerignore] và luôn gộp `apt-get update` với `apt-get install` trong cùng một `RUN`[^dk-aptget].
+1. **Log và dữ liệu bền không vào writable layer.** Docker nói image nên sinh ra container "phù du" tối đa, tức có thể dừng, hủy, dựng lại với thiết lập tối thiểu[^dk-bp-ephemeral]. Writable layer lại mất khi container bị xóa (mục 5), nên log và file upload của `orders-api` không được nằm ở đó. Log nên ra stdout/stderr, như service 12-factor thường làm (nhận xét của người soạn; Docker dẫn Twelve-Factor ở cùng mục nhưng chương này không trích nguyên tắc log của nó). Dữ liệu bền thì ra volume hoặc dịch vụ ngoài.
+2. **Database trong container.** Nếu ai đó định chạy luôn database của `orders-api` trong container, hãy nhớ lời Docker: ứng dụng write-intensive như database storage chịu overhead hiệu năng, nhất là khi dữ liệu có sẵn ở layer chỉ đọc[^dk-db-overhead]. Docker khuyến nghị dùng volume cho loại dữ liệu này[^dk-write-heavy].
+3. **Copy-up là chi phí ẩn của việc sửa file lớn.** Ghi 2 byte vào file 4,5 MB tạo ra bản copy 4,5 MB (thí nghiệm 5). Docker nói file lớn, nhiều layer, cây thư mục sâu làm tác động này rõ hơn[^dk-copyup-cost]. Nếu `orders-api` sửa một file lớn nằm sẵn trong image thì request ghi đầu tiên sẽ chịu thêm latency của lần copy-up (nhận xét của người soạn).
+4. **Image lớn.** Image lớn tốn cả đĩa lẫn thời gian pull (nhận xét của người soạn). Image build từ `rust:*` chứa cả toolchain nên rất nặng (thí nghiệm 4), và Docker gợi ý multi-stage build để chỉ giữ file cần chạy[^dk-multistage]. Có một bẫy: xóa file ở layer sau chỉ thêm whiteout, còn byte ở layer dưới vẫn nằm trong image (suy luận của người soạn từ mục 2 và 4: layer là changeset, whiteout chỉ che). Vì vậy `rm -rf` trong một `RUN` riêng không thu nhỏ image.
+5. **Layer cache khi build.** Mỗi lệnh trong Dockerfile ví dụ của Docker thành một layer[^dk-cache]. Khi một layer đổi, mọi layer sau nó phải chạy lại, kể cả khi sẽ cho kết quả y hệt[^dk-cache2]. Hệ quả cho `orders-api` (nhận xét của người soạn): đặt lệnh ít đổi như cài package hay tải dependency lên trước, rồi `COPY` mã nguồn xuống sau. Docker còn khuyên thêm `.dockerignore` để loại file không liên quan khỏi build[^dk-dockerignore]. Docker cũng dặn luôn gộp `apt-get update` với `apt-get install` trong cùng một `RUN`[^dk-aptget].
 
 <details><summary>Đi sâu: thí nghiệm 8–9 và ví dụ Rust</summary>
 
-**Thí nghiệm 8 (quan sát):** container ghi 50 MiB vào `/var/log/app.log` → `docker ps -s` báo `52.4MB (virtual 61.8MB)` và `docker diff` có `A /var/log/app.log`. Theo Docker, `size` là dữ liệu của writable layer, `virtual` là dữ liệu read-only của image cộng writable layer[^dk-ps-size]; vậy 52.4MB là phần log, và Docker nói container ghi nhiều thì tốn thêm chỗ ở writable layer trên cùng[^dk-write-space].
+**Thí nghiệm 8 (quan sát):** container ghi 50 MiB vào `/var/log/app.log` → `docker ps -s` báo `52.4MB (virtual 61.8MB)` và `docker diff` có `A /var/log/app.log`. Docker định nghĩa `size` là dữ liệu của writable layer và `virtual` là dữ liệu read-only của image cộng writable layer[^dk-ps-size]; vậy 52.4MB là phần log. Docker cũng nói container ghi nhiều thì tốn thêm chỗ ở writable layer trên cùng[^dk-write-space].
 
 **Thí nghiệm 9 (quan sát) — cache bị vô hiệu theo chuỗi.** Dockerfile bốn dòng:
 
@@ -380,7 +386,7 @@ Build lần 1: cả ba bước `[2/4]`,`[3/4]`,`[4/4]` chạy. Lần 2 (không �
 
 ## Liên hệ với Rust
 
-Chương này không có API Rust riêng. Hai điểm nối: image build từ `rust:*` chứa toàn bộ toolchain (image lab: 561 919 680 byte, một layer 547 MB cho toolchain, thí nghiệm 4), nên multi-stage build là cách giữ image chạy nhỏ (nhận xét của người soạn; mục 6, ý 4; Dockerfile multi-stage đã build thật ở [chương 08](08-rust-trong-container.md), mục 5); và `pivot_root`/`mount` là syscall Linux mà một runtime viết bằng Rust phải gọi qua FFI hoặc crate bọc libc (các crate cụ thể chương này không kiểm chứng).
+Chương này không có API Rust riêng; có hai điểm nối. Thứ nhất, image build từ `rust:*` chứa cả toolchain (image lab: 561 919 680 byte, trong đó một layer 547 MB cho toolchain, thí nghiệm 4), nên với `orders-api` multi-stage build là cách giữ image chạy nhỏ (nhận xét của người soạn; xem mục 6, ý 4; Dockerfile multi-stage đã build thật ở [chương 08](08-rust-trong-container.md), mục 5). Thứ hai, `pivot_root` và `mount` là syscall Linux, nên một runtime viết bằng Rust phải gọi chúng qua FFI hoặc một crate bọc libc (các crate cụ thể chương này không kiểm chứng).
 
 ## Tóm tắt
 
@@ -404,7 +410,7 @@ Nó chỉ đổi một thành phần của quá trình phân giải đường d�
 **2.** (Q1) Vì sao `pivot_root` đòi `new_root` là mount point và mount cha không được `MS_SHARED`? runc làm gì để thỏa, và thí nghiệm 2-A/2-B quan sát gì?
 <details><summary>Đáp án</summary>
 
-Man page: `new_root` phải là path tới mount point; path chưa phải thì bind mount lên chính nó.[^pr-mountpoint] Mount cha của `new_root` và của root hiện tại không được `MS_SHARED` để `pivot_root` không lan thay đổi sang mount namespace khác;[^pr-shared][^pr-nopropagate] vi phạm → `EINVAL`.[^pr-einval] runc đặt propagation slave,[^runc-prep-slave] làm mount cha private,[^runc-parentpriv] rồi bind mount rootfs lên chính nó trong `prepareRoot`.[^runc-prep-bind] Thí nghiệm 2-A (propagation shared) in `Invalid argument`; 2-B (`/new` chưa là mount point) in `Resource busy`, và chương nói rõ thứ tự kiểm tra lỗi là chi tiết cài đặt chưa có nguồn.
+Man page: `new_root` phải là path tới mount point; path chưa phải thì bind mount lên chính nó.[^pr-mountpoint] Mount cha của `new_root` và của root hiện tại không được `MS_SHARED`.[^pr-shared] Lý do là để `pivot_root` không lan thay đổi sang mount namespace khác;[^pr-nopropagate] vi phạm → `EINVAL`.[^pr-einval] runc đặt propagation slave,[^runc-prep-slave] làm mount cha private,[^runc-parentpriv] rồi bind mount rootfs lên chính nó trong `prepareRoot`.[^runc-prep-bind] Thí nghiệm 2-A (propagation shared) in `Invalid argument`; 2-B (`/new` chưa là mount point) in `Resource busy`, và chương nói rõ thứ tự kiểm tra lỗi là chi tiết cài đặt chưa có nguồn.
 
 </details>
 
@@ -432,7 +438,7 @@ Entry `etc/.wh.my-app-config` (`.wh.` + basename).[^layer-wh] Opaque whiteout `b
 **6.** (Q3) Vì sao đổi một byte trong một layer làm đổi ID của image?
 <details><summary>Đáp án</summary>
 
-ID image là SHA256 của config JSON; config chứa hash từng layer.[^config-imageid-sha][^config-imageid]
+ID image là SHA256 của config JSON.[^config-imageid-sha] Config lại chứa hash từng layer.[^config-imageid]
 
 </details>
 
@@ -460,14 +466,14 @@ Khi `redirect_dir` tắt, overlayfs trả `EXDEV` cho rename thư mục ở lowe
 **10.** (Q4) Docker 29+ có dùng `overlay2` mặc định không? Kiểm tra thế nào?
 <details><summary>Đáp án</summary>
 
-Với cài mới thì không; mặc định là containerd image store với snapshotter `overlayfs`.[^dk-29][^dk-snap] Kiểm tra bằng `docker info` (Driver = `overlayfs`, `driver-type io.containerd.snapshotter.v1`) và đường dẫn trong `mountinfo`.
+Với cài mới thì không. Mặc định là containerd image store,[^dk-29] với snapshotter `overlayfs`.[^dk-snap] Kiểm tra bằng `docker info` (Driver = `overlayfs`, `driver-type io.containerd.snapshotter.v1`) và đường dẫn trong `mountinfo`.
 
 </details>
 
 **11.** (Q5, Q6) Chọn nơi lưu: (a) file upload của người dùng, (b) cache tạm sinh lại được, (c) config chỉ đọc. Vì sao?
 <details><summary>Đáp án</summary>
 
-(a) volume (ngoài vòng đời container, ghi thẳng filesystem host);[^dk-vol-life][^dk-vol-perf] (b) tmpfs nếu vừa memory limit, nhớ tmpfs tính vào limit;[^dk-tmpfs-mem] (c) bind mount `ro` hoặc bake vào image, kết hợp `--read-only` cho phần còn lại.[^dk-ro] (Phần chọn là nhận xét của người soạn.)
+(a) volume (ngoài vòng đời container,[^dk-vol-life] ghi thẳng filesystem host);[^dk-vol-perf] (b) tmpfs nếu vừa memory limit, nhớ tmpfs tính vào limit;[^dk-tmpfs-mem] (c) bind mount `ro` hoặc bake vào image, kết hợp `--read-only` cho phần còn lại.[^dk-ro] (Phần chọn là nhận xét của người soạn.)
 
 </details>
 

@@ -16,22 +16,32 @@
 - [Chương 01 — Address space](./01-address-space.md) và [Chương 02 — Dịch địa chỉ](./02-address-translation.md): virtual address, VPN/offset, PFN, ý tưởng paging.
 - Giúp ích: [Cache và NUMA](../02-cpu/06-cache-va-numa.md) (TLB cũng là một cache, dựa vào locality).
 
+**Ví dụ chạy suốt chương.** Hãy hình dung `catalog`, một service viết bằng Rust, giữ trong RAM một chỉ mục sản phẩm cỡ 20 GB (một `HashMap` khổng lồ). Mỗi request, một worker thread trong thread pool tra chỉ mục này theo key. Cùng máy còn chạy database và vài process khác. Đây là ví dụ giả định của người soạn, không phải code trong repo, và mọi con số của `catalog` đều là số minh họa. Câu hỏi bám theo chương: mỗi lần một worker đọc một phần tử của chỉ mục, CPU tốn gì để dịch địa chỉ, và khi nào khoản tốn đó đủ lớn để làm p99 của `catalog` xấu đi?
+
+---
+
 ## 1. TLB: cache của các bản dịch (Q1)
 
-> **Trả lời ngắn.** Paging làm mỗi lần truy cập bộ nhớ phải tra page table trước; làm không cẩn thận thì máy chậm hơn vì thêm nhiều truy cập bộ nhớ[^ostep-paging-slow]. TLB là một cache phần cứng giữ các bản dịch địa chỉ phổ biến[^ostep-tlb]. Có sẵn bản dịch trong TLB thì gọi là hit[^ostep-tlbhit]; không có thì gọi là miss, và phần cứng phải làm thêm việc[^ostep-tlbmiss-cost].
+> **Trả lời ngắn.** Với paging, mỗi lần truy cập bộ nhớ đều phải tra page table trước. Làm không cẩn thận thì máy chậm đi vì thêm rất nhiều lần truy cập bộ nhớ[^ostep-paging-slow]. TLB là cách phần cứng tránh chuyện đó: một cache giữ các bản dịch địa chỉ hay dùng[^ostep-tlb]. Có sẵn bản dịch trong TLB thì gọi là hit[^ostep-tlbhit]. Không có thì gọi là miss, và phần cứng phải làm thêm việc[^ostep-tlbmiss-cost].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): mỗi lần đi taxi bạn phải mở cuốn danh bạ dày để tra địa chỉ rồi mới nói được điểm đến. Mẩu giấy ghi vài địa chỉ hay đi chính là TLB: có trên giấy thì khỏi mở danh bạ.
+*Với service `catalog`.* Khi worker chạy `index.get(&key)`, thứ CPU thấy là vài lệnh load trên virtual address. Trước khi RAM trả được dữ liệu, CPU phải biết virtual address đó ứng với physical address nào. Nếu lần tra này luôn phải đi vào RAM thì mọi lookup của `catalog` đều chậm gấp đôi. Mục này nói TLB chặn chuyện đó ra sao, và khi nó chặn hụt thì chuyện gì xảy ra.
 
-Paging cần hai việc phải giải quyết: **chậm** (nhiều truy cập thêm để đọc page table) và **to** (bảng chiếm bộ nhớ). Chương này giải quyết chậm bằng TLB (mục 1–3) và to bằng các cấu trúc bảng nhỏ hơn, chủ yếu nhiều cấp (mục 4–6); huge page (mục 7) giúp cả hai.
+Từ [chương 02](./02-address-translation.md) bạn cần nhớ ba điều. Page table là cấu trúc riêng của từng process. Virtual address tách thành VPN và offset. Mỗi PTE ngoài PFN còn có các bit như valid/present và protection, nên quyền truy cập kiểm được theo từng page (suy luận từ các bit đó).
 
-Nhắc lại từ [chương 02](./02-address-translation.md) (mục 5–6): page table là cấu trúc theo từng process, virtual address tách thành VPN và offset, và mỗi PTE ngoài PFN còn có các bit như valid/present và protection — nên protection thực thi được theo từng page (suy luận từ các bit đó).
+### 1.1 Paging để lại hai vấn đề
 
-**Vấn đề.** Nếu mỗi load/store phải đọc PTE từ RAM trước, mỗi truy cập thành ít nhất hai: paging đòi thêm một lần tham chiếu bộ nhớ chỉ để lấy bản dịch[^ostep-one-extra]. **Cơ chế.** Phần cứng thêm TLB, một phần của MMU, chỉ đơn giản là một cache phần cứng của các bản dịch virtual-to-physical phổ biến[^ostep-tlb]; kernel docs bổ sung rằng MMU còn có thể dùng *page walk cache*[^kdoc-mmu-tlb]. Với mỗi virtual address, phần cứng:
+Paging cho `catalog` một address space riêng, nhưng nó kéo theo hai vấn đề: **chậm** (phải đọc thêm page table cho mỗi truy cập) và **to** (bản thân page table chiếm bộ nhớ). Chương này lo chuyện chậm bằng TLB (mục 1–3), lo chuyện to bằng các cấu trúc bảng nhỏ hơn, chủ yếu là nhiều cấp (mục 4–6). Huge page (mục 7) giúp được cả hai.
 
-1. Rút VPN, tra TLB. Có bản dịch: **TLB hit**[^ostep-tlbhit] — ghép PFN với offset, một truy cập RAM.
-2. Không có: **TLB miss**. MMU dùng *page walk* để xác định physical address[^kdoc-walk]; nếu tham chiếu hợp lệ thì cập nhật TLB[^ostep-tlbmiss-update], rồi thử lại lệnh[^ostep-tlbmiss-retry]. Việc này tốn kém vì phải thêm truy cập bộ nhớ[^ostep-tlbmiss-cost].
+### 1.2 TLB chặn lần đọc thêm bằng cách nào
+
+Nếu mỗi load/store phải đọc PTE từ RAM trước, mỗi truy cập của `catalog` thành ít nhất hai lần đọc: paging đòi thêm một tham chiếu bộ nhớ chỉ để lấy bản dịch[^ostep-one-extra]. Vì vậy phần cứng đặt thêm TLB ngay trong MMU, bộ phận trên chip lo việc dịch địa chỉ. TLB chỉ đơn giản là một cache phần cứng giữ các bản dịch virtual-to-physical hay dùng[^ostep-tlb]. Ngoài TLB, MMU còn có thể dùng các *page walk cache* để tăng tốc việc dịch[^kdoc-mmu-tlb].
+
+Với mỗi virtual address, phần cứng làm theo hai bước:
+
+1. Rút VPN ra và tra TLB. Nếu có bản dịch thì đó là **TLB hit**[^ostep-tlbhit]: ghép PFN với offset, và chỉ tốn một lần truy cập RAM cho chính dữ liệu cần đọc.
+2. Nếu không có thì đó là **TLB miss**. MMU phải *page walk*, tức đi từ đầu page table xuống tới PTE để xác định physical address[^kdoc-walk]. Nếu tham chiếu hợp lệ, phần cứng nạp bản dịch vừa tìm vào TLB[^ostep-tlbmiss-update]. Sau đó nó chạy lại lệnh đang dở[^ostep-tlbmiss-retry]. Cả quá trình này tốn kém vì phải thêm truy cập bộ nhớ[^ostep-tlbmiss-cost].
 
 ```mermaid
 sequenceDiagram
@@ -52,26 +62,36 @@ sequenceDiagram
   end
 ```
 
-**Phân biệt cần nhớ.** TLB miss **không** phải page fault: miss chỉ là chưa có bản dịch trong cache; nếu page present thì không có fault nào. Fault là nhánh dưới của sơ đồ, xem [chương 04](./04-page-fault-va-swapping.md).
+Có một điểm dễ nhầm: TLB miss **không** phải page fault. Miss chỉ có nghĩa là bản dịch chưa nằm trong cache. Nếu page đang present thì page walk lấy được bản dịch và không có fault nào cả. Fault là nhánh dưới của sơ đồ, nói ở [chương 04](./04-page-fault-va-swapping.md). Với `catalog`, TLB miss là chuyện thường ngày của từng lookup chứ chưa phải dấu hiệu có lỗi (nhận xét của người soạn).
 
 <details><summary>Đi sâu: ví dụ hit rate của OSTEP, locality, TLB reach và Culler's Law</summary>
 
-- **Ví dụ (OSTEP).** Duyệt tuần tự một mảng nhỏ cho chuỗi: miss, hit, hit, miss, hit, hit, hit, miss, hit, hit — hit rate 70%[^ostep-hitrate]. Lần đầu chạm mảng mà TLB vẫn có ích nhờ spatial locality: chỉ truy cập đầu tiên trên mỗi page mới miss[^ostep-tlb-spatial]. Như mọi cache, TLB cần cả spatial lẫn temporal locality, và đó là tính chất của chương trình[^ostep-tlb-cache-locality].
-- **Culler's Law.** OSTEP: truy cập ngẫu nhiên, nhất là khi số page chạm vượt *TLB coverage*, gây tổn thất hiệu năng nặng[^ostep-culler]. *TLB reach* (suy luận của người soạn): N entry × kích thước page S. Ví dụ N = 1536 (số minh họa, không phải CPU cụ thể): page 4 KB che 6144 KiB; page 2 MiB che 3072 MiB (phép nhân, đã chạy bằng rustc 1.95.0).
+- **Ví dụ hit rate.** Duyệt tuần tự một mảng nhỏ cho chuỗi truy cập: miss, hit, hit, miss, hit, hit, hit, miss, hit, hit, tức hit rate 70%[^ostep-hitrate]. Lần đầu chạm mảng mà TLB vẫn có ích nhờ spatial locality: chỉ truy cập đầu tiên trên mỗi page mới miss[^ostep-tlb-spatial]. Như mọi cache, TLB cần cả spatial lẫn temporal locality, và đó là tính chất của chương trình chứ không phải của TLB[^ostep-tlb-cache-locality].
+- **Culler's Law.** Truy cập ngẫu nhiên, nhất là khi số page chạm vượt *TLB coverage*, gây tổn thất hiệu năng nặng[^ostep-culler]. *TLB reach* (suy luận của người soạn) là số entry N nhân kích thước page S. Với N = 1536 (số minh họa, không phải CPU cụ thể): page 4 KB phủ 6144 KiB, page 2 MiB phủ 3072 MiB (phép nhân, đã chạy bằng rustc 1.95.0). Đem so với chỉ mục 20 GB của `catalog` thì thấy ngay vì sao lookup ngẫu nhiên là chỗ TLB hay hụt.
 
 </details>
 
-**Quay lại Q1:** TLB là cache các bản dịch; hit tránh được lần đọc page table, miss thì phải page walk — và miss chưa phải page fault.
+**Quay lại Q1:** TLB là cache các bản dịch. Hit tránh được lần đọc page table, miss thì phải page walk, và miss chưa phải page fault.
+
+---
 
 ## 2. Phần cứng hay phần mềm xử lý miss? (Q2)
 
-> **Trả lời ngắn.** Tùy kiến trúc. Trên x86, phần cứng tự đi tra page table nhiều cấp[^ostep-hw-tlb]. Ở kiểu software-managed, phần cứng chỉ phát exception và nhảy vào trap handler của kernel[^ostep-sw-tlb]; đổi lại OS được dùng cấu trúc page table tùy ý[^ostep-sw-flex].
+> **Trả lời ngắn.** Tùy kiến trúc. Trên x86, phần cứng tự đi tra page table nhiều cấp[^ostep-hw-tlb]. Ở kiểu software-managed, phần cứng chỉ phát exception và nhảy vào trap handler của kernel[^ostep-sw-tlb]. Bù lại, OS được dùng cấu trúc page table tùy ý[^ostep-sw-flex].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hết số trên mẩu giấy thì bạn có hai cách — tự mở danh bạ (phần cứng), hoặc gọi thư ký tra hộ rồi ghi lên giấy (phần mềm). Thư ký linh hoạt hơn nhưng phải được dặn kỹ.
+*Với service `catalog`.* Mỗi lần một worker của `catalog` dính TLB miss, phải có ai đó đi tra bảng. Câu hỏi của mục này là ai tra, và việc đó ràng buộc OS vào phần cứng đến mức nào. Ở kiểu đơn giản nhất, phần cứng lo trọn việc đó mà không cần kernel chen vào; kiểu còn lại thì kernel phải chạy code để xử lý từng miss.
 
-**Hardware-managed.** Phần cứng tự xử lý trọn miss; muốn vậy nó phải biết chính xác page table nằm ở đâu (qua một thanh ghi) và định dạng của nó[^ostep-hw-know]. OSTEP lấy x86: page table nhiều cấp cố định, trỏ bởi thanh ghi CR3; phần cứng tự page walk[^ostep-hw-tlb]. **Software-managed.** Khi miss, phần cứng chỉ phát exception: tạm dừng luồng lệnh, nâng lên kernel mode, nhảy tới trap handler[^ostep-sw-tlb]; handler tra page table, nạp TLB bằng lệnh đặc quyền rồi return-from-trap để phần cứng chạy lại lệnh[^ostep-sw-priv].
+### 2.1 Hardware-managed: phần cứng tự tra
+
+Muốn xử lý trọn một miss, phần cứng phải biết chính xác page table nằm ở đâu trong RAM (qua một thanh ghi) và định dạng của nó ra sao[^ostep-hw-know]. x86 thỏa điều kiện đó. Page table của nó nhiều cấp với định dạng cố định, địa chỉ của bảng hiện hành nằm trong thanh ghi CR3, và phần cứng tự page walk[^ostep-hw-tlb].
+
+### 2.2 Software-managed: OS tra hộ
+
+Kiểu còn lại đẩy việc cho OS. Khi miss, phần cứng chỉ phát một exception: nó tạm dừng luồng lệnh, nâng lên kernel mode rồi nhảy tới trap handler[^ostep-sw-tlb]. Handler tra page table, nạp TLB bằng các lệnh đặc quyền rồi return-from-trap để phần cứng chạy lại lệnh[^ostep-sw-priv].
+
+Hai kiểu đánh đổi nhau như sau:
 
 | | Hardware-managed | Software-managed |
 |---|---|---|
@@ -81,55 +101,75 @@ Hình dung (nhận xét của người soạn): hết số trên mẩu giấy th
 
 <details><summary>Đi sâu: handler của OS, ví dụ CPU, và page fault thì khác</summary>
 
-- Handler ở kiểu software-managed là code OS viết riêng cho việc này[^ostep-sw-handler]. OSTEP nêu MIPS R10k và SPARC v9 là ví dụ kiến trúc software-managed[^ostep-sw-arch].
+- Handler ở kiểu software-managed là code OS viết riêng cho việc xử lý TLB miss[^ostep-sw-handler]. OSTEP nêu MIPS R10k và SPARC v9 là ví dụ kiến trúc software-managed[^ostep-sw-arch].
 - Page fault thì khác TLB miss: gần như mọi hệ thống xử lý page fault bằng phần mềm, kể cả khi TLB do phần cứng quản lý[^ostep-pf-sw]. Lý do và luồng từng bước nằm ở [chương 04, mục 1](./04-page-fault-va-swapping.md).
 
 </details>
 
-**Quay lại Q2:** x86 để phần cứng tự tra; software-managed đổi sự phức tạp lấy tính linh hoạt của OS — còn page fault thì (hầu như) luôn do phần mềm xử lý.
+**Quay lại Q2:** x86 để phần cứng tự tra. Software-managed đổi sự phức tạp lấy tính linh hoạt của OS. Page fault thì (hầu như) luôn do phần mềm xử lý.
+
+---
 
 ## 3. Context switch, ASID và replacement (Q3)
 
-> **Trả lời ngắn.** Bản dịch trong TLB chỉ đúng cho process đang chạy[^ostep-tlb-ctx], nên khi đổi process phải xóa hết entry (flush) — đắt vì process mới chịu miss lại[^ostep-flush-cost] — hoặc gắn thêm số nhận diện address space (ASID) vào mỗi entry để nhiều process cùng nằm trong TLB[^ostep-asid-field]. TLB đầy thì đuổi một entry theo LRU hoặc random[^ostep-lru][^ostep-random].
+> **Trả lời ngắn.** Bản dịch trong TLB chỉ đúng cho process đang chạy[^ostep-tlb-ctx]. Vì vậy khi đổi process có hai lựa chọn. Một là xóa hết entry (flush), việc này đắt vì process mới phải chịu miss lại[^ostep-flush-cost]. Hai là gắn thêm số nhận diện address space (ASID) vào mỗi entry để nhiều process cùng nằm trong TLB[^ostep-asid-field]. Khi TLB đầy thì đuổi một entry, thường theo LRU[^ostep-lru]. Cách khác là chọn ngẫu nhiên[^ostep-random].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hai người thuê trọ cùng nói "phòng 10" nhưng ở hai tòa khác nhau; nếu bảo vệ giữ nguyên tờ ghi chú của người trước thì người sau bị dẫn nhầm phòng. Có hai cách: xóa sạch ghi chú mỗi lần đổi người, hoặc ghi thêm tên tòa nhà vào mỗi dòng.
+*Với service `catalog`.* Máy chạy `catalog` còn chạy database và vài process khác, nên một core liên tục chuyển qua lại giữa chúng. TLB chỉ giữ các cặp "trang ảo → frame", trong khi mỗi process có page table riêng. Vậy khi core vừa chạy worker của `catalog` xong rồi chuyển sang database, những bản dịch `catalog` đã nạp vào TLB phải xử lý ra sao?
 
-**Vì sao phải xử lý.** Bản dịch trong TLB chỉ đúng cho process đang chạy[^ostep-tlb-ctx]. Ví dụ của OSTEP: trang ảo thứ 10 của P1 ánh xạ tới frame 100, của P2 tới frame 170; nếu TLB giữ cả hai entry VPN 10 thì phần cứng không phân biệt được entry nào thuộc process nào[^ostep-asid-example]. Hai hướng:
+### 3.1 Vì sao entry cũ gây hại
 
-1. **Flush** TLB khi đổi process[^ostep-flush] — đặt mọi entry invalid[^ostep-asid]. Giá: process phải chịu miss khi chạm lại dữ liệu và code, đắt nếu đổi process thường xuyên[^ostep-flush-cost].
-2. **ASID**: phần cứng thêm trường address-space identifier vào entry[^ostep-asid-field], như một PID ngắn hơn (ví dụ 8 bit so với 32 bit)[^ostep-asid-pid]. TLB giữ được bản dịch của nhiều process cùng lúc; khi chuyển process, OS đặt một thanh ghi đặc quyền thành ASID của process sắp chạy để phần cứng biết đang dịch cho ai[^ostep-asid-reg].
+Bản dịch trong TLB chỉ đúng cho process đang chạy, với process khác chúng vô nghĩa[^ostep-tlb-ctx]. Ví dụ của OSTEP, đặt lại tên cho khớp `catalog`: trang ảo số 10 của `catalog` ánh xạ tới frame 100, còn trang ảo số 10 của database ánh xạ tới frame 170. Nếu TLB giữ cả hai entry VPN 10 thì phần cứng không phân biệt được entry nào dành cho process nào[^ostep-asid-example]. Có hai hướng xử lý.
 
-**Replacement.** TLB đầy thì phải đuổi một entry: LRU[^ostep-lru] hoặc random[^ostep-random].
+### 3.2 Hướng 1: flush
+
+Cách đơn giản nhất là flush TLB mỗi lần đổi process, tức làm rỗng nó trước khi chạy process kế tiếp[^ostep-flush]. Cụ thể, hệ thống đặt mọi entry thành invalid để process sắp chạy không vô tình dùng bản dịch của process trước[^ostep-asid]. Giá phải trả là khi process chạm lại dữ liệu và code của nó, mọi thứ lại miss. Nếu OS đổi process thường xuyên thì cái giá này cao[^ostep-flush-cost]. Với `catalog`, nghĩa là mỗi lần core quay lại chạy worker, các lookup đầu tiên phải nạp lại bản dịch từ page table (suy luận của người soạn).
+
+### 3.3 Hướng 2: ASID
+
+Cách thứ hai là phần cứng thêm một trường address-space identifier (ASID) vào mỗi entry của TLB[^ostep-asid-field]. Bạn có thể coi ASID như một PID ngắn hơn, ví dụ 8 bit so với 32 bit của PID[^ostep-asid-pid]. Nhờ vậy TLB giữ được bản dịch của nhiều process cùng lúc (suy luận từ việc mỗi entry mang ASID riêng). Khi chuyển process, OS đặt một thanh ghi đặc quyền thành ASID của process sắp chạy để phần cứng biết đang dịch cho ai[^ostep-asid-reg].
+
+### 3.4 TLB đầy thì đuổi entry nào
+
+TLB có số entry hữu hạn, nên khi cần chỗ cho bản dịch mới thì phải đuổi một entry cũ. Một cách thường gặp là đuổi entry ít được dùng gần đây nhất (LRU, least-recently-used)[^ostep-lru]. Cách khác là đuổi một entry bất kỳ (random)[^ostep-random].
 
 <details><summary>Đi sâu: nội dung entry, ASID 8 bit, global bit, LRU với n + 1 page</summary>
 
-- **Nội dung.** Một TLB điển hình (theo OSTEP) có 32, 64 hoặc 128 entry, fully associative: bản dịch nằm đâu cũng được, phần cứng tìm song song[^ostep-tlb-size]. Entry có VPN, PFN, và các bit khác như valid, protection, ASID, dirty[^ostep-tlb-entry]. Lưu ý: valid bit của TLB **không** phải valid bit của page table; OSTEP gọi nhầm lẫn này là "a common mistake"[^ostep-valid-mistake]. Con số của CPU cụ thể phải tra tài liệu vendor.
-- Với ASID 8 bit, có hơn 256 process thì sao? OSTEP nêu câu hỏi để ngỏ[^ostep-asid-256].
-- Ví dụ MIPS còn có *global bit* cho page dùng chung: khi bật, ASID bị bỏ qua[^ostep-global].
-- LRU có tình huống góc: vòng lặp qua n + 1 page với TLB n entry khiến LRU miss ở **mọi** truy cập, random tốt hơn nhiều[^ostep-lru-bad].
+- **Nội dung entry.** Một TLB điển hình (theo OSTEP) có 32, 64 hoặc 128 entry và fully associative: bản dịch nằm ở đâu cũng được, phần cứng tìm song song[^ostep-tlb-size]. Entry có VPN, PFN và các bit khác như valid, protection, ASID, dirty[^ostep-tlb-entry]. Lưu ý: valid bit của TLB **không** phải valid bit của page table, và OSTEP gọi nhầm lẫn này là "a common mistake"[^ostep-valid-mistake]. Con số của một CPU cụ thể phải tra tài liệu của vendor.
+- **ASID 8 bit.** Có hơn 256 process thì sao? OSTEP nêu đây là câu hỏi để ngỏ[^ostep-asid-256].
+- **Global bit.** Ví dụ MIPS có thêm *global bit* cho page dùng chung giữa các process. Khi bật, ASID bị bỏ qua[^ostep-global].
+- **Góc chết của LRU.** Vòng lặp qua n + 1 page với TLB n entry khiến LRU miss ở **mọi** truy cập, còn random tốt hơn nhiều[^ostep-lru-bad].
 
 </details>
 
-**Quay lại Q3:** entry TLB chỉ đúng cho một address space nên đổi process phải flush hoặc dùng ASID; entry bị đuổi theo LRU hay random.
+**Quay lại Q3:** entry TLB chỉ đúng cho một address space, nên đổi process thì phải flush hoặc dùng ASID. TLB đầy thì đuổi entry theo LRU hay random.
+
+---
 
 ## 4. Page table quá lớn và bốn hướng thu nhỏ (Q4)
 
-> **Trả lời ngắn.** Bảng tuyến tính cho address space 32-bit, page 4 KB, PTE 4 byte nặng 4 MB cho **mỗi** process[^ostep-pt-size], dù phần lớn entry invalid. Có bốn hướng: page lớn hơn (bị internal fragmentation)[^ostep-internal-frag], hybrid paging + segmentation (kế thừa nhược điểm của segmentation)[^ostep-hybrid-1], inverted page table (phải tìm kiếm)[^ostep-inverted-hash], và nhiều cấp (mục 5).
+> **Trả lời ngắn.** Bảng tuyến tính cho address space 32-bit, page 4 KB, PTE 4 byte nặng 4 MB cho **mỗi** process[^ostep-pt-size], dù phần lớn entry là invalid. Có bốn hướng thu nhỏ: page lớn hơn, hybrid paging + segmentation, inverted page table và nhiều cấp. Page lớn hơn bị internal fragmentation[^ostep-internal-frag]. Hybrid kế thừa nhược điểm của segmentation[^ostep-hybrid-1]. Inverted page table phải tìm kiếm[^ostep-inverted-hash]. Nhiều cấp là hướng thắng thế, nói ở mục 5.
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): danh bạ in sẵn một dòng cho từng số điện thoại có thể tồn tại, dù chỉ vài số có người dùng — dày cộp và gần như toàn dòng trống.
+*Với service `catalog`.* Mục 1–3 lo cho `catalog` khỏi chậm. Còn chuyện to thì tự nó là một bài toán: page table cũng là bộ nhớ, mà process nào cũng phải có một bảng. Phép tính của người soạn cho thấy bảng tuyến tính ngây thơ vô lý đến mức nào với `catalog` chạy 64-bit: address space 48 bit với page 4 KB có 2³⁶ page, PTE 8 byte như ở mục 6, nên bảng tuyến tính nặng 2³⁶ × 8 byte = 512 GiB cho mỗi process, dù `catalog` chỉ dùng một phần rất nhỏ.
 
-Con số 4 MB là phép nhân đã làm ở [chương 02, mục 7](./02-address-translation.md): 32-bit với page 4 KB cho VPN 20 bit, tức 2²⁰ PTE, mỗi PTE 4 byte[^ostep-pt-size]. Trong ví dụ của OSTEP, phần lớn bảng không dùng, toàn entry invalid[^ostep-mostly-invalid]. Cả bốn hướng dưới đây cùng giảm số entry hoặc phần bảng phải giữ (suy luận của người soạn), mỗi hướng bằng một cách khác và trả một giá khác:
+### 4.1 Con số 4 MB
 
-- **Page lớn hơn.** Đây là cách đơn giản nhất[^ostep-bigger]. Giữ address space 32-bit nhưng tăng page lên 16 KB, VPN còn 18 bit cộng offset 14 bit[^ostep-bigger-18], bảng nhỏ đi bốn lần đúng bằng hệ số tăng của page[^ostep-bigger-4x]. Giá: mỗi page cấp ra chỉ dùng một phần thì phần còn lại bị bỏ phí, gọi là internal fragmentation[^ostep-internal-frag].
-- **Hybrid** paging + segmentation: mỗi segment logic (code, heap, stack) có một page table riêng[^ostep-hybrid]. MMU dùng lại cặp thanh ghi của segmentation nhưng đổi nghĩa: base giữ địa chỉ vật lý của page table của segment, bounds cho biết bảng có bao nhiêu page hợp lệ[^ostep-hybrid-regs]; khoảng trống giữa stack và heap nhờ vậy không còn tốn entry[^ostep-hybrid-save]. Giá: vẫn dính segmentation vốn kém linh hoạt[^ostep-hybrid-1], và vì bảng giờ có kích thước tùy ý nên tìm chỗ đặt chúng trong RAM khó hơn, tức external fragmentation quay lại[^ostep-hybrid-2][^ostep-hybrid-free].
-- **Inverted page table**: một bảng duy nhất cho cả hệ thống, một entry cho mỗi *physical* page[^ostep-inverted]; entry ghi process nào đang dùng page đó và virtual page nào của process ánh xạ vào[^ostep-inverted-entry]. Tra bản dịch thành bài toán tìm kiếm; quét tuyến tính thì đắt nên thường dựng thêm hash table[^ostep-inverted-hash]. Kích thước tỉ lệ với RAM vật lý chứ không với số process (suy luận từ định nghĩa).
-- **Nhiều cấp** — hướng thắng thế, mục 5.
+Ví dụ của OSTEP dùng address space 32-bit cho gọn, và con số 4 MB là phép nhân đã làm ở [chương 02, mục 7](./02-address-translation.md). Với page 4 KB, VPN dài 20 bit, tức 2²⁰ PTE, mỗi PTE 4 byte[^ostep-pt-size]. Phần lớn bảng này không dùng, toàn entry invalid[^ostep-mostly-invalid]. Cả bốn hướng dưới đây cùng giảm số entry hoặc phần bảng phải giữ (suy luận của người soạn), mỗi hướng bằng một cách khác và trả một giá khác.
 
-OSTEP kết luận: page table chỉ là cấu trúc dữ liệu, làm nhỏ hay lớn, nhanh hay chậm đều được[^ostep-just-ds].
+### 4.2 Bốn hướng thu nhỏ
+
+**Page lớn hơn.** Đây là cách đơn giản nhất[^ostep-bigger]. Giữ address space 32-bit nhưng tăng page lên 16 KB, VPN còn 18 bit cộng offset 14 bit[^ostep-bigger-18]. Bảng nhỏ đi bốn lần, đúng bằng hệ số tăng của page[^ostep-bigger-4x]. Giá phải trả: mỗi page cấp ra mà chỉ dùng một phần thì phần còn lại bị bỏ phí, gọi là internal fragmentation[^ostep-internal-frag].
+
+**Hybrid paging + segmentation.** Thay vì một page table cho cả address space, mỗi segment logic (code, heap, stack) có một page table riêng[^ostep-hybrid]. MMU dùng lại cặp thanh ghi của segmentation nhưng đổi nghĩa: base giữ địa chỉ vật lý của page table của segment, còn bounds cho biết bảng có bao nhiêu page hợp lệ[^ostep-hybrid-regs]. Nhờ vậy khoảng trống giữa stack và heap không còn tốn entry[^ostep-hybrid-save]. Giá phải trả có hai. Một là vẫn dính segmentation vốn kém linh hoạt[^ostep-hybrid-1]. Hai là bảng giờ có kích thước tùy ý, nên tìm chỗ đặt chúng trong RAM khó hơn[^ostep-hybrid-free]. Hệ quả là external fragmentation quay lại[^ostep-hybrid-2].
+
+**Inverted page table.** Hệ thống chỉ giữ một bảng duy nhất, mỗi *physical* page một entry[^ostep-inverted]. Entry ghi process nào đang dùng page đó và virtual page nào của process ánh xạ vào[^ostep-inverted-entry]. Khi đó tra bản dịch thành bài toán tìm kiếm. Quét tuyến tính thì đắt, nên người ta thường dựng thêm một hash table để tra nhanh[^ostep-inverted-hash]. Kích thước bảng tỉ lệ với RAM vật lý chứ không với số process (suy luận từ định nghĩa).
+
+**Nhiều cấp.** Hướng thắng thế, nói ở mục 5.
+
+Chốt lại, page table chỉ là cấu trúc dữ liệu: làm nhỏ hay lớn, nhanh hay chậm đều được[^ostep-just-ds].
 
 <details><summary>Đi sâu: cỡ page thực tế</summary>
 
@@ -138,145 +178,195 @@ OSTEP kết luận: page table chỉ là cấu trúc dữ liệu, làm nhỏ hay
 
 </details>
 
-**Quay lại Q4:** bảng tuyến tính tốn 4 MB mỗi process trong ví dụ 32-bit; mỗi cách thu nhỏ đổi một giá khác (fragmentation, segmentation, tìm kiếm, hoặc thêm lần đọc ở mục 5).
+**Quay lại Q4:** bảng tuyến tính tốn 4 MB mỗi process trong ví dụ 32-bit. Mỗi cách thu nhỏ đổi một giá khác: fragmentation, segmentation, tìm kiếm, hoặc thêm lần đọc ở mục 5.
+
+---
 
 ## 5. Page table nhiều cấp (Q5)
 
-> **Trả lời ngắn.** Thay vì một mảng liền khối, bảng được chia thành các đoạn dài bằng một page và xếp thành thứ giống cái cây[^ostep-mlpt]. Đoạn nào toàn entry invalid thì không cấp phát, và một page directory (bảng chỉ mục) ghi nhớ đoạn nào còn tồn tại[^ostep-pdir]. Nhờ vậy bảng chỉ chiếm chỗ tỉ lệ với phần address space đang dùng[^ostep-ml-adv]; giá phải trả là khi TLB miss phải đọc bộ nhớ hai lần thay vì một[^ostep-ml-cost].
+> **Trả lời ngắn.** Thay vì một mảng liền khối, bảng được chia thành các đoạn dài bằng một page và xếp thành thứ giống cái cây[^ostep-mlpt]. Đoạn nào toàn entry invalid thì không cấp phát, và một page directory (bảng chỉ mục) ghi nhớ đoạn nào còn tồn tại[^ostep-pdir]. Nhờ vậy bảng chỉ chiếm chỗ tỉ lệ với phần address space đang dùng[^ostep-ml-adv]. Giá phải trả là khi TLB miss phải đọc bộ nhớ hai lần thay vì một[^ostep-ml-cost].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì một cuốn danh bạ liền khối, bạn có một mục lục (directory) chỉ tới từng tập; tập nào không có số nào thì không in.
+*Với service `catalog`.* Address space của `catalog` rộng, nhưng phần nó thật sự dùng (code, heap, stack, vài vùng mmap, trong đó có chỉ mục khổng lồ) gồm vài khối rải rác, giữa chúng là khoảng trống lớn (nhận xét của người soạn). Bảng liền khối buộc phải có entry cho cả khoảng trống đó. Nhiều cấp cho phép bỏ qua nó. Đổi lại, mỗi lần một worker của `catalog` dính TLB miss thì page walk dài hơn.
 
-**Cắt bảng.** Bảng tuyến tính là một mảng PTE rất dài; ta cắt nó thành các đoạn dài đúng bằng một page. Một *page directory* ghi lại đoạn nào được cấp phát và nằm ở đâu; đoạn nào toàn PTE invalid thì bị bỏ, không chiếm RAM[^ostep-pdir].
+### 5.1 Cắt bảng
 
-**Entry của directory (PDE).** Gồm valid bit và PFN như PTE, nhưng valid có nghĩa hơi khác: PDE valid nghĩa là ít nhất một PTE trong page bảng mà nó trỏ tới là valid; PDE invalid thì phần còn lại của nó không có nghĩa[^ostep-pde]. Directory cần một entry cho mỗi page của bảng, và ta lấy một số bit cao của VPN làm chỉ số vào directory[^ostep-index].
+Bảng tuyến tính là một mảng PTE rất dài. Ta cắt nó thành các đoạn dài đúng bằng một page. Một *page directory* ghi lại đoạn nào đã được cấp phát và nằm ở đâu. Đoạn nào toàn PTE invalid thì bỏ luôn, không chiếm RAM[^ostep-pdir].
 
-**Khi TLB miss, phần cứng đi hai bước.**
+Entry của directory (PDE) có valid bit và PFN như PTE, nhưng valid ở đây mang nghĩa hơi khác. PDE valid nghĩa là ít nhất một PTE trong page bảng mà nó trỏ tới là valid, còn PDE invalid thì phần còn lại của nó không có nghĩa[^ostep-pde]. Directory cần một entry cho mỗi page của bảng, và ta lấy một số bit cao của VPN làm chỉ số vào directory[^ostep-index].
 
-1. Dùng các bit cao của VPN đọc PDE trong directory (lần đọc RAM thứ nhất). PDE invalid thì không có page bảng nào để đọc tiếp (suy ra từ định nghĩa trên).
-2. PDE valid: PFN của nó cho biết page bảng nằm đâu; dùng các bit còn lại của VPN chọn PTE trong page đó (lần đọc thứ hai). PTE cho PFN của page dữ liệu, rồi ghép với offset như bảng tuyến tính. Công thức đầy đủ và ví dụ làm tay nằm ở phần Đi sâu.
+### 5.2 TLB miss đi hai bước
 
-**Lợi và giá.** Bảng chiếm chỗ tỉ lệ với phần address space đang dùng[^ostep-ml-adv], và các page của bảng đặt đâu trong RAM cũng được, không cần một khối liền[^ostep-indirection]. Giá: miss cần hai lần đọc bộ nhớ thay vì một[^ostep-ml-cost] — đổi thời gian lấy không gian: TLB hit không khác, TLB miss đắt hơn[^ostep-timespace]. Với address space lớn, hai cấp có thể không đủ[^ostep-more-levels]; ta cần thêm cấp (mục 6).
+Khi `catalog` dính TLB miss trên bảng hai cấp, phần cứng đi hai bước:
+
+1. Dùng các bit cao của VPN đọc PDE trong directory (lần đọc RAM thứ nhất). Nếu PDE invalid thì không có page bảng nào để đọc tiếp (suy ra từ định nghĩa trên).
+2. Nếu PDE valid, PFN của nó cho biết page bảng nằm đâu. Dùng các bit còn lại của VPN chọn PTE trong page đó (lần đọc thứ hai). PTE cho PFN của page dữ liệu, rồi ghép với offset như ở bảng tuyến tính. Công thức đầy đủ và ví dụ làm tay nằm ở phần Đi sâu.
+
+### 5.3 Lợi và giá
+
+Bảng giờ chiếm chỗ tỉ lệ với phần address space đang dùng[^ostep-ml-adv]. Ngoài ra các page của bảng đặt đâu trong RAM cũng được, không cần một khối liền, vì directory thêm một tầng gián tiếp chỉ tới từng mảnh của bảng[^ostep-indirection]. Giá phải trả là mỗi miss cần hai lần đọc bộ nhớ thay vì một[^ostep-ml-cost]. Đó là đổi thời gian lấy không gian: TLB hit không khác gì trước, còn TLB miss đắt hơn[^ostep-timespace]. Với address space lớn như của `catalog`, hai cấp có thể không đủ[^ostep-more-levels], và ta cần thêm cấp (mục 6).
 
 <details><summary>Đi sâu: ví dụ làm tay 0x3F80, tính tiết kiệm, page table bị swap</summary>
 
-**Ví dụ làm tay (OSTEP).** Address space 16 KB, page 64 byte: địa chỉ 14 bit = 8 bit VPN + 6 bit offset, bảng tuyến tính 256 entry[^ostep-example]. Page directory có 16 entry nên dùng 4 bit cao của VPN làm chỉ số, 4 bit sau chỉ số vào page của bảng[^ostep-index]. Dịch `0x3F80` từng bước. (1) Viết 14 bit: `0x3F80` = `11 1111 1000 0000`. (2) 6 bit thấp `000000` là offset = 0; 8 bit cao `1111 1110` là VPN = 254 (254 × 64 = 16256 = `0x3F80`, nên đây đúng là byte đầu của page 254)[^ostep-translate-start]. (3) Lấy 4 bit đầu của VPN, `1111`, làm chỉ số vào directory: entry thứ 15 (đếm từ 0), nó trỏ tới page của bảng nằm ở PFN 101[^ostep-translate-pde]. (4) Lấy 4 bit sau, `1110`, làm chỉ số vào page bảng đó: entry 14, cho biết page 254 nằm ở physical page 55 (`0x37`)[^ostep-translate-result]. (5) Ghép PFN 55 với offset: 55 × 64 = 3520 = `0x0DC0`, tức `00 1101 1100 0000`[^ostep-translate-result]. Số 101 và 55 là nội dung do OSTEP chọn trong hình 20.5, không suy ra được từ địa chỉ. Công thức: `PTEAddr = (PDE.PFN << SHIFT) + (PTIndex * sizeof(PTE))`[^ostep-formulas].
+**Ví dụ làm tay (OSTEP).** Address space 16 KB, page 64 byte: địa chỉ 14 bit gồm 8 bit VPN và 6 bit offset, bảng tuyến tính có 256 entry[^ostep-example]. Page directory có 16 entry, nên dùng 4 bit cao của VPN làm chỉ số vào directory và 4 bit sau làm chỉ số vào page của bảng[^ostep-index]. Dịch `0x3F80` từng bước:
 
-*Tiết kiệm (tính của người soạn từ hình 20.4: code VPN 0–1, heap 4–5, stack 254–255):* VPN 0–5 cùng một page bảng, VPN 254–255 một page khác. Cần 2 page bảng + 1 directory = 3 × 64 = 192 byte, so với 1 KB.
+1. Viết 14 bit: `0x3F80` = `11 1111 1000 0000`.
+2. 6 bit thấp `000000` là offset = 0. 8 bit cao `1111 1110` là VPN = 254. Kiểm lại: 254 × 64 = 16256 = `0x3F80`, nên đây đúng là byte đầu của page 254[^ostep-translate-start].
+3. Lấy 4 bit đầu của VPN, `1111`, làm chỉ số vào directory: entry thứ 15 (đếm từ 0), trỏ tới page của bảng nằm ở PFN 101[^ostep-translate-pde].
+4. Lấy 4 bit sau, `1110`, làm chỉ số vào page bảng đó: entry 14, cho biết page 254 nằm ở physical page 55 (`0x37`)[^ostep-translate-result].
+5. Ghép PFN 55 với offset: 55 × 64 = 3520 = `0x0DC0`, tức `00 1101 1100 0000`[^ostep-translate-result].
 
-Bản thân page table cũng có thể bị swap nếu nằm trong kernel virtual memory[^ostep-pt-swap].
+Số 101 và 55 là nội dung do OSTEP chọn trong hình 20.5, không suy ra được từ địa chỉ. Công thức chung: `PTEAddr = (PDE.PFN << SHIFT) + (PTIndex * sizeof(PTE))`[^ostep-formulas].
+
+**Tiết kiệm** (tính của người soạn từ hình 20.4: code VPN 0–1, heap 4–5, stack 254–255). VPN 0–5 nằm chung một page bảng, VPN 254–255 nằm ở một page khác. Cần 2 page bảng + 1 directory = 3 × 64 = 192 byte, so với 1 KB của bảng tuyến tính.
+
+**Page table bị swap.** Bản thân page table cũng có thể bị swap nếu nằm trong kernel virtual memory[^ostep-pt-swap].
 
 </details>
 
 **Quay lại Q5:** nhiều cấp chỉ cấp phát phần bảng đang dùng, đổi lại mỗi TLB miss ở bảng hai cấp phải đọc RAM hai lần thay vì một.
 
+---
+
 ## 6. Page table của Linux, x86-64 và AArch64 (Q6)
 
-> **Trả lời ngắn.** Linux mô hình hóa page table thành hệ phân cấp hiện cao **năm cấp** — `pgd` → `p4d` → `pud` → `pmd` → `pte` — và từng kiến trúc ánh xạ nó vào giới hạn phần cứng[^kdoc-five]; cấp không dùng được bỏ qua lúc biên dịch (fold)[^kdoc-fold]. Trên x86-64 với 48 bit, địa chỉ cắt thành bốn chỉ số 9 bit cộng offset 12 bit (người soạn tính, bên dưới). AArch64 cho tối đa 4 cấp với page 4 KB[^arm-levels].
+> **Trả lời ngắn.** Linux mô hình hóa page table thành hệ phân cấp hiện cao **năm cấp**: `pgd` → `p4d` → `pud` → `pmd` → `pte`. Mỗi kiến trúc ánh xạ mô hình đó vào giới hạn phần cứng của mình[^kdoc-five]. Cấp nào kiến trúc không dùng thì bị bỏ qua lúc biên dịch (fold)[^kdoc-fold]. Trên x86-64 với địa chỉ 48 bit, virtual address cắt thành bốn chỉ số 9 bit cộng offset 12 bit (người soạn tính, bên dưới). AArch64 cho tối đa 4 cấp với page 4 KB[^arm-levels].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): địa chỉ nhà gồm tỉnh/quận/phường/số nhà — mỗi cấp thu hẹp vùng tìm kiếm, và vùng nào không có nhà thì không cần liệt kê chi tiết.
+*Với service `catalog`.* Mỗi lần worker của `catalog` dính TLB miss trên máy thật, phần cứng đi qua đúng các cấp bảng của mục này. Vì vậy mục này trả lời hai câu hỏi cụ thể: lần miss đó đọc RAM tối đa mấy lần, và khi đọc tài liệu kernel thì mỗi tên `pgd`, `pud`, `pmd` ứng với cấp nào.
 
-**Mô hình Linux.** Phân cấp tồn tại để tiết kiệm bộ nhớ page table và tăng tốc ánh xạ[^kdoc-why]; lỗ lớn trong address space chỉ cần đánh dấu unmapped ở cấp cao[^kdoc-holes]. Từ trên xuống: `pgd` → `p4d` → `pud` → `pmd` → `pte`.
+### 6.1 Mô hình của Linux
 
-- Mỗi process có `pgd` riêng, trong `struct mm_struct`, và mỗi `task_struct` trỏ tới `mm_struct` của nó[^kdoc-pgd].
-- `pte` là *bảng* thấp nhất, không phải một entry — tên gây nhầm vì lịch sử[^kdoc-pte-name].
-- `p4d` chỉ dùng trên hệ 5 cấp thật, nếu không thì bị folded[^kdoc-p4d]; cấp không dùng được *fold* (bỏ qua) lúc biên dịch[^kdoc-fold].
-- Entry cấp cao có thể trỏ thẳng tới vùng vật lý liền khối, ánh xạ vài MB hay GB bằng một entry[^kdoc-huge-entry] — cơ sở của huge page.
+Phân cấp tồn tại để tiết kiệm bộ nhớ cho page table và tăng tốc việc ánh xạ[^kdoc-why]. Một lỗ lớn trong address space chỉ cần đánh dấu unmapped ở cấp cao[^kdoc-holes]. Các cấp, từ trên xuống, là `pgd` → `p4d` → `pud` → `pmd` → `pte`. Có bốn chi tiết cần nhớ:
 
-**x86-64: cắt địa chỉ 48 bit** (tính của người soạn): page 4 KB, mỗi bảng là một page, PTE 8 byte → 512 entry → 9 bit mỗi cấp; 48 = 4 × 9 + 12 bit offset. (Tài liệu giảng dạy của TU Graz nêu mỗi entry của các bảng x86-64 dài 8 byte và mỗi bảng 4 kB, tức 512 entry[^x86-pte8]; kernel docs chỉ nói `pteval_t` là giá trị 32 hoặc 64 bit tùy kiến trúc[^kdoc-pteval]. Chưa trích được Intel SDM vì trang tải về bị chặn.) Đã chạy bằng rustc 1.95.0, với `va = 0x0000_7f12_3456_789a`:
+- Mỗi process có một `pgd` riêng, nằm trong `struct mm_struct`, và mỗi `task_struct` trỏ tới `mm_struct` của nó[^kdoc-pgd].
+- `pte` là *bảng* thấp nhất chứ không phải một entry. Tên này gây nhầm vì lịch sử[^kdoc-pte-name].
+- `p4d` chỉ dùng trên hệ 5 cấp thật, nếu không thì bị folded[^kdoc-p4d]. Fold nghĩa là cấp đó bị bỏ qua lúc biên dịch[^kdoc-fold].
+- Một entry cấp cao có thể trỏ thẳng tới một vùng vật lý liền khối, ánh xạ vài MB hay thậm chí GB bằng một entry[^kdoc-huge-entry]. Đó là cơ sở của huge page ở mục 7.
+
+### 6.2 x86-64: cắt địa chỉ 48 bit
+
+Với page 4 KB, mỗi bảng chiếm đúng một page và mỗi entry dài 8 byte, nên một bảng có 512 entry và cần 9 bit để chọn entry[^x86-pte8]. Địa chỉ 48 bit vì vậy cắt thành bốn chỉ số 9 bit và offset 12 bit: 48 = 4 × 9 + 12 (phép tính của người soạn). Đã chạy bằng rustc 1.95.0 với `va = 0x0000_7f12_3456_789a`:
 
 ```rust
 let (pgd, pud, pmd, pt) = ((va >> 39) & 0x1ff, (va >> 30) & 0x1ff, (va >> 21) & 0x1ff, (va >> 12) & 0x1ff);
 let off = va & 0xfff;
 ```
 
-In ra `pgd=254 pud=72 pmd=418 pte=359 off=0x89a`. Một TLB miss có thể cần **bốn** lần đọc (suy luận của người soạn, mở rộng "hai lần cho hai cấp"[^ostep-ml-cost]); đó là chặn trên, không phải thời gian đo, vì page walk cache[^kdoc-mmu-tlb] và cache dữ liệu giảm bớt. 5 cấp thêm 9 bit (57 = 5 × 9 + 12) và thêm một lần đọc (cũng là chặn trên).
+Kết quả in ra là `pgd=254 pud=72 pmd=418 pte=359 off=0x89a`. Vậy một TLB miss của `catalog` có thể cần **bốn** lần đọc, mở rộng từ "hai lần cho hai cấp" ở mục 5 (suy luận của người soạn)[^ostep-ml-cost]. Đó là chặn trên chứ không phải thời gian đo, vì page walk cache và cache dữ liệu giúp giảm số lần đọc thật[^kdoc-mmu-tlb]. Hệ 5 cấp thêm 9 bit (57 = 5 × 9 + 12) và thêm một lần đọc, cũng là chặn trên.
 
-**AArch64.** Kiến trúc cho tối đa 4 cấp với page 4 KB và 3 cấp với page 64 KB[^arm-levels]. Linux dùng 3–4 cấp với page 4 KB (39 hoặc 48 bit), và 2 cấp với 64 KB (42 bit)[^arm-vabits].
+### 6.3 AArch64
 
-<details><summary>Đi sâu: 48 so với 57 bit, hố non-canonical, TTBR0/TTBR1 và khác biệt giữa các phiên bản docs</summary>
+Kiến trúc cho tối đa 4 cấp với page 4 KB và tối đa 3 cấp với page 64 KB[^arm-levels]. Linux dùng 3–4 cấp với page 4 KB (địa chỉ 39 hoặc 48 bit), và 2 cấp với page 64 KB (42 bit)[^arm-vabits].
 
-- **x86-64: địa chỉ 48/57 bit.** Kiến trúc định nghĩa địa chỉ 64 bit, hiện hỗ trợ 48 và 57 bit; các bit cao được sign-extend, nên có hố giữa user và kernel khi đọc như số không dấu[^x86-sign]. Hố non-canonical đó, cùng direct mapping của toàn bộ RAM vật lý trong nửa kernel, được trình bày ở [chương 01, mục 5](./01-address-space.md). Layout 5 cấp mở rộng user space 512 lần, từ 0.125 PB lên 64 PB[^x86-5lvl-user].
-- **56 hay 57?** Chỗ dễ nhầm: địa chỉ ảo 5 cấp là **57 bit** (kernel docs: 128 PiB không gian ảo[^x86-5lvl-total]), nhưng vì bit cao được sign-extend nên mỗi nửa (user, kernel) chỉ có 56 bit = 64 PiB. Kernel docs nói 5 cấp cho phép không gian địa chỉ ảo userspace 56 bit[^x86-5lvl-56] là nói về nửa user, và ví dụ bản đồ "56-bit" trên chính là dải `0` đến `00ffffffffffffff`. Tương tự 4 cấp: 48 bit tổng (256 TiB[^x86-4lvl-total]), mỗi nửa 47 bit = 128 TiB = 0.125 PiB (suy luận của người soạn từ phép chia đôi; khớp ranh giới `00007fffffffffff` trong bảng bản đồ).
-- Mặc định kernel không cấp địa chỉ user vượt 47 bit trừ khi `mmap` có hint cao hơn[^x86-5lvl-hint].
-- **AArch64: TTBR.** Khác x86-64: một bit cao của virtual address chọn TTBR0 hoặc TTBR1; `swapper_pg_dir` chỉ chứa ánh xạ kernel và ghi vào TTBR1, còn `pgd` của user chứa ánh xạ user[^arm-ttbr]. Bit nào thì tài liệu kernel ghi khác nhau theo phiên bản: docs hiện hành trên docs.kernel.org ghi bit 55[^arm-ttbr], còn bản trong source kernel v6.8 (kernel của máy lab) ghi bit 63[^arm-ttbr-v68]. Mặc định kernel trả địa chỉ userspace trong dải 48 bit; muốn 52 bit phải opt-in qua hint `mmap`[^arm-52].
-- Chương này không khẳng định kích thước TLB hay ASID cụ thể của Intel/AMD/Arm.
+<details><summary>Đi sâu: 48 so với 57 bit, hố non-canonical, TTBR0/TTBR1, nguồn của PTE 8 byte và khác biệt giữa các phiên bản docs</summary>
+
+- **x86-64: địa chỉ 48 hay 57 bit.** Kiến trúc định nghĩa địa chỉ 64 bit, hiện hỗ trợ 48 và 57 bit. Các bit cao được sign-extend, nên khi đọc như số không dấu thì có một hố giữa user và kernel[^x86-sign]. Hố non-canonical đó, cùng direct mapping của toàn bộ RAM vật lý trong nửa kernel, được trình bày ở [chương 01, mục 5](./01-address-space.md). Layout 5 cấp mở rộng user space lên 512 lần, từ 0.125 PB lên 64 PB[^x86-5lvl-user].
+- **56 hay 57 bit?** Chỗ dễ nhầm: địa chỉ ảo 5 cấp là **57 bit** (kernel docs ghi 128 PiB không gian ảo[^x86-5lvl-total]). Nhưng vì bit cao được sign-extend nên mỗi nửa (user, kernel) chỉ có 56 bit = 64 PiB. Câu "5 cấp cho phép không gian địa chỉ ảo userspace 56 bit" trong kernel docs[^x86-5lvl-56] nói về nửa user, và dải `0` đến `00ffffffffffffff` trong ví dụ bản đồ "56-bit" khớp với điều đó. Tương tự với 4 cấp: 48 bit tổng cộng (256 TiB[^x86-4lvl-total]), mỗi nửa 47 bit = 128 TiB = 0.125 PiB (suy luận của người soạn từ phép chia đôi; khớp ranh giới `00007fffffffffff` trong bảng bản đồ).
+- Mặc định kernel không cấp địa chỉ user vượt 47 bit, trừ khi `mmap` có hint cao hơn[^x86-5lvl-hint].
+- **Nguồn của "PTE 8 byte".** Tài liệu giảng dạy của TU Graz nêu mỗi entry của các bảng x86-64 dài 8 byte[^x86-pte8]. Kernel docs chỉ nói `pteval_t` là giá trị 32 hoặc 64 bit tùy kiến trúc[^kdoc-pteval]. Chưa trích được Intel SDM vì trang tải về bị chặn.
+- **AArch64: TTBR.** Khác x86-64, một bit cao của virtual address chọn TTBR0 hay TTBR1. `swapper_pg_dir` chỉ chứa ánh xạ kernel và được ghi vào TTBR1, còn `pgd` của user chứa ánh xạ user. Bit nào chọn thì tài liệu kernel ghi khác nhau theo phiên bản: docs hiện hành trên docs.kernel.org ghi bit 55[^arm-ttbr]. Bản trong source kernel v6.8 (kernel của máy lab) lại ghi bit 63[^arm-ttbr-v68]. Mặc định kernel trả địa chỉ userspace trong dải 48 bit; muốn 52 bit phải opt-in qua hint `mmap`[^arm-52].
+- Chương này không khẳng định kích thước TLB hay ASID cụ thể của Intel, AMD hay Arm.
 
 </details>
 
-**Quay lại Q6:** Linux gọi các cấp là pgd, p4d, pud, pmd, pte; x86-64 48 bit dùng bốn cấp 9 bit + offset 12 bit, AArch64 dùng 3–4 cấp với page 4 KB.
+**Quay lại Q6:** Linux gọi các cấp là pgd, p4d, pud, pmd, pte. x86-64 48 bit dùng bốn cấp 9 bit + offset 12 bit, AArch64 dùng 3–4 cấp với page 4 KB.
+
+---
 
 ## 7. Huge page và Transparent Huge Pages (Q7)
 
-> **Trả lời ngắn.** Huge page là page lớn hơn 4 KB (trên x86 thường 2M, và 1G nếu CPU hỗ trợ[^huge-sizes]); vì TLB có số entry hữu hạn, page lớn làm mỗi entry phủ được nhiều bộ nhớ hơn nên ít miss hơn[^thp-f2b]. Giá phải trả: THP có thể cấp page 2M cho vùng chỉ chạm vài byte, lãng phí bộ nhớ[^thp-waste]; và ở cấu hình `defrag=always` ứng dụng có thể bị stall khi kernel dồn bộ nhớ để cấp page lớn[^thp-defrag-always].
+> **Trả lời ngắn.** Huge page là page lớn hơn 4 KB, trên x86 thường là 2M, và 1G nếu CPU hỗ trợ[^huge-sizes]. TLB có số entry hữu hạn, nên page lớn làm mỗi entry phủ được nhiều bộ nhớ hơn và ít miss hơn[^thp-f2b]. Giá phải trả có hai. THP có thể cấp page 2M cho vùng chỉ chạm vài byte, lãng phí bộ nhớ[^thp-waste]. Và ở cấu hình `defrag=always`, ứng dụng có thể bị stall khi kernel dồn bộ nhớ để cấp page lớn[^thp-defrag-always].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): thay vì ghi từng căn hộ vào mẩu giấy, bạn ghi cả tòa nhà — một dòng phủ nhiều căn, nhưng nếu chỉ ở một căn thì phần còn lại để không.
+*Với service `catalog`.* Chỉ mục 20 GB của `catalog` nằm trong hơn 5 triệu page 4 KB, và mỗi lookup ngẫu nhiên chạm một page khác (20 GiB / 4 KiB = 5 242 880; phép chia của người soạn). Nếu dùng page 2 MiB thì cùng vùng nhớ đó chỉ còn 10 240 page (phép chia của người soạn), tức TLB phải theo dõi ít page hơn 512 lần. Mục này nói huge page làm được điều đó ra sao, và `catalog` phải trả giá gì.
 
-**Vấn đề.** TLB là tài nguyên rất khan hiếm trên bộ xử lý, và kernel docs nói việc dùng TLB hiệu quả càng quan trọng khi RAM lớn dần[^huge-scarce]. Số entry hữu hạn nên muốn tăng reach chỉ còn cách tăng kích thước page (suy luận của người soạn) — mà mục 4 cho thấy page lớn có giá, và OSTEP nói lý do chính để hỗ trợ nhiều cỡ page là giảm áp lực TLB chứ không phải tiết kiệm chỗ cho bảng (mục 4, phần Đi sâu). Huge page chấp nhận giá đó có chọn lọc. Với 9 bit mỗi cấp (mục 6), 2 MB là phạm vi một entry PMD phủ (512 × 4 KB) và 1 GB là của entry PUD (suy luận của người soạn) — đúng cơ chế entry cấp cao trỏ thẳng vùng vật lý[^kdoc-huge-entry]; page walk cũng ngắn đi một cấp (suy luận).
+### 7.1 Vì sao phải có huge page
 
-**hugetlbfs (tường minh).** Dùng qua `mmap` hoặc shared memory SysV[^huge-use]. Huge page bị reserve, không dùng cho việc khác và **không bị swap**[^huge-reserved].
+TLB là tài nguyên rất khan hiếm trên bộ xử lý, và kernel docs nhấn mạnh việc dùng TLB hiệu quả càng quan trọng khi RAM ngày càng lớn[^huge-scarce]. Số entry hữu hạn, nên muốn tăng reach chỉ còn cách tăng kích thước page (suy luận của người soạn). Nhưng mục 4 đã cho thấy page lớn có giá, và OSTEP nói lý do chính để hỗ trợ nhiều cỡ page là giảm áp lực lên TLB chứ không phải tiết kiệm chỗ cho bảng[^ostep-multi-pagesize]. Huge page chấp nhận cái giá đó có chọn lọc.
 
-**THP (tự động).** Có tự động nâng/hạ kích thước page, không có nhược điểm của hugetlbfs[^thp-obj]; hiện chỉ cho anonymous mapping và tmpfs/shmem[^thp-scope]; ứng dụng không cần sửa[^thp-nomod].
+Con số 2 MB và 1 GB đến từ mục 6. Với 9 bit mỗi cấp, một entry PMD phủ 2 MB (512 × 4 KB) và một entry PUD phủ 1 GB (suy luận của người soạn). Đó chính là cơ chế entry cấp cao trỏ thẳng vào vùng vật lý[^kdoc-huge-entry]. Page walk cũng ngắn đi một cấp (suy luận của người soạn).
 
-*Vì sao nhanh hơn.* Kernel docs: yếu tố ít quan trọng là một page fault cho mỗi vùng 2M, giảm 512 lần, chỉ ở lần chạm đầu[^thp-f1]. Yếu tố quan trọng và kéo dài: TLB miss chạy nhanh hơn, đặc biệt với ảo hóa dùng nested page table và "almost always" cả trên bare metal[^thp-f2a], và một TLB entry phủ lượng virtual memory lớn hơn nên ít miss hơn[^thp-f2b].
+### 7.2 hugetlbfs: huge page tường minh
 
-*Giá phải trả.*
-- Lãng phí: khi huge page bật toàn hệ thống, mmap vùng lớn, chạm 1 byte, có thể được cấp page 2M thay vì 4k[^thp-waste].
-- Clear/copy page lớn hơn trong fault[^thp-clear].
-- Stall: với `defrag=always`, ứng dụng stall khi cấp phát thất bại, trực tiếp reclaim và compact bộ nhớ[^thp-defrag-always]. Dịch vụ nhạy latency nên cân nhắc (nhận xét của người soạn).
+Ứng dụng dùng hugetlbfs qua `mmap` hoặc qua shared memory SysV[^huge-use]. Huge page loại này bị reserve trong kernel, không dùng cho việc khác và **không bị swap**[^huge-reserved].
+
+### 7.3 THP: huge page tự động
+
+THP (Transparent Huge Pages) thì kernel tự nâng và hạ kích thước page, không có nhược điểm của hugetlbfs[^thp-obj]. Hiện nó chỉ áp dụng cho anonymous mapping và tmpfs/shmem[^thp-scope]. Ứng dụng không cần sửa gì để hưởng lợi[^thp-nomod]. Với `catalog` đó là điểm đáng giá: bật được mà không đụng code.
+
+Về lợi ích, kernel docs nêu hai yếu tố. Yếu tố ít quan trọng là mỗi vùng 2M chỉ cần một page fault thay vì 512, và chỉ ở lần chạm đầu[^thp-f1]. Yếu tố quan trọng và kéo dài là TLB miss chạy nhanh hơn, đặc biệt với ảo hóa dùng nested page table và "almost always" cả trên bare metal[^thp-f2a]. Lý do là một TLB entry phủ lượng virtual memory lớn hơn nên ít miss hơn[^thp-f2b].
+
+### 7.4 Giá phải trả
+
+- **Lãng phí bộ nhớ.** Khi huge page bật toàn hệ thống, một process mmap vùng lớn rồi chỉ chạm 1 byte vẫn có thể được cấp page 2M thay vì 4k[^thp-waste].
+- **Clear/copy page lớn hơn** trong lúc xử lý fault[^thp-clear].
+- **Stall.** Với `defrag=always`, ứng dụng yêu cầu THP sẽ stall khi cấp phát thất bại: nó trực tiếp reclaim page và compact bộ nhớ để cố cấp ngay một THP[^thp-defrag-always]. Service nhạy latency như `catalog` nên cân nhắc điểm này (nhận xét của người soạn).
 
 <details><summary>Đi sâu: reserve và boot với hugetlbfs, các nút điều khiển THP, quan sát trên máy soạn chương</summary>
 
-- hugetlbfs: reserve bảo đảm cấp được lúc fault[^huge-rsvd]; cấp lúc boot là đáng tin nhất vì bộ nhớ chưa phân mảnh[^huge-boot].
-- *Điều khiển THP.* Bật toàn hệ thống hoặc theo task/vùng nhớ[^thp-control]; chế độ `always`/`madvise`/`never`[^thp-modes]; ứng dụng hưởng lợi nên `madvise(MADV_HUGEPAGE)` vùng quan trọng[^thp-madvise]; `khugepaged` gộp page thường thành huge page nếu cấu hình cho phép[^thp-khuge]; mTHP cấp khối nhỏ hơn cỡ PMD để page fault bớt gây latency spike so với THP cỡ PMD[^thp-mthp].
+- **hugetlbfs.** Reserve bảo đảm cấp được huge page lúc fault[^huge-rsvd]. Cấp lúc boot là cách đáng tin nhất vì bộ nhớ chưa bị phân mảnh[^huge-boot].
+- **Điều khiển THP.** THP bật được toàn hệ thống hoặc giới hạn theo task hay vùng nhớ[^thp-control]. Có các chế độ `always`, `madvise`, `never`[^thp-modes]. Ứng dụng hưởng lợi nên gọi `madvise(MADV_HUGEPAGE)` cho các vùng quan trọng[^thp-madvise]. `khugepaged` gộp các page thường thành huge page nếu hệ thống cấu hình cho phép[^thp-khuge]. mTHP cấp khối nhỏ hơn cỡ PMD, để page fault bớt gây latency spike so với THP cỡ PMD[^thp-mthp].
 - **Quan sát trên máy soạn chương** (một lần chạy, không phải bảo đảm): container Linux của repo (`./labs/linux.sh`, aarch64, page 4096) cho `enabled` = `always [madvise] never`, `defrag` = `always defer defer+madvise [madvise] never`, `AnonHugePages: 0 kB`, `HugePages_Total: 0`, `Hugepagesize: 2048 kB`. Máy của bạn có thể khác: hãy đọc các file đó trên chính máy cần xét.
 
 </details>
 
-**Quay lại Q7:** huge page tăng lượng bộ nhớ mỗi entry TLB phủ được; hugetlbfs dành riêng RAM, THP tự động nhưng có thể phình bộ nhớ và stall.
+**Quay lại Q7:** huge page tăng lượng bộ nhớ mỗi entry TLB phủ được. hugetlbfs dành riêng RAM, còn THP tự động nhưng có thể phình bộ nhớ và gây stall.
+
+---
 
 ## 8. TLB miss với workload backend (Q8)
 
-> **Trả lời ngắn.** Chỉ đáng nghi khi số page khác nhau mà chương trình chạm trong thời gian ngắn vượt TLB coverage — kịch bản mà OSTEP gọi là Culler's Law[^ostep-culler]. Hãy đo bộ đếm TLB miss trước khi chỉnh THP hay hugetlbfs (nhận xét của người soạn).
+> **Trả lời ngắn.** Chỉ đáng nghi khi số page khác nhau mà chương trình chạm trong thời gian ngắn vượt TLB coverage, kịch bản mà OSTEP gọi là Culler's Law[^ostep-culler]. Vì vậy hãy đo bộ đếm TLB miss trước khi chỉnh THP hay hugetlbfs (nhận xét của người soạn).
 
 **Giải thích.**
 
-*Nhận xét của người soạn; chỉ câu có chú thích là sự thật có nguồn.*
+*Với service `catalog`.* Đây là mục trả lời câu hỏi thực tế của cả chương: p99 của `catalog` xấu đi khi chỉ mục lớn lên, vậy có phải do TLB không? Toàn bộ mục là nhận xét của người soạn; chỉ câu nào có chú thích mới là sự thật có nguồn.
 
-Hình dung: thợ sửa xe chỉ cần vài cuốn sổ ở bàn khi làm cùng một xe, nhưng nếu mỗi phút lại tra một xe ở bãi khác nhau thì mẩu giấy ghi chú không đủ chỗ.
+### 8.1 Khi nào TLB thành vấn đề
 
-- **Khi nào thành vấn đề:** số page khác nhau chạm trong thời gian ngắn vượt TLB coverage — kịch bản Culler's Law[^ostep-culler]. Ứng viên: cache in-process hàng GB truy cập theo hash, index trong bộ nhớ, buffer pool. Truy cập ngẫu nhiên mất lợi thế "một miss mỗi page"[^ostep-tlb-spatial]; scan tuần tự thì ổn.
-- **Đắt hơn vẻ ngoài:** mỗi miss là cả một page walk nhiều cấp, đi qua cache như mọi truy cập (suy luận).
-- **Đo trước khi chỉnh:** dùng bộ đếm TLB miss phần cứng (ví dụ `perf stat`; tên sự kiện phụ thuộc CPU, tra `perf list` — chương này không chạy lệnh đó nên không có số liệu), rồi mới thử THP/hugetlbfs và so p50/p99.
+Worker của `catalog` tra chỉ mục theo hash, nên hai key kế nhau rơi vào hai page khác nhau. Truy cập ngẫu nhiên kiểu này mất lợi thế "một miss cho mỗi page" của truy cập tuần tự[^ostep-tlb-spatial]. Khi số page chạm trong thời gian ngắn vượt TLB coverage thì ta rơi vào kịch bản Culler's Law[^ostep-culler]. Một scan tuần tự qua chính chỉ mục đó thì ổn. Các ứng viên dễ gặp ở backend cùng kiểu: cache in-process hàng GB truy cập theo hash, index trong bộ nhớ, buffer pool.
+
+### 8.2 Miss đắt hơn vẻ ngoài
+
+Mỗi miss là cả một page walk nhiều cấp, và các lần đọc của walk đi qua cache như mọi truy cập khác (suy luận của người soạn từ mục 6).
+
+### 8.3 Đo trước khi chỉnh
+
+Hãy dùng bộ đếm TLB miss phần cứng, ví dụ qua `perf stat`. Tên sự kiện phụ thuộc CPU, nên tra `perf list` trên máy bạn; chương này không chạy lệnh đó nên không có số liệu. Sau đó mới thử THP hay hugetlbfs và so p50/p99 của `catalog` trước và sau.
 
 <details><summary>Đi sâu: ảo hóa và rủi ro vận hành</summary>
 
-- **Ảo hóa:** huge page đặc biệt có lợi với nested page table; chỉ một bên (KVM hoặc guest) dùng huge page đã tăng tốc đáng kể[^thp-f2a]. Chạy trong VM (đa số cloud) thì áp dụng.
-- **Rủi ro vận hành:** stall compaction[^thp-defrag-always], phình bộ nhớ[^thp-waste]; hugetlbfs dành riêng RAM, không swap[^huge-reserved]. Trong container, chi phí tính vào giới hạn bộ nhớ (chưa kiểm chứng ở đây).
+- **Ảo hóa.** Huge page đặc biệt có lợi với nested page table: chỉ một bên (KVM hoặc guest) dùng huge page đã tăng tốc đáng kể[^thp-f2a]. Chạy trong VM (đa số cloud) thì áp dụng.
+- **Rủi ro vận hành.** Có ba thứ cần canh. Thứ nhất là stall khi compaction[^thp-defrag-always]. Thứ hai là phình bộ nhớ[^thp-waste]. Thứ ba là hugetlbfs dành riêng RAM nên không swap được[^huge-reserved]. Trong container, chi phí này tính vào giới hạn bộ nhớ (chưa kiểm chứng ở đây).
 
 </details>
 
-**Quay lại Q8:** nghi TLB khi working set truy cập ngẫu nhiên vượt coverage; đo bộ đếm trước, rồi mới thử huge page và chú ý rủi ro vận hành.
+**Quay lại Q8:** nghi TLB khi working set truy cập ngẫu nhiên vượt coverage. Hãy đo bộ đếm trước, rồi mới thử huge page, và để ý rủi ro vận hành.
+
+---
 
 ## Liên hệ với Rust
 
-Rust không có "API TLB". Điểm chạm gián tiếp: bộ nhớ của `Vec`/`Box` lớn đến từ global allocator, mà allocator mặc định hiện không được đặc tả[^alloc-global]. Vùng nhớ đó có thành anonymous mapping (thứ THP áp dụng được[^thp-scope]) hay không là việc của allocator thực tế — xem [chương 06](./06-heap-allocator.md). Suy luận của người soạn: cải thiện cho cấu trúc dữ liệu khổng lồ truy cập ngẫu nhiên nằm ở bố cục dữ liệu hoặc cấu hình hệ thống (THP, `madvise` qua crate như `libc` — chưa kiểm chứng ở đây), không ở `std`.
+Rust không có "API TLB". Điểm chạm gián tiếp là nơi chỉ mục của `catalog` lấy bộ nhớ: nếu nó nằm trong `Vec` hay `Box` lớn thì bộ nhớ đó đến từ global allocator, mà allocator mặc định hiện không được đặc tả[^alloc-global]. Vùng nhớ đó có thành anonymous mapping, thứ THP áp dụng được[^thp-scope], hay không là việc của allocator thực tế; xem [chương 06](./06-heap-allocator.md). Suy luận của người soạn: với cấu trúc dữ liệu khổng lồ truy cập ngẫu nhiên, chỗ cải thiện nằm ở bố cục dữ liệu hoặc cấu hình hệ thống (THP, `madvise` qua crate như `libc`, chưa kiểm chứng ở đây) chứ không ở `std`.
+
+---
 
 ## Tóm tắt
 
-- TLB là cache phần cứng của bản dịch; TLB miss ≠ page fault.
-- Miss do phần cứng (x86) hoặc phần mềm (MIPS, SPARC v9) xử lý; phần mềm đổi lấy sự linh hoạt.
-- Context switch: flush TLB (tốn miss) hoặc ASID (nhiều process cùng nằm trong TLB).
-- LRU có tình huống góc (n + 1 page, n entry); random tránh được.
-- Bảng tuyến tính 32-bit/4 KB nặng 4 MB mỗi process; page lớn → internal fragmentation, hybrid → segmentation, inverted → tìm kiếm, nhiều cấp → thêm lần đọc khi miss.
-- Linux: PGD, P4D, PUD, PMD, PTE, fold cấp không dùng; x86-64 48/57 bit; AArch64 39/48 bit (4 KB) hay 42 bit (64 KB).
-- Huge page: một entry che nhiều hơn, page walk ngắn hơn; hugetlbfs dành riêng, THP tự động nhưng có stall và phình bộ nhớ.
-- Với backend: chỉ nghi TLB khi working set truy cập ngẫu nhiên vượt coverage; đo trước.
+- TLB là cache phần cứng của bản dịch[^ostep-tlb]. TLB miss không phải page fault.
+- Miss do phần cứng xử lý trên x86[^ostep-hw-tlb]. Kiểu software-managed (MIPS, SPARC v9) để phần mềm xử lý[^ostep-sw-arch]. Phần mềm đổi lấy sự linh hoạt[^ostep-sw-flex].
+- Context switch: flush TLB thì tốn miss lại[^ostep-flush-cost]. Dùng ASID thì nhiều process cùng nằm trong TLB[^ostep-asid-field].
+- LRU có tình huống góc (n + 1 page, n entry), random tránh được[^ostep-lru-bad].
+- Bảng tuyến tính 32-bit/4 KB nặng 4 MB mỗi process[^ostep-pt-size]. Page lớn đổi lấy internal fragmentation, hybrid kế thừa segmentation, inverted phải tìm kiếm, nhiều cấp thêm lần đọc khi miss[^ostep-timespace].
+- Linux: PGD, P4D, PUD, PMD, PTE, và fold cấp không dùng[^kdoc-five]. x86-64 là 48/57 bit, AArch64 là 39/48 bit (4 KB) hay 42 bit (64 KB)[^arm-vabits].
+- Huge page: một entry phủ nhiều hơn, page walk ngắn hơn[^thp-f2b]. hugetlbfs dành riêng RAM[^huge-reserved]. THP tự động nhưng có thể phình bộ nhớ[^thp-waste].
+- Với `catalog` và các backend giống nó: chỉ nghi TLB khi working set truy cập ngẫu nhiên vượt coverage[^ostep-culler]. Đo trước khi chỉnh.
+
+---
 
 ## Câu hỏi tự kiểm tra
 
@@ -284,7 +374,7 @@ Rust không có "API TLB". Điểm chạm gián tiếp: bộ nhớ của `Vec`/`
 
 <details><summary>Đáp án</summary>
 
-Miss: chưa có bản dịch trong cache, page walk rồi nạp TLB và thử lại[^ostep-tlbmiss-update][^ostep-tlbmiss-retry]. Fault: page không present hoặc sai quyền, vào handler của OS[^ostep-pf-sw].
+Miss là chưa có bản dịch trong cache: phần cứng page walk rồi nạp TLB[^ostep-tlbmiss-update]. Sau đó nó thử lại lệnh[^ostep-tlbmiss-retry]. Fault là page không present hoặc sai quyền, và nó vào handler của OS[^ostep-pf-sw].
 
 </details>
 
@@ -292,7 +382,7 @@ Miss: chưa có bản dịch trong cache, page walk rồi nạp TLB và thử l�
 
 <details><summary>Đáp án</summary>
 
-[^ostep-hw-tlb][^ostep-sw-tlb][^ostep-sw-flex].
+Hardware-managed: phần cứng tự page walk, ví dụ x86 với CR3[^ostep-hw-tlb]. Software-managed: khi miss phần cứng chỉ phát exception và OS xử lý[^ostep-sw-tlb]. Ưu điểm của kiểu phần mềm là linh hoạt: OS dùng được cấu trúc page table tùy ý[^ostep-sw-flex].
 
 </details>
 
@@ -300,7 +390,7 @@ Miss: chưa có bản dịch trong cache, page walk rồi nạp TLB và thử l�
 
 <details><summary>Đáp án</summary>
 
-Flush[^ostep-asid], đổi lại miss lại từ đầu[^ostep-flush-cost]; ASID[^ostep-asid-field], nhưng ít bit hơn PID[^ostep-asid-pid].
+Cách một là flush[^ostep-asid]. Giá của nó là process mới miss lại từ đầu[^ostep-flush-cost]. Cách hai là ASID[^ostep-asid-field]. Giá của nó là ASID có ít bit hơn PID[^ostep-asid-pid].
 
 </details>
 
@@ -316,7 +406,7 @@ LRU miss mọi truy cập, random tốt hơn nhiều[^ostep-lru-bad].
 
 <details><summary>Đáp án</summary>
 
-4 MB mỗi process[^ostep-pt-size]; 1 MB nhưng internal fragmentation[^ostep-bigger][^ostep-internal-frag].
+Nặng 4 MB mỗi process[^ostep-pt-size]. Với page 16 KB thì bảng còn 1 MB, vì page lớn gấp bốn lần[^ostep-bigger]. Giá là internal fragmentation[^ostep-internal-frag].
 
 </details>
 
@@ -324,7 +414,7 @@ LRU miss mọi truy cập, random tốt hơn nhiều[^ostep-lru-bad].
 
 <details><summary>Đáp án</summary>
 
-Page toàn invalid không cấp phát[^ostep-pdir][^ostep-ml-adv]; nhưng miss cần hai lần đọc[^ostep-ml-cost], hit thì không khác[^ostep-timespace].
+Page bảng toàn invalid thì không cấp phát[^ostep-pdir]. Nhờ vậy bảng chỉ chiếm chỗ tỉ lệ với phần address space đang dùng[^ostep-ml-adv]. Nhưng miss cần hai lần đọc bộ nhớ[^ostep-ml-cost]. Hit thì không khác gì trước[^ostep-timespace].
 
 </details>
 
@@ -332,7 +422,7 @@ Page toàn invalid không cấp phát[^ostep-pdir][^ostep-ml-adv]; nhưng miss c
 
 <details><summary>Đáp án</summary>
 
-PD index 15, PT index 14, PFN 55, physical `0x0DC0`[^ostep-translate-result][^ostep-index].
+PD index 15, PT index 14, PFN 55[^ostep-index]. Physical address là `0x0DC0`[^ostep-translate-result].
 
 </details>
 
@@ -340,7 +430,7 @@ PD index 15, PT index 14, PFN 55, physical `0x0DC0`[^ostep-translate-result][^os
 
 <details><summary>Đáp án</summary>
 
-PGD, P4D, PUD, PMD, PTE[^kdoc-five]; cấp không dùng bị fold[^kdoc-fold]; p4d chỉ dùng trên 5 cấp thật[^kdoc-p4d].
+Các cấp là PGD, P4D, PUD, PMD, PTE[^kdoc-five]. Cấp nào không dùng thì bị fold[^kdoc-fold]. P4D chỉ dùng trên hệ 5 cấp thật[^kdoc-p4d].
 
 </details>
 
@@ -348,15 +438,15 @@ PGD, P4D, PUD, PMD, PTE[^kdoc-five]; cấp không dùng bị fold[^kdoc-fold]; p
 
 <details><summary>Đáp án</summary>
 
-Miss nhanh hơn[^thp-f2a], một entry phủ nhiều hơn[^thp-f2b]. Giá: lãng phí bộ nhớ[^thp-waste], stall khi compaction[^thp-defrag-always]; hugetlbfs không swap được[^huge-reserved].
+Miss chạy nhanh hơn[^thp-f2a]. Một entry cũng phủ nhiều bộ nhớ hơn[^thp-f2b]. Giá phải trả là lãng phí bộ nhớ[^thp-waste]. Ngoài ra có thể stall khi compaction[^thp-defrag-always]. hugetlbfs còn có thêm nhược điểm là không swap được[^huge-reserved].
 
 </details>
 
-10. Service giữ cache 20 GB truy cập theo hash, p99 xấu dù CPU không bão hòa. Chẩn đoán TLB thế nào?
+10. `catalog` giữ cache 20 GB truy cập theo hash, p99 xấu dù CPU không bão hòa. Chẩn đoán TLB thế nào?
 
 <details><summary>Đáp án</summary>
 
-Mục 8 (nhận xét của người soạn): kịch bản Culler's Law[^ostep-culler]; đo bộ đếm TLB miss trước, rồi thử `madvise(MADV_HUGEPAGE)`[^thp-madvise] hoặc hugetlbfs, chú ý rủi ro stall và phình bộ nhớ.
+Theo mục 8 (nhận xét của người soạn): đây đúng là kịch bản Culler's Law[^ostep-culler]. Hãy đo bộ đếm TLB miss trước. Sau đó thử `madvise(MADV_HUGEPAGE)` cho vùng cache[^thp-madvise] hoặc hugetlbfs, và chú ý rủi ro stall và phình bộ nhớ.
 
 </details>
 

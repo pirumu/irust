@@ -19,46 +19,45 @@
 
 ## 1. Cơ chế, chính sách, hai metric và các chính sách kinh điển (Q1)
 
-> **Trả lời ngắn.** OS tách *cơ chế* lấy lại CPU (timer interrupt, context switch)[^ostep-timer] khỏi *chính sách* chọn ai chạy tiếp. Turnaround time tính từ lúc job đến tới lúc xong[^ostep-turnaround]; response time tính từ lúc đến tới lần đầu được chạy[^ostep-response]. Với các giả định của sách, STCF (và SJF khi mọi job đến cùng lúc) tối ưu turnaround[^ostep-stcf-opt]; Round Robin tốt cho response nhưng là một trong những chính sách tệ nhất cho turnaround[^ostep-rr-worst].
+> **Trả lời ngắn.** OS tách hai việc: *cơ chế* lấy lại CPU từ thread đang chạy (timer interrupt, rồi context switch)[^ostep-timer], và *chính sách* chọn thread nào chạy tiếp. Để so sánh các chính sách ta cần hai thước đo. Turnaround time là thời gian từ lúc job đến tới lúc xong[^ostep-turnaround]; response time là thời gian từ lúc đến tới lần đầu được chạy[^ostep-response]. Với các giả định của sách, STCF (và SJF khi mọi job đến cùng lúc) tối ưu turnaround[^ostep-stcf-opt]. Round Robin thì tốt cho response nhưng là một trong những chính sách tệ nhất cho turnaround[^ostep-rr-worst].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): ở quầy thu ngân, khách mua cả xe đẩy làm khách mua một gói kẹo đứng chờ lâu (FIFO). Cho khách ít hàng qua trước thì trung bình nhanh hơn; chia đều từng món cho mọi khách thì ai cũng được phục vụ sớm nhưng ai cũng ra khỏi quầy muộn.
+*Với service của bạn.* Ta dùng lại `orders`, service Rust ở [Phase 1](../01-linux/01-os-va-kernel.md), và đặt nó vào một pod có 2 CPU (nhận xét của người soạn: đây là ví dụ giả định, không phải code trong repo). Trong process có hai kiểu thread. Vài handler thread xử lý request, mỗi request chỉ cần một lát CPU ngắn. Còn thread `export` thỉnh thoảng chạy để dựng báo cáo và ngốn CPU liền một lúc dài. Cả hai kiểu cùng sẵn sàng chạy mà chỉ có 2 CPU, nên kernel phải chọn ai chạy trước, và lựa chọn đó quyết định request nào phải đứng chờ `export`. Ta sẽ đi từ các chính sách đơn giản nhất đến scheduler thật của Linux, rồi quay về câu hỏi của người vận hành `orders`: chỉnh được gì (nice, policy, affinity, quota).
 
-Số thread sẵn sàng chạy thường nhiều hơn số CPU. OS cần hai thứ. Thứ nhất là **cơ chế** lấy lại CPU từ thread đang chạy: timer device được lập trình để ngắt sau mỗi vài mili-giây, khi đó process đang chạy bị dừng và một interrupt handler của OS chạy[^ostep-timer]; rồi context switch lưu một số giá trị register của process đang chạy (ví dụ lên kernel stack của nó) và khôi phục của process sắp chạy[^ostep-ctx]. Thứ hai là **chính sách** (policy): chọn ai chạy tiếp, trong bao lâu. Chương này nói về chính sách; cơ chế nằm ở [chương system call](../01-linux/02-system-call.md) và [chương process](../01-linux/03-process.md).
+### 1.1 Cơ chế và chính sách
 
-Hai metric:
+Số thread sẵn sàng chạy thường nhiều hơn số CPU, nên OS cần hai thứ.
 
-- **Turnaround time** = thời điểm job hoàn thành trừ thời điểm job đến hệ thống: `T_turnaround = T_completion − T_arrival`[^ostep-turnaround].
-- **Response time** = thời gian từ lúc job đến tới lần đầu được lên lịch chạy: `T_response = T_firstrun − T_arrival`[^ostep-response].
+Thứ nhất là **cơ chế** lấy CPU lại từ thread đang chạy. Timer device được lập trình để ngắt sau mỗi vài mili giây; mỗi lần ngắt, process đang chạy bị dừng và một interrupt handler của OS chạy[^ostep-timer]. Sau đó context switch lưu một số giá trị register của process đang chạy (ví dụ lên kernel stack của nó) và khôi phục của process sắp chạy[^ostep-ctx]. Nhờ vậy `export` không thể giữ CPU mãi.
 
-(Nhận xét của người soạn: turnaround hợp với tải batch, response hợp với tải tương tác.) Còn có *fairness*, và OSTEP nhấn mạnh performance với fairness thường đối nghịch nhau[^ostep-fairness]. (Nhận xét của người soạn: với backend, turnaround ≈ cả request xong mất bao lâu, response ≈ bao lâu request mới bắt đầu được xử lý.)
+Thứ hai là **chính sách** (policy): chọn ai chạy tiếp và chạy bao lâu. Đây là phần chương này bàn. Cơ chế đã nằm ở [chương system call](../01-linux/02-system-call.md) và [chương process](../01-linux/03-process.md).
 
-**Các chính sách kinh điển, với số liệu tính lại.**
+### 1.2 Hai thước đo
 
-Mọi con số dưới đây được tính lại bằng một chương trình mô phỏng nhỏ tự viết (bước 1 giây, hòa thì theo thứ tự tên; riêng RR, job mới đến đúng lúc hết slice của job khác được xếp vào hàng *trước* job bị ngắt — đổi quy ước thì hàng RR của A(0,100) B,C(10,10) thành 59,67 và 1); các giá trị 20, 110, 50, 103,33, 3,33, 14 trùng với số OSTEP in trong chương 7.
+Muốn nói một chính sách "tốt" thì phải có thước đo. Ta dùng hai cái. **Turnaround time** là thời điểm job hoàn thành trừ thời điểm job đến hệ thống: `T_turnaround = T_completion − T_arrival`[^ostep-turnaround]. **Response time** là thời gian từ lúc job đến tới lần đầu nó được lên lịch chạy: `T_response = T_firstrun − T_arrival`[^ostep-response].
 
-**FIFO.**
+Với `orders`, nếu coi mỗi request là một job thì turnaround xấp xỉ "cả request xong mất bao lâu", còn response xấp xỉ "bao lâu thì request bắt đầu được xử lý" (nhận xét của người soạn). Turnaround hợp với tải batch như `export`, response hợp với tải tương tác như request của client (cũng nhận xét của người soạn).
 
-FIFO (First In, First Out, hay FCFS): job đến trước chạy trước, chạy đến hết. Ba job A, B, C đến lúc 0, mỗi job 10 giây: A xong lúc 10, B lúc 20, C lúc 30[^ostep-fifo-ex], turnaround trung bình `(10+20+30)/3 = 20`; response 0, 10, 20 (trung bình 10).
+Hai thước đo này hay kéo ngược chiều nhau, và còn thêm *fairness* (công bằng) nữa. Performance và fairness thường đối nghịch[^ostep-fairness]: ta sẽ thấy điều đó ngay ở các chính sách dưới đây.
 
-Nới giả định "cùng độ dài": A chạy 100 giây, B và C 10 giây. Turnaround là 100, 110, 120, trung bình 110 giây — OSTEP gọi là "a painful 110 seconds"[^ostep-fifo-110]. Hiện tượng job ngắn phải xếp sau job dài được đặt tên **convoy effect**[^ostep-convoy].
+### 1.3 Các chính sách kinh điển, với số liệu tính lại
 
-**SJF.**
+Mọi con số dưới đây được tính lại bằng một chương trình mô phỏng nhỏ tự viết (bước 1 giây, hòa thì theo thứ tự tên; quy ước thêm cho RR nằm ở phần Đi sâu cuối mục). Các giá trị 20, 110, 50, 103,33, 3,33 và 14 trùng với số OSTEP in trong chương 7. Đơn vị "giây" là đơn vị của sách, chỉ để số tròn: request thật của `orders` ngắn hơn nhiều, điều quan trọng là tỉ lệ giữa các job (nhận xét của người soạn).
 
-Shortest Job First chạy job ngắn nhất trước, rồi job ngắn kế tiếp[^ostep-sjf]. Với ví dụ trên thứ tự thành B, C, A: turnaround 10, 20, 120, trung bình `(10+20+120)/3 = 50` — SJF hạ trung bình từ 110 xuống 50[^ostep-sjf-50]. Response là B=0, C=10, A=20, trung bình 10.
+**FIFO.** First In, First Out (còn gọi FCFS): job đến trước chạy trước, chạy đến hết. Giả sử ba request A, B, C đến lúc 0, mỗi cái cần 10 giây CPU. A xong lúc 10, B lúc 20, C lúc 30[^ostep-fifo-ex]. Turnaround trung bình `(10+20+30)/3 = 20`; response là 0, 10, 20 (trung bình 10).
 
-Nới giả định "đến cùng lúc": A đến lúc 0 (100 giây), B và C đến lúc 10 (mỗi job 10 giây). SJF thuần là non-preemptive[^ostep-sjf-nonpreempt] nên A đã chạy thì phải chạy hết, B và C vẫn bị kẹt như convoy[^ostep-sjf-late]. A xong lúc 100, B lúc 110, C lúc 120; turnaround (trừ thời điểm đến) là A=100, B=`110−10=100`, C=`120−10=110`, trung bình `103,33`.
+Chính sách này chỉ ổn khi mọi job dài bằng nhau. Giờ cho `export` vào: A là `export` cần 100 giây, B và C là hai request 10 giây, cả ba đến lúc 0. Turnaround là 100, 110, 120, trung bình 110 giây, và sách gọi đó là "a painful 110 seconds"[^ostep-fifo-110]. Hai request ngắn phải xếp sau job dài; hiện tượng này có tên **convoy effect**[^ostep-convoy].
 
-**STCF.**
+**SJF.** Cách chữa tự nhiên là cho job ngắn chạy trước. Shortest Job First chạy job ngắn nhất, rồi job ngắn kế tiếp, cứ thế[^ostep-sjf]. Với ví dụ trên thứ tự thành B, C, A. Turnaround là 10, 20, 120, trung bình `(10+20+120)/3 = 50`: SJF hạ trung bình từ 110 xuống 50[^ostep-sjf-50]. Response là B=0, C=10, A=20, trung bình 10.
 
-Shortest Time-to-Completion First (Preemptive SJF) thêm preemption: mỗi khi có job mới, scheduler xét các job còn lại (kể cả job mới) và chạy job còn ít thời gian nhất[^ostep-stcf]. Trong ví dụ: A chạy 0–10, B và C đến lúc 10 và preempt A, chạy 10–30, rồi A chạy nốt 30–120. Turnaround: A=120, B=10, C=20, trung bình `50`. Với các giả định của sách, STCF tối ưu về turnaround một cách có chứng minh[^ostep-stcf-opt]. Response: A=0, B=0, C=10, trung bình `3,33`, khớp sách[^ostep-resp-ex].
+Nhưng SJF giả định mọi job đến cùng lúc, mà thực tế thì không. Cho A (`export`, 100 giây) đến lúc 0, còn B và C (hai request, mỗi cái 10 giây) đến lúc 10, tức là khi `export` đã chạy được một lúc. SJF thuần là non-preemptive[^ostep-sjf-nonpreempt]. Vì vậy A đã chạy thì phải chạy hết, và B với C bị kẹt sau A đúng kiểu convoy[^ostep-sjf-late]. A xong lúc 100, B lúc 110, C lúc 120. Trừ thời điểm đến, turnaround là A=100, B=`110−10=100`, C=`120−10=110`, trung bình `103,33`.
 
-**Round Robin.**
+**STCF.** Muốn request chen được vào thì scheduler phải có quyền dừng job đang chạy. Shortest Time-to-Completion First (còn gọi Preemptive SJF) thêm preemption: mỗi khi có job mới, scheduler xét các job còn lại, kể cả job mới, và chạy job còn ít thời gian nhất[^ostep-stcf]. Trong ví dụ, A chạy 0–10; B và C đến lúc 10, preempt A và chạy 10–30; rồi A chạy nốt 30–120. Turnaround là A=120, B=10, C=20, trung bình `50`. Với các giả định của sách, STCF tối ưu turnaround và điều này đã được chứng minh[^ostep-stcf-opt]. Response là A=0, B=0, C=10, trung bình `3,33`, khớp với sách[^ostep-resp-ex].
 
-STCF/SJF tốt cho turnaround nhưng với ba job đến cùng lúc, job thứ ba phải đợi hai job trước chạy trọn rồi mới được chạy lần đầu. Round Robin (RR) chạy mỗi job một **time slice** (scheduling quantum) rồi chuyển sang job kế trong run queue[^ostep-rr]; độ dài slice phải là bội số chu kỳ timer interrupt[^ostep-rr-slice].
+**Round Robin.** STCF và SJF tốt cho turnaround, nhưng với ba job đến cùng lúc, job thứ ba phải đợi hai job trước chạy trọn rồi mới được chạy lần đầu. Round Robin (RR) sửa việc đó: chạy mỗi job một **time slice** (còn gọi scheduling quantum) rồi chuyển sang job kế trong run queue[^ostep-rr]. Độ dài slice phải là bội số của chu kỳ timer interrupt[^ostep-rr-slice].
 
-Ba job A, B, C đến cùng lúc, mỗi job 5 giây, slice 1 giây: lịch `ABCABCABCABCABC`. Response 0, 1, 2 (trung bình 1) so với 0, 5, 10 (trung bình 5) của SJF. Nhưng turnaround của RR là 13, 14, 15, trung bình 14 — OSTEP ghi đúng số này và gọi là "pretty awful"[^ostep-rr-ex], so với 10 của SJF/FIFO. Vậy RR với slice hợp lý rất tốt nếu response là metric duy nhất[^ostep-rr-resp], nhưng là một trong những chính sách tệ nhất cho turnaround[^ostep-rr-worst].
+Lấy ba job A, B, C đến cùng lúc, mỗi job 5 giây, slice 1 giây. Lịch chạy là `ABCABCABCABCABC`. Response là 0, 1, 2 (trung bình 1), so với 0, 5, 10 (trung bình 5) của SJF. Nhưng RR kéo dài mọi job: chúng xong lúc 13, 14, 15, trung bình 14, so với 10 của SJF/FIFO. Sách ghi đúng con số này và gọi là "pretty awful"[^ostep-rr-ex]. Tóm lại, RR với slice hợp lý rất tốt nếu response là thước đo duy nhất[^ostep-rr-resp]. Nhưng nó là một trong những chính sách tệ nhất cho turnaround[^ostep-rr-worst].
 
 | Workload (arrival, burst) | Chính sách | Turnaround TB | Response TB |
 |---|---|---|---|
@@ -74,39 +73,37 @@ Ba job A, B, C đến cùng lúc, mỗi job 5 giây, slice 1 giây: lịch `ABCA
 | A,B,C (0,5) | SJF | 10 | 5 |
 | cùng workload | RR slice 1 | 14 | 1 |
 
-Đây là **trade-off nội tại**: nếu chịu bất công thì chạy trọn được job ngắn nhưng response kém; nếu coi trọng fairness thì response tốt nhưng turnaround kém[^ostep-fair-tradeoff].
+Bảng cho thấy một **trade-off nội tại**. Nếu chịu bất công thì chạy trọn được job ngắn, nhưng response kém; nếu coi trọng fairness thì response tốt, nhưng turnaround kém[^ostep-fair-tradeoff]. Với `orders`, STCF là thứ ta muốn (request xong nhanh, `export` chịu chờ), nhưng nó cần biết trước job dài bao lâu. Scheduler thật không biết, và đó là chuyện của mục 2.
 
-<details><summary>Đi sâu: giả định workload, time slice, chi phí chuyển ngữ cảnh (có số đo) và giả định I/O</summary>
+<details><summary>Đi sâu: quy ước mô phỏng RR, giả định workload, time slice, chi phí chuyển ngữ cảnh (có số đo) và giả định I/O</summary>
 
-**Time slice và chi phí chuyển ngữ cảnh.**
+**Quy ước mô phỏng RR.** Khi job mới đến đúng lúc một job khác hết slice, tôi xếp job mới vào hàng *trước* job bị ngắt. Đổi quy ước thì hàng RR của A(0,100) B,C(10,10) thành 59,67 và 1.
 
-Slice càng ngắn thì response càng tốt, nhưng chi phí context switch bắt đầu chi phối; phải chọn slice đủ dài để amortize chi phí chuyển mà không dài đến mức hệ thống kém đáp ứng[^ostep-rr-tradeoff]. OSTEP minh họa bằng số giả định: slice 10 ms, chi phí switch 1 ms thì khoảng 10% thời gian bị lãng phí[^ostep-amort] (không phải số đo). Chi phí không chỉ là register: chương trình đã tích lũy trạng thái trong CPU cache, TLB, branch predictor…[^ostep-ctx-cache]; xem [cache và NUMA](../02-cpu/06-cache-va-numa.md), [TLB](../03-memory/03-page-table-va-tlb.md).
+**Các giả định về workload.** OSTEP bắt đầu bằng cách đơn giản hóa workload (tập job). Sách thừa nhận những giả định này "mostly unrealistic" rồi nới dần[^ostep-assump-unreal]. Đó là: mọi job chạy cùng một khoảng thời gian; mọi job đến cùng lúc; đã bắt đầu thì chạy đến hết; job chỉ dùng CPU, không I/O[^ostep-assump-io]; và thời gian chạy của mỗi job được biết trước[^ostep-assume]. Mỗi chính sách ở trên ra đời khi một giả định bị nới.
+
+**Nới giả định I/O và "oracle".** Job thật gọi I/O. OSTEP coi mỗi CPU burst là một job độc lập, để CPU chạy process khác trong lúc process này chờ I/O (overlap)[^ostep-io]. Giả định cuối, biết trước độ dài job, là giả định tệ nhất: OS đa dụng thường biết rất ít về độ dài job[^ostep-oracle].
+
+**Time slice và chi phí chuyển ngữ cảnh.** Slice càng ngắn thì response càng tốt, nhưng chi phí context switch bắt đầu chi phối. Phải chọn slice đủ dài để amortize chi phí chuyển mà không dài đến mức hệ thống kém đáp ứng[^ostep-rr-tradeoff]. OSTEP minh họa bằng số giả định: slice 10 ms, chi phí switch 1 ms thì khoảng 10% thời gian bị lãng phí[^ostep-amort] (không phải số đo). Chi phí không chỉ là register: chương trình đã tích lũy trạng thái trong CPU cache, TLB, branch predictor…[^ostep-ctx-cache]; xem [cache và NUMA](../02-cpu/06-cache-va-numa.md), [TLB](../03-memory/03-page-table-va-tlb.md).
 
 **Một phép đo (quan sát, không phải bảo đảm).** Tôi chạy chương trình C ping-pong qua hai pipe giữa hai process (mỗi vòng: 2 lần ngủ/đánh thức và 4 syscall), 200 000 vòng, trong container Linux 6.8.0 aarch64 chạy trong VM (Colima), 3 lần mỗi cấu hình. Hai process ghim cùng CPU 0 bằng `sched_setaffinity`: 1820, 1773, 1785 ns mỗi vòng. Ghim vào CPU 0 và CPU 1: 24674, 24549, 24908 ns. Con số gộp cả syscall và pipe nên **không** là chi phí một context switch thuần: mỗi vòng có hai lần chuyển, nên chi phí một lần chuyển kèm syscall và pipe chỉ là cận trên, không quá khoảng nửa số đo. Trong môi trường này, cùng CPU rẻ hơn khoảng 14 lần so với hai CPU. Nguyên nhân (đánh thức CPU đang idle trong VM) là suy luận của người soạn, chưa đo; đừng ngoại suy sang máy thật.
 
-**Nới giả định I/O và "oracle".**
-
-Job thật gọi I/O. OSTEP coi mỗi CPU burst là một job độc lập, để CPU chạy process khác trong lúc process này chờ I/O (overlap)[^ostep-io]. Giả định cuối — biết trước độ dài job — là giả định tệ nhất: OS đa dụng thường biết rất ít về độ dài job[^ostep-oracle].
-
-**Các giả định về workload.** OSTEP bắt đầu bằng cách đơn giản hóa workload (tập job) — những giả định mà sách thừa nhận là "mostly unrealistic" rồi nới dần[^ostep-assump-unreal]. Gồm: mọi job chạy cùng một khoảng thời gian; mọi job đến cùng lúc; đã bắt đầu thì chạy đến hết; job chỉ dùng CPU, không I/O[^ostep-assump-io]; và thời gian chạy của mỗi job được biết trước[^ostep-assume]. Mỗi chính sách ở trên ra đời khi một giả định bị nới.
-
 </details>
 
-**Quay lại Q1:** cơ chế lấy lại CPU tách khỏi chính sách chọn job; SJF/STCF tối ưu turnaround (dưới giả định của sách), RR tốt cho response, và theo OSTEP chính sách công bằng như RR đánh đổi turnaround để lấy response.
+**Quay lại Q1:** cơ chế lấy lại CPU tách khỏi chính sách chọn job; SJF/STCF tối ưu turnaround (dưới giả định của sách) nên đẩy request ngắn lên trước `export`, RR tốt cho response, và theo OSTEP chính sách công bằng như RR đánh đổi turnaround để lấy response.
 
 ## 2. MLFQ — học từ lịch sử (Q2)
 
-> **Trả lời ngắn.** MLFQ không biết trước độ dài job mà quan sát hành vi rồi xếp mức ưu tiên[^ostep-mlfq-learn]: job nhả CPU sớm (ví dụ do I/O) giữ mức, job dùng hết allotment bị hạ một hàng[^ostep-rule4b]. Hai lỗi của bản đầu là starvation và gaming; vá bằng priority boost[^ostep-mlfq-boost] và accounting theo allotment[^ostep-mlfq-rule4].
+> **Trả lời ngắn.** MLFQ không biết trước job dài hay ngắn mà quan sát hành vi rồi xếp mức ưu tiên[^ostep-mlfq-learn]. Job nhả CPU sớm (ví dụ do I/O) thì giữ mức, job dùng hết allotment thì bị hạ một hàng[^ostep-rule4b]. Bản đầu có hai lỗi là starvation và gaming. Priority boost chữa lỗi thứ nhất[^ostep-mlfq-boost]. Cách tính allotment chặt hơn chữa lỗi thứ hai[^ostep-mlfq-rule4].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): hàng đợi VIP ở sân bay — ai hay xong việc nhanh thì được ở hàng trên, ai chiếm quầy lâu thì bị chuyển xuống hàng dưới.
+*Với service `orders`.* STCF cần biết trước thread nào ngắn, nhưng kernel không có thông tin đó: nó không biết thread nào là handler, thread nào là `export`. Điều nó nhìn thấy được là hành vi. Một handler chạy một lát rồi chặn ở socket hay DB; `export` thì chạy liên tục tới hết lượt. MLFQ (Multi-Level Feedback Queue) khai thác đúng khác biệt này: không đòi biết trước bản chất job mà quan sát cách nó chạy rồi xếp ưu tiên tương ứng[^ostep-mlfq-learn]. Mục tiêu là vừa giảm response cho request, vừa giảm turnaround như SJF. Sách lưu ý chi tiết của nhiều MLFQ thật khác nhau[^ostep-mlfq-differ], nên các rule dưới đây là mô hình giảng dạy.
 
-Câu hỏi: làm sao giảm response cho job tương tác và giảm turnaround mà không biết trước độ dài job? MLFQ (Multi-Level Feedback Queue) không đòi tri thức trước về bản chất job mà quan sát hành vi rồi xếp mức ưu tiên tương ứng[^ostep-mlfq-learn]. Sách lưu ý chi tiết của nhiều MLFQ được cài đặt thực tế khác nhau[^ostep-mlfq-differ], nên các rule dưới đây là mô hình giảng dạy.
+### 2.1 Nhiều hàng đợi, nhiều mức ưu tiên
 
-**Rule 1–2**: nhiều hàng đợi, mỗi hàng một mức ưu tiên; job ưu tiên cao hơn chạy, cùng mức thì round-robin[^ostep-mlfq-rules].
+**Rule 1–2**: có nhiều hàng đợi, mỗi hàng một mức ưu tiên; job ưu tiên cao hơn thì chạy, cùng mức thì round-robin[^ostep-mlfq-rules].
 
-Sơ đồ minh họa của người soạn (hàng đợi và tên job là ví dụ; OSTEP nói hàng ưu tiên cao thường được cho slice ngắn, xem đoạn tham số bên dưới):
+Sơ đồ minh họa của người soạn (hàng đợi và tên job là ví dụ; OSTEP nói hàng ưu tiên cao thường được cho slice ngắn, xem phần Đi sâu cuối mục):
 
 ```mermaid
 flowchart TB
@@ -122,120 +119,139 @@ flowchart TB
   H2 --> H1 --> H0
 ```
 
-**Lần thử 1 — đổi ưu tiên.** *Allotment* là lượng thời gian job được ở một mức trước khi bị hạ[^ostep-allotment]. Rule 3: job mới vào ở hàng cao nhất[^ostep-mlfq-rule3]. Rule 4a/4b: dùng hết allotment thì hạ một hàng; nhả CPU trước khi hết (ví dụ do I/O) thì giữ mức[^ostep-rule4b]. Job tương tác ở lại hàng cao, job tính toán dài trôi xuống đáy — xấp xỉ SJF mà không biết trước độ dài.
+### 2.2 Lần thử 1: đổi ưu tiên theo hành vi
 
-Ví dụ tính lại (mô phỏng của tôi: 3 hàng, slice 10 ms, allotment = slice, không I/O): A cần 120 ms đến lúc 0; B cần 20 ms đến lúc 100. A chạy 0–10 ở Q2, 10–20 ở Q1, rồi ở Q0 đến lúc 100. B đến lúc 100 vào Q2, preempt A, chạy 10 ms ở Q2 và 10 ms ở Q1, xong lúc 120; A chạy nốt đến 140. Turnaround của B là 20 ms, response 0 — đối xử như SJF dù scheduler không biết trước B ngắn.
+Cần một khái niệm: *allotment* là lượng thời gian job được ở một mức trước khi scheduler hạ mức của nó[^ostep-allotment]. Rule 3: job mới vào ở hàng cao nhất[^ostep-mlfq-rule3]. Rule 4a/4b: job dùng hết allotment thì bị hạ một hàng; job nhả CPU trước khi hết (ví dụ do I/O) thì giữ mức[^ostep-rule4b]. Kết quả: handler của `orders` ở lại hàng cao, `export` trôi xuống đáy. Đây là xấp xỉ SJF mà không cần biết trước độ dài.
 
-**Hai lỗi của lần thử 1**: *starvation* — quá nhiều job tương tác ăn hết CPU, job chạy lâu không bao giờ được chạy[^ostep-mlfq-starve]; và *gaming* — người dùng viết lại chương trình để qua mặt scheduler[^ostep-gaming] (phát I/O ngay trước khi hết allotment để ở lại mức cao).
+Ví dụ tính lại (mô phỏng của tôi: 3 hàng, slice 10 ms, allotment = slice, không I/O). A là `export` cần 120 ms, đến lúc 0. B là một request nặng cần 20 ms, đến lúc 100. A chạy 0–10 ở Q2, 10–20 ở Q1, rồi ở Q0 đến lúc 100. B đến lúc 100, vào Q2, preempt A, chạy 10 ms ở Q2 và 10 ms ở Q1, xong lúc 120; A chạy nốt đến 140. Turnaround của B là 20 ms, response 0: scheduler đối xử với B như SJF dù không biết trước B ngắn.
 
-**Lần thử 2 — priority boost.** Rule 5: sau mỗi khoảng S, chuyển mọi job lên hàng cao nhất[^ostep-mlfq-boost]. Nhưng S là "voo-doo constant" (từ của Ousterhout): quá cao thì job dài có thể đói, quá thấp thì job tương tác không được chia đủ[^ostep-voodoo].
+### 2.3 Hai lỗi của lần thử 1
 
-**Lần thử 3 — accounting tốt hơn.** Rule 4 hợp nhất 4a/4b: dùng hết allotment ở một mức (bất kể đã nhả CPU bao nhiêu lần) thì bị hạ một hàng[^ostep-mlfq-rule4].
+Lỗi thứ nhất là *starvation*: nếu có "quá nhiều" job tương tác thì chúng ăn hết CPU, và job chạy lâu không bao giờ được chạy[^ostep-mlfq-starve]. Trên `orders`, đó là lúc tải request cao tới mức `export` không bao giờ nhúc nhích. Lỗi thứ hai là *gaming*: một người dùng khôn ngoan có thể viết lại chương trình để qua mặt scheduler[^ostep-gaming]. Cách làm là phát một lệnh I/O ngay trước khi hết allotment để ở lại mức cao (nhận xét của người soạn: `export` chỉ cần ghi vài byte ra file đúng lúc đó).
+
+### 2.4 Lần thử 2 và 3: vá hai lỗi
+
+**Priority boost** chữa starvation. Rule 5: sau mỗi khoảng S, chuyển mọi job lên hàng cao nhất[^ostep-mlfq-boost]. Nhưng chọn S thế nào cũng khó: Ousterhout gọi S là "voo-doo constant", vì quá cao thì job dài có thể đói, quá thấp thì job tương tác không được chia đủ CPU[^ostep-voodoo].
+
+**Accounting tốt hơn** chữa gaming. Rule 4 gộp 4a và 4b làm một: job dùng hết allotment ở một mức, bất kể đã nhả CPU bao nhiêu lần, thì bị hạ một hàng[^ostep-mlfq-rule4]. Chia nhỏ I/O ra không còn giúp `export` ở lại hàng cao.
 
 <details><summary>Đi sâu: tham số của MLFQ và các hệ thống thật</summary>
 
-Tham số còn lại (số hàng, slice mỗi hàng, allotment, chu kỳ boost) không có đáp án dễ; đa số biến thể cho hàng cao slice ngắn[^ostep-mlfq-slices]. Ví dụ hiện thực: lớp Time-Sharing của Solaris dùng bảng cấu hình (mặc định 60 hàng, slice từ 20 ms đến vài trăm ms)[^ostep-solaris]; FreeBSD 4.3 tính ưu tiên bằng công thức theo lượng CPU đã dùng[^ostep-freebsd].
+Các tham số còn lại (số hàng, slice mỗi hàng, allotment, chu kỳ boost) không có đáp án dễ; đa số biến thể cho hàng cao slice ngắn[^ostep-mlfq-slices]. Hai ví dụ hiện thực: lớp Time-Sharing của Solaris dùng bảng cấu hình (mặc định 60 hàng, slice từ 20 ms đến vài trăm ms)[^ostep-solaris]. FreeBSD 4.3 thì tính ưu tiên bằng công thức theo lượng CPU đã dùng[^ostep-freebsd].
 
 </details>
 
-**Quay lại Q2:** MLFQ học độ dài job từ hành vi, và hai rule (boost, accounting) chặn starvation và gaming.
-
+**Quay lại Q2:** MLFQ học độ dài job từ hành vi, nên handler của `orders` ở trên còn `export` ở dưới; hai rule (boost, accounting) chặn starvation và gaming.
 
 ## 3. Proportional share: lottery và stride (Q3)
 
-> **Trả lời ngắn.** Lottery cho mỗi job một số ticket và bốc thăm mỗi slice, nên đạt tỉ lệ ticket theo xác suất chứ không tất định[^ostep-lottery-prob]. Stride là bản tất định: mỗi lần chạy xong cộng stride (tỉ lệ nghịch với ticket) vào pass và luôn chạy job có pass nhỏ nhất[^ostep-stride-rule].
+> **Trả lời ngắn.** Lottery cho mỗi job một số ticket rồi bốc thăm mỗi slice, nên đạt tỉ lệ ticket theo xác suất chứ không tất định[^ostep-lottery-prob]. Stride là bản tất định: mỗi lần chạy xong, cộng stride (tỉ lệ nghịch với ticket) vào pass, và luôn chạy job có pass nhỏ nhất[^ostep-stride-rule].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): xổ số nội bộ — ai cầm nhiều vé thì trúng nhiều lượt dùng CPU hơn; stride thì là cách luân phiên có tính toán để không phụ thuộc may rủi.
+*Với service `orders`.* Giả sử người vận hành không muốn tối ưu turnaround hay response, mà muốn một cam kết đơn giản hơn: các handler luôn có khoảng ba phần tư CPU, `export` có một phần tư, dù có bao nhiêu thread. Đây là họ chính sách khác với các mục trước: thay vì tối ưu một thước đo, scheduler cố bảo đảm mỗi job nhận một tỉ lệ CPU nhất định[^ostep-ps-intro]. Ý tưởng "ticket tỉ lệ với phần CPU" gần với "weight" trong scheduler Linux (suy luận của người soạn; nguồn không nối hai khái niệm này).
 
-Một họ khác không tối ưu turnaround hay response mà cố đảm bảo mỗi job nhận một tỉ lệ CPU nhất định[^ostep-ps-intro]. Ý tưởng "ticket tỉ lệ với phần CPU" gần với "weight" trong scheduler Linux (suy luận của người soạn; nguồn không nối hai khái niệm này).
+### 3.1 Lottery scheduling
 
-**Lottery scheduling.** Mỗi job giữ một số *ticket*; tỉ lệ ticket là tỉ lệ CPU mong muốn. Ví dụ OSTEP: A 75 ticket, B 25 ticket; mỗi slice bốc ngẫu nhiên ticket trúng từ 0 đến 99. Lottery đạt tỉ lệ theo xác suất chứ không tất định[^ostep-lottery-prob]; trong một ví dụ, B chỉ chạy 4 trên 20 slice (20%) thay vì 25%[^ostep-lottery-ex], và khi job ngắn thì độ công bằng trung bình có thể khá thấp[^ostep-lottery-fair]. Tôi mô phỏng lại (5 seed mỗi mức): tỉ lệ slice của B là 0,10–0,35 với 20 slice nhưng 0,242–0,251 với 20 000 — hội tụ về 0,25. Còn "gán ticket thế nào" vẫn là câu hỏi mở[^ostep-ticket-assign].
+Mỗi job giữ một số *ticket*, và tỉ lệ ticket là tỉ lệ CPU mong muốn. Ví dụ của OSTEP: A có 75 ticket, B có 25; mỗi slice, scheduler bốc ngẫu nhiên một số từ 0 đến 99 và job giữ ticket trúng được chạy. Với `orders`, A là nhóm handler, B là `export`.
 
-**Stride scheduling** — bản tất định: mỗi job có *stride* tỉ lệ nghịch với ticket; mỗi lần chạy xong cộng stride vào *pass*; luôn chạy job có pass nhỏ nhất[^ostep-stride-rule]. Ví dụ của sách: A, B, C có 100, 50, 250 ticket; chia 10 000 cho số ticket được stride 100, 200, 40. Mô phỏng của tôi (hòa thì chọn theo tên) cho dãy `ABCCCACC ABCCCACC …`; trong 800 lượt A chạy 200, B 100, C 500, đúng tỉ lệ 2 : 1 : 5 = 100 : 50 : 250 và không có độ lệch xác suất của lottery.
+Vì dựa vào xác suất, lottery đạt tỉ lệ mong muốn theo xác suất chứ không tất định[^ostep-lottery-prob]. Trong một ví dụ của sách, B chỉ chạy 4 trên 20 slice (20%) thay vì 25%[^ostep-lottery-ex]. Khi job ngắn thì độ công bằng trung bình có thể khá thấp[^ostep-lottery-fair]. Tôi mô phỏng lại (5 seed mỗi mức): tỉ lệ slice của B là 0,10–0,35 với 20 slice, nhưng 0,242–0,251 với 20 000, tức hội tụ về 0,25. Còn "gán ticket thế nào" vẫn là câu hỏi mở[^ostep-ticket-assign].
+
+### 3.2 Stride scheduling
+
+Muốn bỏ may rủi thì dùng stride, bản tất định. Mỗi job có một *stride* tỉ lệ nghịch với số ticket; mỗi lần job chạy xong, scheduler cộng stride vào *pass* của nó; lần sau luôn chạy job có pass nhỏ nhất[^ostep-stride-rule].
+
+Ví dụ của sách: A, B, C có 100, 50, 250 ticket; chia 10 000 cho số ticket được stride 100, 200, 40. Mô phỏng của tôi (hòa thì chọn theo tên) cho dãy `ABCCCACC ABCCCACC …`. Trong 800 lượt, A chạy 200, B chạy 100, C chạy 500: đúng tỉ lệ 2 : 1 : 5 = 100 : 50 : 250, và không có độ lệch xác suất như lottery.
 
 <details><summary>Đi sâu: nối với weight và vruntime của Linux</summary>
 
-**Nối với Linux (suy luận của người soạn):** weight của task trong CFS/EEVDF (mục 5 và 6) đóng vai "ticket", `vruntime` đóng vai "pass"; hai thuật toán không giống hệt nhau — kernel docs chỉ nói `vruntime` là runtime chuẩn hóa.
+**Nối với Linux (suy luận của người soạn):** weight của task trong CFS/EEVDF (mục 5 và 6) đóng vai "ticket", `vruntime` đóng vai "pass". Hai thuật toán không giống hệt nhau: kernel docs chỉ nói `vruntime` là runtime chuẩn hóa.
 
 </details>
 
-**Quay lại Q3:** lottery chia theo xác suất, stride chia tất định, cả hai theo tỉ lệ ticket.
+**Quay lại Q3:** lottery chia CPU giữa handler và `export` theo xác suất, stride chia tất định, cả hai theo tỉ lệ ticket.
 
 ## 4. Multiprocessor scheduling (Q4)
 
-> **Trả lời ngắn.** Mỗi CPU có cache riêng, nên chạy tiếp ở CPU cũ nhanh hơn nhờ cache affinity[^ostep-affinity]. Một hàng đợi chung phải tranh lock và làm job nhảy CPU[^ostep-sqms-lock][^ostep-sqms-bounce]; hàng đợi riêng mỗi CPU scale tốt hơn[^ostep-mqms-adv] nhưng gây load imbalance, chữa bằng migration và work stealing[^ostep-imbalance][^ostep-migration][^ostep-steal].
+> **Trả lời ngắn.** Mỗi CPU có cache riêng, nên chạy tiếp ở CPU cũ thì nhanh hơn nhờ cache affinity[^ostep-affinity]. Một hàng đợi chung cho mọi CPU phải tranh lock[^ostep-sqms-lock]. Nó cũng làm job nhảy CPU[^ostep-sqms-bounce]. Hàng đợi riêng mỗi CPU scale tốt hơn[^ostep-mqms-adv]. Nhưng nó gây load imbalance[^ostep-imbalance], mà cách chữa là migration[^ostep-migration] và work stealing[^ostep-steal].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): một hàng chung trước mọi quầy thu ngân thì mọi quầy tranh nhau một cái cửa; mỗi quầy một hàng thì có quầy rảnh trong khi quầy khác đông.
+*Với service `orders`.* Từ đầu chương ta chỉ nói về một CPU. Pod thật có nhiều core, và các handler thread của `orders` chạy song song trên đó. Câu hỏi mới: scheduler giữ một hàng đợi cho cả máy, hay mỗi core một hàng? Và khi một handler dậy sau lúc chờ socket, nó nên chạy ở core nào?
 
-**Vấn đề mới: cache và đồng bộ.**
+### 4.1 Vấn đề mới: cache và đồng bộ
 
-Mỗi CPU có cache riêng cùng chia sẻ bộ nhớ chính. Một process sửa dữ liệu trong cache CPU 1 rồi bị chuyển sang CPU 2 sẽ đọc giá trị cũ nếu không có cơ chế bảo đảm — bài toán **cache coherence**[^ostep-coherence]; phần cứng giải quyết, xem [cache và NUMA](../02-cpu/06-cache-va-numa.md). Cấu trúc dữ liệu chung vẫn cần lock ([chương lock](03-lock.md)).
+Mỗi CPU có cache riêng, cùng chia sẻ bộ nhớ chính. Một process sửa dữ liệu trong cache của CPU 1 rồi bị chuyển sang CPU 2 sẽ đọc giá trị cũ nếu không có cơ chế bảo đảm. Đó là bài toán **cache coherence**[^ostep-coherence], do phần cứng giải quyết; xem [cache và NUMA](../02-cpu/06-cache-va-numa.md). Cấu trúc dữ liệu chung thì vẫn cần lock ([chương lock](03-lock.md)).
 
-**Cache affinity**: process chạy trên một CPU tích lũy trạng thái trong cache (và TLB) của CPU đó; lần sau nên chạy tiếp ở CPU cũ vì nhanh hơn nếu một phần trạng thái còn trong cache[^ostep-affinity]. Chạy ở CPU khác vẫn đúng kết quả nhờ coherence, chỉ chậm hơn.
+**Cache affinity** là hệ quả thực tế cho scheduler. Một process chạy trên một CPU sẽ tích lũy trạng thái trong cache (và TLB) của CPU đó. Lần sau nên cho nó chạy tiếp ở CPU cũ, vì nó nhanh hơn nếu một phần trạng thái còn nằm trong cache[^ostep-affinity]. Chạy ở CPU khác vẫn cho kết quả đúng nhờ coherence, chỉ chậm hơn. Với `orders`, một handler vừa parse xong request, buffer còn nóng trong cache của core 1; dậy lại ở core 1 thì rẻ hơn ở core 3 (nhận xét của người soạn).
 
-**Single-queue (SQMS).**
+### 4.2 Single-queue (SQMS)
 
-Một hàng đợi chung, mỗi CPU lấy job tốt nhất: dễ cài từ scheduler đơn CPU, nhưng hai vấn đề. Không scale vì mọi CPU tranh một lock — lock có thể giảm hiệu năng mạnh khi số CPU tăng[^ostep-sqms-lock]. Và mất affinity vì job bị chuyển vòng quanh các CPU[^ostep-sqms-bounce]; với 5 job A–E trên 4 CPU, lịch trong sách cho thấy job nhảy CPU liên tục, còn cách sửa — A–D ở yên, chỉ E di chuyển giữa các CPU — thì cài phức tạp[^ostep-sqms-aff].
+Cách đơn giản nhất là một hàng đợi chung cho cả máy, mỗi CPU lấy job tốt nhất từ đó. Cách này dễ cài từ scheduler đơn CPU, nhưng có hai vấn đề.
 
-**Multi-queue (MQMS) và load balancing.**
+Thứ nhất là không scale: mọi CPU tranh một lock, và lock có thể làm hiệu năng giảm mạnh khi số CPU tăng[^ostep-sqms-lock]. Thứ hai là mất affinity, vì job bị chuyển vòng quanh các CPU[^ostep-sqms-bounce]. Với 5 job A–E trên 4 CPU, lịch trong sách cho thấy job nhảy CPU liên tục. Cách sửa là để A–D ở yên và chỉ cho E di chuyển giữa các CPU, nhưng cài đặt phức tạp[^ostep-sqms-aff].
 
-Mỗi CPU một hàng đợi; job vào đúng một hàng theo heuristic rồi được lập lịch độc lập. MQMS vốn scale tốt hơn SQMS[^ostep-mqms-adv] và job ở yên một CPU nên có affinity.
+### 4.3 Multi-queue (MQMS) và load balancing
 
-Vấn đề nền tảng của hướng này là **load imbalance**[^ostep-imbalance]. Theo ví dụ sách: nếu C xong, A một mình chiếm CPU 0 còn B, D chia CPU 1, nên A nhận gấp đôi CPU so với B hoặc D; nếu A và C cùng xong thì CPU 0 idle. Giải pháp là **migration**[^ostep-migration]; khi một lần chuyển không đủ thì phải chuyển liên tục. Kỹ thuật cơ bản là **work stealing**: hàng ít việc thỉnh thoảng nhìn sang hàng khác và lấy bớt job nếu hàng đó đầy hơn đáng kể[^ostep-steal]. Có căng thẳng: nhìn quá thường thì overhead cao và mất scale[^ostep-steal-tension]; quá hiếm thì mất cân bằng nặng.
+Hướng ngược lại là mỗi CPU một hàng đợi. Job vào đúng một hàng theo heuristic rồi được lập lịch độc lập. MQMS vốn scale tốt hơn SQMS[^ostep-mqms-adv], và job ở yên một CPU nên có affinity.
+
+Cái giá là **load imbalance**, vấn đề nền tảng của hướng này[^ostep-imbalance]. Theo ví dụ trong sách: nếu C xong, A một mình chiếm CPU 0 còn B và D chia nhau CPU 1, nên A nhận gấp đôi CPU so với B hoặc D. Nếu A và C cùng xong thì CPU 0 idle. Trên `orders`, đó là cảnh một core đứng không trong khi core bên cạnh có ba handler xếp hàng.
+
+Giải pháp là **migration**: chuyển job từ CPU này sang CPU khác thì mới cân tải thật sự[^ostep-migration]. Khi một lần chuyển không đủ thì phải chuyển liên tục. Kỹ thuật cơ bản là **work stealing**: hàng ít việc thỉnh thoảng nhìn sang hàng khác và lấy bớt job nếu hàng đó đầy hơn đáng kể[^ostep-steal]. Ở đây có một căng thẳng. Nhìn sang hàng khác quá thường thì overhead cao và mất khả năng scale[^ostep-steal-tension], còn nhìn quá hiếm thì mất cân bằng nặng.
 
 <details><summary>Đi sâu: tình trạng multiprocessor scheduler của Linux theo các nguồn</summary>
 
-OSTEP ghi nhận trong cộng đồng Linux chưa có giải pháp chung nào xuất hiện cho multiprocessor scheduler[^ostep-linux-multi] — nội dung theo phiên bản sách, không mô tả load balancer hiện nay của kernel. Kernel docs CFS chỉ có một câu trong danh sách thay đổi so với scheduler cũ: SMP load-balancing đã được làm lại và chỉnh cho gọn (reworked/sanitized)[^kdoc-cfs-smp]; trang đó không mô tả thuật toán cân bằng tải.
+OSTEP ghi nhận trong cộng đồng Linux chưa có giải pháp chung nào xuất hiện cho multiprocessor scheduler[^ostep-linux-multi]; đây là nội dung theo phiên bản sách, không mô tả load balancer hiện nay của kernel. Kernel docs CFS chỉ có một câu trong danh sách thay đổi so với scheduler cũ: SMP load-balancing đã được làm lại và chỉnh cho gọn (reworked/sanitized)[^kdoc-cfs-smp]. Trang đó không mô tả thuật toán cân bằng tải.
 
 </details>
 
-**Quay lại Q4:** hàng đợi riêng mỗi CPU giữ affinity và scale, đổi lại cần migration/work stealing để cân tải.
+**Quay lại Q4:** hàng đợi riêng mỗi CPU giữ affinity và scale, đổi lại cần migration/work stealing để cân tải giữa các core của `orders`.
 
 ## 5. Scheduler của Linux: CFS và EEVDF (Q5)
 
-> **Trả lời ngắn.** CFS luôn chạy task có `vruntime` — runtime chuẩn hóa theo số task đang chạy — nhỏ nhất[^kdoc-cfs-pick]. EEVDF, thay dần CFS từ kernel 6.6[^kdoc-eevdf-transition], chọn trong các task có lag ≥ 0 task có virtual deadline sớm nhất[^kdoc-eevdf-pick].
+> **Trả lời ngắn.** CFS luôn chạy task có `vruntime` nhỏ nhất, tức runtime chuẩn hóa theo số task đang chạy[^kdoc-cfs-pick]. EEVDF đang thay dần CFS, bắt đầu từ kernel 6.6[^kdoc-eevdf-transition]. Trong các task có lag ≥ 0, EEVDF chọn task có virtual deadline sớm nhất[^kdoc-eevdf-pick].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): CFS như chia bánh sao cho ai ăn ít nhất được phần kế tiếp; EEVDF thêm "hạn chót" nên người cần phần nhỏ, gấp được xếp trước.
+*Với service `orders`.* Các mục trước là mô hình trong sách. Mục này nói scheduler thật của Linux, thứ quyết định handler thread của `orders` có CPU hay phải chờ `export`. Ta sẽ xem nó đo "ai đã chạy ít nhất" bằng gì (CFS), rồi nó thêm gì để thread nhạy độ trễ như handler được chọn sớm (EEVDF).
 
+### 5.1 CFS và `vruntime`
 
-Theo kernel docs, CFS ("Completely Fair Scheduler") là scheduler "desktop" do Ingo Molnar cài đặt và merge ở Linux 2.6.23[^kdoc-cfs-intro]; `sched(7)` cũng ghi từ 2.6.23 scheduler mặc định là CFS[^man-sched-cfs]. Trang này ghi CFS đang nhường chỗ cho EEVDF (xem bên dưới)[^kdoc-cfs-room]. CFS mô hình hóa một "ideal, precise multi-tasking CPU" trên phần cứng thật[^kdoc-cfs-ideal] — CPU lý tưởng chạy mỗi task song song với tốc độ `1/nr_running`[^kdoc-cfs-ideal-def]. Phần cứng thật chỉ chạy một task một lúc, nên có *virtual runtime*: runtime thực chuẩn hóa theo số task đang chạy[^kdoc-cfs-vruntime].
+CFS ("Completely Fair Scheduler") là scheduler "desktop" do Ingo Molnar cài đặt và merge vào Linux 2.6.23[^kdoc-cfs-intro]. Từ bản đó nó là scheduler mặc định[^man-sched-cfs]. Trang kernel docs về CFS ghi rằng giờ nó đang nhường chỗ cho EEVDF[^kdoc-cfs-room], nên phần này là khung khái niệm, còn kernel mới chọn task bằng EEVDF (xem Đi sâu cuối mục).
 
-Mỗi task có `p->se.vruntime` (nanosecond). CFS luôn cố chạy task có `vruntime` nhỏ nhất, tức task đã chạy ít nhất[^kdoc-cfs-pick], giữ các task runnable trong một rbtree sắp theo khóa đó[^kdoc-cfs-rbtree]. Khi task chạy, thời gian vừa dùng được cộng vào `vruntime`[^kdoc-cfs-account]; khi task khác thành "leftmost" (kèm một khoảng "granularity" để không đổi task quá thường làm hỏng cache) thì task hiện tại bị preempt[^kdoc-cfs-preempt-gran].
+CFS bắt đầu từ một ý tưởng: mô hình hóa một "ideal, precise multi-tasking CPU" trên phần cứng thật[^kdoc-cfs-ideal]. CPU lý tưởng đó chạy mọi task song song với tốc độ bằng nhau, mỗi task `1/nr_running` tốc độ[^kdoc-cfs-ideal-def]. Chẳng hạn hai handler và `export` cùng sẵn sàng trên một CPU thì mỗi cái chạy với một phần ba tốc độ. Phần cứng thật chỉ chạy được một task một lúc, nên CFS cần cách ghi sổ ai đã được bao nhiêu. Cách đó là *virtual runtime*: runtime thực của task, chuẩn hóa theo số task đang chạy[^kdoc-cfs-vruntime].
 
-**EEVDF.**
+Mỗi task có `p->se.vruntime` (nanosecond). CFS luôn cố chạy task có `vruntime` nhỏ nhất, tức task đã chạy ít nhất cho tới giờ[^kdoc-cfs-pick]. Để tìm nhanh task đó, CFS giữ các task runnable trong một rbtree sắp theo khóa `vruntime`[^kdoc-cfs-rbtree]. Khi task đang chạy, thời gian nó vừa dùng được cộng vào `vruntime`[^kdoc-cfs-account]. Khi có task khác trở thành "leftmost" (nhỏ nhất) trong cây, task hiện tại bị preempt, nhưng chỉ khi chênh một khoảng "granularity" nhất định, để không đổi task quá thường làm hỏng cache[^kdoc-cfs-preempt-gran].
 
-Kernel docs hiện mô tả EEVDF ("Earliest Eligible Virtual Deadline First"), giới thiệu lần đầu trong một bài báo khoa học năm 1995[^kdoc-eevdf-1995]; kernel bắt đầu chuyển từ CFS sang EEVDF từ phiên bản 6.6[^kdoc-eevdf-transition]. Giống CFS, EEVDF cố chia CPU đều cho các task runnable cùng ưu tiên[^kdoc-eevdf-same]. Mỗi task có *lag*: dương nghĩa là còn được nợ CPU, âm là đã dùng quá phần của mình[^kdoc-eevdf-lag]. EEVDF chọn các task có lag ≥ 0, tính *virtual deadline* (VD) cho từng task và chạy task có VD sớm nhất[^kdoc-eevdf-pick]. Nhờ vậy task nhạy độ trễ với time slice ngắn được ưu tiên[^kdoc-eevdf-latency], và task có thể xin time slice qua `sched_setattr()`[^kdoc-eevdf-slice]. Để task không lợi dụng việc ngủ ngắn xóa lag âm, docs mô tả cơ chế lag "decay"[^kdoc-eevdf-decay].
+### 5.2 EEVDF
+
+EEVDF ("Earliest Eligible Virtual Deadline First") giữ cùng mục tiêu: chia CPU đều cho các task runnable cùng ưu tiên[^kdoc-eevdf-same]. Thuật toán này được giới thiệu lần đầu trong một bài báo khoa học năm 1995[^kdoc-eevdf-1995]. Kernel bắt đầu chuyển từ CFS sang nó từ phiên bản 6.6[^kdoc-eevdf-transition].
+
+Chỗ khác là cách ghi sổ. Mỗi task có một *lag*. Lag dương nghĩa là task còn được nợ CPU, lag âm nghĩa là nó đã dùng quá phần của mình[^kdoc-eevdf-lag]. EEVDF chỉ xét các task có lag ≥ 0, tính *virtual deadline* (VD) cho từng task và chạy task có VD sớm nhất[^kdoc-eevdf-pick].
+
+Ý nghĩa với `orders`: task nhạy độ trễ với time slice ngắn được ưu tiên, nên đáp ứng tốt hơn[^kdoc-eevdf-latency]. Task cũng có thể tự xin time slice qua `sched_setattr()`[^kdoc-eevdf-slice]. Còn việc task ngủ ngắn để xóa lag âm thì docs chặn bằng cơ chế lag "decay"[^kdoc-eevdf-decay].
 
 <details><summary>Đi sâu: phiên bản kernel và scheduling class</summary>
 
-**Về phiên bản.** Hai trang docs.kernel.org trên là bản hiện hành, không ghim. Ở tag v6.8, tải `Documentation/scheduler/sched-eevdf.rst` trả HTTP 404 (docs EEVDF chưa có trong cây đó), nhưng `kernel/sched/fair.c` v6.8 đã chứa EEVDF: một comment mở đầu nêu tên thuật toán Earliest Eligible Virtual Deadline First[^src-eevdf-title] và `update_deadline()` tính `vd_i = ve_i + r_i / w_i`[^src-eevdf-vd] (`w_i` là weight, tức nice). Suy luận của người soạn: kernel 6.8 của container lab chọn task theo EEVDF, nên phần CFS ở trên là khung khái niệm chứ không phải thuật toán chọn task chính xác của kernel mới; bảng weight ở mục 6 dùng chung.
+**Về phiên bản.** Hai trang docs.kernel.org trên là bản hiện hành, không ghim. Ở tag v6.8, tải `Documentation/scheduler/sched-eevdf.rst` trả HTTP 404 (docs EEVDF chưa có trong cây đó), nhưng `kernel/sched/fair.c` v6.8 đã chứa EEVDF. Một comment mở đầu nêu tên thuật toán Earliest Eligible Virtual Deadline First[^src-eevdf-title]. Hàm `update_deadline()` thì tính `vd_i = ve_i + r_i / w_i`[^src-eevdf-vd] (`w_i` là weight, tức nice). Suy luận của người soạn: kernel 6.8 của container lab chọn task theo EEVDF, nên phần CFS ở trên là khung khái niệm chứ không phải thuật toán chọn task chính xác của kernel mới; bảng weight ở mục 6 dùng chung.
 
-**Scheduling class.**
-
-CFS được thiết kế với "Scheduling Classes", một hệ phân cấp mở rộng các module scheduler[^kdoc-cfs-classes]; mỗi class cài các hook (`enqueue_task`, `pick_next_task`, `task_tick`…) mà core gọi khi có sự kiện[^kdoc-cfs-hooks]. `sched/fair.c` cài CFS, `sched/rt.c` cài `SCHED_FIFO`/`SCHED_RR`[^kdoc-cfs-rt].
+**Scheduling class.** CFS được thiết kế với "Scheduling Classes", một hệ phân cấp mở rộng các module scheduler[^kdoc-cfs-classes]. Mỗi class cài các hook (`enqueue_task`, `pick_next_task`, `task_tick`…) mà core gọi khi có sự kiện[^kdoc-cfs-hooks]. `sched/fair.c` cài CFS, còn `sched/rt.c` cài `SCHED_FIFO`/`SCHED_RR`[^kdoc-cfs-rt].
 
 </details>
 
-**Quay lại Q5:** CFS chọn `vruntime` nhỏ nhất, EEVDF chọn virtual deadline sớm nhất trong các task còn được nợ CPU.
+**Quay lại Q5:** CFS chọn `vruntime` nhỏ nhất, EEVDF chọn virtual deadline sớm nhất trong các task còn được nợ CPU; cả hai đều chia đều CPU giữa handler và `export` khi cùng ưu tiên.
 
 ## 6. Nice và weight (Q6)
 
-> **Trả lời ngắn.** `nice` (−20 đến +19 trên Linux hiện đại) là thuộc tính để scheduler thiên vị hoặc bất lợi một thread[^man-sched-nice][^man-sched-nice-range]; mỗi bậc chênh cho hệ số 1,25[^man-sched-nice-125]. Trong source kernel v6.8, nice được ánh xạ sang weight (nice 0 ứng 1024)[^src-weight], và phần CPU dự kiến của hai task CPU-bound là weight chia tổng weight (suy luận của người soạn).
+> **Trả lời ngắn.** `nice` là thuộc tính để scheduler thiên vị hoặc bất lợi một thread[^man-sched-nice]. Trên Linux hiện đại nó nằm trong khoảng −20 (ưu tiên cao) đến +19 (thấp)[^man-sched-nice-range]. Mỗi bậc chênh cho hệ số 1,25[^man-sched-nice-125]. Trong source kernel v6.8, nice được ánh xạ sang weight (nice 0 ứng 1024)[^src-weight]. Phần CPU dự kiến của hai task CPU-bound là weight chia tổng weight (suy luận của người soạn).
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): nice giống số suất ăn tối thiểu mỗi người được phát khi nhà ăn đông; weight là số suất cụ thể sau khi quy đổi.
+*Với service `orders`.* Cách rẻ nhất để bảo scheduler "handler quan trọng hơn `export`" là chạy `export` với nice cao hơn. Nhưng nice 5 nghĩa là bao nhiêu phần CPU? Mục này quy nice ra weight rồi ra tỉ lệ cụ thể, và đối chiếu với một phép đo.
 
+`nice` là thuộc tính để scheduler thiên vị hoặc bất lợi một process, và tác động lên `SCHED_OTHER` và `SCHED_BATCH`[^man-sched-nice]. Trên Linux hiện đại giá trị đi từ −20 (ưu tiên cao) đến +19 (thấp)[^man-sched-nice-range]. Khác POSIX, trên Linux nice là thuộc tính của *thread*[^man-sched-nice-thread]: `export` có thể có nice riêng, khác handler dù cùng process. Từ CFS, mỗi đơn vị chênh nice giữa hai process cho hệ số 1,25 về mức scheduler thiên vị bên ưu tiên cao hơn[^man-sched-nice-125].
 
-`nice` là thuộc tính để scheduler thiên vị hoặc bất lợi một process, tác động lên `SCHED_OTHER` và `SCHED_BATCH`[^man-sched-nice]. Khoảng giá trị trên Linux hiện đại là −20 (ưu tiên cao) đến +19 (thấp)[^man-sched-nice-range]; khác POSIX, trên Linux đây là thuộc tính của *thread*[^man-sched-nice-thread]. Từ CFS, mỗi đơn vị chênh nice giữa hai process cho hệ số 1,25 về mức scheduler thiên vị bên ưu tiên cao hơn[^man-sched-nice-125].
-
-Cụ thể hóa thành **weight**: bảng `sched_prio_to_weight[40]` trong source kernel v6.8 có nice 0 ứng 1024, nice 5 ứng 335, nice 10 ứng 110, nice 19 ứng 15[^src-weight]; comment trong source nói mỗi bậc là thay đổi khoảng 10% CPU, dùng hệ số 1,25[^src-weight-comment] (chi tiết source, có thể đổi giữa phiên bản). Kernel docs CFS nói `rq->cfs.load` là tổng weight của các task trong runqueue[^kdoc-cfs-load]. Từ đó, phần CPU dự kiến của hai task CPU-bound trên một CPU là `weight / tổng weight` (suy luận của người soạn):
+Kernel cụ thể hóa điều đó thành **weight**. Bảng `sched_prio_to_weight[40]` trong source kernel v6.8 có nice 0 ứng 1024, nice 5 ứng 335, nice 10 ứng 110, nice 19 ứng 15[^src-weight]. Comment trong source nói mỗi bậc là thay đổi khoảng 10% CPU, dùng hệ số 1,25[^src-weight-comment] (chi tiết source, có thể đổi giữa phiên bản). Kernel docs CFS nói `rq->cfs.load` là tổng weight của các task trong runqueue[^kdoc-cfs-load]. Từ đó, phần CPU dự kiến của hai task CPU-bound trên một CPU là `weight / tổng weight` (suy luận của người soạn). Bảng dưới so dự kiến với số đo; hai task CPU-bound ở đây đóng vai một handler bận và `export`.
 
 | Cặp task trên 1 CPU | Dự kiến từ bảng weight | Đo 8 giây (một lần chạy) |
 |---|---|---|
@@ -243,11 +259,13 @@ Cụ thể hóa thành **weight**: bảng `sched_prio_to_weight[40]` trong sourc
 | nice 0 vs nice 5 | 1024/1359 = 75,3% → 6,03 s; 335/1359 = 24,7% → 1,97 s | 6,03 s / 1,98 s |
 | nice 0 vs nice 10 | 1024/1134 = 90,3% → 7,22 s; 110/1134 = 9,7% → 0,78 s | 7,23 s / 0,78 s |
 
+Vậy nếu `export` chạy ở nice 5 trên cùng CPU với một thread nice 0 đang bận, nó nhận khoảng một phần tư CPU, đúng với số đo ở dòng giữa.
+
 <details><summary>Đi sâu: phương pháp đo và hai ngoại lệ (SCHED_IDLE, autogroup)</summary>
 
 Phép đo: hai vòng lặp bận (Python) cùng ghim vào CPU 0 bằng `taskset -c 0`, mỗi cái chạy 8 giây wall-clock, đọc CPU time bằng `time.process_time()`, trong container Linux 6.8.0 aarch64. Một lần chạy (chạy lại khi review: 6,04/1,99 s và 7,24/0,80 s), khớp sát dự đoán và cùng chiều với `sched(7)`: nice cao nhận rất ít CPU khi có tải ưu tiên hơn[^man-sched-nice-125] (thí nghiệm dừng ở nice 10).
 
-Hai điều cần nhớ: (1) với `SCHED_IDLE` nice không có tác dụng[^man-sched-idle]; (2) tính năng *autogroup* (từ Linux 2.6.38) tạo nhóm mới mỗi khi có session mới qua `setsid(2)`[^man-sched-autogroup-session], nên `nice(2)` cảnh báo rằng nice không còn tác dụng truyền thống trong nhiều trường hợp[^man-nice-autogroup]. Ví dụ của `sched(7)` (hai autogroup tranh cùng một CPU): 10 process `make -j10` và một video player — nhờ autogroup, player nhận 50% CPU thay vì 9%[^man-sched-autogroup]; trên SMP tình huống phức tạp hơn.
+Hai điều cần nhớ. (1) Với `SCHED_IDLE` nice không có tác dụng[^man-sched-idle]. (2) Tính năng *autogroup* (từ Linux 2.6.38) tạo nhóm mới mỗi khi có session mới qua `setsid(2)`[^man-sched-autogroup-session]. Vì vậy `nice(2)` cảnh báo rằng nice không còn tác dụng truyền thống trong nhiều trường hợp[^man-nice-autogroup]. Ví dụ của `sched(7)` (hai autogroup tranh cùng một CPU): 10 process `make -j10` và một video player. Nhờ autogroup, player nhận 50% CPU thay vì 9%[^man-sched-autogroup]. Trên SMP tình huống phức tạp hơn.
 
 </details>
 
@@ -255,13 +273,13 @@ Hai điều cần nhớ: (1) với `SCHED_IDLE` nice không có tác dụng[^man
 
 ## 7. Scheduling policy của Linux theo sched(7) (Q7)
 
-> **Trả lời ngắn.** Mỗi thread có một policy và một static priority[^man-sched-policy-prio]: `SCHED_OTHER`, `SCHED_BATCH`, `SCHED_IDLE` là policy thường; `SCHED_FIFO`, `SCHED_RR` là real-time với priority 1–99 và luôn ưu tiên hơn thread thường[^man-sched-rt-range]; `SCHED_DEADLINE` cao nhất trong các policy người dùng điều khiển được[^man-sched-dl-top]. Vòng lặp không block ở FIFO/RR/DEADLINE có thể chặn mọi thread khác vĩnh viễn[^man-sched-rt-runaway].
+> **Trả lời ngắn.** Mỗi thread có một policy và một static priority[^man-sched-policy-prio]. `SCHED_OTHER`, `SCHED_BATCH`, `SCHED_IDLE` là policy thường. `SCHED_FIFO` và `SCHED_RR` là real-time với priority 1–99, luôn ưu tiên hơn thread thường[^man-sched-rt-range]. `SCHED_DEADLINE` cao nhất trong các policy người dùng điều khiển được[^man-sched-dl-top]. Vòng lặp không block ở FIFO/RR/DEADLINE có thể chặn mọi thread khác vĩnh viễn[^man-sched-rt-runaway].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): phòng cấp cứu — ca khẩn (real-time) luôn được khám trước ca thường; nếu một ca khẩn không bao giờ rời giường thì cả phòng đứng yên.
+*Với service `orders`.* Nice chỉ là gợi ý mềm. Nếu muốn handler *luôn* thắng thì có real-time policy; nếu muốn `export` chỉ chạy khi máy rảnh thì có `SCHED_IDLE` hoặc `SCHED_BATCH`. Mục này liệt kê các lựa chọn đó, và lý do vì sao đặt `SCHED_FIFO` cho handler là ý tưởng nguy hiểm: một handler dính `loop {}` như ở [Phase 1](../01-linux/01-os-va-kernel.md) sẽ không còn bị timer cắt nhường cho thread thường nữa.
 
-Mỗi thread có một policy và một static priority `sched_priority`[^man-sched-policy-prio]. Với policy thường (`SCHED_OTHER`, `SCHED_BATCH`, `SCHED_IDLE`) `sched_priority` không dùng và phải là 0; với real-time (`SCHED_FIFO`, `SCHED_RR`) là 1 đến 99, và thread real-time luôn ưu tiên hơn thread thường[^man-sched-rt-range]. Mọi scheduling đều preemptive: thread ưu tiên tĩnh cao hơn sẵn sàng thì thread đang chạy bị preempt[^man-sched-preemptive].
+Mỗi thread có một policy và một static priority `sched_priority`[^man-sched-policy-prio]. Với policy thường (`SCHED_OTHER`, `SCHED_BATCH`, `SCHED_IDLE`) `sched_priority` không dùng và phải là 0. Với real-time (`SCHED_FIFO`, `SCHED_RR`) nó từ 1 đến 99, và thread real-time luôn ưu tiên hơn thread thường[^man-sched-rt-range]. Mọi scheduling đều preemptive: thread có static priority cao hơn mà sẵn sàng chạy thì thread đang chạy bị preempt[^man-sched-preemptive].
 
 | Policy | Theo `sched(7)` / kernel docs |
 |---|---|
@@ -272,31 +290,43 @@ Mỗi thread có một policy và một static priority `sched_priority`[^man-sc
 | `SCHED_RR` | như FIFO nhưng mỗi thread chỉ chạy tối đa một time quantum[^man-sched-rr] |
 | `SCHED_DEADLINE` | từ Linux 3.14[^man-sched-dl]; cao nhất trong các policy người dùng điều khiển được[^man-sched-dl-top] |
 
-CFS cài ba policy `SCHED_NORMAL`, `SCHED_BATCH`, `SCHED_IDLE`[^kdoc-cfs-policies].
+CFS cài ba policy `SCHED_NORMAL`, `SCHED_BATCH`, `SCHED_IDLE`[^kdoc-cfs-policies]. Với `orders`, `SCHED_BATCH` hợp cho `export` (chạy lâu, không cần tương tác), còn handler nên ở `SCHED_OTHER` mặc định (nhận xét của người soạn).
 
 <details><summary>Đi sâu: giới hạn real-time, quyền và thừa hưởng policy</summary>
 
-**Rủi ro và giới hạn.** Vòng lặp không block ở policy FIFO/RR/DEADLINE có thể chặn mọi thread khác khỏi CPU vĩnh viễn[^man-sched-rt-runaway], nên `/proc/sys/kernel/sched_rt_runtime_us` mặc định 950 000 µs trên mỗi 1 giây: 5% CPU dành cho process không real-time/deadline[^man-sched-rt-throttle]. Container lab của tôi đọc ra đúng 950000. Đặt policy real-time cần `CAP_SYS_NICE` hoặc `RLIMIT_RTPRIO`[^man-sched-rtprio]; `SCHED_DEADLINE` cần `CAP_SYS_NICE`[^man-sched-dl-priv]. Trong container lab, `chrt -f 10` bằng root bị `Operation not permitted` (không điều tra nguyên nhân), còn `chrt -b 0` và `chrt -i 0` được.
+**Rủi ro và giới hạn.** Vòng lặp không block ở policy FIFO/RR/DEADLINE có thể chặn mọi thread khác khỏi CPU vĩnh viễn[^man-sched-rt-runaway]. Vì vậy `/proc/sys/kernel/sched_rt_runtime_us` mặc định 950 000 µs trên mỗi 1 giây: 5% CPU dành cho process không real-time/deadline[^man-sched-rt-throttle]. Container lab của tôi đọc ra đúng 950000. Đặt policy real-time cần `CAP_SYS_NICE` hoặc `RLIMIT_RTPRIO`[^man-sched-rtprio]; `SCHED_DEADLINE` cần `CAP_SYS_NICE`[^man-sched-dl-priv]. Trong container lab, `chrt -f 10` bằng root bị `Operation not permitted` (không điều tra nguyên nhân), còn `chrt -b 0` và `chrt -i 0` được.
 
-Policy và tham số được con thừa hưởng qua `fork` và giữ qua `execve`[^man-sched-inherit]; cờ reset-on-fork để con không thừa hưởng policy đặc quyền[^man-sched-reset].
+**Thừa hưởng.** Policy và tham số được con thừa hưởng qua `fork` và giữ qua `execve`[^man-sched-inherit]. Có cờ reset-on-fork để con không thừa hưởng policy đặc quyền[^man-sched-reset].
 
 </details>
 
-**Quay lại Q7:** policy chọn lớp ưu tiên của thread; real-time mạnh nhưng nguy hiểm nên có giới hạn và đòi quyền.
+**Quay lại Q7:** policy chọn lớp ưu tiên của thread; real-time mạnh nhưng nguy hiểm với một handler có bug nên có giới hạn và đòi quyền.
 
 ## 8. CPU affinity và CPU quota trong container (Q8)
 
-> **Trả lời ngắn.** Affinity mask quyết định thread được chạy trên *CPU nào*[^man-aff-desc]. Cgroup `cpu.max` quyết định nhóm được dùng *bao nhiêu thời gian*: tối đa `$MAX` trong mỗi `$PERIOD`[^cg2-max]; còn `cpu.weight` chia CPU theo tỉ lệ giữa các nhóm đang hoạt động[^cg2-prop].
+> **Trả lời ngắn.** Affinity mask quyết định thread được chạy trên *CPU nào*[^man-aff-desc]. Cgroup `cpu.max` quyết định nhóm được dùng *bao nhiêu thời gian*: tối đa `$MAX` trong mỗi `$PERIOD`[^cg2-max]. Còn `cpu.weight` chia CPU theo tỉ lệ giữa các nhóm đang hoạt động[^cg2-prop].
 
 **Giải thích.**
 
-Hình dung (nhận xét của người soạn): affinity là chỉ định "chỉ được dùng các bàn này"; quota là "chỉ được dùng tổng cộng X giờ mỗi tuần".
+*Với service `orders`.* Nice và policy chỉ nói thread nào được ưu tiên. Hai câu hỏi còn lại của người vận hành là: `orders` được phép chạy trên những core nào, và nếu pod chia máy với pod khác thì `orders` được dùng tổng cộng bao nhiêu CPU? Câu đầu là affinity, câu sau là quota của cgroup.
 
-**Affinity mask** của một thread xác định tập CPU thread được phép chạy; đặt mask có thể đem lại lợi ích hiệu năng, ví dụ dành riêng một CPU cho một thread hoặc tránh chi phí invalidate cache khi thread đổi CPU[^man-aff-desc]. Nếu thread đang không chạy trên CPU nào trong mask, nó bị migrate sang một CPU trong mask[^man-aff-migrate]. Mask là thuộc tính từng thread[^man-aff-perthread]; con từ `fork` thừa hưởng mask và mask giữ qua `execve`[^man-aff-inherit]. Tập CPU thực sự được chạy là giao của mask với CPU hiện có, và kernel có thể giới hạn thêm (ví dụ do cpuset) một cách âm thầm[^man-aff-silent]. Tùy chọn boot `isolcpus` cô lập một hay nhiều CPU lúc boot sao cho không process nào được lập lịch lên đó; sau đó chỉ còn `sched_setaffinity()` hoặc cpuset(7) mới đưa process vào các CPU này[^man-aff-isolcpus].
+### 8.1 Affinity: chạy trên CPU nào
 
-**CPU quota trong container.**
+**Affinity mask** của một thread xác định tập CPU mà thread được phép chạy. Đặt mask có thể đem lại lợi ích hiệu năng, ví dụ dành riêng một CPU cho một thread, hoặc tránh chi phí invalidate cache khi thread đổi CPU[^man-aff-desc]. Nếu thread đang không chạy trên CPU nào trong mask, nó bị migrate sang một CPU trong mask[^man-aff-migrate]. Mask là thuộc tính của từng thread[^man-aff-perthread]; con từ `fork` thừa hưởng mask, và mask được giữ qua `execve`[^man-aff-inherit].
 
-Affinity quyết định *CPU nào*; quota quyết định *bao nhiêu thời gian*. Kernel có group scheduling: `CONFIG_CGROUP_SCHED` cho nhóm task và chia CPU công bằng giữa các nhóm[^kdoc-cfs-group]. Giao diện cgroup v2: `cpu.weight` (chia CPU theo tỉ lệ cho các nhóm con đang hoạt động[^cg2-prop]; khoảng [1, 10000][^cg2-weight]), `cpu.weight.nice` (cùng thang giá trị với `nice(2)`)[^cg2-nice], và `cpu.max` dạng `$MAX $PERIOD`, nghĩa là nhóm dùng tối đa `$MAX` trong mỗi `$PERIOD`[^cg2-max]. Weight chia tỉ lệ khi tranh chấp (như proportional share ở mục 3), còn `cpu.max` là trần cứng (nhận xét của người soạn). Chi tiết ở [chương cgroups v2](../08-containers/03-cgroups-v2.md).
+Tập CPU thực sự được chạy là giao của mask với các CPU hiện có, và kernel có thể giới hạn thêm (ví dụ do cpuset) một cách âm thầm[^man-aff-silent]. Nếu `orders` có `sched_setaffinity` mà không chạy được như mong đợi, đây là chỗ cần kiểm tra. Tùy chọn boot `isolcpus` cô lập một hay nhiều CPU lúc boot sao cho không process nào được lập lịch lên đó; sau đó chỉ còn `sched_setaffinity()` hoặc cpuset(7) mới đưa process vào các CPU này[^man-aff-isolcpus].
+
+### 8.2 CPU quota trong container
+
+Affinity quyết định *CPU nào*; quota quyết định *bao nhiêu thời gian*. Kernel có group scheduling: `CONFIG_CGROUP_SCHED` cho phép gom task thành nhóm và chia CPU công bằng giữa các nhóm[^kdoc-cfs-group].
+
+Giao diện cgroup v2 có ba file đáng biết:
+
+- `cpu.weight` chia CPU theo tỉ lệ cho các nhóm con đang hoạt động[^cg2-prop]. Giá trị nằm trong khoảng [1, 10000][^cg2-weight].
+- `cpu.weight.nice` cho phép đọc và đặt weight theo cùng thang giá trị với `nice(2)`[^cg2-nice].
+- `cpu.max` có dạng `$MAX $PERIOD`: nhóm được dùng tối đa `$MAX` trong mỗi `$PERIOD`[^cg2-max].
+
+Weight chia theo tỉ lệ khi có tranh chấp, giống proportional share ở mục 3. Còn `cpu.max` là trần cứng: hết quota thì nhóm phải chờ tới chu kỳ sau dù máy còn rảnh (nhận xét của người soạn). Chi tiết ở [chương cgroups v2](../08-containers/03-cgroups-v2.md).
 
 <details><summary>Đi sâu: thí nghiệm affinity và hệ quả cho load balancing</summary>
 
@@ -304,13 +334,13 @@ Thí nghiệm của tôi: dưới `taskset -c 1,2`, `os.sched_getaffinity(0)` tr
 
 </details>
 
-**Quay lại Q8:** affinity chọn CPU, cgroup quota chọn lượng thời gian CPU.
+**Quay lại Q8:** affinity chọn CPU cho thread của `orders`, cgroup quota chọn lượng thời gian CPU của cả pod.
 
 ## 9. Liên hệ với Rust
 
-- `std` của Rust không đặt nice, policy hay affinity; thứ gần nhất là `std::thread::yield_now`, docs mô tả là báo OS rằng thread sẵn sàng nhường phần time slice còn lại[^rust-yield]. Docs cảnh báo yield trong vòng lặp có thể thành busy-wait khi không có thread nào khác sẵn sàng, và khuyên chờ bằng channel, `Condvar`, `Mutex` hoặc `join`[^rust-yield-warn]. Đặt policy/affinity cần gọi `sched_setaffinity`/`sched_setattr` qua FFI (suy luận của người soạn; tôi không duyệt toàn bộ API của `std` để chứng minh "không có").
-- `std::thread::available_parallelism` có thể đếm quá khi bị giới hạn bởi affinity mask hoặc cgroup quota mà `sched_getaffinity()` hay cgroup fs không truy vấn được (ví dụ do sandbox)[^rust-ap]. Thử bằng rustc 1.95.0 trong container lab (4 CPU): in `4`; dưới `taskset -c 1,2` in `2`; dưới `taskset -c 0` in `1` — tôn trọng affinity mask. Với cgroup quota, mục "Liên hệ với Rust" của [chương cgroups v2](../08-containers/03-cgroups-v2.md) đã đo và đọc source: hàm đọc `cpu.max`, làm tròn xuống, tối thiểu 1 (ví dụ `--cpus 1.5` ra `1`).
-- (Nhận xét của người soạn.) Vì vậy thread pool cỡ cố định, hoặc cỡ theo số CPU của host đọc bằng cách khác (`nproc` không theo `--cpus`, bảng đo ở chương cgroups v2), trong pod có `cpu.max` thấp vẫn tạo nhiều worker hơn quota, và hệ quả là bị throttle chứ không phải ít thread hơn.
+- `std` của Rust không đặt nice, policy hay affinity. Thứ gần nhất là `std::thread::yield_now`, mà docs mô tả là báo OS rằng thread sẵn sàng nhường phần time slice còn lại[^rust-yield]. Docs cảnh báo yield trong vòng lặp có thể thành busy-wait khi không có thread nào khác sẵn sàng, và khuyên chờ bằng channel, `Condvar`, `Mutex` hoặc `join`[^rust-yield-warn]. Muốn đặt policy hay affinity cho thread của `orders` thì phải gọi `sched_setaffinity`/`sched_setattr` qua FFI (suy luận của người soạn; tôi không duyệt toàn bộ API của `std` để chứng minh "không có").
+- `std::thread::available_parallelism` có thể đếm quá khi bị giới hạn bởi affinity mask hoặc cgroup quota mà `sched_getaffinity()` hay cgroup fs không truy vấn được (ví dụ do sandbox)[^rust-ap]. Thử bằng rustc 1.95.0 trong container lab (4 CPU): in `4`; dưới `taskset -c 1,2` in `2`; dưới `taskset -c 0` in `1`, tức tôn trọng affinity mask. Với cgroup quota, mục "Liên hệ với Rust" của [chương cgroups v2](../08-containers/03-cgroups-v2.md) đã đo và đọc source: hàm đọc `cpu.max`, làm tròn xuống, tối thiểu 1 (ví dụ `--cpus 1.5` ra `1`).
+- (Nhận xét của người soạn.) Vì vậy nếu `orders` cỡ thread pool cố định, hoặc theo số CPU của host đọc bằng cách khác (`nproc` không theo `--cpus`, bảng đo ở chương cgroups v2), thì trong pod có `cpu.max` thấp nó vẫn tạo nhiều worker hơn quota. Hệ quả là bị throttle chứ không phải ít thread hơn.
 
 ## Tóm tắt
 
@@ -334,21 +364,21 @@ Turnaround 100, 110, 120 (TB 110)[^ostep-fifo-110]; response 0, 100, 110 (TB 70,
 2. Với B, C đến lúc 10, STCF cho kết quả gì và vì sao SJF thuần không làm được?
 <details><summary>Đáp án</summary>
 
-Turnaround 120, 10, 20 (TB 50), response TB 3,33[^ostep-resp-ex]; SJF thuần là non-preemptive nên B, C phải đợi A (TB 103,33)[^ostep-sjf-nonpreempt][^ostep-sjf-late].
+STCF cho turnaround 120, 10, 20 (TB 50) và response TB 3,33[^ostep-resp-ex]. SJF thuần là non-preemptive nên B, C phải đợi A, ra TB 103,33[^ostep-sjf-nonpreempt]. B và C bị kẹt đúng kiểu convoy dù đến sau A không lâu[^ostep-sjf-late].
 
 </details>
 
 3. Vì sao RR tệ cho turnaround dù response tốt?
 <details><summary>Đáp án</summary>
 
-RR kéo dài mọi job; ba job 5 giây xong lúc 13, 14, 15 (TB 14) so với 10[^ostep-rr-ex][^ostep-rr-worst].
+RR kéo dài mọi job; ba job 5 giây xong lúc 13, 14, 15 (TB 14) so với 10[^ostep-rr-ex]. Sách xếp RR vào nhóm chính sách tệ nhất về turnaround[^ostep-rr-worst].
 
 </details>
 
 4. Nêu rule 4 và rule 5 của MLFQ và lỗi mỗi rule vá.
 <details><summary>Đáp án</summary>
 
-Rule 4: hết allotment thì hạ hàng bất kể đã nhả CPU bao lần, chống gaming[^ostep-mlfq-rule4][^ostep-gaming]. Rule 5: boost sau S, chống starvation[^ostep-mlfq-boost][^ostep-mlfq-starve].
+Rule 4: hết allotment thì hạ hàng bất kể đã nhả CPU bao lần[^ostep-mlfq-rule4]. Nó chống gaming[^ostep-gaming]. Rule 5: boost sau S[^ostep-mlfq-boost]. Nó chống starvation[^ostep-mlfq-starve].
 
 </details>
 
@@ -362,7 +392,7 @@ Stride 100, 200, 40[^ostep-stride-rule]; tỉ lệ 2:1:5 (mô phỏng 800 lượ
 6. Vì sao MQMS cần migration?
 <details><summary>Đáp án</summary>
 
-Hàng đợi riêng gây load imbalance[^ostep-imbalance]; giải pháp là migration/work stealing[^ostep-migration][^ostep-steal].
+Hàng đợi riêng gây load imbalance[^ostep-imbalance]. Cách chữa là migration[^ostep-migration]. Kỹ thuật cụ thể nhất là work stealing[^ostep-steal].
 
 </details>
 
@@ -383,7 +413,7 @@ CFS: `vruntime` nhỏ nhất[^kdoc-cfs-pick]. EEVDF: trong các task lag ≥ 0, 
 9. `cpu.weight` khác `cpu.max` thế nào?
 <details><summary>Đáp án</summary>
 
-`cpu.weight` chia CPU theo tỉ lệ[^cg2-prop], giá trị trong [1, 10000][^cg2-weight]; `cpu.max` là `$MAX $PERIOD`, trần thời gian mỗi chu kỳ[^cg2-max].
+`cpu.weight` chia CPU theo tỉ lệ[^cg2-prop]. Giá trị của nó nằm trong [1, 10000][^cg2-weight]. `cpu.max` là `$MAX $PERIOD`, trần thời gian mỗi chu kỳ[^cg2-max].
 
 </details>
 
