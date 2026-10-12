@@ -11,6 +11,9 @@ create-missing = false
 [preprocessor.mermaid]
 command = "mdbook-mermaid"
 
+[preprocessor.math-escape]
+command = "python3 book-assets/math-escape.py"
+
 [output.html]
 default-theme = "light"
 preferred-dark-theme = "navy"

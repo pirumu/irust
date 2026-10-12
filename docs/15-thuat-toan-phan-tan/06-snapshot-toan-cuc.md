@@ -92,7 +92,7 @@ sequenceDiagram
 
 ### 2.1 Sự kiện và happens-before
 
-Mỗi sự kiện xảy ra ở đúng một process: sự kiện nội bộ, gửi, hoặc nhận. Các sự kiện ở cùng process có thứ tự toàn phần theo thứ tự xảy ra cục bộ, và mỗi sự kiện nhận có đúng một sự kiện gửi tương ứng[^mt-order]. Quan hệ nhân quả (còn gọi happens-before) $<$ là quan hệ nhỏ nhất thỏa ba điều kiện: hai sự kiện cùng process thì cái trước $<$ cái sau; sự kiện gửi $<$ sự kiện nhận tương ứng; và bắc cầu[^mt-hb]. Đây chính là happens-before ở [P12·09, mục 3](../12-he-thong-du-lieu/09-consistency-va-consensus.md). Ta viết $e \lt\_l e'$ khi $e < e'$ và hai sự kiện cùng process.
+Mỗi sự kiện xảy ra ở đúng một process: sự kiện nội bộ, gửi, hoặc nhận. Các sự kiện ở cùng process có thứ tự toàn phần theo thứ tự xảy ra cục bộ, và mỗi sự kiện nhận có đúng một sự kiện gửi tương ứng[^mt-order]. Quan hệ nhân quả (còn gọi happens-before) $<$ là quan hệ nhỏ nhất thỏa ba điều kiện: hai sự kiện cùng process thì cái trước $<$ cái sau; sự kiện gửi $<$ sự kiện nhận tương ứng; và bắc cầu[^mt-hb]. Đây chính là happens-before ở [P12·09, mục 3](../12-he-thong-du-lieu/09-consistency-va-consensus.md). Ta viết $e \lt_l e'$ khi $e < e'$ và hai sự kiện cùng process.
 
 Ký hiệu sự kiện của `ledger` mà ta dùng từ đây đến hết chương, theo vết ở mục 4:
 
@@ -107,11 +107,11 @@ Ký hiệu sự kiện của `ledger` mà ta dùng từ đây đến hết chư�
 | `C2` | C | nhận `t2` từ B |
 | `C3` | C | nhận `t4` từ B |
 
-Quan hệ nhân quả từ các tin nhắn: $A1 < B3$, $B1 < C2$, $C1 < A2$, $B2 < C3$, cộng thêm thứ tự cục bộ ($A1 \lt\_l A2$, $B1 \lt\_l B2 \lt\_l B3$, $C1 \lt\_l C2 \lt\_l C3$) và bắc cầu. Chẳng hạn $C1 < A2$ và $A1 \lt\_l A2$, nhưng không có chuỗi nào nối `A1` với `C1` theo cả hai chiều, nên `A1` và `C1` *đồng thời* (concurrent).
+Quan hệ nhân quả từ các tin nhắn: $A1 < B3$, $B1 < C2$, $C1 < A2$, $B2 < C3$, cộng thêm thứ tự cục bộ ($A1 \lt_l A2$, $B1 \lt_l B2 \lt_l B3$, $C1 \lt_l C2 \lt_l C3$) và bắc cầu. Chẳng hạn $C1 < A2$ và $A1 \lt_l A2$, nhưng không có chuỗi nào nối `A1` với `C1` theo cả hai chiều, nên `A1` và `C1` *đồng thời* (concurrent).
 
 ### 2.2 Định nghĩa cut
 
-Một *cut* là tập con hữu hạn $C$ của các sự kiện sao cho nếu $e \in C$ và $e' \lt\_l e$ thì $e' \in C$[^mt-def1]. Nói cách khác, ở mỗi process, cut lấy một đoạn đầu của dãy sự kiện (một "tiền tố"). Về trực quan, một cut là một đường zigzag chia biểu đồ thời gian thành phần "quá khứ" bên trái và phần "tương lai" bên phải[^mt-zigzag].
+Một *cut* là tập con hữu hạn $C$ của các sự kiện sao cho nếu $e \in C$ và $e' \lt_l e$ thì $e' \in C$[^mt-def1]. Nói cách khác, ở mỗi process, cut lấy một đoạn đầu của dãy sự kiện (một "tiền tố"). Về trực quan, một cut là một đường zigzag chia biểu đồ thời gian thành phần "quá khứ" bên trái và phần "tương lai" bên phải[^mt-zigzag].
 
 Cut *nhất quán* mạnh hơn: nếu $e \in C$ và $e' < e$ (không chỉ cùng process) thì $e' \in C$[^mt-def3]. Tức cut đóng dưới toàn bộ happens-before.
 
@@ -120,7 +120,7 @@ Cut *nhất quán* mạnh hơn: nếu $e \in C$ và $e' < e$ (không chỉ cùng
 *Chứng minh.*
 
 - ($\Rightarrow$) Nếu sự kiện nhận $r \in C$ và $s$ là sự kiện gửi tương ứng thì $s < r$ theo định nghĩa của happens-before. $C$ đóng dưới happens-before nên $s \in C$.
-- ($\Leftarrow$) Giả sử $r \in C$ và $s < r$. Theo định nghĩa, $s < r$ nghĩa là có một dãy $s = x_0, x_1, \dots, x_k = r$ mà mỗi cặp liền kề $(x_{i}, x_{i+1})$ hoặc cùng process với $x_i \lt\_l x_{i+1}$ (một bước cục bộ), hoặc là cặp gửi–nhận của một thông điệp. Ta chứng minh bằng quy nạp lùi theo $i$ từ $k$ xuống $0$ rằng $x_i \in C$. Cơ sở: $x_k = r \in C$. Bước quy nạp: giả sử $x_{i+1} \in C$. Nếu bước $(x_i, x_{i+1})$ là cục bộ thì $x_i \in C$ vì $C$ là cut (đóng dưới $\lt\_l$). Nếu nó là cặp gửi–nhận thì $x_{i+1}$ là sự kiện nhận nằm trong $C$, nên theo giả thiết của chiều này $x_i$ (sự kiện gửi) cũng nằm trong $C$. Vậy $x_0 = s \in C$. $\square$
+- ($\Leftarrow$) Giả sử $r \in C$ và $s < r$. Theo định nghĩa, $s < r$ nghĩa là có một dãy $s = x_0, x_1, \dots, x_k = r$ mà mỗi cặp liền kề $(x_{i}, x_{i+1})$ hoặc cùng process với $x_i \lt_l x_{i+1}$ (một bước cục bộ), hoặc là cặp gửi–nhận của một thông điệp. Ta chứng minh bằng quy nạp lùi theo $i$ từ $k$ xuống $0$ rằng $x_i \in C$. Cơ sở: $x_k = r \in C$. Bước quy nạp: giả sử $x_{i+1} \in C$. Nếu bước $(x_i, x_{i+1})$ là cục bộ thì $x_i \in C$ vì $C$ là cut (đóng dưới $\lt_l$). Nếu nó là cặp gửi–nhận thì $x_{i+1}$ là sự kiện nhận nằm trong $C$, nên theo giả thiết của chiều này $x_i$ (sự kiện gửi) cũng nằm trong $C$. Vậy $x_0 = s \in C$. $\square$
 
 Mệnh đề này là lý do ta kiểm cut chỉ cần nhìn các thông điệp. Mattern phát biểu đúng như thế: cut nhất quán khi mọi thông điệp đã nhận đều đã được gửi, nhưng không cần chiều ngược lại[^mt-def-msg]. Chiều ngược lại không cần vì thông điệp đã gửi mà chưa nhận chính là thứ nằm trên kênh.
 
