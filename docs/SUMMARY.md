@@ -24,6 +24,7 @@
   - [05. Pipeline, branch prediction và speculative execution](02-cpu/05-pipeline-va-speculation.md)
   - [06. Cache hierarchy và NUMA](02-cpu/06-cache-va-numa.md)
   - [07. Rust và máy](02-cpu/07-rust-va-may.md)
+  - [08. Xung nhịp, chu kỳ và đồng hồ trong máy](02-cpu/08-xung-nhip-chu-ky-va-dong-ho.md)
 
 # P3 — Bộ nhớ
 
