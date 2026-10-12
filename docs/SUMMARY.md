@@ -180,6 +180,7 @@
   - [04. Thuật toán và độ phức tạp](14-toan-va-ly-thuyet/04-thuat-toan-va-do-phuc-tap.md)
   - [05. Queueing theory cho backend](14-toan-va-ly-thuyet/05-queueing-theory.md)
   - [06. Thống kê cho benchmark](14-toan-va-ly-thuyet/06-thong-ke-cho-benchmark.md)
+  - [09. Chuỗi Markov và quá trình Poisson](14-toan-va-ly-thuyet/09-chuoi-markov-va-qua-trinh-poisson.md)
 
 # P15 — Thuật toán phân tán
 
@@ -194,6 +195,7 @@
   - [08. Chain replication và CRAQ](15-thuat-toan-phan-tan/08-chain-replication-va-craq.md)
   - [09. Giao dịch phân tán ngoài 2PC](15-thuat-toan-phan-tan/09-giao-dich-phan-tan.md)
   - [10. BFT hiện đại: PBFT view change, Tendermint, HotStuff](15-thuat-toan-phan-tan/10-bft-hien-dai.md)
+  - [11. Đồng bộ đồng hồ trong hệ phân tán](15-thuat-toan-phan-tan/11-dong-bo-dong-ho.md)
 
 # Thực hành
 
